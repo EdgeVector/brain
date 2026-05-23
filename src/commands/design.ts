@@ -6,6 +6,7 @@ import {
   findBySlug,
   nowIso,
   schemaHashFor,
+  validateSlug,
 } from "../record.ts";
 
 export type DesignNewOptions = {
@@ -49,20 +50,4 @@ export async function designNew(opts: DesignNewOptions): Promise<void> {
     updated_at: now,
   };
   await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
-}
-
-function validateSlug(slug: string): void {
-  if (slug.length === 0) {
-    throw new FbrainError({
-      code: "invalid_slug",
-      message: "Slug must be non-empty.",
-    });
-  }
-  if (!/^[a-z0-9][a-z0-9-_]*$/.test(slug)) {
-    throw new FbrainError({
-      code: "invalid_slug",
-      message: `Slug "${slug}" is invalid.`,
-      hint: "Slugs are lowercase, start with a letter or digit, and use [a-z0-9-_].",
-    });
-  }
 }

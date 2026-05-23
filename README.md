@@ -44,6 +44,17 @@ bun link                              # exposes a global `fbrain` binary
 fbrain init                           # 5 steps; writes ~/.fbrain/config.json
 fbrain design new my-first-design --title "First design" --tag spike --body "the body that gets embedded"
 fbrain task new t1 --design my-first-design --title "first task"
+
+# Or pipe a markdown note with frontmatter (idempotent upsert — re-put updates in place):
+cat <<'NOTE' | fbrain put my-second-design
+---
+type: design
+title: Piped via put
+tags: [via-stdin, dogfood]
+---
+the body becomes the indexed body
+NOTE
+
 fbrain list
 fbrain search "body that gets embedded"
 fbrain doctor                         # confirms everything is wired
@@ -58,6 +69,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain init` | Bootstraps the node + registers Design/Task schemas + writes `~/.fbrain/config.json` with canonical hashes |
 | `fbrain design new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a Design |
 | `fbrain task new <slug> [--title T] [--design D] [--tag T]… [--body STR] [--force]` | Creates a Task (rejects dangling `--design`) |
+| `fbrain put <slug>` | Upserts a Design or Task from stdin (YAML frontmatter aware). Re-puts update in place — no `--force`, no 409. v0 only supports `type: design` and `type: task`; other types error and point at Phase 6 |
 | `fbrain get <slug> [--type design|task]` | Prints a record by slug |
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status |
