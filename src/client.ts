@@ -296,7 +296,11 @@ export function newNodeClient(opts: {
       await mutate("update", schemaHash, fields, keyHash, callJson);
     },
     async deleteRecord({ schemaHash, keyHash }) {
-      await mutate("delete", schemaHash, { slug: keyHash }, keyHash, callJson);
+      // Empty fields_and_values is the minimal body — see
+      // docs/phase-5-delete-spike.md, Probe B. The orchestrator's earlier
+      // smoketest passed `{slug: keyHash}` which has the side-effect of
+      // writing a no-op atom rewriting the slug field with itself.
+      await mutate("delete", schemaHash, {}, keyHash, callJson);
     },
     async queryAll({ schemaHash, fields }) {
       const { status, body } = await callJson("/api/query", "POST", {

@@ -21,6 +21,7 @@ import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
+import { deleteRecord } from "./commands/delete.ts";
 import type { RecordType } from "./schemas.ts";
 
 const COMMANDS = [
@@ -36,6 +37,7 @@ const COMMANDS = [
   "doctor",
   "raw",
   "share",
+  "delete",
   "help",
 ] as const;
 type Command = (typeof COMMANDS)[number];
@@ -58,6 +60,7 @@ Commands:
   doctor         health-check the local setup
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
+  delete         soft-delete a record (fold_db is append-only)
   help <cmd>     per-command usage
 
 Global flags:
@@ -166,6 +169,19 @@ for the full evidence and the conditions under which this command can
 become a real share.
 
 Prints a pointer and exits 1.`,
+  delete: `fbrain delete <slug> [--type design|task]
+
+Soft-deletes the record. fold_db's mutation pipeline is append-only — see
+docs/phase-5-delete-spike.md — so the workaround overwrites every user
+field with sentinels and stamps a tombstone tag. All fbrain read paths
+(get, list, status, link, search) then filter the record out.
+
+Without --type, queries both schemas; errors with "specify --type" if the
+slug exists in both. Errors with "No <type>: <slug>" if the slug is
+already deleted or never existed.
+
+After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
+--force) will recreate it.`,
   help: `fbrain help <command>`,
 };
 
@@ -264,6 +280,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runRaw(args, verboseFn);
     case "share":
       return runShare(args);
+    case "delete":
+      return runDelete(args, verboseFn);
     case "help": {
       const target = args[0];
       if (!target) {
@@ -527,6 +545,28 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
 async function runShare(args: Argv): Promise<number> {
   parseArgs({ args, strict: true, allowPositionals: true, options: {} });
   return shareCmd();
+}
+
+async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {
+      type: { type: "string" },
+    },
+  });
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.delete);
+    return 1;
+  }
+  const type = parseRecordType(values.type);
+  const cfg = readConfig();
+  const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
+  if (type) dOpts.type = type;
+  await deleteRecord(dOpts);
+  return 0;
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {

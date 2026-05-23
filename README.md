@@ -14,6 +14,7 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 | 1 | Bootstrap + core CRUD (init, design new, task new, get, list, status, link) | ✅ Landed |
 | 2 | Search + doctor + raw passthrough + polish | ✅ Landed |
 | 3 | Sharing spike | ✅ Memo — see [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) |
+| 5 | `fbrain delete` (soft, with verified semantics) | ✅ Landed — see [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) |
 
 ## Plans
 
@@ -78,6 +79,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain doctor` | Live health check: reachability, provisioning, schemas-loaded, schema drift |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
+| `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 
 Run `fbrain help <command>` for per-command usage.
 
@@ -123,6 +125,23 @@ In short: the sharing **metadata** (ShareRule, ShareInvite, ShareSubscription) i
 `fbrain share` is currently a placeholder: it prints a pointer to the memo and exits non-zero. A real implementation requires fold_db's exemem service to be configured.
 
 Read [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) for the full evidence: every endpoint with its captured request/response JSON, what worked, what didn't, and exactly what a real two-device test would require.
+
+## Delete
+
+fold_db's mutation pipeline is documented as append-only — `MutationType::Delete` writes a sync-log marker but does not remove molecule entries on local storage. `POST /api/mutation` with `mutation_type=delete` therefore returns `{ok: true, success: true}` but the record is still present on every read path. **This is documented behavior, not a bug** (see fold_db's own [`apple_consolidation.rs:25-27`](https://github.com/EdgeVector/fold/blob/main/fold_db_node/src/fold_node/migrations/apple_consolidation.rs)).
+
+`fbrain delete` works around this at the fbrain layer:
+
+1. Resolves `--type` the same way `fbrain get` does (probes both schemas if omitted; errors on ambiguous slug).
+2. Fires an `update` mutation that overwrites every user field with sentinel values (`title="(deleted)"`, `body=""`, `status="archived"|"cancelled"`, `tags=["__fbrain_deleted__"]`, `design_slug=""` for tasks).
+3. Fires the fold_db `delete` mutation for forward-compat (when fold_db ever grows a real hard-delete, this call starts mattering).
+4. Verifies by reading the record back and asserting the tombstone tag is present. If verification fails, errors with `delete_not_applied`.
+
+Every fbrain read path (`get`, `list`, `status`, `link`, `search`) filters tombstoned records via `findBySlug`, so the user-visible behavior matches a hard delete. The slug is also reusable: `fbrain design new <same-slug>` (no `--force`) recreates it cleanly.
+
+`fbrain raw POST /api/query` is the escape hatch — it returns the raw fold_db state including tombstoned rows.
+
+Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) for the full source-code references, probe transcripts, and the fold_db follow-up that's been filed.
 
 ## Architecture
 
