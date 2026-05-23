@@ -1,0 +1,428 @@
+// Typed HTTP wrappers for fold_db_node + schema_service.
+//
+// Every node endpoint sends X-User-Hash (per Phase 0 spike: missing →
+// `401 MISSING_USER_CONTEXT`). All errors flow through `mapError` so
+// every Error Registry row maps to an actionable message in exactly
+// one place.
+
+import type { AddSchemaRequest, RecordType } from "./schemas.ts";
+
+export type Verbose = (msg: string) => void;
+
+const noopVerbose: Verbose = () => {};
+
+export type NativeIndexHit = {
+  schema_name: string;
+  schema_display_name?: string | null;
+  field: string;
+  key_value: { hash: string | null; range: string | null };
+  value: string;
+  metadata?: { fragment_idx?: number; match_type?: string; score?: number };
+};
+
+export type QueryRow = {
+  fields: Record<string, unknown>;
+  key: { hash: string | null; range: string | null };
+  // metadata, author_pub_key, etc. exist but fbrain Phase 1 doesn't read them
+};
+
+export type QueryResponse = {
+  ok: boolean;
+  results: QueryRow[];
+  total_count?: number;
+  returned_count?: number;
+};
+
+export class FbrainError extends Error {
+  readonly code: string;
+  readonly hint?: string;
+  readonly cause?: unknown;
+  constructor(opts: {
+    code: string;
+    message: string;
+    hint?: string;
+    cause?: unknown;
+  }) {
+    super(opts.message);
+    this.name = "FbrainError";
+    this.code = opts.code;
+    this.hint = opts.hint;
+    this.cause = opts.cause;
+  }
+}
+
+const DOCTOR_TIP = "— run `fbrain doctor` for a full diagnosis";
+
+export type SchemaServiceClient = {
+  baseUrl: string;
+  registerSchema(req: AddSchemaRequest): Promise<{
+    canonicalHash: string;
+    status: number;
+    replacedSchema: string | null;
+  }>;
+  listSchemas(): Promise<unknown>;
+};
+
+export type NodeClient = {
+  baseUrl: string;
+  userHash: string;
+  autoIdentity(): Promise<
+    | { provisioned: true; userHash: string }
+    | { provisioned: false; reason: string }
+  >;
+  bootstrap(name: string): Promise<{ userHash: string }>;
+  loadSchemas(): Promise<{
+    available_schemas_loaded: number;
+    schemas_loaded_to_db: number;
+    failed_schemas: string[];
+  }>;
+  createRecord(opts: {
+    schemaHash: string;
+    fields: Record<string, unknown>;
+    keyHash: string;
+  }): Promise<void>;
+  updateRecord(opts: {
+    schemaHash: string;
+    fields: Record<string, unknown>;
+    keyHash: string;
+  }): Promise<void>;
+  deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
+  queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
+  search(query: string): Promise<NativeIndexHit[]>;
+};
+
+export function newSchemaServiceClient(
+  baseUrl: string,
+  verbose: Verbose = noopVerbose,
+): SchemaServiceClient {
+  const url = stripTrailingSlash(baseUrl);
+  return {
+    baseUrl: url,
+    async registerSchema(req) {
+      const path = "/v1/schemas";
+      const res = await callSchemaService(url, path, "POST", req, verbose);
+      const body = await readJson(res);
+      if (res.status !== 200 && res.status !== 201) {
+        throw mapSchemaServiceError(res, body, path);
+      }
+      const schemaObj =
+        body && typeof body === "object"
+          ? ((body as Record<string, unknown>).schema as Record<string, unknown> | undefined)
+          : undefined;
+      const canonicalHash =
+        schemaObj && typeof schemaObj.name === "string" ? (schemaObj.name as string) : null;
+      if (!canonicalHash) {
+        throw new FbrainError({
+          code: "schema_register_no_hash",
+          message: `Schema service did not return a canonical hash for ${req.schema.descriptive_name}.`,
+          hint: "Inspect the schema service response — fbrain expects `schema.name` to carry the identity hash.",
+        });
+      }
+      const replacedSchema =
+        body && typeof body === "object" && "replaced_schema" in body
+          ? ((body.replaced_schema as string | null | undefined) ?? null)
+          : null;
+      return { canonicalHash, status: res.status, replacedSchema };
+    },
+    async listSchemas() {
+      const res = await callSchemaService(url, "/v1/schemas", "GET", undefined, verbose);
+      const body = await readJson(res);
+      if (res.status !== 200) {
+        throw mapSchemaServiceError(res, body, "/v1/schemas");
+      }
+      return body;
+    },
+  };
+}
+
+export function newNodeClient(opts: {
+  baseUrl: string;
+  userHash: string;
+  verbose?: Verbose;
+}): NodeClient {
+  const url = stripTrailingSlash(opts.baseUrl);
+  const verbose = opts.verbose ?? noopVerbose;
+  const userHash = opts.userHash;
+
+  const callJson = async (
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+  ): Promise<{ status: number; body: unknown }> => {
+    const res = await callNode(url, path, method, body, userHash, verbose);
+    const parsed = await readJson(res);
+    return { status: res.status, body: parsed };
+  };
+
+  return {
+    baseUrl: url,
+    userHash,
+    async autoIdentity() {
+      const { status, body } = await callJson("/api/system/auto-identity", "GET");
+      if (status === 200) {
+        const uh = body && typeof body === "object" ? (body as Record<string, unknown>).user_hash : undefined;
+        return {
+          provisioned: true,
+          userHash: typeof uh === "string" ? uh : userHash,
+        };
+      }
+      if (status === 503) {
+        return {
+          provisioned: false,
+          reason: bodyError(body) ?? "node_not_provisioned",
+        };
+      }
+      throw mapNodeError(status, body, "/api/system/auto-identity");
+    },
+    async bootstrap(name) {
+      const { status, body } = await callJson("/api/setup/bootstrap", "POST", { name });
+      if (status === 200) {
+        const uh = body && typeof body === "object" ? (body as Record<string, unknown>).user_hash : undefined;
+        if (typeof uh !== "string" || uh.length === 0) {
+          throw new FbrainError({
+            code: "bootstrap_no_user_hash",
+            message: "Bootstrap succeeded but the node did not return a user_hash.",
+            hint: "Inspect the response from POST /api/setup/bootstrap.",
+          });
+        }
+        return { userHash: uh };
+      }
+      if (status === 410) {
+        throw new FbrainError({
+          code: "onboarding_already_complete",
+          message: "Node is already provisioned (bootstrap rejected with 410).",
+          hint: "fbrain init should probe `/api/system/auto-identity` first and skip bootstrap when it returns 200.",
+        });
+      }
+      throw mapNodeError(status, body, "/api/setup/bootstrap");
+    },
+    async loadSchemas() {
+      const { status, body } = await callJson("/api/schemas/load", "POST");
+      if (status !== 200) throw mapNodeError(status, body, "/api/schemas/load");
+      const b = body as Record<string, unknown>;
+      const failed = Array.isArray(b.failed_schemas) ? (b.failed_schemas as string[]) : [];
+      return {
+        available_schemas_loaded: numField(b, "available_schemas_loaded"),
+        schemas_loaded_to_db: numField(b, "schemas_loaded_to_db"),
+        failed_schemas: failed,
+      };
+    },
+    async createRecord({ schemaHash, fields, keyHash }) {
+      await mutate("create", schemaHash, fields, keyHash, callJson);
+    },
+    async updateRecord({ schemaHash, fields, keyHash }) {
+      await mutate("update", schemaHash, fields, keyHash, callJson);
+    },
+    async deleteRecord({ schemaHash, keyHash }) {
+      await mutate("delete", schemaHash, { slug: keyHash }, keyHash, callJson);
+    },
+    async queryAll({ schemaHash, fields }) {
+      const { status, body } = await callJson("/api/query", "POST", {
+        schema_name: schemaHash,
+        fields,
+      });
+      if (status !== 200) throw mapNodeError(status, body, "/api/query");
+      const b = body as Record<string, unknown>;
+      const results = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      return {
+        ok: true,
+        results,
+        total_count: typeof b.total_count === "number" ? b.total_count : results.length,
+        returned_count:
+          typeof b.returned_count === "number" ? b.returned_count : results.length,
+      };
+    },
+    async search(query) {
+      const qs = `?q=${encodeURIComponent(query)}`;
+      const { status, body } = await callJson(`/api/native-index/search${qs}`, "GET");
+      if (status !== 200) throw mapNodeError(status, body, "/api/native-index/search");
+      const b = body as Record<string, unknown>;
+      const hits = Array.isArray(b.results) ? (b.results as NativeIndexHit[]) : [];
+      return hits;
+    },
+  };
+}
+
+async function mutate(
+  kind: "create" | "update" | "delete",
+  schemaHash: string,
+  fields: Record<string, unknown>,
+  keyHash: string,
+  callJson: (path: string, method: "GET" | "POST", body?: unknown) => Promise<{ status: number; body: unknown }>,
+): Promise<void> {
+  const { status, body } = await callJson("/api/mutation", "POST", {
+    type: "mutation",
+    schema: schemaHash,
+    fields_and_values: fields,
+    key_value: { hash: keyHash, range: null },
+    mutation_type: kind,
+  });
+  if (status !== 200) throw mapNodeError(status, body, "/api/mutation");
+}
+
+function numField(obj: Record<string, unknown>, key: string): number {
+  const v = obj[key];
+  return typeof v === "number" ? v : 0;
+}
+
+function bodyError(body: unknown): string | undefined {
+  if (body && typeof body === "object" && "error" in body) {
+    const e = (body as Record<string, unknown>).error;
+    if (typeof e === "string") return e;
+  }
+  return undefined;
+}
+
+function bodyMessage(body: unknown): string | undefined {
+  if (body && typeof body === "object" && "message" in body) {
+    const m = (body as Record<string, unknown>).message;
+    if (typeof m === "string") return m;
+  }
+  return undefined;
+}
+
+function stripTrailingSlash(url: string): string {
+  return url.endsWith("/") ? url.slice(0, -1) : url;
+}
+
+async function callNode(
+  baseUrl: string,
+  path: string,
+  method: "GET" | "POST",
+  body: unknown,
+  userHash: string,
+  verbose: Verbose,
+): Promise<Response> {
+  const url = `${baseUrl}${path}`;
+  const headers: Record<string, string> = {
+    "X-User-Hash": userHash,
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  verbose(`→ NODE ${method} ${url}` + (body !== undefined ? ` body=${JSON.stringify(body)}` : ""));
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    verbose(`← NODE ${method} ${url} status=${res.status}`);
+    return res;
+  } catch (err) {
+    throw connectionError(baseUrl, "node", err);
+  }
+}
+
+async function callSchemaService(
+  baseUrl: string,
+  path: string,
+  method: "GET" | "POST",
+  body: unknown,
+  verbose: Verbose,
+): Promise<Response> {
+  const url = `${baseUrl}${path}`;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  verbose(`→ SCHEMA ${method} ${url}` + (body !== undefined ? ` body=${JSON.stringify(body)}` : ""));
+  try {
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    verbose(`← SCHEMA ${method} ${url} status=${res.status}`);
+    return res;
+  } catch (err) {
+    throw connectionError(baseUrl, "schema", err);
+  }
+}
+
+async function readJson(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function connectionError(baseUrl: string, service: "node" | "schema", cause: unknown): FbrainError {
+  const which = service === "node" ? "node" : "schema service";
+  return new FbrainError({
+    code: "service_unreachable",
+    message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
+    hint:
+      service === "node"
+        ? "Start a fold node, e.g. `cd fold/fold_db_node && ./run.sh --local --local-schema`."
+        : "Start fold's schema service (`./run.sh --local --local-schema` runs both).",
+    cause,
+  });
+}
+
+function mapNodeError(status: number, body: unknown, path: string): FbrainError {
+  const errCode = bodyError(body);
+  const msg = bodyMessage(body);
+  if (status === 401 && (errCode === "MISSING_USER_CONTEXT" || msg?.includes("Authentication"))) {
+    return new FbrainError({
+      code: "missing_user_context",
+      message: `Node rejected ${path}: missing X-User-Hash ${DOCTOR_TIP}.`,
+      hint: "Re-run `fbrain init` so the config's userHash is regenerated.",
+    });
+  }
+  if (status === 503 && errCode === "node_not_provisioned") {
+    return new FbrainError({
+      code: "node_not_provisioned",
+      message: `Node not set up ${DOCTOR_TIP}.`,
+      hint: "Run `fbrain init` to bootstrap the node.",
+    });
+  }
+  if (status === 409 && errCode === "ambiguous_schema_name") {
+    const candidates = bodyAmbiguous(body);
+    return new FbrainError({
+      code: "ambiguous_schema_name",
+      message:
+        `Node rejected ${path}: schema name resolves to multiple canonical hashes ` +
+        `(${candidates.join(", ")}). fbrain's config likely points at an old schema hash ${DOCTOR_TIP}.`,
+      hint: "Re-run `fbrain init` — config will pick up the current canonical hash.",
+    });
+  }
+  if (status === 400 && (errCode === "unknown_fields" || msg?.includes("unknown"))) {
+    return new FbrainError({
+      code: "unknown_fields",
+      message: `Node rejected ${path}: ${msg ?? "unknown field name"} ${DOCTOR_TIP}.`,
+      hint: "Compare fbrain's schemas.ts against the registered schema; re-run `fbrain init` after editing.",
+    });
+  }
+  return new FbrainError({
+    code: `node_http_${status}`,
+    message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
+    hint: status >= 500 ? "Check the node log; this looks like a node-side bug." : undefined,
+  });
+}
+
+function mapSchemaServiceError(res: Response, body: unknown, path: string): FbrainError {
+  const errCode = bodyError(body);
+  const msg = bodyMessage(body);
+  return new FbrainError({
+    code: `schema_http_${res.status}`,
+    message: `Schema service ${path} returned HTTP ${res.status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""} ${DOCTOR_TIP}.`,
+  });
+}
+
+function bodyAmbiguous(body: unknown): string[] {
+  if (body && typeof body === "object" && "ambiguous_schemas" in body) {
+    const a = (body as Record<string, unknown>).ambiguous_schemas;
+    if (Array.isArray(a)) return a.filter((v): v is string => typeof v === "string");
+  }
+  return [];
+}
+
+export function recordTypeForHash(
+  hash: string,
+  designHash: string,
+  taskHash: string,
+): RecordType | null {
+  if (hash === designHash) return "design";
+  if (hash === taskHash) return "task";
+  return null;
+}
