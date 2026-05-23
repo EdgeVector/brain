@@ -59,14 +59,18 @@ beforeAll(async () => {
   configPath = join(tmpHome, "config.json");
   process.env.FBRAIN_CONFIG = configPath;
   process.env.FBRAIN_NO_STDIN = "1";
+  // Disable init's cold-build retry in tests — we never want to wait
+  // minutes for a deliberately dead port to time out.
+  process.env.FBRAIN_INIT_RETRY_DELAYS_MS = "";
 });
 
 afterAll(async () => {
   delete process.env.FBRAIN_CONFIG;
   delete process.env.FBRAIN_NO_STDIN;
+  delete process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
   if (harness) await harness.teardown();
-});
+}, 60_000);
 
 describeIntegration("error paths", () => {
   test("init against a dead port reports service_unreachable", async () => {

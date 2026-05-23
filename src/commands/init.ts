@@ -13,7 +13,7 @@
 // with the same canonical hash). Re-running init is the prescribed
 // remedy for `409 ambiguous_schema_name`.
 
-import { newNodeClient, newSchemaServiceClient, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
 import { designSchema, taskSchema } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -30,7 +30,25 @@ export type InitOptions = {
   bootstrapName?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  // Tuning hooks (mainly for tests):
+  retryDelaysMs?: number[];
+  sleep?: (ms: number) => Promise<void>;
 };
+
+// Default cold-build retry schedule: 5s, 10s, 20s, 30s, 60s, 60s ≈ 3m max.
+// First run of `fold/run.sh` compiles Rust and can take several minutes
+// before the node starts listening.
+const DEFAULT_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000, 60000, 60000];
+
+function envRetryDelays(): number[] | null {
+  const raw = process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
+  if (raw === undefined) return null;
+  if (raw.length === 0) return [];
+  return raw
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+}
 
 export type InitResult = {
   config: Config;
@@ -50,11 +68,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`[init] existing config at ${configPath} — verifying`);
   }
 
-  // Step 0/5: probe identity
+  // Step 0/5: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
   const probeUserHash = existing?.userHash ?? "init-probe";
   const probeClient = newNodeClient({ baseUrl: opts.nodeUrl, userHash: probeUserHash, verbose: verbose ?? (() => {}) });
-  const identity = await probeClient.autoIdentity();
+  const identity = await probeWithRetry(probeClient, opts, print);
 
   let userHash: string;
   let bootstrapped = false;
@@ -105,4 +123,43 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print(`        wrote config v${CONFIG_VERSION}`);
   print(`[init] ok`);
   return { config, bootstrapped };
+}
+
+type ProbeResult = Awaited<ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>>;
+
+async function probeWithRetry(
+  probeClient: ReturnType<typeof newNodeClient>,
+  opts: InitOptions,
+  print: (line: string) => void,
+): Promise<ProbeResult> {
+  try {
+    return await probeClient.autoIdentity();
+  } catch (err) {
+    if (!isUnreachable(err)) throw err;
+    const delays = opts.retryDelaysMs ?? envRetryDelays() ?? DEFAULT_RETRY_DELAYS_MS;
+    if (delays.length === 0) throw err;
+    const sleep = opts.sleep ?? defaultSleep;
+    print(
+      `        node not reachable at ${opts.nodeUrl}. If this is a first run, fold_db is compiling Rust — give it a few minutes.`,
+    );
+    for (let i = 0; i < delays.length; i++) {
+      const delay = delays[i] ?? 0;
+      print(`        retrying in ${Math.round(delay / 1000)}s (attempt ${i + 1}/${delays.length})…`);
+      await sleep(delay);
+      try {
+        return await probeClient.autoIdentity();
+      } catch (e2) {
+        if (i === delays.length - 1 || !isUnreachable(e2)) throw e2;
+      }
+    }
+    throw err;
+  }
+}
+
+function isUnreachable(err: unknown): boolean {
+  return err instanceof FbrainError && err.code === "service_unreachable";
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
