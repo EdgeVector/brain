@@ -19,6 +19,7 @@ import { linkCmd } from "./commands/link.ts";
 import { searchCmd } from "./commands/search.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
+import { shareCmd } from "./commands/share.ts";
 import type { RecordType } from "./schemas.ts";
 
 const COMMANDS = [
@@ -32,6 +33,7 @@ const COMMANDS = [
   "search",
   "doctor",
   "raw",
+  "share",
   "help",
 ] as const;
 type Command = (typeof COMMANDS)[number];
@@ -52,6 +54,7 @@ Commands:
   search         semantic search over indexed records
   doctor         health-check the local setup
   raw            authenticated passthrough to node or schema service
+  share          (placeholder) — see docs/phase-3-sharing-memo.md
   help <cmd>     per-command usage
 
 Global flags:
@@ -129,6 +132,17 @@ Examples:
   fbrain raw GET /api/system/auto-identity
   fbrain raw POST /api/schemas/load
   fbrain raw GET /v1/schemas`,
+  share: `fbrain share
+
+Placeholder. Phase 3 spike concluded that cross-node data flow requires
+fold_db's S3 + Auth-Lambda transport, which is unreachable from a
+localhost-only spike. The sharing METADATA primitives (ShareRule,
+ShareInvite, ShareSubscription) work end-to-end on loopback but no
+records actually move between nodes. See docs/phase-3-sharing-memo.md
+for the full evidence and the conditions under which this command can
+become a real share.
+
+Prints a pointer and exits 1.`,
   help: `fbrain help <command>`,
 };
 
@@ -223,6 +237,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runDoctor(args, verboseFn);
     case "raw":
       return runRaw(args, verboseFn);
+    case "share":
+      return runShare(args);
     case "help": {
       const target = args[0];
       if (!target) {
@@ -460,6 +476,11 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
   return doctor(dOpts);
+}
+
+async function runShare(args: Argv): Promise<number> {
+  parseArgs({ args, strict: true, allowPositionals: true, options: {} });
+  return shareCmd();
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
