@@ -20,12 +20,14 @@ import { searchCmd } from "./commands/search.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
+import { putCmd } from "./commands/put.ts";
 import type { RecordType } from "./schemas.ts";
 
 const COMMANDS = [
   "init",
   "design",
   "task",
+  "put",
   "get",
   "list",
   "status",
@@ -47,6 +49,7 @@ Commands:
   init           bootstrap a node + register schemas + write config
   design new     create a new Design
   task new       create a new Task
+  put            upsert a Design or Task from stdin (frontmatter-aware)
   get            print a record by slug
   list           list records, newest-first
   status         show or update a record's status
@@ -86,6 +89,26 @@ Idempotent — re-run after \`409 ambiguous_schema_name\` to refresh hashes.
   --tag       repeatable; tag value to attach
   --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
   --force     overwrite an existing slug`,
+  put: `fbrain put <slug>
+
+Read a markdown body (with optional YAML-subset frontmatter) from stdin
+and upsert a Design or Task. Re-putting the same slug updates in place
+— no --force flag, no duplicate, no 409.
+
+Frontmatter (between leading \`---\` lines) keys honored:
+  type     design | task  (case-insensitive; default: design)
+  title    string         (default: first H1 in body, else slug)
+  tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
+
+Body after the closing \`---\` becomes the record's body (indexed for
+search). Empty body is valid.
+
+v0 only routes design and task to writes. Anything else (concept,
+preference, reference, agent, …) errors and points at Phase 6.
+
+Examples:
+  cat note.md | fbrain put my-note
+  echo "---\\ntype: task\\ntitle: Ship it\\ntags: [ship]\\n---\\nbody" | fbrain put ship-it`,
   get: `fbrain get <slug> [--type design|task]
 
 Without --type, queries both schemas. Errors if the slug exists in both.`,
@@ -223,6 +246,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runDesign(args, verboseFn);
     case "task":
       return runTask(args, verboseFn);
+    case "put":
+      return runPut(args, verboseFn);
     case "get":
       return runGet(args, verboseFn);
     case "list":
@@ -348,6 +373,27 @@ async function runTask(args: Argv, verbose: Verbose): Promise<number> {
   if (values.design) tnOpts.designSlug = values.design;
   await taskNew(tnOpts);
   console.log(`created task ${slug}`);
+  return 0;
+}
+
+async function runPut(args: Argv, verbose: Verbose): Promise<number> {
+  const { positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {},
+  });
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.put);
+    return 1;
+  }
+  const cfg = readConfig();
+  const input = await maybeReadStdin();
+  const pOpts: Parameters<typeof putCmd>[0] = { cfg, slug, input };
+  if (verbose) pOpts.verbose = verbose;
+  const result = await putCmd(pOpts);
+  console.log(`${result.action} ${result.type} ${result.slug}`);
   return 0;
 }
 

@@ -83,6 +83,22 @@ export async function findBySlug(
   return list.find((r) => r.slug === slug) ?? null;
 }
 
+export function validateSlug(slug: string): void {
+  if (slug.length === 0) {
+    throw new FbrainError({
+      code: "invalid_slug",
+      message: "Slug must be non-empty.",
+    });
+  }
+  if (!/^[a-z0-9][a-z0-9-_]*$/.test(slug)) {
+    throw new FbrainError({
+      code: "invalid_slug",
+      message: `Slug "${slug}" is invalid.`,
+      hint: "Slugs are lowercase, start with a letter or digit, and use [a-z0-9-_].",
+    });
+  }
+}
+
 export function ensureStatus(type: RecordType, status: string): void {
   if (!isValidStatus(type, status)) {
     throw new FbrainError({
