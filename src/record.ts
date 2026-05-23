@@ -20,6 +20,15 @@ export type FbrainRecord = {
   updated_at: string;
 };
 
+// Soft-delete sentinel — see docs/phase-5-delete-spike.md. fold_db is
+// append-only, so `fbrain delete` overwrites the record's user fields and
+// stamps this tag; every fbrain read path filters records carrying it.
+export const TOMBSTONE_TAG = "__fbrain_deleted__";
+
+export function isTombstoned(r: FbrainRecord): boolean {
+  return r.tags.includes(TOMBSTONE_TAG);
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }
@@ -74,6 +83,20 @@ export async function listRecords(
 }
 
 export async function findBySlug(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  const r = await findBySlugRaw(node, type, schemaHash, slug);
+  if (r === null) return null;
+  return isTombstoned(r) ? null : r;
+}
+
+// Unfiltered variant — returns tombstoned records too. Only `fbrain delete`
+// needs this (to verify its own soft-delete landed). All other read paths
+// MUST use `findBySlug` so they treat tombstones as gone.
+export async function findBySlugRaw(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,

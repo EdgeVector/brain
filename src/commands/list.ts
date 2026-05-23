@@ -3,6 +3,7 @@
 import { newNodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
+  isTombstoned,
   listRecords,
   schemaHashFor,
   type FbrainRecord,
@@ -35,6 +36,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   }
 
   const filtered = all.filter(({ record }) => {
+    if (isTombstoned(record)) return false;
     if (opts.status && record.status !== opts.status) return false;
     if (opts.tag && !record.tags.includes(opts.tag)) return false;
     return true;
