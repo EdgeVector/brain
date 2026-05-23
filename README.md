@@ -13,7 +13,7 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 | 0 | fold_db feasibility spike | ✅ GO (with canonical-hash caveat) — see [spike notes](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/spikes/fbrain-phase-0-spike-notes.md) |
 | 1 | Bootstrap + core CRUD (init, design new, task new, get, list, status, link) | ✅ Landed |
 | 2 | Search + doctor + raw passthrough + polish | ✅ Landed |
-| 3 | Sharing spike | 🚧 In progress |
+| 3 | Sharing spike | ✅ Memo — see [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) |
 
 ## Plans
 
@@ -65,6 +65,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
 | `fbrain doctor` | Live health check: reachability, provisioning, schemas-loaded, schema drift |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
+| `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 
 Run `fbrain help <command>` for per-command usage.
 
@@ -100,6 +101,16 @@ OK
 
 FAIL: 1 issue
 ```
+
+## Sharing
+
+Phase 3 was a sharing spike: stand up two local fold_db nodes, walk every `/api/sharing/*` endpoint, and either land a working `fbrain share` or land a memo explaining why a localhost-only test can't get there. **Outcome: memo.**
+
+In short: the sharing **metadata** (ShareRule, ShareInvite, ShareSubscription) is fully wireable on loopback — two nodes with distinct identities can hand-deliver an invite and persist a subscription end-to-end. But the **data** never actually moves between nodes, because fold_db's cross-node transport is the cloud sync engine (S3-backed, mediated by an Auth Lambda + discovery service), and that layer is unreachable from a localhost-only spike. Without the transport, the "B cannot read an unshared record" negative test is moot — B can't read **any** of A's records, shared or not.
+
+`fbrain share` is currently a placeholder: it prints a pointer to the memo and exits non-zero. A real implementation requires fold_db's exemem service to be configured.
+
+Read [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) for the full evidence: every endpoint with its captured request/response JSON, what worked, what didn't, and exactly what a real two-device test would require.
 
 ## Architecture
 
