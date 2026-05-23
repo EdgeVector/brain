@@ -11,8 +11,8 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 | Phase | Description | Status |
 |---|---|---|
 | 0 | fold_db feasibility spike | ✅ GO (with canonical-hash caveat) — see [spike notes](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/spikes/fbrain-phase-0-spike-notes.md) |
-| 1 | Bootstrap + core CRUD (init, design new, task new, get, list, status, link) | 🚧 In progress |
-| 2 | Search + doctor + polish | ⏳ Pending Phase 1 |
+| 1 | Bootstrap + core CRUD (init, design new, task new, get, list, status, link) | ✅ Landed |
+| 2 | Search + doctor + polish | ⏳ Pending |
 | 3 | Sharing spike | ⏳ Pending Phase 2 |
 
 ## Plans
@@ -37,9 +37,40 @@ fold_db_node              schema_service
 
 All persistence, indexing, and embedding live in fold_db. fbrain holds only the schemas, the CLI parsing, and the error-message layer.
 
-## Getting started (Phase 1+)
+## Getting started
 
-Coming up in Phase 1 — until then, run the Phase 0 spike notes against your own scratch fold_db node if you want to play with the raw API.
+Phase 1 ships `init`, `design new`, `task new`, `get`, `list`, `status`, `link`, and a `doctor` stub. `search` and full `doctor` land in Phase 2.
+
+```bash
+# 1. start a local fold node + schema service (one-time first build is slow)
+cd /path/to/fold/fold_db_node
+./run.sh --local --local-schema --empty-db --home /tmp/fbrain-node
+
+# 2. in another shell, from this repo
+bun install
+bun src/cli.ts init   # writes ~/.fbrain/config.json with canonical schema hashes
+
+# 3. drive it
+bun src/cli.ts design new my-first-design --title "first" --tag spike
+bun src/cli.ts task new t1 --design my-first-design --title "do the thing"
+bun src/cli.ts list
+bun src/cli.ts get my-first-design --type design
+bun src/cli.ts status my-first-design reviewed
+bun src/cli.ts link t1 my-first-design
+```
+
+A global `--verbose` flag echoes every HTTP request and response — including the canonical schema hash being targeted, per the Phase 0 spike's debugging guidance.
+
+`bun link` instructions for a system-wide `fbrain` binary are coming up in Phase 2.
+
+## Tests
+
+```bash
+bun test           # runs unit + integration tests
+bun run typecheck  # strict tsc --noEmit
+```
+
+Integration tests spawn a real `fold_db_node` + `schema_service` against a unique tmpdir. They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset.
 
 ## Out of scope for v0
 

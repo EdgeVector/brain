@@ -1,0 +1,19 @@
+{
+  "name": "fbrain",
+  "version": "0.0.1",
+  "description": "fbrain prototype — CLI brain over fold_db",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fbrain": "src/cli.ts"
+  },
+  "scripts": {
+    "fbrain": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
