@@ -63,14 +63,16 @@ beforeAll(async () => {
   configPath = join(tmpHome, "config.json");
   process.env.FBRAIN_CONFIG = configPath;
   process.env.FBRAIN_NO_STDIN = "1";
+  process.env.FBRAIN_INIT_RETRY_DELAYS_MS = "";
 }, 240_000);
 
 afterAll(async () => {
   delete process.env.FBRAIN_CONFIG;
   delete process.env.FBRAIN_NO_STDIN;
+  delete process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
   if (tmpHome) rmSync(tmpHome, { recursive: true, force: true });
   if (harness) await harness.teardown();
-});
+}, 60_000);
 
 describeIntegration("Phase 1 — core CRUD", () => {
   test("init writes config with canonical hashes", async () => {

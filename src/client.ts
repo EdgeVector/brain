@@ -20,6 +20,28 @@ export type NativeIndexHit = {
   metadata?: { fragment_idx?: number; match_type?: string; score?: number };
 };
 
+export type SearchOptions = {
+  exact?: boolean;
+  minScore?: number;
+};
+
+export type RegisteredSchema = {
+  name: string;
+  descriptive_name: string;
+  schema_type: string;
+  fields: string[];
+  field_types: Record<string, unknown>;
+  identity_hash?: string;
+  source?: string;
+};
+
+export type RawResponse = {
+  status: number;
+  headers: Headers;
+  body: string;
+  json: unknown;
+};
+
 export type QueryRow = {
   fields: Record<string, unknown>;
   key: { hash: string | null; range: string | null };
@@ -61,6 +83,8 @@ export type SchemaServiceClient = {
     replacedSchema: string | null;
   }>;
   listSchemas(): Promise<unknown>;
+  getSchemaByHash(hash: string): Promise<RegisteredSchema | null>;
+  rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
 
 export type NodeClient = {
@@ -88,7 +112,8 @@ export type NodeClient = {
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
-  search(query: string): Promise<NativeIndexHit[]>;
+  search(query: string, opts?: SearchOptions): Promise<NativeIndexHit[]>;
+  rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
 
 export function newSchemaServiceClient(
@@ -132,7 +157,64 @@ export function newSchemaServiceClient(
       }
       return body;
     },
+    async getSchemaByHash(hash) {
+      const path = `/v1/schema/${encodeURIComponent(hash)}`;
+      const res = await callSchemaService(url, path, "GET", undefined, verbose);
+      if (res.status === 404) {
+        await res.text();
+        return null;
+      }
+      const body = await readJson(res);
+      if (res.status !== 200) {
+        throw mapSchemaServiceError(res, body, path);
+      }
+      // Two response shapes have been observed:
+      //   - {schema: {...}, system: bool}  (SchemaEnvelope, current server)
+      //   - {...schema fields...}          (older or simpler responses)
+      // Prefer the envelope; fall back to treating the body as the schema.
+      const obj = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+      if (!obj) {
+        throw new FbrainError({
+          code: "schema_lookup_bad_response",
+          message: `Schema service ${path} returned a non-JSON or non-object body: ${JSON.stringify(body).slice(0, 200)}`,
+        });
+      }
+      const wrapped = obj.schema as Record<string, unknown> | undefined;
+      const schemaObj = wrapped && typeof wrapped === "object" ? wrapped : obj;
+      if (!schemaObj.fields && !schemaObj.field_types && !schemaObj.descriptive_name) {
+        throw new FbrainError({
+          code: "schema_lookup_no_schema",
+          message: `Schema service ${path} returned unrecognised body: ${JSON.stringify(body).slice(0, 200)}`,
+        });
+      }
+      return {
+        name: stringProp(schemaObj, "name"),
+        descriptive_name: stringProp(schemaObj, "descriptive_name"),
+        schema_type: stringProp(schemaObj, "schema_type"),
+        fields: Array.isArray(schemaObj.fields)
+          ? (schemaObj.fields as unknown[]).filter((v): v is string => typeof v === "string")
+          : [],
+        field_types:
+          schemaObj.field_types && typeof schemaObj.field_types === "object"
+            ? (schemaObj.field_types as Record<string, unknown>)
+            : {},
+        identity_hash:
+          typeof schemaObj.identity_hash === "string" ? (schemaObj.identity_hash as string) : undefined,
+        source: typeof schemaObj.source === "string" ? (schemaObj.source as string) : undefined,
+      };
+    },
+    async rawCall(method, path, body) {
+      const res = await callSchemaServiceRaw(url, path, method, body, verbose);
+      const text = await res.text();
+      const json = parseJsonSafe(text);
+      return { status: res.status, headers: res.headers, body: text, json };
+    },
   };
+}
+
+function stringProp(obj: Record<string, unknown>, key: string): string {
+  const v = obj[key];
+  return typeof v === "string" ? v : "";
 }
 
 export function newNodeClient(opts: {
@@ -232,13 +314,25 @@ export function newNodeClient(opts: {
           typeof b.returned_count === "number" ? b.returned_count : results.length,
       };
     },
-    async search(query) {
-      const qs = `?q=${encodeURIComponent(query)}`;
-      const { status, body } = await callJson(`/api/native-index/search${qs}`, "GET");
+    async search(query, searchOpts) {
+      const params = new URLSearchParams();
+      params.set("q", query);
+      if (searchOpts?.exact) params.set("exact", "true");
+      if (typeof searchOpts?.minScore === "number") {
+        params.set("min_score", String(searchOpts.minScore));
+      }
+      const path = `/api/native-index/search?${params.toString()}`;
+      const { status, body } = await callJson(path, "GET");
       if (status !== 200) throw mapNodeError(status, body, "/api/native-index/search");
       const b = body as Record<string, unknown>;
       const hits = Array.isArray(b.results) ? (b.results as NativeIndexHit[]) : [];
       return hits;
+    },
+    async rawCall(method, path, body) {
+      const res = await callNodeRaw(url, path, method, body, userHash, verbose);
+      const text = await res.text();
+      const json = parseJsonSafe(text);
+      return { status: res.status, headers: res.headers, body: text, json };
     },
   };
 }
@@ -293,17 +387,33 @@ async function callNode(
   userHash: string,
   verbose: Verbose,
 ): Promise<Response> {
+  return callNodeRaw(baseUrl, path, method, body, userHash, verbose);
+}
+
+async function callNodeRaw(
+  baseUrl: string,
+  path: string,
+  method: string,
+  body: unknown,
+  userHash: string,
+  verbose: Verbose,
+): Promise<Response> {
   const url = `${baseUrl}${path}`;
   const headers: Record<string, string> = {
     "X-User-Hash": userHash,
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  verbose(`→ NODE ${method} ${url}` + (body !== undefined ? ` body=${JSON.stringify(body)}` : ""));
+  verbose(`→ NODE ${method} ${url}` + (body !== undefined ? ` body=${typeof body === "string" ? body : JSON.stringify(body)}` : ""));
   try {
     const res = await fetch(url, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body:
+        body === undefined
+          ? undefined
+          : typeof body === "string"
+            ? body
+            : JSON.stringify(body),
     });
     verbose(`← NODE ${method} ${url} status=${res.status}`);
     return res;
@@ -319,20 +429,44 @@ async function callSchemaService(
   body: unknown,
   verbose: Verbose,
 ): Promise<Response> {
+  return callSchemaServiceRaw(baseUrl, path, method, body, verbose);
+}
+
+async function callSchemaServiceRaw(
+  baseUrl: string,
+  path: string,
+  method: string,
+  body: unknown,
+  verbose: Verbose,
+): Promise<Response> {
   const url = `${baseUrl}${path}`;
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  verbose(`→ SCHEMA ${method} ${url}` + (body !== undefined ? ` body=${JSON.stringify(body)}` : ""));
+  verbose(`→ SCHEMA ${method} ${url}` + (body !== undefined ? ` body=${typeof body === "string" ? body : JSON.stringify(body)}` : ""));
   try {
     const res = await fetch(url, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body:
+        body === undefined
+          ? undefined
+          : typeof body === "string"
+            ? body
+            : JSON.stringify(body),
     });
     verbose(`← SCHEMA ${method} ${url} status=${res.status}`);
     return res;
   } catch (err) {
     throw connectionError(baseUrl, "schema", err);
+  }
+}
+
+function parseJsonSafe(text: string): unknown {
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
   }
 }
 
@@ -381,8 +515,8 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
     return new FbrainError({
       code: "ambiguous_schema_name",
       message:
-        `Node rejected ${path}: schema name resolves to multiple canonical hashes ` +
-        `(${candidates.join(", ")}). fbrain's config likely points at an old schema hash ${DOCTOR_TIP}.`,
+        `Node rejected ${path}: schema collision (canonical hashes ${candidates.join(", ")}); ` +
+        `fbrain config out of date — run \`fbrain init\` ${DOCTOR_TIP}.`,
       hint: "Re-run `fbrain init` — config will pick up the current canonical hash.",
     });
   }

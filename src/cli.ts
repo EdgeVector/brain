@@ -16,7 +16,9 @@ import { getRecord } from "./commands/get.ts";
 import { listCmd } from "./commands/list.ts";
 import { statusCmd } from "./commands/status.ts";
 import { linkCmd } from "./commands/link.ts";
-import { doctorStub } from "./commands/doctor.ts";
+import { searchCmd } from "./commands/search.ts";
+import { doctor } from "./commands/doctor.ts";
+import { rawCmd } from "./commands/raw.ts";
 import type { RecordType } from "./schemas.ts";
 
 const COMMANDS = [
@@ -27,7 +29,9 @@ const COMMANDS = [
   "list",
   "status",
   "link",
+  "search",
   "doctor",
+  "raw",
   "help",
 ] as const;
 type Command = (typeof COMMANDS)[number];
@@ -45,7 +49,9 @@ Commands:
   list           list records, newest-first
   status         show or update a record's status
   link           link a task to a parent design
-  doctor         health-check the local setup (Phase 2 stub for now)
+  search         semantic search over indexed records
+  doctor         health-check the local setup
+  raw            authenticated passthrough to node or schema service
   help <cmd>     per-command usage
 
 Global flags:
@@ -93,9 +99,36 @@ enum, updates updated_at, and writes back.`,
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
+  search: `fbrain search <query> [-n N] [--exact] [--min-score F]
+
+Semantic search across indexed records. Dedupes fragment hits per record
+and skips stale hits (records deleted since indexing). Prints
+\`slug · score · type · title\` per match.
+
+  -n            max results
+  --exact       exact-match mode (passes ?exact=true to the index)
+  --min-score   server-side score floor (passes ?min_score=F)`,
   doctor: `fbrain doctor
 
-Phase 1 stub. Reports config presence; full health checks land in Phase 2.`,
+Live health checks:
+  - config valid (~/.fbrain/config.json + hex-64 hashes)
+  - schema service reachable
+  - node reachable + provisioned
+  - schemas loaded into the node
+  - schema drift between schemas.ts and the registered Design/Task schemas
+
+Exits non-zero if any check fails.`,
+  raw: `fbrain raw <method> <path> [body]
+
+Authenticated passthrough. \`/api/\` paths go to the node (with
+X-User-Hash); \`/v1/\` paths go to the schema service. Body argument
+is treated as the literal request body; omit or pass \`-\` to read
+from stdin. Exits 0 on 2xx, 1 otherwise.
+
+Examples:
+  fbrain raw GET /api/system/auto-identity
+  fbrain raw POST /api/schemas/load
+  fbrain raw GET /v1/schemas`,
   help: `fbrain help <command>`,
 };
 
@@ -184,9 +217,12 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runStatus(args, verboseFn);
     case "link":
       return runLink(args, verboseFn);
+    case "search":
+      return runSearch(args, verboseFn);
     case "doctor":
-      doctorStub();
-      return 0;
+      return runDoctor(args, verboseFn);
+    case "raw":
+      return runRaw(args, verboseFn);
     case "help": {
       const target = args[0];
       if (!target) {
@@ -384,6 +420,71 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   await linkCmd({ cfg, taskSlug, designSlug, verbose });
   return 0;
+}
+
+async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {
+      n: { type: "string" },
+      exact: { type: "boolean", default: false },
+      "min-score": { type: "string" },
+    },
+  });
+  const query = positionals.join(" ").trim();
+  if (query.length === 0) {
+    console.error(COMMAND_HELP.search);
+    return 1;
+  }
+  const cfg = readConfig();
+  const limit = values.n ? parseInt(values.n, 10) : undefined;
+  const minScore = values["min-score"] !== undefined ? Number(values["min-score"]) : undefined;
+  if (minScore !== undefined && !Number.isFinite(minScore)) {
+    throw new FbrainError({
+      code: "invalid_min_score",
+      message: `--min-score must be a number (got "${values["min-score"]}").`,
+    });
+  }
+  const sOpts: Parameters<typeof searchCmd>[0] = { cfg, query, verbose };
+  if (typeof limit === "number" && Number.isFinite(limit)) sOpts.limit = limit;
+  if (values.exact) sOpts.exact = true;
+  if (minScore !== undefined) sOpts.minScore = minScore;
+  await searchCmd(sOpts);
+  return 0;
+}
+
+async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
+  parseArgs({ args, strict: true, allowPositionals: false, options: {} });
+  const dOpts: Parameters<typeof doctor>[0] = {};
+  if (verbose) dOpts.verbose = verbose;
+  return doctor(dOpts);
+}
+
+async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
+  const { positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {},
+  });
+  const method = positionals[0];
+  const path = positionals[1];
+  if (!method || !path) {
+    console.error(COMMAND_HELP.raw);
+    return 1;
+  }
+  const cfg = readConfig();
+  const rOpts: Parameters<typeof rawCmd>[0] = {
+    cfg,
+    method,
+    path,
+    readStdin: maybeReadStdin,
+    verbose,
+  };
+  if (positionals[2] !== undefined) rOpts.body = positionals[2];
+  return rawCmd(rOpts);
 }
 
 function parseRecordType(raw: string | undefined): RecordType | undefined {
