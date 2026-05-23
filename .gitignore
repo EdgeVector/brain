@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Bun
+bun.lockb
+
+# fbrain local config (~/.fbrain/ is the canonical home, but never commit a sample with creds)
+config.json
+.fbrain/
+
+# scratch
+/tmp/
+*.tmp
+
+# editor
+.vscode/
+.idea/
+*.swp
