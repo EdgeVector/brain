@@ -345,6 +345,8 @@ A typical baseline reading against a polluted homebrew daemon (the H2 case the P
 
 fbrain is the planned replacement for [gbrain](https://github.com/garrytan/gbrain) at EdgeVector. The 2026-05-24 gap-consolidation review locked the replacement direction. **Status:** v0+ prototype, NOT shipped — readiness-gate criteria are defined, **4 of 11 items green, 7 outstanding**. See [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the workflow inventory, named outstanding items (the `ask` regression, second-user dogfood, minion-bus path, parity smoketest, doctor disclosure WARNs, telemetry, rollback rehearsal), and the 2026-08-23 archive-review deadline.
 
+The second-user dogfood (gate item #6) has a ready-to-execute playbook + 7-day monitor at [`docs/dogfood-g14-second-user-playbook.md`](docs/dogfood-g14-second-user-playbook.md) and [`scripts/dogfood-monitor.sh`](scripts/dogfood-monitor.sh) — the human onboarding step is unblocked, awaiting teammate selection.
+
 Until the readiness gate ships, both gbrain and fbrain coexist; the `gbrain put` → fbrain mirror hook keeps writes flowing to both.
 
 ## Out of scope for v0
