@@ -2,7 +2,7 @@
 
 > ⚠️ **PROTOTYPE graduating into gbrain replacement**
 >
-> This is the active prototype for the EdgeVector team-shared brain. The 2026-05-24 review reaffirmed: fbrain replaces gbrain for org deploys. Readiness-gate criteria are defined; **5 of 11 acceptance items are green, 6 outstanding** — see [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the full ship-criteria contract, named outstanding items, and rollback. If the gate isn't green by **2026-08-23**, this repo gets an archive review per the same discipline applied to the four predecessor monorepo predecessors — see [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) Workstream B.
+> This is the active prototype for the EdgeVector team-shared brain. The 2026-05-24 review reaffirmed: fbrain replaces gbrain for org deploys. Readiness-gate criteria are defined; **7 of 11 acceptance items are green, 4 outstanding** — see [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the full ship-criteria contract, named outstanding items, and rollback. If the gate isn't green by **2026-08-23**, this repo gets an archive review per the same discipline applied to the four predecessor monorepo predecessors — see [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) Workstream B.
 
 A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Eight record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes** — with semantic search and a Phase 3 sharing probe.
 
@@ -349,7 +349,7 @@ A typical baseline reading against a polluted homebrew daemon (the H2 case the P
 
 ## Replacement direction
 
-fbrain is the planned replacement for [gbrain](https://github.com/garrytan/gbrain) at EdgeVector. The 2026-05-24 gap-consolidation review locked the replacement direction. **Status:** v0+ prototype, NOT shipped — readiness-gate criteria are defined, **5 of 11 items green, 6 outstanding**. See [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the workflow inventory, named outstanding items (the `ask` regression, second-user dogfood, minion-bus path, parity smoketest, telemetry, rollback rehearsal), and the 2026-08-23 archive-review deadline.
+fbrain is the planned replacement for [gbrain](https://github.com/garrytan/gbrain) at EdgeVector. The 2026-05-24 gap-consolidation review locked the replacement direction. **Status:** v0+ prototype, NOT shipped — readiness-gate criteria are defined, **7 of 11 items green, 4 outstanding**. See [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the workflow inventory, named outstanding items (the `ask` regression, second-user dogfood, parity smoketest, rollback rehearsal), and the 2026-08-23 archive-review deadline.
 
 The second-user dogfood (gate item #6) has a ready-to-execute playbook + 7-day monitor at [`docs/dogfood-g14-second-user-playbook.md`](docs/dogfood-g14-second-user-playbook.md) and [`scripts/dogfood-monitor.sh`](scripts/dogfood-monitor.sh) — the human onboarding step is unblocked, awaiting teammate selection.
 
