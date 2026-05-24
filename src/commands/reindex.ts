@@ -1,0 +1,134 @@
+// `fbrain reindex [--type T] [--dry-run] [--verbose]` — refresh embeddings
+// for every live fbrain record.
+//
+// Workaround for the H2a finding in docs/phase-7-search-latency-spike.md:
+// `fbrain delete` is soft (tombstone tag) and does NOT purge the
+// corresponding entries from fold_db's `EmbeddingIndex`. Over time, the
+// native-index top-50 fills with phantom embeddings + entries from other
+// schemas, drowning out fresh records. Until the upstream purge lands
+// (G3e), this command iterates every live record and re-issues an update
+// mutation, which re-runs fold_db's `index_record` and refreshes the
+// embedding entry in place. The phantom entries for tombstoned records
+// stay in the index — this just guarantees the live ones are present
+// and current.
+//
+// Iterates all 8 types by default; --type narrows. Tombstoned records
+// (those carrying TOMBSTONE_TAG) are skipped, NOT reindexed.
+//
+// Per Step 6 of the G3c task: pollution-ratio reporting is deferred to
+// G3a (`fbrain doctor freshness`). This command reports the count of
+// records reindexed.
+
+import { newNodeClient, type Verbose } from "../client.ts";
+import type { Config } from "../config.ts";
+import {
+  isTombstoned,
+  listRecords,
+  nowIso,
+  schemaHashFor,
+  type FbrainRecord,
+} from "../record.ts";
+import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
+
+export type ReindexOptions = {
+  cfg: Config;
+  type?: RecordType;
+  dryRun?: boolean;
+  verbose?: Verbose;
+  print?: (line: string) => void;
+};
+
+export type ReindexResult = {
+  scanned: number;
+  reindexed: number;
+  skippedTombstone: number;
+  byType: Partial<Record<RecordType, { reindexed: number; skippedTombstone: number }>>;
+};
+
+export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
+  const print = opts.print ?? ((line: string) => console.log(line));
+  const node = newNodeClient({
+    baseUrl: opts.cfg.nodeUrl,
+    userHash: opts.cfg.userHash,
+    verbose: opts.verbose,
+  });
+
+  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
+  const result: ReindexResult = {
+    scanned: 0,
+    reindexed: 0,
+    skippedTombstone: 0,
+    byType: {},
+  };
+
+  for (const type of types) {
+    const schemaHash = schemaHashFor(type, opts.cfg);
+    const records = await listRecords(node, type, schemaHash);
+    const counts = { reindexed: 0, skippedTombstone: 0 };
+    result.byType[type] = counts;
+
+    for (const record of records) {
+      result.scanned++;
+      if (isTombstoned(record)) {
+        result.skippedTombstone++;
+        counts.skippedTombstone++;
+        opts.verbose?.(`skipped-tombstone ${type}/${record.slug}`);
+        continue;
+      }
+
+      if (opts.dryRun) {
+        result.reindexed++;
+        counts.reindexed++;
+        opts.verbose?.(`kept ${type}/${record.slug}`);
+        continue;
+      }
+
+      const fields = buildReindexFields(type, record, nowIso());
+      await node.updateRecord({ schemaHash, fields, keyHash: record.slug });
+      result.reindexed++;
+      counts.reindexed++;
+      opts.verbose?.(`reindexed ${type}/${record.slug}`);
+    }
+  }
+
+  const prefix = opts.dryRun ? "dry-run: would reindex" : "reindexed";
+  const typeScope = opts.type ? ` (type=${opts.type})` : "";
+  print(
+    `${prefix} ${result.reindexed} record(s)${typeScope}, skipped ${result.skippedTombstone} tombstoned`,
+  );
+  // Pollution-ratio reporting is deferred to G3a — see
+  // docs/phase-7-search-latency-spike.md G3a row.
+
+  return result;
+}
+
+// Build the field payload for a re-issued update mutation. Mirrors
+// put.ts's buildFields but takes a FbrainRecord directly: preserves every
+// user-meaningful field (slug, title, body, status, tags, created_at,
+// design_slug, kind) and only refreshes updated_at. The point is to
+// re-trigger fold_db's `index_record` without changing semantics.
+export function buildReindexFields(
+  type: RecordType,
+  record: FbrainRecord,
+  now: string,
+): Record<string, unknown> {
+  const entry = RECORDS[type];
+  const fields: Record<string, unknown> = {
+    slug: record.slug,
+    title: record.title,
+    body: record.body,
+    status: record.status,
+    tags: record.tags,
+    created_at: record.created_at,
+    updated_at: now,
+  };
+  if (entry.hasDesignSlug) {
+    fields.design_slug = record.design_slug ?? "";
+  }
+  if (entry.kind !== null) {
+    fields.kind = entry.kind;
+    fields.v1_marker_a = "fbrain";
+    fields.v1_marker_b = "v1";
+  }
+  return fields;
+}

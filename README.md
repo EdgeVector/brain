@@ -83,6 +83,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
+| `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
 
 Run `fbrain help <command>` for per-command usage.
 
@@ -192,6 +193,25 @@ Every fbrain read path (`get`, `list`, `status`, `link`, `search`) filters tombs
 `fbrain raw POST /api/query` is the escape hatch — it returns the raw fold_db state including tombstoned rows.
 
 Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) for the full source-code references, probe transcripts, and the fold_db follow-up that's been filed.
+
+## Recovery
+
+If `fbrain search` starts returning stale or empty results — most often after a batch of `fbrain delete` calls, or when the homebrew daemon hosts non-fbrain schemas alongside fbrain — run:
+
+```bash
+fbrain reindex             # all 8 types
+fbrain reindex --type concept --dry-run   # preview what would be touched
+```
+
+`fbrain reindex` walks every live (non-tombstoned) record and re-issues an `update` mutation. fold_db's mutation pipeline re-runs `index_record` synchronously, which refreshes the record's embedding entry in the native index. The fresh embeddings then survive the top-50 budget even when tombstoned-but-not-purged phantoms still sit in the index alongside them.
+
+What it does **not** do:
+
+- It does not purge phantom embeddings left behind by `fbrain delete`. The native index has no per-record purge API today; that fix is filed upstream as G3e against fold_db.
+- It does not change tombstone semantics — tombstoned records stay tombstoned and are reported as `skipped-tombstone`.
+- It does not change the search resolver's top-K logic.
+
+Per-record outcomes (`kept | reindexed | skipped-tombstone`) are printed with the global `--verbose` flag. Pollution-ratio measurement (before/after) is intentionally deferred to `fbrain doctor freshness` (G3a). For the full root-cause analysis and the chain of recommended follow-ups, see [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md).
 
 ## Architecture
 
