@@ -183,24 +183,94 @@ describeIntegration("Phase 4 — fbrain put (task)", () => {
 });
 
 describeIntegration("Phase 4 — fbrain put (errors)", () => {
-  test("unsupported type errors with Phase 6 pointer (no write occurs)", async () => {
-    const slug = `phase4-concept-${Date.now().toString(36)}`;
+  test("unrecognised type errors and does not write", async () => {
+    const slug = `phase4-bogus-${Date.now().toString(36)}`;
     const cfg = readConfig(configPath);
     let err: unknown = null;
     try {
       await putCmd({
         cfg,
         slug,
-        input: "---\ntype: concept\ntitle: nope\n---\nbody",
+        // typo — `concep` is not a registered type
+        input: "---\ntype: concep\ntitle: nope\n---\nbody",
       });
     } catch (e) {
       err = e;
     }
     expect(err).not.toBeNull();
     expect((err as { code: string }).code).toBe("unsupported_type");
-    expect((err as { hint: string }).hint).toContain("Phase 6");
     const got = await runCli(["get", slug]);
     expect(got.code).toBe(1);
-    expect(got.stderr).toContain("No design or task");
+    expect(got.stderr).toContain("No record with slug");
+  }, 60_000);
+});
+
+describeIntegration("Phase 6 — fbrain put (new types)", () => {
+  const NEW_TYPES = ["concept", "preference", "reference", "agent", "project", "spike"] as const;
+
+  for (const type of NEW_TYPES) {
+    test(`frontmatter type: ${type} creates a ${type} via put`, async () => {
+      const slug = `phase6-${type}-${Date.now().toString(36)}`;
+      const cfg = readConfig(configPath);
+      const r = await putCmd({
+        cfg,
+        slug,
+        input: `---\ntype: ${type}\ntitle: ${type} via put\ntags: [phase6, ${type}]\n---\nthe ${type} body`,
+      });
+      expect(r.action).toBe("created");
+      expect(r.type).toBe(type);
+      const got = await runCli(["get", slug, "--type", type]);
+      expect(got.code).toBe(0);
+      expect(got.stdout).toContain(`[${type}] ${slug}`);
+      expect(got.stdout).toContain(`${type} via put`);
+      expect(got.stdout).toContain(`the ${type} body`);
+    }, 60_000);
+  }
+
+  test("re-put with new body updates a concept in place", async () => {
+    const slug = `phase6-update-${Date.now().toString(36)}`;
+    const cfg = readConfig(configPath);
+    const first = await putCmd({
+      cfg,
+      slug,
+      input: "---\ntype: concept\ntitle: First\ntags: [a]\n---\nfirst body",
+    });
+    expect(first.action).toBe("created");
+    const second = await putCmd({
+      cfg,
+      slug,
+      input: "---\ntype: concept\ntitle: Second\ntags: [b]\n---\nsecond body",
+    });
+    expect(second.action).toBe("updated");
+    const got = await runCli(["get", slug, "--type", "concept"]);
+    expect(got.code).toBe(0);
+    expect(got.stdout).toContain("Second");
+    expect(got.stdout).toContain("second body");
+  }, 60_000);
+
+  test("cross-schema slug collision: same slug in concept and task → get requires --type", async () => {
+    const slug = `phase6-collide-${Date.now().toString(36)}`;
+    const cfg = readConfig(configPath);
+    await putCmd({
+      cfg,
+      slug,
+      input: "---\ntype: concept\ntitle: Concept side\n---\nconcept body",
+    });
+    await putCmd({
+      cfg,
+      slug,
+      input: "---\ntype: task\ntitle: Task side\n---\ntask body",
+    });
+    const got = await runCli(["get", slug]);
+    expect(got.code).toBe(1);
+    expect(got.stderr).toContain("exists in multiple schemas");
+    expect(got.stderr.toLowerCase()).toContain("--type");
+    // Explicit --type picks the right one.
+    const conceptOnly = await runCli(["get", slug, "--type", "concept"]);
+    expect(conceptOnly.code).toBe(0);
+    expect(conceptOnly.stdout).toContain("Concept side");
+    const taskOnly = await runCli(["get", slug, "--type", "task"]);
+    expect(taskOnly.code).toBe(0);
+    expect(taskOnly.stdout).toContain("Task side");
   }, 60_000);
 });

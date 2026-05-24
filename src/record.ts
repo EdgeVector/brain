@@ -1,13 +1,15 @@
-// Shared record helpers used by the design/task/get/list/status/link commands.
+// Shared record helpers used by the design/task/put/get/list/status/link commands.
 
 import type { NodeClient, QueryRow } from "./client.ts";
 import { FbrainError } from "./client.ts";
 import {
-  designSchema,
-  taskSchema,
-  type RecordType,
+  RECORDS,
   isValidStatus,
+  statusValuesFor,
+  type RecordType,
 } from "./schemas.ts";
+
+
 
 export type FbrainRecord = {
   slug: string;
@@ -18,6 +20,10 @@ export type FbrainRecord = {
   design_slug?: string;
   created_at: string;
   updated_at: string;
+  // For Phase 6 records that live in the shared noteSchema, `kind` tells
+  // us which logical type the row belongs to (concept, preference, etc.).
+  // Absent for Design/Task records.
+  kind?: string;
 };
 
 // Soft-delete sentinel — see docs/phase-5-delete-spike.md. fold_db is
@@ -34,14 +40,22 @@ export function nowIso(): string {
 }
 
 export function fieldsFor(type: RecordType): string[] {
-  return (type === "design" ? designSchema.schema.fields : taskSchema.schema.fields).slice();
+  return RECORDS[type].schema.schema.fields.slice();
 }
 
 export function schemaHashFor(
   type: RecordType,
-  cfg: { designSchemaHash: string; taskSchemaHash: string },
+  cfg: { schemaHashes: Record<string, string> },
 ): string {
-  return type === "design" ? cfg.designSchemaHash : cfg.taskSchemaHash;
+  const hash = cfg.schemaHashes[type];
+  if (!hash || hash.length === 0) {
+    throw new FbrainError({
+      code: "missing_schema_hash",
+      message: `No canonical hash registered for type "${type}" in config.`,
+      hint: "Re-run `fbrain init` so the config picks up all 8 schema hashes.",
+    });
+  }
+  return hash;
 }
 
 export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
@@ -55,7 +69,11 @@ export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
     created_at: stringField(f, "created_at"),
     updated_at: stringField(f, "updated_at"),
   };
-  if (type === "task") base.design_slug = stringField(f, "design_slug");
+  if (RECORDS[type].hasDesignSlug) base.design_slug = stringField(f, "design_slug");
+  if (RECORDS[type].kind !== null) {
+    const k = stringField(f, "kind");
+    if (k.length > 0) base.kind = k;
+  }
   return base;
 }
 
@@ -79,7 +97,12 @@ export async function listRecords(
   schemaHash: string,
 ): Promise<FbrainRecord[]> {
   const res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
-  return res.results.map((row) => rowToRecord(row, type));
+  const records = res.results.map((row) => rowToRecord(row, type));
+  const kind = RECORDS[type].kind;
+  // Phase 6 types share noteSchema — filter by `kind` so a concept query
+  // doesn't return every Phase 6 record across all kinds.
+  if (kind !== null) return records.filter((r) => r.kind === kind);
+  return records;
 }
 
 export async function findBySlug(
@@ -124,13 +147,11 @@ export function validateSlug(slug: string): void {
 
 export function ensureStatus(type: RecordType, status: string): void {
   if (!isValidStatus(type, status)) {
+    const valid = statusValuesFor(type).join(" | ");
     throw new FbrainError({
       code: "invalid_status",
       message: `"${status}" is not a valid ${type} status.`,
-      hint:
-        type === "design"
-          ? "Valid: draft | reviewed | approved | implemented | archived"
-          : "Valid: open | in_progress | blocked | done | cancelled",
+      hint: `Valid: ${valid}`,
     });
   }
 }

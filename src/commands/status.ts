@@ -10,7 +10,7 @@ import {
   schemaHashFor,
   type FbrainRecord,
 } from "../record.ts";
-import type { RecordType } from "../schemas.ts";
+import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type StatusOptions = {
   cfg: Config;
@@ -29,7 +29,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     verbose: opts.verbose,
   });
 
-  const types: RecordType[] = opts.type ? [opts.type] : ["design", "task"];
+  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const found: Array<{ type: RecordType; record: FbrainRecord }> = [];
   for (const t of types) {
     const r = await findBySlug(node, t, schemaHashFor(t, opts.cfg), opts.slug);
@@ -38,13 +38,14 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   if (found.length === 0) {
     throw new FbrainError({
       code: "not_found",
-      message: `No design or task with slug "${opts.slug}".`,
+      message: `No record with slug "${opts.slug}".`,
     });
   }
   if (found.length > 1) {
+    const matchedTypes = found.map((f) => f.type).join(", ");
     throw new FbrainError({
       code: "ambiguous_slug",
-      message: `Slug "${opts.slug}" exists as both a design and a task. Specify --type.`,
+      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
     });
   }
   const only = found[0]!;
@@ -58,13 +59,23 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
 
   const hash = schemaHashFor(only.type, opts.cfg);
   const now = nowIso();
+  const def = RECORDS[only.type];
   const fields: Record<string, unknown> = {
     ...only.record,
     status: opts.newStatus,
     updated_at: now,
   };
-  // Re-shape the array tags + design_slug for tasks.
-  if (only.type === "design") delete fields.design_slug;
+  // Strip type-specific extras the schema doesn't declare.
+  if (!def.hasDesignSlug) delete fields.design_slug;
+  // Phase 6 records carry `kind` plus two fixed-value markers — set them
+  // explicitly so an update doesn't drop them.
+  if (def.kind !== null) {
+    fields.kind = def.kind;
+    fields.v1_marker_a = "fbrain";
+    fields.v1_marker_b = "v1";
+  } else {
+    delete fields.kind;
+  }
   await node.updateRecord({
     schemaHash: hash,
     keyHash: opts.slug,

@@ -11,19 +11,12 @@ import {
   splitFrontmatter,
 } from "../../src/commands/put.ts";
 import { FbrainError } from "../../src/client.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
+import { RECORDS, type RecordType } from "../../src/schemas.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
-const DESIGN_HASH = "84d9f350b4ff55d9bc96178cd83bd858e8db692485dc820474c5c30355a3062b";
-const TASK_HASH = "c0352ec0c4534bfbc7b692ce4437a0843bdc993aeedfa7df9679437a3cf2bd1e";
+const DESIGN_HASH = TEST_HASHES.design;
 
-const cfg: Config = {
-  configVersion: CONFIG_VERSION,
-  nodeUrl: "http://127.0.0.1:9101",
-  schemaServiceUrl: "http://127.0.0.1:9102",
-  userHash: "uh",
-  designSchemaHash: DESIGN_HASH,
-  taskSchemaHash: TASK_HASH,
-};
+const cfg = buildTestCfg({ userHash: "uh" });
 
 describe("splitFrontmatter", () => {
   test("no frontmatter at all returns null + the body verbatim", () => {
@@ -162,7 +155,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(touched).toBe(false);
   });
 
-  test("unsupported type points at Phase 6 and does not hit network", async () => {
+  test("unsupported type rejects before any HTTP traffic", async () => {
     let touched = false;
     installMock(() => {
       touched = true;
@@ -172,7 +165,8 @@ describe("putCmd — pre-request validation + dispatch", () => {
       putCmd({
         cfg,
         slug: "anything",
-        input: "---\ntype: concept\n---\nbody",
+        // `concep` is a typo — Phase 6 supports `concept`, not `concep`.
+        input: "---\ntype: concep\n---\nbody",
       }),
     ).rejects.toMatchObject({ code: "unsupported_type" });
     expect(touched).toBe(false);
@@ -360,6 +354,41 @@ describe("putCmd — pre-request validation + dispatch", () => {
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("");
     expect(fields.status).toBe("open");
+  });
+
+  test.each([
+    "concept",
+    "preference",
+    "reference",
+    "agent",
+    "project",
+    "spike",
+  ] as const)("type: %s creates a record with the type's default status", async (type) => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: `${type}-smoke`,
+      input: `---\ntype: ${type}\ntitle: Smoke\ntags: [phase6]\n---\nbody for ${type}`,
+    });
+    expect(r.type).toBe(type as RecordType);
+    expect(r.action).toBe("created");
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.mutation_type).toBe("create");
+    expect(mutations[0]!.schema).toBe(TEST_HASHES[type as RecordType]);
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.status).toBe(RECORDS[type as RecordType].defaultStatus);
+    expect(fields.title).toBe("Smoke");
+    expect(fields.tags).toEqual(["phase6"]);
+    // Non-task types should NOT have design_slug.
+    expect("design_slug" in fields).toBe(false);
   });
 
   test("update preserves existing design_slug on a task put", async () => {

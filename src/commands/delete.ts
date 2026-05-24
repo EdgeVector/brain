@@ -1,4 +1,4 @@
-// `fbrain delete <slug> [--type design|task]` — soft-delete a record.
+// `fbrain delete <slug> [--type T]` — soft-delete a record.
 //
 // fold_db's mutation pipeline is append-only — see docs/phase-5-delete-spike.md.
 // A real "hard delete" cannot be implemented today, so this command:
@@ -24,7 +24,7 @@ import {
   TOMBSTONE_TAG,
   type FbrainRecord,
 } from "../record.ts";
-import type { RecordType } from "../schemas.ts";
+import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -34,12 +34,19 @@ export type DeleteOptions = {
   print?: (line: string) => void;
 };
 
-// Status fields are validated client-side against the per-type enum (see
-// `ensureStatus` in record.ts). "archived" is the only design status that
-// fits a tombstoned record; "cancelled" is the task equivalent.
+// Tombstone status per type — pick a value from each type's status enum
+// that semantically fits "this is gone". Validated on write by the
+// record's schema (statuses are free-form strings in fold_db itself, but
+// fbrain ensures the value is in the enum via ensureStatus elsewhere).
 export const TOMBSTONE_STATUS: Record<RecordType, string> = {
   design: "archived",
   task: "cancelled",
+  concept: "archived",
+  preference: "superseded",
+  reference: "archived",
+  agent: "archived",
+  project: "archived",
+  spike: "concluded",
 };
 
 export function buildTombstoneFields(
@@ -48,6 +55,7 @@ export function buildTombstoneFields(
   createdAt: string,
   now: string,
 ): Record<string, unknown> {
+  const def = RECORDS[type];
   const fields: Record<string, unknown> = {
     slug,
     title: "(deleted)",
@@ -57,7 +65,15 @@ export function buildTombstoneFields(
     created_at: createdAt,
     updated_at: now,
   };
-  if (type === "task") fields.design_slug = "";
+  if (def.hasDesignSlug) fields.design_slug = "";
+  if (def.kind !== null) {
+    // Phase 6 records on the shared noteSchema carry a `kind` discriminator
+    // plus two fixed-value markers; an update must include them or the
+    // schema rejects the mutation.
+    fields.kind = def.kind;
+    fields.v1_marker_a = "fbrain";
+    fields.v1_marker_b = "v1";
+  }
   return fields;
 }
 
@@ -69,12 +85,17 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     verbose: opts.verbose,
   });
 
-  const probeTypes: RecordType[] = opts.type ? [opts.type] : ["design", "task"];
+  const probeTypes: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const live: Array<{ type: RecordType; record: FbrainRecord }> = [];
   for (const t of probeTypes) {
     const r = await findBySlugRaw(node, t, schemaHashFor(t, opts.cfg), opts.slug);
     if (r === null) continue;
     if (isTombstoned(r)) continue;
+    // For Phase 6 types that share noteSchema, findBySlugRaw returns rows
+    // regardless of kind. Skip the rows whose kind doesn't match this
+    // type so we don't try to "delete" a preference as a concept.
+    const def = RECORDS[t];
+    if (def.kind !== null && r.kind !== def.kind) continue;
     live.push({ type: t, record: r });
   }
 
@@ -87,14 +108,15 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     }
     throw new FbrainError({
       code: "not_found",
-      message: `No design or task with slug "${opts.slug}".`,
+      message: `No record with slug "${opts.slug}".`,
     });
   }
 
   if (live.length > 1) {
+    const matchedTypes = live.map((l) => l.type).join(", ");
     throw new FbrainError({
       code: "ambiguous_slug",
-      message: `Slug "${opts.slug}" exists as both a design and a task. Specify --type.`,
+      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
     });
   }
 

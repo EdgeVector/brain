@@ -13,21 +13,22 @@ import {
   validateConfigShape,
 } from "../../src/commands/doctor.ts";
 import {
+  RECORDS,
   designSchema,
-  taskSchema,
+  type AddSchemaRequest,
 } from "../../src/schemas.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
+import { type Config } from "../../src/config.ts";
 import type {
   NodeClient,
   RegisteredSchema,
   SchemaServiceClient,
 } from "../../src/client.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
-const DESIGN_HASH = "84d9f350b4ff55d9bc96178cd83bd858e8db692485dc820474c5c30355a3062b";
-const TASK_HASH = "c0352ec0c4534bfbc7b692ce4437a0843bdc993aeedfa7df9679437a3cf2bd1e";
+const DESIGN_HASH = TEST_HASHES.design;
 
 function asRegistered(
-  schemaDef: typeof designSchema | typeof taskSchema,
+  schemaDef: AddSchemaRequest,
   canonicalHash: string,
 ): RegisteredSchema {
   return {
@@ -42,15 +43,7 @@ function asRegistered(
 }
 
 function makeCfg(over: Partial<Config> = {}): Config {
-  return {
-    configVersion: CONFIG_VERSION,
-    nodeUrl: "http://127.0.0.1:9101",
-    schemaServiceUrl: "http://127.0.0.1:9102",
-    userHash: "uh-test",
-    designSchemaHash: DESIGN_HASH,
-    taskSchemaHash: TASK_HASH,
-    ...over,
-  };
+  return buildTestCfg(over);
 }
 
 function writeCfg(cfg: Config): string {
@@ -60,9 +53,11 @@ function writeCfg(cfg: Config): string {
   return path;
 }
 
+// Drift overrides keyed by `key` from UNIQUE_SCHEMAS (design | task | note).
+type DriftOverrides = Partial<Record<"design" | "task" | "note", RegisteredSchema | null>>;
+
 function mockSchemaClient(opts: {
-  designReg?: RegisteredSchema | null;
-  taskReg?: RegisteredSchema | null;
+  drift?: DriftOverrides;
   listSchemasOk?: boolean;
 }): SchemaServiceClient {
   return {
@@ -75,11 +70,24 @@ function mockSchemaClient(opts: {
       return { ok: true };
     },
     async getSchemaByHash(hash: string) {
-      if (hash === DESIGN_HASH) {
-        return "designReg" in opts ? (opts.designReg ?? null) : asRegistered(designSchema, DESIGN_HASH);
+      // TEST_HASHES has one entry per RecordType but Phase 6 entries
+      // share the same value (note hash). The doctor only ever queries
+      // the design / task / note hashes, so dispatch on those.
+      if (hash === TEST_HASHES.design) {
+        const override = opts.drift?.design;
+        if (override !== undefined) return override;
+        return asRegistered(RECORDS.design.schema, hash);
       }
-      if (hash === TASK_HASH) {
-        return "taskReg" in opts ? (opts.taskReg ?? null) : asRegistered(taskSchema, TASK_HASH);
+      if (hash === TEST_HASHES.task) {
+        const override = opts.drift?.task;
+        if (override !== undefined) return override;
+        return asRegistered(RECORDS.task.schema, hash);
+      }
+      if (hash === TEST_HASHES.concept) {
+        // Same value covers concept/preference/reference/agent/project/spike.
+        const override = opts.drift?.note;
+        if (override !== undefined) return override;
+        return asRegistered(RECORDS.concept.schema, hash);
       }
       return null;
     },
@@ -130,20 +138,41 @@ function mockNodeClient(opts: {
 }
 
 describe("validateConfigShape", () => {
-  test("accepts hex64 hashes", () => {
+  test("accepts hex64 hashes for every type", () => {
     expect(validateConfigShape(makeCfg())).toEqual([]);
   });
 
-  test("rejects too-short designSchemaHash", () => {
-    const issues = validateConfigShape(makeCfg({ designSchemaHash: "deadbeef" }));
-    expect(issues[0]).toContain("designSchemaHash");
+  test("rejects missing schemaHash for a type", () => {
+    const cfg = makeCfg();
+    const trimmed: Config = {
+      ...cfg,
+      schemaHashes: { ...cfg.schemaHashes },
+    };
+    delete trimmed.schemaHashes.concept;
+    const issues = validateConfigShape(trimmed);
+    expect(issues.join("\n")).toContain('schemaHashes["concept"]');
   });
 
-  test("rejects non-hex taskSchemaHash", () => {
-    const issues = validateConfigShape(
-      makeCfg({ taskSchemaHash: "z".repeat(64) }),
-    );
-    expect(issues[0]).toContain("taskSchemaHash");
+  test("rejects non-hex schemaHash", () => {
+    const cfg = makeCfg({
+      schemaHashes: {
+        ...TEST_HASHES,
+        task: "z".repeat(64),
+      },
+    });
+    const issues = validateConfigShape(cfg);
+    expect(issues.join("\n")).toContain('schemaHashes["task"]');
+  });
+
+  test("rejects too-short schemaHash", () => {
+    const cfg = makeCfg({
+      schemaHashes: {
+        ...TEST_HASHES,
+        design: "deadbeef",
+      },
+    });
+    const issues = validateConfigShape(cfg);
+    expect(issues.join("\n")).toContain('schemaHashes["design"]');
   });
 });
 
@@ -191,7 +220,7 @@ describe("diffSchemas", () => {
 });
 
 describe("doctor verdict logic", () => {
-  test("all green → exit 0", async () => {
+  test("all green → exit 0 and reports drift for every unique schema", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -203,6 +232,10 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(0);
     expect(lines.some((l) => l.includes("OK"))).toBe(true);
     expect(lines.filter((l) => l.startsWith("[FAIL]")).length).toBe(0);
+    // Three unique schemas: Design, Task, FbrainKindNote.
+    expect(lines.some((l) => l.includes("[PASS] schema-drift[Design]"))).toBe(true);
+    expect(lines.some((l) => l.includes("[PASS] schema-drift[Task]"))).toBe(true);
+    expect(lines.some((l) => l.includes("[PASS] schema-drift[FbrainKindNote]"))).toBe(true);
   });
 
   test("missing config → exit 1", async () => {
@@ -219,7 +252,12 @@ describe("doctor verdict logic", () => {
 
   test("invalid hash format → reports config FAIL but doctor keeps going", async () => {
     const configPath = writeCfg(
-      makeCfg({ designSchemaHash: "not-hex-not-64" }),
+      makeCfg({
+        schemaHashes: {
+          ...TEST_HASHES,
+          design: "not-hex-not-64",
+        },
+      }),
     );
     const lines: string[] = [];
     const code = await doctor({
@@ -281,7 +319,7 @@ describe("doctor verdict logic", () => {
       configPath,
       print: (l) => lines.push(l),
       schemaClientFactory: () =>
-        mockSchemaClient({ designReg: null }), // simulates 404 lookup
+        mockSchemaClient({ drift: { design: null } }), // simulates 404 lookup for Design
       nodeClientFactory: () => mockNodeClient({}),
     });
     expect(code).toBe(1);
@@ -298,10 +336,27 @@ describe("doctor verdict logic", () => {
     const code = await doctor({
       configPath,
       print: (l) => lines.push(l),
-      schemaClientFactory: () => mockSchemaClient({ designReg: drifted }),
+      schemaClientFactory: () => mockSchemaClient({ drift: { design: drifted } }),
       nodeClientFactory: () => mockNodeClient({}),
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] schema-drift[Design]"))).toBe(true);
+  });
+
+  test("schema drift on the shared Phase 6 schema → drift FAIL", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const driftedNote = asRegistered(RECORDS.concept.schema, TEST_HASHES.concept);
+    driftedNote.fields = driftedNote.fields.filter((f) => f !== "tags");
+    delete driftedNote.field_types["tags"];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () =>
+        mockSchemaClient({ drift: { note: driftedNote } }),
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.includes("[FAIL] schema-drift[FbrainKindNote]"))).toBe(true);
   });
 });

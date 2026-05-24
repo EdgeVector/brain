@@ -22,9 +22,10 @@ import {
 } from "../client.ts";
 import { tryReadConfig, type Config } from "../config.ts";
 import {
-  designSchema,
-  taskSchema,
+  RECORD_TYPES,
+  UNIQUE_SCHEMAS,
   type AddSchemaRequest,
+  type RecordType,
 } from "../schemas.ts";
 
 export type DoctorOptions = {
@@ -166,16 +167,31 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
-  // 6. schema drift — only meaningful if config is OK and schema service is reachable
+  // 6. schema drift — check each unique schema once (Phase 6 types share
+  // a single FbrainKindNote schema).
   if (cfgIssues.length === 0) {
-    for (const [type, request, hash] of [
-      ["Design", designSchema, cfg.designSchemaHash] as const,
-      ["Task", taskSchema, cfg.taskSchemaHash] as const,
-    ]) {
-      const driftCheck = await checkSchemaDrift(schemaClient, type, request, hash);
+    for (const entry of UNIQUE_SCHEMAS) {
+      const firstType = entry.types[0]!;
+      const hash = cfg.schemaHashes[firstType];
+      const label = entry.schema.schema.descriptive_name;
+      if (!hash) {
+        checks.push({
+          name: `schema-drift[${label}]`,
+          ok: false,
+          detail: `no canonical hash for "${firstType}" in config.schemaHashes`,
+          fix: "re-run `fbrain init`",
+        });
+        continue;
+      }
+      const driftCheck = await checkSchemaDrift(
+        schemaClient,
+        label,
+        entry.schema,
+        hash,
+      );
       checks.push(driftCheck);
       verbose?.(
-        `schema-drift[${type}]: ${driftCheck.ok ? "ok" : `FAIL — ${driftCheck.detail ?? ""}`}`,
+        `schema-drift[${label}]: ${driftCheck.ok ? "ok" : `FAIL — ${driftCheck.detail ?? ""}`}`,
       );
     }
   }
@@ -283,11 +299,15 @@ function sameFieldType(a: unknown, b: unknown): boolean {
 
 export function validateConfigShape(cfg: Config): string[] {
   const issues: string[] = [];
-  if (!/^[0-9a-f]{64}$/i.test(cfg.designSchemaHash)) {
-    issues.push(`designSchemaHash "${cfg.designSchemaHash}" is not a 64-char hex string`);
-  }
-  if (!/^[0-9a-f]{64}$/i.test(cfg.taskSchemaHash)) {
-    issues.push(`taskSchemaHash "${cfg.taskSchemaHash}" is not a 64-char hex string`);
+  for (const type of RECORD_TYPES as readonly RecordType[]) {
+    const h = cfg.schemaHashes[type];
+    if (!h || h.length === 0) {
+      issues.push(`schemaHashes["${type}"] is missing`);
+      continue;
+    }
+    if (!/^[0-9a-f]{64}$/i.test(h)) {
+      issues.push(`schemaHashes["${type}"] "${h}" is not a 64-char hex string`);
+    }
   }
   return issues;
 }

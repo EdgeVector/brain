@@ -98,7 +98,11 @@ describeIntegration("Phase 2 — doctor", () => {
 
   test("doctor with bad-hash config flags config FAIL", async () => {
     const original = readConfig(configPath);
-    const tampered = { ...original, designSchemaHash: "deadbeef" };
+    const tampered = {
+      ...original,
+      designSchemaHash: "deadbeef",
+      schemaHashes: { ...original.schemaHashes, design: "deadbeef" },
+    };
     writeFileSync(configPath, JSON.stringify(tampered), "utf8");
     try {
       const res = await runCli(["doctor"]);

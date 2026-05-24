@@ -8,7 +8,7 @@ import {
   schemaHashFor,
   type FbrainRecord,
 } from "../record.ts";
-import type { RecordType } from "../schemas.ts";
+import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type ListOptions = {
   cfg: Config;
@@ -28,7 +28,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     verbose: opts.verbose,
   });
 
-  const types: RecordType[] = opts.type ? [opts.type] : ["design", "task"];
+  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const all: Array<{ type: RecordType; record: FbrainRecord }> = [];
   for (const t of types) {
     const rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
@@ -55,6 +55,6 @@ export async function listCmd(opts: ListOptions): Promise<void> {
 
   for (const { type, record } of trimmed) {
     const tags = record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
-    print(`${type.padEnd(6)} ${record.slug.padEnd(28)} ${record.status.padEnd(12)} ${record.title}${tags}`);
+    print(`${type.padEnd(10)} ${record.slug.padEnd(28)} ${record.status.padEnd(12)} ${record.title}${tags}`);
   }
 }

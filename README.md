@@ -4,7 +4,7 @@
 >
 > This is a v0 prototype that probes whether [fold_db](https://github.com/EdgeVector/fold) is a viable storage backend for a personal "brain" CLI. If by **2026-08-23** the prototype hasn't graduated into [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) Workstream B, this repo is archived with `ARCHIVED.md` and a `pre-commit` reject hook — the same discipline applied to the four predecessor monorepo predecessors.
 
-A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain that tracks **designs** and **tasks**, with semantic search and a Phase 3 sharing probe.
+A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Eight record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes** — with semantic search and a Phase 3 sharing probe.
 
 ## Status
 
@@ -15,6 +15,7 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 | 2 | Search + doctor + raw passthrough + polish | ✅ Landed |
 | 3 | Sharing spike | ✅ Memo — see [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) |
 | 5 | `fbrain delete` (soft, with verified semantics) | ✅ Landed — see [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) |
+| 6 | Multi-type schemas (Concept / Preference / Reference / Agent / Project / Spike) + table-driven put dispatch | ✅ Landed |
 
 ## Plans
 
@@ -65,16 +66,18 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 
 ## Commands
 
+`<TYPE>` below is one of: `design | task | concept | preference | reference | agent | project | spike`.
+
 | Command | What it does |
 |---|---|
-| `fbrain init` | Bootstraps the node + registers Design/Task schemas + writes `~/.fbrain/config.json` with canonical hashes |
+| `fbrain init` | Bootstraps the node + registers schemas + writes `~/.fbrain/config.json` with canonical hashes |
 | `fbrain design new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a Design |
 | `fbrain task new <slug> [--title T] [--design D] [--tag T]… [--body STR] [--force]` | Creates a Task (rejects dangling `--design`) |
-| `fbrain put <slug>` | Upserts a Design or Task from stdin (YAML frontmatter aware). Re-puts update in place — no `--force`, no 409. v0 only supports `type: design` and `type: task`; other types error and point at Phase 6 |
-| `fbrain get <slug> [--type design|task]` | Prints a record by slug |
+| `fbrain put <slug>` | Upserts a record from stdin (YAML frontmatter aware). `type:` in frontmatter picks the schema — all 8 types route to writes. Re-puts update in place — no `--force`, no 409 |
+| `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type and errors on ambiguity |
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
-| `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status |
-| `fbrain link <task-slug> <design-slug>` | Links a task to its parent design |
+| `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
+| `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
 | `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
 | `fbrain doctor` | Live health check: reachability, provisioning, schemas-loaded, schema drift |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
@@ -82,6 +85,36 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 
 Run `fbrain help <command>` for per-command usage.
+
+## Record types
+
+| Type | Status enum | Schema (in fold_db) |
+|---|---|---|
+| `design` | `draft \| reviewed \| approved \| implemented \| archived` | dedicated `Design` schema |
+| `task` | `open \| in_progress \| blocked \| done \| cancelled` | dedicated `Task` schema (carries `design_slug` for `link`) |
+| `concept` | `active \| archived` | shared `FbrainKindNote` schema |
+| `preference` | `active \| superseded` | shared `FbrainKindNote` schema |
+| `reference` | `active \| broken \| archived` | shared `FbrainKindNote` schema |
+| `agent` | `active \| archived` | shared `FbrainKindNote` schema |
+| `project` | `planning \| in_progress \| done \| archived` | shared `FbrainKindNote` schema |
+| `spike` | `active \| concluded` | shared `FbrainKindNote` schema |
+
+The six Phase 6 types share a single `FbrainKindNote` schema with a `kind` discriminator field. We started with one schema per type, but fold_db's node merges schemas with overlapping field positions during `/api/schemas/load` — the second schema's data becomes inaccessible. The shared schema sidesteps that bug entirely. The trade-off is that slugs are unique GLOBALLY across the six Phase 6 types (a concept and a preference cannot share a slug). For the gbrain → fbrain migration this is fine because gbrain page slugs are already path-prefixed (`concepts/foo` ≠ `projects/foo`).
+
+Default status on create (used when frontmatter omits `status:`): first value of each enum (so `active` for most types, `planning` for project, `draft` for design, `open` for task).
+
+Example: pipe a concept through `fbrain put`:
+
+```bash
+cat <<'NOTE' | fbrain put my-concept
+---
+type: concept
+title: Idempotency in fold
+tags: [fold, concept]
+---
+mutations are keyed by canonical hash; re-POST of the same body is a no-op.
+NOTE
+```
 
 ## Doctor
 
@@ -97,6 +130,7 @@ Run `fbrain help <command>` for per-command usage.
 [PASS] schemas-loaded  — 932/932 loaded
 [PASS] schema-drift[Design]  — Design @ 84d9f350b4ff…
 [PASS] schema-drift[Task]  — Task @ c0352ec0c453…
+[PASS] schema-drift[FbrainKindNote]  — FbrainKindNote @ 57df5c3fe50c…
 
 OK
 ```
@@ -112,6 +146,7 @@ OK
 [FAIL] schema-drift[Design]  — fields missing from registered schema: owner
        fix:   re-run `fbrain init` so the config picks up the current canonical hash; otherwise reconcile schemas.ts with the registered schema
 [PASS] schema-drift[Task]  — Task @ c0352ec0c453…
+[PASS] schema-drift[FbrainKindNote]  — FbrainKindNote @ 57df5c3fe50c…
 
 FAIL: 1 issue
 ```

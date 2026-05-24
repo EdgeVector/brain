@@ -7,21 +7,27 @@ import {
   schemaHashFor,
 } from "../../src/record.ts";
 import { FbrainError } from "../../src/client.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
-const cfg: Config = {
-  configVersion: CONFIG_VERSION,
-  nodeUrl: "http://127.0.0.1:9101",
-  schemaServiceUrl: "http://127.0.0.1:9102",
-  userHash: "uh",
-  designSchemaHash: "designhash",
-  taskSchemaHash: "taskhash",
-};
+const cfg = buildTestCfg({
+  schemaHashes: {
+    ...TEST_HASHES,
+    design: "designhash",
+    task: "taskhash",
+  },
+});
 
 describe("record", () => {
   test("schemaHashFor returns the right hash", () => {
     expect(schemaHashFor("design", cfg)).toBe("designhash");
     expect(schemaHashFor("task", cfg)).toBe("taskhash");
+  });
+
+  test("schemaHashFor throws for a missing type", () => {
+    const partial = buildTestCfg({
+      schemaHashes: { design: "d", task: "t" },
+    });
+    expect(() => schemaHashFor("concept", partial)).toThrow(FbrainError);
   });
 
   test("fieldsFor returns design fields", () => {

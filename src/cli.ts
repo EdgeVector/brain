@@ -22,7 +22,7 @@ import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
 import { deleteRecord } from "./commands/delete.ts";
-import type { RecordType } from "./schemas.ts";
+import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
 const COMMANDS = [
   "init",
@@ -95,36 +95,40 @@ Idempotent — re-run after \`409 ambiguous_schema_name\` to refresh hashes.
   put: `fbrain put <slug>
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
-and upsert a Design or Task. Re-putting the same slug updates in place
-— no --force flag, no duplicate, no 409.
+and upsert a record. Re-putting the same slug updates in place —
+no --force flag, no duplicate, no 409.
 
 Frontmatter (between leading \`---\` lines) keys honored:
-  type     design | task  (case-insensitive; default: design)
+  type     design | task | concept | preference | reference | agent | project | spike
+           (case-insensitive; default: design)
   title    string         (default: first H1 in body, else slug)
   tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
 
 Body after the closing \`---\` becomes the record's body (indexed for
 search). Empty body is valid.
 
-v0 only routes design and task to writes. Anything else (concept,
-preference, reference, agent, …) errors and points at Phase 6.
-
 Examples:
   cat note.md | fbrain put my-note
-  echo "---\\ntype: task\\ntitle: Ship it\\ntags: [ship]\\n---\\nbody" | fbrain put ship-it`,
-  get: `fbrain get <slug> [--type design|task]
+  echo "---\\ntype: concept\\ntitle: Idempotency\\n---\\nbody" | fbrain put concept-idempotency`,
+  get: `fbrain get <slug> [--type T]
 
-Without --type, queries both schemas. Errors if the slug exists in both.`,
+Without --type, queries every registered schema. Errors if the slug
+exists in multiple types (prints all matches first).
+
+  --type    design | task | concept | preference | reference | agent | project | spike`,
   list: `fbrain list [--type T] [--status S] [--tag T] [-n N]
 
-  --type      design | task
+  --type      design | task | concept | preference | reference | agent | project | spike
+              (omit to list across all types)
   --status    filter by status enum
   --tag       filter by tag membership
   -n          max results (newest-first)`,
-  status: `fbrain status <slug> [<new-status>] [--type design|task]
+  status: `fbrain status <slug> [<new-status>] [--type T]
 
 Bare form prints current status. With a new-status, validates against the
-enum, updates updated_at, and writes back.`,
+type's status enum, updates updated_at, and writes back.
+
+  --type    design | task | concept | preference | reference | agent | project | spike`,
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
@@ -596,10 +600,10 @@ async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
 
 function parseRecordType(raw: string | undefined): RecordType | undefined {
   if (raw === undefined) return undefined;
-  if (raw === "design" || raw === "task") return raw;
+  if (isRecordType(raw)) return raw;
   throw new FbrainError({
     code: "invalid_type",
-    message: `--type must be "design" or "task" (got "${raw}").`,
+    message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,
   });
 }
 

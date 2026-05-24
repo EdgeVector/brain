@@ -1,6 +1,6 @@
-// `fbrain get <slug> [--type design|task]` — print a record.
-// If --type is omitted, queries both schemas. If found in both, prints both
-// and tells the user to specify --type.
+// `fbrain get <slug> [--type T]` — print a record.
+// If --type is omitted, queries every registered schema. If found in
+// multiple schemas, prints all matches and tells the user to specify --type.
 
 import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -9,7 +9,7 @@ import {
   schemaHashFor,
   type FbrainRecord,
 } from "../record.ts";
-import type { RecordType } from "../schemas.ts";
+import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type GetOptions = {
   cfg: Config;
@@ -27,7 +27,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     verbose: opts.verbose,
   });
 
-  const types: RecordType[] = opts.type ? [opts.type] : ["design", "task"];
+  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const found: Array<{ type: RecordType; record: FbrainRecord }> = [];
   for (const t of types) {
     const r = await findBySlug(node, t, schemaHashFor(t, opts.cfg), opts.slug);
@@ -43,15 +43,16 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     }
     throw new FbrainError({
       code: "not_found",
-      message: `No design or task with slug "${opts.slug}".`,
+      message: `No record with slug "${opts.slug}".`,
     });
   }
 
   if (found.length > 1) {
     for (const { type, record } of found) print(formatRecord(record, type));
+    const matchedTypes = found.map((f) => f.type).join(", ");
     throw new FbrainError({
       code: "ambiguous_slug",
-      message: `Slug "${opts.slug}" exists as both a design and a task. Specify --type.`,
+      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
     });
   }
 
@@ -66,7 +67,9 @@ export function formatRecord(r: FbrainRecord, type: RecordType): string {
     `status:     ${r.status}`,
     `tags:       ${r.tags.length === 0 ? "(none)" : r.tags.join(", ")}`,
   ];
-  if (type === "task") lines.push(`design:     ${r.design_slug && r.design_slug.length > 0 ? r.design_slug : "(none)"}`);
+  if (RECORDS[type].hasDesignSlug) {
+    lines.push(`design:     ${r.design_slug && r.design_slug.length > 0 ? r.design_slug : "(none)"}`);
+  }
   lines.push(`created_at: ${r.created_at}`);
   lines.push(`updated_at: ${r.updated_at}`);
   if (r.body.length > 0) {
