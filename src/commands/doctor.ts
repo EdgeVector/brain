@@ -9,6 +9,13 @@
 //   6. schema drift — for Design + Task: GET /v1/schema/<canonicalHash>,
 //      compare descriptive_name + fields + field_types against schemas.ts.
 //
+// Always-WARN disclosure probes (G0 gate item #9 —
+// see docs/g0-replacement-readiness-gate.md §6). These don't detect a
+// condition; they declare a known limitation so a teammate dogfooding
+// on a second machine sees it instead of inferring a silent fork:
+//   7. single-machine-slice — record set is local to this daemon.
+//   8. no-team-sync       — `fbrain share` is a placeholder.
+//
 // With `--freshness`: also runs two G3 probes (see docs/phase-7-search-latency-spike.md):
 //   7. freshness-probe — 5 trials of put → search asserting score ≥ 0.5
 //      against a `doctor-freshness-probe-<nonce>` slug namespace, cleaning
@@ -251,6 +258,27 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       );
     }
   }
+
+  // Disclosure probes — always WARN, no detection. They surface the
+  // multi-machine + team-sharing limits called out in
+  // docs/g0-replacement-readiness-gate.md §6 so the gate stays honest
+  // about what fbrain does and doesn't do today.
+  checks.push({
+    name: "single-machine-slice",
+    ok: true,
+    tag: "WARN",
+    detail:
+      "you're on this daemon; record set is local — multi-machine reads " +
+      "require fold_db sync transport (not yet built; tracked as G16)",
+  });
+  checks.push({
+    name: "no-team-sync",
+    ok: true,
+    tag: "WARN",
+    detail:
+      "fbrain share is a placeholder until fold_db cloud sync transport " +
+      "lights up (see docs/phase-3-sharing-memo.md)",
+  });
 
   // G3 freshness + pollution probes — only when --freshness is set and the
   // upstream checks confirmed the node is workable.

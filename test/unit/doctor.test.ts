@@ -349,6 +349,9 @@ describe("doctor verdict logic", () => {
     expect(lines.some((l) => l.includes("[PASS] schema-drift[Design]"))).toBe(true);
     expect(lines.some((l) => l.includes("[PASS] schema-drift[Task]"))).toBe(true);
     expect(lines.some((l) => l.includes("[PASS] schema-drift[FbrainKindNote]"))).toBe(true);
+    // G0 gate item #9 disclosure WARNs — always emitted, never flip exit.
+    expect(lines.some((l) => l.startsWith("[WARN] single-machine-slice"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("[WARN] no-team-sync"))).toBe(true);
   });
 
   test("missing config → exit 1", async () => {
