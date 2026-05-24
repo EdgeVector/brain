@@ -79,7 +79,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
 | `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
-| `fbrain doctor [--freshness]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes (see [Doctor](#doctor)) |
+| `fbrain doctor [--freshness] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
@@ -167,6 +167,32 @@ FAIL: 1 issue
 ```
 
 A polluted result is informative, not a bug in fbrain — it tells you the homebrew daemon's native index is sharing slots with tombstoned embeddings and other schemas. The fix lives upstream in fold_db (G3d / G3e).
+
+### `--usage` (team-adoption telemetry)
+
+`fbrain doctor --usage` skips the health checks and prints a write-count report by `userHash` over the last 7 days. fold_db stamps every atom with the writing user's public key; fbrain derives the 16-byte `userHash` from `sha256(pubkey)` and groups records by it. Only the 8-char prefix of each `userHash` is printed — that's enough to distinguish teammates on a shared daemon without leaking the full identifier.
+
+```
+fbrain usage (last 7 days, by userHash):
+  dcf41c3a  127 writes  (45 today)  types: concept(80) task(30) design(10) preference(7)
+  9f2a1e07    3 writes  (0 today)   types: concept(3)
+total: 130 writes across 2 users
+```
+
+The command also appends/updates a daily-summary line in `~/.fbrain/usage.jsonl`, one record per UTC date, so adoption can be plotted as a time series:
+
+```jsonl
+{"date":"2026-05-22","by_user":{"dcf41c3a":18},"total":18}
+{"date":"2026-05-23","by_user":{"dcf41c3a":12,"9f2a1e07":1},"total":13}
+{"date":"2026-05-24","by_user":{"dcf41c3a":45,"9f2a1e07":0},"total":45}
+```
+
+Re-running on the same day updates that date's line in-place (the report is a snapshot). Flags:
+
+  - `--usage-window N` — override the rolling window (default 7)
+  - `--usage-path PATH` — override the daily-summary file
+
+This is the signal that backs the G0 definition-of-shipped: "2+ daily users with userHash-distinguishable writes for 7 consecutive days." Read writes are not counted — only new records (filtered by `created_at`) — because adoption is about people capturing knowledge, not querying it.
 
 ## Sharing
 

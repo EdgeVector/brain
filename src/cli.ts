@@ -147,7 +147,7 @@ and skips stale hits (records deleted since indexing). Prints
   -n            max results
   --exact       exact-match mode (passes ?exact=true to the index)
   --min-score   server-side score floor (passes ?min_score=F)`,
-  doctor: `fbrain doctor [--freshness]
+  doctor: `fbrain doctor [--freshness] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
   - config valid (~/.fbrain/config.json + hex-64 hashes)
@@ -161,6 +161,15 @@ With --freshness, additionally runs the G3 retrieval-quality probes
   - freshness-probe: 5 trials of put → search assert score ≥ 0.5
   - pollution-probe: one broad query, classify hits as live / stale /
     orphan-schema. PASS at <25% polluted, WARN at 25-50%, FAIL above.
+
+With --usage, skips the health checks and prints a team-adoption
+telemetry report: write count by userHash (8-char prefix only)
+over the last 7 days, broken down by record type. Also appends/
+updates today's per-user count in ~/.fbrain/usage.jsonl for trend
+plotting.
+
+  --usage-window N   override the rolling window (default 7 days)
+  --usage-path PATH  override the daily-summary file path
 
 Exits non-zero if any check fails or the pollution probe FAILs.`,
   raw: `fbrain raw <method> <path> [body]
@@ -591,11 +600,31 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     allowPositionals: false,
     options: {
       freshness: { type: "boolean", default: false },
+      usage: { type: "boolean", default: false },
+      "usage-window": { type: "string" },
+      "usage-path": { type: "string" },
     },
   });
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
   if (values.freshness) dOpts.freshness = true;
+  if (values.usage) {
+    dOpts.usage = true;
+    const windowArg = values["usage-window"];
+    const usageOpts: NonNullable<typeof dOpts.usageOptions> = {};
+    if (windowArg !== undefined) {
+      const n = parseInt(windowArg, 10);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new FbrainError({
+          code: "invalid_usage_window",
+          message: `--usage-window must be a positive integer (got "${windowArg}").`,
+        });
+      }
+      usageOpts.windowDays = n;
+    }
+    if (values["usage-path"]) usageOpts.usagePath = values["usage-path"];
+    dOpts.usageOptions = usageOpts;
+  }
   return doctor(dOpts);
 }
 

@@ -5,6 +5,8 @@
 // every Error Registry row maps to an actionable message in exactly
 // one place.
 
+import { createHash } from "node:crypto";
+
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
 
 export type Verbose = (msg: string) => void;
@@ -53,7 +55,12 @@ export type RawResponse = {
 export type QueryRow = {
   fields: Record<string, unknown>;
   key: { hash: string | null; range: string | null };
-  // metadata, author_pub_key, etc. exist but fbrain Phase 1 doesn't read them
+  // The base64-encoded ed25519 public key of whoever wrote the record's
+  // head atoms. `pubkeyToUserHash` derives the fold_db user_hash from it
+  // for telemetry (G13 `fbrain doctor --usage`).
+  author_pub_key?: string;
+  // metadata also exists (per-field atom_uuid + writer_pubkey) but only
+  // author_pub_key is needed by current code paths.
 };
 
 export type QueryResponse = {
@@ -574,4 +581,14 @@ export function recordTypeForHash(
     if (h === hash) return type as RecordType;
   }
   return null;
+}
+
+// fold_db's user_hash is the first 32 hex chars of sha256(raw pubkey).
+// Verified against `auto-identity`: for our local node, sha256 of the
+// base64-decoded `public_key` truncated to 16 bytes matches the
+// `user_hash` field. Used by `fbrain doctor --usage` to partition writes
+// across teammates without leaking the full pubkey.
+export function pubkeyToUserHash(pubkey: string): string {
+  const raw = Buffer.from(pubkey, "base64");
+  return createHash("sha256").update(raw).digest("hex").slice(0, 32);
 }
