@@ -1,0 +1,229 @@
+{
+  "$schema_version": 1,
+  "description": "Hand-labeled retrieval eval pairs for fbrain. Each pair declares a (query, expected_slug, expected_type) triple plus a `seed` block the harness uses to materialise the record on demand. The slug prefix `eval-retrieval-` is reserved for this harness so seeding/teardown can't collide with real records. See README 'Quality / eval' and docs/phase-7-search-latency-spike.md G3b.",
+  "slug_prefix": "eval-retrieval-",
+  "pairs": [
+    {
+      "query": "distributed cache invalidation across regions",
+      "expected_slug": "eval-retrieval-octopus-design",
+      "expected_type": "design",
+      "seed": {
+        "title": "Octopus — multi-region cache invalidation",
+        "body": "Design for invalidating a distributed cache across geographic regions when a write lands in one shard. Walks the fan-out pattern, the back-channel, and the failure mode where a region misses the broadcast.",
+        "tags": ["eval-retrieval", "design", "cache"]
+      },
+      "notes": "Body keyword 'fan-out' overlaps several records; the design-specific phrase is 'multi-region cache'."
+    },
+    {
+      "query": "implement cache eviction policy",
+      "expected_slug": "eval-retrieval-blueberry-task",
+      "expected_type": "task",
+      "seed": {
+        "title": "Blueberry — implement cache eviction",
+        "body": "Pick an eviction policy (LRU vs LFU vs ARC) and wire it into the in-memory cache layer. Includes benchmarks for hit rate under skewed workloads.",
+        "tags": ["eval-retrieval", "task", "cache"]
+      },
+      "notes": "Pairs with octopus on 'cache' — eval-mode dedup means rank-1 should be the task because the query mentions eviction."
+    },
+    {
+      "query": "backpressure when producers outpace consumers",
+      "expected_slug": "eval-retrieval-canyon-concept",
+      "expected_type": "concept",
+      "seed": {
+        "title": "Canyon — backpressure handling",
+        "body": "What to do when an upstream producer emits faster than the downstream consumer can drain. Covers buffering, dropping, and pushing the slowdown signal back through the pipe.",
+        "tags": ["eval-retrieval", "concept", "flow-control"]
+      }
+    },
+    {
+      "query": "never silently swallow errors",
+      "expected_slug": "eval-retrieval-elder-preference",
+      "expected_type": "preference",
+      "seed": {
+        "title": "Elder — surface every error",
+        "body": "When in doubt, log loud. A silent catch is a future incident in a costume. This preference says: even handled errors get a structured log entry; raw try/catch with bare 'return null' is not OK.",
+        "tags": ["eval-retrieval", "preference", "error-handling"]
+      }
+    },
+    {
+      "query": "Postgres logical replication documentation",
+      "expected_slug": "eval-retrieval-fjord-reference",
+      "expected_type": "reference",
+      "seed": {
+        "title": "Fjord — Postgres replication docs",
+        "body": "Pointer to the canonical Postgres logical replication guide. Covers publications, subscriptions, replication slots, and the typical 'subscription lag growing unbounded' debugging path.",
+        "tags": ["eval-retrieval", "reference", "postgres"]
+      }
+    },
+    {
+      "query": "kanban orchestrator agent that manages task lifecycle",
+      "expected_slug": "eval-retrieval-gondola-agent",
+      "expected_type": "agent",
+      "seed": {
+        "title": "Gondola — kanban orchestrator",
+        "body": "Agent that picks up tasks from the kanban board, runs them in isolated worktrees, and shepherds the resulting PR through merge. Owns the lifecycle handbook and the minion-checkpoint protocol.",
+        "tags": ["eval-retrieval", "agent", "kanban"]
+      }
+    },
+    {
+      "query": "Q3 search latency improvement project",
+      "expected_slug": "eval-retrieval-harbor-project",
+      "expected_type": "project",
+      "seed": {
+        "title": "Harbor — Q3 search latency",
+        "body": "Project to cut p99 search latency from 800 ms to under 200 ms by Q3. Workstreams: native-index pruning, embedding cache, query rewriting, hybrid retrieval baseline.",
+        "tags": ["eval-retrieval", "project", "performance"]
+      }
+    },
+    {
+      "query": "spike investigating why search returns junk after deletes",
+      "expected_slug": "eval-retrieval-iceberg-spike",
+      "expected_type": "spike",
+      "seed": {
+        "title": "Iceberg — search-latency spike root cause",
+        "body": "Spike to investigate why semantic search produces irrelevant top results after a series of soft-deletes. Hypothesis: tombstoned-record embeddings stay in the native index and drown live records.",
+        "tags": ["eval-retrieval", "spike", "search"]
+      }
+    },
+    {
+      "query": "TLS termination at the edge load balancer",
+      "expected_slug": "eval-retrieval-jaguar-design",
+      "expected_type": "design",
+      "seed": {
+        "title": "Jaguar — TLS at the edge",
+        "body": "Terminate TLS at the edge proxy rather than the application server. Reduces fan-out of certificates and centralises rotation. Trade-off: edge needs access to private keys.",
+        "tags": ["eval-retrieval", "design", "tls"]
+      }
+    },
+    {
+      "query": "rotate signing keys on a quarterly schedule",
+      "expected_slug": "eval-retrieval-kestrel-task",
+      "expected_type": "task",
+      "seed": {
+        "title": "Kestrel — rotate signing keys quarterly",
+        "body": "Set up the quarterly key-rotation calendar event, automate the rotation through the KMS workflow, and verify all downstream services pick up the new key within 24 hours.",
+        "tags": ["eval-retrieval", "task", "security"]
+      }
+    },
+    {
+      "query": "eventual consistency tradeoffs in distributed systems",
+      "expected_slug": "eval-retrieval-lichen-concept",
+      "expected_type": "concept",
+      "seed": {
+        "title": "Lichen — eventual consistency tradeoffs",
+        "body": "Why eventual consistency wins over strong consistency in most user-facing systems: better availability, partition tolerance, and tail latency. Costs: read-your-writes anomalies and merge logic on the client.",
+        "tags": ["eval-retrieval", "concept", "distsys"]
+      }
+    },
+    {
+      "query": "prefer explicit code over implicit magic",
+      "expected_slug": "eval-retrieval-mango-preference",
+      "expected_type": "preference",
+      "seed": {
+        "title": "Mango — explicit over implicit",
+        "body": "Default to explicit imports, explicit types, explicit error paths. Magic globals and decorators that mutate behavior at distance are forbidden unless they save more reading than they cost.",
+        "tags": ["eval-retrieval", "preference", "style"]
+      }
+    },
+    {
+      "query": "Kubernetes networking and service mesh primer",
+      "expected_slug": "eval-retrieval-nimbus-reference",
+      "expected_type": "reference",
+      "seed": {
+        "title": "Nimbus — Kubernetes networking guide",
+        "body": "Reference doc for Kubernetes networking: pod CIDRs, services, Ingress, the CNI plugin model, and a survey of common service-mesh implementations (Linkerd, Istio).",
+        "tags": ["eval-retrieval", "reference", "kubernetes"]
+      }
+    },
+    {
+      "query": "automated code review agent that suggests improvements",
+      "expected_slug": "eval-retrieval-orchid-agent",
+      "expected_type": "agent",
+      "seed": {
+        "title": "Orchid — code review automation",
+        "body": "Agent that watches incoming pull requests, runs a battery of static checks, and posts inline suggestions. Adversarial mode tries to break the diff before approving.",
+        "tags": ["eval-retrieval", "agent", "review"]
+      }
+    },
+    {
+      "query": "rewrite onboarding documentation for new hires",
+      "expected_slug": "eval-retrieval-papaya-project",
+      "expected_type": "project",
+      "seed": {
+        "title": "Papaya — onboarding documentation overhaul",
+        "body": "Project to rewrite the new-hire onboarding doc set. Current docs are stale, scattered, and have a 30% bounce rate. Goals: single landing page, working examples, week-1 checklist.",
+        "tags": ["eval-retrieval", "project", "docs"]
+      }
+    },
+    {
+      "query": "websocket reconnection with exponential backoff",
+      "expected_slug": "eval-retrieval-quasar-spike",
+      "expected_type": "spike",
+      "seed": {
+        "title": "Quasar — websocket reconnection",
+        "body": "Spike on resilient websocket reconnection. Survey of jitter strategies, exponential backoff caps, and how to differentiate transient network blips from permanent server-side disconnects.",
+        "tags": ["eval-retrieval", "spike", "websocket"]
+      }
+    },
+    {
+      "query": "rate limiting middleware design with token bucket",
+      "expected_slug": "eval-retrieval-ravine-design",
+      "expected_type": "design",
+      "seed": {
+        "title": "Ravine — rate limiting middleware",
+        "body": "Design for a per-API-key rate limiting middleware using the token bucket algorithm. Bucket state lives in Redis; refill happens lazily on read.",
+        "tags": ["eval-retrieval", "design", "rate-limit"]
+      }
+    },
+    {
+      "query": "migrate Stripe webhook handlers to new API version",
+      "expected_slug": "eval-retrieval-saxon-task",
+      "expected_type": "task",
+      "seed": {
+        "title": "Saxon — migrate Stripe webhooks",
+        "body": "Migrate the Stripe webhook handlers from the 2022-11-15 API version to 2024-06-20. Backward-compatibility shims for event payload changes, plus replay testing against captured fixtures.",
+        "tags": ["eval-retrieval", "task", "stripe"]
+      }
+    },
+    {
+      "query": "back of envelope capacity planning math",
+      "expected_slug": "eval-retrieval-tundra-concept",
+      "expected_type": "concept",
+      "seed": {
+        "title": "Tundra — back-of-envelope capacity",
+        "body": "Heuristics for sizing a service before you have data. Requests-per-second times bytes-per-request gives bandwidth; cache hit rate times memory-per-entry gives footprint. Be off by 2x and ship.",
+        "tags": ["eval-retrieval", "concept", "capacity"]
+      }
+    },
+    {
+      "query": "pin dependencies in the lockfile, no floating versions",
+      "expected_slug": "eval-retrieval-umbra-preference",
+      "expected_type": "preference",
+      "seed": {
+        "title": "Umbra — pin dependencies in lockfile",
+        "body": "Floating dependency versions in production are a footgun. Every dep gets a pinned version in the lockfile; renovate bumps them on a weekly cadence with CI gating.",
+        "tags": ["eval-retrieval", "preference", "supply-chain"]
+      }
+    },
+    {
+      "query": "OpenTelemetry attribute naming conventions",
+      "expected_slug": "eval-retrieval-violet-reference",
+      "expected_type": "reference",
+      "seed": {
+        "title": "Violet — OpenTelemetry attribute conventions",
+        "body": "Pointer to the OpenTelemetry semantic conventions doc. Standardised keys for HTTP, RPC, database, and messaging spans. Use these instead of inventing attribute names per service.",
+        "tags": ["eval-retrieval", "reference", "observability"]
+      }
+    },
+    {
+      "query": "incident response runbook executor agent",
+      "expected_slug": "eval-retrieval-walrus-agent",
+      "expected_type": "agent",
+      "seed": {
+        "title": "Walrus — incident response executor",
+        "body": "Agent that reads a runbook page on PagerDuty alert, executes the suggested mitigations in a sandboxed shell, and reports outcomes back to the incident channel. Human-in-the-loop on destructive steps.",
+        "tags": ["eval-retrieval", "agent", "incident"]
+      }
+    }
+  ]
+}

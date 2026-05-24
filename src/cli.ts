@@ -22,6 +22,7 @@ import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
 import { deleteRecord } from "./commands/delete.ts";
+import { reindexCmd } from "./commands/reindex.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
 const COMMANDS = [
@@ -38,6 +39,7 @@ const COMMANDS = [
   "raw",
   "share",
   "delete",
+  "reindex",
   "mcp",
   "help",
 ] as const;
@@ -58,10 +60,11 @@ Commands:
   status         show or update a record's status
   link           link a task to a parent design
   search         semantic search over indexed records
-  doctor         health-check the local setup
+  doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
+  reindex        re-put every live record to refresh embeddings
   mcp            start an MCP server over stdio (read tools: search/get/list)
   help <cmd>     per-command usage
 
@@ -144,7 +147,7 @@ and skips stale hits (records deleted since indexing). Prints
   -n            max results
   --exact       exact-match mode (passes ?exact=true to the index)
   --min-score   server-side score floor (passes ?min_score=F)`,
-  doctor: `fbrain doctor
+  doctor: `fbrain doctor [--freshness]
 
 Live health checks:
   - config valid (~/.fbrain/config.json + hex-64 hashes)
@@ -153,7 +156,13 @@ Live health checks:
   - schemas loaded into the node
   - schema drift between schemas.ts and the registered Design/Task schemas
 
-Exits non-zero if any check fails.`,
+With --freshness, additionally runs the G3 retrieval-quality probes
+(see docs/phase-7-search-latency-spike.md):
+  - freshness-probe: 5 trials of put → search assert score ≥ 0.5
+  - pollution-probe: one broad query, classify hits as live / stale /
+    orphan-schema. PASS at <25% polluted, WARN at 25-50%, FAIL above.
+
+Exits non-zero if any check fails or the pollution probe FAILs.`,
   raw: `fbrain raw <method> <path> [body]
 
 Authenticated passthrough. \`/api/\` paths go to the node (with
@@ -189,6 +198,21 @@ already deleted or never existed.
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
+  reindex: `fbrain reindex [--type T] [--dry-run] [--verbose]
+
+Refreshes the embedding entry for every live (non-tombstoned) fbrain
+record by re-issuing an update mutation. Workaround for the H2a
+finding in docs/phase-7-search-latency-spike.md — fold_db's
+EmbeddingIndex is not currently purged on tombstone, so this
+guarantees the live records stay current in the native-index top-50.
+Does NOT purge phantom embeddings (that's G3e, upstream fold_db).
+
+  --type      narrow to one of: design | task | concept | preference |
+              reference | agent | project | spike (default: all 8)
+  --dry-run   list records that would be reindexed; no writes
+
+Run with the global --verbose to print per-record outcome
+(kept | reindexed | skipped-tombstone).`,
   mcp: `fbrain mcp
 
 Start a Model Context Protocol server over stdio. Exposes three read
@@ -300,6 +324,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runShare(args);
     case "delete":
       return runDelete(args, verboseFn);
+    case "reindex":
+      return runReindex(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "help": {
@@ -557,9 +583,17 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
-  parseArgs({ args, strict: true, allowPositionals: false, options: {} });
+  const { values } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: false,
+    options: {
+      freshness: { type: "boolean", default: false },
+    },
+  });
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
+  if (values.freshness) dOpts.freshness = true;
   return doctor(dOpts);
 }
 
@@ -603,6 +637,25 @@ async function runMcpCmd(args: Argv): Promise<number> {
   // Block here so the server stays up serving RPCs.
   await new Promise<void>(() => {});
   return 0; // unreachable
+}
+
+async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: false,
+    options: {
+      type: { type: "string" },
+      "dry-run": { type: "boolean", default: false },
+    },
+  });
+  const type = parseRecordType(values.type);
+  const cfg = readConfig();
+  const rOpts: Parameters<typeof reindexCmd>[0] = { cfg, verbose };
+  if (type) rOpts.type = type;
+  if (values["dry-run"]) rOpts.dryRun = true;
+  await reindexCmd(rOpts);
+  return 0;
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {

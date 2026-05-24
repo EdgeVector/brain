@@ -79,10 +79,11 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
 | `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
-| `fbrain doctor` | Live health check: reachability, provisioning, schemas-loaded, schema drift |
+| `fbrain doctor [--freshness]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
+| `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
 | `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 3 read tools — `fbrain_search`, `fbrain_get`, `fbrain_list` — to MCP clients (Claude Code, Codex, …) so agents can query fbrain in-process (see [MCP](#mcp)) |
 
 Run `fbrain help <command>` for per-command usage.
@@ -152,6 +153,21 @@ OK
 FAIL: 1 issue
 ```
 
+### `--freshness` (retrieval-quality probes)
+
+`fbrain doctor --freshness` appends two probes that surface the retrieval-quality issues documented in [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md):
+
+- **freshness-probe** — 5 trials of `put → search`. Each trial writes a `doctor-freshness-probe-<nonce>-N` concept with a unique marker word and asserts the fresh record appears at score ≥ 0.5 in a search for that marker. Probes are soft-deleted in cleanup. FAILs (exit 1) if any trial misses.
+- **pollution-probe** — issues one broad query (`fbrain`) and classifies every returned hit as live, stale (record gone or tombstoned but its embedding remains), or orphan-schema (a non-fbrain schema sharing the same daemon). Tagged PASS at <25% polluted, **WARN** at 25–50%, **FAIL** above 50%. WARN does not flip the exit code; FAIL does.
+
+```
+[PASS] freshness-probe  — 5/5 trials passed (min score ≥ 0.5; avg observed score 0.912)
+[FAIL] pollution-probe  — query "fbrain" → 13 hits: live 2, stale 10 (77%), orphan 1 (8%) — pollution 85%
+       fix:   see docs/phase-7-search-latency-spike.md — upstream fixes are G3d (schema-scoped search) and G3e (purge embeddings on tombstone)
+```
+
+A polluted result is informative, not a bug in fbrain — it tells you the homebrew daemon's native index is sharing slots with tombstoned embeddings and other schemas. The fix lives upstream in fold_db (G3d / G3e).
+
 ## Sharing
 
 Phase 3 was a sharing spike: stand up two local fold_db nodes, walk every `/api/sharing/*` endpoint, and either land a working `fbrain share` or land a memo explaining why a localhost-only test can't get there. **Outcome: memo.**
@@ -178,6 +194,25 @@ Every fbrain read path (`get`, `list`, `status`, `link`, `search`) filters tombs
 `fbrain raw POST /api/query` is the escape hatch — it returns the raw fold_db state including tombstoned rows.
 
 Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) for the full source-code references, probe transcripts, and the fold_db follow-up that's been filed.
+
+## Recovery
+
+If `fbrain search` starts returning stale or empty results — most often after a batch of `fbrain delete` calls, or when the homebrew daemon hosts non-fbrain schemas alongside fbrain — run:
+
+```bash
+fbrain reindex             # all 8 types
+fbrain reindex --type concept --dry-run   # preview what would be touched
+```
+
+`fbrain reindex` walks every live (non-tombstoned) record and re-issues an `update` mutation. fold_db's mutation pipeline re-runs `index_record` synchronously, which refreshes the record's embedding entry in the native index. The fresh embeddings then survive the top-50 budget even when tombstoned-but-not-purged phantoms still sit in the index alongside them.
+
+What it does **not** do:
+
+- It does not purge phantom embeddings left behind by `fbrain delete`. The native index has no per-record purge API today; that fix is filed upstream as G3e against fold_db.
+- It does not change tombstone semantics — tombstoned records stay tombstoned and are reported as `skipped-tombstone`.
+- It does not change the search resolver's top-K logic.
+
+Per-record outcomes (`kept | reindexed | skipped-tombstone`) are printed with the global `--verbose` flag. Pollution-ratio measurement (before/after) is intentionally deferred to `fbrain doctor freshness` (G3a). For the full root-cause analysis and the chain of recommended follow-ups, see [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md).
 
 ## MCP
 
@@ -250,6 +285,30 @@ bun run typecheck  # strict tsc --noEmit
 ```
 
 Integration tests spawn a real `fold_db_node` against a unique tmpdir and point it at the dev cloud schema-service Lambda (us-west-2). They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset. Set `FBRAIN_SKIP_INTEGRATION=1` to force-skip even when the node dir is present (offline dev). Override the dev Lambda URL via `FBRAIN_TEST_SCHEMA_URL` and the node URL via `FBRAIN_TEST_NODE_URL`.
+
+## Quality / eval
+
+`scripts/eval-retrieval.ts` is the retrieval eval harness — a hard prerequisite for shipping G5 (`fbrain ask`) per [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md) G3b. Without a baseline, every retrieval tuning change is guesswork.
+
+```bash
+bun scripts/eval-retrieval.ts                  # seed missing pairs, evaluate, soft-delete seeded
+bun scripts/eval-retrieval.ts --no-seed        # evaluate against the live corpus only
+bun scripts/eval-retrieval.ts --keep           # don't soft-delete after (debugging)
+bun scripts/eval-retrieval.ts --limit 5        # consider only the top-5 (default 10)
+bun scripts/eval-retrieval.ts --out report.json
+```
+
+The pair set lives at [`eval/retrieval/pairs.json`](eval/retrieval/pairs.json) — 20+ hand-labeled `(query, expected_slug, expected_type)` triples, each with a `seed` block so the harness can materialise the record on demand. Slugs are prefixed `eval-retrieval-` so seeding/teardown can't collide with real records. The runner:
+
+1. For each pair, checks whether the seeded record already exists. If not, `put`s it from the seed block.
+2. Issues the query through `searchCmd` programmatically (no shelling out) and captures the top-K slugs.
+3. Computes precision@1 / @3 / @5 and mean reciprocal rank across all pairs.
+4. Emits a JSON report (`schema_version: 1`) plus an optional human-readable table.
+5. Soft-deletes anything it seeded unless `--keep` is passed.
+
+CI runs the harness as a **non-blocking** step (`continue-on-error: true`) — the build logs the numbers but doesn't fail on them. The runner self-skips when `~/.fbrain/config.json` is absent or the node is unreachable, so CI prints "skipping" today; once an ephemeral node is wired into CI the numbers will start flowing. TODO: once we have ≥7 days of runs, gate on a P@1 floor (see the G3b plan).
+
+A typical baseline reading against a polluted homebrew daemon (the H2 case the Phase 7 spike documents) hovers around P@1 ≈ 0.4 — most queries either rank the seeded record first or get drowned by phantom/orphan-schema fragments. That number is the artifact this harness exists to track.
 
 ## Replacement direction
 
