@@ -1,6 +1,8 @@
-// Integration-test harness — spawns a real fold_db_node + schema_service
-// against a unique tmpdir, registers Design + Task, and exposes the
-// canonical hashes captured from the schema service.
+// Integration-test harness — spawns a real fold_db_node against a unique
+// tmpdir and points it at the dev cloud schema-service Lambda (us-west-2).
+// The schema service is no longer spawned locally; it lives in the cloud,
+// shared across all integration runs. Schemas register by canonical hash
+// so identical schemas → identical hash → idempotent re-registration.
 //
 // All tests using this harness MUST run serially: even with separate
 // --home directories per test, sharing the same Cargo target/ would be
@@ -28,6 +30,7 @@ import {
   type RecordType,
 } from "../src/schemas.ts";
 import { newNodeClient, newSchemaServiceClient } from "../src/client.ts";
+import { TEST_SCHEMA_SERVICE_URL } from "./util.ts";
 
 export const FOLD_NODE_DIR =
   process.env.FOLD_NODE_DIR ?? "/Users/tomtang/code/edgevector/fold/fold_db_node";
@@ -65,12 +68,20 @@ type SlotFile = {
 };
 
 export async function startHarness(opts?: { name?: string }): Promise<Harness> {
+  // Cloud schema service is shared and always-on, so we can fail fast if
+  // it's unreachable instead of waiting the full node-cold-build window.
+  const schemaServiceUrl = TEST_SCHEMA_SERVICE_URL;
+
   const home = mkdtempSync(join(tmpdir(), "fbrain-test-node-"));
   const child = spawn({
+    // `--dev` routes the node at the dev cloud schema-service Lambda —
+    // matches schemaServiceUrl above, and run.sh's --dev resolves the
+    // same URL via environments.json. `--local-schema` is gone: we no
+    // longer spawn a local schema_service binary.
     cmd: [
       "./run.sh",
       "--local",
-      "--local-schema",
+      "--dev",
       "--empty-db",
       "--home",
       home,
@@ -111,11 +122,12 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
   }
 
   const nodeUrl = `http://127.0.0.1:${slot.port}`;
-  const schemaServiceUrl = `http://127.0.0.1:${slot.schema_port}`;
 
   try {
     await waitForHttp(`${nodeUrl}/api/system/auto-identity`, 180_000, (status) => status === 200 || status === 503);
-    await waitForHttp(`${schemaServiceUrl}/v1/schemas`, 180_000, (status) => status === 200);
+    // Cloud Lambda is already deployed — short window is enough; a long
+    // wait here would just mask a network/DNS issue we'd rather surface.
+    await waitForHttp(`${schemaServiceUrl}/v1/schemas`, 5_000, (status) => status === 200);
   } catch (err) {
     dumpLogs();
     await killChild(child);

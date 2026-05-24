@@ -26,24 +26,24 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 
 - **Bun** ≥ 1.3.10 — `bun --version`.
 - **Rust toolchain** — only used by fold_db, but its first `./run.sh` invocation compiles the full Rust workspace. **Allow several minutes for the cold build** (cargo target/ is shared across runs once warmed). Subsequent runs are near-instant. `fbrain init` will print a "compiling Rust — give it a few minutes" hint and back off with retries if it hits the node before it's listening.
-- **A local checkout of `EdgeVector/fold`** — fbrain talks to a running `fold_db_node` + `schema_service`. By default, it expects them on `http://127.0.0.1:9101` and `http://127.0.0.1:9102` (the auto-slotter may pick higher ports if those are taken — pass `--node-url` / `--schema-service-url` to `init`).
+- **A running `fold_db_node`** — fbrain defaults to the homebrew daemon at `http://127.0.0.1:9001`. The schema service is the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com` (no local schema_service to run; iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`). Override either with `--node-url` / `--schema-service-url` on `fbrain init` (e.g. to point at a worktree-spawned `./run.sh --local --dev` checkout).
 
 ## Quick start
 
-Assuming `fold` is already running (warm Rust build), you'll be at "first record" in under 5 minutes.
+Assuming the homebrew `fold_db_node` daemon is running on `:9001` and you have
+network access to the prod schema-service Lambda, you'll be at "first record"
+in under a minute.
 
 ```bash
-# 1. start fold (separate shell)
-cd /path/to/fold/fold_db_node
-./run.sh --local --local-schema --empty-db --home /tmp/fbrain-node
-
-# 2. clone, install, link this repo (one-time)
+# 1. install, link (one-time)
 git clone https://github.com/EdgeVector/fbrain && cd fbrain
 bun install
 bun link                              # exposes a global `fbrain` binary
 
-# 3. bootstrap + drive it
+# 2. bootstrap + drive it
 fbrain init                           # 5 steps; writes ~/.fbrain/config.json
+                                      # (auto-heals a stale local-schema config
+                                      #  to the new cloud-Lambda default)
 fbrain design new my-first-design --title "First design" --tag spike --body "the body that gets embedded"
 fbrain task new t1 --design my-first-design --title "first task"
 
@@ -123,7 +123,7 @@ NOTE
 **Green example:**
 
 ```
-[PASS] config  — nodeUrl=http://127.0.0.1:9101 schemaServiceUrl=http://127.0.0.1:9102
+[PASS] config  — nodeUrl=http://127.0.0.1:9001 schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
 [PASS] schema-service-reachable
 [PASS] node-reachable
 [PASS] node-provisioned  — user_hash=dd616fa8…
@@ -138,7 +138,7 @@ OK
 **Red example** (drift detected after schemas.ts was edited but `fbrain init` wasn't re-run):
 
 ```
-[PASS] config  — nodeUrl=http://127.0.0.1:9101 schemaServiceUrl=http://127.0.0.1:9102
+[PASS] config  — nodeUrl=http://127.0.0.1:9001 schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
 [PASS] schema-service-reachable
 [PASS] node-reachable
 [PASS] node-provisioned  — user_hash=dd616fa8…
@@ -180,27 +180,35 @@ Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) for the full
 
 ## Architecture
 
-`fbrain` is a thin **two-service client** over fold_db's local-schema mode:
+`fbrain` is a thin **two-service client** that splits across local + cloud:
 
 ```
 fbrain CLI (TypeScript / Bun)
    │
-   │  HTTP (localhost)
-   ├──────────────────────────┐
-   ▼                          ▼
-fold_db_node              schema_service
-:auto-slotted             :auto-slotted
-(9101–9199)               (9101–9199)
+   ├──── HTTP (localhost) ─────────► fold_db_node (homebrew daemon, :9001)
+   │                                  persistence, indexing, mutations
+   │
+   └──── HTTPS (cloud) ────────────► schema_service (AWS Lambda)
+                                       prod: us-east-1 (daily use)
+                                       dev:  us-west-2 (iteration + CI tests)
 ```
 
-All persistence, indexing, and embedding live in fold_db. fbrain holds only the schemas, the CLI parsing, and the error-message layer. See [`FBRAIN_PROTOTYPE_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PROTOTYPE_PLAN.md) for the rationale.
+The node binary is local — Sled storage, all reads/writes go through it. The
+schema service moved to two cloud Lambdas: prod is the default for daily use,
+dev is targeted by `fbrain init --schema-service-url <dev URL>` and the
+integration test harness. fbrain holds only the schemas, the CLI parsing, and
+the error-message layer. See [`FBRAIN_PROTOTYPE_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PROTOTYPE_PLAN.md) for the rationale.
+
+Power users contributing to fold itself can still point at a worktree-local
+schema service with `--node-url` / `--schema-service-url` on `fbrain init`
+(e.g. when running `./run.sh --local --local-schema` from a fold checkout).
 
 ## Troubleshooting
 
 Top errors you'll hit and the fix:
 
-- **`error: node not reachable at http://127.0.0.1:9101 — run \`fbrain doctor\` for a full diagnosis.`**  
-  fold_db isn't running or is still compiling. Check that `./run.sh --local --local-schema` is still going in another shell. On a first run, give it 1–3 minutes for the Rust cold build.
+- **`error: node not reachable at http://127.0.0.1:9001 — run \`fbrain doctor\` for a full diagnosis.`**  
+  The homebrew `fold_db_node` daemon isn't running. Start it (typically `brew services start fold_db_node` or whatever your install procedure is). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
 
 - **`error: Node not set up — run \`fbrain doctor\` for a full diagnosis.`**  
   The node is running but not provisioned. Run `fbrain init`.
@@ -220,7 +228,7 @@ bun test           # runs unit + integration tests
 bun run typecheck  # strict tsc --noEmit
 ```
 
-Integration tests spawn a real `fold_db_node` + `schema_service` against a unique tmpdir. They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset.
+Integration tests spawn a real `fold_db_node` against a unique tmpdir and point it at the dev cloud schema-service Lambda (us-west-2). They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset. Set `FBRAIN_SKIP_INTEGRATION=1` to force-skip even when the node dir is present (offline dev). Override the dev Lambda URL via `FBRAIN_TEST_SCHEMA_URL` and the node URL via `FBRAIN_TEST_NODE_URL`.
 
 ## Out of scope for v0
 

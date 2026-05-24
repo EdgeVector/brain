@@ -109,6 +109,36 @@ describe("config", () => {
     }
   });
 
+  test("v2 config is migrated in-memory to current — URLs preserved verbatim", () => {
+    const { dir, path } = tmpPath();
+    try {
+      // v2 carries schemaHashes + the mirror fields, same shape as current
+      // — only configVersion changes. URLs (including the dead local-schema
+      // defaults) flow through unchanged; the auto-heal lives in runInit,
+      // not readConfig, so reads stay stable for non-init code paths.
+      const v2 = {
+        configVersion: 2,
+        nodeUrl: "http://127.0.0.1:9101",
+        schemaServiceUrl: "http://127.0.0.1:9102",
+        userHash: "uh-v2",
+        schemaHashes: { design: "d".repeat(64), task: "t".repeat(64) },
+        designSchemaHash: "d".repeat(64),
+        taskSchemaHash: "t".repeat(64),
+      };
+      writeFileSync(path, JSON.stringify(v2));
+      const got = readConfig(path);
+      expect(got.configVersion).toBe(CONFIG_VERSION);
+      expect(got.nodeUrl).toBe("http://127.0.0.1:9101");
+      expect(got.schemaServiceUrl).toBe("http://127.0.0.1:9102");
+      expect(got.schemaHashes).toEqual({
+        design: "d".repeat(64),
+        task: "t".repeat(64),
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("v1 missing designSchemaHash → ConfigInvalidError on migration", () => {
     const { dir, path } = tmpPath();
     try {

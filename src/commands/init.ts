@@ -12,7 +12,8 @@
 // idempotent on the schema service side (identical re-POST returns 200
 // with the same canonical hash). Re-running init is the prescribed
 // remedy for `409 ambiguous_schema_name`, and also the way to upgrade
-// a v1 config to v2.
+// older configs (v1 → current; v2 → current, with URL auto-heal if the
+// existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
 import { UNIQUE_SCHEMAS } from "../schemas.ts";
@@ -25,8 +26,12 @@ import {
 } from "../config.ts";
 
 export type InitOptions = {
-  nodeUrl: string;
-  schemaServiceUrl: string;
+  // Optional — when undefined, the resolver below picks either the existing
+  // config's URL (if it isn't a dead local-schema default) or the new
+  // default. This lets `fbrain init` (no flags) auto-heal a stale config
+  // without clobbering a user-supplied override.
+  nodeUrl?: string;
+  schemaServiceUrl?: string;
   configPath?: string;
   bootstrapName?: string;
   verbose?: Verbose;
@@ -35,6 +40,26 @@ export type InitOptions = {
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
 };
+
+// New default targets — `:9001` is the homebrew `fold_db_node` daemon;
+// the schema service moved off `:9102` to the prod cloud Lambda. The dev
+// Lambda is reserved for the test harness so iteration doesn't pollute prod.
+export const DEFAULT_NODE_URL = "http://127.0.0.1:9001";
+export const DEFAULT_SCHEMA_SERVICE_URL =
+  "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
+
+// Auto-heal triggers: any existing config carrying one of these URLs is
+// treated as "still pointing at the dead pre-cloud local-schema setup".
+// User overrides (any other URL, including a custom localhost port) are
+// preserved verbatim.
+const STALE_NODE_URLS: ReadonlySet<string> = new Set([
+  "http://127.0.0.1:9101",
+  "http://localhost:9101",
+]);
+const STALE_SCHEMA_URLS: ReadonlySet<string> = new Set([
+  "http://127.0.0.1:9102",
+  "http://localhost:9102",
+]);
 
 // Default cold-build retry schedule: 5s, 10s, 20s, 30s, 60s, 60s ≈ 3m max.
 // First run of `fold/run.sh` compiles Rust and can take several minutes
@@ -69,11 +94,21 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`[init] existing config at ${configPath} — verifying`);
   }
 
+  const resolved = resolveUrls(opts, existing);
+  if (resolved.healed.length > 0) {
+    print(
+      `fbrain: auto-upgraded config to v${CONFIG_VERSION} with new schema-service URL` +
+        ` (replaced ${resolved.healed.join(", ")})`,
+    );
+  }
+  const nodeUrl = resolved.nodeUrl;
+  const schemaServiceUrl = resolved.schemaServiceUrl;
+
   // Step 0/5: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
   const probeUserHash = existing?.userHash ?? "init-probe";
-  const probeClient = newNodeClient({ baseUrl: opts.nodeUrl, userHash: probeUserHash, verbose: verbose ?? (() => {}) });
-  const identity = await probeWithRetry(probeClient, opts, print);
+  const probeClient = newNodeClient({ baseUrl: nodeUrl, userHash: probeUserHash, verbose: verbose ?? (() => {}) });
+  const identity = await probeWithRetry(probeClient, { nodeUrl, sleep: opts.sleep, retryDelaysMs: opts.retryDelaysMs }, print);
 
   let userHash: string;
   let bootstrapped = false;
@@ -94,7 +129,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Task, FbrainKindNote) and fan the note hash out to all 6 Phase 6
   // entries in schemaHashes.
   print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas (covering ${UNIQUE_SCHEMAS.reduce((n, s) => n + s.types.length, 0)} record types)`);
-  const schemaClient = newSchemaServiceClient(opts.schemaServiceUrl, verbose);
+  const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
   const schemaHashes: Record<string, string> = {};
   for (const entry of UNIQUE_SCHEMAS) {
     const reg = await schemaClient.registerSchema(entry.schema);
@@ -106,7 +141,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
   // Step 3/5: load schemas into the node
   print(`[4/${STEPS}] loading schemas into the node`);
-  const nodeClient = newNodeClient({ baseUrl: opts.nodeUrl, userHash, verbose: verbose ?? (() => {}) });
+  const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
   const loadResult = await nodeClient.loadSchemas();
   if (loadResult.failed_schemas.length > 0) {
     throw new Error(
@@ -122,8 +157,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print(`[5/${STEPS}] writing config to ${configPath}`);
   const config: Config = {
     configVersion: CONFIG_VERSION,
-    nodeUrl: opts.nodeUrl,
-    schemaServiceUrl: opts.schemaServiceUrl,
+    nodeUrl,
+    schemaServiceUrl,
     userHash,
     schemaHashes,
     designSchemaHash: schemaHashes.design ?? "",
@@ -137,9 +172,15 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
 type ProbeResult = Awaited<ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>>;
 
+type ProbeOpts = {
+  nodeUrl: string;
+  retryDelaysMs?: number[];
+  sleep?: (ms: number) => Promise<void>;
+};
+
 async function probeWithRetry(
   probeClient: ReturnType<typeof newNodeClient>,
-  opts: InitOptions,
+  opts: ProbeOpts,
   print: (line: string) => void,
 ): Promise<ProbeResult> {
   try {
@@ -164,6 +205,48 @@ async function probeWithRetry(
     }
     throw err;
   }
+}
+
+type ResolvedUrls = {
+  nodeUrl: string;
+  schemaServiceUrl: string;
+  // Human-readable descriptors of what we replaced, for the heal notice.
+  // Empty when no heal happened (fresh init, or existing URLs are already
+  // current / are user overrides).
+  healed: string[];
+};
+
+export function resolveUrls(
+  opts: Pick<InitOptions, "nodeUrl" | "schemaServiceUrl">,
+  existing: Config | null,
+): ResolvedUrls {
+  const healed: string[] = [];
+
+  let nodeUrl: string;
+  if (opts.nodeUrl) {
+    nodeUrl = opts.nodeUrl;
+  } else if (!existing) {
+    nodeUrl = DEFAULT_NODE_URL;
+  } else if (STALE_NODE_URLS.has(existing.nodeUrl)) {
+    nodeUrl = DEFAULT_NODE_URL;
+    healed.push(`nodeUrl ${existing.nodeUrl} → ${DEFAULT_NODE_URL}`);
+  } else {
+    nodeUrl = existing.nodeUrl;
+  }
+
+  let schemaServiceUrl: string;
+  if (opts.schemaServiceUrl) {
+    schemaServiceUrl = opts.schemaServiceUrl;
+  } else if (!existing) {
+    schemaServiceUrl = DEFAULT_SCHEMA_SERVICE_URL;
+  } else if (STALE_SCHEMA_URLS.has(existing.schemaServiceUrl)) {
+    schemaServiceUrl = DEFAULT_SCHEMA_SERVICE_URL;
+    healed.push(`schemaServiceUrl ${existing.schemaServiceUrl} → ${DEFAULT_SCHEMA_SERVICE_URL}`);
+  } else {
+    schemaServiceUrl = existing.schemaServiceUrl;
+  }
+
+  return { nodeUrl, schemaServiceUrl, healed };
 }
 
 function isUnreachable(err: unknown): boolean {
