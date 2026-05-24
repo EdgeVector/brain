@@ -23,6 +23,14 @@ export type NativeIndexHit = {
 export type SearchOptions = {
   exact?: boolean;
   minScore?: number;
+  // Schema names to restrict the search to (matched against IndexResult.schema_name).
+  // When set + non-empty, fold_db filters EmbeddingIndex entries to this set
+  // BEFORE the top-50 cosine cut — so unrelated schemas on a shared daemon
+  // (Persona, User Accounts, Contacts, CalendarEvent, …) cannot drown fbrain
+  // hits out of the top-K. Empty / omitted ⇒ no filter (unfiltered). Needs
+  // fold_db `feat(native-index): schema-scoped search filter` (PR #264); older
+  // daemons silently ignore the param so this is safe to send unconditionally.
+  schemas?: string[];
 };
 
 export type RegisteredSchema = {
@@ -324,6 +332,9 @@ export function newNodeClient(opts: {
       if (searchOpts?.exact) params.set("exact", "true");
       if (typeof searchOpts?.minScore === "number") {
         params.set("min_score", String(searchOpts.minScore));
+      }
+      if (searchOpts?.schemas && searchOpts.schemas.length > 0) {
+        params.set("schemas", searchOpts.schemas.join(","));
       }
       const path = `/api/native-index/search?${params.toString()}`;
       const { status, body } = await callJson(path, "GET");

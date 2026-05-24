@@ -53,6 +53,30 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const clientOpts: ClientSearchOptions = {};
   if (opts.exact) clientOpts.exact = true;
   if (typeof opts.minScore === "number") clientOpts.minScore = opts.minScore;
+  // Scope the server-side search to fbrain's registered schemas so the
+  // top-50 cosine cut isn't burned on unrelated schemas hosted by the
+  // same daemon (Persona / User Accounts / Contacts / CalendarEvent / …).
+  // See docs/phase-7-search-latency-spike.md (H2b). Requires fold_db
+  // PR #264; older daemons ignore the param so this is safe unconditionally.
+  //
+  // Dedupe: several record types share the unified MEMO hash (concept,
+  // preference, reference, agent, project, spike all map to the same
+  // schema), so Object.values() returns repeats. The server collapses
+  // duplicates too, but deduping here keeps the URL compact and the
+  // verbose count meaningful ("N unique schemas" vs N record types).
+  const fbrainSchemas = Array.from(
+    new Set(
+      Object.values(opts.cfg.schemaHashes).filter(
+        (h): h is string => typeof h === "string" && h.length > 0,
+      ),
+    ),
+  );
+  if (fbrainSchemas.length > 0) {
+    clientOpts.schemas = fbrainSchemas;
+    opts.verbose?.(
+      `scope: native-index search restricted to ${fbrainSchemas.length} fbrain schema hash(es)`,
+    );
+  }
 
   const hits = await node.search(opts.query, clientOpts);
   opts.verbose?.(`search returned ${hits.length} fragment hit(s)`);
