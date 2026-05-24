@@ -42,6 +42,7 @@ import {
   type RecordType,
 } from "../schemas.ts";
 import { buildTombstoneFields } from "./delete.ts";
+import { runUsageReport, type UsageOptions } from "./usage.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -58,6 +59,12 @@ export type DoctorOptions = {
   pollutionWarnThreshold?: number;     // default 0.25
   pollutionFailThreshold?: number;     // default 0.5
   nonceFn?: () => string;              // override for deterministic tests
+  // --usage report (G13 team-adoption telemetry — see commands/usage.ts).
+  // When set, doctor skips its health-check sequence and just prints the
+  // usage report. Config + node-client wiring still validate first so the
+  // user gets a useful error if init hasn't been run.
+  usage?: boolean;
+  usageOptions?: UsageOptions;
 };
 
 // `tag` overrides the printed tag when set; `ok` always drives the exit code.
@@ -115,6 +122,26 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     userHash: cfg.userHash,
     verbose,
   });
+
+  // --usage diverts to the team-adoption report (G13). It needs a valid
+  // config + reachable node but doesn't depend on the schema-drift /
+  // freshness checks, so we short-circuit before running them.
+  if (opts.usage) {
+    if (cfgIssues.length > 0) {
+      print("usage report skipped — config is invalid (see [FAIL] above).");
+      return finalize(checks, print);
+    }
+    const usageOpts: UsageOptions = { ...(opts.usageOptions ?? {}) };
+    if (!usageOpts.print) usageOpts.print = print;
+    if (!usageOpts.verbose && verbose) usageOpts.verbose = verbose;
+    try {
+      await runUsageReport(nodeClient, cfg, usageOpts);
+      return 0;
+    } catch (err) {
+      print(`usage report failed: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
 
   // 2. schema service reachable
   try {
