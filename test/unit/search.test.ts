@@ -281,6 +281,58 @@ describe("searchCmd", () => {
     await searchCmd({ cfg, query: "blue", minScore: 0.6, print: () => {} });
     expect(capturedUrl).toContain("min_score=0.6");
   });
+
+  test("scopes the search to fbrain's registered schema hashes (G3d)", async () => {
+    // Regression guard for phase-7-search-latency-spike.md (H2b): the
+    // search command must always send `schemas=...` so a shared homebrew
+    // daemon's other schemas can't drown out fbrain hits in the top-50.
+    let capturedUrl = "";
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        capturedUrl = url;
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    await searchCmd({ cfg, query: "x", print: () => {} });
+    const parsed = new URL(capturedUrl, "http://example/");
+    const schemas = parsed.searchParams.get("schemas");
+    expect(schemas).not.toBeNull();
+    const sent = (schemas ?? "").split(",").filter((s) => s.length > 0);
+    // Every test-config schema hash must be present on the wire.
+    for (const h of Object.values(cfg.schemaHashes)) {
+      expect(sent).toContain(h);
+    }
+  });
+
+  test("omits ?schemas when the config carries no schema hashes", async () => {
+    // A pathological empty-config case shouldn't send `schemas=` at all
+    // (that would be a no-op on fold, but it pollutes the URL and obscures
+    // the user-facing scope verbose message). The default mock cfg has
+    // every hash populated, so build a stripped one.
+    const emptyCfg = buildTestCfg({
+      schemaHashes: {
+        design: "",
+        task: "",
+        concept: "",
+        preference: "",
+        reference: "",
+        agent: "",
+        project: "",
+        spike: "",
+      },
+    });
+    let capturedUrl = "";
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        capturedUrl = url;
+        return { status: 200, body: { ok: true, results: [], user_hash: emptyCfg.userHash } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    await searchCmd({ cfg: emptyCfg, query: "x", print: () => {} });
+    expect(capturedUrl).not.toContain("schemas=");
+  });
 });
 
 beforeEach(() => {});

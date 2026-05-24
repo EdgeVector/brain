@@ -134,6 +134,10 @@ Doesn't fix H2 (phantoms still drown the top-50), but unblocks users who *know* 
 
 ### G3d — Upstream `fold_db`: schema-scoped search
 
+**Status (2026-05-24): SHIPPED.** Upstream issue [EdgeVector/fold#262](https://github.com/EdgeVector/fold/issues/262) → PR [EdgeVector/fold#264](https://github.com/EdgeVector/fold/pull/264) added `?schemas=hashA,hashB,...` to `/api/native-index/search`; the EmbeddingIndex filters entries to that set BEFORE the top-50 cosine cut. fbrain side (`src/client.ts` + `src/commands/search.ts`) now passes `Object.values(cfg.schemaHashes)` on every search, so unrelated schemas on a shared homebrew daemon cannot steal top-K slots. **Closes H2b.**
+
+Original plan kept below for reference:
+
 Add a `schemas[]` query parameter to `/api/native-index/search` (`fold/fold_db_node/src/server/routes/query.rs:425`) and a corresponding `search_scoped` method on `NativeIndexManager` (`fold/fold_db/crates/core/src/db_operations/native_index/mod.rs:165`) that pre-filters `EmbeddingIndex.entries` by schema-name set before scoring. fbrain passes its 8 canonical hashes; the top-50 budget is no longer wasted on `Persona`/`Contacts`/etc. **Fixes H2b end-to-end.** Cost: ~1 day (upstream fold_db PR + fbrain client + tests).
 
 ### G3e — Upstream `fold_db`: purge embeddings on tombstone
