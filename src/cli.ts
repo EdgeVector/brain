@@ -65,7 +65,7 @@ Commands:
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record to refresh embeddings
-  mcp            start an MCP server over stdio (read tools: search/get/list)
+  mcp            start an MCP server over stdio (6 tools: search/get/list/put/delete/link)
   help <cmd>     per-command usage
 
 Global flags:
@@ -215,9 +215,11 @@ Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
   mcp: `fbrain mcp
 
-Start a Model Context Protocol server over stdio. Exposes three read
-tools — \`fbrain_search\`, \`fbrain_get\`, \`fbrain_list\` — so MCP clients
-(Claude Code, Codex, etc.) can query fbrain in-process.
+Start a Model Context Protocol server over stdio. Exposes six tools so
+MCP clients (Claude Code, Codex, etc.) can read and write fbrain
+in-process:
+  read:  fbrain_search, fbrain_get, fbrain_list
+  write: fbrain_put,    fbrain_delete, fbrain_link
 
 Register with Claude Code:
   claude mcp add fbrain bun $(realpath src/mcp/main.ts)

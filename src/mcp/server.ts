@@ -1,12 +1,11 @@
-// MCP read server for fbrain — exposes `fbrain_search`, `fbrain_get`,
-// `fbrain_list` to MCP clients (Claude Code, Codex, etc.) over stdio.
+// MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_get`,
+// `fbrain_list`) and write (`fbrain_put`, `fbrain_delete`, `fbrain_link`)
+// tools to MCP clients (Claude Code, Codex, etc.) over stdio.
 //
 // Each handler wraps the existing CLI command function and captures its
 // printed output as a single text content block. No shell-out — the
 // command functions are called in-process so the agent sees the same
-// results as `fbrain search`/`get`/`list` from the terminal.
-//
-// G6 read scope only. Write-side (put, delete, link) lands in G6-write.
+// results as the matching `fbrain` subcommand from the terminal.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -15,6 +14,10 @@ import type { Config } from "../config.ts";
 import { searchCmd } from "../commands/search.ts";
 import { getRecord } from "../commands/get.ts";
 import { listCmd } from "../commands/list.ts";
+import { putCmd } from "../commands/put.ts";
+import { deleteRecord } from "../commands/delete.ts";
+import { linkCmd } from "../commands/link.ts";
+import { statusCmd } from "../commands/status.ts";
 import { FbrainError } from "../client.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "../schemas.ts";
 
@@ -149,7 +152,189 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     },
   );
 
+  server.registerTool(
+    "fbrain_put",
+    {
+      title: "Put fbrain record",
+      description:
+        "Upsert a record. Re-puts update in place — no duplicate, no 409. " +
+        "`type` defaults to `design`. If `frontmatter` is provided it is " +
+        "used verbatim (without the `---` fences); otherwise frontmatter is " +
+        "synthesized from `type`, `title`, `tags`, and `status`. Returns " +
+        "one line: `created|updated <type> <slug>`.",
+      inputSchema: {
+        slug: z.string().min(1).describe("Record slug (lowercase, [a-z0-9-_])."),
+        type: typeEnum.optional().describe("Record type. Defaults to `design`."),
+        title: z
+          .string()
+          .optional()
+          .describe("Record title. Defaults to first H1 in body, else slug."),
+        body: z
+          .string()
+          .optional()
+          .describe("Markdown body (indexed for search). Defaults to empty."),
+        status: z
+          .string()
+          .optional()
+          .describe(
+            "Status enum value for the type. Set in a follow-up `status` " +
+              "mutation after the put. Validated against the type's enum.",
+          ),
+        tags: z
+          .array(z.string())
+          .optional()
+          .describe("Tag list. Replaces existing tags on update."),
+        frontmatter: z
+          .string()
+          .optional()
+          .describe(
+            "Raw YAML-subset frontmatter (no `---` fences). When set, " +
+              "overrides synthesis from `type`/`title`/`tags`.",
+          ),
+      },
+    },
+    async (args) => {
+      const lines: string[] = [];
+      try {
+        const input = buildPutInput(args);
+        const result = await putCmd({ cfg, slug: args.slug, input });
+        lines.push(`${result.action} ${result.type} ${result.slug}`);
+        if (typeof args.status === "string" && args.status.length > 0) {
+          await statusCmd({
+            cfg,
+            slug: args.slug,
+            type: result.type,
+            newStatus: args.status,
+            print: (l) => lines.push(l),
+          });
+        }
+      } catch (err) {
+        return errorResult(err);
+      }
+      return textResult(lines.join("\n"));
+    },
+  );
+
+  server.registerTool(
+    "fbrain_delete",
+    {
+      title: "Delete fbrain record",
+      description:
+        "Soft-delete a record. fold_db is append-only — the workaround " +
+        "stamps a tombstone tag so every fbrain read path treats the " +
+        "record as gone. Without `type`, probes every type and errors if " +
+        "the slug exists in multiple. The slug becomes reusable after " +
+        "delete.",
+      inputSchema: {
+        slug: z.string().min(1).describe("Record slug."),
+        type: typeEnum
+          .optional()
+          .describe(
+            "Restrict delete to one record type. Omit to probe all types " +
+              "(errors on ambiguous slug).",
+          ),
+      },
+    },
+    async (args) => {
+      const lines: string[] = [];
+      const dOpts: Parameters<typeof deleteRecord>[0] = {
+        cfg,
+        slug: args.slug,
+        print: (l) => lines.push(l),
+      };
+      if (args.type) dOpts.type = args.type as RecordType;
+      try {
+        await deleteRecord(dOpts);
+      } catch (err) {
+        return errorResult(err);
+      }
+      return textResult(lines.join("\n"));
+    },
+  );
+
+  server.registerTool(
+    "fbrain_link",
+    {
+      title: "Link fbrain records",
+      description:
+        "Link a task to a parent design. v0 supports task → design only; " +
+        "any other type pair errors with `unsupported_link_pair`.",
+      inputSchema: {
+        from_type: typeEnum.describe("Source record type (must be `task`)."),
+        from_slug: z.string().min(1).describe("Source slug (the task)."),
+        to_type: typeEnum.describe("Target record type (must be `design`)."),
+        to_slug: z.string().min(1).describe("Target slug (the design)."),
+      },
+    },
+    async (args) => {
+      const lines: string[] = [];
+      try {
+        if (args.from_type !== "task" || args.to_type !== "design") {
+          throw new FbrainError({
+            code: "unsupported_link_pair",
+            message: `Link pair ${args.from_type} → ${args.to_type} is not supported.`,
+            hint: "v0 supports task → design only.",
+          });
+        }
+        await linkCmd({
+          cfg,
+          taskSlug: args.from_slug,
+          designSlug: args.to_slug,
+          print: (l) => lines.push(l),
+        });
+      } catch (err) {
+        return errorResult(err);
+      }
+      return textResult(lines.join("\n"));
+    },
+  );
+
   return server;
+}
+
+type PutArgs = {
+  slug: string;
+  type?: string;
+  title?: string;
+  body?: string;
+  status?: string;
+  tags?: string[];
+  frontmatter?: string;
+};
+
+export function buildPutInput(args: PutArgs): string {
+  const body = args.body ?? "";
+  if (typeof args.frontmatter === "string") {
+    const trimmed = args.frontmatter.replace(/^\r?\n+/, "").replace(/\r?\n+$/, "");
+    return trimmed.length === 0
+      ? body
+      : `---\n${trimmed}\n---\n${body}`;
+  }
+  const lines: string[] = [];
+  // Always pin a type — putCmd defaults to `design` when omitted, but the
+  // MCP wrapper should be explicit so the agent's intent is preserved
+  // even if the default ever shifts.
+  lines.push(`type: ${args.type ?? "design"}`);
+  if (args.title !== undefined && args.title.length > 0) {
+    lines.push(`title: ${yamlScalar(args.title)}`);
+  }
+  if (args.tags !== undefined) {
+    const items = args.tags.map((t) => yamlScalar(t)).join(", ");
+    lines.push(`tags: [${items}]`);
+  }
+  return `---\n${lines.join("\n")}\n---\n${body}`;
+}
+
+function yamlScalar(value: string): string {
+  // Quote anything that contains a YAML-significant character so the
+  // frontmatter parser reads it as a scalar — keeps things robust without
+  // pulling in a full YAML serializer.
+  if (/^[A-Za-z0-9 _.\-]+$/.test(value) && !value.startsWith(" ") && !value.endsWith(" ")) {
+    return value;
+  }
+  // Use double quotes, escape embedded quotes and backslashes.
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }
 
 type ToolResult = {

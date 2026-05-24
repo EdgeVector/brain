@@ -1,9 +1,10 @@
-# MCP read-server smoketest
+# MCP server smoketest
 
 End-to-end check that fbrain's MCP server (`fbrain mcp`) exposes the
-three read tools — `fbrain_search`, `fbrain_get`, `fbrain_list` — and
-that an MCP client (Claude Code or `@modelcontextprotocol/inspector`)
-can call them against a live `~/.fbrain/config.json`.
+six tools — read: `fbrain_search`, `fbrain_get`, `fbrain_list`; write:
+`fbrain_put`, `fbrain_delete`, `fbrain_link` — and that an MCP client
+(Claude Code or `@modelcontextprotocol/inspector`) can call them
+against a live `~/.fbrain/config.json`.
 
 > Prerequisite: `fbrain init` has been run and `fbrain doctor` is green.
 > The MCP server reads the same config file as the CLI.
@@ -34,10 +35,11 @@ In a new Claude Code session, ask:
 
 > List the tools exposed by the `fbrain` MCP server.
 
-Expected: Claude reports three tools — `fbrain_search`, `fbrain_get`,
-`fbrain_list`. If you see "no tools" or "server not connected", check
-the Claude Code logs (`~/Library/Logs/Claude` on macOS) for stderr from
-the `bun src/mcp/main.ts` process. The most common failure is
+Expected: Claude reports six tools — `fbrain_search`, `fbrain_get`,
+`fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`. If you
+see "no tools" or "server not connected", check the Claude Code logs
+(`~/Library/Logs/Claude` on macOS) for stderr from the
+`bun src/mcp/main.ts` process. The most common failure is
 `ConfigMissingError` — run `fbrain init` first.
 
 ## C. Smoketest each tool
@@ -73,6 +75,52 @@ tags, body). If multiple types share the slug, the tool errors with
 Expected: Claude calls `fbrain_list` with `{type: "design", limit: 5}`
 and prints `type · slug · status · title` lines.
 
+### C.4 — `fbrain_put` (write)
+
+> Use fbrain to put a new concept with slug `mcp-smoketest` and body
+> "hello world from MCP".
+
+Expected: Claude calls `fbrain_put` with `{type: "concept", slug:
+"mcp-smoketest", body: "hello world from MCP"}` and surfaces
+`created concept mcp-smoketest`. Verify with `fbrain get mcp-smoketest`
+from the terminal — the record should be there with the body the
+agent passed.
+
+If the agent passes `status` alongside (e.g. `status: "archived"`),
+the put is followed by a `fbrain status` mutation. The tool returns
+both lines: `created concept mcp-smoketest` and
+`concept mcp-smoketest: active → archived`.
+
+### C.5 — `fbrain_delete` (write)
+
+> Use fbrain to delete the concept `mcp-smoketest`.
+
+Expected: Claude calls `fbrain_delete` with `{slug: "mcp-smoketest",
+type: "concept"}` and surfaces
+`deleted concept mcp-smoketest (soft — fold_db is append-only; …)`.
+Verify with `fbrain get mcp-smoketest` — should return
+`No record with slug "mcp-smoketest"`. The slug is reusable
+immediately afterward.
+
+If you omit `type`, the wrapper probes every type and errors with
+`ambiguous_slug` when the slug exists in more than one. That mirrors
+the CLI's `fbrain delete` behavior.
+
+### C.6 — `fbrain_link` (write)
+
+> Use fbrain to link task `mcp-smoketest-task` to design
+> `mcp-smoketest-design`.
+
+Expected: Claude calls `fbrain_link` with `{from_type: "task",
+from_slug: "mcp-smoketest-task", to_type: "design", to_slug:
+"mcp-smoketest-design"}` and surfaces
+`linked task mcp-smoketest-task → design mcp-smoketest-design`.
+Verify with `fbrain get mcp-smoketest-task` — the `design_slug:` line
+should show `mcp-smoketest-design`.
+
+v0 supports `task → design` only. Any other pair errors with
+`unsupported_link_pair` before any HTTP traffic.
+
 ## D. Inspector fallback (no Claude Code needed)
 
 If you don't have Claude Code installed but want to verify the server,
@@ -83,7 +131,7 @@ bunx @modelcontextprotocol/inspector bun src/mcp/main.ts
 ```
 
 The inspector opens a local web UI. Use the "List Tools" button — you
-should see three tools registered. Click each tool, fill in the args
+should see six tools registered. Click each tool, fill in the args
 panel (e.g. `query: "replacement"` for search), hit "Call Tool".
 
 ## E. Common failure modes
