@@ -57,7 +57,7 @@ Commands:
   status         show or update a record's status
   link           link a task to a parent design
   search         semantic search over indexed records
-  doctor         health-check the local setup
+  doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
@@ -142,7 +142,7 @@ and skips stale hits (records deleted since indexing). Prints
   -n            max results
   --exact       exact-match mode (passes ?exact=true to the index)
   --min-score   server-side score floor (passes ?min_score=F)`,
-  doctor: `fbrain doctor
+  doctor: `fbrain doctor [--freshness]
 
 Live health checks:
   - config valid (~/.fbrain/config.json + hex-64 hashes)
@@ -151,7 +151,13 @@ Live health checks:
   - schemas loaded into the node
   - schema drift between schemas.ts and the registered Design/Task schemas
 
-Exits non-zero if any check fails.`,
+With --freshness, additionally runs the G3 retrieval-quality probes
+(see docs/phase-7-search-latency-spike.md):
+  - freshness-probe: 5 trials of put → search assert score ≥ 0.5
+  - pollution-probe: one broad query, classify hits as live / stale /
+    orphan-schema. PASS at <25% polluted, WARN at 25-50%, FAIL above.
+
+Exits non-zero if any check fails or the pollution probe FAILs.`,
   raw: `fbrain raw <method> <path> [body]
 
 Authenticated passthrough. \`/api/\` paths go to the node (with
@@ -542,9 +548,17 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
-  parseArgs({ args, strict: true, allowPositionals: false, options: {} });
+  const { values } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: false,
+    options: {
+      freshness: { type: "boolean", default: false },
+    },
+  });
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
+  if (values.freshness) dOpts.freshness = true;
   return doctor(dOpts);
 }
 

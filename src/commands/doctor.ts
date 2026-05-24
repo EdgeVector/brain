@@ -9,12 +9,22 @@
 //   6. schema drift — for Design + Task: GET /v1/schema/<canonicalHash>,
 //      compare descriptive_name + fields + field_types against schemas.ts.
 //
+// With `--freshness`: also runs two G3 probes (see docs/phase-7-search-latency-spike.md):
+//   7. freshness-probe — 5 trials of put → search asserting score ≥ 0.5
+//      against a `doctor-freshness-probe-<nonce>` slug namespace, cleaning
+//      up afterwards. FAILs if any trial misses its own record at score ≥ 0.5.
+//   8. pollution-probe — one broad query (default "fbrain"); classifies each
+//      hit as live / stale-fragment / orphan-schema. PASS if <25% polluted,
+//      WARN at 25-50%, FAIL above 50%.
+//
 // Exit code 0 on all-green, 1 if any check fails.
 
 import {
   FbrainError,
   newNodeClient,
   newSchemaServiceClient,
+  recordTypeForHash,
+  type NativeIndexHit,
   type NodeClient,
   type RegisteredSchema,
   type SchemaServiceClient,
@@ -22,11 +32,16 @@ import {
 } from "../client.ts";
 import { tryReadConfig, type Config } from "../config.ts";
 import {
+  findBySlug,
+  nowIso,
+} from "../record.ts";
+import {
   RECORD_TYPES,
   UNIQUE_SCHEMAS,
   type AddSchemaRequest,
   type RecordType,
 } from "../schemas.ts";
+import { buildTombstoneFields } from "./delete.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -35,11 +50,23 @@ export type DoctorOptions = {
   // For testing: inject prebuilt clients to bypass the real fetches.
   schemaClientFactory?: (url: string, v?: Verbose) => SchemaServiceClient;
   nodeClientFactory?: (opts: { baseUrl: string; userHash: string; verbose?: Verbose }) => NodeClient;
+  // --freshness probes (G3a in docs/phase-7-search-latency-spike.md).
+  freshness?: boolean;
+  freshnessTrials?: number;            // default 5
+  freshnessMinScore?: number;          // default 0.5
+  pollutionQuery?: string;             // default "fbrain"
+  pollutionWarnThreshold?: number;     // default 0.25
+  pollutionFailThreshold?: number;     // default 0.5
+  nonceFn?: () => string;              // override for deterministic tests
 };
 
+// `tag` overrides the printed tag when set; `ok` always drives the exit code.
+// WARN entries set `ok: true` + `tag: "WARN"` so they surface visually but
+// don't trip the doctor verdict.
 type CheckResult = {
   name: string;
   ok: boolean;
+  tag?: "PASS" | "WARN" | "FAIL";
   detail?: string;
   fix?: string;
 };
@@ -49,6 +76,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   const verbose = opts.verbose;
 
   const checks: CheckResult[] = [];
+  let schemasLoadedOk = false;
 
   // 1. config
   const cfg = tryReadConfig(opts.configPath);
@@ -141,6 +169,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     try {
       const loaded = await nodeClient.loadSchemas();
       if (loaded.failed_schemas.length === 0) {
+        schemasLoadedOk = true;
         checks.push({
           name: "schemas-loaded",
           ok: true,
@@ -193,6 +222,31 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       verbose?.(
         `schema-drift[${label}]: ${driftCheck.ok ? "ok" : `FAIL — ${driftCheck.detail ?? ""}`}`,
       );
+    }
+  }
+
+  // G3 freshness + pollution probes — only when --freshness is set and the
+  // upstream checks confirmed the node is workable.
+  if (opts.freshness) {
+    if (cfgIssues.length === 0 && schemasLoadedOk) {
+      const freshness = await runFreshnessProbe(nodeClient, cfg, opts, verbose);
+      checks.push(freshness);
+      verbose?.(
+        `freshness-probe: ${freshness.ok ? "ok" : `FAIL — ${freshness.detail ?? ""}`}`,
+      );
+
+      const pollution = await runPollutionProbe(nodeClient, cfg, opts, verbose);
+      checks.push(pollution);
+      verbose?.(
+        `pollution-probe: ${pollution.tag ?? (pollution.ok ? "PASS" : "FAIL")} — ${pollution.detail ?? ""}`,
+      );
+    } else {
+      checks.push({
+        name: "freshness-probe",
+        ok: false,
+        detail: "skipped — config or schemas-loaded did not pass",
+        fix: "resolve the earlier failures and retry",
+      });
     }
   }
 
@@ -315,10 +369,10 @@ export function validateConfigShape(cfg: Config): string[] {
 function finalize(checks: CheckResult[], print: (line: string) => void): number {
   const failures = checks.filter((c) => !c.ok);
   for (const check of checks) {
-    const tag = check.ok ? "PASS" : "FAIL";
+    const tag = check.tag ?? (check.ok ? "PASS" : "FAIL");
     const detail = check.detail ? `  — ${check.detail}` : "";
     print(`[${tag}] ${check.name}${detail}`);
-    if (!check.ok && check.fix) {
+    if (check.fix && (tag === "FAIL" || tag === "WARN")) {
       print(`       fix:   ${check.fix}`);
     }
   }
@@ -329,4 +383,222 @@ function finalize(checks: CheckResult[], print: (line: string) => void): number 
   }
   print(`FAIL: ${failures.length} issue${failures.length === 1 ? "" : "s"}`);
   return 1;
+}
+
+// G3a — freshness probe. Five trials of put → search; each trial passes
+// when the freshly-written record surfaces in the top-K of a search for a
+// unique marker word at score ≥ freshnessMinScore (default 0.5). Probes are
+// soft-deleted in a finally block so a thrown error mid-trial still
+// cleans up. See docs/phase-7-search-latency-spike.md G3a.
+export async function runFreshnessProbe(
+  node: NodeClient,
+  cfg: Config,
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  const trials = opts.freshnessTrials ?? 5;
+  const minScore = opts.freshnessMinScore ?? 0.5;
+  const nonce = (opts.nonceFn ?? defaultNonce)();
+  const conceptHash = cfg.schemaHashes.concept;
+  if (!conceptHash) {
+    return {
+      name: "freshness-probe",
+      ok: false,
+      detail: 'config has no schemaHashes["concept"]',
+      fix: "re-run `fbrain init` so the config picks up all 8 schema hashes",
+    };
+  }
+
+  type TrialResult = {
+    slug: string;
+    marker: string;
+    found: boolean;
+    score: number | null;
+    pass: boolean;
+  };
+  const created: string[] = [];
+  const trialResults: TrialResult[] = [];
+
+  try {
+    for (let i = 0; i < trials; i++) {
+      const slug = `doctor-freshness-probe-${nonce}-${i}`;
+      const marker = `freshprobe${nonce}${i}`;
+      const body =
+        `Doctor freshness probe trial ${i}. Marker word: ${marker}. ` +
+        `Generated by \`fbrain doctor --freshness\` — safe to delete.`;
+      const now = nowIso();
+      const fields: Record<string, unknown> = {
+        slug,
+        kind: "concept",
+        title: `freshness probe ${i}`,
+        body,
+        status: "active",
+        tags: [],
+        created_at: now,
+        updated_at: now,
+        v1_marker_a: "fbrain",
+        v1_marker_b: "v1",
+      };
+      await node.createRecord({ schemaHash: conceptHash, fields, keyHash: slug });
+      created.push(slug);
+
+      const hits = await node.search(marker);
+      const own = hits.find(
+        (h) => h.key_value.hash === slug && h.schema_name === conceptHash,
+      );
+      const score =
+        own && typeof own.metadata?.score === "number" ? own.metadata.score : null;
+      const found = own !== undefined;
+      const pass = found && typeof score === "number" && score >= minScore;
+      trialResults.push({ slug, marker, found, score, pass });
+      verbose?.(
+        `freshness trial ${i + 1}/${trials}: ${pass ? "PASS" : "FAIL"} ` +
+          `slug=${slug} marker=${marker} found=${found} score=${score ?? "—"}`,
+      );
+    }
+  } finally {
+    for (const slug of created) {
+      try {
+        const cleanupFields = buildTombstoneFields("concept", slug, nowIso(), nowIso());
+        await node.updateRecord({ schemaHash: conceptHash, fields: cleanupFields, keyHash: slug });
+      } catch (err) {
+        verbose?.(
+          `freshness cleanup failed for ${slug}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  const passed = trialResults.filter((t) => t.pass).length;
+  const scored = trialResults.filter((t): t is TrialResult & { score: number } => t.score !== null);
+  const avgScore =
+    scored.length > 0
+      ? scored.reduce((s, t) => s + t.score, 0) / scored.length
+      : null;
+  const detail =
+    `${passed}/${trials} trial${trials === 1 ? "" : "s"} passed` +
+    ` (min score ≥ ${minScore}; ` +
+    (avgScore === null ? "no scores observed" : `avg observed score ${avgScore.toFixed(3)}`) +
+    ")";
+  if (passed === trials) {
+    return { name: "freshness-probe", ok: true, detail };
+  }
+  return {
+    name: "freshness-probe",
+    ok: false,
+    detail,
+    fix: "see docs/phase-7-search-latency-spike.md — fresh writes are not surfacing at score ≥ 0.5",
+  };
+}
+
+// G3a (pollution component) — issue one broad query and classify every hit
+// into live / stale (record gone or tombstoned) / orphan (schema not an
+// fbrain type). PASS at <warnThreshold (default 25%), WARN to failThreshold
+// (default 50%), FAIL above. Mirrors the verbose `skip stale` / `skip
+// schema_name matches no registered fbrain type` lines in `fbrain search`.
+export async function runPollutionProbe(
+  node: NodeClient,
+  cfg: Config,
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  const query = opts.pollutionQuery ?? "fbrain";
+  const warnThreshold = opts.pollutionWarnThreshold ?? 0.25;
+  const failThreshold = opts.pollutionFailThreshold ?? 0.5;
+
+  let hits: NativeIndexHit[];
+  try {
+    hits = await node.search(query);
+  } catch (err) {
+    return {
+      name: "pollution-probe",
+      ok: false,
+      detail: `search "${query}" failed: ${err instanceof Error ? err.message : String(err)}`,
+      fix: "check the node log; the native-index search endpoint is rejecting our query",
+    };
+  }
+  const total = hits.length;
+  if (total === 0) {
+    return {
+      name: "pollution-probe",
+      ok: true,
+      detail: `query "${query}" returned 0 hits — nothing to classify`,
+    };
+  }
+
+  let stale = 0;
+  let orphan = 0;
+  let live = 0;
+  for (const hit of hits) {
+    const slug = hit.key_value.hash;
+    const type = recordTypeForHash(hit.schema_name, cfg.schemaHashes);
+    if (!type) {
+      orphan++;
+      verbose?.(
+        `pollution: orphan schema_name="${hit.schema_name}" slug="${slug ?? "?"}"`,
+      );
+      continue;
+    }
+    if (!slug) {
+      stale++;
+      verbose?.(`pollution: stale (no slug) schema=${type}`);
+      continue;
+    }
+    const schemaHash = cfg.schemaHashes[type]!;
+    let record;
+    try {
+      record = await findBySlug(node, type, schemaHash, slug);
+    } catch (err) {
+      verbose?.(
+        `pollution: findBySlug threw for ${type}/${slug}: ${err instanceof Error ? err.message : String(err)} — counting as stale`,
+      );
+      stale++;
+      continue;
+    }
+    if (!record) {
+      stale++;
+      verbose?.(`pollution: stale ${type}/${slug}`);
+    } else {
+      live++;
+      verbose?.(`pollution: live ${type}/${slug}`);
+    }
+  }
+
+  const stalePct = stale / total;
+  const orphanPct = orphan / total;
+  const combinedPct = (stale + orphan) / total;
+  const detail =
+    `query "${query}" → ${total} hits: ` +
+    `live ${live}, stale ${stale} (${pct(stalePct)}), orphan ${orphan} (${pct(orphanPct)}) ` +
+    `— pollution ${pct(combinedPct)}`;
+  if (combinedPct > failThreshold) {
+    return {
+      name: "pollution-probe",
+      ok: false,
+      tag: "FAIL",
+      detail,
+      fix: "see docs/phase-7-search-latency-spike.md — upstream fixes are G3d (schema-scoped search) and G3e (purge embeddings on tombstone)",
+    };
+  }
+  if (combinedPct > warnThreshold) {
+    return {
+      name: "pollution-probe",
+      ok: true,
+      tag: "WARN",
+      detail,
+      fix: "pollution is climbing; consider the G3c reindex workaround and track upstream G3d/G3e",
+    };
+  }
+  return { name: "pollution-probe", ok: true, detail };
+}
+
+function defaultNonce(): string {
+  // Lowercase hex from Date.now() + a random 24-bit suffix. Stays inside
+  // the slug character set ([a-z0-9-_]).
+  const rand = Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, "0");
+  return `${Date.now().toString(36)}${rand}`;
+}
+
+function pct(n: number): string {
+  return `${(n * 100).toFixed(0)}%`;
 }
