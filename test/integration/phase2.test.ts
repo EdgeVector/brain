@@ -119,6 +119,18 @@ describeIntegration("Phase 2 — doctor", () => {
     expect(res.code).toBe(0);
     expect(res.stdout).toContain("OK");
   });
+
+  // G0 readiness-gate item #9 (docs/g0-replacement-readiness-gate.md §6).
+  // The two disclosure probes always WARN — they're disclosure, not
+  // detection. The exit code must still be 0 on an otherwise-clean run.
+  test("doctor emits disclosure WARNs for single-machine + no-team-sync (exit unchanged)", async () => {
+    const res = await runCli(["doctor"]);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toContain("[WARN] single-machine-slice");
+    expect(res.stdout).toContain("multi-machine reads require fold_db sync transport");
+    expect(res.stdout).toContain("[WARN] no-team-sync");
+    expect(res.stdout).toContain("fbrain share is a placeholder");
+  });
 });
 
 describeIntegration("Phase 2 — search", () => {
