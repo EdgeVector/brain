@@ -230,6 +230,30 @@ bun run typecheck  # strict tsc --noEmit
 
 Integration tests spawn a real `fold_db_node` against a unique tmpdir and point it at the dev cloud schema-service Lambda (us-west-2). They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset. Set `FBRAIN_SKIP_INTEGRATION=1` to force-skip even when the node dir is present (offline dev). Override the dev Lambda URL via `FBRAIN_TEST_SCHEMA_URL` and the node URL via `FBRAIN_TEST_NODE_URL`.
 
+## Quality / eval
+
+`scripts/eval-retrieval.ts` is the retrieval eval harness — a hard prerequisite for shipping G5 (`fbrain ask`) per [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md) G3b. Without a baseline, every retrieval tuning change is guesswork.
+
+```bash
+bun scripts/eval-retrieval.ts                  # seed missing pairs, evaluate, soft-delete seeded
+bun scripts/eval-retrieval.ts --no-seed        # evaluate against the live corpus only
+bun scripts/eval-retrieval.ts --keep           # don't soft-delete after (debugging)
+bun scripts/eval-retrieval.ts --limit 5        # consider only the top-5 (default 10)
+bun scripts/eval-retrieval.ts --out report.json
+```
+
+The pair set lives at [`eval/retrieval/pairs.json`](eval/retrieval/pairs.json) — 20+ hand-labeled `(query, expected_slug, expected_type)` triples, each with a `seed` block so the harness can materialise the record on demand. Slugs are prefixed `eval-retrieval-` so seeding/teardown can't collide with real records. The runner:
+
+1. For each pair, checks whether the seeded record already exists. If not, `put`s it from the seed block.
+2. Issues the query through `searchCmd` programmatically (no shelling out) and captures the top-K slugs.
+3. Computes precision@1 / @3 / @5 and mean reciprocal rank across all pairs.
+4. Emits a JSON report (`schema_version: 1`) plus an optional human-readable table.
+5. Soft-deletes anything it seeded unless `--keep` is passed.
+
+CI runs the harness as a **non-blocking** step (`continue-on-error: true`) — the build logs the numbers but doesn't fail on them. The runner self-skips when `~/.fbrain/config.json` is absent or the node is unreachable, so CI prints "skipping" today; once an ephemeral node is wired into CI the numbers will start flowing. TODO: once we have ≥7 days of runs, gate on a P@1 floor (see the G3b plan).
+
+A typical baseline reading against a polluted homebrew daemon (the H2 case the Phase 7 spike documents) hovers around P@1 ≈ 0.4 — most queries either rank the seeded record first or get drowned by phantom/orphan-schema fragments. That number is the artifact this harness exists to track.
+
 ## Replacement direction
 
 fbrain is the planned replacement for [gbrain](https://github.com/garrytan/gbrain) at EdgeVector. The 2026-05-24 gap-consolidation review locked the replacement direction. **Status:** v0+ prototype, NOT shipped — see the upcoming [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the migration plan, acceptance criteria, and rollback.
