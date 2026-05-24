@@ -216,7 +216,7 @@ Per-record outcomes (`kept | reindexed | skipped-tombstone`) are printed with th
 
 ## MCP
 
-fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read the brain in-process without shelling out. G6 read scope only: `fbrain_search`, `fbrain_get`, `fbrain_list`. The write tools (`put`, `delete`, `link`) land in a separate task.
+fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Six tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`.
 
 ```bash
 # Register fbrain with Claude Code (one-time, after `bun install`):
@@ -226,13 +226,18 @@ claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"
 bun run src/mcp/main.ts
 ```
 
-The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and re-uses the CLI's existing command functions in-process. See [`docs/mcp-smoketest.md`](docs/mcp-smoketest.md) for an end-to-end "ask Claude to search fbrain" verification.
+The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and re-uses the CLI's existing command functions in-process. See [`docs/mcp-smoketest.md`](docs/mcp-smoketest.md) for end-to-end verification (ask Claude to search, put, delete, link).
 
 | Tool | Input | What it does |
 |---|---|---|
 | `fbrain_search` | `query` + `limit?` + `exact?` + `min_score?` | Semantic search; same dedupe + stale-skip as `fbrain search` |
 | `fbrain_get` | `slug` + `type?` | Print one record; errors on ambiguous slug across types |
 | `fbrain_list` | `type?` + `status?` + `tag?` + `limit?` | Newest-first list with filters |
+| `fbrain_put` | `slug` + `type?` + `title?` + `body?` + `status?` + `tags?` + `frontmatter?` | Upsert a record. Synthesizes frontmatter from structured args or passes through raw `frontmatter`; if `status` is set, fires a follow-up `fbrain status` mutation |
+| `fbrain_delete` | `slug` + `type?` | Soft-delete a record (tombstone tag). Without `type`, errors on ambiguous slug |
+| `fbrain_link` | `from_type` + `from_slug` + `to_type` + `to_slug` | Link a task to a parent design. v0: `task → design` only — any other pair errors with `unsupported_link_pair` |
+
+Single-user trust at stdio — no MCP auth layer. The server inherits the CLI's `~/.fbrain/config.json` credentials (your `userHash`), so every write is attributed to you. If you put fbrain behind a remote MCP transport one day, you'll want a real auth story first.
 
 ## Architecture
 
