@@ -34,3 +34,14 @@ jobs:
 
       - name: Unit + integration-skip tests
         run: bun test --timeout 60000
+
+      # Phase 7 G3b — retrieval eval harness. Non-blocking: prints P@1/3/5+MRR
+      # to the build log so we can track quality over time, but does NOT fail
+      # the build. The runner self-skips when ~/.fbrain/config.json is absent
+      # (CI has no node), so in CI today this step just logs "skipping".
+      # TODO: once we have ≥7 days of runs, gate on a P@1 floor — see
+      # docs/phase-7-search-latency-spike.md G3b.
+      - name: Retrieval eval (non-blocking)
+        if: always()
+        continue-on-error: true
+        run: bun scripts/eval-retrieval.ts --format table+json
