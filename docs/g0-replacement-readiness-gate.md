@@ -1,7 +1,7 @@
 # G0 — fbrain replacement-readiness gate
 
 **Last updated:** 2026-05-24
-**Status:** criteria defined; **6 of 11 acceptance items green, 5 outstanding** (see §7 + §8).
+**Status:** criteria defined; **7 of 11 acceptance items green, 4 outstanding** (see §7 + §8).
 **Owner:** Tom Tang.
 **Hard deadline:** 2026-08-23 — if the gate isn't green by then, the README's archive-review clause fires.
 
@@ -17,7 +17,7 @@ Not every gbrain command needs an fbrain equivalent. Only workflows that **Tom o
 
 **Explicitly frozen on gbrain — NOT replaced** (users who need these keep calling `gbrain` directly):
 
-`gbrain integrations`, `gbrain dream`, `gbrain autopilot`, `gbrain transcripts`, `gbrain salience / anomalies`, `gbrain files`, `gbrain code-def / code-refs / code-callers / code-callees / reindex-code`, `gbrain publish`, `gbrain check-resolvable`, `gbrain report`, `gbrain extract`, `gbrain lint`, `gbrain orphans`, `gbrain check-backlinks`, `gbrain timeline*`, `gbrain sources / repos`, `gbrain sync` (git-to-brain), `gbrain import / export`, `gbrain migrate`, `gbrain embed`.
+`gbrain integrations`, `gbrain dream`, `gbrain autopilot`, `gbrain transcripts`, `gbrain salience / anomalies`, `gbrain files`, `gbrain code-def / code-refs / code-callers / code-callees / reindex-code`, `gbrain publish`, `gbrain check-resolvable`, `gbrain report`, `gbrain extract`, `gbrain lint`, `gbrain orphans`, `gbrain check-backlinks`, `gbrain timeline*`, `gbrain sources / repos`, `gbrain sync` (git-to-brain), `gbrain import / export`, `gbrain migrate`, `gbrain embed`, `gbrain jobs *` (kanban minion telemetry — see [`docs/decisions/minion-bus-path.md`](decisions/minion-bus-path.md)).
 
 Replacement is scoped to the **daily read/write/agent-integration surface** — put, get, list, delete, search, ask, doctor, the agent write-mirror, and MCP. That's it.
 
@@ -44,7 +44,7 @@ Replacement is scoped to the **daily read/write/agent-integration surface** — 
 | Write-mirror via `~/.claude/hooks/gbrain-mirror-to-fbrain.sh` | every Claude/Codex Bash tool call | Flip `~/.claude/brain-config.json` to `primary: fbrain`, `write_mirror: gbrain`. The hook is already bidirectional. | Flip runs for **7 consecutive days** on Tom's machine with zero failed reverse-mirrors in `~/.claude/hooks/gbrain-upsert.ts` logs. | hook + reverse direction exist; flip is a one-line config change ([brain-config.json](../../../.claude/brain-config.json)) |
 | MCP read (`search`, `get`, `list`) | agents | `fbrain mcp` (stdio) | A Claude Code skill calls `fbrain_search` / `fbrain_get` / `fbrain_list` and retrieves a known slug. | ✅ shipped — G6 (kanban `95d87`, PR #13), smoketest in [`mcp-smoketest.md`](mcp-smoketest.md) |
 | MCP write (`put`, `delete`) | agents | none | `put` and `delete` exposed via `fbrain mcp`; Claude Code skill smoketest writes + reads back. | ❌ MISSING — G6-write (T2), gate-blocking for full agent self-sufficiency post-flip |
-| `gbrain jobs submit minion-checkpoint` (kanban-agent skill protocol) | every kanban agent (start / blocker / completion) | none — the kanban-agent skill itself depends on `gbrain jobs` | Minion protocol has a **documented + implemented** disposition: (a) explicitly stays on gbrain post-flip, (b) fbrain grows a `jobs` surface, or (c) the kanban-agent skill moves to a different bus. Decision captured in a follow-up doc/PR. | ❌ MISSING — **HARD GATE item #11 (§7).** Without this, every kanban agent breaks the day gbrain is deprecated. |
+| `gbrain jobs submit minion-checkpoint` (kanban-agent skill protocol) | every kanban agent (start / blocker / completion) | **stays on gbrain post-flip** — see [`docs/decisions/minion-bus-path.md`](decisions/minion-bus-path.md) | Minion protocol has a **documented disposition**: gbrain ships as two things going forward — the legacy knowledge brain (frozen surface; replaced by fbrain) and the kanban minion-bus infra (`gbrain jobs *`, append-only telemetry; **not** replaced). | ✅ shipped — [`decisions/minion-bus-path.md`](decisions/minion-bus-path.md). |
 
 ## 4. Who uses what — named users and agents
 
@@ -97,9 +97,9 @@ Each item is measurable, automatable where possible, and links the kanban task /
 8. **Rollback rehearsal.** Mirror-flip-back per §5 performed once on Tom's machine; verified writes land in both stores for 24h post-rehearsal. — ❌ outstanding (chained off #5).
 9. **Doctor surfaces multi-machine + sharing limits.** `fbrain doctor` emits explicit WARN lines for the single-machine and no-team-sync conditions per §6. — ✅ shipped — `single-machine-slice` + `no-team-sync` probes in `src/commands/doctor.ts`; always-WARN, exit unchanged.
 10. **Hybrid `fbrain ask` (G5).** Lands before the flip. Vector-only `fbrain search` is a daily-use regression vs. `gbrain ask`'s RRF + expansion path; **Tom won't ship that regression.** Eval-gated on the G3b/G17 baseline. — ❌ outstanding, T2 in the master plan.
-11. **Minion bus path settled.** The kanban-agent skill's `gbrain jobs submit minion-checkpoint` dependency has a documented + implemented disposition before the mirror flips. Without this, every kanban agent breaks on flip day. — ❌ outstanding, kanban follow-up.
+11. **Minion bus path settled.** The kanban-agent skill's `gbrain jobs submit minion-checkpoint` dependency has a documented + implemented disposition before the mirror flips. Disposition: stay on gbrain — gbrain is dual-purpose post-flip (legacy knowledge brain, replaced; kanban minion-bus infra, not replaced). See [`decisions/minion-bus-path.md`](decisions/minion-bus-path.md). — ✅ shipped.
 
-**Items 2, 3 (search-half), 4, 7, 9 are green.** Items 1, 5, 6, 8, 10, 11 (and the `ask` half of #3) are outstanding.
+**Items 2, 3 (search-half), 4, 7, 9, 11 are green.** Items 1, 5, 6, 8, 10 (and the `ask` half of #3) are outstanding.
 
 ## 8. Status snapshot — 2026-05-24
 
@@ -116,6 +116,6 @@ Each item is measurable, automatable where possible, and links the kanban task /
 | 8 | Rollback rehearsal | ❌ outstanding (chained off #5) |
 | 9 | Doctor disclosure WARNs | ✅ |
 | 10 | Hybrid `fbrain ask` (G5) | ❌ outstanding (T2 in master plan) |
-| 11 | Minion bus path settled | ❌ outstanding (follow-up #1, **hard blocker on flip**) |
+| 11 | Minion bus path settled | ✅ ([`decisions/minion-bus-path.md`](decisions/minion-bus-path.md) — option (a): gbrain stays as the minion bus, append-only telemetry) |
 
-**Score: 6 / 11 green.** Path to green-state: the remaining follow-ups filed alongside the PR #17 sweep cover gate items 1, 6, 11 — items 7 and 9 have now landed via PR #16 (`fbrain doctor --usage`) and PR #19 (`single-machine-slice` + `no-team-sync` WARN probes). Items 5, 8 fall out of #11 + #1 being green. Items 3-ask and 10 are the G5 work in the master plan.
+**Score: 7 / 11 green.** Path to green-state: the remaining follow-ups filed alongside the PR #17 sweep cover gate items 1 and 6 — items 7, 9, 11 have now landed via PR #16 (`fbrain doctor --usage`), PR #19 (`single-machine-slice` + `no-team-sync` WARN probes), and this PR ([`decisions/minion-bus-path.md`](decisions/minion-bus-path.md)). Items 5, 8 fall out of #1 being green. Items 3-ask and 10 are the G5 work in the master plan.
