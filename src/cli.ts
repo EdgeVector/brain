@@ -22,6 +22,7 @@ import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
 import { deleteRecord } from "./commands/delete.ts";
+import { reindexCmd } from "./commands/reindex.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
 const COMMANDS = [
@@ -38,6 +39,7 @@ const COMMANDS = [
   "raw",
   "share",
   "delete",
+  "reindex",
   "help",
 ] as const;
 type Command = (typeof COMMANDS)[number];
@@ -61,6 +63,7 @@ Commands:
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
+  reindex        re-put every live record to refresh embeddings
   help <cmd>     per-command usage
 
 Global flags:
@@ -187,6 +190,21 @@ already deleted or never existed.
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
+  reindex: `fbrain reindex [--type T] [--dry-run] [--verbose]
+
+Refreshes the embedding entry for every live (non-tombstoned) fbrain
+record by re-issuing an update mutation. Workaround for the H2a
+finding in docs/phase-7-search-latency-spike.md — fold_db's
+EmbeddingIndex is not currently purged on tombstone, so this
+guarantees the live records stay current in the native-index top-50.
+Does NOT purge phantom embeddings (that's G3e, upstream fold_db).
+
+  --type      narrow to one of: design | task | concept | preference |
+              reference | agent | project | spike (default: all 8)
+  --dry-run   list records that would be reindexed; no writes
+
+Run with the global --verbose to print per-record outcome
+(kept | reindexed | skipped-tombstone).`,
   help: `fbrain help <command>`,
 };
 
@@ -287,6 +305,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runShare(args);
     case "delete":
       return runDelete(args, verboseFn);
+    case "reindex":
+      return runReindex(args, verboseFn);
     case "help": {
       const target = args[0];
       if (!target) {
@@ -572,6 +592,25 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
   if (type) dOpts.type = type;
   await deleteRecord(dOpts);
+  return 0;
+}
+
+async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
+  const { values } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: false,
+    options: {
+      type: { type: "string" },
+      "dry-run": { type: "boolean", default: false },
+    },
+  });
+  const type = parseRecordType(values.type);
+  const cfg = readConfig();
+  const rOpts: Parameters<typeof reindexCmd>[0] = { cfg, verbose };
+  if (type) rOpts.type = type;
+  if (values["dry-run"]) rOpts.dryRun = true;
+  await reindexCmd(rOpts);
   return 0;
 }
 
