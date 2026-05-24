@@ -84,6 +84,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 | `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
+| `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 3 read tools — `fbrain_search`, `fbrain_get`, `fbrain_list` — to MCP clients (Claude Code, Codex, …) so agents can query fbrain in-process (see [MCP](#mcp)) |
 
 Run `fbrain help <command>` for per-command usage.
 
@@ -212,6 +213,26 @@ What it does **not** do:
 - It does not change the search resolver's top-K logic.
 
 Per-record outcomes (`kept | reindexed | skipped-tombstone`) are printed with the global `--verbose` flag. Pollution-ratio measurement (before/after) is intentionally deferred to `fbrain doctor freshness` (G3a). For the full root-cause analysis and the chain of recommended follow-ups, see [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md).
+
+## MCP
+
+fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read the brain in-process without shelling out. G6 read scope only: `fbrain_search`, `fbrain_get`, `fbrain_list`. The write tools (`put`, `delete`, `link`) land in a separate task.
+
+```bash
+# Register fbrain with Claude Code (one-time, after `bun install`):
+claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"
+
+# Or run the server standalone (useful for testing with @modelcontextprotocol/inspector):
+bun run src/mcp/main.ts
+```
+
+The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and re-uses the CLI's existing command functions in-process. See [`docs/mcp-smoketest.md`](docs/mcp-smoketest.md) for an end-to-end "ask Claude to search fbrain" verification.
+
+| Tool | Input | What it does |
+|---|---|---|
+| `fbrain_search` | `query` + `limit?` + `exact?` + `min_score?` | Semantic search; same dedupe + stale-skip as `fbrain search` |
+| `fbrain_get` | `slug` + `type?` | Print one record; errors on ambiguous slug across types |
+| `fbrain_list` | `type?` + `status?` + `tag?` + `limit?` | Newest-first list with filters |
 
 ## Architecture
 

@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "fbrain": "src/cli.ts"
+    "fbrain": "src/cli.ts",
+    "fbrain-mcp": "src/mcp/main.ts"
   },
   "scripts": {
     "fbrain": "bun src/cli.ts",
@@ -15,5 +16,9 @@
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
   }
 }
