@@ -1,8 +1,8 @@
 # fbrain
 
-> ⚠️ **PROTOTYPE — archive review by 2026-08-23**
+> ⚠️ **PROTOTYPE graduating into gbrain replacement**
 >
-> This is a v0 prototype that probes whether [fold_db](https://github.com/EdgeVector/fold) is a viable storage backend for a personal "brain" CLI. If by **2026-08-23** the prototype hasn't graduated into [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) Workstream B, this repo is archived with `ARCHIVED.md` and a `pre-commit` reject hook — the same discipline applied to the four predecessor monorepo predecessors.
+> This is the active prototype for the EdgeVector team-shared brain. The 2026-05-24 review reaffirmed: fbrain replaces gbrain for org deploys. Readiness-gate status: pending (see [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md)). If the readiness gate hasn't shipped by **2026-08-23**, this repo gets an archive review per the same discipline applied to the four predecessor monorepo predecessors — see [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) Workstream B.
 
 A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Eight record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes** — with semantic search and a Phase 3 sharing probe.
 
@@ -222,9 +222,14 @@ bun run typecheck  # strict tsc --noEmit
 
 Integration tests spawn a real `fold_db_node` + `schema_service` against a unique tmpdir. They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset.
 
+## Replacement direction
+
+fbrain is the planned replacement for [gbrain](https://github.com/garrytan/gbrain) at EdgeVector. The 2026-05-24 gap-consolidation review locked the replacement direction. **Status:** v0+ prototype, NOT shipped — see the upcoming [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the migration plan, acceptance criteria, and rollback.
+
+Until the readiness gate ships, both gbrain and fbrain coexist; the `gbrain put` → fbrain mirror hook keeps writes flowing to both.
+
 ## Out of scope for v0
 
-- Not a replacement for gbrain
 - Not E2E-encrypted (Phase 3 sharing probes the surface, doesn't build a product)
 - Not running new fold_db core code
 - No git-to-brain sync
