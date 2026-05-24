@@ -38,6 +38,7 @@ const COMMANDS = [
   "raw",
   "share",
   "delete",
+  "mcp",
   "help",
 ] as const;
 type Command = (typeof COMMANDS)[number];
@@ -61,6 +62,7 @@ Commands:
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
+  mcp            start an MCP server over stdio (read tools: search/get/list)
   help <cmd>     per-command usage
 
 Global flags:
@@ -187,6 +189,17 @@ already deleted or never existed.
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
+  mcp: `fbrain mcp
+
+Start a Model Context Protocol server over stdio. Exposes three read
+tools — \`fbrain_search\`, \`fbrain_get\`, \`fbrain_list\` — so MCP clients
+(Claude Code, Codex, etc.) can query fbrain in-process.
+
+Register with Claude Code:
+  claude mcp add fbrain bun $(realpath src/mcp/main.ts)
+
+The server reads ~/.fbrain/config.json (same as the CLI). Exits non-zero
+if config is missing — run \`fbrain init\` first.`,
   help: `fbrain help <command>`,
 };
 
@@ -287,6 +300,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runShare(args);
     case "delete":
       return runDelete(args, verboseFn);
+    case "mcp":
+      return runMcpCmd(args);
     case "help": {
       const target = args[0];
       if (!target) {
@@ -573,6 +588,21 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   if (type) dOpts.type = type;
   await deleteRecord(dOpts);
   return 0;
+}
+
+async function runMcpCmd(args: Argv): Promise<number> {
+  parseArgs({ args, strict: true, allowPositionals: false, options: {} });
+  // Lazy-import so the SDK only loads when the user runs `fbrain mcp`.
+  // Keeps CLI startup fast for non-MCP commands.
+  const { runMcp } = await import("./mcp/main.ts");
+  const code = await runMcp();
+  if (code !== 0) return code;
+  // server.connect() returns once stdio is wired; the SDK's stdin reader
+  // would normally keep the event loop alive on its own, but the CLI
+  // entrypoint calls `process.exit(code)` as soon as `main()` resolves.
+  // Block here so the server stays up serving RPCs.
+  await new Promise<void>(() => {});
+  return 0; // unreachable
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
