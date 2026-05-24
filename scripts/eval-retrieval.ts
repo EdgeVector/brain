@@ -27,6 +27,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { searchCmd } from "../src/commands/search.ts";
+import { askCmd } from "../src/commands/ask.ts";
 import { putCmd } from "../src/commands/put.ts";
 import { deleteRecord } from "../src/commands/delete.ts";
 import { findBySlug, schemaHashFor } from "../src/record.ts";
@@ -53,6 +54,8 @@ type PairsFile = {
   pairs: Pair[];
 };
 
+type Mode = "search" | "ask-no-llm" | "ask";
+
 type PairResult = {
   query: string;
   expected_slug: string;
@@ -63,15 +66,8 @@ type PairResult = {
   error: string | null;
 };
 
-type Report = {
-  schema_version: 1;
-  generated_at: string;
-  node_url: string;
-  total_pairs: number;
-  evaluated: number;
-  skipped: number;
-  errors: number;
-  k: number;
+type ModeReport = {
+  mode: Mode;
   metrics: {
     "p@1": number;
     "p@3": number;
@@ -81,12 +77,31 @@ type Report = {
   results: PairResult[];
 };
 
+type Report = {
+  // Bump on every shape change. v2 adds `modes` (multi-mode comparison)
+  // while keeping the legacy single-mode top-level fields populated from
+  // the first mode (typically `search`) so older readers don't break.
+  schema_version: 2;
+  generated_at: string;
+  node_url: string;
+  total_pairs: number;
+  evaluated: number;
+  skipped: number;
+  errors: number;
+  k: number;
+  // Legacy / convenience: same as modes[0].metrics + .results.
+  metrics: ModeReport["metrics"];
+  results: PairResult[];
+  modes: ModeReport[];
+};
+
 type Args = {
   noSeed: boolean;
   keep: boolean;
   limit: number;
   format: "table+json" | "json";
   out: string | null;
+  modes: Mode[];
 };
 
 function parseArgs(argv: string[]): Args {
@@ -96,6 +111,10 @@ function parseArgs(argv: string[]): Args {
     limit: 10,
     format: "table+json",
     out: null,
+    // Default: compare vector-only `search` against `ask --no-llm`.
+    // `ask` (with LLM) is opt-in via --modes to avoid spending tokens on
+    // every CI run; once a key is wired into CI we'll default-include it.
+    modes: ["search", "ask-no-llm"],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -117,6 +136,18 @@ function parseArgs(argv: string[]): Args {
       const v = argv[++i];
       if (!v) throw new Error("--out requires a path");
       args.out = v;
+    } else if (a === "--modes") {
+      const v = argv[++i];
+      if (!v) throw new Error("--modes requires a comma-separated list");
+      const parsed: Mode[] = [];
+      for (const m of v.split(",").map((s) => s.trim()).filter((s) => s.length > 0)) {
+        if (m !== "search" && m !== "ask-no-llm" && m !== "ask") {
+          throw new Error(`--modes value "${m}" not one of: search | ask-no-llm | ask`);
+        }
+        if (!parsed.includes(m)) parsed.push(m);
+      }
+      if (parsed.length === 0) throw new Error("--modes must list at least one mode");
+      args.modes = parsed;
     } else if (a === "--help" || a === "-h") {
       printHelp();
       process.exit(0);
@@ -129,10 +160,14 @@ function parseArgs(argv: string[]): Args {
 
 function printHelp(): void {
   console.log(
-    "bun scripts/eval-retrieval.ts [--no-seed] [--keep] [--limit N] [--format json|table+json] [--out FILE]\n\n" +
+    "bun scripts/eval-retrieval.ts [--no-seed] [--keep] [--limit N] [--modes M[,M...]] [--format json|table+json] [--out FILE]\n\n" +
       "Run the retrieval eval harness against the live fbrain node. Seeds missing\n" +
       "records by default; cleans up after unless --keep is passed. Exits 0 even on\n" +
-      "low scores — gating is a future TODO once we have a baseline.",
+      "low scores — gating is a future TODO once we have a baseline.\n\n" +
+      "Modes (default: search,ask-no-llm):\n" +
+      "  search       vector-only `fbrain search`\n" +
+      "  ask-no-llm   `fbrain ask --no-llm` (BM25 + vector + RRF)\n" +
+      "  ask          `fbrain ask` (adds LLM query expansion — costs Anthropic tokens)\n",
   );
 }
 
@@ -259,15 +294,28 @@ async function rankForPair(
   cfg: Config,
   pair: Pair,
   limit: number,
+  mode: Mode,
 ): Promise<{ rank: number | null; topSlugs: string[]; error: string | null }> {
   const lines: string[] = [];
   try {
-    await searchCmd({
-      cfg,
-      query: pair.query,
-      limit,
-      print: (l) => lines.push(l),
-    });
+    if (mode === "search") {
+      await searchCmd({
+        cfg,
+        query: pair.query,
+        limit,
+        print: (l) => lines.push(l),
+      });
+    } else {
+      // ask / ask-no-llm: same command, different flag.
+      const aOpts: Parameters<typeof askCmd>[0] = {
+        cfg,
+        query: pair.query,
+        limit,
+        print: (l) => lines.push(l),
+      };
+      if (mode === "ask-no-llm") aOpts.noLlm = true;
+      await askCmd(aOpts);
+    }
   } catch (err) {
     return { rank: null, topSlugs: [], error: errMsg(err) };
   }
@@ -276,7 +324,11 @@ async function rankForPair(
   }
   const slugs = lines
     .map((line) => line.trimStart().split(/\s+/)[0] ?? "")
-    .filter((s) => s.length > 0);
+    // Drop the "note:" auto-fallback line emitted by ask when the API key
+    // is missing, and the "expansions:" header from --explain. Both start
+    // with non-slug tokens, so any line whose first token doesn't look like
+    // a slug is ignored.
+    .filter((s) => /^[a-z0-9][a-z0-9-_]*$/.test(s));
   const idx = slugs.indexOf(pair.expected_slug);
   return { rank: idx < 0 ? null : idx + 1, topSlugs: slugs, error: null };
 }
@@ -318,27 +370,31 @@ function printTable(report: Report): void {
   );
   console.log("");
   console.log("metrics:");
-  console.log(`  P@1  ${fmtPct(report.metrics["p@1"]).padStart(6)}`);
-  console.log(`  P@3  ${fmtPct(report.metrics["p@3"]).padStart(6)}`);
-  console.log(`  P@5  ${fmtPct(report.metrics["p@5"]).padStart(6)}`);
-  console.log(`  MRR  ${report.metrics.mrr.toFixed(3).padStart(6)}`);
-  console.log("");
-  console.log("per-pair:");
-  console.log(
-    "  rank  type        slug                                          query",
-  );
-  for (const r of report.results) {
-    const rank = r.error
-      ? "ERR"
-      : r.rank === null
-        ? "—"
-        : String(r.rank);
+  console.log(`  mode             P@1     P@3     P@5     MRR`);
+  for (const m of report.modes) {
     console.log(
-      `  ${rank.padStart(4)}  ${r.expected_type.padEnd(10)}  ${r.expected_slug.padEnd(44)}  ${truncate(r.query, 60)}`,
+      `  ${m.mode.padEnd(15)} ${fmtPct(m.metrics["p@1"]).padStart(6)}  ${fmtPct(m.metrics["p@3"]).padStart(6)}  ${fmtPct(m.metrics["p@5"]).padStart(6)}  ${m.metrics.mrr.toFixed(3).padStart(6)}`,
     );
-    if (r.error) console.log(`        error: ${r.error}`);
   }
   console.log("");
+  for (const m of report.modes) {
+    console.log(`per-pair (${m.mode}):`);
+    console.log(
+      "  rank  type        slug                                          query",
+    );
+    for (const r of m.results) {
+      const rank = r.error
+        ? "ERR"
+        : r.rank === null
+          ? "—"
+          : String(r.rank);
+      console.log(
+        `  ${rank.padStart(4)}  ${r.expected_type.padEnd(10)}  ${r.expected_slug.padEnd(44)}  ${truncate(r.query, 60)}`,
+      );
+      if (r.error) console.log(`        error: ${r.error}`);
+    }
+    console.log("");
+  }
 }
 
 function truncate(s: string, n: number): string {
@@ -369,43 +425,54 @@ async function main(): Promise<number> {
     return 0;
   }
 
+  // Seeding is mode-independent — do it once. Then run each mode's queries
+  // against the same corpus.
   const seededSlugs: Array<{ slug: string; type: RecordType }> = [];
-  const results: PairResult[] = [];
+  const seedErrorByPair = new Map<string, string>();
 
-  for (const pair of file.pairs) {
-    const type = pair.expected_type as RecordType;
-    let seeded = false;
-    let seedError: string | null = null;
-
-    if (!args.noSeed) {
+  if (!args.noSeed) {
+    for (const pair of file.pairs) {
+      const type = pair.expected_type as RecordType;
       const r = await seedIfMissing(cfg, pair);
-      seeded = r.seeded;
-      seedError = r.error;
-      if (seeded) seededSlugs.push({ slug: pair.expected_slug, type });
+      if (r.seeded) seededSlugs.push({ slug: pair.expected_slug, type });
+      if (r.error !== null) seedErrorByPair.set(pair.expected_slug, r.error);
     }
+  }
 
-    if (seedError !== null) {
+  const modeReports: ModeReport[] = [];
+  for (const mode of args.modes) {
+    const results: PairResult[] = [];
+    for (const pair of file.pairs) {
+      const type = pair.expected_type as RecordType;
+      const seeded = seededSlugs.some((s) => s.slug === pair.expected_slug);
+      const seedError = seedErrorByPair.get(pair.expected_slug) ?? null;
+      if (seedError !== null) {
+        results.push({
+          query: pair.query,
+          expected_slug: pair.expected_slug,
+          expected_type: type,
+          rank: null,
+          top_k_slugs: [],
+          seeded,
+          error: seedError,
+        });
+        continue;
+      }
+      const r = await rankForPair(cfg, pair, args.limit, mode);
       results.push({
         query: pair.query,
         expected_slug: pair.expected_slug,
         expected_type: type,
-        rank: null,
-        top_k_slugs: [],
+        rank: r.rank,
+        top_k_slugs: r.topSlugs,
         seeded,
-        error: seedError,
+        error: r.error,
       });
-      continue;
     }
-
-    const r = await rankForPair(cfg, pair, args.limit);
-    results.push({
-      query: pair.query,
-      expected_slug: pair.expected_slug,
-      expected_type: type,
-      rank: r.rank,
-      top_k_slugs: r.topSlugs,
-      seeded,
-      error: r.error,
+    modeReports.push({
+      mode,
+      metrics: computeMetrics(results, args.limit),
+      results,
     });
   }
 
@@ -414,18 +481,21 @@ async function main(): Promise<number> {
     for (const s of seededSlugs) await teardown(cfg, s.slug, s.type);
   }
 
-  const errors = results.filter((r) => r.error !== null).length;
+  // Legacy single-mode top-level fields come from the first mode.
+  const primary = modeReports[0]!;
+  const errors = primary.results.filter((r) => r.error !== null).length;
   const report: Report = {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: new Date().toISOString(),
     node_url: cfg.nodeUrl,
     total_pairs: file.pairs.length,
-    evaluated: results.length - errors,
+    evaluated: primary.results.length - errors,
     skipped: 0,
     errors,
     k: args.limit,
-    metrics: computeMetrics(results, args.limit),
-    results,
+    metrics: primary.metrics,
+    results: primary.results,
+    modes: modeReports,
   };
 
   if (args.format === "table+json") printTable(report);

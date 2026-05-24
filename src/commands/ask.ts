@@ -1,0 +1,380 @@
+// `fbrain ask <query>` — hybrid retrieval.
+//
+// Pipeline:
+//   1. (optional) LLM expands the query into 3 alternative phrasings via
+//      Anthropic.  Original + 3 = 4 query strings.
+//   2. For each query string, run BM25 (client-side index over all live
+//      records) AND vector (node native-index, schema-scoped per G3d).
+//      That's 8 ranked lists when expansion is on, 2 when --no-llm.
+//   3. RRF fuses all lists. The fused top-K is the answer.
+//   4. The chosen records get resolved to full FbrainRecord rows.
+//
+// Why hybrid: vector handles paraphrase ("backpressure" / "producer
+// outpacing"); BM25 handles rare-token / acronym matches the embedding
+// model never trained on.  RRF needs no score calibration between rankers.
+//
+// Cost guardrail: 1 LLM call per invocation when expansion is on. The
+// expansion is logged to --verbose with token + USD estimate. Missing
+// API key -> auto-fallback to BM25 + vector + RRF only (one-line notice).
+
+import {
+  newNodeClient,
+  recordTypeForHash,
+  type NativeIndexHit,
+  type SearchOptions as ClientSearchOptions,
+  type Verbose,
+} from "../client.ts";
+import type { Config } from "../config.ts";
+import {
+  isTombstoned,
+  listRecords,
+  schemaHashFor,
+  type FbrainRecord,
+} from "../record.ts";
+import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import {
+  BM25Index,
+  loadCachedIndex,
+  saveCachedIndex,
+  type BM25Document,
+} from "../retrieval/bm25.ts";
+import {
+  reciprocalRankFusion,
+  RRF_DEFAULT_K,
+  type FusedHit,
+  type RankerInput,
+} from "../retrieval/rrf.ts";
+import {
+  estimateCostUsd,
+  expandQuery,
+  ExpansionError,
+  resolveAnthropicKey,
+  type ExpansionResult,
+} from "../retrieval/expand.ts";
+
+export const DEFAULT_LIMIT = 5;
+// Per-ranker breadth fed into RRF. Wider here gives RRF more material; the
+// final --limit slices the fused top.
+export const RANKER_LIMIT = 25;
+
+export type AskOptions = {
+  cfg: Config;
+  query: string;
+  limit?: number;
+  noLlm?: boolean;
+  explain?: boolean;
+  verbose?: Verbose;
+  print?: (line: string) => void;
+  // For tests: stub the expansion HTTP call.
+  fetchImpl?: typeof fetch;
+};
+
+export type AskHit = {
+  type: RecordType;
+  slug: string;
+  fusedScore: number;
+  // Per-ranker debug. Bm25Rank / vectorRank refer to the ORIGINAL query
+  // when expansion is on; expansionHits enumerates which expansion indices
+  // (0-based) ranked the doc.
+  bm25Rank: number | null;
+  vectorRank: number | null;
+  vectorScore: number | null;
+  expansionHits: Array<{ idx: number; ranker: "bm25" | "vector"; rank: number }>;
+  record: FbrainRecord;
+};
+
+export type AskResult = {
+  query: string;
+  expansions: string[];
+  // null = no LLM call made (--no-llm or missing key).
+  expansion: ExpansionResult | null;
+  hits: AskHit[];
+  bm25CorpusSize: number;
+  bm25CacheHit: boolean;
+};
+
+export async function askCmd(opts: AskOptions): Promise<AskResult> {
+  const print = opts.print ?? ((line: string) => console.log(line));
+  const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
+
+  // ── Stage 0: query expansion ─────────────────────────────────────────
+  let expansions: string[] = [];
+  let expansion: ExpansionResult | null = null;
+  if (!opts.noLlm) {
+    const key = resolveAnthropicKey();
+    if (!key) {
+      // Auto-fallback: behave as --no-llm with a single notice line.
+      print(
+        "note: ANTHROPIC_API_KEY not set; running ask without query expansion (BM25+vector+RRF only).",
+      );
+    } else {
+      try {
+        const exp: Parameters<typeof expandQuery>[0] = {
+          query: opts.query,
+          apiKey: key,
+        };
+        if (opts.fetchImpl) exp.fetchImpl = opts.fetchImpl;
+        expansion = await expandQuery(exp);
+        expansions = expansion.expansions;
+        opts.verbose?.(
+          `expansion: ${expansion.expansions.length} phrasings, ${expansion.latencyMs.toFixed(0)}ms, ` +
+            `tokens in=${expansion.tokens.input} out=${expansion.tokens.output}, ` +
+            `cost≈$${estimateCostUsd(expansion.tokens, expansion.model).toFixed(6)}`,
+        );
+      } catch (err) {
+        const msg = err instanceof ExpansionError ? err.message : String(err);
+        // Soft-fail: a flaky expansion shouldn't break ask. Print and continue
+        // with just the original query.
+        print(`note: query expansion failed (${msg}); continuing without expansion.`);
+      }
+    }
+  }
+
+  const queries = [opts.query, ...expansions];
+
+  // ── Stage 1: BM25 corpus build (cached) ──────────────────────────────
+  const node = newNodeClient({
+    baseUrl: opts.cfg.nodeUrl,
+    userHash: opts.cfg.userHash,
+    verbose: opts.verbose,
+  });
+
+  const docs = await loadBm25Documents(node, opts.cfg);
+  let index = loadCachedIndex(opts.cfg.userHash);
+  const fingerprint = BM25Index.build(docs).fingerprint;
+  let bm25CacheHit = false;
+  if (index && index.fingerprint === fingerprint) {
+    bm25CacheHit = true;
+    opts.verbose?.(`bm25: cache hit (fingerprint ${fingerprint.slice(0, 12)}…)`);
+  } else {
+    index = BM25Index.build(docs);
+    saveCachedIndex(opts.cfg.userHash, index);
+    opts.verbose?.(
+      `bm25: rebuilt index (${docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}…)`,
+    );
+  }
+
+  // ── Stage 2: per-query BM25 + vector ─────────────────────────────────
+  const fbrainSchemas = uniqueFbrainSchemas(opts.cfg);
+  const rankers: RankerInput[] = [];
+  const vectorScoreById = new Map<string, number>();
+  const perQueryVectorTopId = new Map<number, Map<string, number>>();
+  const perQueryBm25TopId = new Map<number, Map<string, number>>();
+
+  for (let qi = 0; qi < queries.length; qi++) {
+    const q = queries[qi]!;
+    const tag = qi === 0 ? "orig" : `exp${qi - 1}`;
+
+    // BM25 over this query.
+    const bm25Hits = index.search(q, RANKER_LIMIT);
+    const bm25Ranked = bm25Hits.map((h) => ({
+      id: docId(h.type, h.slug),
+      rank: h.rank,
+    }));
+    rankers.push({ label: `bm25:${tag}`, hits: bm25Ranked });
+    const bm25Map = new Map<string, number>();
+    for (const r of bm25Ranked) bm25Map.set(r.id, r.rank);
+    perQueryBm25TopId.set(qi, bm25Map);
+    opts.verbose?.(`bm25:${tag} → ${bm25Hits.length} hit(s)`);
+
+    // Vector over this query.
+    const clientOpts: ClientSearchOptions = {};
+    if (fbrainSchemas.length > 0) clientOpts.schemas = fbrainSchemas;
+    const raw = await node.search(q, clientOpts);
+    const collapsed = collapseFragments(raw);
+    const vectorHits = collapsed
+      .map((h) => {
+        const slug = h.key_value.hash;
+        if (!slug) return null;
+        const type = recordTypeForHash(h.schema_name, opts.cfg.schemaHashes);
+        if (!type) return null;
+        const id = docId(type, slug);
+        const score = typeof h.metadata?.score === "number" ? h.metadata.score : 0;
+        return { id, score };
+      })
+      .filter((x): x is { id: string; score: number } => x !== null);
+    vectorHits.sort((a, b) => b.score - a.score);
+    const vectorRanked = vectorHits.slice(0, RANKER_LIMIT).map((h, i) => ({
+      id: h.id,
+      rank: i + 1,
+    }));
+    rankers.push({ label: `vector:${tag}`, hits: vectorRanked });
+    const vMap = new Map<string, number>();
+    for (const r of vectorRanked) vMap.set(r.id, r.rank);
+    perQueryVectorTopId.set(qi, vMap);
+    // Record per-doc top vector score for display.
+    for (const v of vectorHits) {
+      const prior = vectorScoreById.get(v.id);
+      if (prior === undefined || v.score > prior) vectorScoreById.set(v.id, v.score);
+    }
+    opts.verbose?.(
+      `vector:${tag} → ${vectorRanked.length} unique hit(s) (raw fragments=${raw.length})`,
+    );
+  }
+
+  // ── Stage 3: RRF fusion ──────────────────────────────────────────────
+  const fused = reciprocalRankFusion(rankers, { k: RRF_DEFAULT_K });
+
+  // ── Stage 4: resolve + filter ────────────────────────────────────────
+  // Resolve more than `limit` since some may be stale.
+  const overFetch = Math.min(fused.length, limit * 3 + 5);
+  const resolved: AskHit[] = [];
+  for (let i = 0; i < fused.length && resolved.length < limit; i++) {
+    if (i >= overFetch && resolved.length >= limit) break;
+    const f = fused[i]!;
+    const parsed = parseDocId(f.id);
+    if (!parsed) continue;
+    const { type, slug } = parsed;
+    const schemaHash = schemaHashFor(type, opts.cfg);
+    const records = await listRecords(node, type, schemaHash);
+    const rec = records.find((r) => r.slug === slug && !isTombstoned(r));
+    if (!rec) {
+      opts.verbose?.(`skip stale: ${type}/${slug}`);
+      continue;
+    }
+    resolved.push({
+      type,
+      slug,
+      fusedScore: f.fusedScore,
+      bm25Rank: perQueryBm25TopId.get(0)?.get(f.id) ?? null,
+      vectorRank: perQueryVectorTopId.get(0)?.get(f.id) ?? null,
+      vectorScore: vectorScoreById.get(f.id) ?? null,
+      expansionHits: collectExpansionHits(f, perQueryBm25TopId, perQueryVectorTopId),
+      record: rec,
+    });
+  }
+
+  // ── Stage 5: print ───────────────────────────────────────────────────
+  if (opts.explain && expansions.length > 0) {
+    print(`expansions:`);
+    for (const e of expansions) print(`  - ${e}`);
+    print("");
+  }
+  if (resolved.length === 0) {
+    print("no matches");
+  } else {
+    for (const h of resolved) {
+      const score = h.fusedScore.toFixed(4);
+      const bm = h.bm25Rank === null ? "—" : String(h.bm25Rank);
+      const vr = h.vectorRank === null ? "—" : String(h.vectorRank);
+      const exp =
+        h.expansionHits.length === 0 ? "" : `  +exp[${formatExpansionHits(h.expansionHits)}]`;
+      print(
+        `${h.slug.padEnd(28)}  ${score.padStart(7)}  ${h.type.padEnd(10)}  bm25=${bm.padStart(3)}  vec=${vr.padStart(3)}${exp}  ${h.record.title}`,
+      );
+    }
+  }
+
+  if (expansion && opts.verbose) {
+    const usd = estimateCostUsd(expansion.tokens, expansion.model);
+    opts.verbose(
+      `ask: expansion cost ≈ $${usd.toFixed(6)} (${expansion.tokens.input}in / ${expansion.tokens.output}out, ${expansion.model})`,
+    );
+  }
+
+  return {
+    query: opts.query,
+    expansions,
+    expansion,
+    hits: resolved,
+    bm25CorpusSize: docs.length,
+    bm25CacheHit,
+  };
+}
+
+function uniqueFbrainSchemas(cfg: Config): string[] {
+  return Array.from(
+    new Set(
+      Object.values(cfg.schemaHashes).filter(
+        (h): h is string => typeof h === "string" && h.length > 0,
+      ),
+    ),
+  );
+}
+
+async function loadBm25Documents(
+  node: ReturnType<typeof newNodeClient>,
+  cfg: Config,
+): Promise<BM25Document[]> {
+  const docs: BM25Document[] = [];
+  // Walk all 8 logical record types. listRecords already kind-filters and
+  // returns live + tombstoned; we drop tombstones for the index. Phase 6
+  // types share noteSchema so they're effectively listed via separate
+  // kind-filtered queries — same network cost, just split logically.
+  for (const t of RECORD_TYPES) {
+    const records = await listRecords(node, t, schemaHashFor(t, cfg));
+    for (const r of records) {
+      if (isTombstoned(r)) continue;
+      docs.push({
+        type: t,
+        slug: r.slug,
+        title: r.title,
+        body: r.body,
+        updatedAt: r.updated_at,
+      });
+    }
+  }
+  return docs;
+}
+
+export function docId(type: RecordType, slug: string): string {
+  return `${type}::${slug}`;
+}
+
+export function parseDocId(id: string): { type: RecordType; slug: string } | null {
+  const idx = id.indexOf("::");
+  if (idx <= 0) return null;
+  const type = id.slice(0, idx);
+  const slug = id.slice(idx + 2);
+  if (!isRecordType(type) || slug.length === 0) return null;
+  return { type, slug };
+}
+
+function isRecordType(s: string): s is RecordType {
+  return (RECORD_TYPES as readonly string[]).includes(s);
+}
+
+// Collapse multi-fragment vector hits to one per (schema, slug), keeping
+// the highest score. Same shape as search.ts's dedupeHits but returns the
+// raw NativeIndexHit kept per (schema, slug) — caller resolves to record.
+export function collapseFragments(hits: NativeIndexHit[]): NativeIndexHit[] {
+  const best = new Map<string, NativeIndexHit>();
+  for (const h of hits) {
+    const slug = h.key_value.hash;
+    if (!slug) continue;
+    const key = `${h.schema_name}::${slug}`;
+    const score = typeof h.metadata?.score === "number" ? h.metadata.score : -1;
+    const prior = best.get(key);
+    const priorScore = typeof prior?.metadata?.score === "number" ? prior.metadata.score : -1;
+    if (!prior || score > priorScore) best.set(key, h);
+  }
+  return Array.from(best.values());
+}
+
+function collectExpansionHits(
+  f: FusedHit,
+  bm25: Map<number, Map<string, number>>,
+  vector: Map<number, Map<string, number>>,
+): Array<{ idx: number; ranker: "bm25" | "vector"; rank: number }> {
+  const out: Array<{ idx: number; ranker: "bm25" | "vector"; rank: number }> = [];
+  // Expansion queries are at indices 1, 2, 3, ... — anything > 0.
+  for (const [qi, m] of bm25) {
+    if (qi === 0) continue;
+    const r = m.get(f.id);
+    if (r !== undefined) out.push({ idx: qi - 1, ranker: "bm25", rank: r });
+  }
+  for (const [qi, m] of vector) {
+    if (qi === 0) continue;
+    const r = m.get(f.id);
+    if (r !== undefined) out.push({ idx: qi - 1, ranker: "vector", rank: r });
+  }
+  return out;
+}
+
+function formatExpansionHits(
+  hits: Array<{ idx: number; ranker: "bm25" | "vector"; rank: number }>,
+): string {
+  return hits
+    .map((h) => `${h.ranker[0]}${h.idx}=${h.rank}`)
+    .join(",");
+}

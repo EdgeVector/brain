@@ -17,6 +17,7 @@ import { listCmd } from "./commands/list.ts";
 import { statusCmd } from "./commands/status.ts";
 import { linkCmd } from "./commands/link.ts";
 import { searchCmd } from "./commands/search.ts";
+import { askCmd } from "./commands/ask.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
@@ -35,6 +36,7 @@ const COMMANDS = [
   "status",
   "link",
   "search",
+  "ask",
   "doctor",
   "raw",
   "share",
@@ -60,6 +62,7 @@ Commands:
   status         show or update a record's status
   link           link a task to a parent design
   search         semantic search over indexed records
+  ask            hybrid retrieval (BM25 + vector + RRF + LLM expansion)
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
@@ -147,6 +150,25 @@ and skips stale hits (records deleted since indexing). Prints
   -n            max results
   --exact       exact-match mode (passes ?exact=true to the index)
   --min-score   server-side score floor (passes ?min_score=F)`,
+  ask: `fbrain ask <query> [--limit N] [--no-llm] [--explain]
+
+Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
+fused via Reciprocal Rank Fusion. By default an LLM generates 3 alternative
+phrasings of the query; BM25 + vector run against original + 3 expansions
+and RRF fuses across all 8 lists. The 4-query × 2-ranker design lets
+paraphrase recall ride alongside rare-token / acronym recall.
+
+  --limit N     max results (default 5)
+  --no-llm      skip LLM expansion (BM25 + vector + RRF on the original
+                query only — useful offline or to save tokens)
+  --explain     print the LLM-generated expansions before results
+
+Cost: 1 LLM call per invocation. Run with the global --verbose to see
+token + USD estimates and per-ranker debug. Missing ANTHROPIC_API_KEY
+falls back to --no-llm automatically with a one-line notice.
+
+The LLM key is read from \$ANTHROPIC_API_KEY (preferred) or an
+optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
   doctor: `fbrain doctor [--freshness] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
@@ -327,6 +349,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runLink(args, verboseFn);
     case "search":
       return runSearch(args, verboseFn);
+    case "ask":
+      return runAsk(args, verboseFn);
     case "doctor":
       return runDoctor(args, verboseFn);
     case "raw":
@@ -590,6 +614,38 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   if (values.exact) sOpts.exact = true;
   if (minScore !== undefined) sOpts.minScore = minScore;
   await searchCmd(sOpts);
+  return 0;
+}
+
+async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {
+      limit: { type: "string" },
+      "no-llm": { type: "boolean", default: false },
+      explain: { type: "boolean", default: false },
+    },
+  });
+  const query = positionals.join(" ").trim();
+  if (query.length === 0) {
+    console.error(COMMAND_HELP.ask);
+    return 1;
+  }
+  const cfg = readConfig();
+  const limit = values.limit ? parseInt(values.limit, 10) : undefined;
+  if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
+    throw new FbrainError({
+      code: "invalid_limit",
+      message: `--limit must be a positive integer (got "${values.limit}").`,
+    });
+  }
+  const aOpts: Parameters<typeof askCmd>[0] = { cfg, query, verbose };
+  if (typeof limit === "number") aOpts.limit = limit;
+  if (values["no-llm"]) aOpts.noLlm = true;
+  if (values.explain) aOpts.explain = true;
+  await askCmd(aOpts);
   return 0;
 }
 
