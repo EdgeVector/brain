@@ -92,7 +92,7 @@ Each item is measurable, automatable where possible, and links the kanban task /
 3. **Retrieval relevance.** G3b/G17 eval shows fbrain `search` (and `ask`, once G5 ships) P@5 ≥ vector-only baseline on the 20-pair labeled set. — ✅ G3b shipped (kanban `c312a`, PR #10); blocked on G5 for `ask`.
 4. **MCP read surface.** Claude Code skill calls `fbrain_search` → retrieves a known slug. — ✅ G6 (kanban `95d87`, PR #13), [`mcp-smoketest.md`](mcp-smoketest.md).
 5. **Mirror-flip dogfood.** `~/.claude/brain-config.json` flipped to `primary: fbrain` for **7 consecutive days** on Tom's machine with **zero** failed reverse-mirrors. Logged via `gbrain-upsert.ts`. — ❌ outstanding (cannot start until #1, #10, #11 are green).
-6. **Second-user dogfood (G14).** One named teammate writes > 0 records to fbrain over 7 consecutive days under their own `userHash`. — ❌ outstanding, kanban follow-up.
+6. **Second-user dogfood (G14).** One named teammate writes > 0 records to fbrain over 7 consecutive days under their own `userHash`. — ❌ **OUTSTANDING — playbook ready, teammate TBD.** Onboarding steps + monitor live at [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) and [`../scripts/dogfood-monitor.sh`](../scripts/dogfood-monitor.sh). Human-driven step: Tom picks the teammate and runs the playbook off-band.
 7. **Telemetry signal (G13).** `fbrain doctor --usage` shows write count by `userHash` over 7d (≥ 2 hashes). — ❌ outstanding, kanban follow-up.
 8. **Rollback rehearsal.** Mirror-flip-back per §5 performed once on Tom's machine; verified writes land in both stores for 24h post-rehearsal. — ❌ outstanding (chained off #5).
 9. **Doctor surfaces multi-machine + sharing limits.** `fbrain doctor` emits explicit WARN lines for the single-machine and no-team-sync conditions per §6. — ❌ outstanding, kanban follow-up.
@@ -111,7 +111,7 @@ Each item is measurable, automatable where possible, and links the kanban task /
 | 3 | Retrieval relevance — `ask` | ❌ outstanding (blocked on #10) |
 | 4 | MCP read (G6) | ✅ |
 | 5 | Mirror-flip dogfood (7 days) | ❌ outstanding (blocked on #1, #10, #11) |
-| 6 | Second-user dogfood (G14) | ❌ outstanding (follow-up #4) |
+| 6 | Second-user dogfood (G14) | ❌ outstanding — **playbook + monitor ready, teammate TBD** ([`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md), [`../scripts/dogfood-monitor.sh`](../scripts/dogfood-monitor.sh)) |
 | 7 | Telemetry — write count by userHash (G13) | ❌ outstanding (follow-up #5) |
 | 8 | Rollback rehearsal | ❌ outstanding (chained off #5) |
 | 9 | Doctor disclosure WARNs | ❌ outstanding (follow-up #2) |
