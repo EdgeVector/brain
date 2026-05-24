@@ -557,10 +557,10 @@ function bodyAmbiguous(body: unknown): string[] {
 
 export function recordTypeForHash(
   hash: string,
-  designHash: string,
-  taskHash: string,
+  schemaHashes: Record<string, string>,
 ): RecordType | null {
-  if (hash === designHash) return "design";
-  if (hash === taskHash) return "task";
+  for (const [type, h] of Object.entries(schemaHashes)) {
+    if (h === hash) return type as RecordType;
+  }
   return null;
 }

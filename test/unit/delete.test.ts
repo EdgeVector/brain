@@ -22,18 +22,18 @@ import {
   TOMBSTONE_STATUS,
 } from "../../src/commands/delete.ts";
 import { FbrainError, type NodeClient } from "../../src/client.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import type { RecordType } from "../../src/schemas.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
-const cfg: Config = {
-  configVersion: CONFIG_VERSION,
-  nodeUrl: "http://127.0.0.1:9101",
-  schemaServiceUrl: "http://127.0.0.1:9102",
+const cfg = buildTestCfg({
   userHash: "uh",
-  designSchemaHash: "designhash",
-  taskSchemaHash: "taskhash",
-};
+  schemaHashes: {
+    ...TEST_HASHES,
+    design: "designhash",
+    task: "taskhash",
+  },
+});
 
 type RowFields = Record<string, unknown>;
 
@@ -198,7 +198,7 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
     expect(calls.length).toBeGreaterThan(0);
   });
 
-  test("missing slug, no --type → 'No design or task with slug' wording", async () => {
+  test("missing slug, no --type → 'No record with slug' wording", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ ok: true, results: [] }), {
@@ -208,7 +208,7 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
     try {
       await expect(deleteRecord({ cfg, slug: "ghost" })).rejects.toMatchObject({
         code: "not_found",
-        message: 'No design or task with slug "ghost".',
+        message: 'No record with slug "ghost".',
       });
     } finally {
       globalThis.fetch = originalFetch;

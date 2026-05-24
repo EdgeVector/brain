@@ -1,20 +1,21 @@
-// `fbrain init` — bootstrap a node (if needed), register Design + Task,
-// load them, persist canonical hashes to ~/.fbrain/config.json.
+// `fbrain init` — bootstrap a node (if needed), register every fbrain
+// schema, load them, persist canonical hashes to ~/.fbrain/config.json.
 //
 // 5 steps (per Phase 0 spike, step 0 added):
 //   0. probe /api/system/auto-identity
 //   1. POST /api/setup/bootstrap if 503
-//   2. register Design + Task via schema service → capture canonical hashes
+//   2. register all 8 schemas via schema service → capture canonical hashes
 //   3. POST /api/schemas/load
 //   4. verify failed_schemas empty + persist config
 //
 // Idempotent. Step 0 makes a re-run skip bootstrap; step 2's POST is
 // idempotent on the schema service side (identical re-POST returns 200
 // with the same canonical hash). Re-running init is the prescribed
-// remedy for `409 ambiguous_schema_name`.
+// remedy for `409 ambiguous_schema_name`, and also the way to upgrade
+// a v1 config to v2.
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
-import { designSchema, taskSchema } from "../schemas.ts";
+import { UNIQUE_SCHEMAS } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
@@ -87,13 +88,21 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
   }
 
-  // Step 2/5: register schemas
-  print(`[3/${STEPS}] registering Design + Task schemas`);
+  // Step 2/5: register the unique schemas. Phase 6 types (concept,
+  // preference, reference, agent, project, spike) share a single
+  // FbrainKindNote schema, so we register 3 schemas total (Design,
+  // Task, FbrainKindNote) and fan the note hash out to all 6 Phase 6
+  // entries in schemaHashes.
+  print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas (covering ${UNIQUE_SCHEMAS.reduce((n, s) => n + s.types.length, 0)} record types)`);
   const schemaClient = newSchemaServiceClient(opts.schemaServiceUrl, verbose);
-  const designReg = await schemaClient.registerSchema(designSchema);
-  const taskReg = await schemaClient.registerSchema(taskSchema);
-  print(`        Design hash:  ${designReg.canonicalHash}`);
-  print(`        Task hash:    ${taskReg.canonicalHash}`);
+  const schemaHashes: Record<string, string> = {};
+  for (const entry of UNIQUE_SCHEMAS) {
+    const reg = await schemaClient.registerSchema(entry.schema);
+    for (const type of entry.types) {
+      schemaHashes[type] = reg.canonicalHash;
+    }
+    print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
+  }
 
   // Step 3/5: load schemas into the node
   print(`[4/${STEPS}] loading schemas into the node`);
@@ -116,8 +125,9 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     nodeUrl: opts.nodeUrl,
     schemaServiceUrl: opts.schemaServiceUrl,
     userHash,
-    designSchemaHash: designReg.canonicalHash,
-    taskSchemaHash: taskReg.canonicalHash,
+    schemaHashes,
+    designSchemaHash: schemaHashes.design ?? "",
+    taskSchemaHash: schemaHashes.task ?? "",
   };
   writeConfig(config, configPath);
   print(`        wrote config v${CONFIG_VERSION}`);

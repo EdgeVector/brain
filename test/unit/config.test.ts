@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,20 +12,14 @@ import {
   writeConfig,
   type Config,
 } from "../../src/config.ts";
+import { buildTestCfg } from "../util.ts";
 
 function tmpPath(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "fbrain-config-"));
   return { dir, path: join(dir, "config.json") };
 }
 
-const sampleConfig: Config = {
-  configVersion: CONFIG_VERSION,
-  nodeUrl: "http://127.0.0.1:9101",
-  schemaServiceUrl: "http://127.0.0.1:9102",
-  userHash: "abcd1234",
-  designSchemaHash: "d".repeat(64),
-  taskSchemaHash: "t".repeat(64),
-};
+const sampleConfig: Config = buildTestCfg();
 
 describe("config", () => {
   test("writeConfig + readConfig round-trips", () => {
@@ -71,7 +65,7 @@ describe("config", () => {
     const { dir, path } = tmpPath();
     try {
       const partial = { ...sampleConfig } as Partial<Config>;
-      delete partial.designSchemaHash;
+      delete partial.schemaHashes;
       writeFileSync(path, JSON.stringify(partial));
       expect(() => readConfig(path)).toThrow(ConfigInvalidError);
     } finally {
@@ -85,6 +79,65 @@ describe("config", () => {
       const bad = { ...sampleConfig, configVersion: 999 };
       writeFileSync(path, JSON.stringify(bad));
       expect(() => readConfig(path)).toThrow(ConfigInvalidError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v1 config is migrated in-memory to v2", () => {
+    const { dir, path } = tmpPath();
+    try {
+      const v1 = {
+        configVersion: 1,
+        nodeUrl: "http://127.0.0.1:9101",
+        schemaServiceUrl: "http://127.0.0.1:9102",
+        userHash: "uh-v1",
+        designSchemaHash: "d".repeat(64),
+        taskSchemaHash: "t".repeat(64),
+      };
+      writeFileSync(path, JSON.stringify(v1));
+      const got = readConfig(path);
+      expect(got.configVersion).toBe(CONFIG_VERSION);
+      expect(got.schemaHashes).toEqual({
+        design: "d".repeat(64),
+        task: "t".repeat(64),
+      });
+      expect(got.designSchemaHash).toBe("d".repeat(64));
+      expect(got.taskSchemaHash).toBe("t".repeat(64));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("v1 missing designSchemaHash → ConfigInvalidError on migration", () => {
+    const { dir, path } = tmpPath();
+    try {
+      const broken = {
+        configVersion: 1,
+        nodeUrl: "http://127.0.0.1:9101",
+        schemaServiceUrl: "http://127.0.0.1:9102",
+        userHash: "uh-v1",
+        taskSchemaHash: "t".repeat(64),
+      };
+      writeFileSync(path, JSON.stringify(broken));
+      expect(() => readConfig(path)).toThrow(ConfigInvalidError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("writeConfig keeps designSchemaHash/taskSchemaHash mirrored against schemaHashes", () => {
+    const { dir, path } = tmpPath();
+    try {
+      const newDesign = "9".repeat(64);
+      const cfg: Config = {
+        ...sampleConfig,
+        schemaHashes: { ...sampleConfig.schemaHashes, design: newDesign },
+      };
+      writeConfig(cfg, path);
+      const raw = JSON.parse(readFileSync(path, "utf8"));
+      expect(raw.designSchemaHash).toBe(newDesign);
+      expect(raw.schemaHashes.design).toBe(newDesign);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -1,5 +1,5 @@
 // `fbrain put <slug>` — read body from stdin, parse YAML-subset
-// frontmatter, upsert a Design or Task.
+// frontmatter, upsert any of fbrain's record types.
 //
 // Designed to match the gbrain `put` contract closely enough for the
 // `brain` wrapper at ~/.claude/scripts/brain to route writes to fbrain
@@ -11,10 +11,9 @@
 //   - `type:` and `title:` only have meaning here; other keys are
 //     silently ignored (forward-compatible with future fields).
 //
-// For v0 only `type: design` and `type: task` route to actual writes;
-// every other type (concept, preference, reference, agent, …) errors
-// with a clear pointer at Phase 6 (the next task that adds schemas
-// for those types).
+// As of Phase 6, every type in RECORDS routes to a real write:
+// design / task / concept / preference / reference / agent / project / spike.
+// An unrecognised `type:` errors as `unsupported_type`.
 
 import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -25,7 +24,11 @@ import {
   validateSlug,
   type FbrainRecord,
 } from "../record.ts";
-import { defaultStatusFor, type RecordType } from "../schemas.ts";
+import {
+  RECORDS,
+  isRecordType,
+  type RecordType,
+} from "../schemas.ts";
 
 export type PutOptions = {
   cfg: Config;
@@ -57,10 +60,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   const existing = await findBySlug(node, type, hash, opts.slug);
   const now = nowIso();
 
-  const fields: Record<string, unknown> =
-    type === "design"
-      ? buildDesignFields(opts.slug, title, body, parsed.tags, existing, now)
-      : buildTaskFields(opts.slug, title, body, parsed.tags, existing, now);
+  const fields = buildFields(type, opts.slug, title, body, parsed.tags, existing, now);
 
   if (existing) {
     await node.updateRecord({ schemaHash: hash, fields, keyHash: opts.slug });
@@ -70,7 +70,8 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   return { type, slug: opts.slug, action: "created" };
 }
 
-function buildDesignFields(
+function buildFields(
+  type: RecordType,
   slug: string,
   title: string,
   body: string,
@@ -78,47 +79,40 @@ function buildDesignFields(
   existing: FbrainRecord | null,
   now: string,
 ): Record<string, unknown> {
-  return {
+  const entry = RECORDS[type];
+  const base: Record<string, unknown> = {
     slug,
     title,
     body,
-    status: existing?.status ?? defaultStatusFor("design"),
+    status: existing?.status ?? entry.defaultStatus,
     tags,
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };
-}
-
-function buildTaskFields(
-  slug: string,
-  title: string,
-  body: string,
-  tags: string[],
-  existing: FbrainRecord | null,
-  now: string,
-): Record<string, unknown> {
-  return {
-    slug,
-    title,
-    body,
-    status: existing?.status ?? defaultStatusFor("task"),
-    design_slug: existing?.design_slug ?? "",
-    tags,
-    created_at: existing?.created_at ?? now,
-    updated_at: now,
-  };
+  if (entry.hasDesignSlug) {
+    base.design_slug = existing?.design_slug ?? "";
+  }
+  if (entry.kind !== null) {
+    // Phase 6 types share the noteSchema. `kind` tells fbrain which
+    // logical type the row is on read. The v1 markers are fixed-value
+    // structural fields (see schemas.ts).
+    base.kind = entry.kind;
+    base.v1_marker_a = "fbrain";
+    base.v1_marker_b = "v1";
+  }
+  return base;
 }
 
 function resolveRecordType(raw: string | undefined): RecordType {
   if (raw === undefined || raw === "") return "design";
   const normalised = raw.toLowerCase();
-  if (normalised === "design" || normalised === "task") return normalised;
+  if (isRecordType(normalised)) return normalised;
   throw new FbrainError({
     code: "unsupported_type",
-    message: `type "${raw}" is not supported by fbrain v0.`,
+    message: `type "${raw}" is not a recognised fbrain record type.`,
     hint:
-      "Only `design` and `task` route to writes today; Phase 6 adds Concept/Preference/Reference/Agent. " +
-      "For now, set type to `design` or `task`, or wait for Phase 6.",
+      "Supported: design | task | concept | preference | reference | agent | project | spike. " +
+      "Check spelling or pick the closest type.",
   });
 }
 

@@ -67,12 +67,12 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       opts.verbose?.(`skip: hit has no key_value.hash`);
       continue;
     }
-    const type = recordTypeForHash(hit.schema_name, opts.cfg.designSchemaHash, opts.cfg.taskSchemaHash);
+    const type = recordTypeForHash(hit.schema_name, opts.cfg.schemaHashes);
     if (!type) {
-      // schema_name didn't match Design/Task — likely a superseded schema
-      // hash that hasn't been pruned, or a system schema. Skip silently.
+      // schema_name didn't match any registered type — likely a superseded
+      // schema hash that hasn't been pruned, or a system schema. Skip silently.
       opts.verbose?.(
-        `skip: schema_name "${hit.schema_name}" matches neither Design (${opts.cfg.designSchemaHash}) nor Task (${opts.cfg.taskSchemaHash})`,
+        `skip: schema_name "${hit.schema_name}" matches no registered fbrain type`,
       );
       continue;
     }
@@ -86,9 +86,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     const displayName =
       typeof hit.schema_display_name === "string" && hit.schema_display_name.length > 0
         ? hit.schema_display_name
-        : type === "design"
-          ? "Design"
-          : "Task";
+        : capitalize(type);
     const score = typeof hit.metadata?.score === "number" ? hit.metadata.score : null;
     const matchType = typeof hit.metadata?.match_type === "string" ? hit.metadata.match_type : null;
     opts.verbose?.(`kept: ${type}/${slug} score=${score ?? "—"}`);
@@ -115,9 +113,14 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   for (const hit of trimmed) {
     const scoreCol = hit.score === null ? "—" : hit.score.toFixed(3);
     print(
-      `${hit.slug.padEnd(28)}  ${scoreCol.padStart(6)}  ${hit.schemaDisplayName.padEnd(8)}  ${hit.record.title}`,
+      `${hit.slug.padEnd(28)}  ${scoreCol.padStart(6)}  ${hit.schemaDisplayName.padEnd(10)}  ${hit.record.title}`,
     );
   }
+}
+
+function capitalize(s: string): string {
+  if (s.length === 0) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // Exported for unit tests.

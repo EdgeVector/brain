@@ -10,16 +10,13 @@ import {
   resolveBody,
 } from "../../src/commands/raw.ts";
 import { FbrainError } from "../../src/client.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
+import { buildTestCfg } from "../util.ts";
 
-const cfg: Config = {
-  configVersion: CONFIG_VERSION,
+const cfg = buildTestCfg({
   nodeUrl: "http://node.local",
   schemaServiceUrl: "http://schema.local",
   userHash: "uh-test",
-  designSchemaHash: "a".repeat(64),
-  taskSchemaHash: "b".repeat(64),
-};
+});
 
 describe("pickService", () => {
   test("/api/ → node", () => {

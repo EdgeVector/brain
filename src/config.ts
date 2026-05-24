@@ -1,18 +1,26 @@
 // Persistent CLI config — `~/.fbrain/config.json` by default.
 // Holds the canonical schema hashes (NOT the descriptive_names), per the
 // Phase 0 spike finding.
+//
+// v2 (Phase 6): `schemaHashes` map carries one canonical hash per record
+// type. `designSchemaHash` and `taskSchemaHash` are mirrored on disk for
+// backward compat with v1 readers. v1 configs are migrated in-memory on
+// read; the next `fbrain init` persists v2 to disk.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const CONFIG_VERSION = 1;
+export const CONFIG_VERSION = 2;
 
 export type Config = {
   configVersion: number;
   nodeUrl: string;
   schemaServiceUrl: string;
   userHash: string;
+  schemaHashes: Record<string, string>;
+  // Mirror of schemaHashes.design / schemaHashes.task — present on disk
+  // for backward compat with v1 readers. Always kept in sync on write.
   designSchemaHash: string;
   taskSchemaHash: string;
 };
@@ -59,7 +67,20 @@ export function writeConfig(
   path: string = defaultConfigPath(),
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+  const synced = syncMirrors(config);
+  writeFileSync(path, JSON.stringify(synced, null, 2) + "\n", "utf8");
+}
+
+// Keep designSchemaHash/taskSchemaHash mirrored against schemaHashes
+// so v1 readers continue to see the legacy fields populated.
+function syncMirrors(config: Config): Config {
+  return {
+    ...config,
+    designSchemaHash:
+      config.schemaHashes.design ?? config.designSchemaHash ?? "",
+    taskSchemaHash:
+      config.schemaHashes.task ?? config.taskSchemaHash ?? "",
+  };
 }
 
 function assertConfigShape(path: string, raw: unknown): Config {
@@ -67,41 +88,73 @@ function assertConfigShape(path: string, raw: unknown): Config {
     throw new ConfigInvalidError(path, "not an object");
   }
   const r = raw as Record<string, unknown>;
-  const required: (keyof Config)[] = [
-    "configVersion",
-    "nodeUrl",
-    "schemaServiceUrl",
-    "userHash",
-    "designSchemaHash",
-    "taskSchemaHash",
-  ];
-  for (const key of required) {
+
+  for (const key of ["nodeUrl", "schemaServiceUrl", "userHash"] as const) {
     if (!(key in r)) {
       throw new ConfigInvalidError(path, `missing field "${key}"`);
     }
-  }
-  if (r.configVersion !== CONFIG_VERSION) {
-    throw new ConfigInvalidError(
-      path,
-      `configVersion ${String(r.configVersion)} != ${CONFIG_VERSION}`,
-    );
-  }
-  for (const key of [
-    "nodeUrl",
-    "schemaServiceUrl",
-    "userHash",
-    "designSchemaHash",
-    "taskSchemaHash",
-  ] as const) {
     if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
       throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
     }
   }
+
+  const version = r.configVersion;
+  if (version === 1) {
+    // v1 → v2: derive schemaHashes from legacy fields.
+    for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
+      if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
+        throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
+      }
+    }
+    return {
+      configVersion: CONFIG_VERSION,
+      nodeUrl: r.nodeUrl as string,
+      schemaServiceUrl: r.schemaServiceUrl as string,
+      userHash: r.userHash as string,
+      schemaHashes: {
+        design: r.designSchemaHash as string,
+        task: r.taskSchemaHash as string,
+      },
+      designSchemaHash: r.designSchemaHash as string,
+      taskSchemaHash: r.taskSchemaHash as string,
+    };
+  }
+
+  if (version !== CONFIG_VERSION) {
+    throw new ConfigInvalidError(
+      path,
+      `configVersion ${String(version)} != ${CONFIG_VERSION}`,
+    );
+  }
+
+  if (!("schemaHashes" in r)) {
+    throw new ConfigInvalidError(path, `missing field "schemaHashes"`);
+  }
+  const rawHashes = r.schemaHashes;
+  if (typeof rawHashes !== "object" || rawHashes === null || Array.isArray(rawHashes)) {
+    throw new ConfigInvalidError(path, `field "schemaHashes" must be an object`);
+  }
+  const schemaHashes: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawHashes as Record<string, unknown>)) {
+    if (typeof v !== "string" || v.length === 0) {
+      throw new ConfigInvalidError(path, `schemaHashes["${k}"] is not a non-empty string`);
+    }
+    schemaHashes[k] = v;
+  }
+
+  // The two legacy mirror fields must be present (we always write them).
+  for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
+    if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
+      throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
+    }
+  }
+
   return {
     configVersion: CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl: r.schemaServiceUrl as string,
     userHash: r.userHash as string,
+    schemaHashes,
     designSchemaHash: r.designSchemaHash as string,
     taskSchemaHash: r.taskSchemaHash as string,
   };

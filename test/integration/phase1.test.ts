@@ -279,15 +279,15 @@ describeIntegration("Phase 1 — core CRUD", () => {
     expect(res.stdout).toContain("[task] t1");
   });
 
-  test("get with unknown slug exits 1 with No design or task", async () => {
+  test("get with unknown slug exits 1 with No record with slug", async () => {
     const res = await runCli(["get", "no-such-slug"]);
     expect(res.code).toBe(1);
-    expect(res.stderr).toContain("No design or task");
+    expect(res.stderr).toContain("No record with slug");
   });
 
   test("status of unknown slug exits 1", async () => {
     const res = await runCli(["status", "no-such-slug"]);
     expect(res.code).toBe(1);
-    expect(res.stderr).toContain("No design or task");
+    expect(res.stderr).toContain("No record with slug");
   });
 });

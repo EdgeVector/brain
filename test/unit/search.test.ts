@@ -5,21 +5,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { dedupeHits, searchCmd } from "../../src/commands/search.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
-const DESIGN_HASH = "84d9f350b4ff55d9bc96178cd83bd858e8db692485dc820474c5c30355a3062b";
-const TASK_HASH = "c0352ec0c4534bfbc7b692ce4437a0843bdc993aeedfa7df9679437a3cf2bd1e";
+const DESIGN_HASH = TEST_HASHES.design;
+const TASK_HASH = TEST_HASHES.task;
 const OTHER_HASH = "1111111111111111111111111111111111111111111111111111111111111111";
 
-const cfg: Config = {
-  configVersion: CONFIG_VERSION,
-  nodeUrl: "http://127.0.0.1:9101",
-  schemaServiceUrl: "http://127.0.0.1:9102",
-  userHash: "test-hash",
-  designSchemaHash: DESIGN_HASH,
-  taskSchemaHash: TASK_HASH,
-};
+const cfg = buildTestCfg({ userHash: "test-hash" });
 
 function hit(opts: Partial<NativeIndexHit> & { slug: string; schemaName: string }): NativeIndexHit {
   return {
