@@ -79,7 +79,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
 | `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
-| `fbrain doctor` | Live health check: reachability, provisioning, schemas-loaded, schema drift |
+| `fbrain doctor [--freshness]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
@@ -150,6 +150,21 @@ OK
 
 FAIL: 1 issue
 ```
+
+### `--freshness` (retrieval-quality probes)
+
+`fbrain doctor --freshness` appends two probes that surface the retrieval-quality issues documented in [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md):
+
+- **freshness-probe** — 5 trials of `put → search`. Each trial writes a `doctor-freshness-probe-<nonce>-N` concept with a unique marker word and asserts the fresh record appears at score ≥ 0.5 in a search for that marker. Probes are soft-deleted in cleanup. FAILs (exit 1) if any trial misses.
+- **pollution-probe** — issues one broad query (`fbrain`) and classifies every returned hit as live, stale (record gone or tombstoned but its embedding remains), or orphan-schema (a non-fbrain schema sharing the same daemon). Tagged PASS at <25% polluted, **WARN** at 25–50%, **FAIL** above 50%. WARN does not flip the exit code; FAIL does.
+
+```
+[PASS] freshness-probe  — 5/5 trials passed (min score ≥ 0.5; avg observed score 0.912)
+[FAIL] pollution-probe  — query "fbrain" → 13 hits: live 2, stale 10 (77%), orphan 1 (8%) — pollution 85%
+       fix:   see docs/phase-7-search-latency-spike.md — upstream fixes are G3d (schema-scoped search) and G3e (purge embeddings on tombstone)
+```
+
+A polluted result is informative, not a bug in fbrain — it tells you the homebrew daemon's native index is sharing slots with tombstoned embeddings and other schemas. The fix lives upstream in fold_db (G3d / G3e).
 
 ## Sharing
 
