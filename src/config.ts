@@ -6,12 +6,17 @@
 // type. `designSchemaHash` and `taskSchemaHash` are mirrored on disk for
 // backward compat with v1 readers. v1 configs are migrated in-memory on
 // read; the next `fbrain init` persists v2 to disk.
+//
+// v3 (this commit): same shape as v2; the version bump signals that the
+// default schema-service URL moved from the local `:9102` to the cloud
+// Lambda. `runInit` auto-heals v1/v2 configs with the dead local default
+// URLs on the next `fbrain init` (preserving any user override).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const CONFIG_VERSION = 2;
+export const CONFIG_VERSION = 3;
 
 export type Config = {
   configVersion: number;
@@ -100,7 +105,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
 
   const version = r.configVersion;
   if (version === 1) {
-    // v1 → v2: derive schemaHashes from legacy fields.
+    // v1 → current: derive schemaHashes from legacy fields, then bump.
     for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
       if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
         throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
@@ -120,7 +125,12 @@ function assertConfigShape(path: string, raw: unknown): Config {
     };
   }
 
-  if (version !== CONFIG_VERSION) {
+  // v2 → v3 is shape-compatible: same fields, same types. We just bump the
+  // in-memory version so the rest of the validator runs the unified path.
+  // The URL auto-heal lives in runInit so user overrides survive.
+  if (version === 2 || version === CONFIG_VERSION) {
+    // fall through to the shared validation + return below
+  } else {
     throw new ConfigInvalidError(
       path,
       `configVersion ${String(version)} != ${CONFIG_VERSION}`,

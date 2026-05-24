@@ -76,8 +76,9 @@ Probe the node, bootstrap if needed, register Design + Task, load
 schemas, persist ~/.fbrain/config.json with canonical hashes.
 Idempotent — re-run after \`409 ambiguous_schema_name\` to refresh hashes.
 
-  --node-url             defaults to http://127.0.0.1:9101
-  --schema-service-url   defaults to http://127.0.0.1:9102
+  --node-url             defaults to http://127.0.0.1:9001 (homebrew fold_db_node daemon)
+  --schema-service-url   defaults to the prod cloud Lambda
+                         (https://axo709qs11.execute-api.us-east-1.amazonaws.com)
   --name                 bootstrap display name (default: fbrain)`,
   design: `fbrain design new <slug> [--title T] [--tag T]... [--body STR] [--force]
 
@@ -310,12 +311,13 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
       name: { type: "string" },
     },
   });
-  await runInit({
-    nodeUrl: values["node-url"] ?? "http://127.0.0.1:9101",
-    schemaServiceUrl: values["schema-service-url"] ?? "http://127.0.0.1:9102",
-    bootstrapName: values.name,
-    verbose,
-  });
+  // Defaults are resolved inside runInit so it can auto-heal a stale config
+  // (e.g. previously-baked `:9101 / :9102` URLs) without clobbering a user
+  // override the next time `fbrain init` runs without flags.
+  const initOpts: Parameters<typeof runInit>[0] = { bootstrapName: values.name, verbose };
+  if (values["node-url"]) initOpts.nodeUrl = values["node-url"];
+  if (values["schema-service-url"]) initOpts.schemaServiceUrl = values["schema-service-url"];
+  await runInit(initOpts);
   return 0;
 }
 

@@ -17,11 +17,20 @@ export const TEST_HASHES: Record<RecordType, string> = {
   spike: "5".repeat(64),
 };
 
+// Test URL defaults: homebrew `fold_db_node` daemon + the dev cloud Lambda.
+// Dev (us-west-2) — not prod — so iteration-test runs don't pollute the
+// production schema registry. CI / per-env overrides via env vars.
+export const TEST_NODE_URL =
+  process.env.FBRAIN_TEST_NODE_URL ?? "http://127.0.0.1:9001";
+export const TEST_SCHEMA_SERVICE_URL =
+  process.env.FBRAIN_TEST_SCHEMA_URL ??
+  "https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com";
+
 export function buildTestCfg(over: Partial<Config> = {}): Config {
   const base: Config = {
     configVersion: CONFIG_VERSION,
-    nodeUrl: "http://127.0.0.1:9101",
-    schemaServiceUrl: "http://127.0.0.1:9102",
+    nodeUrl: TEST_NODE_URL,
+    schemaServiceUrl: TEST_SCHEMA_SERVICE_URL,
     userHash: "uh-test",
     schemaHashes: { ...TEST_HASHES },
     designSchemaHash: TEST_HASHES.design,
