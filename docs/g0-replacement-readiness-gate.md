@@ -1,7 +1,7 @@
 # G0 — fbrain replacement-readiness gate
 
 **Last updated:** 2026-05-24
-**Status:** criteria defined; **7 of 11 acceptance items green, 4 outstanding** (see §7 + §8).
+**Status:** criteria defined; **8 of 11 acceptance items green, 3 outstanding** (see §7 + §8).
 **Owner:** Tom Tang.
 **Hard deadline:** 2026-08-23 — if the gate isn't green by then, the README's archive-review clause fires.
 
@@ -87,7 +87,7 @@ The acceptance bar: a user can rollback in **under 2 minutes without help**.
 
 Each item is measurable, automatable where possible, and links the kanban task / PR that proved it (or marks outstanding). All 11 must be green before the brain-config mirror flips to `primary: fbrain`.
 
-1. **Round-trip parity** (Table A green-state column). 20 hand-picked slugs put via fbrain → get via fbrain → diff title/body/tags/status. Automated in `scripts/parity-smoketest.sh`. — ❌ outstanding, kanban follow-up.
+1. **Round-trip parity** (Table A green-state column). 20 hand-picked slugs put via fbrain → get via fbrain → diff title/body/tags/status. Automated in [`scripts/parity-smoketest.sh`](../scripts/parity-smoketest.sh) over 20 fixtures in [`test/fixtures/parity/`](../test/fixtures/parity/) covering all 8 record types with frontmatter-shape + body variety. — ✅ shipped (PR linked from this section's commit), exits 0 / idempotent on re-run.
 2. **Retrieval freshness.** `fbrain doctor --freshness` green: 5/5 trials at score ≥ 0.5. — ✅ G3a, PR #11.
 3. **Retrieval relevance.** G3b/G17 eval shows fbrain `search` (and `ask`, once G5 ships) P@5 ≥ vector-only baseline on the 20-pair labeled set. — ✅ G3b shipped (kanban `c312a`, PR #10); blocked on G5 for `ask`.
 4. **MCP read surface.** Claude Code skill calls `fbrain_search` → retrieves a known slug. — ✅ G6 (kanban `95d87`, PR #13), [`mcp-smoketest.md`](mcp-smoketest.md).
@@ -99,13 +99,13 @@ Each item is measurable, automatable where possible, and links the kanban task /
 10. **Hybrid `fbrain ask` (G5).** Lands before the flip. Vector-only `fbrain search` is a daily-use regression vs. `gbrain ask`'s RRF + expansion path; **Tom won't ship that regression.** Eval-gated on the G3b/G17 baseline. — ❌ outstanding, T2 in the master plan.
 11. **Minion bus path settled.** The kanban-agent skill's `gbrain jobs submit minion-checkpoint` dependency has a documented + implemented disposition before the mirror flips. Disposition: stay on gbrain — gbrain is dual-purpose post-flip (legacy knowledge brain, replaced; kanban minion-bus infra, not replaced). See [`decisions/minion-bus-path.md`](decisions/minion-bus-path.md). — ✅ shipped.
 
-**Items 2, 3 (search-half), 4, 7, 9, 11 are green.** Items 1, 5, 6, 8, 10 (and the `ask` half of #3) are outstanding.
+**Items 1, 2, 3 (search-half), 4, 7, 9, 11 are green.** Items 5, 6, 8, 10 (and the `ask` half of #3) are outstanding.
 
 ## 8. Status snapshot — 2026-05-24
 
 | # | Gate item | State |
 |---|---|---|
-| 1 | Round-trip parity smoketest | ❌ outstanding (follow-up #3) |
+| 1 | Round-trip parity smoketest | ✅ shipped — `scripts/parity-smoketest.sh` (20/20 pass, idempotent) |
 | 2 | Retrieval freshness (G3a) | ✅ |
 | 3 | Retrieval relevance — `search` (G3b) | ✅ |
 | 3 | Retrieval relevance — `ask` | ❌ outstanding (blocked on #10) |
@@ -118,4 +118,4 @@ Each item is measurable, automatable where possible, and links the kanban task /
 | 10 | Hybrid `fbrain ask` (G5) | ❌ outstanding (T2 in master plan) |
 | 11 | Minion bus path settled | ✅ ([`decisions/minion-bus-path.md`](decisions/minion-bus-path.md) — option (a): gbrain stays as the minion bus, append-only telemetry) |
 
-**Score: 7 / 11 green.** Path to green-state: the remaining follow-ups filed alongside the PR #17 sweep cover gate items 1 and 6 — items 7, 9, 11 have now landed via PR #16 (`fbrain doctor --usage`), PR #19 (`single-machine-slice` + `no-team-sync` WARN probes), and this PR ([`decisions/minion-bus-path.md`](decisions/minion-bus-path.md)). Items 5, 8 fall out of #1 being green. Items 3-ask and 10 are the G5 work in the master plan.
+**Score: 8 / 11 green.** Path to green-state: the remaining follow-up covers gate item 6 (second-user dogfood — playbook ready, teammate TBD). Items 5, 8 fall out of #10 landing (item #1's dependency on #5 is now resolved by this PR). Items 3-ask and 10 are the G5 work in the master plan.
