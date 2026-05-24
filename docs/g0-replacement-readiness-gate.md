@@ -1,7 +1,7 @@
 # G0 — fbrain replacement-readiness gate
 
 **Last updated:** 2026-05-24
-**Status:** criteria defined; **5 of 11 acceptance items green, 6 outstanding** (see §7 + §8).
+**Status:** criteria defined; **6 of 11 acceptance items green, 5 outstanding** (see §7 + §8).
 **Owner:** Tom Tang.
 **Hard deadline:** 2026-08-23 — if the gate isn't green by then, the README's archive-review clause fires.
 
@@ -93,13 +93,13 @@ Each item is measurable, automatable where possible, and links the kanban task /
 4. **MCP read surface.** Claude Code skill calls `fbrain_search` → retrieves a known slug. — ✅ G6 (kanban `95d87`, PR #13), [`mcp-smoketest.md`](mcp-smoketest.md).
 5. **Mirror-flip dogfood.** `~/.claude/brain-config.json` flipped to `primary: fbrain` for **7 consecutive days** on Tom's machine with **zero** failed reverse-mirrors. Logged via `gbrain-upsert.ts`. — ❌ outstanding (cannot start until #1, #10, #11 are green).
 6. **Second-user dogfood (G14).** One named teammate writes > 0 records to fbrain over 7 consecutive days under their own `userHash`. — ❌ **OUTSTANDING — playbook ready, teammate TBD.** Onboarding steps + monitor live at [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) and [`../scripts/dogfood-monitor.sh`](../scripts/dogfood-monitor.sh). Human-driven step: Tom picks the teammate and runs the playbook off-band.
-7. **Telemetry signal (G13).** `fbrain doctor --usage` shows write count by `userHash` over 7d (≥ 2 hashes). — ❌ outstanding, kanban follow-up.
+7. **Telemetry signal (G13).** `fbrain doctor --usage` shows write count by `userHash` over 7d (≥ 2 hashes). — ✅ flag shipped — PR #16. (Meeting the **≥ 2 hashes** criterion itself is gate item #6's deliverable; this item gates only on the flag existing.)
 8. **Rollback rehearsal.** Mirror-flip-back per §5 performed once on Tom's machine; verified writes land in both stores for 24h post-rehearsal. — ❌ outstanding (chained off #5).
 9. **Doctor surfaces multi-machine + sharing limits.** `fbrain doctor` emits explicit WARN lines for the single-machine and no-team-sync conditions per §6. — ✅ shipped — `single-machine-slice` + `no-team-sync` probes in `src/commands/doctor.ts`; always-WARN, exit unchanged.
 10. **Hybrid `fbrain ask` (G5).** Lands before the flip. Vector-only `fbrain search` is a daily-use regression vs. `gbrain ask`'s RRF + expansion path; **Tom won't ship that regression.** Eval-gated on the G3b/G17 baseline. — ❌ outstanding, T2 in the master plan.
 11. **Minion bus path settled.** The kanban-agent skill's `gbrain jobs submit minion-checkpoint` dependency has a documented + implemented disposition before the mirror flips. Without this, every kanban agent breaks on flip day. — ❌ outstanding, kanban follow-up.
 
-**Items 2, 3 (search-half), 4, 9 are green.** Items 1, 5, 6, 7, 8, 10, 11 (and the `ask` half of #3) are outstanding.
+**Items 2, 3 (search-half), 4, 7, 9 are green.** Items 1, 5, 6, 8, 10, 11 (and the `ask` half of #3) are outstanding.
 
 ## 8. Status snapshot — 2026-05-24
 
@@ -112,10 +112,10 @@ Each item is measurable, automatable where possible, and links the kanban task /
 | 4 | MCP read (G6) | ✅ |
 | 5 | Mirror-flip dogfood (7 days) | ❌ outstanding (blocked on #1, #10, #11) |
 | 6 | Second-user dogfood (G14) | ❌ outstanding — **playbook + monitor ready, teammate TBD** ([`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md), [`../scripts/dogfood-monitor.sh`](../scripts/dogfood-monitor.sh)) |
-| 7 | Telemetry — write count by userHash (G13) | ❌ outstanding (follow-up #5) |
+| 7 | Telemetry — write count by userHash (G13) | ✅ flag shipped (PR #16); ≥ 2-hash criterion tracked under #6 |
 | 8 | Rollback rehearsal | ❌ outstanding (chained off #5) |
 | 9 | Doctor disclosure WARNs | ✅ |
 | 10 | Hybrid `fbrain ask` (G5) | ❌ outstanding (T2 in master plan) |
 | 11 | Minion bus path settled | ❌ outstanding (follow-up #1, **hard blocker on flip**) |
 
-**Score: 5 / 11 green.** Path to green-state: the remaining follow-ups filed alongside the PR #17 sweep cover gate items 1, 6, 7, 11 (item 9 now landed via `single-machine-slice` + `no-team-sync` probes). Items 5, 8 fall out of #11 + #1 being green. Items 3-ask and 10 are the G5 work in the master plan.
+**Score: 6 / 11 green.** Path to green-state: the remaining follow-ups filed alongside the PR #17 sweep cover gate items 1, 6, 11 — items 7 and 9 have now landed via PR #16 (`fbrain doctor --usage`) and PR #19 (`single-machine-slice` + `no-team-sync` WARN probes). Items 5, 8 fall out of #11 + #1 being green. Items 3-ask and 10 are the G5 work in the master plan.
