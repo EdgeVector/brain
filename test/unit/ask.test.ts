@@ -257,6 +257,35 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     },
   );
 
+  test("all-stopword query emits a notice and returns zero hits when nothing else hits", async () => {
+    // Regression for the silent-empty case: `fbrain ask 'the and or'`
+    // used to return zero rows with no log, no notice, no --verbose
+    // surface, because the BM25 tokenizer dropped every term and the
+    // vector ranker had nothing to offer. The pipeline now emits a
+    // one-line print() notice when the ORIGINAL query produced zero
+    // BM25 tokens AND the vector ranker returned nothing — so the user
+    // sees "why am I getting nothing" instead of an empty silence.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      // No live records anywhere; vector stub returns nothing either.
+      queries: {},
+      vectorHits: [],
+    });
+
+    const lines: string[] = [];
+    const result = await askCmd({
+      cfg,
+      query: "the and or",
+      noLlm: true,
+      print: (line) => lines.push(line),
+    });
+
+    expect(result.hits.length).toBe(0);
+    expect(
+      lines.some((l) => l.includes("query tokenized to zero terms")),
+    ).toBe(true);
+  });
+
   test("vector-only stale hit (slug absent from corpus) is skipped, no extra fetch", async () => {
     // The other Stage-4 responsibility is filtering stale hits — a slug
     // returned by the vector index that no longer exists as a live
