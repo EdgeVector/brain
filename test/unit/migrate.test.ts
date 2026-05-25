@@ -117,6 +117,7 @@ function stubFetch(opts: {
   mutations: Array<{ schema: string; mutation_type: string; fields_and_values: Record<string, unknown>; key_value: { hash: string } }>;
   schemaRegistrations: number;
   schemaLoads: number;
+  queryCountsBySchema: Map<string, number>;
 } {
   const originalFetch = globalThis.fetch;
   const mutations: Array<{
@@ -126,6 +127,7 @@ function stubFetch(opts: {
     key_value: { hash: string };
   }> = [];
   const present = opts.presentAtTarget ?? {};
+  const queryCountsBySchema = new Map<string, number>();
   let schemaRegistrations = 0;
   let schemaLoads = 0;
   // Track the most recent POST'd schema so the subsequent GET can
@@ -179,6 +181,7 @@ function stubFetch(opts: {
     }
     if (url.endsWith("/api/query")) {
       const schema = (body as { schema_name: string }).schema_name;
+      queryCountsBySchema.set(schema, (queryCountsBySchema.get(schema) ?? 0) + 1);
       // For the resume / idempotency path, the migrate command queries
       // the destination hash via listRecords. We model that by
       // returning rows for to_hash from `presentAtTarget`.
@@ -229,6 +232,7 @@ function stubFetch(opts: {
       globalThis.fetch = originalFetch;
     },
     mutations,
+    queryCountsBySchema,
     get schemaRegistrations() {
       return schemaRegistrations;
     },
@@ -538,6 +542,49 @@ describe("migrateCmd --add-field", () => {
       expect(readConfigOnDisk().schemaHashes.design).toBe(NEW_HASH);
     } finally {
       stub2.restore();
+    }
+  });
+
+  test("--resume: idempotency check is one bulk listRecords per affected type, not one query per record", async () => {
+    // Regression: the previous implementation called findBySlugRaw inside
+    // the per-record loop. Each call issued queryAll(to_hash), which
+    // returns every row at to_hash — so on a resume with N records the
+    // probe cost was N round-trips with ~N²/2 rows transferred. For a
+    // non-trivial dataset that scales the resume from "fast" to
+    // "hangs / OOMs the node". The fix hoists into a single bulk
+    // listRecords per affected type and uses a Set for the skip check.
+    //
+    // Setup: a fresh migration with 5 records, none yet at to_hash. We
+    // assert that the number of /api/query calls to to_hash is exactly
+    // ONE (the up-front bulk probe), independent of record count.
+    const cfg = buildTestCfg();
+    writeStartingConfig(cfg);
+
+    const stub = stubFetch({
+      queries: {
+        [TEST_HASHES.design]: [
+          designRow("d1"), designRow("d2"), designRow("d3"), designRow("d4"), designRow("d5"),
+        ],
+      },
+    });
+    try {
+      await migrateCmd({
+        cfg,
+        mode: { kind: "add-field", type: "design", fieldName: "priority", fieldSpec: "String", defaultRaw: "P0" },
+        print: () => {},
+        migrationsDir: tmpMigrations,
+        configPath,
+      });
+
+      // 5 creates fired.
+      const creates = stub.mutations.filter((m) => m.mutation_type === "create");
+      expect(creates.length).toBe(5);
+
+      // The critical assertion: exactly ONE query against to_hash for
+      // the idempotency pre-pass, NOT five (one per record).
+      expect(stub.queryCountsBySchema.get(NEW_HASH) ?? 0).toBe(1);
+    } finally {
+      stub.restore();
     }
   });
 
