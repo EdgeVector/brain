@@ -27,7 +27,7 @@ import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
-const COMMANDS = [
+export const COMMANDS = [
   "init",
   "design",
   "task",
@@ -47,7 +47,7 @@ const COMMANDS = [
   "mcp",
   "help",
 ] as const;
-type Command = (typeof COMMANDS)[number];
+export type Command = (typeof COMMANDS)[number];
 
 const TOP_HELP = `fbrain — CLI brain over fold_db
 
@@ -80,7 +80,7 @@ Global flags:
 
 Run \`fbrain help <command>\` for per-command usage.`;
 
-const COMMAND_HELP: Record<string, string> = {
+export const COMMAND_HELP: Record<Command, string> = {
   init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY]
 
 Probe the node, bootstrap if needed, register Design + Task, load
@@ -219,20 +219,22 @@ for the full evidence and the conditions under which this command can
 become a real share.
 
 Prints a pointer and exits 1.`,
-  delete: `fbrain delete <slug> [--type design|task]
+  delete: `fbrain delete <slug> [--type T]
 
 Soft-deletes the record. fold_db's mutation pipeline is append-only — see
 docs/phase-5-delete-spike.md — so the workaround overwrites every user
 field with sentinels and stamps a tombstone tag. All fbrain read paths
 (get, list, status, link, search) then filter the record out.
 
-Without --type, queries both schemas; errors with "specify --type" if the
-slug exists in both. Errors with "No <type>: <slug>" if the slug is
-already deleted or never existed.
+Without --type, queries every registered schema; errors with "specify
+--type" if the slug exists in more than one type. Errors with
+"No <type>: <slug>" if the slug is already deleted or never existed.
+
+  --type    design | task | concept | preference | reference | agent | project | spike
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--verbose]
+  reindex: `fbrain reindex [--type T] [--dry-run]
 
 Refreshes the embedding entry for every live (non-tombstoned) fbrain
 record by re-issuing an update mutation. Workaround for the H2a
@@ -294,6 +296,94 @@ if config is missing — run \`fbrain init\` first.`,
   help: `fbrain help <command>`,
 };
 
+// Per-command parseArgs option sets. Exported so `test/unit/cli-help.test.ts`
+// can assert every `--flag` mentioned in COMMAND_HELP corresponds to a real
+// option the runXxx dispatcher accepts. Each runXxx pulls its option literal
+// from here so help, impl, and test cannot drift.
+//
+// Global flags (`--verbose`, `--help`, `-h`) are stripped in main() and are
+// not modeled here.
+//
+// `as const` preserves parseArgs's generic inference for downstream
+// `values.foo` accesses; `satisfies` enforces that every Command has an entry.
+const INIT_OPTIONS = {
+  "node-url": { type: "string" },
+  "schema-service-url": { type: "string" },
+  name: { type: "string" },
+} as const;
+// design / task: applied after the `new` subcommand is consumed.
+const DESIGN_OPTIONS = {
+  title: { type: "string" },
+  tag: { type: "string", multiple: true },
+  body: { type: "string" },
+  force: { type: "boolean", default: false },
+} as const;
+const TASK_OPTIONS = {
+  title: { type: "string" },
+  design: { type: "string" },
+  tag: { type: "string", multiple: true },
+  body: { type: "string" },
+  force: { type: "boolean", default: false },
+} as const;
+const GET_OPTIONS = { type: { type: "string" } } as const;
+const LIST_OPTIONS = {
+  type: { type: "string" },
+  status: { type: "string" },
+  tag: { type: "string" },
+  n: { type: "string" },
+} as const;
+const STATUS_OPTIONS = { type: { type: "string" } } as const;
+const SEARCH_OPTIONS = {
+  n: { type: "string" },
+  exact: { type: "boolean", default: false },
+  "min-score": { type: "string" },
+} as const;
+const ASK_OPTIONS = {
+  limit: { type: "string" },
+  "no-llm": { type: "boolean", default: false },
+  explain: { type: "boolean", default: false },
+} as const;
+const DOCTOR_OPTIONS = {
+  freshness: { type: "boolean", default: false },
+  usage: { type: "boolean", default: false },
+  "usage-window": { type: "string" },
+  "usage-path": { type: "string" },
+} as const;
+const DELETE_OPTIONS = { type: { type: "string" } } as const;
+const REINDEX_OPTIONS = {
+  type: { type: "string" },
+  "dry-run": { type: "boolean", default: false },
+} as const;
+const MIGRATE_OPTIONS = {
+  "add-field": { type: "boolean", default: false },
+  status: { type: "boolean", default: false },
+  resume: { type: "string" },
+  default: { type: "string" },
+  "dry-run": { type: "boolean", default: false },
+} as const;
+const EMPTY_OPTIONS = {} as const;
+
+export const CLI_SPEC = {
+  init: INIT_OPTIONS,
+  design: DESIGN_OPTIONS,
+  task: TASK_OPTIONS,
+  put: EMPTY_OPTIONS,
+  get: GET_OPTIONS,
+  list: LIST_OPTIONS,
+  status: STATUS_OPTIONS,
+  link: EMPTY_OPTIONS,
+  search: SEARCH_OPTIONS,
+  ask: ASK_OPTIONS,
+  doctor: DOCTOR_OPTIONS,
+  raw: EMPTY_OPTIONS,
+  share: EMPTY_OPTIONS,
+  delete: DELETE_OPTIONS,
+  reindex: REINDEX_OPTIONS,
+  migrate: MIGRATE_OPTIONS,
+  mcp: EMPTY_OPTIONS,
+  help: EMPTY_OPTIONS,
+} as const satisfies Record<Command, Record<string, unknown>>;
+
 type Argv = string[];
 
 export async function main(argv: Argv): Promise<number> {
@@ -350,6 +440,11 @@ function consumeFlag(argv: Argv, name: string): boolean {
 }
 
 function printHelpFor(name: string): number {
+  if (!isCommand(name)) {
+    console.error(`Unknown command: ${name}`);
+    console.log(TOP_HELP);
+    return 1;
+  }
   const h = COMMAND_HELP[name];
   if (!h) {
     console.error(`Unknown command: ${name}`);
@@ -417,11 +512,7 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: false,
-    options: {
-      "node-url": { type: "string" },
-      "schema-service-url": { type: "string" },
-      name: { type: "string" },
-    },
+    options: INIT_OPTIONS,
   });
   // Defaults are resolved inside runInit so it can auto-heal a stale config
   // (e.g. previously-baked `:9101 / :9102` URLs) without clobbering a user
@@ -444,12 +535,7 @@ async function runDesign(args: Argv, verbose: Verbose): Promise<number> {
     args: rest,
     strict: true,
     allowPositionals: true,
-    options: {
-      title: { type: "string" },
-      tag: { type: "string", multiple: true },
-      body: { type: "string" },
-      force: { type: "boolean", default: false },
-    },
+    options: DESIGN_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -482,13 +568,7 @@ async function runTask(args: Argv, verbose: Verbose): Promise<number> {
     args: rest,
     strict: true,
     allowPositionals: true,
-    options: {
-      title: { type: "string" },
-      design: { type: "string" },
-      tag: { type: "string", multiple: true },
-      body: { type: "string" },
-      force: { type: "boolean", default: false },
-    },
+    options: TASK_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -517,7 +597,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {},
+    options: EMPTY_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -538,9 +618,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {
-      type: { type: "string" },
-    },
+    options: GET_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -560,12 +638,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: false,
-    options: {
-      type: { type: "string" },
-      status: { type: "string" },
-      tag: { type: "string" },
-      n: { type: "string" },
-    },
+    options: LIST_OPTIONS,
   });
   const cfg = readConfig();
   const type = parseRecordType(values.type);
@@ -584,9 +657,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {
-      type: { type: "string" },
-    },
+    options: STATUS_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -607,7 +678,7 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {},
+    options: EMPTY_OPTIONS,
   });
   const taskSlug = positionals[0];
   const designSlug = positionals[1];
@@ -625,11 +696,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {
-      n: { type: "string" },
-      exact: { type: "boolean", default: false },
-      "min-score": { type: "string" },
-    },
+    options: SEARCH_OPTIONS,
   });
   const query = positionals.join(" ").trim();
   if (query.length === 0) {
@@ -658,11 +725,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {
-      limit: { type: "string" },
-      "no-llm": { type: "boolean", default: false },
-      explain: { type: "boolean", default: false },
-    },
+    options: ASK_OPTIONS,
   });
   const query = positionals.join(" ").trim();
   if (query.length === 0) {
@@ -690,12 +753,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: false,
-    options: {
-      freshness: { type: "boolean", default: false },
-      usage: { type: "boolean", default: false },
-      "usage-window": { type: "string" },
-      "usage-path": { type: "string" },
-    },
+    options: DOCTOR_OPTIONS,
   });
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
@@ -721,7 +779,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runShare(args: Argv): Promise<number> {
-  parseArgs({ args, strict: true, allowPositionals: true, options: {} });
+  parseArgs({ args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS });
   return shareCmd();
 }
 
@@ -730,9 +788,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {
-      type: { type: "string" },
-    },
+    options: DELETE_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -748,7 +804,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runMcpCmd(args: Argv): Promise<number> {
-  parseArgs({ args, strict: true, allowPositionals: false, options: {} });
+  parseArgs({ args, strict: true, allowPositionals: false, options: EMPTY_OPTIONS });
   // Lazy-import so the SDK only loads when the user runs `fbrain mcp`.
   // Keeps CLI startup fast for non-MCP commands.
   const { runMcp } = await import("./mcp/main.ts");
@@ -767,10 +823,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: false,
-    options: {
-      type: { type: "string" },
-      "dry-run": { type: "boolean", default: false },
-    },
+    options: REINDEX_OPTIONS,
   });
   const type = parseRecordType(values.type);
   const cfg = readConfig();
@@ -786,13 +839,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {
-      "add-field": { type: "boolean", default: false },
-      status: { type: "boolean", default: false },
-      resume: { type: "string" },
-      default: { type: "string" },
-      "dry-run": { type: "boolean", default: false },
-    },
+    options: MIGRATE_OPTIONS,
   });
 
   const cfg = readConfig();
@@ -833,7 +880,7 @@ async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
     args,
     strict: true,
     allowPositionals: true,
-    options: {},
+    options: EMPTY_OPTIONS,
   });
   const method = positionals[0];
   const path = positionals[1];
