@@ -36,6 +36,7 @@ import {
   BM25Index,
   loadCachedIndex,
   saveCachedIndex,
+  tokenize,
   type BM25Document,
 } from "../retrieval/bm25.ts";
 import {
@@ -165,7 +166,12 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     const q = queries[qi]!;
     const tag = qi === 0 ? "orig" : `exp${qi - 1}`;
 
-    // BM25 over this query.
+    // BM25 over this query. We re-tokenize here (cheap) to distinguish
+    // "no surviving terms" (every token was a stopword or sub-2-char)
+    // from "tokenized fine but nothing matched" — search() returns []
+    // in both cases, which makes the all-stopword query indistinguishable
+    // downstream without this peek.
+    const bm25Tokens = tokenize(q);
     const bm25Hits = index.search(q, RANKER_LIMIT);
     const bm25Ranked = bm25Hits.map((h) => ({
       id: docId(h.type, h.slug),
@@ -210,6 +216,20 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     opts.verbose?.(
       `vector:${tag} → ${vectorRanked.length} unique hit(s) (raw fragments=${raw.length})`,
     );
+
+    // User-facing "why am I getting nothing" surface for the original
+    // query. Only fires for qi === 0 (the user's literal words) when
+    // both rankers contributed zero AND the BM25 tokenizer dropped every
+    // token — i.e. the query was all-stopwords or all-sub-2-char. We
+    // intentionally keep the pipeline alive so expansions (when LLM is
+    // on) can still rescue the query; the notice just explains why the
+    // original phrasing alone produced nothing. Always shown, including
+    // in --verbose mode — see the task's OUT OF SCOPE note.
+    if (qi === 0 && bm25Tokens.length === 0 && vectorRanked.length === 0) {
+      print(
+        "note: query tokenized to zero terms (all stopwords or too short); try more specific words.",
+      );
+    }
   }
 
   // ── Stage 3: RRF fusion ──────────────────────────────────────────────
