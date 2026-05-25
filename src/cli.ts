@@ -24,6 +24,7 @@ import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
 import { deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
+import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
 const COMMANDS = [
@@ -42,6 +43,7 @@ const COMMANDS = [
   "share",
   "delete",
   "reindex",
+  "migrate",
   "mcp",
   "help",
 ] as const;
@@ -68,6 +70,7 @@ Commands:
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record to refresh embeddings
+  migrate        evolve a schema by adding a field (see docs/g15-schema-evolution-playbook.md)
   mcp            start an MCP server over stdio (6 tools: search/get/list/put/delete/link)
   help <cmd>     per-command usage
 
@@ -244,6 +247,37 @@ Does NOT purge phantom embeddings (that's G3e, upstream fold_db).
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
+  migrate: `fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
+fbrain migrate --status
+fbrain migrate --resume <manifest-id>
+
+Evolve a fbrain schema by adding a field. fold_db is append-only and
+identity-hashes schemas by (descriptive_name, sorted fields), so
+adding a field necessarily produces a new schema hash. \`migrate\`
+registers the new schema, re-puts every record with the new field set
+to the configured default, and atomically swaps ~/.fbrain/config.json.
+See docs/g15-schema-evolution-playbook.md for the full mechanism +
+recovery recipes.
+
+Phase 6 types (concept | preference | reference | agent | project |
+spike) share one underlying schema; a migrate against any of them
+re-puts and re-hashes all six together.
+
+  --add-field   register + re-put. Args: <type> <field> <type-spec>.
+                <type-spec> is "String" or "Array:String".
+  --default V   default value for pre-existing records under the new
+                field. REQUIRED for String (no implicit empty default).
+                Optional for Array:String (defaults to []; pass a JSON
+                array literal to override).
+  --dry-run     register the new schema + write the manifest as
+                "dry_run"; no record writes, no config swap.
+  --status      tabular listing of every manifest under
+                ~/.fbrain/migrations/ (newest first).
+  --resume ID   resume a previously-interrupted migration. The
+                manifest id is in --status output.
+
+Example:
+  fbrain migrate --add-field concept urgency String --default "normal"`,
   mcp: `fbrain mcp
 
 Start a Model Context Protocol server over stdio. Exposes six tools so
@@ -361,6 +395,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runDelete(args, verboseFn);
     case "reindex":
       return runReindex(args, verboseFn);
+    case "migrate":
+      return runMigrate(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "help": {
@@ -742,6 +778,53 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (type) rOpts.type = type;
   if (values["dry-run"]) rOpts.dryRun = true;
   await reindexCmd(rOpts);
+  return 0;
+}
+
+async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: {
+      "add-field": { type: "boolean", default: false },
+      status: { type: "boolean", default: false },
+      resume: { type: "string" },
+      default: { type: "string" },
+      "dry-run": { type: "boolean", default: false },
+    },
+  });
+
+  const cfg = readConfig();
+  const mOpts: Parameters<typeof migrateCmd>[0] = { cfg, mode: { kind: "status" }, verbose };
+
+  if (values.status) {
+    mOpts.mode = { kind: "status" };
+  } else if (values.resume) {
+    mOpts.mode = { kind: "resume", manifestId: values.resume };
+  } else if (values["add-field"]) {
+    const type = parseRecordType(positionals[0]);
+    const fieldName = positionals[1];
+    const fieldSpec = positionals[2];
+    if (!type || !fieldName || !fieldSpec) {
+      console.error(COMMAND_HELP.migrate);
+      return 1;
+    }
+    const mode: MigrateMode = {
+      kind: "add-field",
+      type,
+      fieldName,
+      fieldSpec,
+      ...(values.default !== undefined ? { defaultRaw: values.default } : {}),
+      ...(values["dry-run"] ? { dryRun: true } : {}),
+    };
+    mOpts.mode = mode;
+  } else {
+    console.error(COMMAND_HELP.migrate);
+    return 1;
+  }
+
+  await migrateCmd(mOpts);
   return 0;
 }
 

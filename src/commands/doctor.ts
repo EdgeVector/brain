@@ -50,6 +50,7 @@ import {
 } from "../schemas.ts";
 import { buildTombstoneFields } from "./delete.ts";
 import { runUsageReport, type UsageOptions } from "./usage.ts";
+import { listManifests, type MigrationManifest } from "../migration.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -231,7 +232,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   }
 
   // 6. schema drift — check each unique schema once (Phase 6 types share
-  // a single FbrainKindNote schema).
+  // a single FbrainKindNote schema). When a completed migration manifest
+  // exists for this schema and its to_hash matches the current config
+  // hash, schemas.ts is *expected* to differ — the drift is the
+  // intentional product of `fbrain migrate --add-field`. Demote to WARN
+  // with a pointer to update schemas.ts; don't fail the doctor verdict.
+  const allManifests = safeListManifests();
   if (cfgIssues.length === 0) {
     for (const entry of UNIQUE_SCHEMAS) {
       const firstType = entry.types[0]!;
@@ -252,9 +258,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         entry.schema,
         hash,
       );
-      checks.push(driftCheck);
+      const softened = softenDriftIfMigrated(driftCheck, entry.key, hash, allManifests);
+      checks.push(softened);
       verbose?.(
-        `schema-drift[${label}]: ${driftCheck.ok ? "ok" : `FAIL — ${driftCheck.detail ?? ""}`}`,
+        `schema-drift[${label}]: ${softened.tag ?? (softened.ok ? "PASS" : "FAIL")} — ${softened.detail ?? ""}`,
       );
     }
   }
@@ -404,6 +411,42 @@ function sameFieldType(a: unknown, b: unknown): boolean {
     return true;
   }
   return false;
+}
+
+// If a completed `migrate` manifest covers this schema and its to_hash
+// matches the live config hash, the drift is documented and expected
+// (schemas.ts hasn't been hand-edited yet to reflect the migration).
+// Surface it as WARN with a fix pointer rather than failing the
+// doctor verdict.
+function softenDriftIfMigrated(
+  drift: CheckResult,
+  schemaKey: string,
+  liveHash: string,
+  manifests: MigrationManifest[],
+): CheckResult {
+  if (drift.ok) return drift;
+  const matching = manifests.find(
+    (m) =>
+      m.scope.schema_key === schemaKey &&
+      m.status === "complete" &&
+      m.to_hash === liveHash,
+  );
+  if (!matching) return drift;
+  return {
+    ...drift,
+    ok: true,
+    tag: "WARN",
+    detail: `${drift.detail ?? "drift detected"} — explained by migration ${matching.id}`,
+    fix: `update src/schemas.ts to add "${matching.field_added}" to the ${schemaKey} schema so the next \`fbrain init\` keeps the new hash`,
+  };
+}
+
+function safeListManifests(): MigrationManifest[] {
+  try {
+    return listManifests();
+  } catch {
+    return [];
+  }
 }
 
 export function validateConfigShape(cfg: Config): string[] {
