@@ -119,7 +119,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         opts.verbose?.(
           `expansion: ${expansion.expansions.length} phrasings, ${expansion.latencyMs.toFixed(0)}ms, ` +
             `tokens in=${expansion.tokens.input} out=${expansion.tokens.output}, ` +
-            `cost≈$${estimateCostUsd(expansion.tokens, expansion.model).toFixed(6)}`,
+            formatCost(estimateCostUsd(expansion.tokens, expansion.model), expansion.model),
         );
       } catch (err) {
         const msg = err instanceof ExpansionError ? err.message : String(err);
@@ -267,7 +267,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   if (expansion && opts.verbose) {
     const usd = estimateCostUsd(expansion.tokens, expansion.model);
     opts.verbose(
-      `ask: expansion cost ≈ $${usd.toFixed(6)} (${expansion.tokens.input}in / ${expansion.tokens.output}out, ${expansion.model})`,
+      `ask: expansion ${formatCost(usd, expansion.model)} (${expansion.tokens.input}in / ${expansion.tokens.output}out, ${expansion.model})`,
     );
   }
 
@@ -279,6 +279,15 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     bm25CorpusSize: docs.length,
     bm25CacheHit,
   };
+}
+
+// Single source of truth for cost rendering in --verbose lines. When the
+// pricing table doesn't know the model, surface that explicitly rather
+// than letting a default fill in a wrong number.
+export function formatCost(usd: number | null, model: string): string {
+  return usd === null
+    ? `cost≈unknown (${model} not in price table)`
+    : `cost≈$${usd.toFixed(6)}`;
 }
 
 function uniqueFbrainSchemas(cfg: Config): string[] {

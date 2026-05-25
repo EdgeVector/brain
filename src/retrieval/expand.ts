@@ -158,28 +158,45 @@ export function parseExpansions(raw: string, count: number): string[] {
   return out;
 }
 
-// Rough cost estimate for --verbose. Haiku 4.5 pricing as of 2026-05:
-// $1/M input, $5/M output (cache read $0.10/M). Numbers are approximate —
-// surfaced for awareness, not billing.
+export type ModelPricing = {
+  /** USD per million input tokens. */
+  input: number;
+  /** USD per million output tokens. */
+  output: number;
+  /** USD per million cache-read input tokens. */
+  cacheRead: number;
+};
+
+// Exact API model IDs → published rates. Substring matching is deliberately
+// avoided: a future model whose name happens to contain "sonnet" but ships
+// at a different price would otherwise be silently misreported. If you add
+// a model, add it here too; estimateCostUsd returns null for anything
+// missing so the caller can surface "unknown" instead of a wrong number.
+//
+// Rates sourced from anthropic.com/pricing on 2026-05-25; re-check when
+// adding a new entry.
+export const MODEL_PRICING: Readonly<Record<string, ModelPricing>> = {
+  "claude-haiku-4-5-20251001": { input: 1.0, output: 5.0, cacheRead: 0.1 },
+  "claude-sonnet-4-6": { input: 3.0, output: 15.0, cacheRead: 0.3 },
+  "claude-opus-4-7": { input: 15.0, output: 75.0, cacheRead: 1.5 },
+};
+
+/**
+ * Rough cost estimate for --verbose telemetry. Returns null when the model
+ * is not in {@link MODEL_PRICING} — callers must surface that as "unknown"
+ * rather than substituting a default, because guessing here silently
+ * produces a number that doesn't match the bill.
+ */
 export function estimateCostUsd(
   tokens: { input: number; output: number; cacheRead: number },
   model: string,
-): number {
-  // Default to haiku rates if we don't recognize the model.
-  let inRate = 1.0, outRate = 5.0, cacheRate = 0.1;
-  if (model.includes("sonnet")) {
-    inRate = 3.0;
-    outRate = 15.0;
-    cacheRate = 0.3;
-  } else if (model.includes("opus")) {
-    inRate = 15.0;
-    outRate = 75.0;
-    cacheRate = 1.5;
-  }
+): number | null {
+  const rates = MODEL_PRICING[model];
+  if (!rates) return null;
   return (
-    (tokens.input * inRate +
-      tokens.output * outRate +
-      tokens.cacheRead * cacheRate) /
+    (tokens.input * rates.input +
+      tokens.output * rates.output +
+      tokens.cacheRead * rates.cacheRead) /
     1_000_000
   );
 }
