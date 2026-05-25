@@ -24,8 +24,9 @@
 //
 // Crash recovery: if step 5 dies mid-flight, the manifest stays
 // `in_progress`; `fbrain migrate --resume <manifest-id>` re-enters at
-// step 5 and finishes through step 7. Resume is idempotent — already-
-// migrated records are skipped via findBySlug under the new hash.
+// step 5 and finishes through step 7. Resume is idempotent — a single
+// bulk `listRecords(to_hash)` per affected type pre-builds the skip
+// set, then the loop checks each record's slug in O(1).
 //
 // Phase 6 sharding: noteSchema backs six logical types. A migration
 // of any one Phase 6 type re-puts every Phase 6 record and swaps all
@@ -49,7 +50,6 @@ import {
   type Config,
 } from "../config.ts";
 import {
-  findBySlugRaw,
   listRecords,
   nowIso,
   schemaHashFor,
@@ -349,6 +349,24 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
   const inPlaceEvolve = manifest.from_hash === manifest.to_hash;
   const mode = inPlaceEvolve ? "in-place evolve (from_hash == to_hash)" : "copy-and-migrate";
   print(`[5/7] ${mode}: ${inPlaceEvolve ? "updating" : "re-putting"} ${records.length} record(s) under ${shortHash(manifest.to_hash)}`);
+
+  // Build the resume idempotency-skip set ONCE per affected type, not
+  // per record. The earlier per-record findBySlugRaw issued one
+  // queryAll(to_hash) per iteration — each returning the full record
+  // set at to_hash — so a resume of N records cost N round-trips with
+  // ~N²/2 total rows transferred. On a non-trivial dataset that's the
+  // difference between a resume that finishes and one that hangs / OOMs
+  // the node. A bulk listRecords per type is a strict drop-in (each
+  // call already returns every slug under the kind-filtered hash) and
+  // the Set lookup is O(1).
+  const presentAtTarget = new Map<RecordType, Set<string>>();
+  if (!inPlaceEvolve) {
+    for (const t of new Set(records.map((r) => r.type))) {
+      const list = await listRecords(node, t, manifest.to_hash);
+      presentAtTarget.set(t, new Set(list.map((r) => r.slug)));
+    }
+  }
+
   for (const { type, record } of records) {
     if (ctx.failAfterRecords !== undefined && writtenThisRun >= ctx.failAfterRecords) {
       throw new FbrainError({
@@ -357,14 +375,9 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
       });
     }
 
-    if (!inPlaceEvolve) {
-      // Copy-and-migrate path. Idempotent skip — record already
-      // present under the new hash (resume path or partial prior run).
-      const already = await findBySlugRaw(node, type, manifest.to_hash, record.slug);
-      if (already !== null) {
-        verbose?.(`skip ${type}/${record.slug} — already present under to_hash`);
-        continue;
-      }
+    if (presentAtTarget.get(type)?.has(record.slug)) {
+      verbose?.(`skip ${type}/${record.slug} — already present under to_hash`);
+      continue;
     }
 
     const fields = buildMigratedFields(
