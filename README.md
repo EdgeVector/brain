@@ -79,11 +79,13 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
 | `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
+| `fbrain ask <query> [--limit N] [--no-llm] [--explain]` | LLM-expanded hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25 |
 | `fbrain doctor [--freshness] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 | `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
+| `fbrain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.fbrain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
 | `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 3 read tools — `fbrain_search`, `fbrain_get`, `fbrain_list` — to MCP clients (Claude Code, Codex, …) so agents can query fbrain in-process (see [MCP](#mcp)) |
 
 Run `fbrain help <command>` for per-command usage.
