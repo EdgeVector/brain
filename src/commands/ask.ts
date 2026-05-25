@@ -83,11 +83,24 @@ export type AskHit = {
   record: FbrainRecord;
 };
 
+// Distinguishes the three "no expansion" stories so --explain can show
+// whether the LLM was skipped intentionally vs. tried-and-failed. Kept
+// alongside `expansion` (which is null whenever kind !== 'ok') rather
+// than collapsing the two — `expansion` still carries the cost telemetry
+// callers use on the success path.
+export type ExpansionStatus =
+  | { kind: "ok" }
+  | { kind: "disabled" } // --no-llm
+  | { kind: "no-key" } // ANTHROPIC_API_KEY not resolvable
+  | { kind: "failed"; reason: string };
+
 export type AskResult = {
   query: string;
   expansions: string[];
-  // null = no LLM call made (--no-llm or missing key).
+  // null = no LLM call made (--no-llm or missing key) OR the call failed.
+  // Cross-reference `expansionStatus` to tell those apart.
   expansion: ExpansionResult | null;
+  expansionStatus: ExpansionStatus;
   hits: AskHit[];
   bm25CorpusSize: number;
   bm25CacheHit: boolean;
@@ -100,13 +113,17 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   // ── Stage 0: query expansion ─────────────────────────────────────────
   let expansions: string[] = [];
   let expansion: ExpansionResult | null = null;
-  if (!opts.noLlm) {
+  let expansionStatus: ExpansionStatus;
+  if (opts.noLlm) {
+    expansionStatus = { kind: "disabled" };
+  } else {
     const key = resolveAnthropicKey();
     if (!key) {
       // Auto-fallback: behave as --no-llm with a single notice line.
       print(
         "note: ANTHROPIC_API_KEY not set; running ask without query expansion (BM25+vector+RRF only).",
       );
+      expansionStatus = { kind: "no-key" };
     } else {
       try {
         const exp: Parameters<typeof expandQuery>[0] = {
@@ -116,6 +133,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         if (opts.fetchImpl) exp.fetchImpl = opts.fetchImpl;
         expansion = await expandQuery(exp);
         expansions = expansion.expansions;
+        expansionStatus = { kind: "ok" };
         opts.verbose?.(
           `expansion: ${expansion.expansions.length} phrasings, ${expansion.latencyMs.toFixed(0)}ms, ` +
             `tokens in=${expansion.tokens.input} out=${expansion.tokens.output}, ` +
@@ -126,6 +144,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         // Soft-fail: a flaky expansion shouldn't break ask. Print and continue
         // with just the original query.
         print(`note: query expansion failed (${msg}); continuing without expansion.`);
+        expansionStatus = { kind: "failed", reason: msg };
       }
     }
   }
@@ -244,10 +263,18 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }
 
   // ── Stage 5: print ───────────────────────────────────────────────────
-  if (opts.explain && expansions.length > 0) {
-    print(`expansions:`);
-    for (const e of expansions) print(`  - ${e}`);
-    print("");
+  if (opts.explain) {
+    if (expansionStatus.kind === "failed") {
+      // Surface WHY expansion soft-fell-through. Without this the explain
+      // output is indistinguishable from a --no-llm run.
+      print(`expansion failed: ${expansionStatus.reason}`);
+      print("");
+    }
+    if (expansions.length > 0) {
+      print(`expansions:`);
+      for (const e of expansions) print(`  - ${e}`);
+      print("");
+    }
   }
   if (resolved.length === 0) {
     print("no matches");
@@ -275,6 +302,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     query: opts.query,
     expansions,
     expansion,
+    expansionStatus,
     hits: resolved,
     bm25CorpusSize: docs.length,
     bm25CacheHit,
