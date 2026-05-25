@@ -174,6 +174,79 @@ describe("docId / parseDocId", () => {
   });
 });
 
+describe("askCmd expansion failure observability (--explain)", () => {
+  test(
+    "expansion fetch throws → AskResult carries failure reason and --explain prints it",
+    async () => {
+      // Pre-fix: a failed expansion was indistinguishable from --no-llm in
+      // --explain output (expansion=null, no expansions list). This test
+      // pins both halves of the fix: the structured status on AskResult,
+      // and the new --explain line that surfaces the reason.
+      const cfg = buildTestCfg();
+      installFetchStub({
+        queries: {
+          // Empty corpus — we only care about the expansion path.
+        },
+        vectorHits: [],
+      });
+      // resolveAnthropicKey() must return truthy so askCmd actually
+      // attempts the expansion (and hits our throwing fetchImpl). The
+      // afterEach restores the developer's real key.
+      process.env.ANTHROPIC_API_KEY = "test-key-not-real";
+
+      const printed: string[] = [];
+      const throwingFetch = (async () => {
+        throw new Error("simulated network outage");
+      }) as unknown as typeof fetch;
+
+      const result = await askCmd({
+        cfg,
+        query: "anything",
+        explain: true,
+        print: (line) => printed.push(line),
+        fetchImpl: throwingFetch,
+      });
+
+      // Structured status: caller can programmatically distinguish failure
+      // from --no-llm / no-key.
+      expect(result.expansionStatus.kind).toBe("failed");
+      if (result.expansionStatus.kind === "failed") {
+        // ExpansionError wraps the underlying error message — assert the
+        // root cause survives so the operator can actually diagnose.
+        expect(result.expansionStatus.reason).toContain("simulated network outage");
+      }
+      // Existing fields stay coherent: expansion stays null (no successful
+      // result), expansions list stays empty.
+      expect(result.expansion).toBeNull();
+      expect(result.expansions).toEqual([]);
+
+      // --explain branch surfaces the reason on its own line. Match a
+      // literal prefix so this doesn't depend on the wrap format.
+      const explainLine = printed.find((l) => l.startsWith("expansion failed:"));
+      expect(explainLine).toBeDefined();
+      expect(explainLine).toContain("simulated network outage");
+    },
+  );
+
+  test("--no-llm path reports kind='disabled', not 'failed'", async () => {
+    // Negative control: --no-llm must NOT look like a failure. Keeps the
+    // discriminator honest if someone later collapses the branches.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const result = await askCmd({
+      cfg,
+      query: "anything",
+      noLlm: true,
+      explain: true,
+      print: () => {},
+    });
+
+    expect(result.expansionStatus.kind).toBe("disabled");
+    expect(result.expansion).toBeNull();
+  });
+});
+
 describe("askCmd resolve N+1 regression (Stage 4)", () => {
   test(
     "resolving 5 fused hits across 5 types makes ZERO extra /api/query calls beyond the corpus build",
