@@ -139,7 +139,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     verbose: opts.verbose,
   });
 
-  const docs = await loadBm25Documents(node, opts.cfg);
+  const { docs, liveById } = await loadBm25Documents(node, opts.cfg);
   let index = loadCachedIndex(opts.cfg.userHash);
   const fingerprint = BM25Index.build(docs).fingerprint;
   let bm25CacheHit = false;
@@ -216,25 +216,24 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const fused = reciprocalRankFusion(rankers, { k: RRF_DEFAULT_K });
 
   // ── Stage 4: resolve + filter ────────────────────────────────────────
-  // Resolve more than `limit` since some may be stale.
-  const overFetch = Math.min(fused.length, limit * 3 + 5);
+  // Every live record was already loaded during the corpus build (Stage 1)
+  // and indexed in `liveById`. Resolve is a Map lookup — no additional
+  // HTTP round-trips. A miss means the doc is stale (vector index ahead
+  // of the kind-filtered live snapshot, or soft-deleted between the
+  // corpus walk and the vector call); silently skip.
   const resolved: AskHit[] = [];
   for (let i = 0; i < fused.length && resolved.length < limit; i++) {
-    if (i >= overFetch && resolved.length >= limit) break;
     const f = fused[i]!;
     const parsed = parseDocId(f.id);
     if (!parsed) continue;
-    const { type, slug } = parsed;
-    const schemaHash = schemaHashFor(type, opts.cfg);
-    const records = await listRecords(node, type, schemaHash);
-    const rec = records.find((r) => r.slug === slug && !isTombstoned(r));
+    const rec = liveById.get(f.id);
     if (!rec) {
-      opts.verbose?.(`skip stale: ${type}/${slug}`);
+      opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
       continue;
     }
     resolved.push({
-      type,
-      slug,
+      type: parsed.type,
+      slug: parsed.slug,
       fusedScore: f.fusedScore,
       bm25Rank: perQueryBm25TopId.get(0)?.get(f.id) ?? null,
       vectorRank: perQueryVectorTopId.get(0)?.get(f.id) ?? null,
@@ -295,8 +294,14 @@ function uniqueFbrainSchemas(cfg: Config): string[] {
 async function loadBm25Documents(
   node: ReturnType<typeof newNodeClient>,
   cfg: Config,
-): Promise<BM25Document[]> {
+): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {
   const docs: BM25Document[] = [];
+  // `liveById` doubles as the Stage-4 resolve lookup: we keep the full
+  // FbrainRecord here so Stage 4 can hand it back without a second
+  // listRecords call. Tombstones are excluded — they're not in the index
+  // either, so anything fused back to a tombstone is a stale ranker hit
+  // and Stage 4 will skip on a miss.
+  const liveById = new Map<string, FbrainRecord>();
   // Walk all 8 logical record types. listRecords already kind-filters and
   // returns live + tombstoned; we drop tombstones for the index. Phase 6
   // types share noteSchema so they're effectively listed via separate
@@ -312,9 +317,10 @@ async function loadBm25Documents(
         body: r.body,
         updatedAt: r.updated_at,
       });
+      liveById.set(docId(t, r.slug), r);
     }
   }
-  return docs;
+  return { docs, liveById };
 }
 
 export function docId(type: RecordType, slug: string): string {
