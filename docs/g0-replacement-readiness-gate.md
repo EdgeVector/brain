@@ -77,11 +77,26 @@ The acceptance bar: a user can rollback in **under 2 minutes without help**.
 
 **Frame:** the gate does **not** require fully solved sync. It requires honest, doctor-surfaced disclosure of the sync limitations so a teammate trying to dogfood gets a WARN, not a silent fork.
 
+**What "limitations" actually means (clarification 2026-05-25).** The earlier phrasing in this section was easy to misread as "fold_db has no sync/sharing transport." That's wrong. Both halves are built:
+
+- **fold_db sync engine** — [`fold/fold_db/crates/core/src/sync/engine.rs`](https://github.com/EdgeVector/fold/blob/main/fold_db/crates/core/src/sync/engine.rs) implements `local Sled → SyncEngine → Auth Lambda → S3 (encrypted blobs)`, with per-share-prefix sync targets wired in [`fold_db_node/src/fold_node/node.rs`](https://github.com/EdgeVector/fold/blob/main/fold_db_node/src/fold_node/node.rs) (~ll. 984-1020).
+- **exemem cloud transport** — [`exemem-infra/lambdas/`](https://github.com/EdgeVector/exemem-infra/tree/main/lambdas) ships 10 deployed services: `auth_service`, `discovery`, `messaging_service`, `storage_service`, `storage_admin_service`, `storage_counter`, `org_service`, `subscription_service`, `billing_service`, `dashboard_service`. Both dev (us-west-2) and prod (us-east-1) stacks are live.
+
+The Phase 3 memo's "not reachable from a localhost-only spike" was a statement about that spike's scope (it ran `--local --local-schema` so the sync engine never started), **not** a claim that the transport doesn't exist. As of 2026-05-25, probing the live homebrew node at `:9001` shows `GET /api/sharing/exemem-status → {"connected": false, "reason": "Exemem session expired or not signed in."}` — the daemon hasn't authenticated against the deployed exemem stack. Once it does, the sync engine has somewhere to talk to.
+
+**So the actual gap for multi-machine + team-sharing is three things, none of which are "no transport":**
+
+1. **Cloud sign-in on the homebrew daemon.** Today fbrain runs the daemon `--local`-style; nothing has called `folddb cloud …` to populate the auth token + discovery URL. See [`docs/cloud-signin-spike-plan.md`](cloud-signin-spike-plan.md).
+2. **Positive end-to-end validation.** Nobody has yet run "A writes a record → B's subscription pulls it through S3 → B reads it." Phase 3 was explicit that this was out of scope; it remains to be done. Until then, multi-device + share is *theoretically* supported.
+3. **`fbrain share` CLI implementation.** The CLI command is still a memo-pointer that exits 1. A real implementation drives `/api/sharing/rules` + `/invite` + `/accept`, gated on `exemem-status: connected:true`.
+
+The gate's stance does not change: **multi-machine + team-sharing remain NOT gate prerequisites.** The G14 second-user dogfood (gate item #6) is still scoped to *separate fbrain installs writing to the same prod node*, not actual cross-node sharing. The clarification here is to stop the docs from implying the transport itself is missing — it isn't; it's just unsigned-into and unvalidated.
+
 | Sync surface | Today | Gate requirement |
 |---|---|---|
 | Single-machine (Tom's laptop) | Works — `fbrain` on homebrew daemon at `:9001`. | The whole gate is scoped to this slice. ✅ baseline. |
-| Multi-machine (Tom's laptop ↔ desktop) | Forked brain — each daemon is local-only. | **NOT a gate prerequisite.** `fbrain doctor` must emit an explicit WARN: "single-machine slice — record set is local to this daemon". G16 owns the future `fbrain pull` over fold_db's sync-log primitives. |
-| Team-sharing (Tom ↔ teammate, different machines) | Phase 3 spike memo (`docs/phase-3-sharing-memo.md`) confirmed `/api/sharing/*` metadata wireable on loopback, but cross-node data transport requires fold_db's cloud sync engine (S3-backed, Auth Lambda + discovery), which is **not reachable from a localhost-only spike**. `fbrain share` is a memo-pointing placeholder that exits 1. | **NOT a gate prerequisite.** Doctor WARN: "no team-sync transport — `fbrain share` is a placeholder until cloud sync lights up". The G14 second-user dogfood (gate item #6) uses *separate fbrain installs writing to the same prod node* — not actual cross-node sharing. |
+| Multi-machine (Tom's laptop ↔ desktop) | One forked brain per daemon. Transport exists in fold_db code + exemem lambdas; nothing has been wired up to use it yet. | **NOT a gate prerequisite.** `fbrain doctor` emits a WARN: "single-machine slice — record set is local to this daemon". G16 owns wiring up `fbrain pull` (or equivalent) over the existing sync-log primitives. |
+| Team-sharing (Tom ↔ teammate, different machines) | Sharing-metadata API works (Phase 3 memo). Cross-node data transport exists (fold_db sync engine + exemem lambdas, both deployed) but is unsigned-into on Tom's daemon and unvalidated end-to-end. `fbrain share` is a memo-pointer stub. | **NOT a gate prerequisite.** Doctor WARN: "no team-sync transport — `fbrain share` is a placeholder until cloud sync is signed in and validated end-to-end". G14 second-user dogfood (gate item #6) uses separate fbrain installs writing to the same prod node — not cross-node sharing. Cloud sign-in path is tracked in [`docs/cloud-signin-spike-plan.md`](cloud-signin-spike-plan.md). |
 
 ## 7. Org-deploy acceptance tests — the 11-item checklist
 
