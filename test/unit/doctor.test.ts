@@ -436,6 +436,40 @@ describe("doctor verdict logic", () => {
     expect(failLine).toContain("node not reachable at http://127.0.0.1:9001");
   });
 
+  // Regression: the `--usage` short-circuit (doctor.ts:149) used to propagate
+  // err.message verbatim — including connectionError()'s DOCTOR_TIP suffix —
+  // so `fbrain doctor --usage` with no node running printed "run `fbrain
+  // doctor` for a full diagnosis" inside doctor's own output. PR #38 fixed
+  // the default flow; this pins the --usage path to the same shape.
+  test("service_unreachable during --usage → printed failure omits circular doctor tip", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const unreachable = new FbrainError({
+      code: "service_unreachable",
+      message:
+        "node not reachable at http://127.0.0.1:9001 — run `fbrain doctor` for a full diagnosis.",
+    });
+    const baseNode = mockNodeClient({});
+    const node: NodeClient = {
+      ...baseNode,
+      async queryAll() {
+        throw unreachable;
+      },
+    };
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => node,
+      usage: true,
+    });
+    expect(code).toBe(1);
+    const usageLine = lines.find((l) => l.startsWith("usage report failed:"));
+    expect(usageLine).toBeDefined();
+    expect(usageLine).not.toContain("fbrain doctor");
+    expect(usageLine).toContain("node not reachable at http://127.0.0.1:9001");
+  });
+
   test("service_unreachable from schema service → FAIL detail omits circular doctor tip", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
