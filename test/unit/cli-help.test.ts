@@ -1,9 +1,12 @@
 // Pins per-command `COMMAND_HELP` strings to the runXxx implementations
-// in `src/cli.ts`.
+// in `src/cli.ts`, and pins the top-level `TOP_HELP` Commands block to
+// the `COMMANDS` list.
 //
 // Without this gate, help text drifts away from what `parseArgs` actually
 // accepts — see the original Phase-1 `delete` drift (help said
-// `[--type design|task]` long after the impl accepted all 8 RECORD_TYPES).
+// `[--type design|task]` long after the impl accepted all 8 RECORD_TYPES),
+// and the 2026-05-25 dogfood that caught `TOP_HELP`'s `put` line still
+// claiming "upsert a Design or Task" long after `put` accepted all 8 types.
 //
 // What we pin:
 //   1. `COMMAND_HELP` keys exactly match the `COMMANDS` list (no command
@@ -15,10 +18,15 @@
 //      dispatch and intentionally ignored.
 //   3. The `delete` help mentions every entry of `RECORD_TYPES`
 //      (regression pin for the design|task→all-8 drift).
+//   4. `TOP_HELP`'s `Commands:` block lists exactly the commands in
+//      `COMMANDS` — catches stale entries AND missing entries when a
+//      new command is added.
+//   5. `TOP_HELP`'s `put` row does not claim `put` is design/task-only
+//      (regression pin for the 2026-05-25 drift).
 
 import { describe, expect, test } from "bun:test";
 
-import { CLI_SPEC, COMMAND_HELP, COMMANDS } from "../../src/cli.ts";
+import { CLI_SPEC, COMMAND_HELP, COMMANDS, TOP_HELP } from "../../src/cli.ts";
 import { RECORD_TYPES } from "../../src/schemas.ts";
 
 const GLOBAL_FLAGS = new Set(["--verbose", "--help"]);
@@ -59,5 +67,35 @@ describe("COMMAND_HELP <-> CLI_SPEC alignment", () => {
     for (const type of RECORD_TYPES) {
       expect(help).toContain(type);
     }
+  });
+});
+
+// Pull the first whitespace-delimited token from each line in `TOP_HELP`'s
+// `Commands:` block. Two-word entries like `design new` and `help <cmd>`
+// reduce to their first token — that's the canonical name in `COMMANDS`.
+function extractTopHelpCommandNames(text: string): string[] {
+  const lines = text.split("\n");
+  const start = lines.findIndex((l) => l.trim() === "Commands:");
+  if (start < 0) throw new Error("TOP_HELP missing 'Commands:' header");
+  const names: string[] = [];
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (line.trim() === "") break;
+    const m = line.match(/^\s{2,}(\S+)/);
+    if (m?.[1]) names.push(m[1]);
+  }
+  return names;
+}
+
+describe("TOP_HELP <-> COMMANDS alignment", () => {
+  test("TOP_HELP Commands block lists exactly the commands in COMMANDS", () => {
+    const documented = extractTopHelpCommandNames(TOP_HELP);
+    expect(new Set(documented)).toEqual(new Set(COMMANDS));
+  });
+
+  test("TOP_HELP put row does not claim put is design/task-only (regression pin)", () => {
+    const putLine = TOP_HELP.split("\n").find((l) => /^\s{2,}put\s/.test(l));
+    expect(putLine).toBeDefined();
+    expect(putLine).not.toMatch(/Design or Task/);
   });
 });
