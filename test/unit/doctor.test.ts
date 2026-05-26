@@ -351,8 +351,18 @@ describe("doctor verdict logic", () => {
     expect(lines.some((l) => l.includes("[PASS] schema-drift[Task]"))).toBe(true);
     expect(lines.some((l) => l.includes("[PASS] schema-drift[FbrainKindNote]"))).toBe(true);
     // G0 gate item #9 disclosure WARNs — always emitted, never flip exit.
-    expect(lines.some((l) => l.startsWith("[WARN] single-machine-slice"))).toBe(true);
-    expect(lines.some((l) => l.startsWith("[WARN] no-team-sync"))).toBe(true);
+    const smsLine = lines.find((l) => l.startsWith("[WARN] single-machine-slice"));
+    const ntsLine = lines.find((l) => l.startsWith("[WARN] no-team-sync"));
+    expect(smsLine).toBeDefined();
+    expect(ntsLine).toBeDefined();
+    // Pin the post-PR-#33 framing: transport is deployed, fbrain hasn't
+    // wired/signed-in yet. Guards against regressing to "not yet built"
+    // or "until fold_db cloud sync transport lights up".
+    expect(smsLine!).toContain("deployed but not yet wired up from fbrain");
+    expect(smsLine!).not.toContain("not yet built");
+    expect(ntsLine!).toContain("no team-sync transport");
+    expect(ntsLine!).toContain("signed in and validated end-to-end");
+    expect(ntsLine!).not.toContain("lights up");
   });
 
   test("missing config → exit 1", async () => {

@@ -1,19 +1,24 @@
 // `fbrain share` — placeholder.
 //
-// The Phase 3 sharing spike concluded that the cross-node data-flow path
-// is not testable on a single machine: it requires the Auth Lambda + S3
-// transport configured at the discovery service. The sharing METADATA
-// primitives (ShareRule, ShareInvite, ShareSubscription) are wireable
-// end-to-end on loopback, but no data ever moves between nodes without
-// the cloud sync layer.
+// The Phase 3 sharing spike concluded that cross-node data flow is a
+// sign-in gap, not a missing-infra gap. Both halves of the transport
+// are built and deployed: fold_db's sync engine (local Sled →
+// SyncEngine → Auth Lambda → S3) and the exemem cloud lambdas
+// (auth_service, discovery, storage_service, …, live in both dev and
+// prod). What's missing is signing fbrain's homebrew daemon into them
+// and running an end-to-end positive test: `GET
+// /api/sharing/exemem-status` on the local daemon at `:9001` returns
+// `{"connected": false}` because nobody has called the sign-in path.
 //
-// See docs/phase-3-sharing-memo.md for the full evidence + the conditions
-// under which this command can become a real, working share.
+// See docs/phase-3-sharing-memo.md for the full evidence, and
+// docs/cloud-signin-spike-plan.md for what it would take to flip
+// this on.
 //
 // Until then, calling `fbrain share` prints the same pointer and exits
 // non-zero so callers don't believe a no-op succeeded.
 
 const MEMO_PATH = "docs/phase-3-sharing-memo.md";
+const SIGNIN_PLAN_PATH = "docs/cloud-signin-spike-plan.md";
 
 export type ShareOptions = {
   print?: (line: string) => void;
@@ -22,22 +27,31 @@ export type ShareOptions = {
 export function shareCmd(opts: ShareOptions = {}): number {
   const print = opts.print ?? ((line: string) => console.error(line));
   print(
-    "fbrain share is a Phase 3 v0+ feature — see " + MEMO_PATH + ".",
+    "fbrain share is a Phase 3 v0+ placeholder — see " + MEMO_PATH + ".",
   );
   print(
-    "Short version: cross-node data flow requires fold_db's S3 + Auth-Lambda",
+    "Short version: the cross-node transport is deployed (fold_db's sync",
   );
   print(
-    "sync layer, which is unreachable from a localhost-only spike. The",
+    "engine + the exemem cloud lambdas, both live in dev and prod), but",
   );
   print(
-    "sharing METADATA (ShareRule, ShareInvite, ShareSubscription) is",
+    "this homebrew daemon has not been signed in to it — `GET",
   );
   print(
-    "fully wireable on loopback, but no records actually move without",
+    "/api/sharing/exemem-status` returns `connected: false`. The sharing",
   );
   print(
-    "the cloud transport configured.",
+    "METADATA (ShareRule, ShareInvite, ShareSubscription) is fully",
+  );
+  print(
+    "wireable on loopback, but no records actually move until the daemon",
+  );
+  print(
+    "authenticates against exemem and an end-to-end positive test passes.",
+  );
+  print(
+    "See " + SIGNIN_PLAN_PATH + " for what it would take to flip this on.",
   );
   return 1;
 }
