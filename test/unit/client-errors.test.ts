@@ -93,6 +93,11 @@ describe("client error mapping", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(FbrainError);
       expect((err as FbrainError).code).toBe("service_unreachable");
+      // Non-doctor callers (list/put/etc.) need to see the doctor tip in
+      // the error message so they know where to look for a diagnosis.
+      // Doctor strips this tip from its own output (see doctor.test.ts);
+      // here we pin that connectionError still appends it for everyone else.
+      expect((err as FbrainError).message).toContain("fbrain doctor");
     }
   });
 

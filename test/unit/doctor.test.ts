@@ -18,13 +18,14 @@ import {
   type AddSchemaRequest,
 } from "../../src/schemas.ts";
 import { type Config } from "../../src/config.ts";
-import type {
-  NativeIndexHit,
-  NodeClient,
-  QueryResponse,
-  QueryRow,
-  RegisteredSchema,
-  SchemaServiceClient,
+import {
+  FbrainError,
+  type NativeIndexHit,
+  type NodeClient,
+  type QueryResponse,
+  type QueryRow,
+  type RegisteredSchema,
+  type SchemaServiceClient,
 } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
@@ -397,6 +398,59 @@ describe("doctor verdict logic", () => {
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] schema-service-reachable"))).toBe(true);
+  });
+
+  // Regression: connectionError() in client.ts appends a DOCTOR_TIP suffix
+  // ("— run `fbrain doctor` for a full diagnosis") so non-doctor commands
+  // (list/put/etc.) point users here. Doctor must NOT echo that tip back
+  // — telling someone running `fbrain doctor` to run `fbrain doctor` is
+  // circular and confusing.
+  test("service_unreachable from node → FAIL detail omits circular doctor tip", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const unreachable = new FbrainError({
+      code: "service_unreachable",
+      message:
+        "node not reachable at http://127.0.0.1:9001 — run `fbrain doctor` for a full diagnosis.",
+    });
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ identityThrows: unreachable }),
+    });
+    expect(code).toBe(1);
+    const failLine = lines.find((l) => l.includes("[FAIL] node-reachable"));
+    expect(failLine).toBeDefined();
+    expect(failLine).not.toContain("fbrain doctor");
+    expect(failLine).toContain("node not reachable at http://127.0.0.1:9001");
+  });
+
+  test("service_unreachable from schema service → FAIL detail omits circular doctor tip", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const unreachable = new FbrainError({
+      code: "service_unreachable",
+      message:
+        "schema service not reachable at http://127.0.0.1:8080 — run `fbrain doctor` for a full diagnosis.",
+    });
+    const mockSchema: SchemaServiceClient = {
+      ...mockSchemaClient({}),
+      async listSchemas() {
+        throw unreachable;
+      },
+    };
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchema,
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(1);
+    const failLine = lines.find((l) => l.includes("[FAIL] schema-service-reachable"));
+    expect(failLine).toBeDefined();
+    expect(failLine).not.toContain("fbrain doctor");
+    expect(failLine).toContain("schema service not reachable at");
   });
 
   test("node not provisioned → FAIL with init hint", async () => {
