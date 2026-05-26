@@ -50,7 +50,7 @@ export const COMMANDS = [
 ] as const;
 export type Command = (typeof COMMANDS)[number];
 
-const TOP_HELP = `fbrain — CLI brain over fold_db
+export const TOP_HELP = `fbrain — CLI brain over fold_db
 
 Usage:
   fbrain <command> [options]
@@ -59,7 +59,7 @@ Commands:
   init           bootstrap a node + register schemas + write config
   design new     create a new Design
   task new       create a new Task
-  put            upsert a Design or Task from stdin (frontmatter-aware)
+  put            upsert any record type from stdin (frontmatter-aware; type: picks schema)
   get            print a record by slug
   list           list records, newest-first
   status         show or update a record's status
