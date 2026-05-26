@@ -22,6 +22,7 @@ import {
   nowIso,
   schemaHashFor,
   TOMBSTONE_TAG,
+  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -86,18 +87,28 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   });
 
   const probeTypes: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const live: Array<{ type: RecordType; record: FbrainRecord }> = [];
-  for (const t of probeTypes) {
-    const r = await findBySlugRaw(node, t, schemaHashFor(t, opts.cfg), opts.slug);
-    if (r === null) continue;
-    if (isTombstoned(r)) continue;
-    // For Phase 6 types that share noteSchema, findBySlugRaw returns rows
-    // regardless of kind. Skip the rows whose kind doesn't match this
-    // type so we don't try to "delete" a preference as a concept.
-    const def = RECORDS[t];
-    if (def.kind !== null && r.kind !== def.kind) continue;
-    live.push({ type: t, record: r });
-  }
+  // Retry the full per-type sweep on an empty result to ride out the
+  // polluted-daemon read flake — see withReadRetry in ../record.ts. The
+  // post-delete verify below is left un-retried: it's testing that a
+  // mutation we just fired landed, not that an existing row is findable.
+  const live = await withReadRetry(
+    async () => {
+      const matches: Array<{ type: RecordType; record: FbrainRecord }> = [];
+      for (const t of probeTypes) {
+        const r = await findBySlugRaw(node, t, schemaHashFor(t, opts.cfg), opts.slug);
+        if (r === null) continue;
+        if (isTombstoned(r)) continue;
+        // For Phase 6 types that share noteSchema, findBySlugRaw returns rows
+        // regardless of kind. Skip the rows whose kind doesn't match this
+        // type so we don't try to "delete" a preference as a concept.
+        const def = RECORDS[t];
+        if (def.kind !== null && r.kind !== def.kind) continue;
+        matches.push({ type: t, record: r });
+      }
+      return matches;
+    },
+    (matches) => matches.length > 0,
+  );
 
   if (live.length === 0) {
     if (opts.type) {

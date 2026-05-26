@@ -8,6 +8,7 @@ import {
   findBySlug,
   nowIso,
   schemaHashFor,
+  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -30,11 +31,19 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   });
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const found: Array<{ type: RecordType; record: FbrainRecord }> = [];
-  for (const t of types) {
-    const r = await findBySlug(node, t, schemaHashFor(t, opts.cfg), opts.slug);
-    if (r) found.push({ type: t, record: r });
-  }
+  // Retry the full per-type sweep on an empty result to ride out the
+  // polluted-daemon read flake — see withReadRetry in ../record.ts.
+  const found = await withReadRetry(
+    async () => {
+      const matches: Array<{ type: RecordType; record: FbrainRecord }> = [];
+      for (const t of types) {
+        const r = await findBySlug(node, t, schemaHashFor(t, opts.cfg), opts.slug);
+        if (r) matches.push({ type: t, record: r });
+      }
+      return matches;
+    },
+    (matches) => matches.length > 0,
+  );
   if (found.length === 0) {
     throw new FbrainError({
       code: "not_found",
