@@ -82,6 +82,41 @@ describe("client error mapping", () => {
     }
   });
 
+  test("bootstrap 410 onboarding_already_complete surfaces node message + drops obsolete hint", async () => {
+    // Reproduces the real homebrew daemon's contradictory state — auto-identity
+    // says not_provisioned, bootstrap returns 410 with a pointer at /api/auth/restore.
+    installMock([
+      {
+        status: 410,
+        body: {
+          ok: false,
+          error: "onboarding_already_complete",
+          message:
+            "This node has already been bootstrapped. POST /api/auth/restore to restore from a recovery phrase.",
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.bootstrap("x");
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("onboarding_already_complete");
+      // The node's own message field must be surfaced so the user sees the
+      // /api/auth/restore suggestion the daemon supplied.
+      expect(fe.message).toContain("/api/auth/restore");
+      // The misleading "should probe /api/system/auto-identity first" hint
+      // is gone — init.ts already probes that endpoint at step [1/5].
+      expect(fe.message).not.toContain("should probe");
+      expect(fe.hint ?? "").not.toContain("should probe");
+      // Hint references the three actionable recovery paths.
+      expect(fe.hint ?? "").toContain("~/.fbrain/config.json");
+      expect(fe.hint ?? "").toContain("~/.folddb/config");
+    }
+  });
+
   test("connection refused → service_unreachable", async () => {
     globalThis.fetch = (async () => {
       throw new TypeError("fetch failed");
