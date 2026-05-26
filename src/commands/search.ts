@@ -131,6 +131,9 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
 
   if (trimmed.length === 0) {
     print("no matches");
+    print(
+      "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query> --no-llm` (BM25 fallback) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
+    );
     return;
   }
 

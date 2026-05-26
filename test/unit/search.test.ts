@@ -145,7 +145,9 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
-    expect(lines).toEqual(["no matches"]);
+    expect(lines[0]).toBe("no matches");
+    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+    expect(lines).toHaveLength(2);
   });
 
   test("skips hits whose schema_name matches neither Design nor Task", async () => {
@@ -166,7 +168,28 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "x", print: (l) => lines.push(l) });
-    expect(lines).toEqual(["no matches"]);
+    expect(lines[0]).toBe("no matches");
+    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+    expect(lines).toHaveLength(2);
+  });
+
+  test("empty result prints BM25-fallback hint pointing at `fbrain ask --no-llm`", async () => {
+    // Vector index has freshness lag (G3a/G3b per phase-7-search-latency-spike.md).
+    // Users who hit "no matches" interactively shouldn't be left thinking the record
+    // isn't there — BM25 (via `fbrain ask --no-llm`) often catches it.
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "papercut", print: (l) => lines.push(l) });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no matches");
+    expect(lines[1]).toMatch(/^hint:\s/);
+    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+    expect(lines[1]).toContain("BM25 fallback");
   });
 
   test("tolerates missing metadata.score → prints — in the score column", async () => {
