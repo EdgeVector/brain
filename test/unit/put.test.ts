@@ -318,7 +318,31 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.title).toBe("Just FM");
   });
 
-  test("entirely empty input is accepted (matches gbrain) and falls back to slug-title design", async () => {
+  test("entirely empty input is rejected with empty_stdin before any HTTP traffic", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({ cfg, slug: "totally-empty", input: "" }),
+    ).rejects.toMatchObject({ code: "empty_stdin" });
+    expect(touched).toBe(false);
+  });
+
+  test("whitespace-only input is rejected with empty_stdin", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({ cfg, slug: "ws-only", input: "   \n\n  \n" }),
+    ).rejects.toMatchObject({ code: "empty_stdin" });
+    expect(touched).toBe(false);
+  });
+
+  test("frontmatter present, body empty → still accepted (explicit intent)", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
@@ -328,11 +352,37 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       return { status: 404 };
     });
-    const r = await putCmd({ cfg, slug: "totally-empty", input: "" });
+    const r = await putCmd({
+      cfg,
+      slug: "fm-empty-body",
+      input: "---\ntype: concept\ntitle: X\n---\n",
+    });
+    expect(r.type).toBe("concept");
     expect(r.action).toBe("created");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.body).toBe("");
-    expect(fields.title).toBe("totally-empty");
+    expect(fields.title).toBe("X");
+  });
+
+  test("body present, no frontmatter → still accepted", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "body-only",
+      input: "just body text\n",
+    });
+    expect(r.type).toBe("design");
+    expect(r.action).toBe("created");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.body).toBe("just body text");
   });
 
   test("type: task on create populates design_slug to empty string", async () => {
