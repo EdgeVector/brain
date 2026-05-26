@@ -160,7 +160,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push({
       name: "schema-service-reachable",
       ok: false,
-      detail: err instanceof Error ? err.message : String(err),
+      detail: doctorReachabilityDetail(err, "schema service", cfg.schemaServiceUrl),
       fix: "start fold's schema service (e.g. `./run.sh --local --local-schema`)",
     });
     verbose?.(`schema-service-reachable: FAIL`);
@@ -193,7 +193,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push({
       name: "node-reachable",
       ok: false,
-      detail: err instanceof Error ? err.message : String(err),
+      detail: doctorReachabilityDetail(err, "node", cfg.nodeUrl),
       fix: "start a fold node (e.g. `cd fold/fold_db_node && ./run.sh --local --local-schema`)",
     });
     verbose?.(`node-reachable: FAIL`);
@@ -439,6 +439,18 @@ function softenDriftIfMigrated(
     detail: `${drift.detail ?? "drift detected"} — explained by migration ${matching.id}`,
     fix: `update src/schemas.ts to add "${matching.field_added}" to the ${schemaKey} schema so the next \`fbrain init\` keeps the new hash`,
   };
+}
+
+// connectionError() in client.ts appends "— run `fbrain doctor` for a full
+// diagnosis" to every service_unreachable message so non-doctor commands
+// (list/put/etc.) point users here. Inside doctor's own output that tip
+// is circular — the user is already running doctor. Bypass err.message
+// for the typed service_unreachable case and synthesize a clean detail.
+function doctorReachabilityDetail(err: unknown, which: string, baseUrl: string): string {
+  if (err instanceof FbrainError && err.code === "service_unreachable") {
+    return `${which} not reachable at ${baseUrl}`;
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 function safeListManifests(): MigrationManifest[] {
