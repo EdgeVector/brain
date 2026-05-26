@@ -146,7 +146,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       await runUsageReport(nodeClient, cfg, usageOpts);
       return 0;
     } catch (err) {
-      print(`usage report failed: ${err instanceof Error ? err.message : String(err)}`);
+      print(`usage report failed: ${doctorReachabilityDetail(err, "node", cfg.nodeUrl)}`);
       return 1;
     }
   }
