@@ -285,10 +285,22 @@ export function newNodeClient(opts: {
         return { userHash: uh };
       }
       if (status === 410) {
+        // The node and auto-identity disagree: auto-identity says
+        // "not provisioned", bootstrap says "already provisioned". Surface
+        // the node's own message field (typically a pointer to
+        // POST /api/auth/restore) — the caller (init.ts) decides whether
+        // to recover from an existing ~/.fbrain/config.json or rethrow.
+        const nodeMsg = bodyMessage(body);
         throw new FbrainError({
           code: "onboarding_already_complete",
-          message: "Node is already provisioned (bootstrap rejected with 410).",
-          hint: "fbrain init should probe `/api/system/auto-identity` first and skip bootstrap when it returns 200.",
+          message:
+            `Node rejected POST /api/setup/bootstrap with 410 — already provisioned` +
+            (nodeMsg ? `: ${nodeMsg}` : ".") +
+            ` (auto-identity simultaneously reports the node as not provisioned — a contradictory state from the daemon).`,
+          hint:
+            "Recovery: (a) if ~/.fbrain/config.json from this node still exists, re-run `fbrain init` so it reuses the saved userHash; " +
+            "(b) follow the node's own instruction above (typically `POST /api/auth/restore` with the recovery phrase); " +
+            "(c) to start fresh, stop the daemon and clear its onboarding state (homebrew default: `rm -rf ~/.folddb/config/`), then re-run `fbrain init`.",
         });
       }
       throw mapNodeError(status, body, "/api/setup/bootstrap");

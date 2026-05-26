@@ -117,10 +117,34 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`[2/${STEPS}] node already provisioned (user_hash=${userHash.slice(0, 8)}…) — skipping bootstrap`);
   } else {
     print(`[2/${STEPS}] node not provisioned (${identity.reason}); running bootstrap`);
-    const result = await probeClient.bootstrap(bootstrapName);
-    userHash = result.userHash;
-    bootstrapped = true;
-    print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
+    try {
+      const result = await probeClient.bootstrap(bootstrapName);
+      userHash = result.userHash;
+      bootstrapped = true;
+      print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
+    } catch (err) {
+      // Option C: the daemon is in the contradictory state where
+      // auto-identity says "not provisioned" but bootstrap returns 410
+      // "already provisioned". If our local config has a usable userHash
+      // from a previous successful init against this node, treat the
+      // config as authoritative and continue — the downstream
+      // schemas-load step exercises X-User-Hash and will surface
+      // `missing_user_context` if the saved userHash is genuinely wrong.
+      // No usable config ⇒ rethrow the FbrainError so the user sees the
+      // node's actual message (e.g. "POST /api/auth/restore …").
+      if (
+        err instanceof FbrainError &&
+        err.code === "onboarding_already_complete" &&
+        hasUsableExistingConfig(existing)
+      ) {
+        userHash = existing.userHash;
+        print(
+          `        bootstrap refused (node + auto-identity disagree); reusing existing config userHash=${userHash.slice(0, 8)}… and continuing`,
+        );
+      } else {
+        throw err;
+      }
+    }
   }
 
   // Step 2/5: register the unique schemas. Phase 6 types (concept,
@@ -251,6 +275,16 @@ export function resolveUrls(
 
 function isUnreachable(err: unknown): boolean {
   return err instanceof FbrainError && err.code === "service_unreachable";
+}
+
+// Option C gate: only reuse a saved userHash when the config carries
+// enough state (userHash + at least one schema hash) to look like a
+// completed init against this node. Insufficient state ⇒ the user is
+// genuinely stuck and should see the node's own recovery message.
+export function hasUsableExistingConfig(cfg: Config | null): cfg is Config {
+  if (!cfg) return false;
+  if (typeof cfg.userHash !== "string" || cfg.userHash.length === 0) return false;
+  return Object.keys(cfg.schemaHashes).length > 0;
 }
 
 function defaultSleep(ms: number): Promise<void> {
