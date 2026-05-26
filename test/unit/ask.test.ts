@@ -245,6 +245,68 @@ describe("askCmd expansion failure observability (--explain)", () => {
     expect(result.expansionStatus.kind).toBe("disabled");
     expect(result.expansion).toBeNull();
   });
+
+  test("--no-llm + --explain prints a 'disabled' notice so --explain isn't a no-op", async () => {
+    // Pre-fix bug: running `ask --no-llm --explain` printed exactly the
+    // same lines as `ask --no-llm` (because the only --explain emit paths
+    // were the failure-reason print and the expansions list, both of which
+    // are quiet when --no-llm is on). An operator debugging with --explain
+    // had no signal that expansions were intentionally off.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const printed: string[] = [];
+    await askCmd({
+      cfg,
+      query: "anything",
+      noLlm: true,
+      explain: true,
+      print: (line) => printed.push(line),
+    });
+
+    expect(printed.some((l) => l.includes("LLM disabled via --no-llm"))).toBe(true);
+  });
+
+  test("--no-llm WITHOUT --explain stays quiet about the disabled status", async () => {
+    // Bookend the previous test: confirm we only emit the explanation
+    // line when --explain is set, so users who don't ask for the debug
+    // surface don't get a new line of chatter on every offline run.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const printed: string[] = [];
+    await askCmd({
+      cfg,
+      query: "anything",
+      noLlm: true,
+      print: (line) => printed.push(line),
+    });
+
+    expect(printed.some((l) => l.includes("LLM disabled via --no-llm"))).toBe(false);
+  });
+
+  test("--explain with no ANTHROPIC_API_KEY prints a no-key notice", async () => {
+    // Third branch of the fix: when the key is absent we already print a
+    // top-of-run `note:` line, but --explain should ALSO drop its own
+    // honest stub so the explain section is non-empty and self-consistent
+    // across all four expansionStatus kinds.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+    // beforeEach already deletes ANTHROPIC_API_KEY — assert we're really
+    // in the no-key branch and not the disabled one.
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const printed: string[] = [];
+    const result = await askCmd({
+      cfg,
+      query: "anything",
+      explain: true,
+      print: (line) => printed.push(line),
+    });
+
+    expect(result.expansionStatus.kind).toBe("no-key");
+    expect(printed.some((l) => l.includes("ANTHROPIC_API_KEY not set"))).toBe(true);
+  });
 });
 
 describe("askCmd resolve N+1 regression (Stage 4)", () => {
