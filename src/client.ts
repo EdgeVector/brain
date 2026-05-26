@@ -88,7 +88,21 @@ export class FbrainError extends Error {
   }
 }
 
-const DOCTOR_TIP = "— run `fbrain doctor` for a full diagnosis";
+// Appended by every node + schema-service error message so non-doctor callers
+// (list/put/etc.) point users at `fbrain doctor`. `doctor` itself must strip
+// this back off — see stripDoctorTip below.
+export const DOCTOR_TIP = "— run `fbrain doctor` for a full diagnosis";
+
+// Strip the trailing " ${DOCTOR_TIP}." that client.ts appends to FbrainError
+// messages, preserving the natural trailing period. Used inside `fbrain doctor`
+// so its own output doesn't tell the user to run `fbrain doctor`.
+export function stripDoctorTip(message: string): string {
+  const suffix = ` ${DOCTOR_TIP}.`;
+  if (message.endsWith(suffix)) {
+    return message.slice(0, -suffix.length) + ".";
+  }
+  return message;
+}
 
 export type SchemaServiceClient = {
   baseUrl: string;

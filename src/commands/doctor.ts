@@ -31,6 +31,7 @@ import {
   newNodeClient,
   newSchemaServiceClient,
   recordTypeForHash,
+  stripDoctorTip,
   type NativeIndexHit,
   type NodeClient,
   type RegisteredSchema,
@@ -472,16 +473,18 @@ export function schemaServiceFixHint(url: string): string {
   );
 }
 
-// connectionError() in client.ts appends "— run `fbrain doctor` for a full
-// diagnosis" to every service_unreachable message so non-doctor commands
-// (list/put/etc.) point users here. Inside doctor's own output that tip
-// is circular — the user is already running doctor. Bypass err.message
-// for the typed service_unreachable case and synthesize a clean detail.
+// client.ts appends "— run `fbrain doctor` for a full diagnosis" to every
+// FbrainError message so non-doctor commands (list/put/etc.) point users
+// here. Inside doctor's own output that tip is circular — the user is
+// already running doctor. For the typed service_unreachable case
+// synthesize a clean detail; for everything else (node_not_provisioned,
+// missing_user_context, schema_http_*, …) strip the shared suffix off
+// err.message via the helper exported from client.ts.
 function doctorReachabilityDetail(err: unknown, which: string, baseUrl: string): string {
   if (err instanceof FbrainError && err.code === "service_unreachable") {
     return `${which} not reachable at ${baseUrl}`;
   }
-  return err instanceof Error ? err.message : String(err);
+  return stripDoctorTip(err instanceof Error ? err.message : String(err));
 }
 
 function safeListManifests(): MigrationManifest[] {

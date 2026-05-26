@@ -471,6 +471,42 @@ describe("doctor verdict logic", () => {
     expect(usageLine).toContain("node not reachable at http://127.0.0.1:9001");
   });
 
+  // Regression: PR #40 added doctorReachabilityDetail() and used it in the
+  // --usage catch block, but only the service_unreachable branch synthesized
+  // a clean detail — every other FbrainError code (node_not_provisioned,
+  // missing_user_context, schema_http_*, …) still propagated err.message
+  // verbatim, which carries the DOCTOR_TIP suffix from client.ts. So
+  // `fbrain doctor --usage` against a daemon up-but-not-provisioned still
+  // printed "usage report failed: Node not set up — run `fbrain doctor` for
+  // a full diagnosis." This pins the fallthrough path to stripDoctorTip().
+  test("node_not_provisioned during --usage → printed failure omits circular doctor tip", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const notProvisioned = new FbrainError({
+      code: "node_not_provisioned",
+      message: "Node not set up — run `fbrain doctor` for a full diagnosis.",
+    });
+    const baseNode = mockNodeClient({});
+    const node: NodeClient = {
+      ...baseNode,
+      async queryAll() {
+        throw notProvisioned;
+      },
+    };
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => node,
+      usage: true,
+    });
+    expect(code).toBe(1);
+    const usageLine = lines.find((l) => l.startsWith("usage report failed:"));
+    expect(usageLine).toBeDefined();
+    expect(usageLine).not.toContain("fbrain doctor");
+    expect(usageLine).toBe("usage report failed: Node not set up.");
+  });
+
   test("service_unreachable from schema service → FAIL detail omits circular doctor tip", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
