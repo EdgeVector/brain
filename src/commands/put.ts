@@ -47,6 +47,18 @@ export type PutResult = {
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
   validateSlug(opts.slug);
   const { frontmatter, body } = splitFrontmatter(opts.input);
+  // Refuse a silent-default record when stdin carried nothing: with no
+  // frontmatter AND no body the upsert would otherwise mint a blank
+  // design row with the slug as title. A scripted `cat $note | fbrain
+  // put $slug` where $note is accidentally empty hits this trap.
+  // Frontmatter-with-empty-body is still valid (explicit intent).
+  if ((frontmatter === null || frontmatter.trim().length === 0) && body.trim().length === 0) {
+    throw new FbrainError({
+      code: "empty_stdin",
+      message: "put: stdin was empty — nothing to write.",
+      hint: "Pipe a body (with optional YAML frontmatter) into `fbrain put <slug>`.",
+    });
+  }
   const parsed = parseFrontmatter(frontmatter);
   const type = resolveRecordType(parsed.type);
   const title = resolveTitle(parsed.title, body, opts.slug);
