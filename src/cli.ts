@@ -7,6 +7,7 @@
 
 import { parseArgs } from "node:util";
 
+import pkg from "../package.json" with { type: "json" };
 import { FbrainError } from "./client.ts";
 import { readConfig, ConfigMissingError } from "./config.ts";
 import { runInit } from "./commands/init.ts";
@@ -77,6 +78,7 @@ Commands:
 Global flags:
   --verbose      echo HTTP requests + responses
   --help, -h     print this help
+  --version, -v  print the fbrain version and exit
 
 Run \`fbrain help <command>\` for per-command usage.`;
 
@@ -389,6 +391,10 @@ type Argv = string[];
 export async function main(argv: Argv): Promise<number> {
   const stripped = argv.slice();
   const verbose = consumeFlag(stripped, "--verbose");
+  if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-v")) {
+    console.log(pkg.version);
+    return 0;
+  }
   if (consumeFlag(stripped, "--help") || consumeFlag(stripped, "-h")) {
     if (stripped[0]) return printHelpFor(stripped[0]);
     console.log(TOP_HELP);
