@@ -6,6 +6,7 @@ import {
   isTombstoned,
   listRecords,
   schemaHashFor,
+  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -29,11 +30,29 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   });
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const all: Array<{ type: RecordType; record: FbrainRecord }> = [];
-  for (const t of types) {
-    const rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
-    for (const r of rs) all.push({ type: t, record: r });
-  }
+  const sweep = async () => {
+    const acc: Array<{ type: RecordType; record: FbrainRecord }> = [];
+    for (const t of types) {
+      const rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
+      for (const r of rs) acc.push({ type: t, record: r });
+    }
+    return acc;
+  };
+  // The dogfood read-flake repro (2026-05-26): a status write lands, but
+  // the immediately-following filtered list returns empty for ~1s. Retry
+  // the sweep only when --status/--tag are present — without them, empty
+  // is a legitimate signal and burning the budget every invocation slows
+  // down genuinely-empty lists. The isHit predicate fires when the sweep
+  // sees any non-tombstoned row; the user filter is applied after, so a
+  // sweep that surfaces a row but the row doesn't match the filter still
+  // stops retrying (we're riding out the empty-sweep flake, not searching
+  // for a matching row). See withReadRetry in ../record.ts.
+  const wantsRetry = opts.status !== undefined || opts.tag !== undefined;
+  const all = wantsRetry
+    ? await withReadRetry(sweep, (acc) =>
+        acc.some(({ record }) => !isTombstoned(record)),
+      )
+    : await sweep();
 
   const filtered = all.filter(({ record }) => {
     if (isTombstoned(record)) return false;
