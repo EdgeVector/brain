@@ -1,7 +1,10 @@
-// Pins `fbrain --version` and `fbrain -v` to print the package.json
-// version on stdout and exit 0. Regression guard for the dogfood report
-// where these flags were unrecognized and dumped help to stderr with
-// exit 1.
+// Pins `fbrain --version` and `fbrain -V` to print `fbrain <version>` on
+// stdout (sourced from package.json — no pinned literal) and exit 0.
+// Regression guard for the original dogfood report where these flags were
+// unrecognized and dumped help to stderr with exit 1.
+//
+// Short form is `-V` (uppercase) to match bun/node/cargo convention and
+// to leave `-v` free for a future `--verbose` short alias.
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
@@ -25,18 +28,18 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
   return { code, stdout, stderr };
 }
 
-describe("fbrain --version / -v", () => {
-  test("--version prints package.json version and exits 0", async () => {
+describe("fbrain --version / -V", () => {
+  test("--version prints `fbrain <package.json version>` and exits 0", async () => {
     const { code, stdout, stderr } = await runCli(["--version"]);
     expect(code).toBe(0);
-    expect(stdout.trim()).toBe(pkg.version);
+    expect(stdout.trim()).toBe(`fbrain ${pkg.version}`);
     expect(stderr).toBe("");
   });
 
-  test("-v prints package.json version and exits 0", async () => {
-    const { code, stdout, stderr } = await runCli(["-v"]);
+  test("-V prints `fbrain <package.json version>` and exits 0", async () => {
+    const { code, stdout, stderr } = await runCli(["-V"]);
     expect(code).toBe(0);
-    expect(stdout.trim()).toBe(pkg.version);
+    expect(stdout.trim()).toBe(`fbrain ${pkg.version}`);
     expect(stderr).toBe("");
   });
 });
