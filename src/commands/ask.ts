@@ -284,13 +284,21 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
 
   // ── Stage 5: print ───────────────────────────────────────────────────
   if (opts.explain) {
+    // --explain must say something in every expansion path, otherwise an
+    // operator running it on the offline path sees output identical to a
+    // plain --no-llm run and concludes --explain is broken.
     if (expansionStatus.kind === "failed") {
-      // Surface WHY expansion soft-fell-through. Without this the explain
-      // output is indistinguishable from a --no-llm run.
       print(`expansion failed: ${expansionStatus.reason}`);
       print("");
-    }
-    if (expansions.length > 0) {
+    } else if (expansionStatus.kind === "disabled") {
+      print("(no expansions — LLM disabled via --no-llm)");
+      print("");
+    } else if (expansionStatus.kind === "no-key") {
+      print(
+        "(no expansions — ANTHROPIC_API_KEY not set; running BM25 + vector on original query only)",
+      );
+      print("");
+    } else if (expansions.length > 0) {
       print(`expansions:`);
       for (const e of expansions) print(`  - ${e}`);
       print("");
