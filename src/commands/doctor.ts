@@ -276,15 +276,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     tag: "WARN",
     detail:
       "you're on this daemon; record set is local — multi-machine reads " +
-      "require fold_db sync transport (not yet built; tracked as G16)",
+      "require fbrain to drive fold_db's sync transport (deployed but not " +
+      "yet wired up from fbrain; tracked as G16)",
   });
   checks.push({
     name: "no-team-sync",
     ok: true,
     tag: "WARN",
     detail:
-      "fbrain share is a placeholder until fold_db cloud sync transport " +
-      "lights up (see docs/phase-3-sharing-memo.md)",
+      "no team-sync transport — `fbrain share` is a placeholder until " +
+      "cloud sync is signed in and validated end-to-end " +
+      "(see docs/phase-3-sharing-memo.md)",
   });
 
   // G3 freshness + pollution probes — only when --freshness is set and the
