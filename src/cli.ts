@@ -78,7 +78,7 @@ Commands:
 Global flags:
   --verbose      echo HTTP requests + responses
   --help, -h     print this help
-  --version, -v  print the fbrain version and exit
+  --version, -V  print the fbrain version and exit
 
 Run \`fbrain help <command>\` for per-command usage.`;
 
@@ -391,8 +391,8 @@ type Argv = string[];
 export async function main(argv: Argv): Promise<number> {
   const stripped = argv.slice();
   const verbose = consumeFlag(stripped, "--verbose");
-  if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-v")) {
-    console.log(pkg.version);
+  if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-V")) {
+    console.log(`fbrain ${pkg.version}`);
     return 0;
   }
   if (consumeFlag(stripped, "--help") || consumeFlag(stripped, "-h")) {
