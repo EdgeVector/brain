@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   diffSchemas,
   doctor,
+  schemaServiceFixHint,
   validateConfigShape,
 } from "../../src/commands/doctor.ts";
 import {
@@ -809,5 +810,47 @@ describe("doctor --freshness probes", () => {
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] freshness-probe") && l.includes("skipped"))).toBe(true);
+  });
+});
+
+// schemaServiceFixHint branches: the schema-service-reachable fix line was
+// originally hard-wired to "--local-schema", which is only right for fold
+// contributors. For fbrain users on a deployed Lambda we want a hint that
+// either points at the alternate env or names both dev/prod URLs.
+describe("schemaServiceFixHint", () => {
+  const DEV_URL = "https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com";
+  const PROD_URL = "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
+
+  test("localhost URL → keep the original --local-schema hint", () => {
+    expect(schemaServiceFixHint("http://localhost:9102")).toBe(
+      "start fold's schema service (e.g. `./run.sh --local --local-schema`)",
+    );
+    expect(schemaServiceFixHint("http://127.0.0.1:9999")).toBe(
+      "start fold's schema service (e.g. `./run.sh --local --local-schema`)",
+    );
+  });
+
+  test("dev Lambda URL → suggest prod / check network", () => {
+    const hint = schemaServiceFixHint(DEV_URL);
+    expect(hint).toContain("check your network");
+    expect(hint).toContain("prod");
+    expect(hint).toContain(PROD_URL);
+    expect(hint).not.toContain("--local-schema");
+  });
+
+  test("prod Lambda URL → suggest dev / check network", () => {
+    const hint = schemaServiceFixHint(PROD_URL);
+    expect(hint).toContain("check your network");
+    expect(hint).toContain("dev");
+    expect(hint).toContain(DEV_URL);
+    expect(hint).not.toContain("--local-schema");
+  });
+
+  test("unknown URL → set schemaServiceUrl, naming both dev + prod", () => {
+    const hint = schemaServiceFixHint("https://wrong.example.com");
+    expect(hint).toContain("schemaServiceUrl");
+    expect(hint).toContain(DEV_URL);
+    expect(hint).toContain(PROD_URL);
+    expect(hint).not.toContain("--local-schema");
   });
 });

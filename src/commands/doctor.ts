@@ -161,7 +161,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       name: "schema-service-reachable",
       ok: false,
       detail: doctorReachabilityDetail(err, "schema service", cfg.schemaServiceUrl),
-      fix: "start fold's schema service (e.g. `./run.sh --local --local-schema`)",
+      fix: schemaServiceFixHint(cfg.schemaServiceUrl),
     });
     verbose?.(`schema-service-reachable: FAIL`);
   }
@@ -441,6 +441,35 @@ function softenDriftIfMigrated(
     detail: `${drift.detail ?? "drift detected"} — explained by migration ${matching.id}`,
     fix: `update src/schemas.ts to add "${matching.field_added}" to the ${schemaKey} schema so the next \`fbrain init\` keeps the new hash`,
   };
+}
+
+// Canonical deployed schema service Lambdas. Mirrored against the prod
+// default in src/commands/init.ts and the dev URL in test/util.ts; kept
+// inline here so the fix-hint stays self-contained (no cross-command
+// import for one constant).
+const SCHEMA_SERVICE_URL_DEV =
+  "https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com";
+const SCHEMA_SERVICE_URL_PROD =
+  "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
+
+// Branch the schema-service-reachable fix hint on the configured URL.
+// Most fbrain users run against a deployed Lambda, so the original
+// "start fold's schema service --local-schema" suggestion is only right
+// for fold contributors pointing at localhost.
+export function schemaServiceFixHint(url: string): string {
+  if (/localhost|127\.0\.0\.1/.test(url)) {
+    return "start fold's schema service (e.g. `./run.sh --local --local-schema`)";
+  }
+  if (url === SCHEMA_SERVICE_URL_DEV) {
+    return `check your network or switch to prod (\`${SCHEMA_SERVICE_URL_PROD}\`)`;
+  }
+  if (url === SCHEMA_SERVICE_URL_PROD) {
+    return `check your network or switch to dev (\`${SCHEMA_SERVICE_URL_DEV}\`)`;
+  }
+  return (
+    `set \`schemaServiceUrl\` in ~/.fbrain/config.json to dev ` +
+    `(\`${SCHEMA_SERVICE_URL_DEV}\`) or prod (\`${SCHEMA_SERVICE_URL_PROD}\`)`
+  );
 }
 
 // connectionError() in client.ts appends "— run `fbrain doctor` for a full
