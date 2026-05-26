@@ -129,6 +129,55 @@ export async function findBySlugRaw(
   return list.find((r) => r.slug === slug) ?? null;
 }
 
+// Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
+// case). The same /api/query intermittently returns 0 results on a daemon
+// whose top-50 budget is saturated by phantom embeddings + orphan schemas:
+// `fbrain put` lands and `fbrain search` returns the row, but `fbrain get`
+// flakes ~1/5 of the time. scripts/parity-smoketest.sh rides this out by
+// retrying each `fbrain get` 5× at 250 ms; the user-facing CLI now does the
+// same so users don't see "No record" for a row they just wrote.
+//
+// 5 × 250 ms is the smoketest's empirical setting — adjust together, not
+// independently, if the upstream G3d/G3e fix changes the flake rate.
+export const READ_RETRY_ATTEMPTS = 5;
+export const READ_RETRY_BACKOFF_MS = 250;
+
+export type ReadRetryOptions = {
+  maxAttempts?: number;
+  backoffMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+// Re-run `fn` up to `maxAttempts` times, sleeping `backoffMs` between tries,
+// until `isHit(result)` returns true. Returns the last result either way —
+// callers handle the genuine-miss case (surfaces the existing "No record"
+// error after the retry budget is spent, same UX as today on a real miss).
+//
+// The retry wraps the full per-type query loop, not each HTTP call: a hit
+// in one type cancels further retries, and a real miss across all types
+// retries the whole sweep. Mirrors what the smoketest does in bash.
+export async function withReadRetry<T>(
+  fn: () => Promise<T>,
+  isHit: (result: T) => boolean,
+  options?: ReadRetryOptions,
+): Promise<T> {
+  const maxAttempts = options?.maxAttempts ?? READ_RETRY_ATTEMPTS;
+  const backoffMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
+  const sleep = options?.sleep ?? defaultSleep;
+  let result = await fn();
+  let attempts = 1;
+  while (!isHit(result) && attempts < maxAttempts) {
+    if (backoffMs > 0) await sleep(backoffMs);
+    result = await fn();
+    attempts++;
+  }
+  return result;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function validateSlug(slug: string): void {
   if (slug.length === 0) {
     throw new FbrainError({
