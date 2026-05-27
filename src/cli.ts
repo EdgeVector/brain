@@ -26,7 +26,6 @@ import { putCmd } from "./commands/put.ts";
 import { deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
-import { consolidateCmd } from "./commands/consolidate.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
 export const COMMANDS = [
@@ -46,7 +45,6 @@ export const COMMANDS = [
   "delete",
   "reindex",
   "migrate",
-  "consolidate",
   "mcp",
   "help",
 ] as const;
@@ -74,7 +72,6 @@ Commands:
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record to refresh embeddings
   migrate        evolve a schema by adding a field (see docs/g15-schema-evolution-playbook.md)
-  consolidate    one-time: migrate legacy FbrainKindNote rows into the per-kind canonical schemas
   mcp            start an MCP server over stdio (6 tools: search/get/list/put/delete/link)
   help <cmd>     per-command usage
 
@@ -305,35 +302,6 @@ re-puts and re-hashes all six together.
 
 Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
-  consolidate: `fbrain consolidate [--type T] [--dry-run]
-
-One-time migration that moves every live legacy FbrainKindNote row
-into its per-kind canonical schema (Concept, Preference, Reference,
-Agent, Project, Spike) and tombstones the legacy row.
-
-Pre-Phase-E records of those six kinds still live in the shared
-FbrainKindNote schema. \`fbrain list\` / \`fbrain get\` surface them via
-a transitional legacy fallback. Running this command consolidates
-every such row so the per-kind schemas become the only live source.
-
-Slug conflicts — where a per-kind record already exists at a legacy
-row's slug (e.g. the user re-wrote that slug post-Phase-E) — are
-skipped with a warning. The legacy row is left untouched and the
-per-kind row continues to win on reads.
-
-Idempotent. Re-running after a successful consolidation is a no-op
-because the remaining legacy rows are already tombstoned.
-
-  --type      narrow to one of: concept | preference | reference |
-              agent | project | spike (default: all six). Passing
-              \`--type design\` or \`--type task\` is a no-op (no legacy
-              backing) and exits 0.
-  --dry-run   report per-type counts (would-migrate, would-skip)
-              without writing. Run this first against any daemon you
-              care about before the live invocation.
-
-Run with the global --verbose to print per-record outcome
-(migrated | would-migrate | skipped-conflict | skipped-tombstone).`,
   mcp: `fbrain mcp
 
 Start a Model Context Protocol server over stdio. Exposes six tools so
@@ -418,10 +386,6 @@ const MIGRATE_OPTIONS = {
   default: { type: "string" },
   "dry-run": { type: "boolean", default: false },
 } as const;
-const CONSOLIDATE_OPTIONS = {
-  type: { type: "string" },
-  "dry-run": { type: "boolean", default: false },
-} as const;
 const EMPTY_OPTIONS = {} as const;
 
 export const CLI_SPEC = {
@@ -441,7 +405,6 @@ export const CLI_SPEC = {
   delete: DELETE_OPTIONS,
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
-  consolidate: CONSOLIDATE_OPTIONS,
   mcp: EMPTY_OPTIONS,
   help: EMPTY_OPTIONS,
 } as const satisfies Record<Command, Record<string, unknown>>;
@@ -622,8 +585,6 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runReindex(args, verboseFn);
     case "migrate":
       return runMigrate(args, verboseFn);
-    case "consolidate":
-      return runConsolidate(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "help": {
@@ -1003,22 +964,6 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (type) rOpts.type = type;
   if (values["dry-run"]) rOpts.dryRun = true;
   await reindexCmd(rOpts);
-  return 0;
-}
-
-async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
-  const { values } = parseArgs({
-    args,
-    strict: true,
-    allowPositionals: false,
-    options: CONSOLIDATE_OPTIONS,
-  });
-  const type = parseRecordType(values.type);
-  const cfg = readConfig();
-  const cOpts: Parameters<typeof consolidateCmd>[0] = { cfg, verbose };
-  if (type) cOpts.type = type;
-  if (values["dry-run"]) cOpts.dryRun = true;
-  await consolidateCmd(cOpts);
   return 0;
 }
 

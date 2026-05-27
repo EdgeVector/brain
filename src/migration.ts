@@ -109,17 +109,14 @@ export function buildManifestId(scope: string, fieldName: string, appliedAt: str
 // sorted field names).
 //
 // **Why the version marker.** fold_db's schema service has a known
-// "overlap-merge" behavior on `/api/schemas/load` (the same root
-// cause that drove the Phase 6 single-schema design — see
-// `src/schemas.ts:8-20`): registering a schema whose field set is a
-// near-superset of an existing schema can collapse onto the existing
-// canonical hash. That breaks our migration: the schema service
-// reports success, but our new field isn't actually addressable
-// under the returned hash. The marker is the same structural-
-// distinctness trick that `v1_marker_a/b` already plays for the
-// initial Phase 6 schema; here we add `<descriptive_name>_marker`
-// (e.g. `FbrainKindNote_v2_marker`) so each migration's field set
-// is unambiguously distinct from any prior registration.
+// "overlap-merge" behavior on `/api/schemas/load`: registering a
+// schema whose field set is a near-superset of an existing schema
+// can collapse onto the existing canonical hash. That breaks our
+// migration: the schema service reports success, but our new field
+// isn't actually addressable under the returned hash. The marker
+// adds `<descriptive_name>_marker` (e.g. `Concept_v2_marker`) so
+// each migration's field set is unambiguously distinct from any
+// prior registration.
 export function schemaWithExtraField(opts: {
   base: AddSchemaRequest;
   fieldName: string;

@@ -65,21 +65,18 @@ type RowFields = Record<string, unknown>;
 function conceptRow(slug: string, over: Partial<RowFields> = {}): RowFields {
   return {
     slug,
-    kind: "concept",
     title: `c-${slug}`,
     body: `body-${slug}`,
     status: "active",
     tags: [],
     created_at: "2026-05-01T00:00:00Z",
     updated_at: "2026-05-01T00:00:00Z",
-    v1_marker_a: "fbrain",
-    v1_marker_b: "v1",
     ...over,
   };
 }
 
 function preferenceRow(slug: string, over: Partial<RowFields> = {}): RowFields {
-  return { ...conceptRow(slug), kind: "preference", status: "active", ...over };
+  return { ...conceptRow(slug), status: "active", ...over };
 }
 
 function designRow(slug: string, over: Partial<RowFields> = {}): RowFields {
@@ -189,7 +186,7 @@ function stubFetch(opts: {
         const rows: RowFields[] = [];
         for (const slug of present[schema]) {
           // Minimal shape — just enough that findBySlugRaw finds it.
-          rows.push({ slug, kind: "concept", title: slug, body: "", status: "active", tags: [], created_at: "", updated_at: "", v1_marker_a: "fbrain", v1_marker_b: "v1" });
+          rows.push({ slug, title: slug, body: "", status: "active", tags: [], created_at: "", updated_at: "" });
         }
         return new Response(
           JSON.stringify({
@@ -323,13 +320,9 @@ describe("migrateCmd post-registration sanity check", () => {
 });
 
 describe("migrateCmd --add-field", () => {
-  test("Phase 6 (post-Phase-E): re-puts only the named kind's records and only swaps that one hash", async () => {
-    // Pre-Phase-E, migrate on `concept` operated as a bundle across all
-    // six Phase 6 kinds because they shared one FbrainKindNote schema.
-    // Post-Phase-E each kind has its own per-kind schema, so a concept
-    // migration touches only concept records and only swaps the concept
-    // hash. Legacy FbrainKindNote rows are out of scope for migrate
-    // until the consolidation pass lands.
+  test("Phase 6: re-puts only the named kind's records and only swaps that one hash", async () => {
+    // Each Phase 6 kind has its own per-kind schema, so a concept migration
+    // touches only concept records and only swaps the concept hash.
     const cfg = buildTestCfg();
     writeStartingConfig(cfg);
 

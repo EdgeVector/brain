@@ -10,11 +10,6 @@
 //     service's dual-signal gate uses the purpose-statement embedding to
 //     veto structural collapse, so all six can share the same 7-field
 //     shape without colliding onto a single canonical hash.
-//   - **FbrainKindNote** — the legacy Phase 6 shared schema. Kept
-//     registered (with `types: []` in `UNIQUE_SCHEMAS`) so old records
-//     written under the discriminator/marker workaround remain readable
-//     via the legacy fallback in list/get. New records of any Phase 6
-//     kind never land here.
 //
 // Why dedicated schemas now? Pre-Phase-E we used one shared
 // `FbrainKindNote` schema + a `kind` discriminator + `v1_marker_a/b`
@@ -22,8 +17,9 @@
 // canonicalization. With dual-signal canonicalization default-on,
 // the structural collision is solved at the schema-service layer
 // (distinct purpose statements veto the merge), so the workaround
-// becomes unnecessary for new records. See fbrain design
-// `dual-signal-schema-canonicalization`.
+// is unnecessary. After the consolidation migration (PR #63) moved
+// every pre-Phase-E `FbrainKindNote` row into its per-kind canonical,
+// the legacy schema is no longer registered or read from.
 //
 // `POST /v1/schemas` accepts these bodies; the response's `schema.name`
 // IS THE CANONICAL HASH that every subsequent mutation/query MUST pin
@@ -299,91 +295,6 @@ export const spikeSchema: AddSchemaRequest = phase6Schema(
   SPIKE_STATUSES,
 );
 
-// Legacy Phase 6 schema — kept registered so records written before
-// Phase E (which used a single shared schema + `kind` discriminator +
-// v1_marker_a/b structural markers) remain accessible. New records of
-// any Phase 6 kind go to the per-kind schemas above; the legacy fallback
-// in list/get is the only read path that still hits this schema.
-export const NOTE_SCHEMA_DESCRIPTIVE_NAME = "FbrainKindNote";
-
-export const noteSchema: AddSchemaRequest = {
-  schema: {
-    name: NOTE_SCHEMA_DESCRIPTIVE_NAME,
-    descriptive_name: NOTE_SCHEMA_DESCRIPTIVE_NAME,
-    purpose_statement: NOTE_SCHEMA_DESCRIPTIVE_NAME,
-    schema_type: "Hash",
-    key: { hash_field: "slug" },
-    fields: [
-      "slug",
-      "kind",
-      "title",
-      "body",
-      "status",
-      "tags",
-      "created_at",
-      "updated_at",
-      "v1_marker_a",
-      "v1_marker_b",
-    ],
-    field_types: {
-      slug: "String",
-      kind: "String",
-      title: "String",
-      body: "String",
-      status: "String",
-      tags: { Array: "String" },
-      created_at: "String",
-      updated_at: "String",
-      v1_marker_a: "String",
-      v1_marker_b: "String",
-    },
-    field_descriptions: {
-      slug: "stable url-style id (globally unique across all kinds)",
-      kind: "record kind: concept | preference | reference | agent | project | spike",
-      title: "one-line name",
-      body: "markdown content",
-      status: "per-kind status enum",
-      tags: "array of freeform tags",
-      created_at: "RFC 3339 timestamp",
-      updated_at: "RFC 3339 timestamp",
-      v1_marker_a: "fold structural-distinctness marker (always \"fbrain\")",
-      v1_marker_b: "fold structural-distinctness marker (always \"v1\")",
-    },
-    field_classifications: { title: ["word"], body: ["word"] },
-    field_data_classifications: {
-      slug: GENERAL,
-      kind: GENERAL,
-      title: GENERAL,
-      body: GENERAL,
-      status: GENERAL,
-      tags: GENERAL,
-      created_at: GENERAL,
-      updated_at: GENERAL,
-      v1_marker_a: GENERAL,
-      v1_marker_b: GENERAL,
-    },
-  },
-  mutation_mappers: {},
-};
-
-// Subset of noteSchema fields exposed on legacy reads — the v1_marker_*
-// fields are never user-visible, so we leave them out of FbrainRecord.
-export const LEGACY_NOTE_QUERY_FIELDS = [
-  "slug",
-  "kind",
-  "title",
-  "body",
-  "status",
-  "tags",
-  "created_at",
-  "updated_at",
-] as const;
-
-// Config key under which `fbrain init` persists the legacy FbrainKindNote
-// canonical hash. Distinct from a RecordType key so it can't be mistaken
-// for a per-kind hash by lookups like `schemaHashFor`.
-export const LEGACY_NOTE_SCHEMA_KEY = "__legacy_note__";
-
 export const RECORD_TYPES = [
   "design",
   "task",
@@ -402,11 +313,6 @@ export type RecordTypeDef = {
   statuses: readonly string[];
   defaultStatus: string;
   hasDesignSlug: boolean;
-  // For Phase 6 kinds: the `kind` value that legacy FbrainKindNote rows
-  // carry, used by the legacy read-path to filter cross-kind rows back to
-  // this type. null for Design/Task (no legacy backing) AND null for the
-  // new per-kind schemas' own rows (they don't have a `kind` field).
-  legacyKind: string | null;
 };
 
 export const RECORDS: Record<RecordType, RecordTypeDef> = {
@@ -416,7 +322,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: DESIGN_STATUSES,
     defaultStatus: "draft",
     hasDesignSlug: false,
-    legacyKind: null,
   },
   task: {
     type: "task",
@@ -424,7 +329,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: TASK_STATUSES,
     defaultStatus: "open",
     hasDesignSlug: true,
-    legacyKind: null,
   },
   concept: {
     type: "concept",
@@ -432,7 +336,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: CONCEPT_STATUSES,
     defaultStatus: "active",
     hasDesignSlug: false,
-    legacyKind: "concept",
   },
   preference: {
     type: "preference",
@@ -440,7 +343,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: PREFERENCE_STATUSES,
     defaultStatus: "active",
     hasDesignSlug: false,
-    legacyKind: "preference",
   },
   reference: {
     type: "reference",
@@ -448,7 +350,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: REFERENCE_STATUSES,
     defaultStatus: "active",
     hasDesignSlug: false,
-    legacyKind: "reference",
   },
   agent: {
     type: "agent",
@@ -456,7 +357,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: AGENT_STATUSES,
     defaultStatus: "active",
     hasDesignSlug: false,
-    legacyKind: "agent",
   },
   project: {
     type: "project",
@@ -464,7 +364,6 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: PROJECT_STATUSES,
     defaultStatus: "planning",
     hasDesignSlug: false,
-    legacyKind: "project",
   },
   spike: {
     type: "spike",
@@ -472,15 +371,12 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     statuses: SPIKE_STATUSES,
     defaultStatus: "active",
     hasDesignSlug: false,
-    legacyKind: "spike",
   },
 };
 
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
 // entry binds a config-key (where `init` writes the canonical hash) to
-// the AddSchemaRequest. The legacy FbrainKindNote entry has `types: []`
-// — no RecordType routes new writes there; the per-kind legacy read
-// path resolves its hash via `LEGACY_NOTE_SCHEMA_KEY`.
+// the AddSchemaRequest. One entry per RecordType — no legacy alias.
 export const UNIQUE_SCHEMAS: Array<{
   key: string;
   schema: AddSchemaRequest;
@@ -494,7 +390,6 @@ export const UNIQUE_SCHEMAS: Array<{
   { key: "agent", schema: agentSchema, types: ["agent"] },
   { key: "project", schema: projectSchema, types: ["project"] },
   { key: "spike", schema: spikeSchema, types: ["spike"] },
-  { key: LEGACY_NOTE_SCHEMA_KEY, schema: noteSchema, types: [] },
 ];
 
 export function isRecordType(s: string): s is RecordType {

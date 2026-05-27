@@ -21,7 +21,7 @@ import type {
   QueryResponse,
   QueryRow,
 } from "../../src/client.ts";
-import { buildTestCfg, TEST_HASHES, TEST_LEGACY_NOTE_HASH } from "../util.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 // Two synthetic ed25519-shaped base64 pubkeys. The pair must hash to
 // 8-char prefixes that are visually distinct so output assertions are
@@ -51,7 +51,6 @@ type FakeRow = {
 };
 
 function makeRow(r: FakeRow): { schemaHash: string; row: QueryRow } {
-  const isNote = r.type !== "design" && r.type !== "task";
   const fields: Record<string, unknown> = {
     slug: r.slug,
     title: r.slug,
@@ -62,11 +61,6 @@ function makeRow(r: FakeRow): { schemaHash: string; row: QueryRow } {
     updated_at: r.created_at,
   };
   if (r.type === "task") fields.design_slug = "";
-  if (isNote) {
-    fields.kind = r.type;
-    fields.v1_marker_a = "fbrain";
-    fields.v1_marker_b = "v1";
-  }
   return {
     schemaHash: TEST_HASHES[r.type],
     row: {
@@ -182,32 +176,6 @@ describe("runUsageReport", () => {
     const report = await runUsageReport(node, cfg, { now: NOW, noPersist: true, print: () => {} });
     expect(report.totalWrites).toBe(1);
     expect(report.users.length).toBe(1);
-  });
-
-  test("ignores legacy FbrainKindNote rows without a `kind` field", async () => {
-    // Post-Phase-E: per-kind rows are valid even without a `kind` field
-    // (their schema doesn't have one). The discriminator-required check
-    // applies to the LEGACY noteSchema, where missing kind = malformed.
-    const cfg = buildTestCfg();
-    const node = mockNodeWithRows([]);
-    node.queryAll = async (opts) => {
-      if (opts.schemaHash === TEST_LEGACY_NOTE_HASH) {
-        // Simulate a legacy FbrainKindNote row missing the discriminator.
-        return {
-          ok: true,
-          results: [{
-            fields: { slug: "no-kind", created_at: TODAY_AT_NOON },
-            key: { hash: "no-kind", range: null },
-            author_pub_key: PUBKEY_A,
-          }],
-          total_count: 1,
-          returned_count: 1,
-        };
-      }
-      return { ok: true, results: [], total_count: 0, returned_count: 0 };
-    };
-    const report = await runUsageReport(node, cfg, { now: NOW, noPersist: true, print: () => {} });
-    expect(report.totalWrites).toBe(0);
   });
 
   test("custom windowDays narrows / widens the window", async () => {

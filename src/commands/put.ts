@@ -120,10 +120,6 @@ function buildFields(
   if (entry.hasDesignSlug) {
     base.design_slug = existing?.design_slug ?? "";
   }
-  // Pre-Phase-E this branch wrote `kind` + `v1_marker_a/b` for the six
-  // Phase 6 kinds because they shared the FbrainKindNote schema. Phase E
-  // gave each kind its own dedicated schema, so the discriminator and
-  // structural markers are no longer needed for new writes.
   return base;
 }
 

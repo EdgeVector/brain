@@ -27,7 +27,7 @@ import {
   MIGRATION_DIR_ENV,
   type MigrationManifest,
 } from "../../src/migration.ts";
-import { noteSchema, designSchema } from "../../src/schemas.ts";
+import { conceptSchema, designSchema } from "../../src/schemas.ts";
 
 const HEX_HASH = "a".repeat(64);
 const HEX_HASH_2 = "b".repeat(64);
@@ -54,7 +54,7 @@ function manifest(overrides: Partial<MigrationManifest> = {}): MigrationManifest
     from_hash: HEX_HASH,
     to_hash: HEX_HASH_2,
     descriptive_name_from: "FbrainKindNote",
-    descriptive_name_to: "FbrainKindNote_v2",
+    descriptive_name_to: "Concept_v2",
     field_added: "urgency",
     field_type: "String",
     default: "normal",
@@ -105,17 +105,17 @@ describe("validateDefault", () => {
 describe("schemaWithExtraField", () => {
   test("appends a String field + version marker; bumps descriptive_name; preserves prior fields", () => {
     const out = schemaWithExtraField({
-      base: noteSchema,
+      base: conceptSchema,
       fieldName: "urgency",
       fieldType: "String",
       description: "test field",
-      newDescriptiveName: "FbrainKindNote_v2",
+      newDescriptiveName: "Concept_v2",
     });
-    expect(out.schema.descriptive_name).toBe("FbrainKindNote_v2");
-    expect(out.schema.name).toBe("FbrainKindNote_v2");
-    const marker = versionMarkerField("FbrainKindNote_v2");
+    expect(out.schema.descriptive_name).toBe("Concept_v2");
+    expect(out.schema.name).toBe("Concept_v2");
+    const marker = versionMarkerField("Concept_v2");
     expect(out.schema.fields).toEqual([
-      ...noteSchema.schema.fields,
+      ...conceptSchema.schema.fields,
       "urgency",
       marker,
     ]);
@@ -154,38 +154,38 @@ describe("schemaWithExtraField", () => {
   test("refuses to add a field that already exists", () => {
     expect(() =>
       schemaWithExtraField({
-        base: noteSchema,
+        base: conceptSchema,
         fieldName: "tags",
         fieldType: { Array: "String" },
         description: "no-op",
-        newDescriptiveName: "FbrainKindNote_v2",
+        newDescriptiveName: "Concept_v2",
       }),
     ).toThrow(/already exists/);
   });
 
   test("does not mutate the base schema", () => {
-    const beforeFields = [...noteSchema.schema.fields];
+    const beforeFields = [...conceptSchema.schema.fields];
     schemaWithExtraField({
-      base: noteSchema,
+      base: conceptSchema,
       fieldName: "tmp_field",
       fieldType: "String",
       description: "tmp",
-      newDescriptiveName: "FbrainKindNote_v9",
+      newDescriptiveName: "Concept_v9",
     });
-    expect(noteSchema.schema.fields).toEqual(beforeFields);
-    expect("tmp_field" in noteSchema.schema.field_types).toBe(false);
+    expect(conceptSchema.schema.fields).toEqual(beforeFields);
+    expect("tmp_field" in conceptSchema.schema.field_types).toBe(false);
   });
 });
 
 describe("versionMarkerField / versionMarkerValue", () => {
   test("marker name is a sanitised wrap of the descriptive_name", () => {
-    expect(versionMarkerField("FbrainKindNote_v2")).toBe("_FbrainKindNote_v2_marker");
+    expect(versionMarkerField("Concept_v2")).toBe("_Concept_v2_marker");
     expect(versionMarkerField("Design_v3")).toBe("_Design_v3_marker");
     // Non-alnum chars get folded to _.
     expect(versionMarkerField("foo-bar.baz")).toBe("_foo_bar_baz_marker");
   });
   test("marker value is the descriptive_name itself", () => {
-    expect(versionMarkerValue("FbrainKindNote_v2")).toBe("FbrainKindNote_v2");
+    expect(versionMarkerValue("Concept_v2")).toBe("Concept_v2");
   });
 });
 

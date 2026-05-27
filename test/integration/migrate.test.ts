@@ -2,9 +2,9 @@
 // + cloud schema-service harness.
 //
 // Covers the full Option A dance end-to-end:
-//   * Phase 6 migration re-puts every kind that shares noteSchema,
-//     swaps all six schemaHashes entries, and lets `get` find the
-//     migrated record with the new field at its default.
+//   * Phase 6 migration re-puts the named kind's records, swaps just
+//     that kind's schemaHashes entry, and lets `get` find the migrated
+//     record with the new field at its default.
 //   * Mid-flight failure + --resume completes the work, idempotent.
 //   * --status surfaces both manifests.
 //

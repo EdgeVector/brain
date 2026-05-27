@@ -4,8 +4,6 @@ import {
   AGENT_STATUSES,
   CONCEPT_STATUSES,
   DESIGN_STATUSES,
-  LEGACY_NOTE_SCHEMA_KEY,
-  NOTE_SCHEMA_DESCRIPTIVE_NAME,
   PREFERENCE_STATUSES,
   PROJECT_STATUSES,
   RECORDS,
@@ -20,7 +18,6 @@ import {
   designSchema,
   isRecordType,
   isValidStatus,
-  noteSchema,
   preferenceSchema,
   projectSchema,
   referenceSchema,
@@ -91,9 +88,10 @@ describe("schemas", () => {
     expect(isRecordType("Design")).toBe(false); // case-sensitive
   });
 
-  test("each Phase 6 type owns a dedicated schema (post-Phase-E)", () => {
-    // Pre-Phase-E all six aliased to noteSchema; Phase E gave each its own
-    // 7-field schema distinguished by descriptive_name + purpose_statement.
+  test("each Phase 6 type owns a dedicated schema", () => {
+    // All six Phase 6 kinds share the same 7-field shape; the dual-signal
+    // gate (descriptive_name + purpose_statement) is what keeps the
+    // canonical hashes distinct.
     const phase6 = [
       ["concept", conceptSchema, CONCEPT_STATUSES, "active", "Concept"],
       ["preference", preferenceSchema, PREFERENCE_STATUSES, "active", "Preference"],
@@ -119,9 +117,6 @@ describe("schemas", () => {
       expect(statusValuesFor(type)).toEqual(statuses);
       expect(defaultStatusFor(type)).toBe(defaultStatus);
       expect(schemaFor(type)).toBe(schema);
-      // legacyKind matches the type name — used by the legacy read-path to
-      // filter FbrainKindNote rows back to this RecordType.
-      expect(RECORDS[type].legacyKind).toBe(typeKey);
     }
   });
 
@@ -149,19 +144,10 @@ describe("schemas", () => {
     expect(new Set(purposes).size).toBe(6);
   });
 
-  test("FbrainKindNote stays registered with its legacy 10-field shape", () => {
-    expect(noteSchema.schema.descriptive_name).toBe(NOTE_SCHEMA_DESCRIPTIVE_NAME);
-    expect(noteSchema.schema.fields.length).toBe(10);
-    expect(noteSchema.schema.fields).toContain("kind");
-    expect(noteSchema.schema.fields).toContain("v1_marker_a");
-    expect(noteSchema.schema.fields).toContain("v1_marker_b");
-  });
-
-  test("UNIQUE_SCHEMAS has 9 entries: design + task + 6 per-kind + 1 legacy", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(9);
+  test("UNIQUE_SCHEMAS has 8 entries: design + task + 6 per-kind", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(8);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
-      LEGACY_NOTE_SCHEMA_KEY,
       "agent",
       "concept",
       "design",
@@ -170,18 +156,11 @@ describe("schemas", () => {
       "reference",
       "spike",
       "task",
-    ].sort());
-    // Legacy entry has no types — new writes never route there.
-    const legacy = UNIQUE_SCHEMAS.find((e) => e.key === LEGACY_NOTE_SCHEMA_KEY)!;
-    expect(legacy.types).toEqual([]);
-    expect(legacy.schema).toBe(noteSchema);
-  });
-
-  test("legacyKind: null for design/task, matches type for Phase 6", () => {
-    expect(RECORDS.design.legacyKind).toBeNull();
-    expect(RECORDS.task.legacyKind).toBeNull();
-    for (const t of ["concept", "preference", "reference", "agent", "project", "spike"] as const) {
-      expect(RECORDS[t].legacyKind).toBe(t);
+    ]);
+    // Every entry covers exactly one RecordType.
+    for (const entry of UNIQUE_SCHEMAS) {
+      expect(entry.types.length).toBe(1);
+      expect(entry.types[0]).toBe(entry.key as RecordType);
     }
   });
 

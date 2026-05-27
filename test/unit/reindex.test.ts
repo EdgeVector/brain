@@ -59,15 +59,12 @@ function taskRow(slug: string, over: Partial<RowFields> = {}): RowFields {
 function conceptRow(slug: string, over: Partial<RowFields> = {}): RowFields {
   return {
     slug,
-    kind: "concept",
     title: `c-${slug}`,
     body: `cbody-${slug}`,
     status: "active",
     tags: [],
     created_at: "2026-05-01T00:00:00Z",
     updated_at: "2026-05-01T00:00:00Z",
-    v1_marker_a: "fbrain",
-    v1_marker_b: "v1",
     ...over,
   };
 }
@@ -75,7 +72,6 @@ function conceptRow(slug: string, over: Partial<RowFields> = {}): RowFields {
 function preferenceRow(slug: string, over: Partial<RowFields> = {}): RowFields {
   return {
     ...conceptRow(slug),
-    kind: "preference",
     status: "active",
     ...over,
   };
@@ -192,12 +188,9 @@ describe("buildReindexFields", () => {
 
 describe("reindexCmd", () => {
   test("reindexes every live record across all 8 types, skips tombstones", async () => {
-    // Note: TEST_HASHES gives each Phase-6 type a distinct synthetic
-    // hash, even though the real system shares a single noteSchema
-    // hash across them. Each `--type X` iteration queries via X's
-    // hash, so we stash rows per logical-type hash here. In production
-    // listRecords also filters by `kind`, which we exercise with the
-    // dead-c row (kind=concept) under the concept hash.
+    // TEST_HASHES gives each Phase 6 type a distinct synthetic hash;
+    // each `--type X` iteration queries via X's hash, so we stash rows
+    // per type hash here.
     const { restore, mutations } = stubFetch({
       queries: {
         [TEST_HASHES.design]: [

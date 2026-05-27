@@ -403,10 +403,8 @@ async function loadBm25Documents(
   // and Stage 4 will skip on a miss.
   const liveById = new Map<string, FbrainRecord>();
   // Walk the active record types. When --type narrows the set we skip the
-  // others entirely — smaller index, fewer HTTP calls. listRecords already
-  // kind-filters and returns live + tombstoned; we drop tombstones for the
-  // index. Phase 6 types share noteSchema so they're effectively listed via
-  // separate kind-filtered queries — same network cost, just split logically.
+  // others entirely — smaller index, fewer HTTP calls. listRecords returns
+  // live + tombstoned; we drop tombstones for the index.
   for (const t of types) {
     const records = await listRecords(node, t, schemaHashFor(t, cfg));
     for (const r of records) {

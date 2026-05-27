@@ -5,7 +5,8 @@ import type { Config } from "../config.ts";
 import { formatTable } from "../format.ts";
 import {
   isTombstoned,
-  listRecordsWithLegacy,
+  listRecords,
+  schemaHashFor,
   withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
@@ -43,9 +44,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   const sweep = async () => {
     const acc: Array<{ type: RecordType; record: FbrainRecord }> = [];
     for (const t of types) {
-      // Per-kind canonical + legacy FbrainKindNote merged with per-kind wins.
-      // For design/task the legacy half is a no-op (no legacy backing).
-      const rs = await listRecordsWithLegacy(node, t, opts.cfg);
+      const rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
       for (const r of rs) acc.push({ type: t, record: r });
     }
     return acc;

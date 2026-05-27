@@ -7,7 +7,7 @@ import {
   ensureStatus,
   nowIso,
   resolveBySlug,
-  writeSchemaHashFor,
+  schemaHashFor,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
 
@@ -42,10 +42,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
 
   ensureStatus(only.type, opts.newStatus);
 
-  // Write back to the schema the record currently lives in: per-kind for
-  // new records, legacy FbrainKindNote for pre-Phase-E records. Mixing
-  // these up would create duplicate rows.
-  const hash = writeSchemaHashFor(only.type, only.legacy, opts.cfg);
+  const hash = schemaHashFor(only.type, opts.cfg);
   const now = nowIso();
   const def = RECORDS[only.type];
   const fields: Record<string, unknown> = {
@@ -53,19 +50,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     status: opts.newStatus,
     updated_at: now,
   };
-  // Strip type-specific extras the destination schema doesn't declare.
   if (!def.hasDesignSlug) delete fields.design_slug;
-  // Legacy FbrainKindNote rows carry `kind` plus two fixed-value markers
-  // and the schema requires them; per-kind rows don't have those fields.
-  if (only.legacy) {
-    fields.kind = def.legacyKind;
-    fields.v1_marker_a = "fbrain";
-    fields.v1_marker_b = "v1";
-  } else {
-    delete fields.kind;
-    delete (fields as Record<string, unknown>).v1_marker_a;
-    delete (fields as Record<string, unknown>).v1_marker_b;
-  }
   await node.updateRecord({
     schemaHash: hash,
     keyHash: opts.slug,
