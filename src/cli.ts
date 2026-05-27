@@ -146,7 +146,7 @@ type's status enum, updates updated_at, and writes back.
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
-  search: `fbrain search <query> [-n N] [--exact] [--min-score F]
+  search: `fbrain search <query> [-n N] [--exact] [--min-score F] [--type T]...
 
 Semantic search across indexed records. Dedupes fragment hits per record
 and skips stale hits (records deleted since indexing). Prints
@@ -154,8 +154,12 @@ and skips stale hits (records deleted since indexing). Prints
 
   -n            max results
   --exact       exact-match mode (passes ?exact=true to the index)
-  --min-score   server-side score floor (passes ?min_score=F)`,
-  ask: `fbrain ask <query> [--limit N] [--no-llm] [--explain]
+  --min-score   server-side score floor (passes ?min_score=F)
+  --type        restrict results to a record type; repeat to allow several
+                (e.g. \`--type design --type task\`).
+                One of: design | task | concept | preference | reference |
+                agent | project | spike. Omit to search across all 8 types.`,
+  ask: `fbrain ask <query> [--limit N] [--no-llm] [--explain] [--type T]...
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
 fused via Reciprocal Rank Fusion. By default an LLM generates 3 alternative
@@ -167,6 +171,11 @@ paraphrase recall ride alongside rare-token / acronym recall.
   --no-llm      skip LLM expansion (BM25 + vector + RRF on the original
                 query only — useful offline or to save tokens)
   --explain     print the LLM-generated expansions before results
+  --type        restrict results to a record type; repeat to allow several
+                (e.g. \`--type design --type task\`). Narrows both the BM25
+                corpus and the vector schemas filter.
+                One of: design | task | concept | preference | reference |
+                agent | project | spike. Omit to search across all 8 types.
 
 Cost: 1 LLM call per invocation. Run with the global --verbose to see
 token + USD estimates and per-ranker debug. Missing ANTHROPIC_API_KEY
@@ -339,11 +348,13 @@ const SEARCH_OPTIONS = {
   n: { type: "string" },
   exact: { type: "boolean", default: false },
   "min-score": { type: "string" },
+  type: { type: "string", multiple: true },
 } as const;
 const ASK_OPTIONS = {
   limit: { type: "string" },
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
+  type: { type: "string", multiple: true },
 } as const;
 const DOCTOR_OPTIONS = {
   freshness: { type: "boolean", default: false },
@@ -709,8 +720,9 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.search);
     return 1;
   }
-  const cfg = readConfig();
-  const limit = values.n ? parseInt(values.n, 10) : undefined;
+  // Validate --type / --min-score before readConfig so a malformed invocation
+  // surfaces the parse error even on an un-init'd machine.
+  const searchTypes = parseRecordTypeList(values.type);
   const minScore = values["min-score"] !== undefined ? Number(values["min-score"]) : undefined;
   if (minScore !== undefined && !Number.isFinite(minScore)) {
     throw new FbrainError({
@@ -718,10 +730,13 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
       message: `--min-score must be a number (got "${values["min-score"]}").`,
     });
   }
+  const cfg = readConfig();
+  const limit = values.n ? parseInt(values.n, 10) : undefined;
   const sOpts: Parameters<typeof searchCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number" && Number.isFinite(limit)) sOpts.limit = limit;
   if (values.exact) sOpts.exact = true;
   if (minScore !== undefined) sOpts.minScore = minScore;
+  if (searchTypes) sOpts.types = searchTypes;
   await searchCmd(sOpts);
   return 0;
 }
@@ -738,7 +753,9 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.ask);
     return 1;
   }
-  const cfg = readConfig();
+  // Validate --type before readConfig so an unknown type surfaces even on
+  // an un-init'd machine.
+  const askTypes = parseRecordTypeList(values.type);
   const limit = values.limit ? parseInt(values.limit, 10) : undefined;
   if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
     throw new FbrainError({
@@ -746,10 +763,12 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
       message: `--limit must be a positive integer (got "${values.limit}").`,
     });
   }
+  const cfg = readConfig();
   const aOpts: Parameters<typeof askCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number") aOpts.limit = limit;
   if (values["no-llm"]) aOpts.noLlm = true;
   if (values.explain) aOpts.explain = true;
+  if (askTypes) aOpts.types = askTypes;
   await askCmd(aOpts);
   return 0;
 }
@@ -913,6 +932,24 @@ function parseRecordType(raw: string | undefined): RecordType | undefined {
     code: "invalid_type",
     message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,
   });
+}
+
+// Repeatable `--type` (search / ask). Validates every value against the 8
+// record types and dedupes. Returns undefined when the flag is absent so
+// callers can leave the filter unset.
+function parseRecordTypeList(raw: string[] | undefined): RecordType[] | undefined {
+  if (raw === undefined || raw.length === 0) return undefined;
+  const seen = new Set<RecordType>();
+  for (const v of raw) {
+    if (!isRecordType(v)) {
+      throw new FbrainError({
+        code: "invalid_type",
+        message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${v}").`,
+      });
+    }
+    seen.add(v);
+  }
+  return Array.from(seen);
 }
 
 async function maybeReadStdin(): Promise<string> {

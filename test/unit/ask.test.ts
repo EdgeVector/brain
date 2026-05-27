@@ -421,6 +421,142 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     ).toBe(true);
   });
 
+  test("--type design narrows BM25 corpus + vector schemas filter, dropping concept noise", async () => {
+    // End-to-end --type sanity for ask. Corpus mixes designs with concepts
+    // (the agent-pr-events-* shape). With --type design:
+    //   - loadBm25Documents only walks the design type → no /api/query call
+    //     for the concept hash.
+    //   - The vector schemas= param carries only the design hash.
+    //   - Only design hits are returned.
+    const cfg = buildTestCfg();
+    const designRows = [
+      designRow("the-readiness-gate", "concurrent backpressure"),
+      designRow("another-design", "concurrent backpressure"),
+    ];
+    const conceptRows = [
+      noteRow("agent-pr-events-pr-created", "concept", "concurrent backpressure"),
+      noteRow("agent-pr-events-pr-merged", "concept", "concurrent backpressure"),
+    ];
+
+    let lastSearchUrl = "";
+    const queryCounts = new Map<string, number>();
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/query")) {
+        const body = init?.body ? JSON.parse(init.body as string) : undefined;
+        const schema = (body as { schema_name: string }).schema_name;
+        queryCounts.set(schema, (queryCounts.get(schema) ?? 0) + 1);
+        const rows =
+          schema === TEST_HASHES.design
+            ? designRows
+            : schema === TEST_HASHES.concept
+              ? conceptRows
+              : [];
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: rows.map((f) => ({ fields: f, key: { hash: f.slug as string, range: null } })),
+            total_count: rows.length,
+            returned_count: rows.length,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/native-index/search")) {
+        lastSearchUrl = url;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [
+              vectorHit({ schemaName: TEST_HASHES.design, slug: "the-readiness-gate", score: 0.9 }),
+              vectorHit({ schemaName: TEST_HASHES.design, slug: "another-design", score: 0.8 }),
+              vectorHit({
+                schemaName: TEST_HASHES.concept,
+                slug: "agent-pr-events-pr-created",
+                score: 0.95,
+              }),
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    const result = await askCmd({
+      cfg,
+      query: "backpressure",
+      types: ["design"],
+      limit: 5,
+      noLlm: true,
+      print: () => {},
+    });
+
+    // Vector wire only carries the design hash.
+    const parsed = new URL(lastSearchUrl, "http://example/");
+    const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    expect(sent).toEqual([TEST_HASHES.design]);
+
+    // BM25 corpus build only queried the design type — no concept walk.
+    expect(queryCounts.get(TEST_HASHES.design)).toBe(1);
+    expect(queryCounts.get(TEST_HASHES.concept) ?? 0).toBe(0);
+
+    // Results are design only — no agent-pr-events-* noise.
+    expect(result.hits.length).toBeGreaterThan(0);
+    for (const h of result.hits) {
+      expect(h.type).toBe("design");
+    }
+    const slugs = result.hits.map((h) => h.slug);
+    expect(slugs).not.toContain("agent-pr-events-pr-created");
+    expect(slugs).not.toContain("agent-pr-events-pr-merged");
+  });
+
+  test("--type design --type task narrows corpus to both types", async () => {
+    // Multi-type form: the BM25 walk and the vector wire both carry exactly
+    // the requested types.
+    const cfg = buildTestCfg();
+    let lastSearchUrl = "";
+    const queryCounts = new Map<string, number>();
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/query")) {
+        const body = init?.body ? JSON.parse(init.body as string) : undefined;
+        const schema = (body as { schema_name: string }).schema_name;
+        queryCounts.set(schema, (queryCounts.get(schema) ?? 0) + 1);
+        return new Response(
+          JSON.stringify({ ok: true, results: [], total_count: 0, returned_count: 0 }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/api/native-index/search")) {
+        lastSearchUrl = url;
+        return new Response(
+          JSON.stringify({ ok: true, results: [] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+
+    await askCmd({
+      cfg,
+      query: "anything",
+      types: ["design", "task"],
+      noLlm: true,
+      print: () => {},
+    });
+
+    const parsed = new URL(lastSearchUrl, "http://example/");
+    const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    expect(new Set(sent)).toEqual(new Set([TEST_HASHES.design, TEST_HASHES.task]));
+
+    expect(queryCounts.get(TEST_HASHES.design)).toBe(1);
+    expect(queryCounts.get(TEST_HASHES.task)).toBe(1);
+    // No walks of the six Phase 6 types.
+    expect(queryCounts.get(TEST_HASHES.concept) ?? 0).toBe(0);
+    expect(queryCounts.get(TEST_HASHES.preference) ?? 0).toBe(0);
+  });
+
   test("vector-only stale hit (slug absent from corpus) is skipped, no extra fetch", async () => {
     // The other Stage-4 responsibility is filtering stale hits — a slug
     // returned by the vector index that no longer exists as a live
