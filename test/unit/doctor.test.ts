@@ -134,6 +134,9 @@ function mockNodeClient(opts: {
   store?: Record<string, FbrainStoreRow[]>;
   // Captures every mutation issued through this client.
   mutations?: RecordedMutation[];
+  // When set, every `search()` call rejects with this error. Used to
+  // exercise the embedding-runtime probe's failure path.
+  searchThrows?: Error;
 }): NodeClient {
   const store = opts.store ?? {};
   const mutations = opts.mutations ?? [];
@@ -187,6 +190,7 @@ function mockNodeClient(opts: {
       return { ok: true, results: rows, total_count: rows.length, returned_count: rows.length };
     },
     async search(query: string): Promise<NativeIndexHit[]> {
+      if (opts.searchThrows) throw opts.searchThrows;
       // Freshness probe uses marker words starting with "freshprobe". The
       // probe always searches immediately after a create, so the
       // most-recently-created slug pairs 1:1 with the current marker.
@@ -596,6 +600,49 @@ describe("doctor verdict logic", () => {
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] schema-drift[Design]"))).toBe(true);
+  });
+
+  test("embedding-runtime probe → PASS when the one-token search succeeds", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.startsWith("[PASS] embedding-runtime"))).toBe(true);
+  });
+
+  test("embedding-runtime probe → FAIL surfaces brew-restart fix when search rejects with embedding_model_unavailable", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          searchThrows: new FbrainError({
+            code: "embedding_model_unavailable",
+            message:
+              "Semantic search is unavailable — the fold_db node failed to load its embedding model.",
+            hint:
+              "Restart the node so it re-fetches the ONNX file from the embedding cache " +
+              "(homebrew: `brew services restart fold_db_node`).",
+          }),
+        }),
+    });
+    expect(code).toBe(1);
+    // The probe must surface as a distinct, structured FAIL — not blended
+    // into schema-drift. The fix line carries the user-actionable brew
+    // command verbatim.
+    const failLine = lines.find((l) => l.startsWith("[FAIL] embedding-runtime"));
+    expect(failLine).toBeDefined();
+    expect(failLine!).toContain("Semantic search is unavailable");
+    const fixLine = lines[lines.indexOf(failLine!) + 1] ?? "";
+    expect(fixLine).toContain("brew services restart fold_db_node");
   });
 
   test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {
