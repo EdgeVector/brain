@@ -631,7 +631,7 @@ export async function runFreshnessProbe(
     name: "freshness-probe",
     ok: false,
     detail,
-    fix: "see docs/phase-7-search-latency-spike.md — fresh writes are not surfacing at score ≥ 0.5",
+    fix: "run `fbrain reindex` to refresh embeddings; fresh writes are not surfacing at score ≥ 0.5 (see docs/phase-7-search-latency-spike.md)",
   };
 }
 
@@ -721,7 +721,7 @@ export async function runPollutionProbe(
       ok: false,
       tag: "FAIL",
       detail,
-      fix: "see docs/phase-7-search-latency-spike.md — upstream fixes are G3d (schema-scoped search) and G3e (purge embeddings on tombstone)",
+      fix: "run `fbrain reindex` to refresh embeddings; upstream fixes tracked in docs/phase-7-search-latency-spike.md (G3d schema-scoped search, G3e tombstone-purge)",
     };
   }
   if (combinedPct > warnThreshold) {
