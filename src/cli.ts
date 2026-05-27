@@ -521,6 +521,17 @@ function consumeFlag(argv: Argv, name: string): boolean {
   return true;
 }
 
+// Return the token immediately following `flag` in argv (e.g. peek the
+// value of `-n` before parseArgs runs). Returns undefined if the flag
+// isn't present or is the last token. Used to validate values that
+// would otherwise trip parseArgs's short-option detection — `-n -1`
+// reads `-1` as a new option and produces a cryptic error.
+function peekNextValue(argv: Argv, flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  if (i === -1 || i === argv.length - 1) return undefined;
+  return argv[i + 1];
+}
+
 function printHelpFor(name: string): number {
   if (!isCommand(name)) {
     console.error(`Unknown command: ${name}`);
@@ -727,6 +738,21 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
+  // Pre-flight `-n <value>` so the error for `-n 0` and `-n -1` is a
+  // one-liner instead of parseArgs's cryptic "Option -n argument is
+  // ambiguous" (it sees `-1` as a new short option, not -n's value).
+  // We still let parseArgs do the canonical parse below — this only
+  // catches the malformed cases.
+  const nRaw = peekNextValue(args, "-n");
+  if (nRaw !== undefined) {
+    const n = parseInt(nRaw, 10);
+    if (!Number.isFinite(n) || String(n) !== nRaw.trim() || n < 1) {
+      throw new FbrainError({
+        code: "invalid_limit",
+        message: `-n must be a positive integer (got "${nRaw}").`,
+      });
+    }
+  }
   const { values } = parseArgs({
     args,
     strict: true,

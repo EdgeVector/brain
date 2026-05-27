@@ -15,6 +15,7 @@ import {
   recordTypeForHash,
 } from "../client.ts";
 import type { Config } from "../config.ts";
+import { formatTable } from "../format.ts";
 import {
   findBySlug,
   schemaHashFor,
@@ -160,12 +161,16 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     return;
   }
 
-  for (const hit of trimmed) {
-    const scoreCol = hit.score === null ? "—" : hit.score.toFixed(3);
-    print(
-      `${hit.slug.padEnd(28)}  ${scoreCol.padStart(6)}  ${hit.schemaDisplayName.padEnd(10)}  ${hit.record.title}`,
-    );
-  }
+  const lines = formatTable(
+    trimmed.map((hit) => [
+      hit.slug,
+      hit.score === null ? "—" : hit.score.toFixed(3),
+      hit.schemaDisplayName,
+      hit.record.title,
+    ]),
+    { align: ["left", "right", "left", "left"] },
+  );
+  for (const line of lines) print(line);
 }
 
 function capitalize(s: string): string {
