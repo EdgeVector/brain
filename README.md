@@ -86,7 +86,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain delete <slug> [--type design|task]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 | `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
 | `fbrain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.fbrain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
-| `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 3 read tools — `fbrain_search`, `fbrain_get`, `fbrain_list` — to MCP clients (Claude Code, Codex, …) so agents can query fbrain in-process (see [MCP](#mcp)) |
+| `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 6 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_get`, `fbrain_list`; write: `fbrain_put`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
 
 Run `fbrain help <command>` for per-command usage.
 
