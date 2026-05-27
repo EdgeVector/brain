@@ -7,12 +7,24 @@
 //   2. Fires the fold_db `mutation_type=delete` for symbolic intent and
 //      forward-compat with a future hard-delete path. The minimal
 //      `fields_and_values: {}` body is used per the spike.
-//   3. Verifies the soft-delete by reading the record back (raw — bypassing
-//      the tombstone filter) and asserting the tombstone tag is present.
+//   3. Verifies the soft-delete by reading the record back and asserting
+//      it is no longer user-visible — either filtered out (per-field
+//      fold_db tombstone) or carrying our tombstone tag.
 //
 // Every other fbrain read path (`get`, `list`, `status`, `link`, `search`)
 // filters tombstoned records out via `findBySlug` / `list`'s explicit check,
 // so the user-visible behavior matches a hard delete.
+//
+// Verify semantics evolved with fold_db: when the spike was written,
+// `MutationType::Delete` was a no-op so the verify checked that our
+// tombstone tag had landed on the still-present row. Current fold_db
+// repurposes `MutationType::Delete` as a per-field tombstone write that
+// the default query filter hides (see
+// `fold_db/crates/core/src/fold_db_core/mutation_manager.rs` —
+// "MutationType::Delete is repurposed as the tombstone write"), so the
+// post-delete read may legitimately return null. Both null and "row with
+// our tombstone tag" are success; only "row visible with no tombstone
+// tag" raises delete_not_applied.
 
 import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -94,28 +106,37 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const fields = buildTombstoneFields(type, opts.slug, record.created_at, nowIso());
 
   await node.updateRecord({ schemaHash, fields, keyHash: opts.slug });
-  // Forward-compat: fire fold_db's own delete so any future hard-delete or
-  // sync-log consumer sees the explicit intent. No-op at the storage layer
-  // today (see spike doc, Probe B).
+  // Fire fold_db's own delete mutation so the sync-log marker + per-field
+  // tombstone (current fold_db) are written. When the spike was authored
+  // this was a no-op at the storage layer (Probe B); current fold_db
+  // repurposes it as a per-field tombstone write that hides the row from
+  // default queries — which the verify below tolerates.
   await node.deleteRecord({ schemaHash, keyHash: opts.slug });
 
-  // Same /api/query top-100 page-flake that bit `put` (PR #53) also hides
-  // the row from a single post-delete verify on a saturated daemon — the
-  // mutation lands but the read returns []. Retry the read on the
-  // "row IS present" predicate so we don't surface a false
-  // "delete_not_applied" on a successful delete. The tombstone gate runs
-  // once the row resurfaces; a genuinely-missing-or-not-tombstoned row
-  // still raises after the retry budget is spent.
+  // Verify the soft-delete landed. A successful delete leaves the row in
+  // one of two states:
+  //   (a) row absent from the raw read — current fold_db's
+  //       `MutationType::Delete` writes a per-field tombstone that the
+  //       default query filter hides;
+  //   (b) row present but carrying our TOMBSTONE_TAG — older fold_db
+  //       (pre-tombstone repurposing) where `MutationType::Delete` is a
+  //       no-op and only the prior `update` mutation matters.
+  // Only "row visible AND not tombstoned" is a real failure: the update
+  // mutation reported success but the tag did not land.
+  //
+  // Retry on the worst-case signal (row visible AND not tombstoned), so
+  // the page-flake hedge from PR #53 still absorbs a transient
+  // un-tombstoned read on a saturated daemon.
   const verify = await withReadRetry(
     () => findBySlugRaw(node, type, schemaHash, opts.slug),
-    (r) => r !== null,
+    (r) => r === null || isTombstoned(r),
   );
-  if (verify === null || !isTombstoned(verify)) {
+  if (verify !== null && !isTombstoned(verify)) {
     throw new FbrainError({
       code: "delete_not_applied",
       message: `Soft-delete did not stick for ${type} ${opts.slug}.`,
       hint:
-        "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read does not show the tombstone tag.",
+        "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read still shows the record without the tombstone tag.",
     });
   }
 

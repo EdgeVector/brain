@@ -434,13 +434,15 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
     }
   });
 
-  // Regression: same /api/query top-100 page-flake that bit `put` (PR #53)
-  // also hides the row from the post-delete verify on a polluted daemon —
-  // mutation lands, but the immediate verify read returns []. Pre-fix,
-  // delete surfaced a false "delete_not_applied" on what was a successful
-  // operation. With withReadRetry around the verify read, a single flake
-  // is absorbed.
-  test("re-reads on a flake: first verify query returns [], second returns the tombstoned row", async () => {
+  // Regression for #64: current fold_db's `MutationType::Delete` is
+  // repurposed as a per-field tombstone write that the default query
+  // filter hides — so the post-delete verify read returns [] on a
+  // perfectly-successful delete. Pre-fix, delete waited for the row to
+  // resurface and then surfaced a false "delete_not_applied" once the
+  // retry budget was spent. The fix accepts a missing row as success
+  // (purged from the visible set), keeping the "row visible without the
+  // tombstone tag" path as the only real failure.
+  test("post-delete verify accepts a missing row as success (fold_db filters its own tombstone)", async () => {
     let verifyReads = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
@@ -454,23 +456,74 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
           });
         }
         verifyReads++;
-        // Initial probe (#1) finds the live row. Post-update verify reads
-        // begin at #2: the first one flakes (empty page); the second
-        // surfaces the tombstoned row.
+        // Initial probe (#1) finds the live row. Every post-update read
+        // returns [] — modelling fold_db's filter-out behavior after
+        // MutationType::Delete writes its per-field tombstone.
         if (verifyReads === 1) {
           return new Response(
             JSON.stringify({
               ok: true,
-              results: [{ fields: designRow("flaky-delete", { title: "alive" }), key: { hash: "flaky-delete", range: null } }],
+              results: [{ fields: designRow("purged-delete", { title: "alive" }), key: { hash: "purged-delete", range: null } }],
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           );
         }
-        if (verifyReads === 2) {
+        return new Response(JSON.stringify({ ok: true, results: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/mutation")) {
+        return new Response(JSON.stringify({ ok: true, success: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      await deleteRecord({
+        cfg,
+        slug: "purged-delete",
+        type: "design",
+        print: (l) => lines.push(l),
+      });
+      expect(lines.join("\n")).toContain("deleted design purged-delete");
+      // 1 = initial resolve probe, 2 = single post-delete verify; the
+      // retry must NOT keep looping while the row is missing — that was
+      // the pre-fix false-failure path.
+      expect(verifyReads).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // Pre-current-fold_db behavior: the row stayed present after delete
+  // and only carried our TOMBSTONE_TAG. The verify must still recognise
+  // that case as success so older daemons keep working.
+  test("post-delete verify accepts a tombstoned row as success (legacy fold_db)", async () => {
+    let queryCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.designSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
+        }
+        queryCount++;
+        if (queryCount === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: [{ fields: designRow("tombstoned-only"), key: { hash: "tombstoned-only", range: null } }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
         }
         return new Response(
           JSON.stringify({
@@ -478,13 +531,13 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
             results: [
               {
                 fields: {
-                  ...designRow("flaky-delete"),
+                  ...designRow("tombstoned-only"),
                   title: "(deleted)",
                   body: "",
                   status: "archived",
                   tags: [TOMBSTONE_TAG],
                 },
-                key: { hash: "flaky-delete", range: null },
+                key: { hash: "tombstoned-only", range: null },
               },
             ],
           }),
@@ -503,13 +556,11 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const lines: string[] = [];
       await deleteRecord({
         cfg,
-        slug: "flaky-delete",
+        slug: "tombstoned-only",
         type: "design",
         print: (l) => lines.push(l),
       });
-      expect(lines.join("\n")).toContain("deleted design flaky-delete");
-      // 1 = initial probe; 2 = flaked verify; 3 = retry that finds the tombstone.
-      expect(verifyReads).toBeGreaterThanOrEqual(3);
+      expect(lines.join("\n")).toContain("deleted design tombstoned-only");
     } finally {
       globalThis.fetch = originalFetch;
     }
