@@ -16,6 +16,7 @@ import {
 import {
   RECORDS,
   designSchema,
+  noteSchema,
   type AddSchemaRequest,
 } from "../../src/schemas.ts";
 import { type Config } from "../../src/config.ts";
@@ -29,7 +30,7 @@ import {
   type SchemaServiceClient,
 } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { buildTestCfg, TEST_HASHES, TEST_LEGACY_NOTE_HASH } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -59,13 +60,38 @@ function writeCfg(cfg: Config): string {
   return path;
 }
 
-// Drift overrides keyed by `key` from UNIQUE_SCHEMAS (design | task | note).
-type DriftOverrides = Partial<Record<"design" | "task" | "note", RegisteredSchema | null>>;
+// Drift overrides keyed by `key` from UNIQUE_SCHEMAS — design, task, the
+// six per-kind schemas, plus the legacy FbrainKindNote (`note`).
+type DriftKey =
+  | "design"
+  | "task"
+  | "concept"
+  | "preference"
+  | "reference"
+  | "agent"
+  | "project"
+  | "spike"
+  | "note";
+type DriftOverrides = Partial<Record<DriftKey, RegisteredSchema | null>>;
 
 function mockSchemaClient(opts: {
   drift?: DriftOverrides;
   listSchemasOk?: boolean;
 }): SchemaServiceClient {
+  // Per-hash mapping covering all 9 UNIQUE_SCHEMAS entries: 2 baseline
+  // (design/task) + 6 per-kind (concept/preference/reference/agent/project/spike)
+  // + legacy FbrainKindNote (under TEST_LEGACY_NOTE_HASH).
+  const dispatch: Array<{ hash: string; driftKey: DriftKey; schema: AddSchemaRequest }> = [
+    { hash: TEST_HASHES.design, driftKey: "design", schema: RECORDS.design.schema },
+    { hash: TEST_HASHES.task, driftKey: "task", schema: RECORDS.task.schema },
+    { hash: TEST_HASHES.concept, driftKey: "concept", schema: RECORDS.concept.schema },
+    { hash: TEST_HASHES.preference, driftKey: "preference", schema: RECORDS.preference.schema },
+    { hash: TEST_HASHES.reference, driftKey: "reference", schema: RECORDS.reference.schema },
+    { hash: TEST_HASHES.agent, driftKey: "agent", schema: RECORDS.agent.schema },
+    { hash: TEST_HASHES.project, driftKey: "project", schema: RECORDS.project.schema },
+    { hash: TEST_HASHES.spike, driftKey: "spike", schema: RECORDS.spike.schema },
+    { hash: TEST_LEGACY_NOTE_HASH, driftKey: "note", schema: noteSchema },
+  ];
   return {
     baseUrl: "mock",
     async registerSchema() {
@@ -76,26 +102,11 @@ function mockSchemaClient(opts: {
       return { ok: true };
     },
     async getSchemaByHash(hash: string) {
-      // TEST_HASHES has one entry per RecordType but Phase 6 entries
-      // share the same value (note hash). The doctor only ever queries
-      // the design / task / note hashes, so dispatch on those.
-      if (hash === TEST_HASHES.design) {
-        const override = opts.drift?.design;
-        if (override !== undefined) return override;
-        return asRegistered(RECORDS.design.schema, hash);
-      }
-      if (hash === TEST_HASHES.task) {
-        const override = opts.drift?.task;
-        if (override !== undefined) return override;
-        return asRegistered(RECORDS.task.schema, hash);
-      }
-      if (hash === TEST_HASHES.concept) {
-        // Same value covers concept/preference/reference/agent/project/spike.
-        const override = opts.drift?.note;
-        if (override !== undefined) return override;
-        return asRegistered(RECORDS.concept.schema, hash);
-      }
-      return null;
+      const match = dispatch.find((d) => d.hash === hash);
+      if (!match) return null;
+      const override = opts.drift?.[match.driftKey];
+      if (override !== undefined) return override;
+      return asRegistered(match.schema, hash);
     },
     async rawCall() {
       return { status: 200, headers: new Headers(), body: "", json: null };

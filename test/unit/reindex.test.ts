@@ -169,7 +169,10 @@ describe("buildReindexFields", () => {
     expect(out2.design_slug).toBe("parent-d");
   });
 
-  test("concept (Phase 6): stamps kind + v1 markers", () => {
+  test("concept (Phase 6): per-kind schema, no kind/marker fields", () => {
+    // Post-Phase-E each Phase 6 kind has its own dedicated 7-field
+    // schema. buildReindexFields targets the per-kind canonical, which
+    // doesn't carry the legacy `kind` discriminator or v1_marker_*.
     const rec: FbrainRecord = {
       slug: "c1",
       title: "C",
@@ -178,12 +181,12 @@ describe("buildReindexFields", () => {
       tags: ["t1"],
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-02-01T00:00:00Z",
-      kind: "concept",
     };
     const out = buildReindexFields("concept", rec, "2026-05-24T20:00:00Z");
-    expect(out.kind).toBe("concept");
-    expect(out.v1_marker_a).toBe("fbrain");
-    expect(out.v1_marker_b).toBe("v1");
+    expect("kind" in out).toBe(false);
+    expect("v1_marker_a" in out).toBe(false);
+    expect("v1_marker_b" in out).toBe(false);
+    expect(out.updated_at).toBe("2026-05-24T20:00:00Z");
   });
 });
 

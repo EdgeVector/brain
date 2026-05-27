@@ -344,33 +344,30 @@ describe("resolveBySlug", () => {
     ).rejects.toMatchObject({ code: "not_found" });
   });
 
-  test("raw mode applies the caller-supplied filter (mirrors delete's Phase-6 kind check)", async () => {
-    // Seed two same-slug rows across two Phase-6 types that share noteSchema.
-    // The filter should drop the row whose kind doesn't match the type being
-    // probed, leaving exactly one hit.
+  test("raw mode applies the caller-supplied filter", async () => {
+    // The filter callback is generic: caller decides what's a hit. Here we
+    // assert it's invoked for the probed type and respects its return value.
+    // Pre-Phase-E this was used by delete.ts to drop rows whose `kind`
+    // didn't match the type slot; post-Phase-E each kind owns its own
+    // schema so the kind check is no longer needed, but the filter
+    // feature itself stays.
     const conceptHash = TEST_HASHES.concept;
-    const preferenceHash = TEST_HASHES.preference;
-    const node = mockNode({
-      [conceptHash]: [row("shared", { kind: "concept" })],
-      [preferenceHash]: [row("shared", { kind: "preference" })],
-    });
-    const seenKinds: string[] = [];
+    const node = mockNode({ [conceptHash]: [row("k1"), row("k2")] });
+    const filtered: string[] = [];
     const result = await resolveBySlug({
       node,
       cfg,
-      slug: "shared",
+      slug: "k1",
       type: "concept",
       raw: true,
       filter: (r: FbrainRecord, t: RecordType) => {
-        seenKinds.push(`${t}/${r.kind ?? ""}`);
-        return r.kind === t;
+        filtered.push(`${t}/${r.slug}`);
+        return r.slug === "k1";
       },
     });
     expect(result.type).toBe("concept");
-    expect(result.record.kind).toBe("concept");
-    // Filter was invoked exactly once (only the concept probe ran since
-    // opts.type narrows the sweep to one type).
-    expect(seenKinds).toEqual(["concept/concept"]);
+    expect(result.record.slug).toBe("k1");
+    expect(filtered).toEqual(["concept/k1"]);
   });
 
   test("single hit returns the ResolvedRecord with type + record", async () => {
