@@ -324,7 +324,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       const exp =
         h.expansionHits.length === 0 ? "" : `  +exp[${formatExpansionHits(h.expansionHits)}]`;
       print(
-        `${h.slug.padEnd(28)}  ${score.padStart(7)}  ${h.type.padEnd(10)}  bm25=${bm.padStart(3)}  vec=${vr.padStart(3)}${exp}  ${h.record.title}`,
+        `${h.slug.padEnd(28)}  ${score.padStart(7)}  ${capitalize(h.type).padEnd(10)}  bm25=${bm.padStart(3)}  vec=${vr.padStart(3)}${exp}  ${h.record.title}`,
       );
     }
   }
@@ -345,6 +345,11 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     bm25CorpusSize: docs.length,
     bm25CacheHit,
   };
+}
+
+function capitalize(s: string): string {
+  if (s.length === 0) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // Single source of truth for cost rendering in --verbose lines. When the
