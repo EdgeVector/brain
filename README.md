@@ -332,6 +332,9 @@ Top errors you'll hit and the fix:
 - **`error: Node rejected POST /api/setup/bootstrap with 410 — already provisioned …`**  
   The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where `~/.folddb/config/` carries over from a previous fold install. Recovery: (a) if you still have `~/.fbrain/config.json` from when this node was working, re-run `fbrain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.folddb/config/`, restart, then re-run `fbrain init`.
 
+- **`?? ~/` showing up in `git status` inside this repo.**  
+  Don't get confused by it — that literal `~` directory is `fold_db` writing to a config path of `~/.folddb` without expanding the tilde, leaving a real `./~/` subtree in whatever cwd it ran from. The contents are safe to delete (`rm -rf ./~`). It's also gitignored (`/~/` in `.gitignore`) so it won't be staged.
+
 When in doubt, `fbrain doctor` will tell you exactly which check is failing and what to do.
 
 ## Tests

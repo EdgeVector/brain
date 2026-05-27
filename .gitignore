@@ -14,6 +14,12 @@ config.json
 /tmp/
 *.tmp
 
+# Stray "~/" directory: fold_db can pass a literal "~/.folddb" to create_dir_all
+# without expanding the tilde, leaving a real "./~/" subtree in whatever cwd it
+# ran from. The data inside is safe to delete. Directory-rooted so we never
+# ignore a file literally named "~" deeper in the tree.
+/~/
+
 # editor
 .vscode/
 .idea/
