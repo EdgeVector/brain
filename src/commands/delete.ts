@@ -20,12 +20,11 @@ import {
   findBySlugRaw,
   isTombstoned,
   nowIso,
+  resolveBySlug,
   schemaHashFor,
   TOMBSTONE_TAG,
-  withReadRetry,
-  type FbrainRecord,
 } from "../record.ts";
-import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { RECORDS, type RecordType } from "../schemas.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -86,52 +85,25 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     verbose: opts.verbose,
   });
 
-  const probeTypes: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  // Retry the full per-type sweep on an empty result to ride out the
-  // polluted-daemon read flake — see withReadRetry in ../record.ts. The
-  // post-delete verify below is left un-retried: it's testing that a
-  // mutation we just fired landed, not that an existing row is findable.
-  const live = await withReadRetry(
-    async () => {
-      const matches: Array<{ type: RecordType; record: FbrainRecord }> = [];
-      for (const t of probeTypes) {
-        const r = await findBySlugRaw(node, t, schemaHashFor(t, opts.cfg), opts.slug);
-        if (r === null) continue;
-        if (isTombstoned(r)) continue;
-        // For Phase 6 types that share noteSchema, findBySlugRaw returns rows
-        // regardless of kind. Skip the rows whose kind doesn't match this
-        // type so we don't try to "delete" a preference as a concept.
-        const def = RECORDS[t];
-        if (def.kind !== null && r.kind !== def.kind) continue;
-        matches.push({ type: t, record: r });
-      }
-      return matches;
+  // raw mode bypasses tombstone filtering at the lookup layer; resolveBySlug
+  // drops tombstones inside the helper afterward. The post-delete verify
+  // below is intentionally NOT retried — it's testing that the mutation we
+  // just fired landed, not that an existing row is findable.
+  const { type, record } = await resolveBySlug({
+    node,
+    cfg: opts.cfg,
+    slug: opts.slug,
+    type: opts.type,
+    raw: true,
+    // For Phase 6 types that share noteSchema, findBySlugRaw returns rows
+    // regardless of kind. Skip rows whose kind doesn't match this type so we
+    // don't try to "delete" a preference as a concept.
+    filter: (r, t) => {
+      const def = RECORDS[t];
+      return def.kind === null || r.kind === def.kind;
     },
-    (matches) => matches.length > 0,
-  );
-
-  if (live.length === 0) {
-    if (opts.type) {
-      throw new FbrainError({
-        code: "not_found",
-        message: `No ${opts.type}: ${opts.slug}`,
-      });
-    }
-    throw new FbrainError({
-      code: "not_found",
-      message: `No record with slug "${opts.slug}".`,
-    });
-  }
-
-  if (live.length > 1) {
-    const matchedTypes = live.map((l) => l.type).join(", ");
-    throw new FbrainError({
-      code: "ambiguous_slug",
-      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
-    });
-  }
-
-  const { type, record } = live[0]!;
+    notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
+  });
   const schemaHash = schemaHashFor(type, opts.cfg);
 
   const fields = buildTombstoneFields(type, opts.slug, record.created_at, nowIso());
