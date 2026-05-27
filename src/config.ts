@@ -7,16 +7,30 @@
 // backward compat with v1 readers. v1 configs are migrated in-memory on
 // read; the next `fbrain init` persists v2 to disk.
 //
-// v3 (this commit): same shape as v2; the version bump signals that the
+// v3 (Phase D): same shape as v2; the version bump signals that the
 // default schema-service URL moved from the local `:9102` to the cloud
 // Lambda. `runInit` auto-heals v1/v2 configs with the dead local default
 // URLs on the next `fbrain init` (preserving any user override).
+//
+// v4 (this commit): legacy FbrainKindNote cleanup. The legacy schema and
+// its `__legacy_note__` schemaHashes entry are gone. Any v3 config that
+// still carries that entry is auto-healed on read by stripping the entry
+// — the cleanup is purely shape, not data (consolidation already moved
+// every legacy row into the per-kind canonicals).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const CONFIG_VERSION = 3;
+export const CONFIG_VERSION = 4;
+
+// Legacy FbrainKindNote schema-key (pre-v4). Defined here, not in
+// schemas.ts, so the config migration can detect + strip it without
+// keeping the legacy schema definition alive. Any v3 config that carried
+// this key in `schemaHashes` is auto-healed on read (the entry is
+// dropped). Records were already moved to per-kind schemas by the
+// consolidation migration (PR #63) before this cleanup landed.
+const LEGACY_NOTE_SCHEMA_KEY_V3 = "__legacy_note__";
 
 export type Config = {
   configVersion: number;
@@ -125,10 +139,11 @@ function assertConfigShape(path: string, raw: unknown): Config {
     };
   }
 
-  // v2 → v3 is shape-compatible: same fields, same types. We just bump the
-  // in-memory version so the rest of the validator runs the unified path.
-  // The URL auto-heal lives in runInit so user overrides survive.
-  if (version === 2 || version === CONFIG_VERSION) {
+  // v2/v3 → v4 are shape-compatible: same fields, same types. We bump
+  // the in-memory version so the rest of the validator runs the unified
+  // path. The URL auto-heal (v2→v3) lives in runInit so user overrides
+  // survive; the v3→v4 legacy-key strip happens below.
+  if (version === 2 || version === 3 || version === CONFIG_VERSION) {
     // fall through to the shared validation + return below
   } else {
     throw new ConfigInvalidError(
@@ -149,6 +164,11 @@ function assertConfigShape(path: string, raw: unknown): Config {
     if (typeof v !== "string" || v.length === 0) {
       throw new ConfigInvalidError(path, `schemaHashes["${k}"] is not a non-empty string`);
     }
+    // v3 → v4: drop the now-defunct legacy FbrainKindNote entry. Records
+    // were migrated into per-kind canonicals by `fbrain consolidate`
+    // before this cleanup landed; keeping the key would route reads at
+    // an unregistered hash.
+    if (k === LEGACY_NOTE_SCHEMA_KEY_V3) continue;
     schemaHashes[k] = v;
   }
 

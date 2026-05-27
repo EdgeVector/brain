@@ -147,27 +147,18 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 2/5: register the unique schemas. As of Phase E each Phase 6
-  // kind has its own dedicated schema, so init registers Design + Task +
-  // six per-kind schemas + the legacy FbrainKindNote (kept registered
-  // so pre-Phase-E records remain readable via the legacy fallback).
-  print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas (covering ${UNIQUE_SCHEMAS.reduce((n, s) => n + s.types.length, 0)} record types)`);
+  // Step 2/5: register the eight per-kind schemas — Design + Task +
+  // Concept/Preference/Reference/Agent/Project/Spike. Each entry has
+  // exactly one RecordType, so the hash is written once under that key.
+  print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas`);
   const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
   const schemaHashes: Record<string, string> = {};
   for (const entry of UNIQUE_SCHEMAS) {
     const reg = await schemaClient.registerSchema(entry.schema);
-    // Persist under the entry's key (for the legacy fallback's lookup)
-    // and under each RecordType the entry covers (for schemaHashFor).
-    // Most entries have key === types[0], so this writes the same hash
-    // twice under the same key — harmless.
-    schemaHashes[entry.key] = reg.canonicalHash;
     for (const type of entry.types) {
       schemaHashes[type] = reg.canonicalHash;
     }
-    const coverage = entry.types.length > 0
-      ? `covers ${entry.types.join(", ")}`
-      : "legacy read-only";
-    print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (${coverage})`);
+    print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
   }
 
   // Step 3/5: load schemas into the node

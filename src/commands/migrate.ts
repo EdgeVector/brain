@@ -28,10 +28,9 @@
 // bulk `listRecords(to_hash)` per affected type pre-builds the skip
 // set, then the loop checks each record's slug in O(1).
 //
-// Phase 6 sharding: noteSchema backs six logical types. A migration
-// of any one Phase 6 type re-puts every Phase 6 record and swaps all
-// six schemaHashes entries atomically, preserving the Phase 6
-// "one-schema-for-six-kinds" invariant.
+// Phase 6 schemas: each kind has its own canonical hash, so a migration
+// touches only the named type's records and swaps only that one
+// schemaHashes entry.
 
 import { renameSync, writeFileSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
@@ -161,10 +160,8 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   const { cfg, mode, print, verbose } = ctx;
   const dir = ctx.migrationsDir ?? defaultMigrationsDir();
 
-  // 1. Resolve scope. Post-Phase-E each Phase 6 type owns its own
-  // per-kind schema, so a migration covers one type at a time. Legacy
-  // FbrainKindNote rows are untouched here — they need the consolidation
-  // pass before per-kind migrations apply to them (separate follow-up).
+  // 1. Resolve scope. Each Phase 6 type owns its own per-kind schema,
+  // so a migration covers one type at a time.
   const scope = resolveScope(mode.type);
   const baseSchema = scope.schemaEntry.schema;
 
@@ -505,10 +502,10 @@ async function enumerateAllRecords(
 // Build the field payload to write under the new schema hash. Mirrors
 // reindex.ts's buildReindexFields: preserve every user-meaningful
 // field; add the new field with the configured default; bump
-// updated_at; preserve created_at, tags (including tombstone), and
-// v1_marker_*. Also stamps the per-migration version marker (see
-// `versionMarkerField` in `src/migration.ts`) so the new schema's
-// field set is structurally distinct from any prior registration.
+// updated_at; preserve created_at and tags (including tombstone). Also
+// stamps the per-migration version marker (see `versionMarkerField`
+// in `src/migration.ts`) so the new schema's field set is structurally
+// distinct from any prior registration.
 export function buildMigratedFields(
   type: RecordType,
   record: FbrainRecord,
@@ -530,9 +527,6 @@ export function buildMigratedFields(
   if (entry.hasDesignSlug) {
     fields.design_slug = record.design_slug ?? "";
   }
-  // Pre-Phase-E this added `kind` + `v1_marker_a/b` because Phase 6 types
-  // shared the FbrainKindNote schema. Post-Phase-E migrations operate on
-  // each per-kind schema, which doesn't carry those fields.
   fields[fieldAdded] = defaultValue;
   if (descriptiveNameTo) {
     fields[versionMarkerField(descriptiveNameTo)] = versionMarkerValue(descriptiveNameTo);
@@ -571,7 +565,7 @@ async function assertFieldRegistered(
         "docs/g15-schema-evolution-playbook.md → 'Failure modes'). " +
         "Re-run with a structurally-distinct field set (the per-migration " +
         "version marker is added automatically; if you're still hitting this, " +
-        "the schema service has a prior FbrainKindNote_vN with overlapping fields).",
+        "the schema service has a prior <Schema>_vN registration with overlapping fields).",
     });
   }
 }

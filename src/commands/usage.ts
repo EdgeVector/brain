@@ -1,11 +1,11 @@
 // `fbrain doctor --usage` — team-adoption telemetry (G13).
 //
-// Iterates every record across the three registered schemas (Design,
-// Task, FbrainKindNote) via /api/query, derives a per-record userHash
-// from the author public key, and counts records created in the last
-// N days (default 7) — grouped by userHash and broken down by record
-// type. Prints only the 8-char prefix of each userHash so the report
-// is shareable without leaking identifiers.
+// Iterates every record across the eight registered schemas via
+// /api/query, derives a per-record userHash from the author public key,
+// and counts records created in the last N days (default 7) — grouped
+// by userHash and broken down by record type. Prints only the 8-char
+// prefix of each userHash so the report is shareable without leaking
+// identifiers.
 //
 // Also persists today's per-user counts to ~/.fbrain/usage.jsonl as
 // one line per UTC date so we can plot adoption trends over time.
@@ -28,11 +28,7 @@ import {
 import { type Config } from "../config.ts";
 import { fieldsFor } from "../record.ts";
 import {
-  LEGACY_NOTE_QUERY_FIELDS,
-  LEGACY_NOTE_SCHEMA_KEY,
-  RECORDS,
   UNIQUE_SCHEMAS,
-  isRecordType,
   type RecordType,
 } from "../schemas.ts";
 
@@ -81,13 +77,8 @@ export async function runUsageReport(
       verbose?.(`usage: skipping ${entry.key} — no schemaHash in config`);
       continue;
     }
-    // The legacy FbrainKindNote entry has `types: []` (no new writes route
-    // there). Read its rows with the legacy field shape and resolve each
-    // row's RecordType from its `kind` discriminator.
-    const isLegacy = entry.key === LEGACY_NOTE_SCHEMA_KEY;
-    const fields = isLegacy
-      ? [...LEGACY_NOTE_QUERY_FIELDS]
-      : fieldsFor(entry.types[0]!);
+    const type = entry.types[0]!;
+    const fields = fieldsFor(type);
     let rows: QueryRow[];
     try {
       const res = await node.queryAll({ schemaHash, fields });
@@ -101,10 +92,6 @@ export async function runUsageReport(
     verbose?.(`usage: ${entry.key} → ${rows.length} rows`);
 
     for (const row of rows) {
-      const type = isLegacy
-        ? resolveLegacyType(row)
-        : resolveType(row, entry.types);
-      if (!type) continue;
       const createdAt = stringField(row.fields, "created_at");
       if (!createdAt) continue;
       const ts = Date.parse(createdAt);
@@ -234,32 +221,6 @@ function utcMidnight(d: Date): Date {
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function resolveType(row: QueryRow, candidates: readonly RecordType[]): RecordType | null {
-  if (candidates.length === 1) {
-    const only = candidates[0]!;
-    // Sanity check: if the row also carries `kind` (e.g. a stray legacy
-    // FbrainKindNote field somehow surfaced through a per-kind query),
-    // it must match the type's expected discriminator value.
-    if (RECORDS[only].legacyKind !== null) {
-      const k = stringField(row.fields, "kind");
-      if (k.length > 0 && k !== RECORDS[only].legacyKind) return null;
-    }
-    return only;
-  }
-  const kind = stringField(row.fields, "kind");
-  if (kind.length === 0) return null;
-  if (!isRecordType(kind)) return null;
-  return candidates.includes(kind) ? kind : null;
-}
-
-// Legacy FbrainKindNote rows: discriminate by the `kind` field. Only
-// rows whose kind matches a known Phase 6 RecordType are counted.
-function resolveLegacyType(row: QueryRow): RecordType | null {
-  const k = stringField(row.fields, "kind");
-  if (k.length === 0 || !isRecordType(k)) return null;
-  return RECORDS[k].legacyKind !== null ? k : null;
 }
 
 function stringField(f: Record<string, unknown> | undefined, key: string): string {

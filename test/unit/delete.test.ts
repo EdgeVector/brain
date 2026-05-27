@@ -131,7 +131,6 @@ describe("buildTombstoneFields", () => {
       "doomed",
       "2026-01-01T00:00:00Z",
       "2026-05-23T10:00:00Z",
-      false,
     );
     expect(fields).toEqual({
       slug: "doomed",
@@ -150,7 +149,6 @@ describe("buildTombstoneFields", () => {
       "doomed-task",
       "2026-01-01T00:00:00Z",
       "2026-05-23T10:00:00Z",
-      false,
     );
     expect(fields.status).toBe("cancelled");
     expect(fields.design_slug).toBe("");
@@ -159,32 +157,18 @@ describe("buildTombstoneFields", () => {
 
   test("preserves created_at exactly", () => {
     const original = "2026-02-15T03:04:05.678Z";
-    const fields = buildTombstoneFields("design", "s", original, "2026-05-23T10:00:00Z", false);
+    const fields = buildTombstoneFields("design", "s", original, "2026-05-23T10:00:00Z");
     expect(fields.created_at).toBe(original);
   });
 
-  test("legacy=true on a Phase 6 type adds kind + v1_marker_a/b", () => {
+  test("Phase 6 payload has no kind or v1_marker fields (per-kind schema)", () => {
     const fields = buildTombstoneFields(
       "concept",
-      "old-concept",
+      "concept-x",
       "2026-01-01T00:00:00Z",
       "2026-05-27T10:00:00Z",
-      true,
     );
     expect(fields.status).toBe("archived");
-    expect(fields.kind).toBe("concept");
-    expect(fields.v1_marker_a).toBe("fbrain");
-    expect(fields.v1_marker_b).toBe("v1");
-  });
-
-  test("legacy=false on a Phase 6 type omits kind + v1_marker_a/b (per-kind schema doesn't carry them)", () => {
-    const fields = buildTombstoneFields(
-      "concept",
-      "new-concept",
-      "2026-01-01T00:00:00Z",
-      "2026-05-27T10:00:00Z",
-      false,
-    );
     expect(fields.kind).toBeUndefined();
     expect(fields.v1_marker_a).toBeUndefined();
     expect(fields.v1_marker_b).toBeUndefined();

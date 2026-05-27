@@ -207,8 +207,7 @@ export function tokenize(text: string): string[] {
 export function computeFingerprint(docs: BM25Document[]): string {
   // Stable hash of the (slug, updated_at) pairs sorted by slug. This is what
   // tells us "did the corpus change since the last build?". Including type
-  // means a slug moving between types invalidates too — defensive belt &
-  // suspenders against the shared-noteSchema case.
+  // means a slug moving between types invalidates too.
   const pairs = docs
     .map((d) => `${d.type}::${d.slug}@${d.updatedAt}`)
     .sort();

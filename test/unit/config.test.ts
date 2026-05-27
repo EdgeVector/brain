@@ -156,6 +156,46 @@ describe("config", () => {
     }
   });
 
+  test("v3 → v4: __legacy_note__ schemaHash entry is auto-stripped on read", () => {
+    // v3 configs registered FbrainKindNote alongside the per-kind canonicals.
+    // v4 drops the legacy schema entirely; the entry is silently removed so
+    // a stale v3 config on disk reads cleanly without a forced re-init.
+    const { dir, path } = tmpPath();
+    try {
+      const v3 = {
+        configVersion: 3,
+        nodeUrl: "http://127.0.0.1:9001",
+        schemaServiceUrl: "https://axo709qs11.execute-api.us-east-1.amazonaws.com",
+        userHash: "uh-v3",
+        schemaHashes: {
+          design: "d".repeat(64),
+          task: "t".repeat(64),
+          concept: "c".repeat(64),
+          preference: "f".repeat(64),
+          reference: "e".repeat(64),
+          agent: "a".repeat(64),
+          project: "9".repeat(64),
+          spike: "5".repeat(64),
+          __legacy_note__: "b".repeat(64),
+        },
+        designSchemaHash: "d".repeat(64),
+        taskSchemaHash: "t".repeat(64),
+      };
+      writeFileSync(path, JSON.stringify(v3));
+      const got = readConfig(path);
+      expect(got.configVersion).toBe(CONFIG_VERSION);
+      expect(got.schemaHashes.__legacy_note__).toBeUndefined();
+      expect(got.schemaHashes.concept).toBe("c".repeat(64));
+      // Re-writing the upgraded config persists the stripped shape.
+      writeConfig(got, path);
+      const raw = JSON.parse(readFileSync(path, "utf8"));
+      expect(raw.schemaHashes.__legacy_note__).toBeUndefined();
+      expect(raw.configVersion).toBe(CONFIG_VERSION);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("writeConfig keeps designSchemaHash/taskSchemaHash mirrored against schemaHashes", () => {
     const { dir, path } = tmpPath();
     try {

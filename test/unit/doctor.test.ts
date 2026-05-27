@@ -16,7 +16,6 @@ import {
 import {
   RECORDS,
   designSchema,
-  noteSchema,
   type AddSchemaRequest,
 } from "../../src/schemas.ts";
 import { type Config } from "../../src/config.ts";
@@ -30,7 +29,7 @@ import {
   type SchemaServiceClient,
 } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import { buildTestCfg, TEST_HASHES, TEST_LEGACY_NOTE_HASH } from "../util.ts";
+import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -60,8 +59,8 @@ function writeCfg(cfg: Config): string {
   return path;
 }
 
-// Drift overrides keyed by `key` from UNIQUE_SCHEMAS — design, task, the
-// six per-kind schemas, plus the legacy FbrainKindNote (`note`).
+// Drift overrides keyed by `key` from UNIQUE_SCHEMAS — design, task,
+// plus the six per-kind Phase 6 schemas.
 type DriftKey =
   | "design"
   | "task"
@@ -70,17 +69,15 @@ type DriftKey =
   | "reference"
   | "agent"
   | "project"
-  | "spike"
-  | "note";
+  | "spike";
 type DriftOverrides = Partial<Record<DriftKey, RegisteredSchema | null>>;
 
 function mockSchemaClient(opts: {
   drift?: DriftOverrides;
   listSchemasOk?: boolean;
 }): SchemaServiceClient {
-  // Per-hash mapping covering all 9 UNIQUE_SCHEMAS entries: 2 baseline
-  // (design/task) + 6 per-kind (concept/preference/reference/agent/project/spike)
-  // + legacy FbrainKindNote (under TEST_LEGACY_NOTE_HASH).
+  // Per-hash mapping covering all 8 UNIQUE_SCHEMAS entries: 2 baseline
+  // (design/task) + 6 per-kind (concept/preference/reference/agent/project/spike).
   const dispatch: Array<{ hash: string; driftKey: DriftKey; schema: AddSchemaRequest }> = [
     { hash: TEST_HASHES.design, driftKey: "design", schema: RECORDS.design.schema },
     { hash: TEST_HASHES.task, driftKey: "task", schema: RECORDS.task.schema },
@@ -90,7 +87,6 @@ function mockSchemaClient(opts: {
     { hash: TEST_HASHES.agent, driftKey: "agent", schema: RECORDS.agent.schema },
     { hash: TEST_HASHES.project, driftKey: "project", schema: RECORDS.project.schema },
     { hash: TEST_HASHES.spike, driftKey: "spike", schema: RECORDS.spike.schema },
-    { hash: TEST_LEGACY_NOTE_HASH, driftKey: "note", schema: noteSchema },
   ];
   return {
     baseUrl: "mock",
@@ -134,8 +130,7 @@ function mockNodeClient(opts: {
   // Pollution probe: hits returned for any search NOT matching a freshness
   // marker (markers start with `freshprobe`).
   onPollutionSearch?: PollutionHook;
-  // Per-schema-hash store used by queryAll. Rows must carry `kind` to
-  // satisfy the listRecords filter for shared-noteSchema types.
+  // Per-schema-hash store used by queryAll.
   store?: Record<string, FbrainStoreRow[]>;
   // Captures every mutation issued through this client.
   mutations?: RecordedMutation[];
@@ -210,22 +205,17 @@ function mockNodeClient(opts: {
 
 type FbrainStoreRow = { slug: string; fields: Record<string, unknown> };
 
-// Helper: every Phase 6 record needs `kind` to survive the listRecords
-// filter. Wrap a slug/tags pair so tests don't have to repeat the boilerplate.
 function conceptRow(slug: string, tags: string[] = []): FbrainStoreRow {
   return {
     slug,
     fields: {
       slug,
-      kind: "concept",
       title: slug,
       body: "",
       status: "active",
       tags,
       created_at: "2026-05-24T00:00:00.000Z",
       updated_at: "2026-05-24T00:00:00.000Z",
-      v1_marker_a: "fbrain",
-      v1_marker_b: "v1",
     },
   };
 }
@@ -233,7 +223,7 @@ function conceptRow(slug: string, tags: string[] = []): FbrainStoreRow {
 function selfHit(slug: string, schemaHash: string, score: number): NativeIndexHit {
   return {
     schema_name: schemaHash,
-    schema_display_name: "FbrainKindNote",
+    schema_display_name: "Concept",
     field: "body",
     key_value: { hash: slug, range: null },
     value: "...",
@@ -255,7 +245,7 @@ function orphanHit(slug: string | null): NativeIndexHit {
 function fbrainHit(slug: string, schemaHash: string, score: number): NativeIndexHit {
   return {
     schema_name: schemaHash,
-    schema_display_name: "FbrainKindNote",
+    schema_display_name: "Concept",
     field: "body",
     key_value: { hash: slug, range: null },
     value: "...",
@@ -358,10 +348,13 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(0);
     expect(lines.some((l) => l.includes("OK"))).toBe(true);
     expect(lines.filter((l) => l.startsWith("[FAIL]")).length).toBe(0);
-    // Three unique schemas: Design, Task, FbrainKindNote.
+    // Eight unique schemas: Design, Task, and six Phase 6 kinds.
     expect(lines.some((l) => l.includes("[PASS] schema-drift[Design]"))).toBe(true);
     expect(lines.some((l) => l.includes("[PASS] schema-drift[Task]"))).toBe(true);
-    expect(lines.some((l) => l.includes("[PASS] schema-drift[FbrainKindNote]"))).toBe(true);
+    expect(lines.some((l) => l.includes("[PASS] schema-drift[Concept]"))).toBe(true);
+    expect(lines.some((l) => l.includes("[PASS] schema-drift[Spike]"))).toBe(true);
+    // FbrainKindNote is no longer registered.
+    expect(lines.some((l) => l.includes("FbrainKindNote"))).toBe(false);
     // G0 gate item #9 disclosure WARNs — always emitted, never flip exit.
     const smsLine = lines.find((l) => l.startsWith("[WARN] single-machine-slice"));
     const ntsLine = lines.find((l) => l.startsWith("[WARN] no-team-sync"));
@@ -605,21 +598,21 @@ describe("doctor verdict logic", () => {
     expect(lines.some((l) => l.includes("[FAIL] schema-drift[Design]"))).toBe(true);
   });
 
-  test("schema drift on the shared Phase 6 schema → drift FAIL", async () => {
+  test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
-    const driftedNote = asRegistered(RECORDS.concept.schema, TEST_HASHES.concept);
-    driftedNote.fields = driftedNote.fields.filter((f) => f !== "tags");
-    delete driftedNote.field_types["tags"];
+    const driftedConcept = asRegistered(RECORDS.concept.schema, TEST_HASHES.concept);
+    driftedConcept.fields = driftedConcept.fields.filter((f) => f !== "tags");
+    delete driftedConcept.field_types["tags"];
     const code = await doctor({
       configPath,
       print: (l) => lines.push(l),
       schemaClientFactory: () =>
-        mockSchemaClient({ drift: { note: driftedNote } }),
+        mockSchemaClient({ drift: { concept: driftedConcept } }),
       nodeClientFactory: () => mockNodeClient({}),
     });
     expect(code).toBe(1);
-    expect(lines.some((l) => l.includes("[FAIL] schema-drift[FbrainKindNote]"))).toBe(true);
+    expect(lines.some((l) => l.includes("[FAIL] schema-drift[Concept]"))).toBe(true);
   });
 });
 

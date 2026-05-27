@@ -232,14 +232,13 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
-  // 6. schema drift — check each unique schema once. As of Phase E this
-  // iterates 8 entries: Design + Task + six per-kind Phase 6 schemas +
-  // the legacy FbrainKindNote (kept registered for read-back of pre-
-  // Phase-E records). When a completed migration manifest exists for
-  // this schema and its to_hash matches the current config hash,
-  // schemas.ts is *expected* to differ — the drift is the intentional
-  // product of `fbrain migrate --add-field`. Demote to WARN with a
-  // pointer to update schemas.ts; don't fail the doctor verdict.
+  // 6. schema drift — check each unique schema once. Iterates 8 entries:
+  // Design + Task + six per-kind Phase 6 schemas. When a completed
+  // migration manifest exists for this schema and its to_hash matches
+  // the current config hash, schemas.ts is *expected* to differ — the
+  // drift is the intentional product of `fbrain migrate --add-field`.
+  // Demote to WARN with a pointer to update schemas.ts; don't fail
+  // the doctor verdict.
   const allManifests = safeListManifests();
   if (cfgIssues.length === 0) {
     for (const entry of UNIQUE_SCHEMAS) {
@@ -574,15 +573,12 @@ export async function runFreshnessProbe(
       const now = nowIso();
       const fields: Record<string, unknown> = {
         slug,
-        kind: "concept",
         title: `freshness probe ${i}`,
         body,
         status: "active",
         tags: [],
         created_at: now,
         updated_at: now,
-        v1_marker_a: "fbrain",
-        v1_marker_b: "v1",
       };
       await node.createRecord({ schemaHash: conceptHash, fields, keyHash: slug });
       created.push(slug);
@@ -604,8 +600,7 @@ export async function runFreshnessProbe(
   } finally {
     for (const slug of created) {
       try {
-        // Freshness probe creates records via per-kind schema, so legacy=false.
-        const cleanupFields = buildTombstoneFields("concept", slug, nowIso(), nowIso(), false);
+        const cleanupFields = buildTombstoneFields("concept", slug, nowIso(), nowIso());
         await node.updateRecord({ schemaHash: conceptHash, fields: cleanupFields, keyHash: slug });
       } catch (err) {
         verbose?.(

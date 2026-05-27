@@ -128,10 +128,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       opts.verbose?.(`skip stale: ${type}/${slug} not found in current store`);
       continue;
     }
-    // Display the user-facing record type, not the underlying fold_db
-    // schema name. Six Phase-6 types share the `FbrainKindNote` schema —
-    // showing that internal name leaks implementation terminology. The
-    // resolved `type` already discriminates concept/preference/etc.
+    // Display the user-facing record type, capitalized.
     const displayName = capitalize(type);
     const score = typeof hit.metadata?.score === "number" ? hit.metadata.score : null;
     const matchType = typeof hit.metadata?.match_type === "string" ? hit.metadata.match_type : null;
