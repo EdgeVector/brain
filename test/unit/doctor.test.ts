@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  classifySchemaDrift,
   diffSchemas,
   doctor,
   schemaServiceFixHint,
@@ -16,6 +17,7 @@ import {
 import {
   RECORDS,
   designSchema,
+  projectSchema,
   type AddSchemaRequest,
 } from "../../src/schemas.ts";
 import { type Config } from "../../src/config.ts";
@@ -336,6 +338,76 @@ describe("diffSchemas", () => {
     const reg = asRegistered(designSchema, DESIGN_HASH);
     // tags is Array(String) in schemas.ts; ensure matching shape returns no diff
     expect(diffSchemas(designSchema, reg)).toEqual([]);
+  });
+});
+
+// classifySchemaDrift was added (PR landed alongside this test) because
+// doctor's old extras-only behavior reported FAIL with a `fbrain init` hint
+// that couldn't recover — the schema service expands schemas of the same
+// descriptive_name (often colliding with Schema.org starter_seeds) and
+// never shrinks them, so re-registering returns the same hash. Extras-only
+// is now WARN; everything else stays real_drift.
+describe("classifySchemaDrift", () => {
+  test("identical schemas → kind=none", () => {
+    const reg = asRegistered(designSchema, DESIGN_HASH);
+    expect(classifySchemaDrift(designSchema, reg)).toEqual({ kind: "none" });
+  });
+
+  test("registered has extra field only → kind=extras_only", () => {
+    const reg = asRegistered(projectSchema, TEST_HASHES.project);
+    reg.fields.push("identifier");
+    reg.field_types["identifier"] = "String";
+    const c = classifySchemaDrift(projectSchema, reg);
+    expect(c.kind).toBe("extras_only");
+    if (c.kind === "extras_only") {
+      expect(c.extras).toEqual(["identifier"]);
+    }
+  });
+
+  test("registered has multiple extras → kind=extras_only carries all of them", () => {
+    const reg = asRegistered(designSchema, DESIGN_HASH);
+    reg.fields.push("owner", "deadline");
+    reg.field_types["owner"] = "String";
+    reg.field_types["deadline"] = "String";
+    const c = classifySchemaDrift(designSchema, reg);
+    expect(c.kind).toBe("extras_only");
+    if (c.kind === "extras_only") {
+      expect(new Set(c.extras)).toEqual(new Set(["owner", "deadline"]));
+    }
+  });
+
+  test("registered missing a field → kind=real_drift (not extras-only)", () => {
+    const reg = asRegistered(designSchema, DESIGN_HASH);
+    reg.fields = reg.fields.filter((f) => f !== "tags");
+    delete reg.field_types["tags"];
+    const c = classifySchemaDrift(designSchema, reg);
+    expect(c.kind).toBe("real_drift");
+  });
+
+  test("mixed drift (extras + missing) → kind=real_drift", () => {
+    const reg = asRegistered(designSchema, DESIGN_HASH);
+    reg.fields = reg.fields.filter((f) => f !== "tags");
+    delete reg.field_types["tags"];
+    reg.fields.push("owner");
+    reg.field_types["owner"] = "String";
+    const c = classifySchemaDrift(designSchema, reg);
+    expect(c.kind).toBe("real_drift");
+  });
+
+  test("descriptive_name mismatch is real_drift even with extras", () => {
+    const reg = asRegistered(designSchema, DESIGN_HASH);
+    reg.descriptive_name = "DesignRenamed";
+    reg.fields.push("owner");
+    reg.field_types["owner"] = "String";
+    const c = classifySchemaDrift(designSchema, reg);
+    expect(c.kind).toBe("real_drift");
+  });
+
+  test("field_types mismatch is real_drift", () => {
+    const reg = asRegistered(designSchema, DESIGN_HASH);
+    reg.field_types["body"] = { Array: "String" };
+    const c = classifySchemaDrift(designSchema, reg);
+    expect(c.kind).toBe("real_drift");
   });
 });
 
@@ -660,6 +732,82 @@ describe("doctor verdict logic", () => {
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] schema-drift[Concept]"))).toBe(true);
+  });
+
+  // Regression for the Project + Schema.org starter_seed collision documented
+  // in the task that introduced this test. POSTing the canonical Project
+  // schema to the schema service expanded against an existing schema that
+  // had `identifier`, so the registered schema carried an extra field
+  // schemas.ts did not. The old code FAILed and pointed at `fbrain init`,
+  // but init kept returning the same hash (the service expands schemas, it
+  // doesn't shrink them). Now: WARN, exit 0, and the hint names the real
+  // recovery (bump descriptive_name in src/schemas.ts).
+  test("extras-only drift → WARN with expansion-aware hint, doctor exits 0", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const expanded = asRegistered(RECORDS.project.schema, TEST_HASHES.project);
+    expanded.fields.push("identifier");
+    expanded.field_types["identifier"] = "String";
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () =>
+        mockSchemaClient({ drift: { project: expanded } }),
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(0);
+    const warnLine = lines.find((l) => l.includes("schema-drift[Project]"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.startsWith("[WARN]")).toBe(true);
+    expect(warnLine!).toContain("identifier");
+    // The fix-hint must NOT push the user back at `fbrain init` as if that
+    // would clear the warning — that's the original bug. It must name the
+    // real recovery: bump descriptive_name in src/schemas.ts.
+    const fixLine = lines.find(
+      (l, i) =>
+        l.trim().startsWith("fix:") &&
+        i > 0 &&
+        (lines[i - 1] ?? "").includes("schema-drift[Project]"),
+    );
+    expect(fixLine).toBeDefined();
+    expect(fixLine!).toContain("descriptive_name");
+    expect(fixLine!).toContain("src/schemas.ts");
+    expect(fixLine!).toContain("expansion");
+  });
+
+  // Locks the comparison input. doctor's drift check must fetch the
+  // schema at the hash stored in cfg.schemaHashes[entry.key] — not a
+  // cached, stale, or recomputed hash. The bonus on this PR's task asked
+  // for a guard against this. If a future refactor introduces a different
+  // hash source (e.g. recomputing from schemas.ts), this test catches it.
+  test("drift check fetches the schema at the config's stored hash", async () => {
+    const customProjectHash = "9".repeat(63) + "a";
+    const cfg = makeCfg({
+      schemaHashes: { ...TEST_HASHES, project: customProjectHash },
+    });
+    const configPath = writeCfg(cfg);
+    const lines: string[] = [];
+    const lookups: string[] = [];
+    const baseSchema = mockSchemaClient({});
+    const wrapped: SchemaServiceClient = {
+      ...baseSchema,
+      async getSchemaByHash(hash) {
+        lookups.push(hash);
+        if (hash === customProjectHash) {
+          return asRegistered(RECORDS.project.schema, customProjectHash);
+        }
+        return baseSchema.getSchemaByHash(hash);
+      },
+    };
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => wrapped,
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(0);
+    expect(lookups).toContain(customProjectHash);
+    expect(lines.some((l) => l.includes("[PASS] schema-drift[Project]"))).toBe(true);
   });
 });
 
