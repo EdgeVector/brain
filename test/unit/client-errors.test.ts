@@ -117,6 +117,62 @@ describe("client error mapping", () => {
     }
   });
 
+  test("node 400 'Failed to init embedding model' (in body.error) → embedding_model_unavailable", async () => {
+    // Real wire shape from fold_db when fastembed can't init — body.error
+    // carries the whole "Bad request: Schema error: Invalid data: Failed to
+    // init embedding model: Failed to retrieve model.onnx" string and
+    // there's no separate body.message. The rewrap must still trip.
+    installMock([
+      {
+        status: 400,
+        body: {
+          ok: false,
+          error:
+            "Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx",
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.search("anything");
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("embedding_model_unavailable");
+      // Message must NOT be the raw upstream wall of text; must lead with
+      // fbrain framing and surface the raw cause parenthetically.
+      expect(fe.message).toContain("embedding model is not available");
+      expect(fe.message).toContain("Failed to retrieve model.onnx"); // raw, truncated
+      expect(fe.message).toContain("fbrain doctor");
+      // Hint must point at a real recovery step.
+      expect(fe.hint ?? "").toContain("observability.jsonl");
+      expect(fe.hint ?? "").toContain("brew services restart folddb");
+    }
+  });
+
+  test("node 400 with embedding-model substring in body.message also rewraps", async () => {
+    // Belt-and-braces: if a future fold_db build moves the string to
+    // body.message instead of body.error, the rewrap still fires.
+    installMock([
+      {
+        status: 400,
+        body: {
+          ok: false,
+          message:
+            "Bad request: Schema error: Invalid data: Failed to init embedding model: some new fastembed error",
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.search("anything");
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("embedding_model_unavailable");
+    }
+  });
+
   test("connection refused → service_unreachable", async () => {
     globalThis.fetch = (async () => {
       throw new TypeError("fetch failed");

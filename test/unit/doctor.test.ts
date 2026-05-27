@@ -134,6 +134,9 @@ function mockNodeClient(opts: {
   // Pollution probe: hits returned for any search NOT matching a freshness
   // marker (markers start with `freshprobe`).
   onPollutionSearch?: PollutionHook;
+  // Embedding-model probe: when set, EVERY search call throws this error.
+  // Used to simulate the upstream "Failed to retrieve model.onnx" failure.
+  searchThrows?: Error;
   // Per-schema-hash store used by queryAll. Rows must carry `kind` to
   // satisfy the listRecords filter for shared-noteSchema types.
   store?: Record<string, FbrainStoreRow[]>;
@@ -192,6 +195,7 @@ function mockNodeClient(opts: {
       return { ok: true, results: rows, total_count: rows.length, returned_count: rows.length };
     },
     async search(query: string): Promise<NativeIndexHit[]> {
+      if (opts.searchThrows) throw opts.searchThrows;
       // Freshness probe uses marker words starting with "freshprobe". The
       // probe always searches immediately after a create, so the
       // most-recently-created slug pairs 1:1 with the current marker.
@@ -620,6 +624,112 @@ describe("doctor verdict logic", () => {
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] schema-drift[FbrainKindNote]"))).toBe(true);
+  });
+});
+
+describe("embedding-model probe", () => {
+  test("trivial search succeeds → PASS", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.startsWith("[PASS] embedding-model"))).toBe(true);
+  });
+
+  test("FbrainError embedding_model_unavailable → FAIL with recovery hint", async () => {
+    // The real wire failure: client.ts mapped a 400 + body.error containing
+    // "Failed to init embedding model" into this FbrainError. Doctor must
+    // surface a FAIL whose fix-line names the daemon log + restart steps.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          searchThrows: new FbrainError({
+            code: "embedding_model_unavailable",
+            message:
+              "Node /api/native-index/search rejected the request — the embedding model is not available (raw: Failed to init embedding model: ...) — run `fbrain doctor` for a full diagnosis.",
+            hint: "ignored — doctor uses its own constant",
+          }),
+        }),
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] embedding-model"));
+    expect(fail).toBeDefined();
+    expect(fail).not.toContain("fbrain doctor"); // circular tip stripped
+    // The fix-line (next line, prefixed with `       fix:`) must point at
+    // concrete recovery steps, not the upstream model.onnx wall of text.
+    const fixIdx = lines.findIndex((l) => l.startsWith("[FAIL] embedding-model")) + 1;
+    expect(lines[fixIdx]).toContain("observability.jsonl");
+    expect(lines[fixIdx]).toContain("brew services restart folddb");
+  });
+
+  test("raw substring match — un-rewrapped error from older fbrain still FAILs", async () => {
+    // Belt-and-braces: a search error whose message contains "Failed to
+    // init embedding model" but wasn't mapped to FbrainError (e.g. a stale
+    // fbrain build in flight, or a future fold_db payload tweak) must
+    // still trip the probe via the substring fallback.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          searchThrows: new Error(
+            "Node /api/native-index/search returned HTTP 400 [Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx].",
+          ),
+        }),
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] embedding-model"));
+    expect(fail).toBeDefined();
+    const fixIdx = lines.findIndex((l) => l.startsWith("[FAIL] embedding-model")) + 1;
+    expect(lines[fixIdx]).toContain("brew services restart folddb");
+  });
+
+  test("unrelated search error → FAIL with generic message (not the model hint)", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({ searchThrows: new Error("something else broke") }),
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] embedding-model"));
+    expect(fail).toBeDefined();
+    expect(fail).toContain("something else broke");
+    const fixIdx = lines.findIndex((l) => l.startsWith("[FAIL] embedding-model")) + 1;
+    // Generic-error path must NOT print the model-specific recovery
+    // command, or the user will chase the wrong thing.
+    expect(lines[fixIdx]).not.toContain("brew services restart folddb");
+  });
+
+  test("schemas-loaded gates the probe — no probe if schemas didn't load", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ failedSchemas: ["X"] }),
+    });
+    expect(code).toBe(1);
+    // The earlier schemas-loaded FAIL is enough; the embedding probe
+    // would only add noise when the node clearly isn't workable.
+    expect(lines.some((l) => l.includes("embedding-model"))).toBe(false);
   });
 });
 

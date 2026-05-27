@@ -27,7 +27,9 @@
 // Exit code 0 on all-green, 1 if any check fails.
 
 import {
+  EMBEDDING_MODEL_RECOVERY_HINT,
   FbrainError,
+  isEmbeddingModelInitFailure,
   newNodeClient,
   newSchemaServiceClient,
   recordTypeForHash,
@@ -266,6 +268,22 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         `schema-drift[${label}]: ${softened.tag ?? (softened.ok ? "PASS" : "FAIL")} — ${softened.detail ?? ""}`,
       );
     }
+  }
+
+  // 6b. embedding-model — issue a trivial semantic search; if the daemon
+  // returns the "Failed to init embedding model" / "Failed to retrieve
+  // model.onnx" rewrap, FAIL with the same recovery hint that search/ask
+  // print. Without this probe, doctor passes 100% green while the
+  // headline `fbrain search` is broken — exactly the silent regression
+  // the user reported. Gate on schemasLoadedOk so we don't spam the
+  // user with an embedding-model FAIL when the underlying node is
+  // unreachable or unprovisioned (those already have their own FAILs).
+  if (schemasLoadedOk) {
+    const embed = await runEmbeddingModelProbe(nodeClient, verbose);
+    checks.push(embed);
+    verbose?.(
+      `embedding-model: ${embed.ok ? "ok" : `FAIL — ${embed.detail ?? ""}`}`,
+    );
   }
 
   // Disclosure probes — always WARN, no detection. They surface the
@@ -736,6 +754,57 @@ export async function runPollutionProbe(
     };
   }
   return { name: "pollution-probe", ok: true, detail };
+}
+
+// Issue a trivial search to catch the embedding model being unavailable.
+// PASS if the call returns (any hits or none). FAIL only on the specific
+// `embedding_model_unavailable` FbrainError client.ts maps from
+// "Failed to init embedding model" / "Failed to retrieve model.onnx".
+// Other errors (network drop mid-probe, unrelated 5xx) propagate as a
+// generic FAIL so we don't silently swallow them.
+export async function runEmbeddingModelProbe(
+  node: NodeClient,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  try {
+    await node.search("ok");
+    return {
+      name: "embedding-model",
+      ok: true,
+      detail: "trivial semantic search returned without an embedding-model error",
+    };
+  } catch (err) {
+    if (err instanceof FbrainError && err.code === "embedding_model_unavailable") {
+      verbose?.(
+        `embedding-model probe: caught embedding_model_unavailable — ${err.message}`,
+      );
+      return {
+        name: "embedding-model",
+        ok: false,
+        detail: stripDoctorTip(err.message),
+        fix: EMBEDDING_MODEL_RECOVERY_HINT,
+      };
+    }
+    // Tolerate the wire-level "node sent embedding error but client.ts
+    // didn't rewrap it" — older fbrain builds in flight, or a payload
+    // whose phrasing fastembed changed. We detect by message substring
+    // and still FAIL with the right fix-hint.
+    const raw = err instanceof Error ? err.message : String(err);
+    if (isEmbeddingModelInitFailure(400, raw)) {
+      return {
+        name: "embedding-model",
+        ok: false,
+        detail: stripDoctorTip(raw),
+        fix: EMBEDDING_MODEL_RECOVERY_HINT,
+      };
+    }
+    return {
+      name: "embedding-model",
+      ok: false,
+      detail: `probe query failed: ${stripDoctorTip(raw)}`,
+      fix: "check the daemon log (`~/.folddb/observability.jsonl`); the search endpoint rejected our probe with an unexpected error",
+    };
+  }
 }
 
 function defaultNonce(): string {

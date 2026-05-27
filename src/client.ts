@@ -541,6 +541,41 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
   });
 }
 
+// Shared recovery hint for `embedding_model_unavailable`. Kept here so
+// both client.ts (the search/ask error path) and doctor.ts (the always-on
+// probe) print the same instructions — fixing it in two places would
+// invite drift.
+export const EMBEDDING_MODEL_RECOVERY_HINT =
+  "The folddb daemon's fastembed couldn't load the all-MiniLM-L6-v2 ONNX model " +
+  "(this is an upstream fold_db / fastembed issue, not a fbrain one). " +
+  "Try in order: (1) check the daemon log for the underlying fastembed error — " +
+  "`grep -i 'Failed to retrieve' ~/.folddb/observability.jsonl | tail -3`; " +
+  "(2) restart the daemon (homebrew: `brew services restart folddb`); " +
+  "(3) if still failing, delete the cache and let it redownload on next search — " +
+  "`rm -rf ~/.fastembed_cache && brew services restart folddb`; " +
+  "(4) if step 3 doesn't fix it, file upstream at fold_db with the log excerpt — " +
+  "until then `fbrain` calls that need embeddings (search / ask / writes that index) will fail.";
+
+export function isEmbeddingModelInitFailure(
+  status: number,
+  msg: string | undefined,
+): boolean {
+  if (status !== 400 || !msg) return false;
+  // The upstream message is built by fold_db's embedding_model.rs as
+  // "Failed to init embedding model: {fastembed err}" — fastembed's
+  // "Failed to retrieve model.onnx" is the only failure mode observed
+  // in dogfood logs, but match both phrases so a future fastembed
+  // error string still trips the rewrap.
+  return (
+    msg.includes("Failed to init embedding model") ||
+    msg.includes("Failed to retrieve model.onnx")
+  );
+}
+
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n - 1) + "…";
+}
+
 function mapNodeError(status: number, body: unknown, path: string): FbrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
@@ -573,6 +608,22 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
       code: "unknown_fields",
       message: `Node rejected ${path}: ${msg ?? "unknown field name"} ${DOCTOR_TIP}.`,
       hint: "Compare fbrain's schemas.ts against the registered schema; re-run `fbrain init` after editing.",
+    });
+  }
+  // Embedding-model init failures: fastembed couldn't load the ONNX model
+  // (network down on first call, daemon's cwd points away from its
+  // .fastembed_cache, a partial/corrupt download). Surface a fbrain-shaped
+  // error pointing at `fbrain doctor` so the user gets a recovery path
+  // instead of the raw upstream `Failed to retrieve model.onnx`. fold_db
+  // returns this inside body.error (e.g. "Bad request: Schema error:
+  // Invalid data: Failed to init embedding model: ..."), not body.message
+  // — match on whichever field the substring lands in.
+  if (isEmbeddingModelInitFailure(status, msg ?? errCode)) {
+    const raw = msg ?? errCode ?? "";
+    return new FbrainError({
+      code: "embedding_model_unavailable",
+      message: `Node ${path} rejected the request — the embedding model is not available (raw: ${truncate(raw, 200)}) ${DOCTOR_TIP}.`,
+      hint: EMBEDDING_MODEL_RECOVERY_HINT,
     });
   }
   return new FbrainError({
