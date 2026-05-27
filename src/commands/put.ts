@@ -22,6 +22,7 @@ import {
   nowIso,
   schemaHashFor,
   validateSlug,
+  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import {
@@ -74,7 +75,17 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     verbose: opts.verbose,
   });
   const hash = schemaHashFor(type, opts.cfg);
-  const existing = await findBySlug(node, type, hash, opts.slug);
+  // The fold_db_node `/api/query` endpoint returns a non-deterministic
+  // top-100 slice of records per schema, so a single findBySlug call on a
+  // schema with >100 rows can miss a slug that genuinely exists (~40%
+  // miss rate empirically on a 168-row concept schema). That miss made
+  // put fall through to `createRecord`, which re-stamped `created_at` and
+  // printed "created" for what was actually an update. withReadRetry is
+  // the same hedge `resolveBySlug` already applies to get/status/delete.
+  const existing = await withReadRetry(
+    () => findBySlug(node, type, hash, opts.slug),
+    (r) => r !== null,
+  );
   const now = nowIso();
 
   const fields = buildFields(type, opts.slug, title, body, parsed.tags, existing, now);
