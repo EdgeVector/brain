@@ -117,6 +117,67 @@ describe("client error mapping", () => {
     }
   });
 
+  test("search 400 'Failed to retrieve model.onnx' (error-field shape) → embedding_model_unavailable + brew restart hint", async () => {
+    // Reproduces the exact body the homebrew fold_db_node returns on
+    // GET /api/native-index/search?q=… when its on-disk ONNX cache is
+    // missing or corrupt — typically after `brew upgrade fold_db_node`.
+    // The current homebrew daemon puts the failure text in `error`
+    // (no `message` field); the opaque ONNX error has historically been
+    // the #1 papercut on `fbrain search` / `fbrain ask`. We grep both
+    // fields so future daemon versions that move the text to `message`
+    // keep matching.
+    installMock([
+      {
+        status: 400,
+        body: {
+          error:
+            "Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx",
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.search("anything");
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("embedding_model_unavailable");
+      expect(fe.message).toContain("Semantic search is unavailable");
+      expect(fe.message).toContain("embedding model");
+      expect(fe.message).toContain("fbrain doctor");
+      expect(fe.hint ?? "").toContain("brew services restart fold_db_node");
+      expect(fe.hint ?? "").toContain("fbrain doctor --freshness");
+      expect(fe.hint ?? "").toContain("fold_db_node.log");
+    }
+  });
+
+  test("search 400 'Failed to retrieve model.onnx' (message-field shape) → embedding_model_unavailable", async () => {
+    // Same condition, but with the failure text in `message` and a short
+    // machine code in `error`. Pin both shapes so a future daemon refactor
+    // can't silently regress the mapping.
+    installMock([
+      {
+        status: 400,
+        body: {
+          error: "schema_error",
+          message:
+            "Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx",
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.search("anything");
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("embedding_model_unavailable");
+      expect(fe.hint ?? "").toContain("brew services restart fold_db_node");
+    }
+  });
+
   test("connection refused → service_unreachable", async () => {
     globalThis.fetch = (async () => {
       throw new TypeError("fetch failed");

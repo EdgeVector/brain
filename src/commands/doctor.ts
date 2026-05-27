@@ -267,6 +267,18 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
+  // Embedding-runtime probe — issue one trivial search query so the node
+  // is forced to load its ONNX model. Surfaces the
+  // `embedding_model_unavailable` failure as a structured FAIL, separate
+  // from schema-drift, so `fbrain doctor` is the one source of truth for
+  // "is search end-to-end usable?" — not just "are the schemas right?".
+  // Cheap when it passes (one GET); the heavy freshness probe stays
+  // gated behind --freshness.
+  if (provisioned && schemasLoadedOk) {
+    const embed = await runEmbeddingProbe(nodeClient, verbose);
+    checks.push(embed);
+  }
+
   // Disclosure probes — always WARN, no detection. They surface the
   // multi-machine + team-sharing limits called out in
   // docs/g0-replacement-readiness-gate.md §6 so the gate stays honest
@@ -527,6 +539,44 @@ function finalize(checks: CheckResult[], print: (line: string) => void): number 
   }
   print(`FAIL: ${failures.length} issue${failures.length === 1 ? "" : "s"}`);
   return 1;
+}
+
+// One-token search probe: forces the node's lazy ONNX load so the
+// `embedding_model_unavailable` failure surfaces as a structured FAIL in
+// the doctor verdict rather than being hidden behind an `fbrain search`
+// call. We don't care about the hit list — only whether the call
+// completes. The probe is read-only and cheap, so it runs on every
+// `fbrain doctor` invocation (no --freshness gate).
+export async function runEmbeddingProbe(
+  node: NodeClient,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  try {
+    const hits = await node.search("fbrain");
+    verbose?.(`embedding-runtime: ok (${hits.length} hits to probe query)`);
+    return {
+      name: "embedding-runtime",
+      ok: true,
+      detail: "one-token search returned without an embedding-model error",
+    };
+  } catch (err) {
+    if (err instanceof FbrainError && err.code === "embedding_model_unavailable") {
+      return {
+        name: "embedding-runtime",
+        ok: false,
+        detail: stripDoctorTip(err.message),
+        fix:
+          err.hint ??
+          "restart the node so it re-fetches the ONNX file (homebrew: `brew services restart fold_db_node`)",
+      };
+    }
+    return {
+      name: "embedding-runtime",
+      ok: false,
+      detail: stripDoctorTip(err instanceof Error ? err.message : String(err)),
+      fix: "check the node log; the native-index search endpoint is rejecting our probe query",
+    };
+  }
 }
 
 // G3a — freshness probe. Five trials of put → search; each trial passes

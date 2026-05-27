@@ -575,6 +575,29 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
       hint: "Compare fbrain's schemas.ts against the registered schema; re-run `fbrain init` after editing.",
     });
   }
+  // The fold_db_node's embedding subsystem lazily loads `model.onnx` from a
+  // local cache on the first semantic-search call. After certain restarts
+  // (notably `brew upgrade fold_db_node`) the cache can be partially
+  // populated, and the node returns a 400 whose body carries
+  // "...Failed to init embedding model: Failed to retrieve model.onnx"
+  // — sometimes under `message`, sometimes under `error` (the homebrew
+  // daemon currently puts the full text in `error`). Without translation
+  // the user sees an opaque error on `fbrain search` / `fbrain ask`;
+  // with translation they get a single, actionable recovery command.
+  const onnxBlob = [msg, errCode].filter((s): s is string => typeof s === "string").join(" ");
+  if (status === 400 && /Failed to (init embedding model|retrieve model\.onnx)/i.test(onnxBlob)) {
+    return new FbrainError({
+      code: "embedding_model_unavailable",
+      message:
+        `Semantic search is unavailable — the fold_db node failed to load its embedding model ` +
+        `(${onnxBlob.trim()}) ${DOCTOR_TIP}.`,
+      hint:
+        "Restart the node so it re-fetches the ONNX file from the embedding cache " +
+        "(homebrew: `brew services restart fold_db_node`). " +
+        "If the failure persists, run `fbrain doctor --freshness` and capture " +
+        "the node log (~/Library/Logs/Homebrew/fold_db_node.log).",
+    });
+  }
   return new FbrainError({
     code: `node_http_${status}`,
     message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
