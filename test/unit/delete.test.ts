@@ -421,6 +421,87 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
     }
   });
 
+  // Regression: same /api/query top-100 page-flake that bit `put` (PR #53)
+  // also hides the row from the post-delete verify on a polluted daemon —
+  // mutation lands, but the immediate verify read returns []. Pre-fix,
+  // delete surfaced a false "delete_not_applied" on what was a successful
+  // operation. With withReadRetry around the verify read, a single flake
+  // is absorbed.
+  test("re-reads on a flake: first verify query returns [], second returns the tombstoned row", async () => {
+    let verifyReads = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.designSchemaHash) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        verifyReads++;
+        // Initial probe (#1) finds the live row. Post-update verify reads
+        // begin at #2: the first one flakes (empty page); the second
+        // surfaces the tombstoned row.
+        if (verifyReads === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: [{ fields: designRow("flaky-delete", { title: "alive" }), key: { hash: "flaky-delete", range: null } }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (verifyReads === 2) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [
+              {
+                fields: {
+                  ...designRow("flaky-delete"),
+                  title: "(deleted)",
+                  body: "",
+                  status: "archived",
+                  tags: [TOMBSTONE_TAG],
+                },
+                key: { hash: "flaky-delete", range: null },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation")) {
+        return new Response(JSON.stringify({ ok: true, success: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      await deleteRecord({
+        cfg,
+        slug: "flaky-delete",
+        type: "design",
+        print: (l) => lines.push(l),
+      });
+      expect(lines.join("\n")).toContain("deleted design flaky-delete");
+      // 1 = initial probe; 2 = flaked verify; 3 = retry that finds the tombstone.
+      expect(verifyReads).toBeGreaterThanOrEqual(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("post-delete verify failure raises delete_not_applied", async () => {
     // Initial query finds the record; mutation succeeds; verify query
     // returns the record WITHOUT the tombstone tag. The guard should fire.

@@ -23,6 +23,7 @@ import {
   resolveBySlug,
   schemaHashFor,
   TOMBSTONE_TAG,
+  withReadRetry,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
 
@@ -86,9 +87,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   });
 
   // raw mode bypasses tombstone filtering at the lookup layer; resolveBySlug
-  // drops tombstones inside the helper afterward. The post-delete verify
-  // below is intentionally NOT retried — it's testing that the mutation we
-  // just fired landed, not that an existing row is findable.
+  // drops tombstones inside the helper afterward.
   const { type, record } = await resolveBySlug({
     node,
     cfg: opts.cfg,
@@ -114,7 +113,17 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // today (see spike doc, Probe B).
   await node.deleteRecord({ schemaHash, keyHash: opts.slug });
 
-  const verify = await findBySlugRaw(node, type, schemaHash, opts.slug);
+  // Same /api/query top-100 page-flake that bit `put` (PR #53) also hides
+  // the row from a single post-delete verify on a saturated daemon — the
+  // mutation lands but the read returns []. Retry the read on the
+  // "row IS present" predicate so we don't surface a false
+  // "delete_not_applied" on a successful delete. The tombstone gate runs
+  // once the row resurfaces; a genuinely-missing-or-not-tombstoned row
+  // still raises after the retry budget is spent.
+  const verify = await withReadRetry(
+    () => findBySlugRaw(node, type, schemaHash, opts.slug),
+    (r) => r !== null,
+  );
   if (verify === null || !isTombstoned(verify)) {
     throw new FbrainError({
       code: "delete_not_applied",
