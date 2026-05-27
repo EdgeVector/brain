@@ -175,8 +175,11 @@ paraphrase recall ride alongside rare-token / acronym recall.
 
   --limit N     max results (default 5)
   --no-llm      skip LLM expansion (BM25 + vector + RRF on the original
-                query only — useful offline or to save tokens)
-  --explain     print the LLM-generated expansions before results
+                query only — useful offline or to save tokens).
+                Incompatible with --explain (there is nothing to explain
+                without expansions); the combination exits 2.
+  --explain     print the LLM-generated expansions before results.
+                Requires expansion — incompatible with --no-llm.
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`). Narrows both the BM25
                 corpus and the vector schemas filter.
@@ -185,7 +188,9 @@ paraphrase recall ride alongside rare-token / acronym recall.
 
 Cost: 1 LLM call per invocation. Run with the global --verbose to see
 token + USD estimates and per-ranker debug. Missing ANTHROPIC_API_KEY
-falls back to --no-llm automatically with a one-line notice.
+falls back to --no-llm automatically with a one-line notice; with
+--explain set, the explain section also prints a no-key notice instead
+of silently dropping.
 
 The LLM key is read from \$ANTHROPIC_API_KEY (preferred) or an
 optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
@@ -760,6 +765,12 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   if (query.length === 0) {
     console.error(COMMAND_HELP.ask);
     return 1;
+  }
+  if (values.explain && values["no-llm"]) {
+    console.error(
+      "error: --explain requires LLM expansion; remove --no-llm or drop --explain.",
+    );
+    return 2;
   }
   // Validate --type before readConfig so an unknown type surfaces even on
   // an un-init'd machine.
