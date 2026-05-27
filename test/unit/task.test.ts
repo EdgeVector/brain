@@ -1,0 +1,198 @@
+// Unit tests for `fbrain task new`. Like designNew, the slug-already-
+// exists guard must survive a single /api/query miss caused by the
+// fold_db_node top-100 truncation. The parent-design lookup for
+// --design <slug> needs the same hedge — otherwise a valid parent on a
+// >100-row design schema flakes to dangling_design_slug ~40% of the time.
+
+import { afterEach, describe, expect, test } from "bun:test";
+
+import { taskNew } from "../../src/commands/task.ts";
+import { TEST_HASHES, buildTestCfg } from "../util.ts";
+
+const cfg = buildTestCfg({ userHash: "uh" });
+const DESIGN_HASH = TEST_HASHES.design;
+const TASK_HASH = TEST_HASHES.task;
+
+const realFetch = globalThis.fetch;
+
+type MockHandler = (url: string, init?: RequestInit) => { status: number; body?: unknown };
+
+function installMock(handler: MockHandler): void {
+  globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : String(input);
+    const out = handler(url, init);
+    return new Response(JSON.stringify(out.body ?? {}), {
+      status: out.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof globalThis.fetch;
+}
+
+function querySchema(init?: RequestInit): string | undefined {
+  const raw = init?.body;
+  if (typeof raw !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(raw) as { schema_name?: unknown };
+    return typeof parsed.schema_name === "string" ? parsed.schema_name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+describe("taskNew", () => {
+  test("creates a task when no row with the slug exists", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await taskNew({
+      cfg,
+      slug: "t-fresh",
+      title: "Fresh task",
+      body: "body",
+      tags: ["a"],
+    });
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.mutation_type).toBe("create");
+    expect(mutations[0]!.schema).toBe(TASK_HASH);
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.status).toBe("open");
+    expect(fields.design_slug).toBe("");
+  });
+
+  // Regression: /api/query truncation hides the existing row on the
+  // first call, then returns it on retry. Without withReadRetry the
+  // slug_already_exists guard fails open and createRecord silently
+  // overwrites the row's created_at.
+  test("rejects with slug_already_exists when /api/query flakes once before returning the row", async () => {
+    const existing = {
+      fields: {
+        slug: "flaky-task",
+        title: "Original",
+        body: "old",
+        status: "open",
+        tags: [],
+        design_slug: "",
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+      key: { hash: "flaky-task", range: null },
+    };
+    let queryCalls = 0;
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        queryCalls++;
+        const results = queryCalls === 1 ? [] : [existing];
+        return { status: 200, body: { ok: true, results } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await expect(
+      taskNew({
+        cfg,
+        slug: "flaky-task",
+        title: "Replacement",
+        body: "",
+        tags: [],
+      }),
+    ).rejects.toMatchObject({ code: "slug_already_exists" });
+    expect(queryCalls).toBeGreaterThanOrEqual(2);
+    expect(mutations).toEqual([]);
+  });
+
+  // Same flake, different lookup: the parent-design existence check
+  // must also retry, otherwise --design <valid-slug> rejects with
+  // dangling_design_slug whenever the parent is outside the daemon's
+  // top-100 page on the first call.
+  test("parent-design lookup retries through a flaky page miss", async () => {
+    const parentDesign = {
+      fields: {
+        slug: "parent-design",
+        title: "Parent",
+        body: "",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+      key: { hash: "parent-design", range: null },
+    };
+    let designQueryCalls = 0;
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        if (schema === DESIGN_HASH) {
+          designQueryCalls++;
+          // First design query returns an empty page (parent fell out
+          // of the top-100 slice); retries return the parent row.
+          const results = designQueryCalls === 1 ? [] : [parentDesign];
+          return { status: 200, body: { ok: true, results } };
+        }
+        // Task slug doesn't exist — every task query returns empty.
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await taskNew({
+      cfg,
+      slug: "child-task",
+      title: "Child",
+      body: "",
+      tags: [],
+      designSlug: "parent-design",
+    });
+    expect(designQueryCalls).toBeGreaterThanOrEqual(2);
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.mutation_type).toBe("create");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.design_slug).toBe("parent-design");
+  });
+
+  test("parent-design that genuinely doesn't exist still errors with dangling_design_slug", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        // Every query returns empty — neither the task slug nor the
+        // referenced design exist.
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await expect(
+      taskNew({
+        cfg,
+        slug: "child-task",
+        title: "Child",
+        body: "",
+        tags: [],
+        designSlug: "ghost-design",
+      }),
+    ).rejects.toMatchObject({ code: "dangling_design_slug" });
+    expect(mutations).toEqual([]);
+  }, 30_000);
+});

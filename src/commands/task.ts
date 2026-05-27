@@ -2,7 +2,13 @@
 
 import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
-import { findBySlug, nowIso, schemaHashFor, validateSlug } from "../record.ts";
+import {
+  findBySlug,
+  nowIso,
+  schemaHashFor,
+  validateSlug,
+  withReadRetry,
+} from "../record.ts";
 
 export type TaskNewOptions = {
   cfg: Config;
@@ -25,7 +31,15 @@ export async function taskNew(opts: TaskNewOptions): Promise<void> {
   const hash = schemaHashFor("task", opts.cfg);
 
   if (!opts.force) {
-    const existing = await findBySlug(node, "task", hash, opts.slug);
+    // /api/query returns a non-deterministic top-100 slice per schema, so
+    // a single findBySlug can miss an existing slug on a schema with >100
+    // rows. Without the retry the duplicate guard fails open ~40% of the
+    // time and the createRecord below silently overwrites the row. Same
+    // hedge put.ts and resolveBySlug use. See PR #53.
+    const existing = await withReadRetry(
+      () => findBySlug(node, "task", hash, opts.slug),
+      (r) => r !== null,
+    );
     if (existing) {
       throw new FbrainError({
         code: "slug_already_exists",
@@ -36,9 +50,15 @@ export async function taskNew(opts: TaskNewOptions): Promise<void> {
   }
 
   // Validate the design exists, if provided — same dangling-ref rule as link.
+  // Retry-hedged for the same /api/query truncation reason as above:
+  // without it, a valid parent on a >100-row design schema flakes to
+  // dangling_design_slug ~40% of the time.
   if (opts.designSlug && opts.designSlug.length > 0) {
     const designHash = schemaHashFor("design", opts.cfg);
-    const parent = await findBySlug(node, "design", designHash, opts.designSlug);
+    const parent = await withReadRetry(
+      () => findBySlug(node, "design", designHash, opts.designSlug!),
+      (r) => r !== null,
+    );
     if (!parent) {
       throw new FbrainError({
         code: "dangling_design_slug",

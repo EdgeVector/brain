@@ -7,6 +7,7 @@ import {
   nowIso,
   schemaHashFor,
   validateSlug,
+  withReadRetry,
 } from "../record.ts";
 
 export type DesignNewOptions = {
@@ -29,7 +30,15 @@ export async function designNew(opts: DesignNewOptions): Promise<void> {
   const hash = schemaHashFor("design", opts.cfg);
 
   if (!opts.force) {
-    const existing = await findBySlug(node, "design", hash, opts.slug);
+    // /api/query returns a non-deterministic top-100 slice per schema, so
+    // a single findBySlug can miss an existing slug on a schema with >100
+    // rows. Without the retry the duplicate guard fails open ~40% of the
+    // time and the createRecord below silently overwrites the row. Same
+    // hedge put.ts and resolveBySlug use. See PR #53.
+    const existing = await withReadRetry(
+      () => findBySlug(node, "design", hash, opts.slug),
+      (r) => r !== null,
+    );
     if (existing) {
       throw new FbrainError({
         code: "slug_already_exists",
@@ -39,6 +48,9 @@ export async function designNew(opts: DesignNewOptions): Promise<void> {
     }
   }
 
+  // --force intentionally skips the lookup and stamps a fresh created_at.
+  // It's a deliberate "re-create from scratch" — callers wanting upsert
+  // semantics (preserve created_at) should use `fbrain put` instead.
   const now = nowIso();
   const fields = {
     slug: opts.slug,
