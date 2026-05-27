@@ -109,11 +109,15 @@ Idempotent — re-run after \`409 ambiguous_schema_name\` to refresh hashes.
   --tag       repeatable; tag value to attach
   --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
   --force     overwrite an existing slug`,
-  put: `fbrain put <slug> [--type T]
+  put: `fbrain put [<slug>] [--type T]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
 and upsert a record. Re-putting the same slug updates in place —
 no --force flag, no duplicate, no 409.
+
+Slug resolution: one of the positional arg or frontmatter \`slug:\` is
+required. There is NO silent default. If both are set and disagree, the
+put errors with slug_conflict (mirrors the type_conflict behavior).
 
 Type resolution: one of frontmatter \`type:\` or \`--type T\` is required.
 There is NO silent default — a stdin stream without a type errors out.
@@ -123,6 +127,7 @@ If both are set and disagree, the put errors with type_conflict.
             (case-insensitive; overrides absent frontmatter, errors on conflict)
 
 Frontmatter (between leading \`---\` lines) keys honored:
+  slug     string         (positional arg overrides; conflict if both differ)
   type     same 8 values as --type
   title    string         (default: first H1 in body, else slug)
   tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
@@ -132,7 +137,7 @@ search). Empty body is valid as long as the type is set.
 
 Examples:
   cat note.md | fbrain put my-note --type concept
-  echo "---\\ntype: concept\\ntitle: Idempotency\\n---\\nbody" | fbrain put concept-idempotency`,
+  echo "---\\ntype: concept\\nslug: concept-idempotency\\ntitle: Idempotency\\n---\\nbody" | fbrain put`,
   get: `fbrain get <slug> [--type T]
 
 Without --type, queries every registered schema. Errors if the slug
@@ -741,14 +746,14 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     allowPositionals: true,
     options: PUT_OPTIONS,
   });
-  const slug = positionals[0];
-  if (!slug) {
-    console.error(COMMAND_HELP.put);
-    return 1;
-  }
   const cfg = readConfig();
   const input = await maybeReadStdin();
-  const pOpts: Parameters<typeof putCmd>[0] = { cfg, slug, input };
+  // Slug is optional at the CLI boundary — putCmd resolves it from the
+  // positional arg and/or frontmatter `slug:` and raises `missing_slug`
+  // if neither is set. The old code dumped usage on missing positional,
+  // which silently hid a frontmatter slug.
+  const pOpts: Parameters<typeof putCmd>[0] = { cfg, input };
+  if (positionals[0]) pOpts.slug = positionals[0];
   if (values.type !== undefined) pOpts.typeOverride = values.type;
   if (verbose) pOpts.verbose = verbose;
   const result = await putCmd(pOpts);

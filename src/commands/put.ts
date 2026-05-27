@@ -1,5 +1,8 @@
-// `fbrain put <slug>` — read body from stdin, parse YAML-subset
-// frontmatter, upsert any of fbrain's record types.
+// `fbrain put [<slug>]` — read body from stdin, parse YAML-subset
+// frontmatter, upsert any of fbrain's record types. The slug may be
+// passed as a positional arg or set via frontmatter `slug:` — at least
+// one is required, and disagreement between the two errors with
+// `slug_conflict` (mirrors the `type_conflict` contract).
 //
 // Designed to match the gbrain `put` contract closely enough for the
 // `brain` wrapper at ~/.claude/scripts/brain to route writes to fbrain
@@ -8,7 +11,7 @@
 // Frontmatter is the gbrain YAML SUBSET, not full YAML:
 //   - `key: value` on a single line (inline scalar; quoted optional)
 //   - `tags: [a, b]` inline list, or `tags:` followed by `  - a` block list
-//   - `type:` and `title:` only have meaning here; other keys are
+//   - `slug:`, `type:`, and `title:` only have meaning here; other keys are
 //     silently ignored (forward-compatible with future fields).
 //
 // As of Phase 6, every type in RECORDS routes to a real write:
@@ -33,7 +36,10 @@ import {
 
 export type PutOptions = {
   cfg: Config;
-  slug: string;
+  // Slug from the CLI positional arg. Optional because the slug may instead
+  // be supplied via frontmatter `slug:`. If both are set and disagree,
+  // putCmd errors with `slug_conflict`; if neither is set, `missing_slug`.
+  slug?: string;
   input: string;
   // Override / supply the record type from the command line. Useful when
   // piping schema-less notes: `cat note.md | fbrain put slug --type concept`.
@@ -51,7 +57,6 @@ export type PutResult = {
 };
 
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
-  validateSlug(opts.slug);
   const { frontmatter, body } = splitFrontmatter(opts.input);
   // Refuse a silent-default record when stdin carried nothing: with no
   // frontmatter AND no body the upsert would otherwise mint a blank
@@ -66,8 +71,10 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     });
   }
   const parsed = parseFrontmatter(frontmatter);
+  const slug = resolveSlug(opts.slug, parsed.slug);
+  validateSlug(slug);
   const type = resolveRecordType(parsed.type, opts.typeOverride);
-  const title = resolveTitle(parsed.title, body, opts.slug);
+  const title = resolveTitle(parsed.title, body, slug);
 
   const node = newNodeClient({
     baseUrl: opts.cfg.nodeUrl,
@@ -83,19 +90,19 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // printed "created" for what was actually an update. withReadRetry is
   // the same hedge `resolveBySlug` already applies to get/status/delete.
   const existing = await withReadRetry(
-    () => findBySlug(node, type, hash, opts.slug),
+    () => findBySlug(node, type, hash, slug),
     (r) => r !== null,
   );
   const now = nowIso();
 
-  const fields = buildFields(type, opts.slug, title, body, parsed.tags, existing, now);
+  const fields = buildFields(type, slug, title, body, parsed.tags, existing, now);
 
   if (existing) {
-    await node.updateRecord({ schemaHash: hash, fields, keyHash: opts.slug });
-    return { type, slug: opts.slug, action: "updated" };
+    await node.updateRecord({ schemaHash: hash, fields, keyHash: slug });
+    return { type, slug, action: "updated" };
   }
-  await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
-  return { type, slug: opts.slug, action: "created" };
+  await node.createRecord({ schemaHash: hash, fields, keyHash: slug });
+  return { type, slug, action: "created" };
 }
 
 function buildFields(
@@ -125,6 +132,37 @@ function buildFields(
   // gave each kind its own dedicated schema, so the discriminator and
   // structural markers are no longer needed for new writes.
   return base;
+}
+
+function resolveSlug(
+  positional: string | undefined,
+  fromFrontmatter: string | undefined,
+): string {
+  // Mirror the resolveRecordType contract: positional and frontmatter are
+  // peers — either one supplies the value, both must agree if both are set,
+  // and missing-from-both is a specific error (not a usage dump).
+  const posTrim = positional?.trim() ?? "";
+  const fmTrim = fromFrontmatter?.trim() ?? "";
+  const pos = posTrim.length > 0 ? posTrim : undefined;
+  const fm = fmTrim.length > 0 ? fmTrim : undefined;
+
+  if (pos && fm && pos !== fm) {
+    throw new FbrainError({
+      code: "slug_conflict",
+      message:
+        `positional slug "${pos}" conflicts with frontmatter \`slug: ${fm}\`.`,
+      hint: "Drop one — they must agree. Frontmatter and the positional arg can't be set to different slugs.",
+    });
+  }
+  const chosen = pos ?? fm;
+  if (chosen === undefined) {
+    throw new FbrainError({
+      code: "missing_slug",
+      message: "fbrain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
+      hint: "Example: `fbrain put my-note` OR include `slug: my-note` in the YAML frontmatter.",
+    });
+  }
+  return chosen;
 }
 
 function resolveRecordType(
@@ -193,6 +231,7 @@ function firstH1(body: string): string | null {
 }
 
 export type ParsedFrontmatter = {
+  slug: string | undefined;
   type: string | undefined;
   title: string | undefined;
   tags: string[];
@@ -214,6 +253,7 @@ export function splitFrontmatter(input: string): {
 
 export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
   const out: ParsedFrontmatter = {
+    slug: undefined,
     type: undefined,
     title: undefined,
     tags: [],
@@ -279,7 +319,8 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
 
     const stripped = stripQuotes(value);
     out.raw[key] = stripped;
-    if (key === "type") out.type = stripped;
+    if (key === "slug") out.slug = stripped;
+    else if (key === "type") out.type = stripped;
     else if (key === "title") out.title = stripped;
     currentListKey = null;
     currentList = null;
