@@ -106,23 +106,29 @@ Idempotent — re-run after \`409 ambiguous_schema_name\` to refresh hashes.
   --tag       repeatable; tag value to attach
   --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
   --force     overwrite an existing slug`,
-  put: `fbrain put <slug>
+  put: `fbrain put <slug> [--type T]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
 and upsert a record. Re-putting the same slug updates in place —
 no --force flag, no duplicate, no 409.
 
+Type resolution: one of frontmatter \`type:\` or \`--type T\` is required.
+There is NO silent default — a stdin stream without a type errors out.
+If both are set and disagree, the put errors with type_conflict.
+
+  --type    design | task | concept | preference | reference | agent | project | spike
+            (case-insensitive; overrides absent frontmatter, errors on conflict)
+
 Frontmatter (between leading \`---\` lines) keys honored:
-  type     design | task | concept | preference | reference | agent | project | spike
-           (case-insensitive; default: design)
+  type     same 8 values as --type
   title    string         (default: first H1 in body, else slug)
   tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
 
 Body after the closing \`---\` becomes the record's body (indexed for
-search). Empty body is valid.
+search). Empty body is valid as long as the type is set.
 
 Examples:
-  cat note.md | fbrain put my-note
+  cat note.md | fbrain put my-note --type concept
   echo "---\\ntype: concept\\ntitle: Idempotency\\n---\\nbody" | fbrain put concept-idempotency`,
   get: `fbrain get <slug> [--type T]
 
@@ -336,6 +342,7 @@ const TASK_OPTIONS = {
   body: { type: "string" },
   force: { type: "boolean", default: false },
 } as const;
+const PUT_OPTIONS = { type: { type: "string" } } as const;
 const GET_OPTIONS = { type: { type: "string" } } as const;
 const LIST_OPTIONS = {
   type: { type: "string" },
@@ -380,7 +387,7 @@ export const CLI_SPEC = {
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
-  put: EMPTY_OPTIONS,
+  put: PUT_OPTIONS,
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
   status: STATUS_OPTIONS,
@@ -610,11 +617,11 @@ async function runTask(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runPut(args: Argv, verbose: Verbose): Promise<number> {
-  const { positionals } = parseArgs({
+  const { values, positionals } = parseArgs({
     args,
     strict: true,
     allowPositionals: true,
-    options: EMPTY_OPTIONS,
+    options: PUT_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -624,6 +631,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   const input = await maybeReadStdin();
   const pOpts: Parameters<typeof putCmd>[0] = { cfg, slug, input };
+  if (values.type !== undefined) pOpts.typeOverride = values.type;
   if (verbose) pOpts.verbose = verbose;
   const result = await putCmd(pOpts);
   console.log(`${result.action} ${result.type} ${result.slug}`);
