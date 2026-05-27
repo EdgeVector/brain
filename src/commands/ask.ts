@@ -64,6 +64,11 @@ export type AskOptions = {
   limit?: number;
   noLlm?: boolean;
   explain?: boolean;
+  // Restrict results to these record types. Undefined / empty = all 8 types.
+  // Repeatable on the CLI via `--type T` (e.g. `--type design --type task`).
+  // BM25 corpus is built only over the requested types and the vector call
+  // is server-side schema-scoped, so both rankers see the narrowed slice.
+  types?: readonly RecordType[];
   verbose?: Verbose;
   print?: (line: string) => void;
   // For tests: stub the expansion HTTP call.
@@ -110,6 +115,11 @@ export type AskResult = {
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
   const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
+  const typeFilter =
+    opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
+  const activeTypes: readonly RecordType[] = typeFilter
+    ? RECORD_TYPES.filter((t) => typeFilter.has(t))
+    : RECORD_TYPES;
 
   // ── Stage 0: query expansion ─────────────────────────────────────────
   let expansions: string[] = [];
@@ -159,7 +169,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     verbose: opts.verbose,
   });
 
-  const { docs, liveById } = await loadBm25Documents(node, opts.cfg);
+  const { docs, liveById } = await loadBm25Documents(node, opts.cfg, activeTypes);
   let index = loadCachedIndex(opts.cfg.userHash);
   const fingerprint = BM25Index.build(docs).fingerprint;
   let bm25CacheHit = false;
@@ -175,7 +185,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }
 
   // ── Stage 2: per-query BM25 + vector ─────────────────────────────────
-  const fbrainSchemas = uniqueFbrainSchemas(opts.cfg);
+  const fbrainSchemas = uniqueFbrainSchemas(opts.cfg, activeTypes);
   const rankers: RankerInput[] = [];
   const vectorScoreById = new Map<string, number>();
   const perQueryVectorTopId = new Map<number, Map<string, number>>();
@@ -346,12 +356,15 @@ export function formatCost(usd: number | null, model: string): string {
     : `cost≈$${usd.toFixed(6)}`;
 }
 
-function uniqueFbrainSchemas(cfg: Config): string[] {
+function uniqueFbrainSchemas(
+  cfg: Config,
+  types: readonly RecordType[],
+): string[] {
   return Array.from(
     new Set(
-      Object.values(cfg.schemaHashes).filter(
-        (h): h is string => typeof h === "string" && h.length > 0,
-      ),
+      types
+        .map((t) => cfg.schemaHashes[t])
+        .filter((h): h is string => typeof h === "string" && h.length > 0),
     ),
   );
 }
@@ -359,6 +372,7 @@ function uniqueFbrainSchemas(cfg: Config): string[] {
 async function loadBm25Documents(
   node: ReturnType<typeof newNodeClient>,
   cfg: Config,
+  types: readonly RecordType[],
 ): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {
   const docs: BM25Document[] = [];
   // `liveById` doubles as the Stage-4 resolve lookup: we keep the full
@@ -367,11 +381,12 @@ async function loadBm25Documents(
   // either, so anything fused back to a tombstone is a stale ranker hit
   // and Stage 4 will skip on a miss.
   const liveById = new Map<string, FbrainRecord>();
-  // Walk all 8 logical record types. listRecords already kind-filters and
-  // returns live + tombstoned; we drop tombstones for the index. Phase 6
-  // types share noteSchema so they're effectively listed via separate
-  // kind-filtered queries — same network cost, just split logically.
-  for (const t of RECORD_TYPES) {
+  // Walk the active record types. When --type narrows the set we skip the
+  // others entirely — smaller index, fewer HTTP calls. listRecords already
+  // kind-filters and returns live + tombstoned; we drop tombstones for the
+  // index. Phase 6 types share noteSchema so they're effectively listed via
+  // separate kind-filtered queries — same network cost, just split logically.
+  for (const t of types) {
     const records = await listRecords(node, t, schemaHashFor(t, cfg));
     for (const r of records) {
       if (isTombstoned(r)) continue;

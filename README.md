@@ -78,8 +78,8 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
-| `fbrain search <query> [-n N] [--exact] [--min-score F]` | Semantic search; dedupes fragments per record, skips stale hits |
-| `fbrain ask <query> [--limit N] [--no-llm] [--explain]` | LLM-expanded hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25 |
+| `fbrain search <query> [-n N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more of the 8 record types (e.g. `--type design --type task` to exclude noisy concept streams) |
+| `fbrain ask <query> [--limit N] [--no-llm] [--explain] [--type T]…` | LLM-expanded hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter |
 | `fbrain doctor [--freshness] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |

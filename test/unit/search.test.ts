@@ -328,6 +328,142 @@ describe("searchCmd", () => {
     }
   });
 
+  test("--type design restricts the schemas filter to the design hash and drops non-design hits", async () => {
+    // Mixed fixture: one design + one concept come back from the vector index.
+    // With --type design, the schemas= param on the wire must contain ONLY the
+    // design hash, and the concept hit must not appear in the printed output.
+    const designRow = {
+      fields: {
+        slug: "the-readiness-gate",
+        title: "Readiness Gate",
+        body: "design body",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "the-readiness-gate", range: null },
+    };
+    let capturedUrl = "";
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        capturedUrl = url;
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "the-readiness-gate",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.9 },
+              }),
+              // Same slug shape as agent-pr-events-* noise — concept on the
+              // shared MEMO hash. Must NOT appear after --type design.
+              hit({
+                slug: "agent-pr-events-noise",
+                schemaName: TEST_HASHES.concept,
+                schema_display_name: "FbrainKindNote",
+                metadata: { score: 0.95 },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [designRow] } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "readiness",
+      types: ["design"],
+      print: (l) => lines.push(l),
+    });
+    // The wire only carries the design hash — none of the other 7 type hashes.
+    const parsed = new URL(capturedUrl, "http://example/");
+    const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    expect(sent).toEqual([DESIGN_HASH]);
+    // Output contains the design slug; the concept noise is filtered out.
+    const joined = lines.join("\n");
+    expect(joined).toContain("the-readiness-gate");
+    expect(joined).not.toContain("agent-pr-events-noise");
+  });
+
+  test("--type design --type task sends both hashes on the wire (dedup'd)", async () => {
+    let capturedUrl = "";
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        capturedUrl = url;
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    await searchCmd({
+      cfg,
+      query: "x",
+      types: ["design", "task", "design"],
+      print: () => {},
+    });
+    const parsed = new URL(capturedUrl, "http://example/");
+    const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    // Order follows the cfg.schemaHashes iteration; assert membership +
+    // dedup rather than pinning order.
+    expect(new Set(sent)).toEqual(new Set([DESIGN_HASH, TASK_HASH]));
+    expect(sent.length).toBe(2);
+  });
+
+  test("--type filter drops a resolved hit whose type didn't match (Phase 6 MEMO case)", async () => {
+    // Simulate a daemon where concept + preference both live on the same
+    // canonical hash, and the user filters by --type preference. The shared
+    // hash means the server returns BOTH on the wire, and only the
+    // resolved-type post-filter can keep just preferences.
+    const sharedHash = TEST_HASHES.concept; // any non-design/task hash
+    const sharedCfg = buildTestCfg({
+      schemaHashes: {
+        ...TEST_HASHES,
+        concept: sharedHash,
+        preference: sharedHash,
+      },
+    });
+    // findBySlug looks at listRecords' kind filter to distinguish concept
+    // vs preference — but recordTypeForHash returns the FIRST type matching
+    // the hash, which in iteration order is "concept". So the resolved
+    // type is "concept" → the --type=preference filter drops it.
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "a-note",
+                schemaName: sharedHash,
+                schema_display_name: "FbrainKindNote",
+                metadata: { score: 0.5 },
+              }),
+            ],
+            user_hash: sharedCfg.userHash,
+          },
+        };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const lines: string[] = [];
+    await searchCmd({
+      cfg: sharedCfg,
+      query: "x",
+      types: ["preference"],
+      print: (l) => lines.push(l),
+    });
+    expect(lines[0]).toBe("no matches");
+  });
+
   test("omits ?schemas when the config carries no schema hashes", async () => {
     // A pathological empty-config case shouldn't send `schemas=` at all
     // (that would be a no-op on fold, but it pollutes the URL and obscures

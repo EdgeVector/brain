@@ -28,6 +28,9 @@ export type SearchOptions = {
   limit?: number;
   exact?: boolean;
   minScore?: number;
+  // Restrict results to these record types. Undefined / empty = all 8 types.
+  // Repeatable on the CLI via `--type T` (e.g. `--type design --type task`).
+  types?: readonly RecordType[];
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -64,17 +67,26 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // schema), so Object.values() returns repeats. The server collapses
   // duplicates too, but deduping here keeps the URL compact and the
   // verbose count meaningful ("N unique schemas" vs N record types).
+  //
+  // When `--type T` is set, restrict to the hashes for those types only.
+  // For Phase 6 types (concept | preference | reference | agent | project |
+  // spike) that share the unified MEMO hash, the server filter alone can't
+  // tell e.g. concept from preference — it'll return any record on that
+  // hash. The post-filter on resolved hits (below) finishes the job.
+  const typeFilter = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
   const fbrainSchemas = Array.from(
     new Set(
-      Object.values(opts.cfg.schemaHashes).filter(
-        (h): h is string => typeof h === "string" && h.length > 0,
-      ),
+      Object.entries(opts.cfg.schemaHashes)
+        .filter(([t]) => (typeFilter ? typeFilter.has(t as RecordType) : true))
+        .map(([, h]) => h)
+        .filter((h): h is string => typeof h === "string" && h.length > 0),
     ),
   );
   if (fbrainSchemas.length > 0) {
     clientOpts.schemas = fbrainSchemas;
     opts.verbose?.(
-      `scope: native-index search restricted to ${fbrainSchemas.length} fbrain schema hash(es)`,
+      `scope: native-index search restricted to ${fbrainSchemas.length} fbrain schema hash(es)` +
+        (typeFilter ? ` (types: ${[...typeFilter].join(",")})` : ""),
     );
   }
 
@@ -98,6 +110,14 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       opts.verbose?.(
         `skip: schema_name "${hit.schema_name}" matches no registered fbrain type`,
       );
+      continue;
+    }
+    // Filter by --type. For Design/Task this is purely belt-and-braces (the
+    // schemas filter on the wire already excluded them); for the shared
+    // MEMO schema it's load-bearing — the server filter keeps every Phase 6
+    // record and only the resolved type tells concept apart from preference.
+    if (typeFilter && !typeFilter.has(type)) {
+      opts.verbose?.(`skip: ${type}/${slug} not in --type filter`);
       continue;
     }
     const schemaHash = schemaHashFor(type, opts.cfg);
