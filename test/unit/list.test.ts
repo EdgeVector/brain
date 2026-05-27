@@ -402,3 +402,229 @@ describe("listCmd — read-flake retry", () => {
     expect(lines[0]).toContain("alive");
   });
 });
+
+// Pagination + filter-vs-cap regression. The `/api/query` endpoint
+// defaults to limit=100 server-side and does not accept a tag/status
+// filter in the body, so `queryAll` MUST paginate to surface a tagged
+// record that lives outside the first page. Pre-fix: `fbrain list --tag
+// foo` against a >100-record bucket silently dropped the older matches.
+describe("listCmd — pagination across the server's /api/query cap", () => {
+  // Stub that respects body.limit/body.offset and reports has_more
+  // exactly like fold_db_node's QueryResponse contract (DEFAULT_QUERY_LIMIT
+  // / MAX_QUERY_LIMIT in fold_db_node/src/handlers/query.rs). Returns one
+  // server-cap-sized page per call and lets the caller iterate.
+  function stubPaginatedFetch(
+    rowsBySchema: Map<string, Fields[]>,
+    opts: { defaultLimit?: number } = {},
+  ): {
+    restore: () => void;
+    pageRequestsBySchema: Map<string, number>;
+  } {
+    const defaultLimit = opts.defaultLimit ?? 100;
+    const pageRequestsBySchema = new Map<string, number>();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        const schema = String(body.schema_name);
+        const limit =
+          typeof body.limit === "number" ? body.limit : defaultLimit;
+        const offset = typeof body.offset === "number" ? body.offset : 0;
+        const all = rowsBySchema.get(schema) ?? [];
+        const page = all.slice(offset, offset + limit);
+        pageRequestsBySchema.set(
+          schema,
+          (pageRequestsBySchema.get(schema) ?? 0) + 1,
+        );
+        const results = page.map((fields) => ({
+          fields,
+          key: { hash: String(fields.slug ?? "k"), range: null },
+        }));
+        const hasMore = offset + page.length < all.length;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results,
+            total_count: all.length,
+            returned_count: results.length,
+            limit,
+            offset,
+            has_more: hasMore,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    return {
+      restore: () => void (globalThis.fetch = originalFetch),
+      pageRequestsBySchema,
+    };
+  }
+
+  function spikeRowAt(slug: string, updatedAt: string, over: Partial<Fields> = {}): Fields {
+    return spikeRow(slug, { updated_at: updatedAt, ...over });
+  }
+
+  test("--tag finds the only match even when it's the OLDEST record (Phase 6 dogfood repro)", async () => {
+    // 25 concepts in the bucket, only the oldest tagged `target`. With
+    // -n 5, the post-filter result is 1 — not 0. This is the user-visible
+    // contract: filters apply to the full set, not to the top-N window.
+    const rows: Fields[] = Array.from({ length: 25 }, (_, i) =>
+      spikeRowAt(
+        `slug-${String(i).padStart(2, "0")}`,
+        `2026-05-${String(1 + i).padStart(2, "0")}T00:00:00Z`,
+        // slug-00 is the OLDEST (2026-05-01) and the only `target` row.
+        i === 0 ? { tags: ["target"] } : {},
+      ),
+    );
+    const { restore } = stubPaginatedFetch(
+      new Map([[TEST_HASHES.spike, rows]]),
+    );
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        tag: "target",
+        limit: 5,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("slug-00");
+  });
+
+  test("--tag surfaces a match past the server's default 100-row cap", async () => {
+    // 150 spikes in storage; only the LAST one carries the `target` tag.
+    // Pre-fix the client sent no `limit` to /api/query and inherited the
+    // server's DEFAULT_QUERY_LIMIT=100, so the matching row at storage
+    // position 149 was invisible and `fbrain list --tag target` printed
+    // "no records". With the fix the client passes limit=1000 (the
+    // server's MAX_QUERY_LIMIT), the row is in the first page, and the
+    // in-memory filter finds it.
+    const rows: Fields[] = Array.from({ length: 150 }, (_, i) =>
+      spikeRowAt(
+        `slug-${String(i).padStart(3, "0")}`,
+        `2026-04-${String(1 + (i % 30)).padStart(2, "0")}T00:${String(
+          59 - Math.floor(i / 30),
+        ).padStart(2, "0")}:00Z`,
+        i === 149 ? { tags: ["target"] } : {},
+      ),
+    );
+    const { restore } = stubPaginatedFetch(
+      new Map([[TEST_HASHES.spike, rows]]),
+    );
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        tag: "target",
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("slug-149");
+  });
+
+  test("multi-page bucket (>QUERY_PAGE_SIZE rows) finds a match on page 2", async () => {
+    // 1500 spikes — exceeds the client's QUERY_PAGE_SIZE (1000) so the
+    // client must paginate. The match lives at storage position 1400,
+    // inside page 2. Verifies queryAll's pagination loop terminates
+    // correctly and aggregates results across pages.
+    const matchIdx = 1400;
+    const rows: Fields[] = Array.from({ length: 1500 }, (_, i) =>
+      spikeRowAt(
+        `slug-${String(i).padStart(4, "0")}`,
+        `2026-04-${String(1 + (i % 30)).padStart(2, "0")}T00:${String(
+          (i * 17) % 60,
+        ).padStart(2, "0")}:00Z`,
+        i === matchIdx ? { tags: ["target"] } : {},
+      ),
+    );
+    const { restore, pageRequestsBySchema } = stubPaginatedFetch(
+      new Map([[TEST_HASHES.spike, rows]]),
+    );
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        tag: "target",
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain(`slug-${String(matchIdx).padStart(4, "0")}`);
+    // 1500 records / 1000 per page = 2 pages. The retry path isn't
+    // engaged because the first sweep saw ≥1 non-tombstoned row.
+    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(2);
+  });
+
+  test("--status finds a status-matched record in page 2", async () => {
+    // Same bug class as --tag: the in-memory filter must see all rows.
+    // 150 spikes, only the last has status "concluded".
+    const rows: Fields[] = Array.from({ length: 150 }, (_, i) =>
+      spikeRowAt(
+        `slug-${String(i).padStart(3, "0")}`,
+        `2026-04-${String(1 + (i % 30)).padStart(2, "0")}T00:00:00Z`,
+        i === 149 ? { status: "concluded" } : {},
+      ),
+    );
+    const { restore } = stubPaginatedFetch(
+      new Map([[TEST_HASHES.spike, rows]]),
+    );
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        status: "concluded",
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("slug-149");
+    expect(lines[0]).toContain("concluded");
+  });
+
+  test("a 1000-record bucket resolves in a single page request (QUERY_PAGE_SIZE)", async () => {
+    // 1000 rows fits in one client page (QUERY_PAGE_SIZE), so the stub
+    // sees exactly one /api/query when we set defaultLimit to the same
+    // size. Pre-fix the client sent no `limit` at all and inherited the
+    // server's 100-row default — 10x more round trips at this scale.
+    const rows: Fields[] = Array.from({ length: 1000 }, (_, i) =>
+      spikeRowAt(
+        `slug-${String(i).padStart(4, "0")}`,
+        `2026-04-${String(1 + (i % 30)).padStart(2, "0")}T00:00:00Z`,
+      ),
+    );
+    const { restore, pageRequestsBySchema } = stubPaginatedFetch(
+      new Map([[TEST_HASHES.spike, rows]]),
+      { defaultLimit: 1000 },
+    );
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        print: () => {},
+      });
+    } finally {
+      restore();
+    }
+    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(1);
+  });
+});

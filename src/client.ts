@@ -68,7 +68,22 @@ export type QueryResponse = {
   results: QueryRow[];
   total_count?: number;
   returned_count?: number;
+  has_more?: boolean;
 };
+
+// Single-request page size for the `/api/query` pagination loop. The node
+// caps individual page requests at MAX_QUERY_LIMIT (1000); we ride that
+// cap directly so a database of N records resolves in ceil(N/1000) round
+// trips. The server's INTERNAL_FETCH_CAP (10000) is a separate ceiling
+// on the post-filter result set per-request — beyond that the node sets
+// `has_more` and we'd need to keep iterating.
+export const QUERY_PAGE_SIZE = 1000;
+
+// Safety cap to prevent an infinite pagination loop if the node ever
+// returns `has_more: true` together with an empty `results` page. At a
+// page size of 1000 this still permits 1,000,000 records before bailing
+// — well beyond fbrain's expected scale, but bounded.
+export const QUERY_PAGE_LIMIT = 1000;
 
 export class FbrainError extends Error {
   readonly code: string;
@@ -344,19 +359,46 @@ export function newNodeClient(opts: {
       await mutate("delete", schemaHash, {}, keyHash, callJson);
     },
     async queryAll({ schemaHash, fields }) {
-      const { status, body } = await callJson("/api/query", "POST", {
-        schema_name: schemaHash,
-        fields,
-      });
-      if (status !== 200) throw mapNodeError(status, body, "/api/query");
-      const b = body as Record<string, unknown>;
-      const results = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      // The node's /api/query handler silently defaults to limit=100
+      // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
+      // does NOT support a body-side tag/status filter — so any caller
+      // that wants to filter by a record field has to fetch everything
+      // and filter in-memory. We paginate up to QUERY_PAGE_SIZE rows per
+      // request and stop once the node reports `has_more: false`, which
+      // gives us a complete-result contract regardless of how big the
+      // backing schema is (subject to the safety guards below).
+      const allResults: QueryRow[] = [];
+      let offset = 0;
+      let lastTotalCount = 0;
+      for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
+        const { status, body } = await callJson("/api/query", "POST", {
+          schema_name: schemaHash,
+          fields,
+          limit: QUERY_PAGE_SIZE,
+          offset,
+        });
+        if (status !== 200) throw mapNodeError(status, body, "/api/query");
+        const b = body as Record<string, unknown>;
+        const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+        allResults.push(...pageResults);
+        lastTotalCount =
+          typeof b.total_count === "number" ? b.total_count : allResults.length;
+        // Stop on explicit `has_more: false`. Absent `has_more` (older
+        // node, or a stub) is treated as "done" — a single non-paginated
+        // response is then equivalent to the pre-pagination contract.
+        const hasMore = b.has_more === true;
+        if (!hasMore) break;
+        // Guard against an infinite loop if the node ever returns
+        // has_more=true with an empty page. Without this, a stuck-empty
+        // page would spin until the page cap.
+        if (pageResults.length === 0) break;
+        offset += pageResults.length;
+      }
       return {
         ok: true,
-        results,
-        total_count: typeof b.total_count === "number" ? b.total_count : results.length,
-        returned_count:
-          typeof b.returned_count === "number" ? b.returned_count : results.length,
+        results: allResults,
+        total_count: lastTotalCount,
+        returned_count: allResults.length,
       };
     },
     async search(query, searchOpts) {
