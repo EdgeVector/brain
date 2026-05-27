@@ -2,6 +2,7 @@
 
 import { newNodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
+import { formatTable } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
@@ -11,11 +12,21 @@ import {
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
+// Default cap for an unfiltered `fbrain list`. Without it an
+// unfiltered list dumps every record in the index — 80+ already, and
+// growing. A `-n N` flag overrides this; the truncation hint tells the
+// user what they're missing.
+export const DEFAULT_LIST_LIMIT = 20;
+
 export type ListOptions = {
   cfg: Config;
   type?: RecordType;
   status?: string;
   tag?: string;
+  // Optional explicit cap. When omitted, `listCmd` applies
+  // DEFAULT_LIST_LIMIT and prints a "K more" hint on truncation.
+  // Must be a positive integer when set — non-positive values are
+  // rejected by the CLI before they reach here.
   limit?: number;
   verbose?: Verbose;
   print?: (line: string) => void;
@@ -65,15 +76,35 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     (a, b) => Date.parse(b.record.updated_at) - Date.parse(a.record.updated_at),
   );
 
-  const trimmed = opts.limit && opts.limit > 0 ? filtered.slice(0, opts.limit) : filtered;
-
-  if (trimmed.length === 0) {
+  // Genuinely-empty result wins over the truncation path — print
+  // `no records` even when the implicit default cap would have taken
+  // effect. (Iron: the cap is a UX guard against floods, not a signal.)
+  if (filtered.length === 0) {
     print("no records");
     return;
   }
 
-  for (const { type, record } of trimmed) {
-    const tags = record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
-    print(`${type.padEnd(10)} ${record.slug.padEnd(28)} ${record.status.padEnd(12)} ${record.title}${tags}`);
+  // Explicit `-n N` overrides the default. Non-positive values are
+  // rejected upstream in cli.ts, so any `opts.limit` reaching here is
+  // a positive integer.
+  const effectiveLimit = opts.limit ?? DEFAULT_LIST_LIMIT;
+  const trimmed = filtered.slice(0, effectiveLimit);
+  const truncated = filtered.length - trimmed.length;
+
+  const lines = formatTable(
+    trimmed.map(({ type, record }) => {
+      const tags = record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
+      return [type, record.slug, record.status, `${record.title}${tags}`];
+    }),
+  );
+  for (const line of lines) print(line);
+
+  // Only hint when the default cap (not an explicit `-n N`) clipped
+  // the output. With an explicit limit the user asked for N — they
+  // already know they're seeing a slice.
+  if (opts.limit === undefined && truncated > 0) {
+    print(
+      `… ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
+    );
   }
 }

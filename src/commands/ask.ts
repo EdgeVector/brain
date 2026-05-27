@@ -25,6 +25,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import type { Config } from "../config.ts";
+import { formatTable } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
@@ -317,16 +318,31 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   if (resolved.length === 0) {
     print("no matches");
   } else {
-    for (const h of resolved) {
-      const score = h.fusedScore.toFixed(4);
-      const bm = h.bm25Rank === null ? "—" : String(h.bm25Rank);
-      const vr = h.vectorRank === null ? "—" : String(h.vectorRank);
-      const exp =
-        h.expansionHits.length === 0 ? "" : `  +exp[${formatExpansionHits(h.expansionHits)}]`;
-      print(
-        `${h.slug.padEnd(28)}  ${score.padStart(7)}  ${capitalize(h.type).padEnd(10)}  bm25=${bm.padStart(3)}  vec=${vr.padStart(3)}${exp}  ${h.record.title}`,
-      );
-    }
+    // Expansion column collapses when every row has no expansion hits;
+    // formatTable computes a 0-width column for an all-empty column,
+    // and adjacent gaps merge into the same 2-space separator.
+    const lines = formatTable(
+      resolved.map((h) => {
+        const score = h.fusedScore.toFixed(4);
+        const bm = h.bm25Rank === null ? "—" : String(h.bm25Rank);
+        const vr = h.vectorRank === null ? "—" : String(h.vectorRank);
+        const exp =
+          h.expansionHits.length === 0
+            ? ""
+            : `+exp[${formatExpansionHits(h.expansionHits)}]`;
+        return [
+          h.slug,
+          score,
+          capitalize(h.type),
+          `bm25=${bm}`,
+          `vec=${vr}`,
+          exp,
+          h.record.title,
+        ];
+      }),
+      { align: ["left", "right", "left", "left", "left", "left", "left"] },
+    );
+    for (const line of lines) print(line);
   }
 
   if (expansion && opts.verbose) {
