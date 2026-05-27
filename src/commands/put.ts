@@ -34,6 +34,11 @@ export type PutOptions = {
   cfg: Config;
   slug: string;
   input: string;
+  // Override / supply the record type from the command line. Useful when
+  // piping schema-less notes: `cat note.md | fbrain put slug --type concept`.
+  // If frontmatter also carries `type:` and the two disagree, putCmd errors
+  // with `type_conflict` rather than silently picking one.
+  typeOverride?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -60,7 +65,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     });
   }
   const parsed = parseFrontmatter(frontmatter);
-  const type = resolveRecordType(parsed.type);
+  const type = resolveRecordType(parsed.type, opts.typeOverride);
   const title = resolveTitle(parsed.title, body, opts.slug);
 
   const node = newNodeClient({
@@ -115,8 +120,40 @@ function buildFields(
   return base;
 }
 
-function resolveRecordType(raw: string | undefined): RecordType {
-  if (raw === undefined || raw === "") return "design";
+function resolveRecordType(
+  fromFrontmatter: string | undefined,
+  override: string | undefined,
+): RecordType {
+  // Why no silent default: the historic fallback was `design`, which is the
+  // heaviest opinionated record type (status enum, design_slug machinery).
+  // Piping a schema-less note silently created a Design row — a frequent
+  // mis-type trap. We now require an explicit signal: either frontmatter
+  // `type:` or a `--type` flag.
+  const fmType = normaliseType(fromFrontmatter);
+  const ovType = normaliseType(override);
+
+  if (fmType && ovType && fmType !== ovType) {
+    throw new FbrainError({
+      code: "type_conflict",
+      message:
+        `--type ${ovType} conflicts with frontmatter \`type: ${fmType}\`.`,
+      hint: "Drop one — they must agree. Frontmatter and --type can't both be set to different types.",
+    });
+  }
+  const chosen = fmType ?? ovType;
+  if (chosen === undefined) {
+    throw new FbrainError({
+      code: "missing_type",
+      message:
+        "fbrain put requires a `type:` field in frontmatter (or pass --type <T>).",
+      hint: "One of: design | task | concept | preference | reference | agent | project | spike.",
+    });
+  }
+  return chosen;
+}
+
+function normaliseType(raw: string | undefined): RecordType | undefined {
+  if (raw === undefined || raw === "") return undefined;
   const normalised = raw.toLowerCase();
   if (isRecordType(normalised)) return normalised;
   throw new FbrainError({

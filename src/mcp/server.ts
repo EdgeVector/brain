@@ -311,9 +311,9 @@ export function buildPutInput(args: PutArgs): string {
       : `---\n${trimmed}\n---\n${body}`;
   }
   const lines: string[] = [];
-  // Always pin a type — putCmd defaults to `design` when omitted, but the
-  // MCP wrapper should be explicit so the agent's intent is preserved
-  // even if the default ever shifts.
+  // Always pin a type. putCmd refuses a put with no `type:` field; the MCP
+  // wrapper synthesizes `type: design` as the historic default so existing
+  // agents (which omit `type` for design rows) keep working.
   lines.push(`type: ${args.type ?? "design"}`);
   if (args.title !== undefined && args.title.length > 0) {
     lines.push(`title: ${yamlScalar(args.title)}`);

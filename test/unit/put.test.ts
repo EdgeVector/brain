@@ -258,7 +258,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.updated_at).not.toBe("2026-01-01T00:00:00.000Z");
   });
 
-  test("no frontmatter at all → defaults to design, title from H1", async () => {
+  test("no frontmatter + --type design → title from H1", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
@@ -272,13 +272,14 @@ describe("putCmd — pre-request validation + dispatch", () => {
       cfg,
       slug: "h1-titled",
       input: "# Title From H1\n\nthe rest of the body",
+      typeOverride: "design",
     });
     expect(r.type).toBe("design");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.title).toBe("Title From H1");
   });
 
-  test("no frontmatter and no H1 → title falls back to slug", async () => {
+  test("no frontmatter, no H1, --type design → title falls back to slug", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
@@ -292,6 +293,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       cfg,
       slug: "no-title",
       input: "just some body text, no heading at all",
+      typeOverride: "design",
     });
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.title).toBe("no-title");
@@ -364,7 +366,19 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.title).toBe("X");
   });
 
-  test("body present, no frontmatter → still accepted", async () => {
+  test("body present, no frontmatter, no --type → rejected with missing_type", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({ cfg, slug: "body-only", input: "just body text\n" }),
+    ).rejects.toMatchObject({ code: "missing_type" });
+    expect(touched).toBe(false);
+  });
+
+  test("body present, no frontmatter, --type concept → accepted", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
@@ -378,11 +392,102 @@ describe("putCmd — pre-request validation + dispatch", () => {
       cfg,
       slug: "body-only",
       input: "just body text\n",
+      typeOverride: "concept",
     });
-    expect(r.type).toBe("design");
+    expect(r.type).toBe("concept");
     expect(r.action).toBe("created");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.body).toBe("just body text");
+  });
+
+  test("frontmatter present, no type: field, no --type → rejected with missing_type", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "no-type-field",
+        input: "---\ntitle: just a title\n---\nbody",
+      }),
+    ).rejects.toMatchObject({ code: "missing_type" });
+    expect(touched).toBe(false);
+  });
+
+  test("frontmatter present, no type: field, --type concept → accepted", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "fm-no-type",
+      input: "---\ntitle: From FM\n---\nbody",
+      typeOverride: "concept",
+    });
+    expect(r.type).toBe("concept");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.title).toBe("From FM");
+  });
+
+  test("--type matches frontmatter type → no conflict, just accepted", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "agree",
+      input: "---\ntype: task\ntitle: T\n---\nbody",
+      typeOverride: "task",
+    });
+    expect(r.type).toBe("task");
+  });
+
+  test("--type disagrees with frontmatter type → rejected with type_conflict", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "disagree",
+        input: "---\ntype: task\ntitle: T\n---\nbody",
+        typeOverride: "design",
+      }),
+    ).rejects.toMatchObject({ code: "type_conflict" });
+    expect(touched).toBe(false);
+  });
+
+  test("--type with an unsupported value rejects with unsupported_type", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "bad-override",
+        input: "body",
+        typeOverride: "concep",
+      }),
+    ).rejects.toMatchObject({ code: "unsupported_type" });
+    expect(touched).toBe(false);
   });
 
   test("type: task on create populates design_slug to empty string", async () => {

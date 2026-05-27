@@ -73,7 +73,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain init` | Bootstraps the node + registers schemas + writes `~/.fbrain/config.json` with canonical hashes |
 | `fbrain design new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a Design |
 | `fbrain task new <slug> [--title T] [--design D] [--tag T]… [--body STR] [--force]` | Creates a Task (rejects dangling `--design`) |
-| `fbrain put <slug>` | Upserts a record from stdin (YAML frontmatter aware). `type:` in frontmatter picks the schema — all 8 types route to writes. Re-puts update in place — no `--force`, no 409 |
+| `fbrain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
 | `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type and errors on ambiguity |
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
