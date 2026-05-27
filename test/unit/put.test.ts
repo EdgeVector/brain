@@ -581,4 +581,85 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.status).toBe("in_progress");
     expect(fields.created_at).toBe("2026-02-02T00:00:00.000Z");
   });
+
+  // Regression: fold_db_node `/api/query` returns a non-deterministic
+  // top-100 slice per schema, so a schema with >100 rows can have an
+  // existing slug get skipped from the page. Pre-fix, the put handler
+  // called findBySlug once and on a miss fell through to createRecord —
+  // overwriting the row with a fresh `created_at` and printing "created"
+  // even though it was an upsert. The retry hedge (mirrors what
+  // resolveBySlug does for get/status/delete) must re-query until the
+  // record surfaces.
+  test("re-put recovers when /api/query flakes once then returns the row", async () => {
+    const existing = {
+      fields: {
+        slug: "flaky-upsert",
+        title: "Original",
+        body: "old body",
+        status: "active",
+        tags: ["initial"],
+        created_at: "2026-03-03T00:00:00.000Z",
+        updated_at: "2026-03-03T00:00:00.000Z",
+        kind: "concept",
+      },
+      key: { hash: "flaky-upsert", range: null },
+    };
+    let queryCalls = 0;
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        queryCalls++;
+        // First call returns an empty page (the slug fell outside the
+        // top-100 slice). Subsequent calls return the row.
+        const results = queryCalls === 1 ? [] : [existing];
+        return { status: 200, body: { ok: true, results } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "flaky-upsert",
+      input: "---\ntype: concept\ntitle: Second\ntags: [b]\n---\nsecond body",
+    });
+    expect(r.action).toBe("updated");
+    expect(queryCalls).toBeGreaterThanOrEqual(2);
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.mutation_type).toBe("update");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.created_at).toBe("2026-03-03T00:00:00.000Z");
+    expect(fields.updated_at).not.toBe("2026-03-03T00:00:00.000Z");
+    expect(typeof fields.updated_at).toBe("string");
+    expect(fields.title).toBe("Second");
+    expect(fields.body).toBe("second body");
+  });
+
+  test("genuine first put still creates after retry budget (record never existed)", async () => {
+    let queryCalls = 0;
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        queryCalls++;
+        // No record exists — every retry returns empty.
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "never-existed",
+      // Tiny backoff so the test doesn't sit through the full retry window.
+      input: "---\ntype: concept\ntitle: Fresh\n---\nfresh body",
+    });
+    expect(r.action).toBe("created");
+    expect(queryCalls).toBeGreaterThanOrEqual(1);
+    expect(mutations[0]!.mutation_type).toBe("create");
+  }, 30_000);
 });

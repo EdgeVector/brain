@@ -360,13 +360,17 @@ describe("fbrain_put tool", () => {
 
   test("status arg fires a follow-up status update after the put", async () => {
     const mutations: Array<Record<string, unknown>> = [];
-    let queryCount = 0;
+    // putCmd's pre-existence check now retries through withReadRetry —
+    // it must see "no row" through the entire retry budget so the put
+    // routes to createRecord (not updateRecord). After the create
+    // mutation lands, the status command's findBySlug must see the row.
+    // Gate the mock on whether a mutation has happened, not on query
+    // index — the latter is brittle to retry-count changes.
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
-        queryCount += 1;
-        // First query: pre-put existence check (empty).
-        // Second query: status command's findBySlug for the just-created record.
-        if (queryCount === 1) return { status: 200, body: { ok: true, results: [] } };
+        if (mutations.length === 0) {
+          return { status: 200, body: { ok: true, results: [] } };
+        }
         return {
           status: 200,
           body: {
@@ -416,12 +420,15 @@ describe("fbrain_put tool", () => {
   });
 
   test("invalid status arg errors and surfaces through MCP isError", async () => {
-    let queryCount = 0;
+    const mutations: Array<Record<string, unknown>> = [];
+    // Same gating as the "fires a follow-up status update" test above:
+    // putCmd's pre-existence check retries, so we can't condition on
+    // queryCount === 1. Use mutation-fired as the boundary instead.
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
-        queryCount += 1;
-        if (queryCount === 1) return { status: 200, body: { ok: true, results: [] } };
-        // The status command's findBySlug needs to see the record.
+        if (mutations.length === 0) {
+          return { status: 200, body: { ok: true, results: [] } };
+        }
         return {
           status: 200,
           body: {
@@ -443,7 +450,10 @@ describe("fbrain_put tool", () => {
           },
         };
       }
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
       return { status: 404 };
     });
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
