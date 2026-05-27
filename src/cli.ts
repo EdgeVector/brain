@@ -425,8 +425,16 @@ export async function main(argv: Argv): Promise<number> {
     return 0;
   }
   if (!isCommand(cmd)) {
-    console.error(`Unknown command: ${cmd}`);
-    console.error(TOP_HELP);
+    const suggestion = suggestCommand({
+      single: cmd,
+      compound: stripped[1] ? `${cmd} ${stripped[1]}` : undefined,
+    });
+    if (suggestion) {
+      console.error(`Unknown command: ${cmd}. Did you mean: ${suggestion}?`);
+    } else {
+      console.error(`Unknown command: ${cmd}`);
+      console.error(TOP_HELP);
+    }
     return 1;
   }
   const rest = stripped.slice(1);
@@ -454,6 +462,51 @@ export async function main(argv: Argv): Promise<number> {
 
 function isCommand(s: string): s is Command {
   return (COMMANDS as readonly string[]).includes(s);
+}
+
+const COMPOUND_COMMANDS = ["design new", "task new"] as const;
+
+// Suggest the closest valid command for an unknown input. `single` is matched
+// against every entry in COMMANDS; `compound` (e.g. `desogn new`) is matched
+// against the two-token subcommand pairs so `desogn new` suggests `design new`
+// rather than the bare `design`. Returns null when no candidate scores within
+// max(2, floor(input.length / 3)) edits — at which point callers fall back
+// to TOP_HELP for cold-start discovery.
+export function suggestCommand(opts: { single?: string; compound?: string }): string | null {
+  let best: string | null = null;
+  let bestDist = Infinity;
+  let bestLen = 0;
+  const consider = (candidate: string, input: string) => {
+    const d = levenshtein(input, candidate);
+    if (d < bestDist) {
+      bestDist = d;
+      bestLen = input.length;
+      best = candidate;
+    }
+  };
+  // Compound first so a tie favors the more-specific two-token suggestion.
+  if (opts.compound) for (const c of COMPOUND_COMMANDS) consider(c, opts.compound);
+  if (opts.single) for (const c of COMMANDS) consider(c, opts.single);
+  if (best === null) return null;
+  const threshold = Math.max(2, Math.floor(bestLen / 3));
+  return bestDist <= threshold ? best : null;
+}
+
+export function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  let prev: number[] = [];
+  for (let j = 0; j <= b.length; j++) prev.push(j);
+  for (let i = 1; i <= a.length; i++) {
+    const curr: number[] = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr.push(Math.min(curr[j - 1]! + 1, prev[j]! + 1, prev[j - 1]! + cost));
+    }
+    prev = curr;
+  }
+  return prev[b.length]!;
 }
 
 function consumeFlag(argv: Argv, name: string): boolean {
@@ -551,7 +604,12 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
 async function runDesign(args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0];
   if (sub !== "new") {
-    console.error(`Unknown design subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP.design}`);
+    const suggestion = sub ? suggestCommand({ compound: `design ${sub}` }) : null;
+    if (suggestion) {
+      console.error(`Unknown design subcommand: ${sub}. Did you mean: ${suggestion}?`);
+    } else {
+      console.error(`Unknown design subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP.design}`);
+    }
     return 1;
   }
   const rest = args.slice(1);
@@ -584,7 +642,12 @@ async function runDesign(args: Argv, verbose: Verbose): Promise<number> {
 async function runTask(args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0];
   if (sub !== "new") {
-    console.error(`Unknown task subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP.task}`);
+    const suggestion = sub ? suggestCommand({ compound: `task ${sub}` }) : null;
+    if (suggestion) {
+      console.error(`Unknown task subcommand: ${sub}. Did you mean: ${suggestion}?`);
+    } else {
+      console.error(`Unknown task subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP.task}`);
+    }
     return 1;
   }
   const rest = args.slice(1);
