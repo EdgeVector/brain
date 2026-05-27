@@ -28,6 +28,8 @@ import {
 import { type Config } from "../config.ts";
 import { fieldsFor } from "../record.ts";
 import {
+  LEGACY_NOTE_QUERY_FIELDS,
+  LEGACY_NOTE_SCHEMA_KEY,
   RECORDS,
   UNIQUE_SCHEMAS,
   isRecordType,
@@ -74,15 +76,21 @@ export async function runUsageReport(
   const perUser = new Map<string, Counts>();
 
   for (const entry of UNIQUE_SCHEMAS) {
-    const firstType = entry.types[0]!;
-    const schemaHash = cfg.schemaHashes[firstType];
+    const schemaHash = cfg.schemaHashes[entry.key];
     if (!schemaHash) {
       verbose?.(`usage: skipping ${entry.key} — no schemaHash in config`);
       continue;
     }
+    // The legacy FbrainKindNote entry has `types: []` (no new writes route
+    // there). Read its rows with the legacy field shape and resolve each
+    // row's RecordType from its `kind` discriminator.
+    const isLegacy = entry.key === LEGACY_NOTE_SCHEMA_KEY;
+    const fields = isLegacy
+      ? [...LEGACY_NOTE_QUERY_FIELDS]
+      : fieldsFor(entry.types[0]!);
     let rows: QueryRow[];
     try {
-      const res = await node.queryAll({ schemaHash, fields: fieldsFor(firstType) });
+      const res = await node.queryAll({ schemaHash, fields });
       rows = res.results;
     } catch (err) {
       verbose?.(
@@ -93,7 +101,9 @@ export async function runUsageReport(
     verbose?.(`usage: ${entry.key} → ${rows.length} rows`);
 
     for (const row of rows) {
-      const type = resolveType(row, entry.types);
+      const type = isLegacy
+        ? resolveLegacyType(row)
+        : resolveType(row, entry.types);
       if (!type) continue;
       const createdAt = stringField(row.fields, "created_at");
       if (!createdAt) continue;
@@ -229,13 +239,12 @@ function isoDate(d: Date): string {
 function resolveType(row: QueryRow, candidates: readonly RecordType[]): RecordType | null {
   if (candidates.length === 1) {
     const only = candidates[0]!;
-    // Sanity check: if the row also carries `kind`, it must match. This
-    // guards against the day a Phase 6 row gets misrouted into a
-    // single-type schema bucket (it shouldn't, but the cost of asserting
-    // is one comparison).
-    if (RECORDS[only].kind !== null) {
+    // Sanity check: if the row also carries `kind` (e.g. a stray legacy
+    // FbrainKindNote field somehow surfaced through a per-kind query),
+    // it must match the type's expected discriminator value.
+    if (RECORDS[only].legacyKind !== null) {
       const k = stringField(row.fields, "kind");
-      if (k.length > 0 && k !== RECORDS[only].kind) return null;
+      if (k.length > 0 && k !== RECORDS[only].legacyKind) return null;
     }
     return only;
   }
@@ -243,6 +252,14 @@ function resolveType(row: QueryRow, candidates: readonly RecordType[]): RecordTy
   if (kind.length === 0) return null;
   if (!isRecordType(kind)) return null;
   return candidates.includes(kind) ? kind : null;
+}
+
+// Legacy FbrainKindNote rows: discriminate by the `kind` field. Only
+// rows whose kind matches a known Phase 6 RecordType are counted.
+function resolveLegacyType(row: QueryRow): RecordType | null {
+  const k = stringField(row.fields, "kind");
+  if (k.length === 0 || !isRecordType(k)) return null;
+  return RECORDS[k].legacyKind !== null ? k : null;
 }
 
 function stringField(f: Record<string, unknown> | undefined, key: string): string {

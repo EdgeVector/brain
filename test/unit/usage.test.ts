@@ -21,7 +21,7 @@ import type {
   QueryResponse,
   QueryRow,
 } from "../../src/client.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { buildTestCfg, TEST_HASHES, TEST_LEGACY_NOTE_HASH } from "../util.ts";
 
 // Two synthetic ed25519-shaped base64 pubkeys. The pair must hash to
 // 8-char prefixes that are visually distinct so output assertions are
@@ -184,12 +184,15 @@ describe("runUsageReport", () => {
     expect(report.users.length).toBe(1);
   });
 
-  test("ignores Phase 6 rows without a `kind` field", async () => {
+  test("ignores legacy FbrainKindNote rows without a `kind` field", async () => {
+    // Post-Phase-E: per-kind rows are valid even without a `kind` field
+    // (their schema doesn't have one). The discriminator-required check
+    // applies to the LEGACY noteSchema, where missing kind = malformed.
     const cfg = buildTestCfg();
     const node = mockNodeWithRows([]);
     node.queryAll = async (opts) => {
-      if (opts.schemaHash === TEST_HASHES.concept) {
-        // Simulate a noteSchema row that's missing `kind`.
+      if (opts.schemaHash === TEST_LEGACY_NOTE_HASH) {
+        // Simulate a legacy FbrainKindNote row missing the discriminator.
         return {
           ok: true,
           results: [{

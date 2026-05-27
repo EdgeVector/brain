@@ -17,11 +17,12 @@
 import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
+  findBySlugLegacyRaw,
   findBySlugRaw,
   isTombstoned,
   nowIso,
   resolveBySlug,
-  schemaHashFor,
+  writeSchemaHashFor,
   TOMBSTONE_TAG,
   withReadRetry,
 } from "../record.ts";
@@ -55,6 +56,7 @@ export function buildTombstoneFields(
   slug: string,
   createdAt: string,
   now: string,
+  legacy: boolean,
 ): Record<string, unknown> {
   const def = RECORDS[type];
   const fields: Record<string, unknown> = {
@@ -67,11 +69,10 @@ export function buildTombstoneFields(
     updated_at: now,
   };
   if (def.hasDesignSlug) fields.design_slug = "";
-  if (def.kind !== null) {
-    // Phase 6 records on the shared noteSchema carry a `kind` discriminator
-    // plus two fixed-value markers; an update must include them or the
-    // schema rejects the mutation.
-    fields.kind = def.kind;
+  if (legacy) {
+    // Pre-Phase-E FbrainKindNote rows carry a `kind` discriminator plus
+    // two fixed-value markers; the schema requires them on update.
+    fields.kind = def.legacyKind;
     fields.v1_marker_a = "fbrain";
     fields.v1_marker_b = "v1";
   }
@@ -87,25 +88,22 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   });
 
   // raw mode bypasses tombstone filtering at the lookup layer; resolveBySlug
-  // drops tombstones inside the helper afterward.
-  const { type, record } = await resolveBySlug({
+  // drops tombstones inside the helper afterward. For Phase 6 types
+  // resolveBySlug also probes the legacy FbrainKindNote schema, so a row
+  // resolved here may be marked .legacy=true — mutations must then target
+  // the legacy hash, not the per-kind one.
+  const resolved = await resolveBySlug({
     node,
     cfg: opts.cfg,
     slug: opts.slug,
     type: opts.type,
     raw: true,
-    // For Phase 6 types that share noteSchema, findBySlugRaw returns rows
-    // regardless of kind. Skip rows whose kind doesn't match this type so we
-    // don't try to "delete" a preference as a concept.
-    filter: (r, t) => {
-      const def = RECORDS[t];
-      return def.kind === null || r.kind === def.kind;
-    },
     notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
   });
-  const schemaHash = schemaHashFor(type, opts.cfg);
+  const { type, record, legacy } = resolved;
+  const schemaHash = writeSchemaHashFor(type, legacy, opts.cfg);
 
-  const fields = buildTombstoneFields(type, opts.slug, record.created_at, nowIso());
+  const fields = buildTombstoneFields(type, opts.slug, record.created_at, nowIso(), legacy);
 
   await node.updateRecord({ schemaHash, fields, keyHash: opts.slug });
   // Forward-compat: fire fold_db's own delete so any future hard-delete or
@@ -121,7 +119,9 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // once the row resurfaces; a genuinely-missing-or-not-tombstoned row
   // still raises after the retry budget is spent.
   const verify = await withReadRetry(
-    () => findBySlugRaw(node, type, schemaHash, opts.slug),
+    () => legacy
+      ? findBySlugLegacyRaw(node, type, schemaHash, opts.slug)
+      : findBySlugRaw(node, type, schemaHash, opts.slug),
     (r) => r !== null,
   );
   if (verify === null || !isTombstoned(verify)) {

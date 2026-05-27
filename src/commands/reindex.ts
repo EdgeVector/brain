@@ -105,8 +105,12 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
 // Build the field payload for a re-issued update mutation. Mirrors
 // put.ts's buildFields but takes a FbrainRecord directly: preserves every
 // user-meaningful field (slug, title, body, status, tags, created_at,
-// design_slug, kind) and only refreshes updated_at. The point is to
+// design_slug) and only refreshes updated_at. The point is to
 // re-trigger fold_db's `index_record` without changing semantics.
+//
+// Post-Phase-E this targets the per-kind schema for every type (legacy
+// FbrainKindNote rows are not re-indexed here — a separate follow-up
+// task wires that path).
 export function buildReindexFields(
   type: RecordType,
   record: FbrainRecord,
@@ -124,11 +128,6 @@ export function buildReindexFields(
   };
   if (entry.hasDesignSlug) {
     fields.design_slug = record.design_slug ?? "";
-  }
-  if (entry.kind !== null) {
-    fields.kind = entry.kind;
-    fields.v1_marker_a = "fbrain";
-    fields.v1_marker_b = "v1";
   }
   return fields;
 }

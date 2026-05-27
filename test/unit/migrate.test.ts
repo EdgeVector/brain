@@ -243,7 +243,9 @@ function stubFetch(opts: {
 }
 
 describe("buildMigratedFields", () => {
-  test("Phase 6: preserves body/tags, stamps kind + v1 markers, adds new field at default + version marker, bumps updated_at", () => {
+  test("Phase 6 (post-Phase-E): per-kind schema, no kind/marker fields, new field stamped with version marker", () => {
+    // Post-Phase-E each Phase 6 kind has its own 7-field schema; the
+    // legacy `kind`/v1_marker_* fields are no longer added on migrate.
     const rec: FbrainRecord = {
       slug: "c1",
       title: "T",
@@ -252,21 +254,20 @@ describe("buildMigratedFields", () => {
       tags: ["x", TOMBSTONE_TAG],
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-02-01T00:00:00Z",
-      kind: "concept",
     };
-    const out = buildMigratedFields("concept", rec, "urgency", "normal", "2026-05-24T20:00:00Z", "FbrainKindNote_v2");
+    const out = buildMigratedFields("concept", rec, "urgency", "normal", "2026-05-24T20:00:00Z", "Concept_v2");
     expect(out.slug).toBe("c1");
     expect(out.title).toBe("T");
     expect(out.body).toBe("Body");
     expect(out.tags).toEqual(["x", TOMBSTONE_TAG]); // tombstone preserved
-    expect(out.kind).toBe("concept");
-    expect(out.v1_marker_a).toBe("fbrain");
-    expect(out.v1_marker_b).toBe("v1");
+    expect("kind" in out).toBe(false);
+    expect("v1_marker_a" in out).toBe(false);
+    expect("v1_marker_b" in out).toBe(false);
     expect(out.created_at).toBe("2026-01-01T00:00:00Z");
     expect(out.updated_at).toBe("2026-05-24T20:00:00Z");
     expect(out.urgency).toBe("normal");
     // Per-migration version marker stamped.
-    expect(out[versionMarkerField("FbrainKindNote_v2")]).toBe("FbrainKindNote_v2");
+    expect(out[versionMarkerField("Concept_v2")]).toBe("Concept_v2");
   });
 
   test("Design: no kind / markers; design_slug omitted for design", () => {
@@ -283,7 +284,7 @@ describe("buildMigratedFields", () => {
 
   test("Array:String default lands as an array", () => {
     const rec: FbrainRecord = {
-      slug: "c1", title: "T", body: "B", status: "active", tags: [], created_at: "", updated_at: "", kind: "concept",
+      slug: "c1", title: "T", body: "B", status: "active", tags: [], created_at: "", updated_at: "",
     };
     const out = buildMigratedFields("concept", rec, "watchers", ["alice", "bob"], "2026-05-24T20:00:00Z");
     expect(out.watchers).toEqual(["alice", "bob"]);
@@ -322,40 +323,27 @@ describe("migrateCmd post-registration sanity check", () => {
 });
 
 describe("migrateCmd --add-field", () => {
-  test("Phase 6: re-puts every Phase 6 record (regardless of named --type) and swaps all six hashes", async () => {
+  test("Phase 6 (post-Phase-E): re-puts only the named kind's records and only swaps that one hash", async () => {
+    // Pre-Phase-E, migrate on `concept` operated as a bundle across all
+    // six Phase 6 kinds because they shared one FbrainKindNote schema.
+    // Post-Phase-E each kind has its own per-kind schema, so a concept
+    // migration touches only concept records and only swaps the concept
+    // hash. Legacy FbrainKindNote rows are out of scope for migrate
+    // until the consolidation pass lands.
     const cfg = buildTestCfg();
     writeStartingConfig(cfg);
-    // We model a real setup where all six Phase 6 types share one hash:
-    // here we point them at TEST_HASHES.concept so listRecords queries
-    // converge. The migrate command reads from_hash = schemaHashes[first
-    // affected type] = concept's hash.
-    const sharedNoteHash = TEST_HASHES.concept;
-    const cfgShared = buildTestCfg({
-      schemaHashes: {
-        ...cfg.schemaHashes,
-        concept: sharedNoteHash,
-        preference: sharedNoteHash,
-        reference: sharedNoteHash,
-        agent: sharedNoteHash,
-        project: sharedNoteHash,
-        spike: sharedNoteHash,
-      },
-    });
-    writeStartingConfig(cfgShared);
 
     const stub = stubFetch({
       queries: {
-        [sharedNoteHash]: [
-          conceptRow("c1"),
-          conceptRow("c2"),
-          preferenceRow("p1"),
-        ],
+        [TEST_HASHES.concept]: [conceptRow("c1"), conceptRow("c2")],
+        // Sister-kind rows are NOT touched by a concept migration.
+        [TEST_HASHES.preference]: [preferenceRow("p1")],
       },
     });
     try {
       const lines: string[] = [];
       const result = await migrateCmd({
-        cfg: cfgShared,
+        cfg,
         mode: { kind: "add-field", type: "concept", fieldName: "urgency", fieldSpec: "String", defaultRaw: "normal" },
         print: (l) => lines.push(l),
         migrationsDir: tmpMigrations,
@@ -363,30 +351,26 @@ describe("migrateCmd --add-field", () => {
       });
       expect(result.manifest).toBeDefined();
       expect(result.manifest!.status).toBe("complete");
-      expect(result.manifest!.scope.affected_types).toEqual([
-        "concept", "preference", "reference", "agent", "project", "spike",
-      ]);
+      expect(result.manifest!.scope.affected_types).toEqual(["concept"]);
 
-      // listRecords filters by kind, so only c1, c2, p1 (3 records) are
-      // re-put despite the query returning them all under the shared
-      // hash for every iteration. Each affected_type iteration walks
-      // the shared hash and filters by its own kind.
+      // Only concept rows re-put (c1, c2). preference rows untouched.
       const creates = stub.mutations.filter((m) => m.mutation_type === "create");
-      expect(creates.length).toBe(3);
+      expect(creates.length).toBe(2);
       expect(creates.every((m) => m.schema === NEW_HASH)).toBe(true);
       const slugs = new Set(creates.map((m) => m.key_value.hash));
-      expect(slugs).toEqual(new Set(["c1", "c2", "p1"]));
+      expect(slugs).toEqual(new Set(["c1", "c2"]));
 
       // Schema registration + load fired exactly once.
       expect(stub.schemaRegistrations).toBe(1);
       expect(stub.schemaLoads).toBe(1);
 
-      // Config swap: every Phase 6 type now points at NEW_HASH.
+      // Config swap: only concept's hash changes.
       const swapped = readConfigOnDisk();
-      for (const t of ["concept", "preference", "reference", "agent", "project", "spike"] as const) {
-        expect(swapped.schemaHashes[t]).toBe(NEW_HASH);
+      expect(swapped.schemaHashes.concept).toBe(NEW_HASH);
+      // Sister kinds + design/task unchanged.
+      for (const t of ["preference", "reference", "agent", "project", "spike"] as const) {
+        expect(swapped.schemaHashes[t]).toBe(TEST_HASHES[t]);
       }
-      // Design/Task unaffected.
       expect(swapped.schemaHashes.design).toBe(TEST_HASHES.design);
       expect(swapped.schemaHashes.task).toBe(TEST_HASHES.task);
 
@@ -394,13 +378,13 @@ describe("migrateCmd --add-field", () => {
       const manifests = listManifests(tmpMigrations);
       expect(manifests.length).toBe(1);
       expect(manifests[0]!.status).toBe("complete");
-      expect(manifests[0]!.migrated_count).toBe(3);
+      expect(manifests[0]!.migrated_count).toBe(2);
       expect(manifests[0]!.field_added).toBe("urgency");
       expect(manifests[0]!.default).toBe("normal");
 
       // Summary line in stdout.
       const joined = lines.join("\n");
-      expect(joined).toContain("migrated 3/3 record(s)");
+      expect(joined).toContain("migrated 2/2 record(s)");
       expect(joined).toContain("field=urgency=\"normal\"");
       expect(joined).toContain("note: update src/schemas.ts");
     } finally {

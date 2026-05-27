@@ -4,6 +4,8 @@ import type { NodeClient, QueryRow } from "./client.ts";
 import { FbrainError } from "./client.ts";
 import type { Config } from "./config.ts";
 import {
+  LEGACY_NOTE_QUERY_FIELDS,
+  LEGACY_NOTE_SCHEMA_KEY,
   RECORDS,
   RECORD_TYPES,
   isValidStatus,
@@ -60,6 +62,24 @@ export function schemaHashFor(
   return hash;
 }
 
+// Hash of the legacy FbrainKindNote schema, where pre-Phase-E Phase 6
+// records (concept/preference/reference/agent/project/spike) still live.
+// Returns null when:
+//   - `type` is design or task (no legacy backing)
+//   - the legacy hash is missing from config — e.g. a config written
+//     pre-Phase-E that hasn't been re-init'd yet. In that case the
+//     legacy fallback in list/get is silently skipped; the user sees
+//     only per-kind hits and should re-run `fbrain init` (doctor will
+//     surface the missing key).
+export function legacySchemaHashFor(
+  type: RecordType,
+  cfg: { schemaHashes: Record<string, string> },
+): string | null {
+  if (RECORDS[type].legacyKind === null) return null;
+  const hash = cfg.schemaHashes[LEGACY_NOTE_SCHEMA_KEY];
+  return hash && hash.length > 0 ? hash : null;
+}
+
 export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
   const f = (row.fields ?? {}) as Record<string, unknown>;
   const base: FbrainRecord = {
@@ -72,11 +92,24 @@ export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
     updated_at: stringField(f, "updated_at"),
   };
   if (RECORDS[type].hasDesignSlug) base.design_slug = stringField(f, "design_slug");
-  if (RECORDS[type].kind !== null) {
-    const k = stringField(f, "kind");
-    if (k.length > 0) base.kind = k;
-  }
   return base;
+}
+
+// Shape a legacy FbrainKindNote row into the same FbrainRecord envelope.
+// Pulls `kind` out so callers can filter by it; v1_marker_a/b are dropped
+// (never user-visible).
+export function legacyRowToRecord(row: QueryRow): FbrainRecord & { kind: string } {
+  const f = (row.fields ?? {}) as Record<string, unknown>;
+  return {
+    slug: stringField(f, "slug"),
+    title: stringField(f, "title"),
+    body: stringField(f, "body"),
+    status: stringField(f, "status"),
+    tags: arrayStringField(f, "tags"),
+    created_at: stringField(f, "created_at"),
+    updated_at: stringField(f, "updated_at"),
+    kind: stringField(f, "kind"),
+  };
 }
 
 function stringField(f: Record<string, unknown>, key: string): string {
@@ -99,12 +132,47 @@ export async function listRecords(
   schemaHash: string,
 ): Promise<FbrainRecord[]> {
   const res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
-  const records = res.results.map((row) => rowToRecord(row, type));
-  const kind = RECORDS[type].kind;
-  // Phase 6 types share noteSchema — filter by `kind` so a concept query
-  // doesn't return every Phase 6 record across all kinds.
-  if (kind !== null) return records.filter((r) => r.kind === kind);
-  return records;
+  return res.results.map((row) => rowToRecord(row, type));
+}
+
+// Read-only fallback over the legacy FbrainKindNote schema. For Phase 6
+// types whose pre-Phase-E records still live in noteSchema, this surfaces
+// them filtered by their `kind` discriminator. design/task have no legacy
+// backing and never call this. Returns an empty array if `legacyHash` is
+// null (no legacy hash registered in config — typical for pre-Phase-E
+// configs that haven't been re-init'd).
+export async function listLegacyKindRecords(
+  node: NodeClient,
+  type: RecordType,
+  legacyHash: string | null,
+): Promise<FbrainRecord[]> {
+  const wantKind = RECORDS[type].legacyKind;
+  if (wantKind === null || legacyHash === null) return [];
+  const res = await node.queryAll({
+    schemaHash: legacyHash,
+    fields: [...LEGACY_NOTE_QUERY_FIELDS],
+  });
+  const records = res.results.map(legacyRowToRecord);
+  // Pre-Phase-E rows of this kind also need their `kind` field stripped
+  // off before being returned — FbrainRecord doesn't include it.
+  return records
+    .filter((r) => r.kind === wantKind)
+    .map(({ kind: _kind, ...rest }) => rest);
+}
+
+// Per-kind canonical + legacy fallback, deduped by slug (per-kind wins).
+// Always the right call for Phase 6 types; for design/task it short-
+// circuits to the per-kind path because `legacySchemaHashFor` returns null.
+export async function listRecordsWithLegacy(
+  node: NodeClient,
+  type: RecordType,
+  cfg: Config,
+): Promise<FbrainRecord[]> {
+  const perKind = await listRecords(node, type, schemaHashFor(type, cfg));
+  const legacy = await listLegacyKindRecords(node, type, legacySchemaHashFor(type, cfg));
+  if (legacy.length === 0) return perKind;
+  const seen = new Set(perKind.map((r) => r.slug));
+  return perKind.concat(legacy.filter((r) => !seen.has(r.slug)));
 }
 
 export async function findBySlug(
@@ -129,6 +197,31 @@ export async function findBySlugRaw(
 ): Promise<FbrainRecord | null> {
   const list = await listRecords(node, type, schemaHash);
   return list.find((r) => r.slug === slug) ?? null;
+}
+
+// findBySlug-equivalent for the legacy FbrainKindNote schema. Mirrors
+// findBySlug's tombstone filter so pre-Phase-E deleted rows stay hidden.
+export async function findBySlugLegacy(
+  node: NodeClient,
+  type: RecordType,
+  legacyHash: string | null,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  const hit = await findBySlugLegacyRaw(node, type, legacyHash, slug);
+  if (hit === null) return null;
+  return isTombstoned(hit) ? null : hit;
+}
+
+// Unfiltered legacy variant — returns tombstoned rows. Same contract as
+// `findBySlugRaw`, only the `fbrain delete` path needs it.
+export async function findBySlugLegacyRaw(
+  node: NodeClient,
+  type: RecordType,
+  legacyHash: string | null,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  const rows = await listLegacyKindRecords(node, type, legacyHash);
+  return rows.find((r) => r.slug === slug) ?? null;
 }
 
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
@@ -180,7 +273,38 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export type ResolvedRecord = { type: RecordType; record: FbrainRecord };
+export type ResolvedRecord = {
+  type: RecordType;
+  record: FbrainRecord;
+  // True when the row came from the legacy FbrainKindNote schema, not the
+  // per-kind canonical. Mutations (status, delete) must write back to the
+  // same schema the record currently lives in, so callers branch on this.
+  legacy: boolean;
+};
+
+// Resolve the schema hash to write a record back to. For new per-kind
+// records this is the per-kind canonical; for legacy FbrainKindNote
+// records (resolved.legacy === true) this is the legacy hash. Throws if
+// the legacy hash is somehow missing — should never happen because the
+// record was already read from that hash.
+export function writeSchemaHashFor(
+  type: RecordType,
+  legacy: boolean,
+  cfg: { schemaHashes: Record<string, string> },
+): string {
+  if (legacy) {
+    const hash = legacySchemaHashFor(type, cfg);
+    if (hash === null) {
+      throw new FbrainError({
+        code: "missing_schema_hash",
+        message: `Legacy FbrainKindNote hash missing from config — cannot write back legacy ${type}.`,
+        hint: "Re-run `fbrain init` so the config picks up the legacy hash.",
+      });
+    }
+    return hash;
+  }
+  return schemaHashFor(type, cfg);
+}
 
 export interface ResolveBySlugOpts {
   node: NodeClient;
@@ -212,20 +336,43 @@ export interface ResolveBySlugOpts {
 // read-flake, error on not-found / ambiguous" sweep. Three commands (get,
 // status, delete) carried near-identical 25–35 line variants of this block
 // before consolidation — see commit history for refactor/resolve-by-slug.
+//
+// For Phase 6 types this also probes the legacy FbrainKindNote schema
+// (pre-Phase-E records). A per-kind hit wins over a legacy hit of the
+// same slug — necessary because consolidation may re-write a slug into
+// the per-kind canonical without first removing it from the legacy one.
 export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRecord> {
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const matches = await withReadRetry(
     async () => {
       const hits: ResolvedRecord[] = [];
+      const seen = new Set<RecordType>();
       for (const t of types) {
         const hash = schemaHashFor(t, opts.cfg);
         const row = opts.raw
           ? await findBySlugRaw(opts.node, t, hash, opts.slug)
           : await findBySlug(opts.node, t, hash, opts.slug);
-        if (row === null) continue;
-        if (opts.raw && isTombstoned(row)) continue;
-        if (opts.filter && !opts.filter(row, t)) continue;
-        hits.push({ type: t, record: row });
+        if (row !== null) {
+          if (opts.raw && isTombstoned(row)) continue;
+          if (opts.filter && !opts.filter(row, t)) continue;
+          hits.push({ type: t, record: row, legacy: false });
+          seen.add(t);
+        }
+      }
+      // Legacy fallback for Phase 6 types — only fires when the per-kind
+      // probe didn't already surface a row at this slug for this type, so
+      // a slug consolidated into the new schema wins over its legacy twin.
+      for (const t of types) {
+        if (seen.has(t)) continue;
+        const legacyHash = legacySchemaHashFor(t, opts.cfg);
+        if (legacyHash === null) continue;
+        const legacyRow = opts.raw
+          ? await findBySlugLegacyRaw(opts.node, t, legacyHash, opts.slug)
+          : await findBySlugLegacy(opts.node, t, legacyHash, opts.slug);
+        if (legacyRow === null) continue;
+        if (opts.raw && isTombstoned(legacyRow)) continue;
+        if (opts.filter && !opts.filter(legacyRow, t)) continue;
+        hits.push({ type: t, record: legacyRow, legacy: true });
       }
       return hits;
     },

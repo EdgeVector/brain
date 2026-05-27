@@ -1,6 +1,6 @@
 // Test helpers shared across unit and integration suites.
 
-import { RECORD_TYPES, type RecordType } from "../src/schemas.ts";
+import { LEGACY_NOTE_SCHEMA_KEY, RECORD_TYPES, type RecordType } from "../src/schemas.ts";
 import { CONFIG_VERSION, type Config } from "../src/config.ts";
 
 // Synthetic 64-hex hashes for unit tests — distinct first byte per type so
@@ -17,6 +17,12 @@ export const TEST_HASHES: Record<RecordType, string> = {
   spike: "5".repeat(64),
 };
 
+// Synthetic hash for the legacy FbrainKindNote schema — kept registered
+// for pre-Phase-E records' read fallback (UNIQUE_SCHEMAS's `__legacy_note__`
+// entry). buildTestCfg merges this into schemaHashes under
+// LEGACY_NOTE_SCHEMA_KEY so legacy-aware code paths resolve it.
+export const TEST_LEGACY_NOTE_HASH = "b".repeat(64);
+
 // Test URL defaults: homebrew `fold_db_node` daemon + the dev cloud Lambda.
 // Dev (us-west-2) — not prod — so iteration-test runs don't pollute the
 // production schema registry. CI / per-env overrides via env vars.
@@ -32,7 +38,10 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
     nodeUrl: TEST_NODE_URL,
     schemaServiceUrl: TEST_SCHEMA_SERVICE_URL,
     userHash: "uh-test",
-    schemaHashes: { ...TEST_HASHES },
+    schemaHashes: {
+      ...TEST_HASHES,
+      [LEGACY_NOTE_SCHEMA_KEY]: TEST_LEGACY_NOTE_HASH,
+    },
     designSchemaHash: TEST_HASHES.design,
     taskSchemaHash: TEST_HASHES.task,
   };

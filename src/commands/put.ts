@@ -120,14 +120,10 @@ function buildFields(
   if (entry.hasDesignSlug) {
     base.design_slug = existing?.design_slug ?? "";
   }
-  if (entry.kind !== null) {
-    // Phase 6 types share the noteSchema. `kind` tells fbrain which
-    // logical type the row is on read. The v1 markers are fixed-value
-    // structural fields (see schemas.ts).
-    base.kind = entry.kind;
-    base.v1_marker_a = "fbrain";
-    base.v1_marker_b = "v1";
-  }
+  // Pre-Phase-E this branch wrote `kind` + `v1_marker_a/b` for the six
+  // Phase 6 kinds because they shared the FbrainKindNote schema. Phase E
+  // gave each kind its own dedicated schema, so the discriminator and
+  // structural markers are no longer needed for new writes.
   return base;
 }
 

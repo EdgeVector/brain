@@ -161,8 +161,10 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   const { cfg, mode, print, verbose } = ctx;
   const dir = ctx.migrationsDir ?? defaultMigrationsDir();
 
-  // 1. Resolve scope. Phase 6 types (RECORDS[type].kind !== null)
-  // share noteSchema and migrate as a bundle.
+  // 1. Resolve scope. Post-Phase-E each Phase 6 type owns its own
+  // per-kind schema, so a migration covers one type at a time. Legacy
+  // FbrainKindNote rows are untouched here — they need the consolidation
+  // pass before per-kind migrations apply to them (separate follow-up).
   const scope = resolveScope(mode.type);
   const baseSchema = scope.schemaEntry.schema;
 
@@ -528,11 +530,9 @@ export function buildMigratedFields(
   if (entry.hasDesignSlug) {
     fields.design_slug = record.design_slug ?? "";
   }
-  if (entry.kind !== null) {
-    fields.kind = entry.kind;
-    fields.v1_marker_a = "fbrain";
-    fields.v1_marker_b = "v1";
-  }
+  // Pre-Phase-E this added `kind` + `v1_marker_a/b` because Phase 6 types
+  // shared the FbrainKindNote schema. Post-Phase-E migrations operate on
+  // each per-kind schema, which doesn't carry those fields.
   fields[fieldAdded] = defaultValue;
   if (descriptiveNameTo) {
     fields[versionMarkerField(descriptiveNameTo)] = versionMarkerValue(descriptiveNameTo);

@@ -331,7 +331,9 @@ describe("fbrain_put tool", () => {
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.slug).toBe("ask-test");
     expect(fields.body).toBe("hello world from MCP");
-    expect(fields.kind).toBe("concept");
+    // Post-Phase-E concept lives in its own dedicated schema; the legacy
+    // `kind` discriminator is no longer written on new records.
+    expect("kind" in fields).toBe(false);
   });
 
   test("raw frontmatter passthrough wins over title/tags args", async () => {
@@ -355,7 +357,8 @@ describe("fbrain_put tool", () => {
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.title).toBe("From Raw");
     expect(fields.tags).toEqual(["from-raw"]);
-    expect(fields.kind).toBe("preference");
+    // Per-kind preference schema has no `kind` field.
+    expect("kind" in fields).toBe(false);
   });
 
   test("status arg fires a follow-up status update after the put", async () => {
