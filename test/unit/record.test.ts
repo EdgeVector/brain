@@ -5,11 +5,16 @@ import {
   fieldsFor,
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
+  resolveBySlug,
   rowToRecord,
   schemaHashFor,
+  TOMBSTONE_TAG,
   withReadRetry,
+  type FbrainRecord,
+  type ResolvedRecord,
 } from "../../src/record.ts";
-import { FbrainError } from "../../src/client.ts";
+import { FbrainError, type NodeClient, type QueryResponse } from "../../src/client.ts";
+import type { RecordType } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const cfg = buildTestCfg({
@@ -192,5 +197,186 @@ describe("withReadRetry", () => {
       ),
     ).rejects.toThrow("ECONNREFUSED");
     expect(calls).toBe(1);
+  });
+});
+
+// resolveBySlug consolidates the slug-resolution sweep used by `fbrain get`,
+// `status`, and `delete`. These tests pin the contract — typed/untyped
+// not-found wording, ambiguous error, raw mode tombstone drop, filter
+// callback, onAmbiguous side-effect.
+describe("resolveBySlug", () => {
+  type Row = { fields: Record<string, unknown> };
+  // Each entry maps a schemaHash → list of rows the mock node returns for
+  // that schema. Order matters: it's preserved as result order.
+  type Seed = Record<string, Row[]>;
+
+  function mockNode(seed: Seed): NodeClient {
+    return {
+      baseUrl: "mock",
+      userHash: "uh",
+      async autoIdentity() {
+        return { provisioned: true, userHash: "uh" };
+      },
+      async bootstrap() {
+        return { userHash: "uh" };
+      },
+      async loadSchemas() {
+        return { available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] };
+      },
+      async createRecord() {},
+      async updateRecord() {},
+      async deleteRecord() {},
+      async queryAll({ schemaHash }): Promise<QueryResponse> {
+        const rows = seed[schemaHash] ?? [];
+        const results = rows.map((r) => ({
+          fields: r.fields,
+          key: {
+            hash:
+              typeof r.fields.slug === "string" ? (r.fields.slug as string) : null,
+            range: null,
+          },
+        }));
+        return {
+          ok: true,
+          results,
+          total_count: results.length,
+          returned_count: results.length,
+        };
+      },
+      async search() {
+        return [];
+      },
+      async rawCall() {
+        return { status: 200, headers: new Headers(), body: "", json: null };
+      },
+    };
+  }
+
+  function row(slug: string, over: Partial<Record<string, unknown>> = {}): Row {
+    return {
+      fields: {
+        slug,
+        title: "T",
+        body: "B",
+        status: "draft",
+        tags: [],
+        created_at: "2026-05-01T00:00:00Z",
+        updated_at: "2026-05-01T00:00:00Z",
+        ...over,
+      },
+    };
+  }
+
+  const cfg = buildTestCfg({
+    schemaHashes: {
+      ...TEST_HASHES,
+      design: "designhash",
+      task: "taskhash",
+    },
+  });
+
+  test("untyped not-found uses the default 'No record with slug' wording", async () => {
+    const node = mockNode({});
+    await expect(
+      resolveBySlug({ node, cfg, slug: "ghost" }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      message: 'No record with slug "ghost".',
+    });
+  });
+
+  test("typed not-found uses the typed message override when provided", async () => {
+    const node = mockNode({});
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "ghost",
+        type: "design",
+        notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
+      }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      message: "No design: ghost",
+    });
+  });
+
+  test("typed not-found falls back to the default when no override is given", async () => {
+    const node = mockNode({});
+    await expect(
+      resolveBySlug({ node, cfg, slug: "ghost", type: "design" }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      message: 'No record with slug "ghost".',
+    });
+  });
+
+  test("ambiguous slug across two types throws ambiguous_slug and runs onAmbiguous first", async () => {
+    const node = mockNode({
+      designhash: [row("dual")],
+      taskhash: [row("dual", { status: "open", design_slug: "" })],
+    });
+    const seen: ResolvedRecord[] = [];
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "dual",
+        onAmbiguous: (matches) => {
+          seen.push(...matches);
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "ambiguous_slug",
+    });
+    expect(seen.map((m) => m.type).sort()).toEqual(["design", "task"]);
+  });
+
+  test("raw mode drops tombstoned rows inside the helper", async () => {
+    // findBySlug strips tombstones at the lookup layer; findBySlugRaw does
+    // not. In raw mode the helper must still drop them — no current caller
+    // wants to see them, and the only raw caller (delete) relies on the
+    // helper for that filter.
+    const tombstone = row("doomed", { tags: [TOMBSTONE_TAG] });
+    const node = mockNode({ designhash: [tombstone] });
+    await expect(
+      resolveBySlug({ node, cfg, slug: "doomed", type: "design", raw: true }),
+    ).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  test("raw mode applies the caller-supplied filter (mirrors delete's Phase-6 kind check)", async () => {
+    // Seed two same-slug rows across two Phase-6 types that share noteSchema.
+    // The filter should drop the row whose kind doesn't match the type being
+    // probed, leaving exactly one hit.
+    const conceptHash = TEST_HASHES.concept;
+    const preferenceHash = TEST_HASHES.preference;
+    const node = mockNode({
+      [conceptHash]: [row("shared", { kind: "concept" })],
+      [preferenceHash]: [row("shared", { kind: "preference" })],
+    });
+    const seenKinds: string[] = [];
+    const result = await resolveBySlug({
+      node,
+      cfg,
+      slug: "shared",
+      type: "concept",
+      raw: true,
+      filter: (r: FbrainRecord, t: RecordType) => {
+        seenKinds.push(`${t}/${r.kind ?? ""}`);
+        return r.kind === t;
+      },
+    });
+    expect(result.type).toBe("concept");
+    expect(result.record.kind).toBe("concept");
+    // Filter was invoked exactly once (only the concept probe ran since
+    // opts.type narrows the sweep to one type).
+    expect(seenKinds).toEqual(["concept/concept"]);
+  });
+
+  test("single hit returns the ResolvedRecord with type + record", async () => {
+    const node = mockNode({ designhash: [row("solo")] });
+    const r = await resolveBySlug({ node, cfg, slug: "solo", type: "design" });
+    expect(r.type).toBe("design");
+    expect(r.record.slug).toBe("solo");
   });
 });

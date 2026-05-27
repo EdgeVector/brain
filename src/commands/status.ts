@@ -1,17 +1,15 @@
 // `fbrain status <slug>` — read (getter, respects read-verb instinct).
 // `fbrain status <slug> <new-status>` — update.
 
-import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
+import { newNodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
   ensureStatus,
-  findBySlug,
   nowIso,
+  resolveBySlug,
   schemaHashFor,
-  withReadRetry,
-  type FbrainRecord,
 } from "../record.ts";
-import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { RECORDS, type RecordType } from "../schemas.ts";
 
 export type StatusOptions = {
   cfg: Config;
@@ -30,34 +28,12 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     verbose: opts.verbose,
   });
 
-  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  // Retry the full per-type sweep on an empty result to ride out the
-  // polluted-daemon read flake — see withReadRetry in ../record.ts.
-  const found = await withReadRetry(
-    async () => {
-      const matches: Array<{ type: RecordType; record: FbrainRecord }> = [];
-      for (const t of types) {
-        const r = await findBySlug(node, t, schemaHashFor(t, opts.cfg), opts.slug);
-        if (r) matches.push({ type: t, record: r });
-      }
-      return matches;
-    },
-    (matches) => matches.length > 0,
-  );
-  if (found.length === 0) {
-    throw new FbrainError({
-      code: "not_found",
-      message: `No record with slug "${opts.slug}".`,
-    });
-  }
-  if (found.length > 1) {
-    const matchedTypes = found.map((f) => f.type).join(", ");
-    throw new FbrainError({
-      code: "ambiguous_slug",
-      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
-    });
-  }
-  const only = found[0]!;
+  const only = await resolveBySlug({
+    node,
+    cfg: opts.cfg,
+    slug: opts.slug,
+    type: opts.type,
+  });
 
   if (opts.newStatus === undefined) {
     print(only.record.status);

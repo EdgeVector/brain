@@ -2,8 +2,10 @@
 
 import type { NodeClient, QueryRow } from "./client.ts";
 import { FbrainError } from "./client.ts";
+import type { Config } from "./config.ts";
 import {
   RECORDS,
+  RECORD_TYPES,
   isValidStatus,
   statusValuesFor,
   type RecordType,
@@ -176,6 +178,79 @@ export async function withReadRetry<T>(
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export type ResolvedRecord = { type: RecordType; record: FbrainRecord };
+
+export interface ResolveBySlugOpts {
+  node: NodeClient;
+  cfg: Config;
+  slug: string;
+  // Narrow the sweep to one type. Omit to scan every registered type.
+  type?: RecordType;
+  // Raw mode bypasses the tombstone filter at the lookup layer (findBySlugRaw)
+  // so callers like `fbrain delete` can apply their own row-level logic. The
+  // helper still drops tombstones afterward — there is no current caller that
+  // wants to see them. Default false (uses tombstone-aware findBySlug).
+  raw?: boolean;
+  // Extra per-row filter applied after tombstone drop. Returning false skips
+  // the row. Used by `delete` to drop Phase-6 rows whose `kind` doesn't match
+  // the type slot being probed.
+  filter?: (r: FbrainRecord, t: RecordType) => boolean;
+  // Override the not_found error message. `typed` fires when opts.type is set;
+  // `untyped` fires otherwise. Defaults match the pre-refactor strings.
+  notFoundMessage?: {
+    typed?: (t: RecordType, slug: string) => string;
+    untyped?: (slug: string) => string;
+  };
+  // Side-effect that runs with the matches just before an ambiguous_slug
+  // throw — used by `fbrain get` to print each match before erroring.
+  onAmbiguous?: (matches: ResolvedRecord[]) => void;
+}
+
+// Centralized "find a record by slug across record types, retry on
+// read-flake, error on not-found / ambiguous" sweep. Three commands (get,
+// status, delete) carried near-identical 25–35 line variants of this block
+// before consolidation — see commit history for refactor/resolve-by-slug.
+export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRecord> {
+  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
+  const matches = await withReadRetry(
+    async () => {
+      const hits: ResolvedRecord[] = [];
+      for (const t of types) {
+        const hash = schemaHashFor(t, opts.cfg);
+        const row = opts.raw
+          ? await findBySlugRaw(opts.node, t, hash, opts.slug)
+          : await findBySlug(opts.node, t, hash, opts.slug);
+        if (row === null) continue;
+        if (opts.raw && isTombstoned(row)) continue;
+        if (opts.filter && !opts.filter(row, t)) continue;
+        hits.push({ type: t, record: row });
+      }
+      return hits;
+    },
+    (hits) => hits.length > 0,
+  );
+
+  if (matches.length === 0) {
+    const fallback = `No record with slug "${opts.slug}".`;
+    const message =
+      opts.type !== undefined
+        ? (opts.notFoundMessage?.typed?.(opts.type, opts.slug) ?? fallback)
+        : (opts.notFoundMessage?.untyped?.(opts.slug) ?? fallback);
+    throw new FbrainError({ code: "not_found", message });
+  }
+
+  if (matches.length > 1) {
+    opts.onAmbiguous?.(matches);
+    const matchedTypes = matches.map((m) => m.type).join(", ");
+    throw new FbrainError({
+      code: "ambiguous_slug",
+      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
+    });
+  }
+
+  return matches[0]!;
 }
 
 export function validateSlug(slug: string): void {
