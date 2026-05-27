@@ -1033,6 +1033,84 @@ describe("doctor --freshness probes", () => {
     expect(lines.some((l) => l.includes("stale 1"))).toBe(true);
   });
 
+  test("freshness probe writes only per-kind Concept fields (no legacy kind/v1_marker_a/v1_marker_b)", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const mutations: RecordedMutation[] = [];
+    const conceptHash = TEST_HASHES.concept;
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      freshnessTrials: 1,
+      nonceFn: () => "shape",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          mutations,
+          onFreshnessSearch: (slug) => selfHit(slug, conceptHash, 0.9),
+          onPollutionSearch: () => [],
+        }),
+    });
+    expect(code).toBe(0);
+    const create = mutations.find((m) => m.kind === "create");
+    expect(create).toBeDefined();
+    const fields = create!.fields;
+    // Phase-E Concept schema's exact 7-field shape — the legacy discriminator
+    // and structural markers must NOT be written, or fold rejects the mutation.
+    expect(Object.keys(fields).sort()).toEqual([
+      "body",
+      "created_at",
+      "slug",
+      "status",
+      "tags",
+      "title",
+      "updated_at",
+    ]);
+    expect("kind" in fields).toBe(false);
+    expect("v1_marker_a" in fields).toBe(false);
+    expect("v1_marker_b" in fields).toBe(false);
+  });
+
+  test("freshness probe degrades gracefully when search throws (e.g. missing model.onnx) and still cleans up", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const mutations: RecordedMutation[] = [];
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      freshnessTrials: 3,
+      nonceFn: () => "model-missing",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          mutations,
+          searchThrows: new Error("native-index unavailable: model.onnx not found"),
+        }),
+    });
+    expect(code).toBe(1);
+    expect(
+      lines.some(
+        (l) =>
+          l.startsWith("[FAIL] freshness-probe") &&
+          l.includes("native-index search failed") &&
+          l.includes("model.onnx"),
+      ),
+    ).toBe(true);
+    // Probe breaks after the first failed search, so exactly one create
+    // happens — and that one record is still tombstoned in the finally block.
+    const creates = mutations.filter((m) => m.kind === "create");
+    expect(creates.length).toBe(1);
+    const cleanupUpdates = mutations.filter(
+      (m) =>
+        m.kind === "update" &&
+        Array.isArray(m.fields["tags"]) &&
+        (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
+    );
+    expect(cleanupUpdates.length).toBe(1);
+  });
+
   test("probes skipped if schemas-loaded failed", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
