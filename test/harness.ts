@@ -67,6 +67,63 @@ type SlotFile = {
   pid: number;
 };
 
+// Every node that's currently live, so the process-level teardown guard can
+// reap it if the run is interrupted (Ctrl-C / SIGTERM) before its own
+// teardown() runs. `port`/`pid` stay null until the slot file is read.
+type LiveSlot = {
+  child: Subprocess;
+  home: string;
+  port: number | null;
+  pid: number | null;
+};
+
+const liveSlots = new Set<LiveSlot>();
+let teardownGuardInstalled = false;
+
+// Install once per process: when the test run is interrupted, SIGKILL every
+// live run.sh process group and clean up its slot file + temp home. Without
+// this, a `bun test` that's Ctrl-C'd or externally SIGTERM'd never runs the
+// per-slot teardown and orphans every node it had spawned — made worse by
+// `detached`, which puts run.sh in its own session so it no longer dies with
+// the terminal's foreground group on Ctrl-C.
+//
+// SIGINT/SIGTERM are the load-bearing handlers here: empirically `bun test`
+// fires those but does NOT fire process.on("exit"), so 'exit' is only a
+// best-effort backstop for non-bun-test runners. (In-process throws are
+// handled directly by startHarness's dispose(), not by this guard.) Each
+// handler must be fully synchronous — SIGKILL is enough to stop the
+// disposable nodes and free their ports.
+function installTeardownGuard(): void {
+  if (teardownGuardInstalled) return;
+  teardownGuardInstalled = true;
+
+  const reapAllSync = (): void => {
+    for (const s of liveSlots) {
+      try {
+        // Negative pid → the whole process group (wrapper + folddb_server
+        // grandchild + any vite/esbuild/tail children).
+        process.kill(-s.child.pid, "SIGKILL");
+      } catch {
+        // group already gone
+      }
+      if (s.port !== null && s.pid !== null) cleanupSlotFile(s.port, s.pid);
+      safeRm(s.home);
+    }
+    liveSlots.clear();
+  };
+
+  process.on("exit", reapAllSync);
+  // Adding a SIGINT/SIGTERM listener suppresses the default terminate, so we
+  // reap and then exit ourselves. process.exit re-fires the 'exit' handler,
+  // but liveSlots is already cleared by then so it's a harmless no-op.
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      reapAllSync();
+      process.exit(sig === "SIGINT" ? 130 : 143);
+    });
+  }
+}
+
 export async function startHarness(opts?: { name?: string }): Promise<Harness> {
   // Cloud schema service is shared and always-on, so we can fail fast if
   // it's unreachable instead of waiting the full node-cold-build window.
@@ -91,6 +148,12 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
     stderr: "pipe",
     stdin: "ignore",
     env: { ...process.env, FORCE_COLOR: "0" },
+    // run.sh launches folddb_server (and vite) as nohup-backgrounded children
+    // and only traps EXIT — never SIGTERM — so a SIGTERM to the wrapper kills
+    // bash without firing its cleanup, orphaning the server. setsid() (via
+    // detached) makes run.sh its own process-group leader so teardown can
+    // signal the whole group at once and reap the grandchildren too.
+    detached: true,
   });
 
   let stdoutBuf = "";
@@ -111,84 +174,91 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
     }
   };
 
-  let slot: SlotFile | null = null;
-  try {
-    slot = await waitForSlotFile(home, 180_000);
-  } catch (err) {
-    dumpLogs();
+  // Register before any await so an interrupt during startup still reaps us.
+  const liveSlot: LiveSlot = { child, home, port: null, pid: null };
+  liveSlots.add(liveSlot);
+  installTeardownGuard();
+
+  // Single teardown path shared by every error branch and the returned
+  // teardown(): group-kill the process tree, drop the slot file, delete the
+  // temp home, and deregister from the interrupt guard.
+  const dispose = async (): Promise<void> => {
     await killChild(child);
+    if (liveSlot.port !== null && liveSlot.pid !== null) {
+      cleanupSlotFile(liveSlot.port, liveSlot.pid);
+    }
     safeRm(home);
-    throw err;
-  }
+    liveSlots.delete(liveSlot);
+  };
 
-  const nodeUrl = `http://127.0.0.1:${slot.port}`;
-
+  // Everything after the spawn runs under one try/catch so that ANY startup
+  // failure — slot timeout, HTTP wait, bootstrap, schema registration (e.g. a
+  // shared-cloud-schema-service 409), schema load — tears the node down via
+  // dispose() instead of orphaning it. `bun test` does NOT fire
+  // process.on("exit") handlers, so the teardown guard can't backstop an
+  // in-process throw; dispose() must run here.
   try {
+    const slot = await waitForSlotFile(home, 180_000);
+
+    const nodeUrl = `http://127.0.0.1:${slot.port}`;
+    liveSlot.port = slot.port;
+    liveSlot.pid = slot.pid;
+
     await waitForHttp(`${nodeUrl}/api/system/auto-identity`, 180_000, (status) => status === 200 || status === 503);
     // Cloud Lambda is already deployed — short window is enough; a long
     // wait here would just mask a network/DNS issue we'd rather surface.
     await waitForHttp(`${schemaServiceUrl}/v1/schemas`, 5_000, (status) => status === 200);
+
+    // Bootstrap. The node returns 503 from auto-identity until we do.
+    const tmpNodeClient = newNodeClient({ baseUrl: nodeUrl, userHash: "bootstrap-tmp" });
+    const identity = await tmpNodeClient.autoIdentity();
+    let userHash: string;
+    if (identity.provisioned) {
+      userHash = identity.userHash;
+    } else {
+      const name = opts?.name ?? "fbrain-test";
+      const result = await tmpNodeClient.bootstrap(name);
+      userHash = result.userHash;
+    }
+
+    // Register every UNIQUE fbrain schema (3 total — Phase 6 types share
+    // one) → capture canonical hashes and fan to all RecordType keys.
+    const schemaClient = newSchemaServiceClient(schemaServiceUrl);
+    const schemaHashes = {} as Record<RecordType, string>;
+    for (const entry of UNIQUE_SCHEMAS) {
+      const reg = await schemaClient.registerSchema(entry.schema);
+      for (const type of entry.types) {
+        schemaHashes[type] = reg.canonicalHash;
+      }
+    }
+
+    // Load schemas into the node.
+    const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash });
+    const loadResult = await nodeClient.loadSchemas();
+    if (loadResult.failed_schemas.length > 0) {
+      throw new Error(
+        `Schema load reported failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
+      );
+    }
+
+    const harness: Harness = {
+      nodeUrl,
+      schemaServiceUrl,
+      userHash,
+      schemaHashes,
+      designSchemaHash: schemaHashes.design,
+      taskSchemaHash: schemaHashes.task,
+      home,
+      pid: slot.pid,
+      teardown: dispose,
+    };
+
+    return harness;
   } catch (err) {
     dumpLogs();
-    await killChild(child);
-    safeRm(home);
-    cleanupSlotFile(slot.port, slot.pid);
+    await dispose();
     throw err;
   }
-
-  // Bootstrap. The node returns 503 from auto-identity until we do.
-  const tmpNodeClient = newNodeClient({ baseUrl: nodeUrl, userHash: "bootstrap-tmp" });
-  const identity = await tmpNodeClient.autoIdentity();
-  let userHash: string;
-  if (identity.provisioned) {
-    userHash = identity.userHash;
-  } else {
-    const name = opts?.name ?? "fbrain-test";
-    const result = await tmpNodeClient.bootstrap(name);
-    userHash = result.userHash;
-  }
-
-  // Register every UNIQUE fbrain schema (3 total — Phase 6 types share
-  // one) → capture canonical hashes and fan to all RecordType keys.
-  const schemaClient = newSchemaServiceClient(schemaServiceUrl);
-  const schemaHashes = {} as Record<RecordType, string>;
-  for (const entry of UNIQUE_SCHEMAS) {
-    const reg = await schemaClient.registerSchema(entry.schema);
-    for (const type of entry.types) {
-      schemaHashes[type] = reg.canonicalHash;
-    }
-  }
-
-  // Load schemas into the node.
-  const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash });
-  const loadResult = await nodeClient.loadSchemas();
-  if (loadResult.failed_schemas.length > 0) {
-    dumpLogs();
-    await killChild(child);
-    safeRm(home);
-    cleanupSlotFile(slot.port, slot.pid);
-    throw new Error(
-      `Schema load reported failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
-    );
-  }
-
-  const harness: Harness = {
-    nodeUrl,
-    schemaServiceUrl,
-    userHash,
-    schemaHashes,
-    designSchemaHash: schemaHashes.design,
-    taskSchemaHash: schemaHashes.task,
-    home,
-    pid: slot.pid,
-    teardown: async () => {
-      await killChild(child);
-      cleanupSlotFile(slot!.port, slot!.pid);
-      safeRm(home);
-    },
-  };
-
-  return harness;
 }
 
 async function readStream(stream: ReadableStream<Uint8Array> | null, onChunk: (s: string) => void): Promise<void> {
@@ -255,22 +325,38 @@ async function waitForHttp(
 }
 
 async function killChild(child: Subprocess): Promise<void> {
-  try {
-    child.kill("SIGTERM");
-  } catch {
-    // already exited
-  }
-  // Give it a moment to flush + reap children.
+  const pid = child.pid;
+  // run.sh is spawned detached, so it leads its own process group; the
+  // folddb_server it nohup-backgrounds (plus any vite/esbuild/tail children)
+  // share that pgid. Signalling the NEGATIVE pid hits the whole group —
+  // child.kill() alone would signal only the bash wrapper, orphaning the
+  // server (the leak this guards against).
+  const killGroup = (signal: NodeJS.Signals): void => {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      // ESRCH (group already gone) or detached not honored — fall back to
+      // signalling just the wrapper pid.
+      try {
+        child.kill(signal);
+      } catch {
+        // already exited
+      }
+    }
+  };
+
+  killGroup("SIGTERM");
+  // run.sh has no SIGTERM trap, so the wrapper dies near-instantly; wait
+  // (bounded) for Bun to reap it before we force-kill the group.
   const exitDeadline = Date.now() + 10_000;
   while (Date.now() < exitDeadline) {
-    if (child.exitCode !== null) return;
+    if (child.exitCode !== null) break;
     await sleep(100);
   }
-  try {
-    child.kill("SIGKILL");
-  } catch {
-    // ignore
-  }
+  // SIGKILL the whole group to reap the folddb_server grandchild and any
+  // other children that survived (or ignored) the SIGTERM. No-op if the
+  // group already drained.
+  killGroup("SIGKILL");
 }
 
 function cleanupSlotFile(port: number, pid: number): void {
