@@ -109,6 +109,23 @@ describe("parseFrontmatter", () => {
     expect(r.raw.author).toBe("alice");
   });
 
+  test("slug: field is captured", () => {
+    const r = parseFrontmatter("type: concept\nslug: hello-2026\ntitle: Hello");
+    expect(r.slug).toBe("hello-2026");
+    expect(r.type).toBe("concept");
+    expect(r.title).toBe("Hello");
+  });
+
+  test("quoted slug is unquoted like other scalars", () => {
+    const r = parseFrontmatter('slug: "my-slug"\ntype: design');
+    expect(r.slug).toBe("my-slug");
+  });
+
+  test("no slug: field → undefined", () => {
+    const r = parseFrontmatter("type: design\ntitle: T");
+    expect(r.slug).toBeUndefined();
+  });
+
   test("malformed line throws frontmatter_malformed with line number", () => {
     try {
       parseFrontmatter("type: design\nthisLineHasNoColon\ntitle: T");
@@ -151,6 +168,89 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     await expect(
       putCmd({ cfg, slug: "Bad Slug", input: "---\ntype: design\n---\n" }),
+    ).rejects.toMatchObject({ code: "invalid_slug" });
+    expect(touched).toBe(false);
+  });
+
+  test("slug from frontmatter alone is honored (no positional)", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      input: "---\ntype: concept\nslug: from-fm\ntitle: T\n---\nbody",
+    });
+    expect(r.slug).toBe("from-fm");
+    expect(r.action).toBe("created");
+    expect(mutations[0]!.mutation_type).toBe("create");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.slug).toBe("from-fm");
+  });
+
+  test("no slug anywhere → rejected with missing_slug before any HTTP traffic", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({ cfg, input: "---\ntype: concept\ntitle: T\n---\nbody" }),
+    ).rejects.toMatchObject({ code: "missing_slug" });
+    expect(touched).toBe(false);
+  });
+
+  test("positional slug matches frontmatter slug → accepted", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "same-slug",
+      input: "---\ntype: concept\nslug: same-slug\n---\nbody",
+    });
+    expect(r.slug).toBe("same-slug");
+    expect(r.action).toBe("created");
+  });
+
+  test("positional slug conflicts with frontmatter slug → rejected with slug_conflict", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "cli-slug",
+        input: "---\ntype: concept\nslug: other-slug\n---\nbody",
+      }),
+    ).rejects.toMatchObject({ code: "slug_conflict" });
+    expect(touched).toBe(false);
+  });
+
+  test("invalid slug in frontmatter is caught by validateSlug", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        input: "---\ntype: concept\nslug: Bad Slug\n---\nbody",
+      }),
     ).rejects.toMatchObject({ code: "invalid_slug" });
     expect(touched).toBe(false);
   });
