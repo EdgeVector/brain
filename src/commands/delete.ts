@@ -26,11 +26,13 @@
 // our tombstone tag" are success; only "row visible with no tombstone
 // tag" raises delete_not_applied.
 
-import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
+import { newNodeClient, FbrainError, type NodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
+  type FbrainRecord,
   findBySlugRaw,
   isTombstoned,
+  listRecords,
   nowIso,
   resolveBySlug,
   schemaHashFor,
@@ -43,9 +45,41 @@ export type DeleteOptions = {
   cfg: Config;
   slug: string;
   type?: RecordType;
+  // Override the referential-integrity guard that blocks deleting a design
+  // still referenced by live tasks. With --force the design is deleted and
+  // those tasks' design_slug references are left dangling (a warning lists
+  // them). Mirrors the --force escape hatch on `task new` / `put`.
+  force?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
+
+// Live (non-tombstoned) tasks whose design_slug points at `designSlug`.
+// fold_db has no server-side field filter (see client.ts queryAll), so we
+// list every task and match in-memory. Retry-hedged for the same transient
+// empty-page flake task-new's parent lookup guards against: without the
+// hedge a flake hides a linked task, the design deletes, and we re-introduce
+// exactly the orphaning this guard exists to prevent. `isHit` fires as soon
+// as one match surfaces; a design with genuinely zero linked tasks spends
+// the full retry budget before proceeding — the same negative-case cost the
+// create-side guards accept to stay correct under flake.
+async function findLinkedTaskSlugs(
+  node: NodeClient,
+  cfg: Config,
+  designSlug: string,
+): Promise<string[]> {
+  const taskHash = schemaHashFor("task", cfg);
+  const isLinked = (r: FbrainRecord): boolean =>
+    !isTombstoned(r) && r.design_slug === designSlug;
+  const tasks = await withReadRetry(
+    () => listRecords(node, "task", taskHash),
+    (rows) => rows.some(isLinked),
+  );
+  return tasks
+    .filter(isLinked)
+    .map((r) => r.slug)
+    .sort();
+}
 
 // Tombstone status per type — pick a value from each type's status enum
 // that semantically fits "this is gone". Validated on write by the
@@ -101,6 +135,32 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
   });
   const { type, record } = resolved;
+
+  // Referential-integrity guard, symmetric with the create-time rejection in
+  // `task new --design` / `link`: those refuse to point a task at a missing
+  // design, so deleting a design out from under live tasks must not silently
+  // orphan them. Only Task carries design_slug (RECORDS[*].hasDesignSlug), so
+  // this is a design-only concern. Runs before any mutation: a blocked delete
+  // leaves the design untouched.
+  if (type === "design") {
+    const linked = await findLinkedTaskSlugs(node, opts.cfg, opts.slug);
+    if (linked.length > 0) {
+      const n = linked.length;
+      const noun = n === 1 ? "task" : "tasks";
+      const verb = n === 1 ? "links" : "link";
+      if (!opts.force) {
+        throw new FbrainError({
+          code: "design_has_linked_tasks",
+          message: `Cannot delete design "${opts.slug}" — ${n} ${noun} still ${verb} to it: ${linked.join(", ")}.`,
+          hint: "Re-link those tasks to another design (`fbrain link <task> <design>`) or delete them first (`fbrain delete <task> --type task`), or pass --force to delete anyway (their design references will dangle).",
+        });
+      }
+      print(
+        `warning: ${n} ${noun} still ${verb} to design "${opts.slug}" (${linked.join(", ")}); after this delete their design references will dangle.`,
+      );
+    }
+  }
+
   const schemaHash = schemaHashFor(type, opts.cfg);
 
   const fields = buildTombstoneFields(type, opts.slug, record.created_at, nowIso());

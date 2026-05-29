@@ -611,6 +611,214 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
   });
 });
 
+// Referential-integrity guard: deleting a design that still has live tasks
+// pointing at it is blocked by default (symmetric with `task new --design` /
+// `link` rejecting a dangling design), with --force as the escape hatch.
+describe("deleteRecord — design linked-task guard", () => {
+  const queryResp = (results: unknown[]): Response =>
+    new Response(JSON.stringify({ ok: true, results }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const mutationResp = (): Response =>
+    new Response(JSON.stringify({ ok: true, success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const asRow = (slug: string, fields: RowFields) => ({
+    fields,
+    key: { hash: slug, range: null },
+  });
+
+  test("blocks deleting a design with a live linked task; no mutation fires", async () => {
+    const mutationsFired: unknown[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === cfg.designSchemaHash) {
+          return queryResp([asRow("parent", designRow("parent"))]);
+        }
+        if (body.schema_name === cfg.taskSchemaHash) {
+          return queryResp([asRow("child", taskRow("child", { design_slug: "parent" }))]);
+        }
+        return queryResp([]);
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutationsFired.push(init?.body);
+        return mutationResp();
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await expect(
+        deleteRecord({ cfg, slug: "parent", type: "design", print: () => {} }),
+      ).rejects.toMatchObject({
+        code: "design_has_linked_tasks",
+        message: 'Cannot delete design "parent" — 1 task still links to it: child.',
+      });
+      expect(mutationsFired.length).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("blocks with a sorted, pluralized list when several tasks link to the design", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === cfg.designSchemaHash) {
+          return queryResp([asRow("parent", designRow("parent"))]);
+        }
+        if (body.schema_name === cfg.taskSchemaHash) {
+          return queryResp([
+            asRow("zeta", taskRow("zeta", { design_slug: "parent" })),
+            asRow("alpha", taskRow("alpha", { design_slug: "parent" })),
+          ]);
+        }
+        return queryResp([]);
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await expect(
+        deleteRecord({ cfg, slug: "parent", type: "design", print: () => {} }),
+      ).rejects.toMatchObject({
+        code: "design_has_linked_tasks",
+        message: 'Cannot delete design "parent" — 2 tasks still link to it: alpha, zeta.',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("--force deletes the design despite linked tasks and warns about the orphans", async () => {
+    let designQueryCount = 0;
+    const captured: { update?: unknown; delete?: unknown } = {};
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === cfg.designSchemaHash) {
+          designQueryCount++;
+          // #1 = resolve (live row); later = post-delete verify (tombstoned).
+          if (designQueryCount === 1) {
+            return queryResp([asRow("parent", designRow("parent", { title: "alive" }))]);
+          }
+          return queryResp([
+            asRow("parent", designRow("parent", {
+              title: "(deleted)",
+              body: "",
+              status: "archived",
+              tags: [TOMBSTONE_TAG],
+            })),
+          ]);
+        }
+        if (body.schema_name === cfg.taskSchemaHash) {
+          return queryResp([asRow("child", taskRow("child", { design_slug: "parent" }))]);
+        }
+        return queryResp([]);
+      }
+      if (url.endsWith("/api/mutation")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.mutation_type === "update") captured.update = body;
+        if (body.mutation_type === "delete") captured.delete = body;
+        return mutationResp();
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      await deleteRecord({
+        cfg,
+        slug: "parent",
+        type: "design",
+        force: true,
+        print: (l) => lines.push(l),
+      });
+      const out = lines.join("\n");
+      expect(out).toContain("warning:");
+      expect(out).toContain("child");
+      expect(out).toContain("deleted design parent");
+      expect(captured.update).toBeDefined();
+      expect(captured.delete).toBeDefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("deletes a design when no live task links to it (tombstoned + other-design tasks ignored)", async () => {
+    let designQueryCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === cfg.designSchemaHash) {
+          designQueryCount++;
+          if (designQueryCount === 1) {
+            return queryResp([asRow("lonely", designRow("lonely"))]);
+          }
+          return queryResp([]); // post-delete verify: purged
+        }
+        if (body.schema_name === cfg.taskSchemaHash) {
+          return queryResp([
+            // tombstoned task that still names the design — must be ignored
+            asRow("ghost", taskRow("ghost", { design_slug: "lonely", tags: [TOMBSTONE_TAG] })),
+            // live task pointing at a different design — must be ignored
+            asRow("elsewhere", taskRow("elsewhere", { design_slug: "another-design" })),
+          ]);
+        }
+        return queryResp([]);
+      }
+      if (url.endsWith("/api/mutation")) {
+        return mutationResp();
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      await deleteRecord({
+        cfg,
+        slug: "lonely",
+        type: "design",
+        print: (l) => lines.push(l),
+      });
+      expect(lines.join("\n")).toContain("deleted design lonely");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }, 30_000);
+
+  test("deleting a task is unaffected by the design guard (no linked-task scan)", async () => {
+    let queryCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.taskSchemaHash) return queryResp([]);
+        queryCount++;
+        if (queryCount === 1) return queryResp([asRow("solo", taskRow("solo"))]);
+        return queryResp([]); // verify: purged
+      }
+      if (url.endsWith("/api/mutation")) return mutationResp();
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      await deleteRecord({ cfg, slug: "solo", type: "task", print: (l) => lines.push(l) });
+      expect(lines.join("\n")).toContain("deleted task solo");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 // Touch the unused mock helpers so the test file doesn't accumulate
 // orphan exports as new cases are added.
 void newMockState;

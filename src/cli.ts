@@ -246,7 +246,7 @@ for the full evidence and the conditions under which this command can
 become a real share.
 
 Prints a pointer and exits 1.`,
-  delete: `fbrain delete <slug> [--type T]
+  delete: `fbrain delete <slug> [--type T] [--force]
 
 Soft-deletes the record. fold_db's mutation pipeline is append-only — see
 docs/phase-5-delete-spike.md — so the workaround overwrites every user
@@ -257,7 +257,13 @@ Without --type, queries every registered schema; errors with "specify
 --type" if the slug exists in more than one type. Errors with
 "No <type>: <slug>" if the slug is already deleted or never existed.
 
+Deleting a design that still has live tasks linked to it is blocked
+(symmetric with \`task new --design\` / \`link\` rejecting a dangling
+design). Re-link or delete those tasks first, or pass --force to delete
+anyway — the tasks' design references are then left dangling.
+
   --type    design | task | concept | preference | reference | agent | project | spike
+  --force   delete a design even if live tasks still link to it
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
@@ -379,7 +385,10 @@ const DOCTOR_OPTIONS = {
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
 } as const;
-const DELETE_OPTIONS = { type: { type: "string" } } as const;
+const DELETE_OPTIONS = {
+  type: { type: "string" },
+  force: { type: "boolean", default: false },
+} as const;
 const REINDEX_OPTIONS = {
   type: { type: "string" },
   "dry-run": { type: "boolean", default: false },
@@ -937,6 +946,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
   if (type) dOpts.type = type;
+  if (values.force) dOpts.force = true;
   await deleteRecord(dOpts);
   return 0;
 }
