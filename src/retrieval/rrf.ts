@@ -63,5 +63,13 @@ export function reciprocalRankFusion(
       }
     }
   }
-  return Array.from(acc.values()).sort((a, b) => b.fusedScore - a.fusedScore);
+  // Sort by fused score, descending. Ties broken by id (ascending, code-unit
+  // order) so the output is invariant to the order of `inputs`. RRF sums are
+  // commutative, but a bare score sort leaves equal-score docs in Map-insertion
+  // order — which depends on which ranker first saw each doc. With identical
+  // inputs in a different ranker order that flips the top-N (ask.ts truncates
+  // the fused list), so the id key pins a single deterministic ordering.
+  return Array.from(acc.values()).sort(
+    (a, b) => b.fusedScore - a.fusedScore || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
 }
