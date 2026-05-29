@@ -134,6 +134,10 @@ export function schemaWithExtraField(opts: {
   return {
     schema: {
       name: newDescriptiveName,
+      // Carry the owning app forward so the migrated schema stays in the same
+      // `fbrain/*` namespace and its identity hash continues to fold in
+      // owner_app_id (app_identity v3.1).
+      owner_app_id: base.schema.owner_app_id,
       descriptive_name: newDescriptiveName,
       schema_type: base.schema.schema_type,
       key: { ...base.schema.key },

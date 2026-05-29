@@ -25,10 +25,31 @@
 // IS THE CANONICAL HASH that every subsequent mutation/query MUST pin
 // to. The descriptive_name is for human-facing display only.
 
+// The app id that owns every fbrain schema. Under app_identity v3.1,
+// `owner_app_id` is part of the schema's identity: the schema_service resolver
+// normalizes `name: "Concept"` + `owner_app_id: "fbrain"` to the canonical
+// name `fbrain/Concept` (design doc, "owner_app_id participates in
+// identity_hash"). So `fbrain/Concept` and `kanban/Concept` are distinct
+// identities even with identical fields. The publish path (`folddb-dev app
+// publish` / `schema publish --app fbrain`, run by the developer in the
+// migration runbook) authorizes this claim with a dev cert; fbrain's own
+// schema definitions just declare ownership so re-registration is idempotent
+// and the node resolves short names to the fbrain/* namespace at boot.
+export const OWNER_APP_ID = "fbrain";
+
+/** Prefix a short schema name with the owning app id → canonical `fbrain/<Name>`. */
+export function namespacedSchemaName(shortName: string): string {
+  return `${OWNER_APP_ID}/${shortName}`;
+}
+
 export type FieldType = "String" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
+  // App-identity ownership. The schema_service folds this into the identity
+  // hash and stores the schema under the canonical name `{owner_app_id}/{name}`
+  // (= `fbrain/<Name>`). Required for every user schema under v3.1.
+  owner_app_id: string;
   descriptive_name: string;
   // Phase A of dual-signal canonicalization (PR #303): the schema service
   // consults this alongside the structural signal at registration time.
@@ -144,6 +165,7 @@ function phase6Schema(
   return {
     schema: {
       name: descriptive_name,
+      owner_app_id: OWNER_APP_ID,
       descriptive_name,
       purpose_statement,
       schema_type: "Hash",
@@ -164,6 +186,7 @@ function phase6Schema(
 export const designSchema: AddSchemaRequest = {
   schema: {
     name: "Design",
+    owner_app_id: OWNER_APP_ID,
     descriptive_name: "Design",
     purpose_statement: "Design",
     schema_type: "Hash",
@@ -212,6 +235,7 @@ export const designSchema: AddSchemaRequest = {
 export const taskSchema: AddSchemaRequest = {
   schema: {
     name: "Task",
+    owner_app_id: OWNER_APP_ID,
     descriptive_name: "Task",
     purpose_statement: "Task",
     schema_type: "Hash",

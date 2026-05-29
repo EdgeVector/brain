@@ -36,12 +36,12 @@ import { renameSync, writeFileSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 
 import {
-  newNodeClient,
   newSchemaServiceClient,
   FbrainError,
   type NodeClient,
   type Verbose,
 } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
@@ -206,7 +206,11 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   await assertFieldRegistered(schemaClient, toHash, mode.fieldName, newDescriptiveName);
 
   print(`[2/7] loading schemas into the node`);
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose });
+  const { node } = newWriteNodeClient({
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+    ...(verbose ? { verbose } : {}),
+  });
   const loadResult = await node.loadSchemas();
   if (loadResult.failed_schemas.length > 0) {
     throw new FbrainError({
@@ -288,7 +292,11 @@ async function resumeMigration(ctx: ResumeCtx): Promise<MigrateResult> {
   const dir = ctx.migrationsDir ?? defaultMigrationsDir();
 
   print(`[resume] picking up ${manifest.id} (${manifest.migrated_count}/${manifest.total_count} so far)`);
-  const node = newNodeClient({ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose });
+  const { node } = newWriteNodeClient({
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+    ...(verbose ? { verbose } : {}),
+  });
   const scope: ScopeInfo = {
     schemaKey: manifest.scope.schema_key,
     affectedTypes: manifest.scope.affected_types,

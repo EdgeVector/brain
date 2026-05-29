@@ -1,6 +1,7 @@
 // `fbrain task new <slug> [--title T] [--design D] [--tag T]... [--body STR]` — create a Task.
 
-import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
+import { FbrainError, type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlug,
@@ -23,10 +24,10 @@ export type TaskNewOptions = {
 
 export async function taskNew(opts: TaskNewOptions): Promise<void> {
   validateSlug(opts.slug);
-  const node = newNodeClient({
+  const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const hash = schemaHashFor("task", opts.cfg);
 

@@ -220,6 +220,7 @@ describe("client error mapping", () => {
     const r = await c.registerSchema({
       schema: {
         name: "Design",
+        owner_app_id: "fbrain",
         descriptive_name: "Design",
         schema_type: "Hash",
         key: { hash_field: "slug" },
@@ -235,6 +236,83 @@ describe("client error mapping", () => {
     expect(r.canonicalHash).toBe("deadbeef");
   });
 
+  // Capability 403s: the node renders the body VERBATIM (not in fbrain's
+  // {ok,error} envelope) as `{"status":403,"reason":"<reason>", ...}`. The
+  // client must read `body.reason` (a new field) and carry it on the
+  // FbrainError so the capability layer can apply the contract behavior.
+  test("node 403 capability_revoked carries capabilityReason + capability_id detail", async () => {
+    installMock([
+      {
+        status: 403,
+        body: { status: 403, reason: "capability_revoked", capability_id: "uuid-1" },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.createRecord({ schemaHash: "h", fields: {}, keyHash: "k" });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.capabilityReason).toBe("capability_revoked");
+      expect(fe.capabilityDetail?.capabilityId).toBe("uuid-1");
+    }
+  });
+
+  test("node 403 capability_out_of_scope carries the schema detail", async () => {
+    installMock([
+      { status: 403, body: { status: 403, reason: "capability_out_of_scope", schema: "fbrain/Concept" } },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.updateRecord({ schemaHash: "h", fields: {}, keyHash: "k" });
+      throw new Error("did not throw");
+    } catch (err) {
+      const fe = err as FbrainError;
+      expect(fe.capabilityReason).toBe("capability_out_of_scope");
+      expect(fe.capabilityDetail?.schema).toBe("fbrain/Concept");
+    }
+  });
+
+  test("node 403 capability_replay carries the timestamp skew", async () => {
+    installMock([
+      { status: 403, body: { status: 403, reason: "capability_replay", timestamp_skew_secs: 90 } },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.deleteRecord({ schemaHash: "h", keyHash: "k" });
+      throw new Error("did not throw");
+    } catch (err) {
+      const fe = err as FbrainError;
+      expect(fe.capabilityReason).toBe("capability_replay");
+      expect(fe.capabilityDetail?.timestampSkewSecs).toBe(90);
+    }
+  });
+
+  test("node 403 consent_required carries the reason", async () => {
+    installMock([{ status: 403, body: { status: 403, reason: "consent_required" } }]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.createRecord({ schemaHash: "h", fields: {}, keyHash: "k" });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).capabilityReason).toBe("consent_required");
+    }
+  });
+
+  test("a 403 WITHOUT a reason falls through to the generic node_http_403 mapping", async () => {
+    installMock([{ status: 403, body: { message: "nope" } }]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.createRecord({ schemaHash: "h", fields: {}, keyHash: "k" });
+      throw new Error("did not throw");
+    } catch (err) {
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("node_http_403");
+      expect(fe.capabilityReason).toBeUndefined();
+    }
+  });
+
   test("schema service POST without schema.name throws schema_register_no_hash", async () => {
     installMock([{ status: 201, body: { something: "weird" } }]);
     const c = newSchemaServiceClient("http://127.0.0.1:9102");
@@ -242,6 +320,7 @@ describe("client error mapping", () => {
       await c.registerSchema({
         schema: {
           name: "x",
+          owner_app_id: "fbrain",
           descriptive_name: "x",
           schema_type: "Hash",
           key: { hash_field: "slug" },

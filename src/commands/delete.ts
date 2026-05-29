@@ -26,7 +26,8 @@
 // our tombstone tag" are success; only "row visible with no tombstone
 // tag" raises delete_not_applied.
 
-import { newNodeClient, FbrainError, type NodeClient, type Verbose } from "../client.ts";
+import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   type FbrainRecord,
@@ -118,10 +119,10 @@ export function buildTombstoneFields(
 
 export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  const node = newNodeClient({
+  const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
 
   // raw mode bypasses tombstone filtering at the lookup layer; resolveBySlug

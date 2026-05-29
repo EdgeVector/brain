@@ -18,7 +18,8 @@
 // design / task / concept / preference / reference / agent / project / spike.
 // An unrecognised `type:` errors as `unsupported_type`.
 
-import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
+import { FbrainError, type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlug,
@@ -76,10 +77,10 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   const type = resolveRecordType(parsed.type, opts.typeOverride);
   const title = resolveTitle(parsed.title, body, slug);
 
-  const node = newNodeClient({
+  const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const hash = schemaHashFor(type, opts.cfg);
   // The fold_db_node `/api/query` endpoint returns a non-deterministic
