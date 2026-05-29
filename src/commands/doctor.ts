@@ -643,7 +643,7 @@ export async function runEmbeddingProbe(
         detail: stripDoctorTip(err.message),
         fix:
           err.hint ??
-          "restart the node so it re-fetches the ONNX file (homebrew: `brew services restart fold_db_node`)",
+          "restart the node so it re-fetches the ONNX file (homebrew: `folddb daemon stop && folddb daemon start`)",
       };
     }
     return {
