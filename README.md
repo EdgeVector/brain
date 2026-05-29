@@ -282,7 +282,7 @@ The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and 
 | `fbrain_search` | `query` + `limit?` + `exact?` + `min_score?` | Semantic search; same dedupe + stale-skip as `fbrain search` |
 | `fbrain_get` | `slug` + `type?` | Print one record; errors on ambiguous slug across types |
 | `fbrain_list` | `type?` + `status?` + `tag?` + `limit?` | Newest-first list with filters |
-| `fbrain_put` | `slug` + `type?` + `title?` + `body?` + `status?` + `tags?` + `frontmatter?` | Upsert a record. Synthesizes frontmatter from structured args or passes through raw `frontmatter`; if `status` is set, fires a follow-up `fbrain status` mutation |
+| `fbrain_put` | `slug` + `type?` + `title?` + `body?` + `status?` + `tags?` + `frontmatter?` | Upsert a record. Synthesizes frontmatter from structured args or passes through raw `frontmatter`. One of `type` or a `type:` field in `frontmatter` is required — there is NO silent default (matches CLI `put`); if `status` is set, fires a follow-up `fbrain status` mutation |
 | `fbrain_delete` | `slug` + `type?` | Soft-delete a record (tombstone tag). Without `type`, errors on ambiguous slug |
 | `fbrain_link` | `from_type` + `from_slug` + `to_type` + `to_slug` | Link a task to a parent design. v0: `task → design` only — any other pair errors with `unsupported_link_pair` |
 

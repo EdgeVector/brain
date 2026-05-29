@@ -271,14 +271,16 @@ describe("buildPutInput", () => {
     expect(input).toBe("---\ntype: concept\ntitle: Hello\ntags: [a, b]\n---\nthe body");
   });
 
-  test("defaults type to design when omitted", () => {
-    const input = buildPutInput({ slug: "x" });
-    expect(input.startsWith("---\ntype: design\n---")).toBe(true);
+  test("throws missing_type when no type and no frontmatter (no silent default)", () => {
+    // Mirror of the CLI `put` contract (#70): an untyped synthesized put
+    // must error loudly instead of silently filing a `design` record.
+    expect(() => buildPutInput({ slug: "x", body: "b" })).toThrow(/requires a `type`/);
   });
 
   test("quotes scalar values that contain YAML-significant characters", () => {
     const input = buildPutInput({
       slug: "x",
+      type: "design",
       title: 'Has "quotes" and: colon',
       tags: ["has, comma", "ok-tag"],
     });
@@ -480,6 +482,44 @@ describe("fbrain_put tool", () => {
     const res = await tools.fbrain_put!({ slug: "Bad Slug", type: "design", body: "b" });
     expect(res.isError).toBe(true);
     expect(touched).toBe(false);
+  });
+
+  test("no type and no frontmatter errors via isError before any HTTP traffic", async () => {
+    // The MCP write surface honors the same no-silent-default contract as the
+    // CLI `put` (#70): an untyped put must not silently become a `design` row.
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_put!({ slug: "untyped", body: "hello" });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text ?? "").toContain("requires a `type`");
+    expect(touched).toBe(false);
+  });
+
+  test("type carried in raw frontmatter satisfies the contract (no top-level type)", async () => {
+    // Mirrors the CLI's "one of frontmatter `type:` or `--type`" — the
+    // frontmatter escape hatch supplies the type, so no `type` arg is needed.
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_put!({
+      slug: "fm-typed",
+      frontmatter: "type: concept\ntitle: From Raw",
+      body: "raw body",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0]!.text).toBe("created concept fm-typed");
+    expect(mutations).toHaveLength(1);
   });
 });
 

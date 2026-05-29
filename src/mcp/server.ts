@@ -158,13 +158,19 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       title: "Put fbrain record",
       description:
         "Upsert a record. Re-puts update in place — no duplicate, no 409. " +
-        "`type` defaults to `design`. If `frontmatter` is provided it is " +
+        "One of `type` or a `type:` field in `frontmatter` is required — " +
+        "there is NO silent default. If `frontmatter` is provided it is " +
         "used verbatim (without the `---` fences); otherwise frontmatter is " +
         "synthesized from `type`, `title`, `tags`, and `status`. Returns " +
         "one line: `created|updated <type> <slug>`.",
       inputSchema: {
         slug: z.string().min(1).describe("Record slug (lowercase, [a-z0-9-_])."),
-        type: typeEnum.optional().describe("Record type. Defaults to `design`."),
+        type: typeEnum
+          .optional()
+          .describe(
+            "Record type. Required unless a `type:` field is set in " +
+              "`frontmatter` — there is no silent default.",
+          ),
         title: z
           .string()
           .optional()
@@ -310,11 +316,21 @@ export function buildPutInput(args: PutArgs): string {
       ? body
       : `---\n${trimmed}\n---\n${body}`;
   }
+  // No raw frontmatter: synthesize it from the args. Mirror the CLI `put`
+  // contract — there is NO silent type default. The historic fallback was
+  // `design` (the heaviest type), so an untyped put silently minted a Design
+  // row — the exact footgun #70 removed from the CLI. Require an explicit
+  // type; the `frontmatter` path above carries its own `type:` instead.
+  if (args.type === undefined || args.type.length === 0) {
+    throw new FbrainError({
+      code: "missing_type",
+      message:
+        "fbrain_put requires a `type` (or a `type:` field in `frontmatter`).",
+      hint: "One of: design | task | concept | preference | reference | agent | project | spike.",
+    });
+  }
   const lines: string[] = [];
-  // Always pin a type. putCmd refuses a put with no `type:` field; the MCP
-  // wrapper synthesizes `type: design` as the historic default so existing
-  // agents (which omit `type` for design rows) keep working.
-  lines.push(`type: ${args.type ?? "design"}`);
+  lines.push(`type: ${args.type}`);
   if (args.title !== undefined && args.title.length > 0) {
     lines.push(`title: ${yamlScalar(args.title)}`);
   }
