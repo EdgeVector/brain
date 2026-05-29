@@ -687,7 +687,7 @@ describe("doctor verdict logic", () => {
     expect(lines.some((l) => l.startsWith("[PASS] embedding-runtime"))).toBe(true);
   });
 
-  test("embedding-runtime probe → FAIL surfaces brew-restart fix when search rejects with embedding_model_unavailable", async () => {
+  test("embedding-runtime probe → FAIL surfaces daemon-restart fix when search rejects with embedding_model_unavailable", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -702,19 +702,19 @@ describe("doctor verdict logic", () => {
               "Semantic search is unavailable — the fold_db node failed to load its embedding model.",
             hint:
               "Restart the node so it re-fetches the ONNX file from the embedding cache " +
-              "(homebrew: `brew services restart fold_db_node`).",
+              "(homebrew: `folddb daemon stop && folddb daemon start`).",
           }),
         }),
     });
     expect(code).toBe(1);
     // The probe must surface as a distinct, structured FAIL — not blended
-    // into schema-drift. The fix line carries the user-actionable brew
-    // command verbatim.
+    // into schema-drift. The fix line carries the user-actionable
+    // daemon-restart command verbatim.
     const failLine = lines.find((l) => l.startsWith("[FAIL] embedding-runtime"));
     expect(failLine).toBeDefined();
     expect(failLine!).toContain("Semantic search is unavailable");
     const fixLine = lines[lines.indexOf(failLine!) + 1] ?? "";
-    expect(fixLine).toContain("brew services restart fold_db_node");
+    expect(fixLine).toContain("folddb daemon stop && folddb daemon start");
   });
 
   test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {

@@ -619,7 +619,7 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
   }
   // The fold_db_node's embedding subsystem lazily loads `model.onnx` from a
   // local cache on the first semantic-search call. After certain restarts
-  // (notably `brew upgrade fold_db_node`) the cache can be partially
+  // (notably `brew upgrade folddb`) the cache can be partially
   // populated, and the node returns a 400 whose body carries
   // "...Failed to init embedding model: Failed to retrieve model.onnx"
   // — sometimes under `message`, sometimes under `error` (the homebrew
@@ -635,9 +635,9 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
         `(${onnxBlob.trim()}) ${DOCTOR_TIP}.`,
       hint:
         "Restart the node so it re-fetches the ONNX file from the embedding cache " +
-        "(homebrew: `brew services restart fold_db_node`). " +
+        "(homebrew: `folddb daemon stop && folddb daemon start`). " +
         "If the failure persists, run `fbrain doctor --freshness` and capture " +
-        "the node log (~/Library/Logs/Homebrew/fold_db_node.log).",
+        "the node log (the latest file under ~/Library/Logs/Homebrew/folddb/).",
     });
   }
   return new FbrainError({

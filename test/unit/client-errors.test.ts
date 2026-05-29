@@ -117,10 +117,10 @@ describe("client error mapping", () => {
     }
   });
 
-  test("search 400 'Failed to retrieve model.onnx' (error-field shape) → embedding_model_unavailable + brew restart hint", async () => {
+  test("search 400 'Failed to retrieve model.onnx' (error-field shape) → embedding_model_unavailable + folddb daemon restart hint", async () => {
     // Reproduces the exact body the homebrew fold_db_node returns on
     // GET /api/native-index/search?q=… when its on-disk ONNX cache is
-    // missing or corrupt — typically after `brew upgrade fold_db_node`.
+    // missing or corrupt — typically after `brew upgrade folddb`.
     // The current homebrew daemon puts the failure text in `error`
     // (no `message` field); the opaque ONNX error has historically been
     // the #1 papercut on `fbrain search` / `fbrain ask`. We grep both
@@ -146,9 +146,9 @@ describe("client error mapping", () => {
       expect(fe.message).toContain("Semantic search is unavailable");
       expect(fe.message).toContain("embedding model");
       expect(fe.message).toContain("fbrain doctor");
-      expect(fe.hint ?? "").toContain("brew services restart fold_db_node");
+      expect(fe.hint ?? "").toContain("folddb daemon stop && folddb daemon start");
       expect(fe.hint ?? "").toContain("fbrain doctor --freshness");
-      expect(fe.hint ?? "").toContain("fold_db_node.log");
+      expect(fe.hint ?? "").toContain("~/Library/Logs/Homebrew/folddb/");
     }
   });
 
@@ -174,7 +174,7 @@ describe("client error mapping", () => {
       expect(err).toBeInstanceOf(FbrainError);
       const fe = err as FbrainError;
       expect(fe.code).toBe("embedding_model_unavailable");
-      expect(fe.hint ?? "").toContain("brew services restart fold_db_node");
+      expect(fe.hint ?? "").toContain("folddb daemon stop && folddb daemon start");
     }
   });
 
