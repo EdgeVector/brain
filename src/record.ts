@@ -137,10 +137,24 @@ export type ReadRetryOptions = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-// Re-run `fn` up to `maxAttempts` times, sleeping `backoffMs` between tries,
-// until `isHit(result)` returns true. Returns the last result either way —
-// callers handle the genuine-miss case (surfaces the existing "No record"
-// error after the retry budget is spent, same UX as today on a real miss).
+// Pure schedule: how long to wait *before* attempt N (1-based). Constant
+// `ceilingMs` today — first attempt skips the wait, subsequent attempts pause
+// for the ceiling. Splitting this out lets tests pin the schedule's contract
+// (monotonic, capped) independently of the retry driver, and lets the schedule
+// grow later (linear/exponential/jittered) without touching `withReadRetry`.
+export function computeBackoffMs(
+  attempt: number,
+  ceilingMs: number = READ_RETRY_BACKOFF_MS,
+): number {
+  if (attempt <= 1) return 0;
+  return ceilingMs;
+}
+
+// Re-run `fn` up to `maxAttempts` times, sleeping per `computeBackoffMs`
+// between tries, until `isHit(result)` returns true. Returns the last result
+// either way — callers handle the genuine-miss case (surfaces the existing
+// "No record" error after the retry budget is spent, same UX as today on a
+// real miss).
 //
 // The retry wraps the full per-type query loop, not each HTTP call: a hit
 // in one type cancels further retries, and a real miss across all types
@@ -151,14 +165,14 @@ export async function withReadRetry<T>(
   options?: ReadRetryOptions,
 ): Promise<T> {
   const maxAttempts = options?.maxAttempts ?? READ_RETRY_ATTEMPTS;
-  const backoffMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
+  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
-  let result = await fn();
-  let attempts = 1;
-  while (!isHit(result) && attempts < maxAttempts) {
-    if (backoffMs > 0) await sleep(backoffMs);
+  let result!: T;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
     result = await fn();
-    attempts++;
+    if (isHit(result)) return result;
   }
   return result;
 }

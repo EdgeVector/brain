@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  computeBackoffMs,
   ensureStatus,
   fieldsFor,
   READ_RETRY_ATTEMPTS,
@@ -111,6 +112,57 @@ describe("record", () => {
   test("ensureStatus throws FbrainError on invalid", () => {
     expect(() => ensureStatus("design", "in_progress")).toThrow(FbrainError);
     expect(() => ensureStatus("task", "draft")).toThrow(FbrainError);
+  });
+});
+
+describe("computeBackoffMs", () => {
+  // Pin the schedule's contract independently of the retry driver: any future
+  // change (linear, exponential, jittered) must keep these properties so
+  // callers can reason about total wait without re-reading the impl.
+  test("schedule across the default attempt budget is monotonic and capped at the ceiling", () => {
+    const schedule = Array.from({ length: READ_RETRY_ATTEMPTS }, (_, i) =>
+      computeBackoffMs(i + 1),
+    );
+    expect(schedule).toHaveLength(5);
+    for (let i = 1; i < schedule.length; i++) {
+      expect(schedule[i]).toBeGreaterThanOrEqual(schedule[i - 1]!);
+    }
+    for (const ms of schedule) {
+      expect(ms).toBeGreaterThanOrEqual(0);
+      expect(ms).toBeLessThanOrEqual(READ_RETRY_BACKOFF_MS);
+    }
+  });
+
+  test("first attempt has no pre-wait", () => {
+    expect(computeBackoffMs(1)).toBe(0);
+    expect(computeBackoffMs(0)).toBe(0);
+  });
+
+  test("custom ceiling caps every subsequent wait", () => {
+    for (let a = 2; a <= 20; a++) {
+      expect(computeBackoffMs(a, 17)).toBeLessThanOrEqual(17);
+    }
+  });
+
+  test("withReadRetry sleeps the schedule and runs exactly maxAttempts on a persistent miss", async () => {
+    const sleepCalls: number[] = [];
+    let calls = 0;
+    const result = await withReadRetry(
+      async () => {
+        calls++;
+        return [] as string[];
+      },
+      (r) => r.length > 0,
+      { sleep: async (ms) => void sleepCalls.push(ms) },
+    );
+    expect(result).toEqual([]);
+    expect(calls).toBe(READ_RETRY_ATTEMPTS);
+    // One sleep per retry (attempts 2..N), each matching the schedule for
+    // that attempt — so the driver and the pure schedule stay in sync.
+    const expected = Array.from({ length: READ_RETRY_ATTEMPTS - 1 }, (_, i) =>
+      computeBackoffMs(i + 2),
+    );
+    expect(sleepCalls).toEqual(expected);
   });
 });
 
