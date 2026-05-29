@@ -74,7 +74,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain design new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a Design |
 | `fbrain task new <slug> [--title T] [--design D] [--tag T]… [--body STR] [--force]` | Creates a Task (rejects dangling `--design`) |
 | `fbrain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
-| `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type and errors on ambiguity |
+| `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it prints all matches before erroring so you can pick one |
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
@@ -96,14 +96,16 @@ Run `fbrain help <command>` for per-command usage.
 |---|---|---|
 | `design` | `draft \| reviewed \| approved \| implemented \| archived` | dedicated `Design` schema |
 | `task` | `open \| in_progress \| blocked \| done \| cancelled` | dedicated `Task` schema (carries `design_slug` for `link`) |
-| `concept` | `active \| archived` | shared `FbrainKindNote` schema |
-| `preference` | `active \| superseded` | shared `FbrainKindNote` schema |
-| `reference` | `active \| broken \| archived` | shared `FbrainKindNote` schema |
-| `agent` | `active \| archived` | shared `FbrainKindNote` schema |
-| `project` | `planning \| in_progress \| done \| archived` | shared `FbrainKindNote` schema |
-| `spike` | `active \| concluded` | shared `FbrainKindNote` schema |
+| `concept` | `active \| archived` | dedicated `Concept` schema |
+| `preference` | `active \| superseded` | dedicated `Preference` schema |
+| `reference` | `active \| broken \| archived` | dedicated `Reference` schema |
+| `agent` | `active \| archived` | dedicated `Agent` schema |
+| `project` | `planning \| in_progress \| done \| archived` | dedicated `Project` schema |
+| `spike` | `active \| concluded` | dedicated `Spike` schema |
 
-The six Phase 6 types share a single `FbrainKindNote` schema with a `kind` discriminator field. We started with one schema per type, but fold_db's node merges schemas with overlapping field positions during `/api/schemas/load` — the second schema's data becomes inaccessible. The shared schema sidesteps that bug entirely. The trade-off is that slugs are unique GLOBALLY across the six Phase 6 types (a concept and a preference cannot share a slug). For the gbrain → fbrain migration this is fine because gbrain page slugs are already path-prefixed (`concepts/foo` ≠ `projects/foo`).
+Each of the six Phase 6 types gets its own dedicated schema with a distinct `descriptive_name` + `purpose_statement`. We originally landed a single combined schema (`FbrainKindNote`) plus a `kind` discriminator as a workaround for fold_db's structural canonicalization (the node merged schemas with overlapping field positions during `/api/schemas/load`, making the second schema's data inaccessible). As of Phase E (PR #63, dual-signal canonicalization cutover) the schema service consults the purpose-statement embedding alongside the structural signal, so distinct purpose statements veto the merge and all six can share the same 7-field shape without colliding onto one canonical hash. The combined-schema workaround was retired; the consolidation migration moved every pre-Phase-E row into its per-kind canonical, and the legacy `FbrainKindNote` schema is no longer registered or read.
+
+Slug uniqueness is now per-type — a `concept` and a `preference` can share the slug `foo`. When `fbrain get`, `fbrain status`, or `fbrain delete` is invoked without `--type` on a slug that resolves in more than one schema, the command errors with `Slug "X" exists in multiple schemas (concept, preference). Specify --type.` and you re-issue with `--type` to disambiguate.
 
 Default status on create (used when frontmatter omits `status:`): first value of each enum (so `active` for most types, `planning` for project, `draft` for design, `open` for task).
 
@@ -134,7 +136,12 @@ NOTE
 [PASS] schemas-loaded  — 932/932 loaded
 [PASS] schema-drift[Design]  — Design @ 84d9f350b4ff…
 [PASS] schema-drift[Task]  — Task @ c0352ec0c453…
-[PASS] schema-drift[FbrainKindNote]  — FbrainKindNote @ 57df5c3fe50c…
+[PASS] schema-drift[Concept]  — Concept @ 57df5c3fe50c…
+[PASS] schema-drift[Preference]  — Preference @ 9b1f04ac7e21…
+[PASS] schema-drift[Reference]  — Reference @ a3d2cc18f9b5…
+[PASS] schema-drift[Agent]  — Agent @ 42e7b6815ac0…
+[PASS] schema-drift[Project]  — Project @ 7c5a90def142…
+[PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
 [WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require fold_db sync transport (not yet built; tracked as G16)
 [WARN] no-team-sync  — fbrain share is a placeholder until fold_db cloud sync transport lights up (see docs/phase-3-sharing-memo.md)
 
@@ -154,7 +161,12 @@ The two `[WARN]` lines at the bottom are **always emitted** — they're disclosu
 [FAIL] schema-drift[Design]  — fields missing from registered schema: owner
        fix:   re-run `fbrain init` so the config picks up the current canonical hash; otherwise reconcile schemas.ts with the registered schema
 [PASS] schema-drift[Task]  — Task @ c0352ec0c453…
-[PASS] schema-drift[FbrainKindNote]  — FbrainKindNote @ 57df5c3fe50c…
+[PASS] schema-drift[Concept]  — Concept @ 57df5c3fe50c…
+[PASS] schema-drift[Preference]  — Preference @ 9b1f04ac7e21…
+[PASS] schema-drift[Reference]  — Reference @ a3d2cc18f9b5…
+[PASS] schema-drift[Agent]  — Agent @ 42e7b6815ac0…
+[PASS] schema-drift[Project]  — Project @ 7c5a90def142…
+[PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
 [WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require fold_db sync transport (not yet built; tracked as G16)
 [WARN] no-team-sync  — fbrain share is a placeholder until fold_db cloud sync transport lights up (see docs/phase-3-sharing-memo.md)
 
