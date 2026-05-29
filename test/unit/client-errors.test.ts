@@ -149,6 +149,12 @@ describe("client error mapping", () => {
       expect(fe.hint ?? "").toContain("folddb daemon stop && folddb daemon start");
       expect(fe.hint ?? "").toContain("fbrain doctor --freshness");
       expect(fe.hint ?? "").toContain("~/Library/Logs/Homebrew/folddb/");
+      // The channel-neutral variant (shown over `hint` on the MCP boundary)
+      // must carry none of that CLI/brew remediation an agent can't run.
+      expect(fe.agentHint ?? "").not.toContain("folddb daemon");
+      expect(fe.agentHint ?? "").not.toContain("fbrain doctor");
+      expect(fe.agentHint ?? "").not.toContain("brew");
+      expect(fe.agentHint ?? "").toContain("operator");
     }
   });
 

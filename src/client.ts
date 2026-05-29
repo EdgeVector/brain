@@ -88,17 +88,24 @@ export const QUERY_PAGE_LIMIT = 1000;
 export class FbrainError extends Error {
   readonly code: string;
   readonly hint?: string;
+  // Channel-neutral alternative to `hint` for non-interactive callers (the
+  // MCP server). `hint` carries CLI/brew remediation an agent can't run
+  // (`fbrain doctor`, `folddb daemon …`); when an error sets `agentHint` the
+  // MCP boundary shows that instead. See errorResult in src/mcp/server.ts.
+  readonly agentHint?: string;
   readonly cause?: unknown;
   constructor(opts: {
     code: string;
     message: string;
     hint?: string;
+    agentHint?: string;
     cause?: unknown;
   }) {
     super(opts.message);
     this.name = "FbrainError";
     this.code = opts.code;
     this.hint = opts.hint;
+    this.agentHint = opts.agentHint;
     this.cause = opts.cause;
   }
 }
@@ -638,6 +645,9 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
         "(homebrew: `folddb daemon stop && folddb daemon start`). " +
         "If the failure persists, run `fbrain doctor --freshness` and capture " +
         "the node log (the latest file under ~/Library/Logs/Homebrew/folddb/).",
+      agentHint:
+        "This is a node-side issue, not something this tool can fix — ask the " +
+        "operator to restart the fold_db node, then retry.",
     });
   }
   return new FbrainError({
