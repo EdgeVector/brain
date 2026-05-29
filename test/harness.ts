@@ -35,13 +35,30 @@ import { TEST_SCHEMA_SERVICE_URL } from "./util.ts";
 export const FOLD_NODE_DIR =
   process.env.FOLD_NODE_DIR ?? "/Users/tomtang/code/edgevector/fold/fold_db_node";
 
-export function isHarnessAvailable(): boolean {
-  if (process.env.FBRAIN_SKIP_INTEGRATION === "1") return false;
+function runShExists(): boolean {
   try {
     return statSync(join(FOLD_NODE_DIR, "run.sh")).isFile();
   } catch {
     return false;
   }
+}
+
+// One-shot bootability probe result, populated by the top-level await at the
+// bottom of this module so the synchronous skip gate below can return a real
+// answer at integration-test module-evaluation time. Without this, the gate
+// could only check whether run.sh exists — which is what the README claimed
+// but didn't deliver: every integration test file would independently attempt
+// a 180s boot against an un-bootable node, turning ~25 min of wall-clock into
+// red failures instead of a clean skip.
+let probedAvailable: boolean | null = null;
+
+export function isHarnessAvailable(): boolean {
+  if (process.env.FBRAIN_SKIP_INTEGRATION === "1") return false;
+  if (probedAvailable !== null) return probedAvailable;
+  // Defensive fallback for any caller that bypasses the TLA path (e.g. a
+  // tool that imports without executing the module's top-level). Matches
+  // the previous gate's behavior.
+  return runShExists();
 }
 
 export type Harness = {
@@ -124,15 +141,24 @@ function installTeardownGuard(): void {
   }
 }
 
-export async function startHarness(opts?: { name?: string }): Promise<Harness> {
-  // Cloud schema service is shared and always-on, so we can fail fast if
-  // it's unreachable instead of waiting the full node-cold-build window.
-  const schemaServiceUrl = TEST_SCHEMA_SERVICE_URL;
+type SpawnedNode = {
+  child: Subprocess;
+  home: string;
+  liveSlot: LiveSlot;
+  dispose: () => Promise<void>;
+  dumpLogs: () => void;
+};
 
+// Spawn run.sh into a fresh tmp home and register interrupt-time teardown.
+// Shared by startHarness (real harness setup) and probeNodeBootable (one-shot
+// bootability probe). Keeping the spawn arguments and the dispose semantics in
+// one place keeps the probe a true rehearsal of the real boot — if the spawn
+// shape ever changes, both paths change together.
+function spawnNode(): SpawnedNode {
   const home = mkdtempSync(join(tmpdir(), "fbrain-test-node-"));
   const child = spawn({
     // `--dev` routes the node at the dev cloud schema-service Lambda —
-    // matches schemaServiceUrl above, and run.sh's --dev resolves the
+    // matches schemaServiceUrl below, and run.sh's --dev resolves the
     // same URL via environments.json. `--local-schema` is gone: we no
     // longer spawn a local schema_service binary.
     cmd: [
@@ -165,7 +191,7 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
     stderrBuf += chunk;
   });
 
-  const dumpLogs = () => {
+  const dumpLogs = (): void => {
     if (process.env.FBRAIN_HARNESS_VERBOSE === "1") {
       // eslint-disable-next-line no-console
       console.error("--- harness stdout ---\n" + stdoutBuf);
@@ -191,6 +217,17 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
     liveSlots.delete(liveSlot);
   };
 
+  return { child, home, liveSlot, dispose, dumpLogs };
+}
+
+export async function startHarness(opts?: { name?: string }): Promise<Harness> {
+  // Cloud schema service is shared and always-on, so we can fail fast if
+  // it's unreachable instead of waiting the full node-cold-build window.
+  const schemaServiceUrl = TEST_SCHEMA_SERVICE_URL;
+
+  const node = spawnNode();
+  const { child, home, liveSlot, dispose, dumpLogs } = node;
+
   // Everything after the spawn runs under one try/catch so that ANY startup
   // failure — slot timeout, HTTP wait, bootstrap, schema registration (e.g. a
   // shared-cloud-schema-service 409), schema load — tears the node down via
@@ -198,13 +235,13 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
   // process.on("exit") handlers, so the teardown guard can't backstop an
   // in-process throw; dispose() must run here.
   try {
-    const slot = await waitForSlotFile(home, 180_000);
+    const slot = await waitForSlotFile(home, 180_000, child);
 
     const nodeUrl = `http://127.0.0.1:${slot.port}`;
     liveSlot.port = slot.port;
     liveSlot.pid = slot.pid;
 
-    await waitForHttp(`${nodeUrl}/api/system/auto-identity`, 180_000, (status) => status === 200 || status === 503);
+    await waitForHttp(`${nodeUrl}/api/system/auto-identity`, 180_000, (status) => status === 200 || status === 503, child);
     // Cloud Lambda is already deployed — short window is enough; a long
     // wait here would just mask a network/DNS issue we'd rather surface.
     await waitForHttp(`${schemaServiceUrl}/v1/schemas`, 5_000, (status) => status === 200);
@@ -276,9 +313,18 @@ async function readStream(stream: ReadableStream<Uint8Array> | null, onChunk: (s
   }
 }
 
-async function waitForSlotFile(home: string, timeoutMs: number): Promise<SlotFile> {
+// Optional `child` lets the caller short-circuit when run.sh has exited —
+// e.g. cargo build error, port bind failure, missing binary. Without it,
+// waits burn the full timeout (180s) on a long-dead wrapper. A LIVE slow
+// cold build keeps run.sh alive, so this never breaks the happy path.
+async function waitForSlotFile(home: string, timeoutMs: number, child?: Subprocess): Promise<SlotFile> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (child && child.exitCode !== null) {
+      throw new Error(
+        `fold_db_node (run.sh) exited (code ${child.exitCode}) before writing a slot file for home=${home}`,
+      );
+    }
     if (existsSync(SLOT_DIR)) {
       let entries: string[] = [];
       try {
@@ -308,10 +354,16 @@ async function waitForHttp(
   url: string,
   timeoutMs: number,
   ok: (status: number) => boolean,
+  child?: Subprocess,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastErr: string | null = null;
   while (Date.now() < deadline) {
+    if (child && child.exitCode !== null) {
+      throw new Error(
+        `fold_db_node (run.sh) exited (code ${child.exitCode}) before serving ${url}`,
+      );
+    }
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
       if (ok(res.status)) return;
@@ -380,6 +432,85 @@ function safeRm(path: string): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+let skipNoticeShown = false;
+
+function skipNotice(reason: string): void {
+  if (skipNoticeShown) return;
+  skipNoticeShown = true;
+  // eslint-disable-next-line no-console
+  console.error(
+    `[fbrain harness] integration tests skipped — ${reason}. ` +
+      `Unit subset will still run. Set FOLD_NODE_DIR to a working fold_db_node ` +
+      `and ensure it boots to enable; unset FBRAIN_SKIP_INTEGRATION if set.`,
+  );
+}
+
+// One-shot bootability probe. Runs once per test process at module-eval time
+// (via the top-level await below). Tears down its probe node immediately.
+//
+// Fail-fast strategy: the probe relies on early child-exit detection in the
+// waits — the common failures (cargo build error, port :9101..9199 all busy,
+// missing binary, run.sh non-exec) all kill run.sh in seconds, not 180s. A
+// healthy slow cold build keeps run.sh alive and proceeds normally, so this
+// preserves the happy path. The cloud schema-service is checked first with a
+// short timeout because the harness can't function without it and the check
+// is cheap.
+async function probeNodeBootable(): Promise<boolean> {
+  if (process.env.FBRAIN_SKIP_INTEGRATION === "1") {
+    skipNotice("FBRAIN_SKIP_INTEGRATION=1");
+    return false;
+  }
+  if (!runShExists()) {
+    skipNotice(`no run.sh at ${FOLD_NODE_DIR}`);
+    return false;
+  }
+
+  try {
+    await waitForHttp(
+      `${TEST_SCHEMA_SERVICE_URL}/v1/schemas`,
+      5_000,
+      (s) => s === 200,
+    );
+  } catch {
+    skipNotice(`cloud schema-service unreachable (${TEST_SCHEMA_SERVICE_URL})`);
+    return false;
+  }
+
+  const node = spawnNode();
+  try {
+    const slot = await waitForSlotFile(node.home, 180_000, node.child);
+    node.liveSlot.port = slot.port;
+    node.liveSlot.pid = slot.pid;
+    await waitForHttp(
+      `http://127.0.0.1:${slot.port}/api/system/auto-identity`,
+      180_000,
+      (s) => s === 200 || s === 503,
+      node.child,
+    );
+    return true;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    skipNotice(`fold_db_node failed to boot — ${reason}`);
+    node.dumpLogs();
+    return false;
+  } finally {
+    await node.dispose();
+  }
+}
+
+// Top-level await: every importer of this module — i.e. every integration
+// test file — is held until probedAvailable is set, so each file's
+// `describe.skip` decision sees a real bootability answer. The try/catch is
+// belt-and-suspenders: probeNodeBootable is already written to never throw,
+// but a crash here would otherwise break module import for every test file.
+try {
+  probedAvailable = await probeNodeBootable();
+} catch (err) {
+  // eslint-disable-next-line no-console
+  console.error(`[fbrain harness] probe crashed: ${err}; treating as unavailable`);
+  probedAvailable = false;
 }
 
 export type ProbeSchemas = {

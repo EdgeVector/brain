@@ -347,7 +347,7 @@ bun test           # runs unit + integration tests
 bun run typecheck  # strict tsc --noEmit
 ```
 
-Integration tests spawn a real `fold_db_node` against a unique tmpdir and point it at the dev cloud schema-service Lambda (us-west-2). They skip cleanly when `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't reachable, so CI runs the unit subset. Set `FBRAIN_SKIP_INTEGRATION=1` to force-skip even when the node dir is present (offline dev). Override the dev Lambda URL via `FBRAIN_TEST_SCHEMA_URL` and the node URL via `FBRAIN_TEST_NODE_URL`.
+Integration tests spawn a real `fold_db_node` against a unique tmpdir and point it at the dev cloud schema-service Lambda (us-west-2). At test start the harness runs a one-shot bootability probe (cloud schema-service reachable + one real `run.sh` boot with early-child-exit detection) — if `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't present, the cloud Lambda isn't reachable, or `run.sh` can't boot a node, every integration file skips cleanly in seconds with a single notice and only the unit subset runs. Set `FBRAIN_SKIP_INTEGRATION=1` to force-skip even when the node dir is present (offline dev). Override the dev Lambda URL via `FBRAIN_TEST_SCHEMA_URL` and the node URL via `FBRAIN_TEST_NODE_URL`.
 
 ## Quality / eval
 
