@@ -23,7 +23,6 @@ import {
 } from "../../src/commands/delete.ts";
 import { FbrainError, type NodeClient } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import type { RecordType } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const cfg = buildTestCfg({
