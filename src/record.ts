@@ -236,7 +236,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
     const matchedTypes = matches.map((m) => m.type).join(", ");
     throw new FbrainError({
       code: "ambiguous_slug",
-      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify --type.`,
+      message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify a \`type\`.`,
     });
   }
 

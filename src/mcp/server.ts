@@ -18,7 +18,7 @@ import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { statusCmd } from "../commands/status.ts";
-import { FbrainError } from "../client.ts";
+import { FbrainError, stripDoctorTip } from "../client.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
@@ -376,7 +376,13 @@ function textResult(text: string): ToolResult {
 function errorResult(err: unknown): ToolResult {
   let message: string;
   if (err instanceof FbrainError) {
-    message = err.hint ? `${err.message} (hint: ${err.hint})` : err.message;
+    // This channel is consumed by agents, not a human at a terminal: the CLI
+    // `fbrain doctor` tip and brew/daemon remediation in `hint` aren't
+    // actionable here. Drop the doctor tip from the message and prefer a
+    // channel-neutral `agentHint` over the CLI-flavored `hint` when set.
+    const base = stripDoctorTip(err.message);
+    const hint = err.agentHint ?? err.hint;
+    message = hint ? `${base} (hint: ${hint})` : base;
   } else if (err instanceof Error) {
     message = err.message;
   } else {

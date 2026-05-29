@@ -139,6 +139,41 @@ describe("fbrain_search tool", () => {
     expect(res.isError).toBe(true);
     expect(res.content[0]!.text ?? "").toContain("error:");
   });
+
+  test("embedding-down error is channel-neutral — no CLI/brew remediation reaches the agent", async () => {
+    // The node fails to load its embedding model; client.ts maps that to a
+    // rich FbrainError whose CLI `hint` names `folddb daemon`,
+    // `fbrain doctor --freshness`, and a homebrew log path, and whose message
+    // carries the `fbrain doctor` tip. None of that is actionable for an MCP
+    // agent — the boundary must strip the doctor tip and swap in the
+    // channel-neutral `agentHint`.
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 400,
+          body: {
+            error:
+              "Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx",
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_search!({ query: "anything" });
+    expect(res.isError).toBe(true);
+    const text = res.content[0]!.text ?? "";
+    // Still tells the agent what's wrong …
+    expect(text).toContain("Semantic search is unavailable");
+    // … but no CLI-/brew-only remediation it can't perform.
+    expect(text).not.toContain("fbrain doctor");
+    expect(text).not.toContain("folddb daemon");
+    expect(text).not.toContain("brew");
+    expect(text).not.toContain("Library/Logs");
+    expect(text).not.toContain("--freshness");
+    // Carries the channel-neutral, operator-facing hint instead.
+    expect(text).toContain("operator");
+  });
 });
 
 describe("fbrain_get tool", () => {
@@ -176,6 +211,25 @@ describe("fbrain_get tool", () => {
     const res = await tools.fbrain_get!({ slug: "ghost", type: "design" });
     expect(res.isError).toBe(true);
     expect(res.content[0]!.text ?? "").toContain("No design: ghost");
+  });
+
+  test("ambiguous slug error names the `type` arg, not the CLI `--type` flag", async () => {
+    // A slug present in multiple schemas resolves to ambiguous_slug. The
+    // shared message is consumed by the CLI (`--type`) AND this MCP tool
+    // (a `type` argument), so it must not reference the CLI-only flag.
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("dual")] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_get!({ slug: "dual" });
+    expect(res.isError).toBe(true);
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("exists in multiple schemas");
+    expect(text).not.toContain("--type");
+    expect(text).toContain("Specify a `type`");
   });
 });
 
