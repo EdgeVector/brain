@@ -26,7 +26,7 @@ import {
   MIGRATION_DIR_ENV,
   type MigrationManifest,
 } from "../../src/migration.ts";
-import { CONFIG_VERSION, type Config } from "../../src/config.ts";
+import { type Config } from "../../src/config.ts";
 import { TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
