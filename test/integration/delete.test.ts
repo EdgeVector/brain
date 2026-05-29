@@ -234,3 +234,46 @@ describeIntegration("Phase 5 — delete (task) + design-slug ambiguity", () => {
     expect(row!.fields.tags).toEqual([TOMBSTONE_TAG]);
   }, 90_000);
 });
+
+describeIntegration("Phase 5 — delete design referential integrity", () => {
+  test("blocks deleting a design with a live linked task; --force overrides and get flags the orphan", async () => {
+    const design = unique("guard-design");
+    const task = unique("guard-task");
+
+    const dCreate = await runCli(["design", "new", design, "--title", "parent", "--body", "B"]);
+    expect(dCreate.code).toBe(0);
+    const tCreate = await runCli(["task", "new", task, "--title", "child", "--body", "B", "--design", design]);
+    expect(tCreate.code).toBe(0);
+
+    // Block-by-default: the design cannot be deleted while the task links to it.
+    const blocked = await runCli(["delete", design, "--type", "design"]);
+    expect(blocked.code).toBe(1);
+    expect(blocked.stderr).toContain(task);
+    expect(blocked.stderr.toLowerCase()).toContain("--force");
+    // The block is fail-safe: the design is untouched and still gettable.
+    const stillThere = await runCli(["get", design, "--type", "design"]);
+    expect(stillThere.code).toBe(0);
+
+    // --force overrides and warns about the soon-to-dangle task.
+    const forced = await runCli(["delete", design, "--type", "design", "--force"]);
+    expect(forced.code).toBe(0);
+    expect(forced.stdout).toContain(`deleted design ${design}`);
+    expect(forced.stdout).toContain(task);
+
+    // The task now has a dangling design reference — get flags it.
+    const orphanGet = await runCli(["get", task, "--type", "task"]);
+    expect(orphanGet.code).toBe(0);
+    expect(orphanGet.stdout).toContain(`design:     ${design} (deleted)`);
+
+    // cleanup so the orphan doesn't pollute later list assertions
+    await runCli(["delete", task, "--type", "task"]);
+  }, 120_000);
+
+  test("deleting a design with no linked tasks still works", async () => {
+    const design = unique("guard-unlinked");
+    await runCli(["design", "new", design, "--title", "lonely", "--body", "B"]);
+    const del = await runCli(["delete", design, "--type", "design"]);
+    expect(del.code).toBe(0);
+    expect(del.stdout).toContain(`deleted design ${design}`);
+  }, 60_000);
+});

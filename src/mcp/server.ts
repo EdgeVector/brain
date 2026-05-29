@@ -223,8 +223,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "Soft-delete a record. fold_db is append-only — the workaround " +
         "stamps a tombstone tag so every fbrain read path treats the " +
         "record as gone. Without `type`, probes every type and errors if " +
-        "the slug exists in multiple. The slug becomes reusable after " +
-        "delete.",
+        "the slug exists in multiple. Deleting a design still referenced " +
+        "by live tasks is blocked unless `force` is set (the slug becomes " +
+        "reusable after delete).",
       inputSchema: {
         slug: z.string().min(1).describe("Record slug."),
         type: typeEnum
@@ -232,6 +233,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "Restrict delete to one record type. Omit to probe all types " +
               "(errors on ambiguous slug).",
+          ),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            "Delete a design even if live tasks still link to it, leaving " +
+              "their design references dangling.",
           ),
       },
     },
@@ -243,6 +251,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         print: (l) => lines.push(l),
       };
       if (args.type) dOpts.type = args.type as RecordType;
+      if (args.force) dOpts.force = true;
       try {
         await deleteRecord(dOpts);
       } catch (err) {

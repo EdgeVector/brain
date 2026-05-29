@@ -4,7 +4,13 @@
 
 import { newNodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
-import { resolveBySlug, type FbrainRecord } from "../record.ts";
+import {
+  findBySlug,
+  resolveBySlug,
+  schemaHashFor,
+  withReadRetry,
+  type FbrainRecord,
+} from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
 
 export type GetOptions = {
@@ -34,10 +40,30 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     },
   });
 
-  print(formatRecord(found.record, found.type));
+  // Flag a dangling design reference. A task's design_slug is validated on
+  // write (task new / link), so a now-missing parent means the design was
+  // deleted out from under it — surface that instead of printing a live-
+  // looking pointer. Retry-hedged so a transient empty read doesn't mislabel
+  // a live design as deleted (same flake task new's parent lookup guards).
+  let designMissing = false;
+  const designSlug = found.record.design_slug;
+  if (RECORDS[found.type].hasDesignSlug && designSlug && designSlug.length > 0) {
+    const designHash = schemaHashFor("design", opts.cfg);
+    const parent = await withReadRetry(
+      () => findBySlug(node, "design", designHash, designSlug),
+      (r) => r !== null,
+    );
+    designMissing = parent === null;
+  }
+
+  print(formatRecord(found.record, found.type, designMissing));
 }
 
-export function formatRecord(r: FbrainRecord, type: RecordType): string {
+export function formatRecord(
+  r: FbrainRecord,
+  type: RecordType,
+  designMissing = false,
+): string {
   const lines = [
     `[${type}] ${r.slug}`,
     `title:      ${r.title}`,
@@ -45,7 +71,11 @@ export function formatRecord(r: FbrainRecord, type: RecordType): string {
     `tags:       ${r.tags.length === 0 ? "(none)" : r.tags.join(", ")}`,
   ];
   if (RECORDS[type].hasDesignSlug) {
-    lines.push(`design:     ${r.design_slug && r.design_slug.length > 0 ? r.design_slug : "(none)"}`);
+    const hasDesign = r.design_slug !== undefined && r.design_slug.length > 0;
+    const designValue = hasDesign
+      ? `${r.design_slug}${designMissing ? " (deleted)" : ""}`
+      : "(none)";
+    lines.push(`design:     ${designValue}`);
   }
   lines.push(`created_at: ${r.created_at}`);
   lines.push(`updated_at: ${r.updated_at}`);
