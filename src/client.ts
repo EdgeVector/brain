@@ -371,12 +371,34 @@ export function newNodeClient(opts: {
       // does NOT support a body-side tag/status filter — so any caller
       // that wants to filter by a record field has to fetch everything
       // and filter in-memory. We paginate up to QUERY_PAGE_SIZE rows per
-      // request and stop once the node reports `has_more: false`, which
-      // gives us a complete-result contract regardless of how big the
-      // backing schema is (subject to the safety guards below).
+      // request and stop once the node reports `has_more: false`.
+      //
+      // CLIENT-SIDE GUARDS — fold_db_node's offset pagination is broken
+      // (handler `fold_db_node/src/handlers/query.rs`: `.skip(offset)
+      // .take(limit)` over an unstably-ordered result set). Verified
+      // 2026-05-30: paging a 177-row schema by 100 returns 177 rows but
+      // only 134 unique — ~43 dups + ~43 silently dropped. fbrain is
+      // safe today only because QUERY_PAGE_SIZE (1000) exceeds every
+      // current schema's row count, so the second page is never
+      // requested. To stay safe once any schema grows past the page
+      // size, we never trust offset-paged results blindly:
+      //   1. Dedupe rows by record key across pages — so a stable-
+      //      ordering future node fix transparently keeps working,
+      //      and an unstable node can never inflate the set with
+      //      duplicates.
+      //   2. If a follow-up page returns ONLY already-seen keys but
+      //      claims has_more=true, throw — pagination is stalled
+      //      mid-table and looping further would either spin to the
+      //      QUERY_PAGE_LIMIT cap or return a silently-truncated set.
+      //   3. After the loop terminates (has_more=false), if the
+      //      node's own total_count is greater than our deduped row
+      //      count, throw — the node dropped rows we cannot recover.
+      // The proper root-cause fix lives in fold_db_node/query.rs
+      // (stable ordering); this guard lets fbrain land independently.
       const allResults: QueryRow[] = [];
+      const seenKeys = new Set<string>();
       let offset = 0;
-      let lastTotalCount = 0;
+      let lastTotalCount: number | null = null;
       for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
         const { status, body } = await callJson("/api/query", "POST", {
           schema_name: schemaHash,
@@ -387,24 +409,58 @@ export function newNodeClient(opts: {
         if (status !== 200) throw mapNodeError(status, body, "/api/query");
         const b = body as Record<string, unknown>;
         const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
-        allResults.push(...pageResults);
-        lastTotalCount =
-          typeof b.total_count === "number" ? b.total_count : allResults.length;
+        if (typeof b.total_count === "number") lastTotalCount = b.total_count;
+        let newOnPage = 0;
+        for (const row of pageResults) {
+          const k = recordDedupKey(row);
+          if (seenKeys.has(k)) continue;
+          seenKeys.add(k);
+          allResults.push(row);
+          newOnPage++;
+        }
         // Stop on explicit `has_more: false`. Absent `has_more` (older
         // node, or a stub) is treated as "done" — a single non-paginated
         // response is then equivalent to the pre-pagination contract.
         const hasMore = b.has_more === true;
         if (!hasMore) break;
-        // Guard against an infinite loop if the node ever returns
-        // has_more=true with an empty page. Without this, a stuck-empty
-        // page would spin until the page cap.
+        if (newOnPage === 0) {
+          throw new FbrainError({
+            code: "query_pagination_stalled",
+            message:
+              `Node /api/query returned page ${page + 1} at offset=${offset} ` +
+              `with only previously-seen record keys but reported has_more=true — ` +
+              `fold_db_node's offset pagination is unstable on schemas larger than ` +
+              `QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) and would loop or truncate ${DOCTOR_TIP}.`,
+            hint:
+              "Upgrade the fold_db_node to a version with stable /api/query ordering, " +
+              "or temporarily reduce the schema's row count below QUERY_PAGE_SIZE.",
+          });
+        }
+        // Defensive: a node that returns has_more=true with an empty
+        // results array would spin without progress. The stalled-page
+        // guard above already covers this (0 new keys), but keep an
+        // explicit break for clarity and so the throw above can only
+        // ever fire on a real overlap.
         if (pageResults.length === 0) break;
         offset += pageResults.length;
+      }
+      if (lastTotalCount !== null && allResults.length < lastTotalCount) {
+        throw new FbrainError({
+          code: "query_pagination_incomplete",
+          message:
+            `Node /api/query finished with has_more=false but only ${allResults.length} ` +
+            `unique records were collected across pages — the node's reported total_count ` +
+            `was ${lastTotalCount}. fold_db_node's offset pagination silently dropped rows ` +
+            `via overlapping pages ${DOCTOR_TIP}.`,
+          hint:
+            "Upgrade the fold_db_node to a version with stable /api/query ordering, " +
+            "or temporarily reduce the schema's row count below QUERY_PAGE_SIZE.",
+        });
       }
       return {
         ok: true,
         results: allResults,
-        total_count: lastTotalCount,
+        total_count: lastTotalCount ?? allResults.length,
         returned_count: allResults.length,
       };
     },
@@ -449,6 +505,22 @@ async function mutate(
     mutation_type: kind,
   });
   if (status !== 200) throw mapNodeError(status, body, "/api/mutation");
+}
+
+// String identity for a QueryRow's record key, used by queryAll to
+// dedupe across pages. fold_db keys are either hash-typed (range null)
+// or range-typed (hash null); either field alone is not unique across
+// schemas with mixed keys, so we combine both with a separator that
+// cannot appear in a hex hash or range string.
+function recordDedupKey(row: QueryRow): string {
+  const key = row.key;
+  if (!key || typeof key !== "object") {
+    // No key at all — fall back to JSON of the fields so rows still
+    // dedupe deterministically. A node returning rows with no key is
+    // already broken, but the dedupe contract must still hold.
+    return `__no_key__|${JSON.stringify(row.fields ?? null)}`;
+  }
+  return `h:${key.hash ?? ""}|r:${key.range ?? ""}`;
 }
 
 function numField(obj: Record<string, unknown>, key: string): number {
