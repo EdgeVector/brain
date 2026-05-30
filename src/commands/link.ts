@@ -3,7 +3,7 @@
 
 import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
-import { findBySlug, nowIso, schemaHashFor } from "../record.ts";
+import { findBySlug, nowIso, schemaHashFor, withReadRetry } from "../record.ts";
 
 export type LinkOptions = {
   cfg: Config;
@@ -24,7 +24,15 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   const taskHash = schemaHashFor("task", opts.cfg);
   const designHash = schemaHashFor("design", opts.cfg);
 
-  const task = await findBySlug(node, "task", taskHash, opts.taskSlug);
+  // /api/query returns a non-deterministic top-100 slice per schema, so a
+  // single findBySlug can miss an existing slug on a schema with >100 rows.
+  // Without the retry, link rejects a real task/design with `not_found` or
+  // `dangling_design_slug` ~40% of the time on a saturated daemon. Same
+  // hedge `task new` / `design new` / put.ts / resolveBySlug already apply.
+  const task = await withReadRetry(
+    () => findBySlug(node, "task", taskHash, opts.taskSlug),
+    (r) => r !== null,
+  );
   if (!task) {
     throw new FbrainError({
       code: "not_found",
@@ -32,7 +40,10 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     });
   }
 
-  const design = await findBySlug(node, "design", designHash, opts.designSlug);
+  const design = await withReadRetry(
+    () => findBySlug(node, "design", designHash, opts.designSlug),
+    (r) => r !== null,
+  );
   if (!design) {
     throw new FbrainError({
       code: "dangling_design_slug",
