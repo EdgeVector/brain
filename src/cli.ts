@@ -968,6 +968,25 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     allowPositionals: false,
     options: DOCTOR_OPTIONS,
   });
+
+  // `--usage-window` and `--usage-path` only mean anything under `--usage`
+  // (COMMAND_HELP.doctor documents them nested under it). Without `--usage`,
+  // the dispatcher below never reads them — so `fbrain doctor --usage-window
+  // 14` ran a normal health check and silently dropped the override. Reject
+  // the combo before doctor() so the user can fix the invocation instead of
+  // debugging a no-op. Same flavor as PRs #93/#94 (migrate orphan flags).
+  if (!values.usage) {
+    const orphans: string[] = [];
+    if (values["usage-window"] !== undefined) orphans.push("--usage-window");
+    if (values["usage-path"] !== undefined) orphans.push("--usage-path");
+    if (orphans.length > 0) {
+      throw new FbrainError({
+        code: "doctor_flag_requires_usage",
+        message: `${orphans.join(", ")} only ${orphans.length === 1 ? "applies" : "apply"} to --usage.`,
+      });
+    }
+  }
+
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
   if (values.freshness) dOpts.freshness = true;
