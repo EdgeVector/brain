@@ -176,7 +176,7 @@ export function newSchemaServiceClient(
     baseUrl: url,
     async registerSchema(req) {
       const path = "/v1/schemas";
-      const res = await callSchemaService(url, path, "POST", req, verbose);
+      const res = await callSchemaServiceRaw(url, path, "POST", req, verbose);
       const body = await readJson(res);
       if (res.status !== 200 && res.status !== 201) {
         throw mapSchemaServiceError(res, body, path);
@@ -201,7 +201,7 @@ export function newSchemaServiceClient(
       return { canonicalHash, status: res.status, replacedSchema };
     },
     async listSchemas() {
-      const res = await callSchemaService(url, "/v1/schemas", "GET", undefined, verbose);
+      const res = await callSchemaServiceRaw(url, "/v1/schemas", "GET", undefined, verbose);
       const body = await readJson(res);
       if (res.status !== 200) {
         throw mapSchemaServiceError(res, body, "/v1/schemas");
@@ -210,7 +210,7 @@ export function newSchemaServiceClient(
     },
     async getSchemaByHash(hash) {
       const path = `/v1/schema/${encodeURIComponent(hash)}`;
-      const res = await callSchemaService(url, path, "GET", undefined, verbose);
+      const res = await callSchemaServiceRaw(url, path, "GET", undefined, verbose);
       if (res.status === 404) {
         await res.text();
         return null;
@@ -282,7 +282,7 @@ export function newNodeClient(opts: {
     method: "GET" | "POST",
     body?: unknown,
   ): Promise<{ status: number; body: unknown }> => {
-    const res = await callNode(url, path, method, body, userHash, verbose);
+    const res = await callNodeRaw(url, path, method, body, userHash, verbose);
     const parsed = await readJson(res);
     return { status: res.status, body: parsed };
   };
@@ -476,17 +476,6 @@ function stripTrailingSlash(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url;
 }
 
-async function callNode(
-  baseUrl: string,
-  path: string,
-  method: "GET" | "POST",
-  body: unknown,
-  userHash: string,
-  verbose: Verbose,
-): Promise<Response> {
-  return callNodeRaw(baseUrl, path, method, body, userHash, verbose);
-}
-
 async function callNodeRaw(
   baseUrl: string,
   path: string,
@@ -517,16 +506,6 @@ async function callNodeRaw(
   } catch (err) {
     throw connectionError(baseUrl, "node", err);
   }
-}
-
-async function callSchemaService(
-  baseUrl: string,
-  path: string,
-  method: "GET" | "POST",
-  body: unknown,
-  verbose: Verbose,
-): Promise<Response> {
-  return callSchemaServiceRaw(baseUrl, path, method, body, verbose);
 }
 
 async function callSchemaServiceRaw(
