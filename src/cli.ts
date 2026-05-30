@@ -931,6 +931,25 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
+  // Pre-flight `--usage-window <value>` so doctor behaves symmetrically with
+  // `ask --limit` / `list -n` / `search -n` (PRs #87, #88). Three bugs the
+  // post-parseArgs check missed:
+  //   - `--usage-window -1` produced parseArgs's cryptic "Option '--usage-window'
+  //     argument is ambiguous" (it sees `-1` as another option).
+  //   - `--usage-window 3.5` was silently parseInt'd to 3.
+  //   - `--usage-window 5abc` was silently parseInt'd to 5.
+  // The strict `String(n) !== raw.trim()` check rejects both junk-tail forms;
+  // running before parseArgs avoids the ambiguous-option error.
+  const windowRaw = peekNextValue(args, "--usage-window");
+  if (windowRaw !== undefined) {
+    const n = parseInt(windowRaw, 10);
+    if (!Number.isFinite(n) || String(n) !== windowRaw.trim() || n < 1) {
+      throw new FbrainError({
+        code: "invalid_usage_window",
+        message: `--usage-window must be a positive integer (got "${windowRaw}").`,
+      });
+    }
+  }
   const { values } = parseArgs({
     args,
     strict: true,
@@ -944,16 +963,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     dOpts.usage = true;
     const windowArg = values["usage-window"];
     const usageOpts: NonNullable<typeof dOpts.usageOptions> = {};
-    if (windowArg !== undefined) {
-      const n = parseInt(windowArg, 10);
-      if (!Number.isFinite(n) || n <= 0) {
-        throw new FbrainError({
-          code: "invalid_usage_window",
-          message: `--usage-window must be a positive integer (got "${windowArg}").`,
-        });
-      }
-      usageOpts.windowDays = n;
-    }
+    if (windowArg !== undefined) usageOpts.windowDays = parseInt(windowArg, 10);
     if (values["usage-path"]) usageOpts.usagePath = values["usage-path"];
     dOpts.usageOptions = usageOpts;
   }
