@@ -607,6 +607,13 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
         console.log(TOP_HELP);
         return 0;
       }
+      // Accept the two-word names from TOP_HELP ("design new" / "task new")
+      // whether the user quoted them as a single arg or typed them as two
+      // tokens — both forms appear verbatim in the index.
+      const joined = args.slice(0, 2).join(" ");
+      if ((COMPOUND_COMMANDS as readonly string[]).includes(joined)) {
+        return printHelpFor(joined.split(" ")[0]!);
+      }
       return printHelpFor(target);
     }
   }
