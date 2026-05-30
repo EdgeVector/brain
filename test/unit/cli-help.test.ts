@@ -25,9 +25,27 @@
 //      (regression pin for the 2026-05-25 drift).
 
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 
 import { CLI_SPEC, COMMAND_HELP, COMMANDS, TOP_HELP } from "../../src/cli.ts";
 import { RECORD_TYPES } from "../../src/schemas.ts";
+
+const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
+
+async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(["bun", CLI_PATH, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    env: { ...process.env, FBRAIN_NO_STDIN: "1" },
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const code = await proc.exited;
+  return { code, stdout, stderr };
+}
 
 const GLOBAL_FLAGS = new Set(["--verbose", "--help"]);
 
@@ -97,5 +115,40 @@ describe("TOP_HELP <-> COMMANDS alignment", () => {
     const putLine = TOP_HELP.split("\n").find((l) => /^\s{2,}put\s/.test(l));
     expect(putLine).toBeDefined();
     expect(putLine).not.toMatch(/Design or Task/);
+  });
+});
+
+// `TOP_HELP` lists the two compound commands as `design new` and `task new`,
+// so users copy-pasting those exact names into `fbrain help` should land on
+// the right per-command usage — whether they quote the two-word name
+// ("help \"design new\"") or pass it as two tokens ("help design new").
+describe("`fbrain help` accepts the two-word names from TOP_HELP", () => {
+  test('help "design new" matches help design (exit 0, same usage)', async () => {
+    const [baseline, quoted] = await Promise.all([runCli(["help", "design"]), runCli(["help", "design new"])]);
+    expect(baseline.code).toBe(0);
+    expect(quoted.code).toBe(0);
+    expect(quoted.stdout).toBe(baseline.stdout);
+    expect(quoted.stderr).toBe("");
+  });
+
+  test('help "task new" matches help task (exit 0, same usage)', async () => {
+    const [baseline, quoted] = await Promise.all([runCli(["help", "task"]), runCli(["help", "task new"])]);
+    expect(baseline.code).toBe(0);
+    expect(quoted.code).toBe(0);
+    expect(quoted.stdout).toBe(baseline.stdout);
+    expect(quoted.stderr).toBe("");
+  });
+
+  test("help design new (two unquoted tokens) matches help design", async () => {
+    const [baseline, split] = await Promise.all([runCli(["help", "design"]), runCli(["help", "design", "new"])]);
+    expect(baseline.code).toBe(0);
+    expect(split.code).toBe(0);
+    expect(split.stdout).toBe(baseline.stdout);
+  });
+
+  test("help bogus still errors (exit 1)", async () => {
+    const { code, stderr } = await runCli(["help", "bogus"]);
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/Unknown command: bogus/);
   });
 });
