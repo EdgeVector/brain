@@ -1068,6 +1068,23 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
     });
   }
 
+  // `--default` and `--dry-run` only mean anything under `--add-field` (see
+  // COMMAND_HELP.migrate). With `--status` or `--resume` they were silently
+  // dropped — e.g. `fbrain migrate --status --dry-run` ran a normal status
+  // listing and discarded `--dry-run`. Reject the combo before readConfig
+  // so the user can fix the invocation. Same flavor as PR #93 and PR #56.
+  if (!values["add-field"]) {
+    const orphans: string[] = [];
+    if (values.default !== undefined) orphans.push("--default");
+    if (values["dry-run"]) orphans.push("--dry-run");
+    if (orphans.length > 0) {
+      throw new FbrainError({
+        code: "migrate_flag_requires_add_field",
+        message: `${orphans.join(", ")} only ${orphans.length === 1 ? "applies" : "apply"} to --add-field.`,
+      });
+    }
+  }
+
   const cfg = readConfig();
   const mOpts: Parameters<typeof migrateCmd>[0] = { cfg, mode: { kind: "status" }, verbose };
 
