@@ -93,7 +93,7 @@ export class FbrainError extends Error {
   // (`fbrain doctor`, `folddb daemon …`); when an error sets `agentHint` the
   // MCP boundary shows that instead. See errorResult in src/mcp/server.ts.
   readonly agentHint?: string;
-  readonly cause?: unknown;
+  override readonly cause?: unknown;
   constructor(opts: {
     code: string;
     message: string;
