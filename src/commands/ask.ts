@@ -35,6 +35,7 @@ import {
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
   BM25Index,
+  computeFingerprint,
   loadCachedIndex,
   saveCachedIndex,
   tokenize,
@@ -172,7 +173,11 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
 
   const { docs, liveById } = await loadBm25Documents(node, opts.cfg, activeTypes);
   let index = loadCachedIndex(opts.cfg.userHash);
-  const fingerprint = BM25Index.build(docs).fingerprint;
+  // computeFingerprint is the same hash BM25Index.build assigns, so we use it
+  // standalone here to decide cache hit vs miss — building the full index
+  // just to read its fingerprint would discard a full postings build on every
+  // cache hit.
+  const fingerprint = computeFingerprint(docs);
   let bm25CacheHit = false;
   if (index && index.fingerprint === fingerprint) {
     bm25CacheHit = true;
