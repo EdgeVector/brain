@@ -1,0 +1,5 @@
+# Bun test config. The preload defaults app_identity enforcement OFF for the
+# unit suite so write-command tests don't trip the consent handshake; the
+# capability tests opt back in explicitly. See test/setup.ts for the rationale.
+[test]
+preload = ["./test/setup.ts"]

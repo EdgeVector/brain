@@ -19,7 +19,8 @@
 // G3a (`fbrain doctor freshness`). This command reports the count of
 // records reindexed.
 
-import { newNodeClient, type Verbose } from "../client.ts";
+import { type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   isTombstoned,
@@ -47,10 +48,12 @@ export type ReindexResult = {
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  const node = newNodeClient({
+  // --dry-run issues no writes, so it never invokes the capability provider
+  // and never triggers consent; a real reindex acquires on its first update.
+  const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;

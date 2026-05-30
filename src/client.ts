@@ -13,6 +13,13 @@ export type Verbose = (msg: string) => void;
 
 const noopVerbose: Verbose = () => {};
 
+// Per-write capability header names (mirror fold_db_node/src/handlers/caller.rs:
+// APP_CAPABILITY_HEADER / CAPABILITY_TS_HEADER). Defined here — the lowest
+// layer that writes them onto the wire — so capability.ts can import them
+// without a circular dependency.
+export const APP_CAPABILITY_HEADER = "X-App-Capability";
+export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
+
 export type NativeIndexHit = {
   schema_name: string;
   schema_display_name?: string | null;
@@ -32,6 +39,14 @@ export type SearchOptions = {
   // hits out of the top-K. Empty / omitted ⇒ no filter (unfiltered). Needs
   // fold_db `feat(native-index): schema-scoped search filter` (PR #264); older
   // daemons silently ignore the param so this is safe to send unconditionally.
+  //
+  // Under app_identity v3.1 this filter is largely REDUNDANT: fbrain's schemas
+  // are namespaced under `fbrain/*` (owner_app_id folds into the identity hash),
+  // so the hashes fbrain queries no longer collide with other apps' schemas on
+  // a shared daemon. The design's optional `X-App-ID` read hint is the eventual
+  // replacement. We keep this filter for now — it stays correct (it filters by
+  // the app-namespaced hash) and harmless, and it protects search quality
+  // during the migration window before every node carries namespaced data.
   schemas?: string[];
 };
 
@@ -85,6 +100,14 @@ export const QUERY_PAGE_SIZE = 1000;
 // — well beyond fbrain's expected scale, but bounded.
 export const QUERY_PAGE_LIMIT = 1000;
 
+// Detail fields carried by a capability 403 (the node may include `schema`,
+// `capability_id`, or `timestamp_skew_secs` depending on the reason).
+export type Capability403Detail = {
+  schema?: string;
+  capabilityId?: string;
+  timestampSkewSecs?: number;
+};
+
 export class FbrainError extends Error {
   readonly code: string;
   readonly hint?: string;
@@ -94,12 +117,19 @@ export class FbrainError extends Error {
   // MCP boundary shows that instead. See errorResult in src/mcp/server.ts.
   readonly agentHint?: string;
   override readonly cause?: unknown;
+  // Set when this error is a discriminated capability 403 (app_identity v3.1).
+  // The capability layer switches on `capabilityReason` to decide whether to
+  // discard the cached token, silently re-acquire, retry once, or surface.
+  readonly capabilityReason?: string;
+  readonly capabilityDetail?: Capability403Detail;
   constructor(opts: {
     code: string;
     message: string;
     hint?: string;
     agentHint?: string;
     cause?: unknown;
+    capabilityReason?: string;
+    capabilityDetail?: Capability403Detail;
   }) {
     super(opts.message);
     this.name = "FbrainError";
@@ -107,6 +137,8 @@ export class FbrainError extends Error {
     this.hint = opts.hint;
     this.agentHint = opts.agentHint;
     this.cause = opts.cause;
+    this.capabilityReason = opts.capabilityReason;
+    this.capabilityDetail = opts.capabilityDetail;
   }
 }
 
@@ -138,6 +170,13 @@ export type SchemaServiceClient = {
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
 
+// Supplies the verbatim base64 CapabilityToken blob attached to every write
+// as `X-App-Capability`. Returns null when no capability is held (the node
+// then treats the caller as NodeOwner, or — under enforcement — 403s with
+// `consent_required`). Resolved per write so a re-acquired token is picked up
+// without rebuilding the client.
+export type CapabilityProvider = () => string | null;
+
 export type NodeClient = {
   baseUrl: string;
   userHash: string;
@@ -146,6 +185,11 @@ export type NodeClient = {
     | { provisioned: false; reason: string }
   >;
   bootstrap(name: string): Promise<{ userHash: string }>;
+  // App-identity consent handshake (app_identity v3.1). request-consent +
+  // consent-status are the two app-driven steps; the owner grants out-of-band
+  // via `folddb consent grant`.
+  requestConsent(appId: string, scope: string): Promise<{ status: number; body: unknown }>;
+  consentStatus(requestId: string): Promise<{ status: number; body: unknown }>;
   loadSchemas(): Promise<{
     available_schemas_loaded: number;
     schemas_loaded_to_db: number;
@@ -272,17 +316,25 @@ export function newNodeClient(opts: {
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
+  // When set, every MUTATION (create/update/delete) attaches the returned
+  // base64 capability blob as `X-App-Capability` plus a fresh `X-Capability-Ts`.
+  // Reads are NOT gated (design: reads bypass capability enforcement), so the
+  // provider is only consulted on the mutation path. Returning null sends no
+  // capability headers (NodeOwner fallback / enforcement off).
+  capability?: CapabilityProvider;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
+  const capability = opts.capability;
 
   const callJson = async (
     path: string,
     method: "GET" | "POST",
     body?: unknown,
+    extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> => {
-    const res = await callNodeRaw(url, path, method, body, userHash, verbose);
+    const res = await callNodeRaw(url, path, method, body, userHash, verbose, extraHeaders);
     const parsed = await readJson(res);
     return { status: res.status, body: parsed };
   };
@@ -341,6 +393,17 @@ export function newNodeClient(opts: {
       }
       throw mapNodeError(status, body, "/api/setup/bootstrap");
     },
+    async requestConsent(appId, scope) {
+      // Returns the raw {status, body} so the capability layer can branch on
+      // 202 / 404 / 400 per the consent contract.
+      return callJson("/api/apps/request-consent", "POST", { app_id: appId, scope });
+    },
+    async consentStatus(requestId) {
+      return callJson(
+        `/api/apps/consent-status/${encodeURIComponent(requestId)}`,
+        "GET",
+      );
+    },
     async loadSchemas() {
       const { status, body } = await callJson("/api/schemas/load", "POST");
       if (status !== 200) throw mapNodeError(status, body, "/api/schemas/load");
@@ -353,17 +416,17 @@ export function newNodeClient(opts: {
       };
     },
     async createRecord({ schemaHash, fields, keyHash }) {
-      await mutate("create", schemaHash, fields, keyHash, callJson);
+      await mutate("create", schemaHash, fields, keyHash, callJson, capability);
     },
     async updateRecord({ schemaHash, fields, keyHash }) {
-      await mutate("update", schemaHash, fields, keyHash, callJson);
+      await mutate("update", schemaHash, fields, keyHash, callJson, capability);
     },
     async deleteRecord({ schemaHash, keyHash }) {
       // Empty fields_and_values is the minimal body — see
       // docs/phase-5-delete-spike.md, Probe B. The orchestrator's earlier
       // smoketest passed `{slug: keyHash}` which has the side-effect of
       // writing a no-op atom rewriting the slug field with itself.
-      await mutate("delete", schemaHash, {}, keyHash, callJson);
+      await mutate("delete", schemaHash, {}, keyHash, callJson, capability);
     },
     async queryAll({ schemaHash, fields }) {
       // The node's /api/query handler silently defaults to limit=100
@@ -439,15 +502,33 @@ async function mutate(
   schemaHash: string,
   fields: Record<string, unknown>,
   keyHash: string,
-  callJson: (path: string, method: "GET" | "POST", body?: unknown) => Promise<{ status: number; body: unknown }>,
+  callJson: (
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ) => Promise<{ status: number; body: unknown }>,
+  capability: CapabilityProvider | undefined,
 ): Promise<void> {
+  // App-identity v3.1: attach the verbatim base64 capability blob plus a fresh
+  // unix-epoch-seconds timestamp on every mutation. The timestamp is recomputed
+  // per call so a token cached for hours still lands inside the node's ±60s
+  // replay window. No capability provider, or a provider returning null, sends
+  // neither header — the node treats the caller as NodeOwner (or, under
+  // enforcement, 403s with `consent_required`).
+  const extraHeaders: Record<string, string> = {};
+  const blob = capability?.() ?? null;
+  if (blob !== null) {
+    extraHeaders[APP_CAPABILITY_HEADER] = blob;
+    extraHeaders[CAPABILITY_TS_HEADER] = String(Math.floor(Date.now() / 1000));
+  }
   const { status, body } = await callJson("/api/mutation", "POST", {
     type: "mutation",
     schema: schemaHash,
     fields_and_values: fields,
     key_value: { hash: keyHash, range: null },
     mutation_type: kind,
-  });
+  }, extraHeaders);
   if (status !== 200) throw mapNodeError(status, body, "/api/mutation");
 }
 
@@ -483,10 +564,12 @@ async function callNodeRaw(
   body: unknown,
   userHash: string,
   verbose: Verbose,
+  extraHeaders?: Record<string, string>,
 ): Promise<Response> {
   const url = `${baseUrl}${path}`;
   const headers: Record<string, string> = {
     "X-User-Hash": userHash,
+    ...(extraHeaders ?? {}),
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   verbose(`→ NODE ${method} ${url}` + (body !== undefined ? ` body=${typeof body === "string" ? body : JSON.stringify(body)}` : ""));
@@ -572,6 +655,29 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
 function mapNodeError(status: number, body: unknown, path: string): FbrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
+  // Discriminated capability 403 (app_identity v3.1). The body is verbatim
+  // `{"status":403,"reason":"<reason>", ...}`. Carry the reason + any detail
+  // on the FbrainError so the capability layer can apply the contract behavior
+  // (discard / re-acquire / retry-once / surface). A 403 without a recognised
+  // `reason` falls through to the generic mapping below.
+  if (status === 403) {
+    const reason = bodyStringField(body, "reason");
+    if (reason !== undefined) {
+      const detail: Capability403Detail = {};
+      const schema = bodyStringField(body, "schema");
+      if (schema !== undefined) detail.schema = schema;
+      const capabilityId = bodyStringField(body, "capability_id");
+      if (capabilityId !== undefined) detail.capabilityId = capabilityId;
+      const skew = bodyNumberField(body, "timestamp_skew_secs");
+      if (skew !== undefined) detail.timestampSkewSecs = skew;
+      return new FbrainError({
+        code: `capability_403_${reason}`,
+        message: `Node rejected ${path}: capability denied (${reason}).`,
+        capabilityReason: reason,
+        capabilityDetail: detail,
+      });
+    }
+  }
   if (status === 401 && (errCode === "MISSING_USER_CONTEXT" || msg?.includes("Authentication"))) {
     return new FbrainError({
       code: "missing_user_context",
@@ -651,6 +757,22 @@ function bodyAmbiguous(body: unknown): string[] {
     if (Array.isArray(a)) return a.filter((v): v is string => typeof v === "string");
   }
   return [];
+}
+
+function bodyStringField(body: unknown, key: string): string | undefined {
+  if (body && typeof body === "object" && key in body) {
+    const v = (body as Record<string, unknown>)[key];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+}
+
+function bodyNumberField(body: unknown, key: string): number | undefined {
+  if (body && typeof body === "object" && key in body) {
+    const v = (body as Record<string, unknown>)[key];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return undefined;
 }
 
 export function recordTypeForHash(
