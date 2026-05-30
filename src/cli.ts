@@ -1047,6 +1047,27 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
     options: MIGRATE_OPTIONS,
   });
 
+  // --status / --resume / --add-field pick three mutually exclusive modes,
+  // but the dispatch below is if/else if/else — when more than one is set
+  // the first branch silently wins and the others' args are dropped:
+  //   fbrain migrate --status --add-field concept urgency String
+  //     → ran --status, silently ignored the add-field args.
+  //   fbrain migrate --resume m-1234 --add-field concept urgency String
+  //     → ran --resume, silently ignored --add-field.
+  // Reject the conflict before readConfig so the user can fix the
+  // invocation instead of debugging a no-op migration. Same spirit as
+  // `ask --explain --no-llm` (PR #56).
+  const modes: string[] = [];
+  if (values.status) modes.push("--status");
+  if (values.resume) modes.push("--resume");
+  if (values["add-field"]) modes.push("--add-field");
+  if (modes.length > 1) {
+    throw new FbrainError({
+      code: "migrate_mode_conflict",
+      message: `${modes.join(", ")} are mutually exclusive — pick one.`,
+    });
+  }
+
   const cfg = readConfig();
   const mOpts: Parameters<typeof migrateCmd>[0] = { cfg, mode: { kind: "status" }, verbose };
 
