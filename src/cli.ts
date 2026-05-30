@@ -862,12 +862,24 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   // Validate --type / --min-score before readConfig so a malformed invocation
   // surfaces the parse error even on an un-init'd machine.
   const searchTypes = parseRecordTypeList(values.type);
-  const minScore = values["min-score"] !== undefined ? Number(values["min-score"]) : undefined;
-  if (minScore !== undefined && !Number.isFinite(minScore)) {
-    throw new FbrainError({
-      code: "invalid_min_score",
-      message: `--min-score must be a number (got "${values["min-score"]}").`,
-    });
+  // Check the raw string before calling Number(): `Number("")` and
+  // `Number("  ")` both return 0 (well-known JS quirk), so without the
+  // trim-length guard `--min-score ""` and `--min-score "   "` silently
+  // pass validation and apply a zero floor (i.e. no filter at all) —
+  // masking a malformed invocation. Symmetric with the integer-flag chain
+  // in PRs #87/#88/#89: reject the bad input loudly instead of silently
+  // dropping it to a fake default.
+  const minScoreRaw = values["min-score"];
+  let minScore: number | undefined;
+  if (minScoreRaw !== undefined) {
+    const n = Number(minScoreRaw);
+    if (minScoreRaw.trim().length === 0 || !Number.isFinite(n)) {
+      throw new FbrainError({
+        code: "invalid_min_score",
+        message: `--min-score must be a number (got "${minScoreRaw}").`,
+      });
+    }
+    minScore = n;
   }
   const cfg = readConfig();
   const limit = values.n ? parseInt(values.n, 10) : undefined;
