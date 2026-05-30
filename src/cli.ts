@@ -546,6 +546,31 @@ function peekNextValue(argv: Argv, flag: string): string | undefined {
   return argv[i + 1];
 }
 
+// Validate that `flag`'s value is a positive integer BEFORE parseArgs runs.
+// Three failure modes parseArgs doesn't catch cleanly:
+//   - `flag -1` produces parseArgs's cryptic "Option '<flag>' argument is
+//     ambiguous" (it reads `-1` as a new option, not <flag>'s value).
+//   - `flag 3.5` is silently parseInt'd to 3.
+//   - `flag 5abc` is silently parseInt'd to 5.
+// The strict `String(n) !== raw.trim()` check rejects both junk-tail forms;
+// running before parseArgs avoids the ambiguous-option error. Same shape as
+// the integer-flag chain in PRs #87/#88/#89.
+function validatePositiveIntFlag(
+  argv: Argv,
+  flag: string,
+  code: string,
+): void {
+  const raw = peekNextValue(argv, flag);
+  if (raw === undefined) return;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || String(n) !== raw.trim() || n < 1) {
+    throw new FbrainError({
+      code,
+      message: `${flag} must be a positive integer (got "${raw}").`,
+    });
+  }
+}
+
 function printHelpFor(name: string): number {
   if (!isCommand(name)) {
     console.error(`Unknown command: ${name}`);
@@ -759,21 +784,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
-  // Pre-flight `-n <value>` so the error for `-n 0` and `-n -1` is a
-  // one-liner instead of parseArgs's cryptic "Option -n argument is
-  // ambiguous" (it sees `-1` as a new short option, not -n's value).
-  // We still let parseArgs do the canonical parse below — this only
-  // catches the malformed cases.
-  const nRaw = peekNextValue(args, "-n");
-  if (nRaw !== undefined) {
-    const n = parseInt(nRaw, 10);
-    if (!Number.isFinite(n) || String(n) !== nRaw.trim() || n < 1) {
-      throw new FbrainError({
-        code: "invalid_limit",
-        message: `-n must be a positive integer (got "${nRaw}").`,
-      });
-    }
-  }
+  validatePositiveIntFlag(args, "-n", "invalid_limit");
   const { values } = parseArgs({
     args,
     strict: true,
@@ -832,22 +843,7 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
-  // Pre-flight `-n <value>` so search behaves symmetrically with `list`:
-  // `-n 0` previously fell through searchCmd's `opts.limit && opts.limit > 0`
-  // guard and returned every record, and `-n -1` produced parseArgs's cryptic
-  // "Option -n argument is ambiguous". Both now error with the same one-liner
-  // as `list -n`. PR #59's commit message claimed to cover search but the
-  // diff only updated runList.
-  const nRaw = peekNextValue(args, "-n");
-  if (nRaw !== undefined) {
-    const n = parseInt(nRaw, 10);
-    if (!Number.isFinite(n) || String(n) !== nRaw.trim() || n < 1) {
-      throw new FbrainError({
-        code: "invalid_limit",
-        message: `-n must be a positive integer (got "${nRaw}").`,
-      });
-    }
-  }
+  validatePositiveIntFlag(args, "-n", "invalid_limit");
   const { values, positionals } = parseArgs({
     args,
     strict: true,
@@ -893,24 +889,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
-  // Pre-flight `--limit <value>` so ask behaves symmetrically with `list -n`
-  // / `search -n` (PR #87). Three bugs the post-parseArgs check missed:
-  //   - `--limit -1` produced parseArgs's cryptic "Option '--limit' argument
-  //     is ambiguous" (it sees `-1` as another option, not --limit's value).
-  //   - `--limit 3.5` was silently parseInt'd to 3.
-  //   - `--limit 5abc` was silently parseInt'd to 5.
-  // The strict `String(n) !== raw.trim()` check rejects both junk-tail forms;
-  // running before parseArgs avoids the ambiguous-option error.
-  const limitRaw = peekNextValue(args, "--limit");
-  if (limitRaw !== undefined) {
-    const n = parseInt(limitRaw, 10);
-    if (!Number.isFinite(n) || String(n) !== limitRaw.trim() || n < 1) {
-      throw new FbrainError({
-        code: "invalid_limit",
-        message: `--limit must be a positive integer (got "${limitRaw}").`,
-      });
-    }
-  }
+  validatePositiveIntFlag(args, "--limit", "invalid_limit");
   const { values, positionals } = parseArgs({
     args,
     strict: true,
@@ -943,25 +922,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
-  // Pre-flight `--usage-window <value>` so doctor behaves symmetrically with
-  // `ask --limit` / `list -n` / `search -n` (PRs #87, #88). Three bugs the
-  // post-parseArgs check missed:
-  //   - `--usage-window -1` produced parseArgs's cryptic "Option '--usage-window'
-  //     argument is ambiguous" (it sees `-1` as another option).
-  //   - `--usage-window 3.5` was silently parseInt'd to 3.
-  //   - `--usage-window 5abc` was silently parseInt'd to 5.
-  // The strict `String(n) !== raw.trim()` check rejects both junk-tail forms;
-  // running before parseArgs avoids the ambiguous-option error.
-  const windowRaw = peekNextValue(args, "--usage-window");
-  if (windowRaw !== undefined) {
-    const n = parseInt(windowRaw, 10);
-    if (!Number.isFinite(n) || String(n) !== windowRaw.trim() || n < 1) {
-      throw new FbrainError({
-        code: "invalid_usage_window",
-        message: `--usage-window must be a positive integer (got "${windowRaw}").`,
-      });
-    }
-  }
+  validatePositiveIntFlag(args, "--usage-window", "invalid_usage_window");
   const { values } = parseArgs({
     args,
     strict: true,
