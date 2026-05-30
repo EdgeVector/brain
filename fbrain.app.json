@@ -1,0 +1,5 @@
+{
+  "display_name": "fbrain",
+  "description": "EdgeVector's CLI brain over fold_db — eight record types (designs, tasks, concepts, preferences, references, agents, projects, spikes) with semantic search, sharing, and migration. Tom's local prototype graduating into the gbrain replacement.",
+  "homepage_url": "https://github.com/EdgeVector/fbrain"
+}

@@ -1,6 +1,7 @@
 // `fbrain design new <slug> [--title T] [--tag T]... [--body STR]` — create a Design.
 
-import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
+import { FbrainError, type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlug,
@@ -22,10 +23,10 @@ export type DesignNewOptions = {
 
 export async function designNew(opts: DesignNewOptions): Promise<void> {
   validateSlug(opts.slug);
-  const node = newNodeClient({
+  const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const hash = schemaHashFor("design", opts.cfg);
 

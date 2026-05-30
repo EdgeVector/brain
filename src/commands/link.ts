@@ -1,7 +1,8 @@
 // `fbrain link <task-slug> <design-slug>` — set a task's parent design.
 // Rejects a non-existent design (no dangling refs).
 
-import { newNodeClient, FbrainError, type Verbose } from "../client.ts";
+import { FbrainError, type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { findBySlug, nowIso, schemaHashFor, withReadRetry } from "../record.ts";
 
@@ -15,10 +16,10 @@ export type LinkOptions = {
 
 export async function linkCmd(opts: LinkOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  const node = newNodeClient({
+  const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
 
   const taskHash = schemaHashFor("task", opts.cfg);

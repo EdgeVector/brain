@@ -220,6 +220,7 @@ describe("client error mapping", () => {
     const r = await c.registerSchema({
       schema: {
         name: "Design",
+        owner_app_id: "fbrain",
         descriptive_name: "Design",
         schema_type: "Hash",
         key: { hash_field: "slug" },
@@ -242,6 +243,7 @@ describe("client error mapping", () => {
       await c.registerSchema({
         schema: {
           name: "x",
+          owner_app_id: "fbrain",
           descriptive_name: "x",
           schema_type: "Hash",
           key: { hash_field: "slug" },
