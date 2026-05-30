@@ -881,6 +881,24 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
+  // Pre-flight `--limit <value>` so ask behaves symmetrically with `list -n`
+  // / `search -n` (PR #87). Three bugs the post-parseArgs check missed:
+  //   - `--limit -1` produced parseArgs's cryptic "Option '--limit' argument
+  //     is ambiguous" (it sees `-1` as another option, not --limit's value).
+  //   - `--limit 3.5` was silently parseInt'd to 3.
+  //   - `--limit 5abc` was silently parseInt'd to 5.
+  // The strict `String(n) !== raw.trim()` check rejects both junk-tail forms;
+  // running before parseArgs avoids the ambiguous-option error.
+  const limitRaw = peekNextValue(args, "--limit");
+  if (limitRaw !== undefined) {
+    const n = parseInt(limitRaw, 10);
+    if (!Number.isFinite(n) || String(n) !== limitRaw.trim() || n < 1) {
+      throw new FbrainError({
+        code: "invalid_limit",
+        message: `--limit must be a positive integer (got "${limitRaw}").`,
+      });
+    }
+  }
   const { values, positionals } = parseArgs({
     args,
     strict: true,
@@ -902,12 +920,6 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   // an un-init'd machine.
   const askTypes = parseRecordTypeList(values.type);
   const limit = values.limit ? parseInt(values.limit, 10) : undefined;
-  if (limit !== undefined && (!Number.isFinite(limit) || limit < 1)) {
-    throw new FbrainError({
-      code: "invalid_limit",
-      message: `--limit must be a positive integer (got "${values.limit}").`,
-    });
-  }
   const cfg = readConfig();
   const aOpts: Parameters<typeof askCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number") aOpts.limit = limit;
