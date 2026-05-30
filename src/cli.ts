@@ -832,6 +832,22 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
+  // Pre-flight `-n <value>` so search behaves symmetrically with `list`:
+  // `-n 0` previously fell through searchCmd's `opts.limit && opts.limit > 0`
+  // guard and returned every record, and `-n -1` produced parseArgs's cryptic
+  // "Option -n argument is ambiguous". Both now error with the same one-liner
+  // as `list -n`. PR #59's commit message claimed to cover search but the
+  // diff only updated runList.
+  const nRaw = peekNextValue(args, "-n");
+  if (nRaw !== undefined) {
+    const n = parseInt(nRaw, 10);
+    if (!Number.isFinite(n) || String(n) !== nRaw.trim() || n < 1) {
+      throw new FbrainError({
+        code: "invalid_limit",
+        message: `-n must be a positive integer (got "${nRaw}").`,
+      });
+    }
+  }
   const { values, positionals } = parseArgs({
     args,
     strict: true,
