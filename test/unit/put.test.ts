@@ -86,6 +86,22 @@ describe("parseFrontmatter", () => {
     expect(r.tags).toEqual([]);
   });
 
+  // Regression: the inline-list splitter mishandled commas inside quoted
+  // scalars — `tags: ["foo,bar"]` collapsed to `["\"foo", "bar\""]`, silently
+  // corrupting any tag carrying a literal comma. The MCP `buildPutInput`
+  // ALWAYS quotes a tag with a comma (so this fires through every MCP put
+  // whose agent passed a comma-bearing tag) and any CLI user typing the
+  // documented `["a,b", c]` YAML subset hit the same trap.
+  test("inline tags list preserves commas inside double-quoted scalars", () => {
+    const r = parseFrontmatter('tags: ["foo,bar", "ok", baz]');
+    expect(r.tags).toEqual(["foo,bar", "ok", "baz"]);
+  });
+
+  test("inline tags list preserves commas inside single-quoted scalars", () => {
+    const r = parseFrontmatter("tags: ['a,b', plain]");
+    expect(r.tags).toEqual(["a,b", "plain"]);
+  });
+
   test("block tags list", () => {
     const r = parseFrontmatter("tags:\n  - a\n  - b\n  - c");
     expect(r.tags).toEqual(["a", "b", "c"]);
