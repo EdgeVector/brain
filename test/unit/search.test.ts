@@ -62,6 +62,69 @@ describe("dedupeHits", () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.key_value.hash).toBe("kept");
   });
+
+  test("collapses fragments where schema_display_name varies between null and a string", () => {
+    // Regression: NativeIndexHit declares `schema_display_name?: string | null`,
+    // so a single record's fragments can legitimately come back with the
+    // display name present on one and null/missing on another. Pre-fix the
+    // dedupe key was `displayName::slug` with displayName falling back to the
+    // schema hash when missing — i.e. `"Concept::a"` vs `"<hash>::a"`, two
+    // different keys for what is logically the SAME (schema, slug). Both
+    // fragments survived dedupe and the search command resolved both via
+    // findBySlug to the SAME underlying record, so the printed output carried
+    // a duplicate row for that record. The fix keys by `schema_name` (the
+    // canonical hash, always a string), making the dedupe robust against any
+    // server-side inconsistency in `schema_display_name`.
+    const hits: NativeIndexHit[] = [
+      hit({
+        slug: "a",
+        schemaName: DESIGN_HASH,
+        schema_display_name: "Design",
+        metadata: { score: 0.4 },
+      }),
+      hit({
+        slug: "a",
+        schemaName: DESIGN_HASH,
+        schema_display_name: null,
+        metadata: { score: 0.6 },
+      }),
+    ];
+    const out = dedupeHits(hits);
+    expect(out).toHaveLength(1);
+    // Highest-score fragment must win regardless of which one carried the
+    // display name; pin the score so a future change to keep the
+    // display-name-carrying fragment (a different policy) shows up here.
+    expect(out[0]!.metadata!.score).toBe(0.6);
+  });
+
+  test("does not collapse two distinct schemas that share a display name", () => {
+    // Defensive: if a shared daemon hosts a non-fbrain schema whose
+    // descriptive_name happens to match one of fbrain's (e.g. another app's
+    // "Design") and that schema sneaks past the `schemas=` filter, the
+    // fragment dedupe must keep them apart by canonical hash so the wrong-
+    // schema record doesn't silently displace fbrain's. Pre-fix dedupe by
+    // displayName would have collapsed both onto `"Design::x"` and dropped
+    // the lower-scoring one — which could be the genuine fbrain hit.
+    const FOREIGN_HASH = "2".repeat(64);
+    const hits: NativeIndexHit[] = [
+      hit({
+        slug: "x",
+        schemaName: DESIGN_HASH,
+        schema_display_name: "Design",
+        metadata: { score: 0.5 },
+      }),
+      hit({
+        slug: "x",
+        schemaName: FOREIGN_HASH,
+        schema_display_name: "Design",
+        metadata: { score: 0.9 },
+      }),
+    ];
+    const out = dedupeHits(hits);
+    expect(out).toHaveLength(2);
+    const hashes = out.map((h) => h.schema_name).sort();
+    expect(hashes).toEqual([FOREIGN_HASH, DESIGN_HASH].sort());
+  });
 });
 
 const realFetch = globalThis.fetch;
@@ -516,6 +579,63 @@ describe("searchCmd", () => {
       print: (l) => lines.push(l),
     });
     expect(lines[0]).toBe("no matches");
+  });
+
+  test("does not duplicate a record when its fragments disagree on schema_display_name", async () => {
+    // End-to-end version of the dedupeHits regression. The server returns
+    // two fragments of the SAME design ("alpha"), one with
+    // schema_display_name="Design" and one with schema_display_name=null
+    // (legal per the wire type). Pre-fix the dedupe-key fallback put them
+    // under distinct keys, both survived dedupe, both resolved via
+    // findBySlug to the same record, and the printed output carried
+    // "alpha" twice. The fix collapses them by schema hash.
+    const recordRow = {
+      fields: {
+        slug: "alpha",
+        title: "Alpha design",
+        body: "blueberry octopus",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: "alpha", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "alpha",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.4 },
+              }),
+              hit({
+                slug: "alpha",
+                schemaName: DESIGN_HASH,
+                schema_display_name: null,
+                metadata: { score: 0.6 },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "blueberry", print: (l) => lines.push(l) });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("alpha");
+    // The kept fragment's score must be the higher of the two (0.6, not 0.4).
+    expect(lines[0]).toContain("0.600");
   });
 
   test("omits ?schemas when the config carries no schema hashes", async () => {
