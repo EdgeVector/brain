@@ -116,7 +116,14 @@ function buildFields(
   slug: string,
   title: string,
   body: string,
-  tags: string[],
+  // Optional explicit tags from frontmatter `tags:`. When the user wrote
+  // any `tags:` line — including `tags: []` — the parsed array wins (so
+  // an explicit clear is honored). When the user did NOT write `tags:`
+  // at all, this is `undefined` and existing tags are preserved on
+  // update, mirroring how `status` handles absence. Pre-fix, the parser
+  // defaulted to `[]` and a re-put without `tags:` silently clobbered
+  // the existing record's tags.
+  tags: string[] | undefined,
   // Optional explicit status from frontmatter `status:`. When set, it
   // wins over the existing record's status (so a `put` that carries
   // `status: in_progress` actually lands that status) and over the
@@ -132,7 +139,7 @@ function buildFields(
     title,
     body,
     status: status ?? existing?.status ?? entry.defaultStatus,
-    tags,
+    tags: tags ?? existing?.tags ?? [],
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };
@@ -246,7 +253,13 @@ export type ParsedFrontmatter = {
   // string) at parse time — the caller validates it against the record
   // type's enum via `ensureStatus` once the type is resolved.
   status: string | undefined;
-  tags: string[];
+  // Optional tags list. `undefined` means the user did not write a `tags:`
+  // line at all (so `buildFields` should preserve existing tags on update);
+  // an empty `[]` means the user explicitly wrote `tags: []` (so existing
+  // tags should be cleared). Mirrors how `status` distinguishes "absent"
+  // from "explicit" — without this, a re-put that omits `tags:` silently
+  // clobbered the existing record's tags to `[]`.
+  tags: string[] | undefined;
   raw: Record<string, string | string[]>;
 };
 
@@ -269,7 +282,7 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
     type: undefined,
     title: undefined,
     status: undefined,
-    tags: [],
+    tags: undefined,
     raw: {},
   };
   if (raw === null || raw.trim().length === 0) return out;
