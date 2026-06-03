@@ -30,6 +30,7 @@ import {
   isTombstoned,
   listRecords,
   schemaHashFor,
+  uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -191,7 +192,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }
 
   // ── Stage 2: per-query BM25 + vector ─────────────────────────────────
-  const fbrainSchemas = uniqueFbrainSchemas(opts.cfg, activeTypes);
+  const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
   const rankers: RankerInput[] = [];
   const vectorScoreById = new Map<string, number>();
   const perQueryVectorTopId = new Map<number, Map<string, number>>();
@@ -380,19 +381,6 @@ export function formatCost(usd: number | null, model: string): string {
   return usd === null
     ? `cost≈unknown (${model} not in price table)`
     : `cost≈$${usd.toFixed(6)}`;
-}
-
-function uniqueFbrainSchemas(
-  cfg: Config,
-  types: readonly RecordType[],
-): string[] {
-  return Array.from(
-    new Set(
-      types
-        .map((t) => cfg.schemaHashes[t])
-        .filter((h): h is string => typeof h === "string" && h.length > 0),
-    ),
-  );
 }
 
 async function loadBm25Documents(

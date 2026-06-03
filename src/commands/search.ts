@@ -19,10 +19,11 @@ import { formatTable } from "../format.ts";
 import {
   findBySlug,
   schemaHashFor,
+  uniqueSchemaHashes,
   withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
-import type { RecordType } from "../schemas.ts";
+import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type SearchOptions = {
   cfg: Config;
@@ -76,14 +77,10 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // tell e.g. concept from preference — it'll return any record on that
   // hash. The post-filter on resolved hits (below) finishes the job.
   const typeFilter = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
-  const fbrainSchemas = Array.from(
-    new Set(
-      Object.entries(opts.cfg.schemaHashes)
-        .filter(([t]) => (typeFilter ? typeFilter.has(t as RecordType) : true))
-        .map(([, h]) => h)
-        .filter((h): h is string => typeof h === "string" && h.length > 0),
-    ),
-  );
+  const activeTypes: readonly RecordType[] = typeFilter
+    ? RECORD_TYPES.filter((t) => typeFilter.has(t))
+    : RECORD_TYPES;
+  const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
   if (fbrainSchemas.length > 0) {
     clientOpts.schemas = fbrainSchemas;
     opts.verbose?.(

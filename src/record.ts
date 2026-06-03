@@ -56,6 +56,28 @@ export function schemaHashFor(
   return hash;
 }
 
+// Deduped list of canonical schema hashes for the given record types. Used
+// by `search` and `ask` to scope native-index queries to fbrain's schemas
+// (the `schemas` filter on /api/native-index/search). Phase 6 types
+// concept/preference/reference/agent/project/spike all map to the same
+// unified MEMO schema, so the per-type lookups return the same hash six
+// times — the Set collapses them so the URL stays compact and the verbose
+// count is meaningful ("N unique schemas" vs N record types). Missing or
+// empty entries are filtered out so a partially-initialised config doesn't
+// inject an empty filter element.
+export function uniqueSchemaHashes(
+  cfg: { schemaHashes: Record<string, string> },
+  types: readonly RecordType[],
+): string[] {
+  return Array.from(
+    new Set(
+      types
+        .map((t) => cfg.schemaHashes[t])
+        .filter((h): h is string => typeof h === "string" && h.length > 0),
+    ),
+  );
+}
+
 export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
   const f = (row.fields ?? {}) as Record<string, unknown>;
   const base: FbrainRecord = {
