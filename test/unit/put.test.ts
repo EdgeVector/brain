@@ -61,13 +61,16 @@ describe("parseFrontmatter", () => {
     const r = parseFrontmatter(null);
     expect(r.type).toBeUndefined();
     expect(r.title).toBeUndefined();
-    expect(r.tags).toEqual([]);
+    // `undefined` rather than `[]` so `buildFields` can tell "user did not
+    // write `tags:`" (preserve existing on update) apart from the explicit
+    // `tags: []` clear-intent — see the tags-preservation regression below.
+    expect(r.tags).toBeUndefined();
   });
 
   test("empty string → no type/title/tags", () => {
     const r = parseFrontmatter("");
     expect(r.type).toBeUndefined();
-    expect(r.tags).toEqual([]);
+    expect(r.tags).toBeUndefined();
   });
 
   test("simple scalars", () => {
@@ -168,6 +171,28 @@ describe("parseFrontmatter", () => {
   test("no status: field → undefined (not the empty string)", () => {
     const r = parseFrontmatter("type: design\ntitle: T");
     expect(r.status).toBeUndefined();
+  });
+
+  // Three-way distinction the absent/explicit/empty contract relies on. Pre-fix
+  // the parser collapsed (a) and (c) to the same `[]`, so the put handler
+  // couldn't tell "user said nothing about tags" from "user said `tags: []`" —
+  // both clobbered existing tags on update.
+  test("absent tags: field → undefined (distinct from explicit empty list)", () => {
+    const r = parseFrontmatter("type: design\ntitle: T");
+    expect(r.tags).toBeUndefined();
+  });
+
+  test("explicit `tags: []` → empty array (distinct from absent)", () => {
+    const r = parseFrontmatter("type: design\ntags: []");
+    expect(r.tags).toEqual([]);
+  });
+
+  test("explicit empty block-list `tags:` with no items → empty array (distinct from absent)", () => {
+    // `tags:` with no value opens a block list; no `- item` lines follow,
+    // so the user's explicit intent is "no tags". Must still be `[]`, not
+    // `undefined`, so an update honors the clear instead of preserving.
+    const r = parseFrontmatter("type: design\ntags:\ntitle: T");
+    expect(r.tags).toEqual([]);
   });
 
   test("malformed line throws frontmatter_malformed with line number", () => {
@@ -921,6 +946,107 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_status" });
     expect(touched).toBe(false);
+  });
+
+  // Regression: `tags:` followed the same shape of bug as `status:` (see
+  // #108) — the parser defaulted `parsed.tags` to `[]` when no `tags:` line
+  // was present, indistinguishable from an explicit `tags: []`. `buildFields`
+  // then unconditionally wrote that `[]` to fold_db, so a re-put that
+  // touched only the body silently cleared every existing tag. The fix
+  // lifts `parsed.tags` to `string[] | undefined` so absence preserves and
+  // explicit empty still clears — symmetric with the `status` cascade.
+  test("re-put without a tags: line preserves the existing tags (no clobber)", async () => {
+    const existing = {
+      fields: {
+        slug: "no-tags-line",
+        title: "Old",
+        body: "old",
+        status: "reviewed",
+        tags: ["alpha", "beta"],
+        created_at: "2026-02-02T00:00:00.000Z",
+        updated_at: "2026-02-02T00:00:00.000Z",
+      },
+      key: { hash: "no-tags-line", range: null },
+    };
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [existing] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "no-tags-line",
+      input: "---\ntype: design\ntitle: New\n---\nnew body",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Pre-fix this was `[]` — every existing tag silently lost.
+    expect(fields.tags).toEqual(["alpha", "beta"]);
+  });
+
+  test("re-put with explicit `tags: []` still clears the existing tags (no over-preserve)", async () => {
+    // The other side of the absent/explicit contract: an explicit empty
+    // list is a user instruction to clear, and must override existing
+    // tags. Without this assertion, a future "always preserve" tweak
+    // would silently break the clear-intent path.
+    const existing = {
+      fields: {
+        slug: "explicit-clear",
+        title: "Old",
+        body: "old",
+        status: "reviewed",
+        tags: ["keep", "me"],
+        created_at: "2026-02-02T00:00:00.000Z",
+        updated_at: "2026-02-02T00:00:00.000Z",
+      },
+      key: { hash: "explicit-clear", range: null },
+    };
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [existing] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "explicit-clear",
+      input: "---\ntype: design\ntitle: New\ntags: []\n---\nnew body",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.tags).toEqual([]);
+  });
+
+  test("first put without a tags: line creates with an empty tags list (no existing to preserve)", async () => {
+    // On CREATE there is no existing record, so an absent `tags:` falls
+    // all the way through to the final `[]` default — matches the
+    // pre-fix observable for the create path so this fix is strictly a
+    // preservation improvement, not a behavior change for new records.
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "create-no-tags",
+      input: "---\ntype: design\ntitle: Fresh\n---\nbody",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.tags).toEqual([]);
   });
 
   test("genuine first put still creates after retry budget (record never existed)", async () => {
