@@ -147,10 +147,25 @@ export class BM25Index {
         scores.set(d, (scores.get(d) ?? 0) + contrib);
       }
     }
+    // Sort by score DESC, ties broken by (type::slug) ASC. The id key pins a
+    // single deterministic ordering: without it, equal-score docs land in
+    // Map-insertion order, which depends on which query term's posting list
+    // was scanned first — i.e. on the order tokens appear in the query
+    // string. That non-determinism flowed into RRF (changing the fused
+    // contribution for tied BM25 hits) and could shift the final `fbrain
+    // ask` output for queries that differ only in word order. Same shape
+    // as the rrf.ts tie-break, applied one layer down.
     const ranked = Array.from(scores.entries())
-      .sort((a, b) => b[1] - a[1])
+      .map(([d, score]) => {
+        const doc = this.documents[d]!;
+        return { d, score, id: `${doc.type}::${doc.slug}` };
+      })
+      .sort(
+        (a, b) =>
+          b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      )
       .slice(0, Math.max(limit, 1));
-    return ranked.map(([d, score], i) => {
+    return ranked.map(({ d, score }, i) => {
       const doc = this.documents[d]!;
       return { type: doc.type, slug: doc.slug, score, rank: i + 1 };
     });
