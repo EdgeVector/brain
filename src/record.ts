@@ -217,23 +217,35 @@ export interface ResolveBySlugOpts {
 // before consolidation — see commit history for refactor/resolve-by-slug.
 export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRecord> {
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const matches = await withReadRetry(
-    async () => {
-      const hits: ResolvedRecord[] = [];
-      for (const t of types) {
-        const hash = schemaHashFor(t, opts.cfg);
-        const row = opts.raw
-          ? await findBySlugRaw(opts.node, t, hash, opts.slug)
-          : await findBySlug(opts.node, t, hash, opts.slug);
-        if (row !== null) {
-          if (opts.raw && isTombstoned(row)) continue;
-          if (opts.filter && !opts.filter(row, t)) continue;
-          hits.push({ type: t, record: row });
-        }
-      }
-      return hits;
-    },
-    (hits) => hits.length > 0,
+  // Per-type retry, run in parallel. The previous shape wrapped one
+  // outer withReadRetry around a sequential sweep that returned the
+  // FIRST attempt with any hit — but the `/api/query` top-100 page
+  // flake nulls a real row out of one schema's slice on the same
+  // attempt another schema catches its row. With the outer-retry
+  // shape, an untyped lookup of an ambiguous slug then surfaced as a
+  // single match: `fbrain get` / `status` / `delete` would silently
+  // operate on the one type that caught it and skip the sibling.
+  // Giving each type its own retry budget lets the flaked type
+  // recover within its own loop, so ambiguity is detected before the
+  // helper returns.
+  const perType = await Promise.all(
+    types.map(async (t): Promise<ResolvedRecord | null> => {
+      const hash = schemaHashFor(t, opts.cfg);
+      const row = await withReadRetry(
+        () =>
+          opts.raw
+            ? findBySlugRaw(opts.node, t, hash, opts.slug)
+            : findBySlug(opts.node, t, hash, opts.slug),
+        (r) => r !== null,
+      );
+      if (row === null) return null;
+      if (opts.raw && isTombstoned(row)) return null;
+      if (opts.filter && !opts.filter(row, t)) return null;
+      return { type: t, record: row };
+    }),
+  );
+  const matches: ResolvedRecord[] = perType.filter(
+    (m): m is ResolvedRecord => m !== null,
   );
 
   if (matches.length === 0) {

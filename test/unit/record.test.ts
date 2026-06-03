@@ -390,6 +390,106 @@ describe("resolveBySlug", () => {
     expect(seen.map((m) => m.type).sort()).toEqual(["design", "task"]);
   });
 
+  test(
+    "untyped lookup detects ambiguity even when one type's first read flakes",
+    async () => {
+      // Pre-fix the sweep returned the first attempt's hits as soon as any
+      // non-empty result surfaced — but the /api/query top-100 page flake
+      // can return [] for a real row on a saturated schema, so when one
+      // type's row was caught on attempt 1 and the sibling type's first
+      // call flaked, the helper saw a single hit and called it
+      // unambiguous. `fbrain get`, `status`, and `delete` (all untyped
+      // forms) would then silently operate on one type while the same
+      // slug under the other type went unsurfaced. Per-type retries let
+      // the flake recover within its own budget so the ambiguity is
+      // detected before the helper returns.
+      let taskQueryCalls = 0;
+      const node: NodeClient = {
+        baseUrl: "mock",
+        userHash: "uh",
+        async autoIdentity() {
+          return { provisioned: true, userHash: "uh" };
+        },
+        async bootstrap() {
+          return { userHash: "uh" };
+        },
+        async requestConsent() {
+          return { status: 202, body: { request_id: "r" } };
+        },
+        async consentStatus() {
+          return { status: 200, body: { status: "granted" } };
+        },
+        async loadSchemas() {
+          return {
+            available_schemas_loaded: 0,
+            schemas_loaded_to_db: 0,
+            failed_schemas: [],
+          };
+        },
+        async createRecord() {},
+        async updateRecord() {},
+        async deleteRecord() {},
+        async queryAll({ schemaHash }): Promise<QueryResponse> {
+          if (schemaHash === "designhash") {
+            return {
+              ok: true,
+              results: [
+                {
+                  fields: row("alpha").fields,
+                  key: { hash: "alpha", range: null },
+                },
+              ],
+              total_count: 1,
+              returned_count: 1,
+            };
+          }
+          if (schemaHash === "taskhash") {
+            taskQueryCalls++;
+            // First call models the top-100 flake — the row is in the
+            // schema but missing from this slice. Retries surface it.
+            if (taskQueryCalls === 1) {
+              return { ok: true, results: [], total_count: 0, returned_count: 0 };
+            }
+            return {
+              ok: true,
+              results: [
+                {
+                  fields: row("alpha", { status: "open", design_slug: "" }).fields,
+                  key: { hash: "alpha", range: null },
+                },
+              ],
+              total_count: 1,
+              returned_count: 1,
+            };
+          }
+          return { ok: true, results: [], total_count: 0, returned_count: 0 };
+        },
+        async search() {
+          return [];
+        },
+        async rawCall() {
+          return { status: 200, headers: new Headers(), body: "", json: null };
+        },
+      };
+      const seen: ResolvedRecord[] = [];
+      await expect(
+        resolveBySlug({
+          node,
+          cfg,
+          slug: "alpha",
+          onAmbiguous: (matches) => {
+            seen.push(...matches);
+          },
+        }),
+      ).rejects.toMatchObject({ code: "ambiguous_slug" });
+      // Confirms the task lookup retried past the flake instead of giving
+      // up after the first empty slice.
+      expect(taskQueryCalls).toBeGreaterThanOrEqual(2);
+      expect(seen.map((m) => m.type).sort()).toEqual(["design", "task"]);
+    },
+    10_000,
+  );
+
   test("raw mode drops tombstoned rows inside the helper", async () => {
     // findBySlug strips tombstones at the lookup layer; findBySlugRaw does
     // not. In raw mode the helper must still drop them — no current caller
