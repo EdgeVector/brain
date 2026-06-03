@@ -930,6 +930,19 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     options: DOCTOR_OPTIONS,
   });
 
+  // `--usage` and `--freshness` pick mutually exclusive top-level paths:
+  // doctor()'s `if (opts.usage)` short-circuit returns before the freshness
+  // probes ever run, so `fbrain doctor --usage --freshness` ran the usage
+  // report and silently dropped --freshness. Reject the combo before
+  // doctor() so the user can fix the invocation instead of debugging a
+  // no-op. Same flavor as PR #93 (migrate mode conflict).
+  if (values.usage && values.freshness) {
+    throw new FbrainError({
+      code: "doctor_mode_conflict",
+      message: "--usage and --freshness are mutually exclusive — pick one.",
+    });
+  }
+
   // `--usage-window` and `--usage-path` only mean anything under `--usage`
   // (COMMAND_HELP.doctor documents them nested under it). Without `--usage`,
   // the dispatcher below never reads them — so `fbrain doctor --usage-window
