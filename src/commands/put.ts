@@ -296,7 +296,9 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
       const items =
         inner.length === 0
           ? []
-          : inner.split(",").map((s) => stripQuotes(s.trim())).filter((s) => s.length > 0);
+          : splitInlineListItems(inner)
+              .map((s) => stripQuotes(s.trim()))
+              .filter((s) => s.length > 0);
       out.raw[key] = items;
       if (key === "tags") out.tags = items;
       currentListKey = null;
@@ -326,6 +328,41 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
   // Suppress unused-var warning while preserving meaning.
   void currentListKey;
   return out;
+}
+
+// Split an inline-list inner body (the text between `[` and `]`) on commas,
+// but treat commas that fall inside a double- or single-quoted scalar as part
+// of the scalar. The naive `inner.split(",")` mangles `tags: ["a,b", "c"]`
+// into `["\"a", "b\"", "c"]` — a silent corruption on every write whose tag
+// (or future inline-list field) happens to carry a literal comma. The MCP
+// `buildPutInput` always quotes tags with commas, so this fires through the
+// MCP put path verbatim and through any CLI user typing the documented YAML
+// subset; mirrors YAML's inline-flow rule that a quoted scalar's interior
+// commas belong to the scalar.
+function splitInlineListItems(inner: string): string[] {
+  const items: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  for (const ch of inner) {
+    if (quote !== null) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ",") {
+      items.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  items.push(current);
+  return items;
 }
 
 function stripQuotes(value: string): string {
