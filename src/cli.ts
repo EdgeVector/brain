@@ -979,6 +979,19 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.delete);
     return 1;
   }
+  // `fbrain delete <slug>` accepts exactly one positional. Without this
+  // check, extra positionals were silently dropped: `fbrain delete slug1
+  // slug2` soft-deleted slug1 and threw slug2 away with no warning. Worst
+  // class of silent drop — a destructive command claiming success while
+  // half the user's intent vanished. Same shape as the silently-dropped
+  // flag fixes in PRs #93/#94/#96/#108: reject loudly before any I/O.
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `delete takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain delete <slug>` once per record; bulk delete is not supported.",
+    });
+  }
   const type = parseRecordType(values.type);
   const cfg = readConfig();
   const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
