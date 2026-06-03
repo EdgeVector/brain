@@ -26,6 +26,7 @@ import {
   APP_CAPABILITY_HEADER,
   CAPABILITY_TS_HEADER,
   FbrainError,
+  bodyStringField,
   type Verbose,
 } from "./client.ts";
 
@@ -338,7 +339,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   if (req.status === 400) {
     throw new FbrainError({
       code: "invalid_scope",
-      message: `Node rejected consent request: ${bodyErrorField(req.body) ?? "invalid scope"}.`,
+      message: `Node rejected consent request: ${bodyStringField(req.body, "error") ?? "invalid scope"}.`,
     });
   }
   if (req.status !== 202) {
@@ -347,7 +348,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       message: `request-consent returned HTTP ${req.status}.`,
     });
   }
-  const requestId = stringField(req.body, "request_id");
+  const requestId = bodyStringField(req.body, "request_id");
   if (!requestId) {
     throw new FbrainError({
       code: "request_consent_no_id",
@@ -363,7 +364,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   for (;;) {
     const res = await opts.transport.consentStatus(requestId);
     if (res.status === 200) {
-      const blob = stringField(res.body, "capability");
+      const blob = bodyStringField(res.body, "capability");
       if (!blob) {
         throw new FbrainError({
           code: "consent_status_no_capability",
@@ -424,18 +425,6 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function stringField(body: unknown, key: string): string | undefined {
-  if (body && typeof body === "object" && key in body) {
-    const v = (body as Record<string, unknown>)[key];
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return undefined;
-}
-
-function bodyErrorField(body: unknown): string | undefined {
-  return stringField(body, "error");
-}
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
