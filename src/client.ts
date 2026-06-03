@@ -638,29 +638,15 @@ async function callNodeRaw(
   verbose: Verbose,
   extraHeaders?: Record<string, string>,
 ): Promise<Response> {
-  const url = `${baseUrl}${path}`;
-  const headers: Record<string, string> = {
-    "X-User-Hash": userHash,
-    ...(extraHeaders ?? {}),
-  };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  verbose(`→ NODE ${method} ${url}` + (body !== undefined ? ` body=${typeof body === "string" ? body : JSON.stringify(body)}` : ""));
-  try {
-    const res = await fetch(url, {
-      method,
-      headers,
-      body:
-        body === undefined
-          ? undefined
-          : typeof body === "string"
-            ? body
-            : JSON.stringify(body),
-    });
-    verbose(`← NODE ${method} ${url} status=${res.status}`);
-    return res;
-  } catch (err) {
-    throw connectionError(baseUrl, "node", err);
-  }
+  return verboseFetch({
+    baseUrl,
+    path,
+    method,
+    body,
+    verbose,
+    service: "node",
+    headers: { "X-User-Hash": userHash, ...(extraHeaders ?? {}) },
+  });
 }
 
 async function callSchemaServiceRaw(
@@ -670,25 +656,41 @@ async function callSchemaServiceRaw(
   body: unknown,
   verbose: Verbose,
 ): Promise<Response> {
-  const url = `${baseUrl}${path}`;
-  const headers: Record<string, string> = {};
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  verbose(`→ SCHEMA ${method} ${url}` + (body !== undefined ? ` body=${typeof body === "string" ? body : JSON.stringify(body)}` : ""));
+  return verboseFetch({ baseUrl, path, method, body, verbose, service: "schema", headers: {} });
+}
+
+// Shared inner fetch for both service clients. Differs only by the verbose
+// log tag (NODE vs SCHEMA), the service-specific headers passed in (the node
+// always sends X-User-Hash), and the connectionError service param. Same
+// shape and intent as the per-flag helpers in PRs #87/#88/#89/#97.
+async function verboseFetch(opts: {
+  baseUrl: string;
+  path: string;
+  method: string;
+  body: unknown;
+  verbose: Verbose;
+  service: "node" | "schema";
+  headers: Record<string, string>;
+}): Promise<Response> {
+  const url = `${opts.baseUrl}${opts.path}`;
+  const tag = opts.service === "node" ? "NODE" : "SCHEMA";
+  const headers = { ...opts.headers };
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const bodyStr =
+    opts.body === undefined
+      ? undefined
+      : typeof opts.body === "string"
+        ? opts.body
+        : JSON.stringify(opts.body);
+  opts.verbose(
+    `→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
+  );
   try {
-    const res = await fetch(url, {
-      method,
-      headers,
-      body:
-        body === undefined
-          ? undefined
-          : typeof body === "string"
-            ? body
-            : JSON.stringify(body),
-    });
-    verbose(`← SCHEMA ${method} ${url} status=${res.status}`);
+    const res = await fetch(url, { method: opts.method, headers, body: bodyStr });
+    opts.verbose(`← ${tag} ${opts.method} ${url} status=${res.status}`);
     return res;
   } catch (err) {
-    throw connectionError(baseUrl, "schema", err);
+    throw connectionError(opts.baseUrl, opts.service, err);
   }
 }
 
