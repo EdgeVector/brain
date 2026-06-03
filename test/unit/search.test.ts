@@ -124,6 +124,60 @@ describe("searchCmd", () => {
     expect(lines[0]).toContain("Alpha design");
   });
 
+  test("retries findBySlug past a transient empty /api/query slice and surfaces the hit", async () => {
+    // /api/query's top-100 slice is non-deterministic on a saturated daemon
+    // (docs/phase-7-search-latency-spike.md H2 + PR #98). A bare findBySlug
+    // can return null for a real row, which the pre-fix search command
+    // misclassified as "stale" and silently dropped from the printed
+    // results. Pin the retry hedge so a flaked first /api/query lands the
+    // row on retry and the user still sees their match.
+    const recordRow = {
+      fields: {
+        slug: "flaky",
+        title: "Flaky design",
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "flaky", range: null },
+    };
+    let queryCalls = 0;
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({ slug: "flaky", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.42 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        queryCalls++;
+        // First attempt models the top-100 slice flake — empty result for a
+        // row that is genuinely in the schema. Subsequent attempts surface
+        // it. Without the retry hedge in search.ts, the empty first slice
+        // would drop the hit as "stale".
+        if (queryCalls === 1) {
+          return { status: 200, body: { ok: true, results: [], total_count: 0, returned_count: 0 } };
+        }
+        return { status: 200, body: { ok: true, results: [recordRow], total_count: 1, returned_count: 1 } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
+    expect(queryCalls).toBeGreaterThanOrEqual(2);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("flaky");
+    expect(lines[0]).toContain("Flaky design");
+  }, 10_000);
+
   test("silently skips stale hits where findBySlug returns nothing", async () => {
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
