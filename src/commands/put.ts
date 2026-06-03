@@ -11,8 +11,8 @@
 // Frontmatter is the gbrain YAML SUBSET, not full YAML:
 //   - `key: value` on a single line (inline scalar; quoted optional)
 //   - `tags: [a, b]` inline list, or `tags:` followed by `  - a` block list
-//   - `slug:`, `type:`, and `title:` only have meaning here; other keys are
-//     silently ignored (forward-compatible with future fields).
+//   - `slug:`, `type:`, `title:`, `status:`, and `tags:` have meaning here;
+//     other keys are silently ignored (forward-compatible with future fields).
 //
 // As of Phase 6, every type in RECORDS routes to a real write:
 // design / task / concept / preference / reference / agent / project / spike.
@@ -22,6 +22,7 @@ import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
+  ensureStatus,
   findBySlug,
   nowIso,
   schemaHashFor,
@@ -76,6 +77,10 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   validateSlug(slug);
   const type = resolveRecordType(parsed.type, opts.typeOverride);
   const title = resolveTitle(parsed.title, body, slug);
+  // Validate status against the resolved type's enum BEFORE any HTTP
+  // traffic so a bad status — typo or wrong enum for the type — never
+  // racks up a network round-trip. Mirrors validateSlug's pre-flight.
+  if (parsed.status !== undefined) ensureStatus(type, parsed.status);
 
   const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
@@ -96,7 +101,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   );
   const now = nowIso();
 
-  const fields = buildFields(type, slug, title, body, parsed.tags, existing, now);
+  const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, existing, now);
 
   if (existing) {
     await node.updateRecord({ schemaHash: hash, fields, keyHash: slug });
@@ -112,6 +117,12 @@ function buildFields(
   title: string,
   body: string,
   tags: string[],
+  // Optional explicit status from frontmatter `status:`. When set, it
+  // wins over the existing record's status (so a `put` that carries
+  // `status: in_progress` actually lands that status) and over the
+  // type's default. Validated by the caller via `ensureStatus` before
+  // we get here — invalid values can't reach this point.
+  status: string | undefined,
   existing: FbrainRecord | null,
   now: string,
 ): Record<string, unknown> {
@@ -120,7 +131,7 @@ function buildFields(
     slug,
     title,
     body,
-    status: existing?.status ?? entry.defaultStatus,
+    status: status ?? existing?.status ?? entry.defaultStatus,
     tags,
     created_at: existing?.created_at ?? now,
     updated_at: now,
@@ -231,6 +242,10 @@ export type ParsedFrontmatter = {
   slug: string | undefined;
   type: string | undefined;
   title: string | undefined;
+  // Optional explicit status from frontmatter `status:`. Untyped (a free
+  // string) at parse time — the caller validates it against the record
+  // type's enum via `ensureStatus` once the type is resolved.
+  status: string | undefined;
   tags: string[];
   raw: Record<string, string | string[]>;
 };
@@ -253,6 +268,7 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
     slug: undefined,
     type: undefined,
     title: undefined,
+    status: undefined,
     tags: [],
     raw: {},
   };
@@ -321,6 +337,7 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
     if (key === "slug") out.slug = stripped;
     else if (key === "type") out.type = stripped;
     else if (key === "title") out.title = stripped;
+    else if (key === "status") out.status = stripped;
     currentListKey = null;
     currentList = null;
   }

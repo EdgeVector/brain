@@ -154,6 +154,22 @@ describe("parseFrontmatter", () => {
     expect(r.slug).toBeUndefined();
   });
 
+  test("status: field is captured into the typed slot (not just .raw)", () => {
+    const r = parseFrontmatter("type: task\nstatus: in_progress\ntitle: T");
+    expect(r.status).toBe("in_progress");
+    expect(r.raw.status).toBe("in_progress");
+  });
+
+  test("quoted status: is unquoted like other scalars", () => {
+    const r = parseFrontmatter('status: "reviewed"\ntype: design');
+    expect(r.status).toBe("reviewed");
+  });
+
+  test("no status: field → undefined (not the empty string)", () => {
+    const r = parseFrontmatter("type: design\ntitle: T");
+    expect(r.status).toBeUndefined();
+  });
+
   test("malformed line throws frontmatter_malformed with line number", () => {
     try {
       parseFrontmatter("type: design\nthisLineHasNoColon\ntitle: T");
@@ -763,6 +779,148 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(typeof fields.updated_at).toBe("string");
     expect(fields.title).toBe("Second");
     expect(fields.body).toBe("second body");
+  });
+
+  // Regression: `status:` in frontmatter used to be silently dropped — the
+  // parser extracted slug/type/title/tags into typed slots but `status:`
+  // landed only in `.raw`, and `buildFields` always overrode it with
+  // either the existing row's status or the type's defaultStatus. So a
+  // user-typed `status: in_progress` never reached fold_db, and re-puts of
+  // a fresh record always landed on `defaultStatus` regardless of what
+  // the frontmatter asked for. The fix routes `parsed.status` into
+  // `buildFields` as a first-priority winner (over both existing and
+  // default), validated upstream by `ensureStatus` so an invalid status
+  // can't reach the network.
+  test("status: in frontmatter is honored on create", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "with-status",
+      input: "---\ntype: task\ntitle: A task\nstatus: in_progress\n---\nbody",
+    });
+    expect(r.action).toBe("created");
+    expect(mutations[0]!.mutation_type).toBe("create");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Without the fix this lands on "open" (the task type's defaultStatus).
+    expect(fields.status).toBe("in_progress");
+  });
+
+  test("status: in frontmatter overrides the existing record's status on update", async () => {
+    const existing = {
+      fields: {
+        slug: "with-status-up",
+        title: "Old",
+        body: "old",
+        status: "open",
+        tags: [],
+        design_slug: "",
+        created_at: "2026-02-02T00:00:00.000Z",
+        updated_at: "2026-02-02T00:00:00.000Z",
+      },
+      key: { hash: "with-status-up", range: null },
+    };
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [existing] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "with-status-up",
+      input: "---\ntype: task\ntitle: New\nstatus: blocked\n---\nnew body",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Pre-fix: the existing "open" status would win and "blocked" would
+    // be silently lost. The fix lets an explicit frontmatter status take
+    // priority — symmetric with how `title:` and `tags:` already do.
+    expect(fields.status).toBe("blocked");
+  });
+
+  test("re-put without a status: still preserves the existing status (no clobber)", async () => {
+    // Mirrors the existing "preserves status if user moved it past default"
+    // integration test, locked in at the unit layer so the new status
+    // routing can't regress the preservation path.
+    const existing = {
+      fields: {
+        slug: "no-status-line",
+        title: "Old",
+        body: "old",
+        status: "reviewed",
+        tags: [],
+        created_at: "2026-02-02T00:00:00.000Z",
+        updated_at: "2026-02-02T00:00:00.000Z",
+      },
+      key: { hash: "no-status-line", range: null },
+    };
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [existing] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "no-status-line",
+      input: "---\ntype: design\ntitle: New\n---\nnew body",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.status).toBe("reviewed");
+  });
+
+  test("invalid status: in frontmatter is rejected before any HTTP traffic", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "bad-status",
+        // "shipped" is not in TASK_STATUSES — must surface as invalid_status,
+        // not silently fall through and write a defaulted "open" row.
+        input: "---\ntype: task\ntitle: T\nstatus: shipped\n---\nbody",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_status" });
+    expect(touched).toBe(false);
+  });
+
+  test("status valid for one type but not another fails when the type disagrees", async () => {
+    // `in_progress` is a Task status but not a Design status. Choosing the
+    // wrong type for a valid-looking status must reject; the validation
+    // pins to the RESOLVED type, not the raw string.
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "wrong-type-status",
+        input: "---\ntype: design\ntitle: T\nstatus: in_progress\n---\nbody",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_status" });
+    expect(touched).toBe(false);
   });
 
   test("genuine first put still creates after retry budget (record never existed)", async () => {
