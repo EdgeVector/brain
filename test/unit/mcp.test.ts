@@ -361,6 +361,30 @@ describe("buildPutInput", () => {
   test("empty frontmatter passthrough strips the fences and just returns body", () => {
     expect(buildPutInput({ slug: "x", frontmatter: "", body: "raw" })).toBe("raw");
   });
+
+  // Regression: the MCP serializer always escapes `\` and `"` when wrapping a
+  // tag in double quotes, but the put-side parser didn't honor those escapes
+  // — so a tag containing a backslash or an embedded quote round-tripped
+  // corrupted (`a\b` → `a\\b`, `a"b` → `a\"b`, `a"b,c` even split into two
+  // malformed items). The serializer and parser must agree on the escape
+  // protocol or the put→get round-trip silently mangles the tag list.
+  test("inline tag list round-trips through buildPutInput → parseFrontmatter", async () => {
+    const { parseFrontmatter, splitFrontmatter } = await import(
+      "../../src/commands/put.ts"
+    );
+    const cases: string[][] = [
+      ["a\\b"],
+      ['a"b'],
+      ['a"b,c', "plain"],
+      ["foo,bar", "plain"],
+    ];
+    for (const tags of cases) {
+      const input = buildPutInput({ slug: "x", type: "concept", tags });
+      const { frontmatter } = splitFrontmatter(input);
+      const parsed = parseFrontmatter(frontmatter);
+      expect(parsed.tags).toEqual(tags);
+    }
+  });
 });
 
 describe("fbrain_put tool", () => {

@@ -102,6 +102,18 @@ describe("parseFrontmatter", () => {
     expect(r.tags).toEqual(["a,b", "plain"]);
   });
 
+  // Regression: the inline-list parser didn't honor `\"` / `\\` inside a
+  // double-quoted scalar, so the MCP `yamlScalar` escape protocol round-tripped
+  // wrong — a tag like `a"b` came back as `a\"b` (backslash injected) and a
+  // tag like `a"b,c` was split into two malformed items because `\"` was read
+  // as the closing quote and the following `,` as a separator. Mirrors the
+  // serializer in src/mcp/server.ts that always escapes `\` and `"` when it
+  // wraps a tag in double quotes.
+  test("inline tags list un-escapes \\\" and \\\\ inside double-quoted scalars", () => {
+    const r = parseFrontmatter('tags: ["a\\"b", "a\\\\b", "a\\"b,c"]');
+    expect(r.tags).toEqual(['a"b', "a\\b", 'a"b,c']);
+  });
+
   test("block tags list", () => {
     const r = parseFrontmatter("tags:\n  - a\n  - b\n  - c");
     expect(r.tags).toEqual(["a", "b", "c"]);

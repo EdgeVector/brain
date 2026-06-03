@@ -339,27 +339,45 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
 // MCP put path verbatim and through any CLI user typing the documented YAML
 // subset; mirrors YAML's inline-flow rule that a quoted scalar's interior
 // commas belong to the scalar.
+//
+// Inside a double-quoted scalar, `\"` and `\\` are escape sequences (matching
+// what the MCP serializer in `yamlScalar` emits): a backslash defers the next
+// char so an escaped quote doesn't terminate the scalar and a `,` after it
+// isn't treated as a separator. Single quotes carry no escapes in YAML, so
+// they're passed through verbatim.
 function splitInlineListItems(inner: string): string[] {
   const items: string[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
-  for (const ch of inner) {
+  let i = 0;
+  while (i < inner.length) {
+    const ch = inner.charAt(i);
+    if (quote === '"' && ch === "\\" && i + 1 < inner.length) {
+      // Defer the escape pair as-is; `stripQuotes` un-escapes after split.
+      current += ch + inner.charAt(i + 1);
+      i += 2;
+      continue;
+    }
     if (quote !== null) {
       current += ch;
       if (ch === quote) quote = null;
+      i++;
       continue;
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
       current += ch;
+      i++;
       continue;
     }
     if (ch === ",") {
       items.push(current);
       current = "";
+      i++;
       continue;
     }
     current += ch;
+    i++;
   }
   items.push(current);
   return items;
@@ -369,8 +387,35 @@ function stripQuotes(value: string): string {
   if (value.length < 2) return value;
   const first = value.charAt(0);
   const last = value.charAt(value.length - 1);
-  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+  if (first === '"' && last === '"') {
+    return unescapeDoubleQuoted(value.slice(1, -1));
+  }
+  if (first === "'" && last === "'") {
     return value.slice(1, -1);
   }
   return value;
+}
+
+// Reverse the `yamlScalar` MCP serializer: `\\` → `\`, `\"` → `"`. Pass any
+// other `\X` through unchanged (the serializer never emits them, and YAML's
+// fuller escape table — `\n`, `\t`, `\uXXXX`, … — is out of scope for this
+// subset). Without this, a tag like `a\b` round-trips as `a\\b` and `a"b`
+// round-trips as `a\"b`.
+function unescapeDoubleQuoted(inner: string): string {
+  let out = "";
+  let i = 0;
+  while (i < inner.length) {
+    const ch = inner.charAt(i);
+    if (ch === "\\" && i + 1 < inner.length) {
+      const next = inner.charAt(i + 1);
+      if (next === "\\" || next === '"') {
+        out += next;
+        i += 2;
+        continue;
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return out;
 }
