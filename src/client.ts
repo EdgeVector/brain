@@ -833,7 +833,7 @@ function bodyAmbiguous(body: unknown): string[] {
   return [];
 }
 
-function bodyStringField(body: unknown, key: string): string | undefined {
+export function bodyStringField(body: unknown, key: string): string | undefined {
   if (body && typeof body === "object" && key in body) {
     const v = (body as Record<string, unknown>)[key];
     if (typeof v === "string" && v.length > 0) return v;
