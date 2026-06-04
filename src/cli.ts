@@ -267,7 +267,7 @@ anyway — the tasks' design references are then left dangling.
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
-  reindex: `fbrain reindex [--type T] [--dry-run]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--repair-titles]
 
 Refreshes the embedding entry for every live (non-tombstoned) fbrain
 record by re-issuing an update mutation. Workaround for the H2a
@@ -276,12 +276,21 @@ EmbeddingIndex is not currently purged on tombstone, so this
 guarantees the live records stay current in the native-index top-50.
 Does NOT purge phantom embeddings (that's G3e, upstream fold_db).
 
-  --type      narrow to one of: design | task | concept | preference |
-              reference | agent | project | spike (default: all 8)
-  --dry-run   list records that would be reindexed; no writes
+  --type            narrow to one of: design | task | concept | preference |
+                    reference | agent | project | spike (default: all 8)
+  --dry-run         list records that would be reindexed; no writes
+  --repair-titles   one-shot repair mode: skip the embedding refresh and
+                    only fix records whose stored title is the literal text
+                    of a YAML block-scalar indicator (\`>\`, \`>-\`, \`>+\`, \`|\`,
+                    \`|-\`, \`|+\`) — leftovers from a pre-fix import path that
+                    didn't fold the scalar (#7852b). Title is repaired to
+                    the first H1 of the body, or the slug as last resort.
+                    Idempotent; prints every change. Combine with --dry-run
+                    to preview without writing.
 
 Run with the global --verbose to print per-record outcome
-(kept | reindexed | skipped-tombstone).`,
+(kept | reindexed | skipped-tombstone, or ok | repaired | would-repair
+under --repair-titles).`,
   migrate: `fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
 fbrain migrate --status
 fbrain migrate --resume <manifest-id>
@@ -392,6 +401,7 @@ const DELETE_OPTIONS = {
 const REINDEX_OPTIONS = {
   type: { type: "string" },
   "dry-run": { type: "boolean", default: false },
+  "repair-titles": { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -1041,6 +1051,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   const rOpts: Parameters<typeof reindexCmd>[0] = { cfg, verbose };
   if (type) rOpts.type = type;
   if (values["dry-run"]) rOpts.dryRun = true;
+  if (values["repair-titles"]) rOpts.repairTitles = true;
   await reindexCmd(rOpts);
   return 0;
 }

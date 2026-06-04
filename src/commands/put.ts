@@ -359,6 +359,60 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
       continue;
     }
 
+    // Block scalar header — `>`/`|` optionally followed by a chomping indicator
+    // (`-`/`+`) and/or an explicit indent digit. Consume more-indented
+    // continuation lines as the scalar body. Pre-fix, a folded title like
+    //   title: >-
+    //     A long title that
+    //     wraps across lines
+    // stored the literal `>-` as the title and threw `frontmatter_malformed`
+    // on the indented continuation lines — see #7852b. Pragmatic YAML 1.2:
+    // common-case folding + chomping, no anchors/tags/explicit-indent edge
+    // cases beyond the indicator digit (which we honor).
+    // YAML allows the chomping indicator and explicit indent digit in either
+    // order: `>2-` and `>-2` both mean "fold, strip, indent 2".
+    const blockHeader = value.match(/^([>|])(?:([-+])([1-9])?|([1-9])([-+])?)?$/);
+    if (blockHeader) {
+      const style = blockHeader[1] as ">" | "|";
+      const chomp = ((blockHeader[2] ?? blockHeader[5] ?? "") as "" | "-" | "+");
+      const indentDigit = blockHeader[3] ?? blockHeader[4];
+      const explicitIndent = indentDigit ? parseInt(indentDigit, 10) : 0;
+      const bodyLines: string[] = [];
+      let blockIndent = explicitIndent;
+      let j = i + 1;
+      while (j < lines.length) {
+        const next = lines[j]!;
+        const ws = next.match(/^(\s*)(.*)$/)!;
+        const leading = ws[1]!.length;
+        const content = ws[2]!;
+        if (content.length === 0) {
+          // Blank line: part of the block; may be trimmed by chomping later.
+          bodyLines.push("");
+          j++;
+          continue;
+        }
+        // De-indented (column 0) non-blank line ends the block — it's the
+        // next frontmatter key, since keys live at column 0.
+        if (leading === 0) break;
+        if (blockIndent === 0) blockIndent = leading;
+        if (leading < blockIndent) break;
+        bodyLines.push(next.slice(blockIndent));
+        j++;
+      }
+      // Advance the outer loop past the lines we just consumed.
+      i = j - 1;
+
+      const folded = foldBlockScalar(style, chomp, bodyLines);
+      out.raw[key] = folded;
+      if (key === "slug") out.slug = folded;
+      else if (key === "type") out.type = folded;
+      else if (key === "title") out.title = folded;
+      else if (key === "status") out.status = folded;
+      currentListKey = null;
+      currentList = null;
+      continue;
+    }
+
     if (value.length === 0) {
       // Block-list opener — subsequent indented `- item` lines belong here.
       const list: string[] = [];
@@ -382,6 +436,68 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
   // Suppress unused-var warning while preserving meaning.
   void currentListKey;
   return out;
+}
+
+// Apply YAML block-scalar folding + chomping. Pragmatic subset:
+//   |  literal: preserve every line break verbatim.
+//   >  folded:  consecutive non-empty lines join with a single space;
+//               a blank line in the middle becomes a single `\n`.
+// Chomping suffix:
+//   -  strip — no trailing newline.
+//   +  keep — preserve all trailing blank lines as `\n`s.
+//   '' (clip) — exactly one trailing newline if the body had content.
+// These feed scalar fields (title/status/slug/type/raw[k]); leading-quote
+// stripping intentionally not applied (the scalar body is the text).
+function foldBlockScalar(
+  style: ">" | "|",
+  chomp: "" | "-" | "+",
+  bodyLines: string[],
+): string {
+  // Count trailing blank lines so chomping can decide whether to keep them,
+  // then strip them off the working buffer for folding.
+  let trailingBlanks = 0;
+  while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1] === "") {
+    trailingBlanks++;
+    bodyLines.pop();
+  }
+
+  let folded: string;
+  if (style === "|") {
+    folded = bodyLines.join("\n");
+  } else {
+    // Folded: walk lines, join non-blank runs with a single space; each
+    // blank line in the middle emits one `\n`.
+    let buf = "";
+    let prevBlank = false;
+    let started = false;
+    for (const ln of bodyLines) {
+      if (ln === "") {
+        buf += "\n";
+        prevBlank = true;
+        continue;
+      }
+      if (!started) {
+        buf = ln;
+        started = true;
+        prevBlank = false;
+        continue;
+      }
+      if (prevBlank) {
+        buf += ln;
+      } else {
+        buf += " " + ln;
+      }
+      prevBlank = false;
+    }
+    folded = buf;
+  }
+
+  if (chomp === "-") return folded;
+  if (chomp === "+") {
+    return folded + "\n".repeat(trailingBlanks + (folded.length > 0 ? 1 : 0));
+  }
+  // Clip (default): one trailing newline if body had any content.
+  return folded.length > 0 ? folded + "\n" : folded;
 }
 
 // Split an inline-list inner body (the text between `[` and `]`) on commas,
