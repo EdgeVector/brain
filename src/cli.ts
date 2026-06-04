@@ -85,9 +85,11 @@ Run \`fbrain help <command>\` for per-command usage.`;
 export const COMMAND_HELP: Record<Command, string> = {
   init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY]
 
-Probe the node, bootstrap if needed, register Design + Task, load
-schemas, persist ~/.fbrain/config.json with canonical hashes.
-Idempotent — re-run after \`409 ambiguous_schema_name\` to refresh hashes.
+Probe the node, bootstrap if needed, register every schema, load them,
+persist ~/.fbrain/config.json with canonical hashes, then prompt once to
+grant fbrain consent against this node so the first write doesn't stall.
+Idempotent — re-running skips bootstrap and the consent prompt when a
+live capability is already on disk.
 
   --node-url             defaults to http://127.0.0.1:9001 (homebrew fold_db_node daemon)
   --schema-service-url   defaults to the prod cloud Lambda

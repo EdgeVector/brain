@@ -1,12 +1,13 @@
 // `fbrain init` — bootstrap a node (if needed), register every fbrain
 // schema, load them, persist canonical hashes to ~/.fbrain/config.json.
 //
-// 5 steps (per Phase 0 spike, step 0 added):
+// 6 steps:
 //   0. probe /api/system/auto-identity
 //   1. POST /api/setup/bootstrap if 503
 //   2. register all 8 schemas via schema service → capture canonical hashes
 //   3. POST /api/schemas/load
 //   4. verify failed_schemas empty + persist config
+//   5. inline app-identity consent grant (prompt → folddb consent grant → poll)
 //
 // Idempotent. Step 0 makes a re-run skip bootstrap; step 2's POST is
 // idempotent on the schema service side (identical re-POST returns 200
@@ -24,6 +25,11 @@ import {
   writeConfig,
   type Config,
 } from "../config.ts";
+import {
+  establishConsentInline,
+  type EstablishConsentOptions,
+  type EstablishConsentResult,
+} from "./init-consent.ts";
 
 export type InitOptions = {
   // Optional — when undefined, the resolver below picks either the existing
@@ -39,6 +45,12 @@ export type InitOptions = {
   // Tuning hooks (mainly for tests):
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
+  // Inline consent (Step 6/6) injection seam for tests. When omitted, init
+  // runs the real `establishConsentInline` against the configured node.
+  consent?: Pick<
+    EstablishConsentOptions,
+    "store" | "transport" | "ask" | "resolveFolddb" | "runFolddbGrant" | "isTty" | "pollIntervalMs" | "sleep" | "maxWaitMs"
+  >;
 };
 
 // New default targets — `:9001` is the homebrew `fold_db_node` daemon;
@@ -79,9 +91,10 @@ function envRetryDelays(): number[] | null {
 export type InitResult = {
   config: Config;
   bootstrapped: boolean;
+  consent: EstablishConsentResult;
 };
 
-const STEPS = 5;
+const STEPS = 6;
 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
@@ -104,7 +117,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const nodeUrl = resolved.nodeUrl;
   const schemaServiceUrl = resolved.schemaServiceUrl;
 
-  // Step 0/5: probe identity (with cold-build retry).
+  // Step 0/6: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
   const probeUserHash = existing?.userHash ?? "init-probe";
   const probeClient = newNodeClient({ baseUrl: nodeUrl, userHash: probeUserHash, verbose: verbose ?? (() => {}) });
@@ -147,7 +160,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 2/5: register the eight per-kind schemas — Design + Task +
+  // Step 2/6: register the eight per-kind schemas — Design + Task +
   // Concept/Preference/Reference/Agent/Project/Spike. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas`);
@@ -161,7 +174,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
   }
 
-  // Step 3/5: load schemas into the node
+  // Step 3/6: load schemas into the node
   print(`[4/${STEPS}] loading schemas into the node`);
   const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
   const loadResult = await nodeClient.loadSchemas();
@@ -175,7 +188,9 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       ` (failed_schemas empty ✓)`,
   );
 
-  // Step 4/5: persist config
+  // Step 4/6: persist config (config file written before consent so a Ctrl-C
+  // mid-grant doesn't lose schema state — the next init re-runs the consent
+  // step idempotently).
   print(`[5/${STEPS}] writing config to ${configPath}`);
   const config: Config = {
     configVersion: CONFIG_VERSION,
@@ -188,8 +203,22 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   };
   writeConfig(config, configPath);
   print(`        wrote config v${CONFIG_VERSION}`);
+
+  // Step 5/6: inline consent — eliminate the "two-terminal dance" on first
+  // write. Idempotent (skips silently when a live capability is already on
+  // disk); non-TTY safe (skips with a one-line note for CI/scripts); falls
+  // back to the manual instruction when `folddb` is not on PATH.
+  print(`[6/${STEPS}] establishing consent (one-time grant for fbrain's namespace)`);
+  const consentBase: EstablishConsentOptions = {
+    nodeUrl,
+    userHash,
+    print,
+  };
+  if (verbose !== undefined) consentBase.verbose = verbose;
+  const consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
+
   print(`[init] ok`);
-  return { config, bootstrapped };
+  return { config, bootstrapped, consent };
 }
 
 type ProbeResult = Awaited<ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>>;
