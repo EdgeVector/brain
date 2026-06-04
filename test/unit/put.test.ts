@@ -241,6 +241,103 @@ describe("parseFrontmatter", () => {
       expect(fe.message).toContain("thisLineHasNoColon");
     }
   });
+
+  // Block-scalar support — see #7852b. Pre-fix, a standard YAML `>-` /
+  // `|` title threw `frontmatter_malformed` on the indented continuation
+  // line (and a bulk-import path stored the literal `>-` as the title for
+  // 15 records in Tom's brain).
+  describe("block scalars", () => {
+    test("folded `>-` title joins lines with space, strips trailing newline", () => {
+      const r = parseFrontmatter(
+        "type: concept\ntitle: >-\n  A long title that\n  wraps across lines",
+      );
+      expect(r.title).toBe("A long title that wraps across lines");
+      expect(r.type).toBe("concept");
+    });
+
+    test("folded `>` (clip chomp) keeps single trailing newline", () => {
+      const r = parseFrontmatter("title: >\n  hello\n  world");
+      expect(r.title).toBe("hello world\n");
+    });
+
+    test("folded `>+` (keep chomp) preserves trailing blank lines", () => {
+      const r = parseFrontmatter("title: >+\n  hello\n  world\n\n");
+      expect(r.title).toBe("hello world\n\n\n");
+    });
+
+    test("literal `|` preserves line breaks as `\\n`", () => {
+      const r = parseFrontmatter("type: concept\nraw_body: |\n  line one\n  line two\n  line three");
+      // `raw_body` is an unknown key, so it lands in r.raw (not a typed slot).
+      expect(r.raw.raw_body).toBe("line one\nline two\nline three\n");
+    });
+
+    test("literal `|-` strips trailing newline", () => {
+      const r = parseFrontmatter("title: |-\n  line one\n  line two");
+      expect(r.title).toBe("line one\nline two");
+    });
+
+    test("literal `|+` keeps trailing blank lines", () => {
+      const r = parseFrontmatter("title: |+\n  hello\n\n");
+      expect(r.title).toBe("hello\n\n\n");
+    });
+
+    test("folded `>` with blank line in middle emits a `\\n`", () => {
+      const r = parseFrontmatter("title: >-\n  para one\n\n  para two");
+      expect(r.title).toBe("para one\npara two");
+    });
+
+    test("block scalar stops when the next column-0 key starts", () => {
+      const r = parseFrontmatter(
+        "title: >-\n  folded title here\nstatus: in_progress\ntype: task",
+      );
+      expect(r.title).toBe("folded title here");
+      expect(r.status).toBe("in_progress");
+      expect(r.type).toBe("task");
+    });
+
+    test("block scalar at end of frontmatter (no trailing content)", () => {
+      const r = parseFrontmatter("type: concept\ntitle: >-\n  the title");
+      expect(r.title).toBe("the title");
+    });
+
+    test("status: as a folded scalar is captured into the typed slot", () => {
+      const r = parseFrontmatter(
+        "type: task\nstatus: >-\n  in_progress\ntitle: T",
+      );
+      expect(r.status).toBe("in_progress");
+    });
+
+    test("slug: as a folded scalar is captured into the typed slot", () => {
+      const r = parseFrontmatter(
+        "type: concept\nslug: >-\n  my-slug\ntitle: T",
+      );
+      expect(r.slug).toBe("my-slug");
+    });
+
+    test("explicit indent indicator `>2` honors the declared column", () => {
+      const r = parseFrontmatter("title: >2-\n    extra indented body");
+      // With explicitIndent=2, we strip 2 chars; the remaining 2 spaces
+      // are part of the content.
+      expect(r.title).toBe("  extra indented body");
+    });
+
+    test("genuine malformed line still throws after block scalar feature", () => {
+      try {
+        parseFrontmatter("title: >-\n  ok\nthisLineHasNoColon\ntype: task");
+        throw new Error("should not reach");
+      } catch (err) {
+        expect(err).toBeInstanceOf(FbrainError);
+        const fe = err as FbrainError;
+        expect(fe.code).toBe("frontmatter_malformed");
+        expect(fe.message).toContain("thisLineHasNoColon");
+      }
+    });
+
+    test("unknown key with folded scalar is stored in .raw", () => {
+      const r = parseFrontmatter("author: >-\n  Jane\n  Doe");
+      expect(r.raw.author).toBe("Jane Doe");
+    });
+  });
 });
 
 const realFetch = globalThis.fetch;

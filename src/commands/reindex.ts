@@ -35,6 +35,14 @@ export type ReindexOptions = {
   cfg: Config;
   type?: RecordType;
   dryRun?: boolean;
+  // Repair-only mode: skip the embedding refresh and only fix records whose
+  // stored `title` is the literal text of a YAML block-scalar indicator
+  // (`>`, `>-`, `>+`, `|`, `|-`, `|+`). These were created by a pre-fix
+  // import path that pasted the indicator into the title slot instead of
+  // folding the scalar body — see #7852b. Title is repaired to the first
+  // H1 of the body, or the slug as last resort (the original folded text
+  // is unrecoverable). Idempotent: a second run finds nothing to fix.
+  repairTitles?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -43,8 +51,40 @@ export type ReindexResult = {
   scanned: number;
   reindexed: number;
   skippedTombstone: number;
+  // Populated only when `repairTitles` is set. Each entry: { type, slug,
+  // previousTitle, newTitle, source: "h1" | "slug" }.
+  repaired?: Array<{
+    type: RecordType;
+    slug: string;
+    previousTitle: string;
+    newTitle: string;
+    source: "h1" | "slug";
+  }>;
   byType: Partial<Record<RecordType, { reindexed: number; skippedTombstone: number }>>;
 };
+
+// Literal text the corrupted import wrote into the title slot. Matches the
+// set of YAML block-scalar indicators the parser now folds correctly.
+const BLOCK_SCALAR_INDICATORS = new Set([">", ">-", ">+", "|", "|-", "|+"]);
+
+function isCorruptBlockScalarTitle(title: string): boolean {
+  return BLOCK_SCALAR_INDICATORS.has(title.trim());
+}
+
+// Pick a repaired title. Mirrors put.ts's resolveTitle fallback chain
+// (first H1, else slug) since the original folded text is lost.
+export function pickRepairedTitle(
+  body: string,
+  slug: string,
+): { title: string; source: "h1" | "slug" } {
+  for (const line of body.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const m = line.match(/^#\s+(.+)$/);
+    if (m) return { title: m[1]!.trim(), source: "h1" };
+    break;
+  }
+  return { title: slug, source: "slug" };
+}
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
@@ -63,6 +103,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     skippedTombstone: 0,
     byType: {},
   };
+  if (opts.repairTitles) result.repaired = [];
 
   for (const type of types) {
     const schemaHash = schemaHashFor(type, opts.cfg);
@@ -79,6 +120,30 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
         continue;
       }
 
+      if (opts.repairTitles) {
+        if (!isCorruptBlockScalarTitle(record.title)) {
+          opts.verbose?.(`ok ${type}/${record.slug}`);
+          continue;
+        }
+        const { title: newTitle, source } = pickRepairedTitle(record.body, record.slug);
+        const entry = {
+          type,
+          slug: record.slug,
+          previousTitle: record.title,
+          newTitle,
+          source,
+        };
+        result.repaired!.push(entry);
+        if (opts.dryRun) {
+          opts.verbose?.(`would-repair ${type}/${record.slug} → "${newTitle}" (from ${source})`);
+          continue;
+        }
+        const fields = buildReindexFields(type, { ...record, title: newTitle }, nowIso());
+        await node.updateRecord({ schemaHash, fields, keyHash: record.slug });
+        opts.verbose?.(`repaired ${type}/${record.slug} → "${newTitle}" (from ${source})`);
+        continue;
+      }
+
       if (opts.dryRun) {
         result.reindexed++;
         counts.reindexed++;
@@ -92,6 +157,17 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       counts.reindexed++;
       opts.verbose?.(`reindexed ${type}/${record.slug}`);
     }
+  }
+
+  if (opts.repairTitles) {
+    const repaired = result.repaired ?? [];
+    const prefix = opts.dryRun ? "dry-run: would repair" : "repaired";
+    const typeScope = opts.type ? ` (type=${opts.type})` : "";
+    print(`${prefix} ${repaired.length} title(s)${typeScope}`);
+    for (const r of repaired) {
+      print(`  ${r.type}/${r.slug}: ${JSON.stringify(r.previousTitle)} → ${JSON.stringify(r.newTitle)} (from ${r.source})`);
+    }
+    return result;
   }
 
   const prefix = opts.dryRun ? "dry-run: would reindex" : "reindexed";
