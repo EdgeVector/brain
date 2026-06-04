@@ -104,6 +104,30 @@ describe("record", () => {
     expect(r.tags).toEqual(["a", "b", "c"]);
   });
 
+  test("rowToRecord drops empty entries from the comma-split fallback", () => {
+    // Symmetry with the write path: put.ts's inline-list parser
+    // (`tags: [a, , b]`) strips empties via `.filter(s => s.length > 0)` so
+    // empty strings never reach the node. The read fallback must mirror
+    // that — otherwise a server-side serializer that emits trailing commas,
+    // empty-middle commas, or whitespace-only tag strings leaks phantom
+    // empty tags into the in-memory record, surfacing as stray `,` separators
+    // in `fbrain get` / `fbrain list` output and inflating `tags.length`.
+    const cases: Array<[string, string[]]> = [
+      ["foo,", ["foo"]],
+      ["foo,,bar", ["foo", "bar"]],
+      [",", []],
+      ["   ", []],
+      ["  ,foo, ,bar,", ["foo", "bar"]],
+    ];
+    for (const [raw, expected] of cases) {
+      const r = rowToRecord(
+        { fields: { tags: raw }, key: { hash: "x", range: null } },
+        "design",
+      );
+      expect(r.tags).toEqual(expected);
+    }
+  });
+
   test("ensureStatus accepts valid status", () => {
     expect(() => ensureStatus("design", "draft")).not.toThrow();
     expect(() => ensureStatus("task", "in_progress")).not.toThrow();
