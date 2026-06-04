@@ -17,7 +17,7 @@
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
-import { UNIQUE_SCHEMAS } from "../schemas.ts";
+import { UNIQUE_SCHEMAS, withoutOwnerAppId } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
@@ -30,6 +30,7 @@ import {
   type EstablishConsentOptions,
   type EstablishConsentResult,
 } from "./init-consent.ts";
+import { appIdentityEnforceEnabled } from "../write-context.ts";
 
 export type InitOptions = {
   // Optional — when undefined, the resolver below picks either the existing
@@ -163,11 +164,29 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Step 2/6: register the eight per-kind schemas — Design + Task +
   // Concept/Preference/Reference/Agent/Project/Spike. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
+  //
+  // FBRAIN_APP_IDENTITY_ENFORCE=off is the documented dev escape hatch
+  // (remedy (c) of `CERT_REQUIRED_HINT`). When enforcement is off we strip
+  // `owner_app_id` so the bare un-owned publish lands on a schema service
+  // with no `APP_IDENTITY_ROOT_PUBKEYS` (the dev-local stack) WITHOUT the
+  // 401 cert_required gate — the env var would otherwise be inert here
+  // (it's only consulted by writes/consent) and the hint would be lying.
+  // On a roots-configured schema service the bare POST is rejected
+  // instead with 400 `owner_app_id_required`, which is the documented
+  // dev-only contract: remedy (c) tells callers to point at a node +
+  // schema service that also have app-identity disabled.
+  const enforceOn = appIdentityEnforceEnabled();
   print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas`);
+  if (!enforceOn) {
+    print(
+      `        FBRAIN_APP_IDENTITY_ENFORCE=off → registering bare (no owner_app_id) — schemas will NOT be namespaced under fbrain/*`,
+    );
+  }
   const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
   const schemaHashes: Record<string, string> = {};
   for (const entry of UNIQUE_SCHEMAS) {
-    const reg = await schemaClient.registerSchema(entry.schema);
+    const req = enforceOn ? entry.schema : withoutOwnerAppId(entry.schema);
+    const reg = await schemaClient.registerSchema(req);
     for (const type of entry.types) {
       schemaHashes[type] = reg.canonicalHash;
     }

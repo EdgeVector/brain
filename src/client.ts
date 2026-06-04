@@ -828,7 +828,7 @@ export const CERT_REQUIRED_HINT =
   "Remedies, any one of: " +
   "(a) wait for / pull the fold fix above so re-POST is cert-free; " +
   "(b) ask a maintainer with a DevCert to run `fbrain init` once against this schema service so the canonical hashes are published; " +
-  "(c) for a local/dev node, set FBRAIN_APP_IDENTITY_ENFORCE=off and point at a node with APP_IDENTITY_ENFORCE off to skip the publish step.";
+  "(c) for a local/dev stack, set FBRAIN_APP_IDENTITY_ENFORCE=off and re-run `fbrain init` against a node + schema service that ALSO have app-identity disabled (no APP_IDENTITY_ROOT_PUBKEYS) — fbrain then publishes bare un-owned variants of its schemas, bypassing the cert gate. Bare hashes won't match production fbrain/* hashes, so this is a dev-only escape hatch.";
 
 export function mapSchemaServiceError(res: Response, body: unknown, path: string): FbrainError {
   const errCode = bodyError(body);
