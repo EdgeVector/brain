@@ -111,4 +111,45 @@ describe("parseExpansions", () => {
     const raw = '"""triple quoted"""';
     expect(parseExpansions(raw, 1)).toEqual(["triple quoted"]);
   });
+
+  test("leading whitespace before a quoted phrasing is stripped along with the quotes", () => {
+    // Regression: bullet-strip and number-strip allow a `\s*` prefix
+    // (`^\s*[-*•]\s+`, `^\s*\d+[.)]\s+`), but the quote-strip regex used to be
+    // anchored as `^["'\`]+` — no leading-whitespace allowance. So an indented
+    // quoted line like `  "foo"` would survive bullet/number strip unchanged,
+    // then the `^["'\`]+` alternation couldn't match because position 0 was a
+    // space. Only the trailing quote got stripped. After the final .trim()
+    // the result was `"foo` — a corrupted phrasing with a leftover leading
+    // quote, which then flows into vector search (the raw query string is
+    // sent to embeddings) and silently degrades recall.
+    //
+    // Realistic trigger: the system prompt says "no preamble, no quotes" but
+    // models ignore it and produce things like:
+    //   Here are 3 alternative phrasings:
+    //     "first phrasing"
+    //     "second phrasing"
+    //     "third phrasing"
+    // The first line drops out as preamble, but each indented quoted line
+    // used to leak a leading `"`.
+    const raw = '  "first phrasing"\n\t"second phrasing"\n   `backtick phrasing`';
+    expect(parseExpansions(raw, 3)).toEqual([
+      "first phrasing",
+      "second phrasing",
+      "backtick phrasing",
+    ]);
+  });
+
+  test("a line that is only leading whitespace + quotes collapses and is skipped", () => {
+    // Companion to the regression above: `   "  ` (whitespace, lone quote,
+    // whitespace) used to survive as the single-character phrasing `"` —
+    // the leading-quote alternation couldn't match (position 0 was a space),
+    // so only the trailing whitespace got .trim()-ed off and a bare `"` was
+    // pushed as an "expansion". With the fix the leading run of whitespace +
+    // quotes collapses, the result is empty, and the line is skipped.
+    const raw = 'real phrasing\n   "  \nanother phrasing';
+    expect(parseExpansions(raw, 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+  });
 });
