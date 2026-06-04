@@ -323,7 +323,8 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }
   if (resolved.length === 0) {
     print("no matches");
-  } else {
+  } else if (opts.verbose) {
+    // Verbose: per-ranker debug columns (bm25=, vec=, +exp[...]).
     // Expansion column collapses when every row has no expansion hits;
     // formatTable computes a 0-width column for an all-empty column,
     // and adjacent gaps merge into the same 2-space separator.
@@ -347,6 +348,20 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         ];
       }),
       { align: ["left", "right", "left", "left", "left", "left", "left"] },
+    );
+    for (const line of lines) print(line);
+  } else {
+    // Default: clean `slug · score · type · title` — same shape as
+    // `fbrain search` and MCP `fbrain_search`. Per-ranker debug is
+    // operator-only and lives behind --verbose.
+    const lines = formatTable(
+      resolved.map((h) => [
+        h.slug,
+        h.fusedScore.toFixed(4),
+        capitalize(h.type),
+        h.record.title,
+      ]),
+      { align: ["left", "right", "left", "left"] },
     );
     for (const line of lines) print(line);
   }

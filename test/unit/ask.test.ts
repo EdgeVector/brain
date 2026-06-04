@@ -590,3 +590,61 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     expect(totalQueries).toBe(RECORD_TYPES.length);
   });
 });
+
+describe("askCmd output column gating (default vs --verbose)", () => {
+  test("default output is `slug · score · type · title` — no bm25=/vec=/+exp[] columns", async () => {
+    // Regression: per-ranker debug columns leaked into the default `ask`
+    // output even though `fbrain help ask` documents them as --verbose-
+    // only ("Run with the global --verbose to see ... per-ranker debug").
+    // Clean by default; debug behind --verbose.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")] },
+      vectorHits: [vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 })],
+    });
+
+    const lines: string[] = [];
+    const result = await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: (line) => lines.push(line),
+    });
+
+    expect(result.hits.length).toBeGreaterThan(0);
+    const joined = lines.join("\n");
+    expect(joined).not.toContain("bm25=");
+    expect(joined).not.toContain("vec=");
+    expect(joined).not.toContain("+exp[");
+    // Sanity: the row still carries the four expected columns.
+    const row = lines.find((l) => l.includes("d1"));
+    expect(row).toBeDefined();
+    expect(row).toContain("Design");
+    expect(row).toContain("T-d1");
+  });
+
+  test("--verbose output retains the bm25=/vec= debug columns", async () => {
+    // Bookend: when the global --verbose is set (modelled as a verbose
+    // callback per Verbose's runtime shape, matching how cli.ts wires it),
+    // the operator-debug columns come back so power users can still
+    // diagnose ranker behaviour.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")] },
+      vectorHits: [vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 })],
+    });
+
+    const lines: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      verbose: () => {},
+      print: (line) => lines.push(line),
+    });
+
+    const row = lines.find((l) => l.includes("d1") && l.includes("bm25="));
+    expect(row).toBeDefined();
+    expect(row).toContain("vec=");
+  });
+});
