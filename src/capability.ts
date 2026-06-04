@@ -284,6 +284,30 @@ export function reactionFor(
 }
 
 // ---------------------------------------------------------------------------
+// Idempotency check (used by `fbrain init` to skip the inline consent step
+// when a live capability is already on disk)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read-only: does this store hold a structurally-valid, JCS-integrity-bound
+ * capability for `appId` on this `nodeUrl`? Does NOT clear corrupt cache (use
+ * CapabilitySession for that lifecycle); intended for `fbrain init`'s
+ * idempotency gate so re-running init never re-prompts.
+ */
+export async function hasValidCachedCapability(
+  store: CapabilityStore,
+  nodeUrl: string,
+  appId: string = FBRAIN_APP_ID,
+): Promise<boolean> {
+  const cached = await store.load(nodeUrl);
+  if (cached === null) return false;
+  const token = decodeCapabilityBlob(cached.blob);
+  if (token === null) return false;
+  if (token.app_id !== appId) return false;
+  return await tokenIntegrityValid(token);
+}
+
+// ---------------------------------------------------------------------------
 // Consent acquisition (request-consent → poll consent-status)
 // ---------------------------------------------------------------------------
 
@@ -297,6 +321,19 @@ export type ConsentTransport = {
   consentStatus(requestId: string): Promise<{ status: number; body: unknown }>;
 };
 
+/**
+ * Hook invoked once `request-consent` has returned 202, before polling
+ * begins. The default prints the "First-run setup — run: …" instruction so a
+ * second-terminal owner can grant. `fbrain init`'s inline-consent flow
+ * overrides this to shell out to `folddb consent grant <app_id> --yes`
+ * directly, eliminating the two-terminal dance on the brew happy path.
+ */
+export type OnConsentRequested = (ctx: {
+  appId: string;
+  requestId: string;
+  print: (line: string) => void;
+}) => void | Promise<void>;
+
 export type AcquireOptions = {
   appId?: string;
   scope?: string;
@@ -309,6 +346,8 @@ export type AcquireOptions = {
   sleep?: (ms: number) => Promise<void>;
   /** Hard cap on polling so a never-granted request doesn't loop forever. */
   maxWaitMs?: number;
+  /** See {@link OnConsentRequested}. */
+  onConsentRequested?: OnConsentRequested;
 };
 
 /**
@@ -356,8 +395,15 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
     });
   }
 
-  // Step 3: the clear, single, actionable console instruction.
-  print(`First-run setup — run: \`folddb consent grant ${appId}\` in your terminal.`);
+  // Step 3: tell the user what to do. By default that's the manual
+  // "First-run setup — run: …" instruction; `fbrain init`'s inline flow
+  // overrides this hook to shell out to `folddb consent grant` directly so the
+  // brew happy path never requires a second terminal.
+  if (opts.onConsentRequested) {
+    await opts.onConsentRequested({ appId, requestId, print });
+  } else {
+    print(`First-run setup — run: \`folddb consent grant ${appId}\` in your terminal.`);
+  }
   print(`Waiting for you to grant access to this node (polling every ${Math.round(pollIntervalMs / 1000)}s)…`);
 
   const deadline = Date.now() + maxWaitMs;
