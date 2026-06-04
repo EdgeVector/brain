@@ -2,7 +2,7 @@
 // factories so we can exercise each drift dimension and the verdict logic
 // without touching the network.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +31,14 @@ import {
   type SchemaServiceClient,
 } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
+import {
+  type CapabilityStore,
+  type CapabilityToken,
+} from "../../src/capability.ts";
+import { inMemoryCapabilityStore } from "../../src/keychain.ts";
+import { canonicalize, type JsonValue } from "../../src/jcs.ts";
+import { sha256Hex } from "../../src/hash.ts";
+import type { WriteNodeClient, WriteNodeClientOptions } from "../../src/write-context.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
@@ -1129,6 +1137,445 @@ describe("doctor --freshness probes", () => {
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] freshness-probe") && l.includes("skipped"))).toBe(true);
+  });
+});
+
+// Write-readiness probe: doctor used to be all read-path checks, so a node
+// with a cold app registry / missing grant / revoked capability reported
+// all-PASS while every write 4xx'd. These tests pin the new probe's three
+// verdicts: PASS only when both a valid cached capability exists AND the
+// node's app registry recognises fbrain (request-consent → 202); FAIL with
+// an actionable hint when either is missing; WARN (never silent PASS) when
+// the probe can't determine the state.
+describe("doctor write-readiness probe", () => {
+  // test/setup.ts forces FBRAIN_APP_IDENTITY_ENFORCE=false for the suite so
+  // command tests can run without standing up the consent path. The probe's
+  // very first branch checks that env var and emits a WARN if enforcement
+  // is off — masking every PASS/FAIL/WARN case below. Flip it back ON
+  // around this describe so the probe runs its full registration + cached
+  // capability + status-code logic.
+  let prevEnforce: string | undefined;
+  beforeEach(() => {
+    prevEnforce = process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+  });
+  afterEach(() => {
+    if (prevEnforce === undefined) delete process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+    else process.env.FBRAIN_APP_IDENTITY_ENFORCE = prevEnforce;
+  });
+
+  // Build a real capability blob whose JCS payload_hash matches. The probe
+  // runs the same tokenIntegrityValid() check the write path uses, so a
+  // synthetic blob with the wrong hash would always FAIL — defeating the
+  // PASS test.
+  async function mintBlob(opts: { appId?: string; corruptHash?: boolean } = {}): Promise<string> {
+    const token: CapabilityToken = {
+      envelope: {
+        version: 1,
+        purpose: "capability_grant",
+        alg: "Ed25519",
+        key_id: "a".repeat(64),
+        issued_at: "2026-06-04T12:00:00Z",
+        env: "dev",
+        payload_hash: "",
+        sig: "cGxhY2Vob2xkZXItc2lnbmF0dXJl",
+      },
+      capability_id: "cap-doctor",
+      app_id: opts.appId ?? "fbrain",
+      scope: { Wildcard: "fbrain/*" },
+      granted_ops: ["Read", "Write"],
+      granted_at: "2026-06-04T12:00:00Z",
+      node_pubkey: "bm9kZS1wdWJrZXktYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+    };
+    const payload = { ...(token as unknown as Record<string, JsonValue>) };
+    delete payload.envelope;
+    token.envelope.payload_hash = opts.corruptHash
+      ? "deadbeef".repeat(8)
+      : await sha256Hex(canonicalize(payload as JsonValue));
+    return Buffer.from(JSON.stringify(token), "utf8").toString("base64");
+  }
+
+  async function withCachedCapability(
+    nodeUrl: string,
+    opts: { appId?: string; corruptHash?: boolean } = {},
+  ): Promise<CapabilityStore> {
+    const store = inMemoryCapabilityStore();
+    const blob = await mintBlob(opts);
+    await store.save({
+      appId: opts.appId ?? "fbrain",
+      nodeUrl,
+      nodePubkey: "bm9kZS1wdWJrZXktYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+      capabilityId: "cap-doctor",
+      blob,
+    });
+    return store;
+  }
+
+  function nodeWithConsent(consent: { status: number; body?: unknown }): NodeClient {
+    const base = mockNodeClient({});
+    return {
+      ...base,
+      async requestConsent() {
+        return { status: consent.status, body: consent.body ?? {} };
+      },
+    };
+  }
+
+  test("PASS: capability cached + consent dry-run 202", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const store = await withCachedCapability(cfg.nodeUrl);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: store,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => nodeWithConsent({ status: 202, body: { request_id: "r-1" } }),
+    });
+    expect(code).toBe(0);
+    const pass = lines.find((l) => l.startsWith("[PASS] write-ready"));
+    expect(pass).toBeDefined();
+    expect(pass!).toContain("capability cached");
+  });
+
+  test("FAIL: app not registered (request-consent → 404) reports write-blocked with cold-registry hint", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const store = await withCachedCapability(cfg.nodeUrl);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: store,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        nodeWithConsent({ status: 404, body: { error: "not_a_developer" } }),
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] write-blocked"));
+    expect(fail).toBeDefined();
+    expect(fail!).toContain("does not recognise app");
+    expect(fail!).toContain("fbrain");
+    // The fix line names BOTH the symptom every write hits AND a real
+    // next step (restart / publish), not a circular "run init" loop.
+    const fix = lines[lines.indexOf(fail!) + 1] ?? "";
+    expect(fix).toContain("app_not_registered");
+    expect(fix.toLowerCase()).toContain("restart");
+  });
+
+  test("FAIL: no capability cached (consent dry-run 202) reports write-blocked with init hint", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => nodeWithConsent({ status: 202, body: { request_id: "r-1" } }),
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] write-blocked"));
+    expect(fail).toBeDefined();
+    expect(fail!).toContain("no capability stored");
+    const fix = lines[lines.indexOf(fail!) + 1] ?? "";
+    expect(fix).toContain("fbrain init");
+  });
+
+  test("FAIL: stored capability fails JCS integrity check is treated as absent", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const store = await withCachedCapability(cfg.nodeUrl, { corruptHash: true });
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: store,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => nodeWithConsent({ status: 202, body: { request_id: "r-1" } }),
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] write-blocked"));
+    expect(fail).toBeDefined();
+    expect(fail!).toContain("JCS integrity check");
+  });
+
+  test("WARN: consent dry-run returns 5xx → fail closed (WARN, exit stays 0)", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const store = await withCachedCapability(cfg.nodeUrl);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: store,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => nodeWithConsent({ status: 500, body: { error: "boom" } }),
+    });
+    expect(code).toBe(0);
+    const warn = lines.find((l) => l.startsWith("[WARN] write-ready"));
+    expect(warn).toBeDefined();
+    expect(warn!).toContain("HTTP 500");
+    expect(warn!).toContain("cannot determine");
+  });
+
+  test("WARN: consent dry-run throws → fail closed (WARN, never silent PASS)", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const store = await withCachedCapability(cfg.nodeUrl);
+    const lines: string[] = [];
+    const base = mockNodeClient({});
+    const throwingNode: NodeClient = {
+      ...base,
+      async requestConsent() {
+        throw new Error("consent endpoint exploded");
+      },
+    };
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: store,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => throwingNode,
+    });
+    expect(code).toBe(0);
+    const warn = lines.find((l) => l.startsWith("[WARN] write-ready"));
+    expect(warn).toBeDefined();
+    expect(warn!).toContain("consent endpoint exploded");
+  });
+
+  test("WARN: client enforcement OFF → declare the limitation (exit 0)", async () => {
+    // beforeEach forced enforcement ON; this test flips it back OFF.
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "false";
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+    });
+    expect(code).toBe(0);
+    const warn = lines.find((l) => l.startsWith("[WARN] write-ready"));
+    expect(warn).toBeDefined();
+    expect(warn!).toContain("enforcement is OFF");
+  });
+
+  test("regression: with no flag the probe runs (catches the pre-PR all-green-while-writes-blocked case)", async () => {
+    // Plain `fbrain doctor` (no --freshness, no --write, no --usage) — the
+    // 2026-06-04 dogfood that motivated this PR. With consent returning 404,
+    // doctor MUST exit non-zero and surface write-blocked; pre-PR it printed
+    // all-PASS.
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        nodeWithConsent({ status: 404, body: { error: "not_a_developer" } }),
+    });
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.startsWith("[FAIL] write-blocked"))).toBe(true);
+  });
+});
+
+describe("doctor --write round-trip probe", () => {
+  // The probe destructures `{ node }` only — `session` is never touched —
+  // so a stubbed session object cast through `unknown` is sufficient for
+  // the WriteNodeClient shape these tests pass in.
+  function stubWriteClient(node: NodeClient): WriteNodeClient {
+    return { node, session: {} as unknown as WriteNodeClient["session"] };
+  }
+
+  // Match the write-readiness describe block: force enforcement ON so the
+  // write-ready probe in front of the round-trip behaves the same way it
+  // does in production. Without this, the suite-wide enforcement-off
+  // default makes write-ready emit a WARN that mixes into the expected
+  // exit codes below.
+  let prevEnforce: string | undefined;
+  beforeEach(() => {
+    prevEnforce = process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+  });
+  afterEach(() => {
+    if (prevEnforce === undefined) delete process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+    else process.env.FBRAIN_APP_IDENTITY_ENFORCE = prevEnforce;
+  });
+
+  function captureWriteClient(opts: {
+    mutations: RecordedMutation[];
+    onCreate?: (slug: string) => void | Promise<void>;
+    nodeOverrides?: Partial<NodeClient>;
+  }): (wnOpts: WriteNodeClientOptions) => WriteNodeClient {
+    return (_wnOpts) => {
+      const base = mockNodeClient({ mutations: opts.mutations });
+      const node: NodeClient = {
+        ...base,
+        async createRecord(args) {
+          await base.createRecord(args);
+          if (opts.onCreate) await opts.onCreate(args.keyHash);
+        },
+        ...(opts.nodeOverrides ?? {}),
+      };
+      return stubWriteClient(node);
+    };
+  }
+
+  test("PASS: put → get → soft-delete round-trip, cleanup tombstone written", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const mutations: RecordedMutation[] = [];
+    const lines: string[] = [];
+    const conceptHash = TEST_HASHES.concept;
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      write: true,
+      nonceFn: () => "rt1",
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      // Write-ready probe also runs in this codepath; give it a passable
+      // 202 so its WARN/FAIL doesn't mask the round-trip PASS we're testing.
+      nodeClientFactory: () => mockNodeClient({}),
+      writeNodeFactory: captureWriteClient({ mutations }),
+    });
+    expect(code).toBe(1); // write-ready FAILs (no cached capability) but the round-trip itself PASSes
+    const pass = lines.find((l) => l.startsWith("[PASS] write-roundtrip"));
+    expect(pass).toBeDefined();
+    expect(pass!).toContain("doctor-write-roundtrip-rt1");
+    // One create + one tombstone update — same shape as the freshness probe.
+    const creates = mutations.filter((m) => m.kind === "create" && m.schemaHash === conceptHash);
+    expect(creates.length).toBe(1);
+    expect(creates[0]!.slug).toBe("doctor-write-roundtrip-rt1");
+    const tombstones = mutations.filter(
+      (m) =>
+        m.kind === "update" &&
+        Array.isArray(m.fields["tags"]) &&
+        (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
+    );
+    expect(tombstones.length).toBe(1);
+    expect(tombstones[0]!.slug).toBe("doctor-write-roundtrip-rt1");
+  });
+
+  test("FAIL: create throws → exit 1, no cleanup needed (nothing landed)", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const mutations: RecordedMutation[] = [];
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      write: true,
+      nonceFn: () => "rt2",
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      writeNodeFactory: (_wnOpts) => {
+        const base = mockNodeClient({ mutations });
+        return stubWriteClient({
+          ...base,
+          async createRecord() {
+            throw new FbrainError({
+              code: "capability_consent_required",
+              message: "fbrain write rejected: consent_required.",
+            });
+          },
+        });
+      },
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] write-roundtrip"));
+    expect(fail).toBeDefined();
+    expect(fail!).toContain("consent_required");
+    // No creates landed → nothing to tombstone.
+    expect(mutations.filter((m) => m.kind === "create").length).toBe(0);
+    expect(mutations.filter((m) => m.kind === "update").length).toBe(0);
+  });
+
+  test("FAIL: create succeeds but readback returns null → tombstone STILL written in finally", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const mutations: RecordedMutation[] = [];
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      write: true,
+      nonceFn: () => "rt3",
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      writeNodeFactory: (_wnOpts) => {
+        const base = mockNodeClient({ mutations });
+        // Override queryAll so the readback finds nothing — simulates a
+        // node that 200s the create but can't surface the row.
+        return stubWriteClient({
+          ...base,
+          async queryAll() {
+            return { ok: true, results: [], total_count: 0, returned_count: 0 };
+          },
+        });
+      },
+    });
+    expect(code).toBe(1);
+    const fail = lines.find((l) => l.startsWith("[FAIL] write-roundtrip"));
+    expect(fail).toBeDefined();
+    expect(fail!).toContain("subsequent read returned null");
+    // The create happened, so the finally MUST still tombstone — same
+    // contract as the freshness probe's cleanup guarantee.
+    const tombstones = mutations.filter(
+      (m) =>
+        m.kind === "update" &&
+        Array.isArray(m.fields["tags"]) &&
+        (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
+    );
+    expect(tombstones.length).toBe(1);
+  });
+
+  test("not run when --write is omitted (regression: no surprise writes from plain doctor)", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const mutations: RecordedMutation[] = [];
+    const lines: string[] = [];
+    let writeFactoryCalled = false;
+    await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ mutations }),
+      writeNodeFactory: (_wnOpts) => {
+        writeFactoryCalled = true;
+        return stubWriteClient(mockNodeClient({ mutations }));
+      },
+    });
+    expect(writeFactoryCalled).toBe(false);
+    expect(lines.some((l) => l.includes("write-roundtrip"))).toBe(false);
+    expect(mutations.length).toBe(0);
+  });
+
+  test("skipped if schemas-loaded failed", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      write: true,
+      capabilityStore: inMemoryCapabilityStore(),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ failedSchemas: ["BrokenSchema"] }),
+    });
+    expect(code).toBe(1);
+    expect(
+      lines.some((l) => l.includes("[FAIL] write-roundtrip") && l.includes("skipped")),
+    ).toBe(true);
   });
 });
 

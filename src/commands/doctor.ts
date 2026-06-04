@@ -8,21 +8,33 @@
 //   5. schemas loaded into the node (POST /api/schemas/load → failed_schemas empty)
 //   6. schema drift — for Design + Task: GET /v1/schema/<canonicalHash>,
 //      compare descriptive_name + fields + field_types against schemas.ts.
+//   7. embedding-runtime — one-token search forces ONNX load.
+//   8. write-ready — capability cached for this node + consent dry-run
+//      returns 202 (not 404). Pre-this-PR doctor was all read-path
+//      probes, so a node that rejected every write (cold app registry,
+//      revoked grant, missing capability) still reported all-PASS. This
+//      probe asks both questions a write needs to answer "yes" to and
+//      surfaces a structured FAIL ("write-blocked") with an actionable
+//      hint that distinguishes a missing grant from a cold registry.
 //
 // Always-WARN disclosure probes (G0 gate item #9 —
 // see docs/g0-replacement-readiness-gate.md §6). These don't detect a
 // condition; they declare a known limitation so a teammate dogfooding
 // on a second machine sees it instead of inferring a silent fork:
-//   7. single-machine-slice — record set is local to this daemon.
-//   8. no-team-sync       — `fbrain share` is a placeholder.
+//   - single-machine-slice — record set is local to this daemon.
+//   - no-team-sync       — `fbrain share` is a placeholder.
 //
 // With `--freshness`: also runs two G3 probes (see docs/phase-7-search-latency-spike.md):
-//   7. freshness-probe — 5 trials of put → search asserting score ≥ 0.5
-//      against a `doctor-freshness-probe-<nonce>` slug namespace, cleaning
-//      up afterwards. FAILs if any trial misses its own record at score ≥ 0.5.
-//   8. pollution-probe — one broad query (default "fbrain"); classifies each
-//      hit as live / stale-fragment / orphan-schema. PASS if <25% polluted,
-//      WARN at 25-50%, FAIL above 50%.
+//   - freshness-probe — 5 trials of put → search asserting score ≥ 0.5
+//     against a `doctor-freshness-probe-<nonce>` slug namespace, cleaning
+//     up afterwards. FAILs if any trial misses its own record at score ≥ 0.5.
+//   - pollution-probe — one broad query (default "fbrain"); classifies each
+//     hit as live / stale-fragment / orphan-schema. PASS if <25% polluted,
+//     WARN at 25-50%, FAIL above 50%.
+//
+// With `--write`: also runs a real put → get → soft-delete round-trip
+// under a reserved `doctor-write-roundtrip-<nonce>` slug. OFF by default
+// so plain `fbrain doctor` never mutates.
 //
 // Exit code 0 on all-green, 1 if any check fails.
 
@@ -52,6 +64,19 @@ import {
 import { buildTombstoneFields } from "./delete.ts";
 import { runUsageReport, type UsageOptions } from "./usage.ts";
 import { listManifests, type MigrationManifest } from "../migration.ts";
+import {
+  FBRAIN_APP_ID,
+  decodeCapabilityBlob,
+  tokenIntegrityValid,
+  type CapabilityStore,
+} from "../capability.ts";
+import { defaultCapabilityStore } from "../keychain.ts";
+import {
+  appIdentityEnforceEnabled,
+  newWriteNodeClient,
+  type WriteNodeClient,
+  type WriteNodeClientOptions,
+} from "../write-context.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -74,6 +99,16 @@ export type DoctorOptions = {
   // user gets a useful error if init hasn't been run.
   usage?: boolean;
   usageOptions?: UsageOptions;
+  // --write probe: do a real put → get → soft-delete round-trip under a
+  // reserved slug to verify writes land end-to-end. Off by default so plain
+  // `fbrain doctor` never mutates.
+  write?: boolean;
+  // Override for tests: the capability store the write-ready probe inspects
+  // and the round-trip writes use. Defaults to the OS keychain store.
+  capabilityStore?: CapabilityStore;
+  // Override for tests: the write-node-client factory used by the round-trip
+  // probe. Defaults to newWriteNodeClient.
+  writeNodeFactory?: (opts: WriteNodeClientOptions) => WriteNodeClient;
 };
 
 // `tag` overrides the printed tag when set; `ok` always drives the exit code.
@@ -284,6 +319,23 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(embed);
   }
 
+  // Write-readiness probe — capability + consent-path check. The pre-PR
+  // doctor was all read-path probes, so a node that rejected every write
+  // (cold app registry, revoked capability, missing grant, …) still
+  // reported all-PASS. This probe asks both questions a write needs:
+  //   (a) is a valid CapabilityToken cached for this node, and
+  //   (b) does the node's app registry know about fbrain (does
+  //       request-consent return 202, not 404)?
+  // Read-only: it polls request-consent for the HTTP status but never
+  // grants or waits, so the leftover pending request times out naturally.
+  // Fails closed — any indeterminate state (consent endpoint 5xx, store
+  // unreadable) surfaces as a WARN, not a silent PASS.
+  if (provisioned && cfgIssues.length === 0) {
+    const store = opts.capabilityStore ?? defaultCapabilityStore();
+    const writeReady = await runWriteReadyProbe(nodeClient, cfg.nodeUrl, store, verbose);
+    checks.push(writeReady);
+  }
+
   // Disclosure probes — always WARN, no detection. They surface the
   // multi-machine + team-sharing limits called out in
   // docs/g0-replacement-readiness-gate.md §6 so the gate stays honest
@@ -306,6 +358,28 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       "cloud sync is signed in and validated end-to-end " +
       "(see docs/phase-3-sharing-memo.md)",
   });
+
+  // --write probe — real put → get → soft-delete round-trip under a
+  // reserved slug. The write-ready probe above is a static check; this is
+  // the active proof that capability headers attach + the consent path
+  // resolves + the node accepts the mutation. OFF by default so plain
+  // `fbrain doctor` never mutates.
+  if (opts.write) {
+    if (cfgIssues.length === 0 && schemasLoadedOk) {
+      const writeProbe = await runWriteRoundtripProbe(cfg, opts, verbose);
+      checks.push(writeProbe);
+      verbose?.(
+        `write-roundtrip: ${writeProbe.tag ?? (writeProbe.ok ? "PASS" : "FAIL")} — ${writeProbe.detail ?? ""}`,
+      );
+    } else {
+      checks.push({
+        name: "write-roundtrip",
+        ok: false,
+        detail: "skipped — config or schemas-loaded did not pass",
+        fix: "resolve the earlier failures and retry",
+      });
+    }
+  }
 
   // G3 freshness + pollution probes — only when --freshness is set and the
   // upstream checks confirmed the node is workable.
@@ -895,4 +969,237 @@ function defaultNonce(): string {
 
 function pct(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
+}
+
+// Write-readiness probe — asks the two questions any mutation needs to
+// answer "yes" to:
+//   (a) is a valid CapabilityToken cached locally for this node? (load it,
+//       run the same JCS integrity check the write path uses before replay).
+//   (b) does the node's app registry know about fbrain? (probe
+//       POST /api/apps/request-consent and read the status — 202 means
+//       known, 404 means the registry has no fbrain entry).
+// Read-only: the leftover pending consent request times out naturally
+// within the node's 5-min consent window — we never poll or grant.
+// Fails closed: any indeterminate state (consent endpoint 5xx / throws,
+// keychain unreadable) surfaces as WARN, never silently PASS.
+export async function runWriteReadyProbe(
+  node: NodeClient,
+  nodeUrl: string,
+  store: CapabilityStore,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  // Client-side enforcement OFF means fbrain won't attach capability headers,
+  // and on a node ALSO running enforcement-off writes land as NodeOwner with
+  // no consent step at all. We can't introspect the node's setting, so we
+  // declare the limitation: WARN so the doctor verdict stays green for the
+  // dogfood case but the user sees the half-configured state.
+  if (!appIdentityEnforceEnabled()) {
+    verbose?.(`write-ready: enforcement off — emitting WARN`);
+    return {
+      name: "write-ready",
+      ok: true,
+      tag: "WARN",
+      detail:
+        "client app-identity enforcement is OFF (FBRAIN_APP_IDENTITY_ENFORCE) — " +
+        "no capability check performed; writes will succeed only if the node also has enforcement off",
+    };
+  }
+
+  // (a) Local capability check — load from the store + JCS-integrity-validate.
+  // Mirrors the gate in CapabilitySession.loadValidCached() so this probe
+  // never reports PASS for a cached token the write path would discard.
+  let capabilityValid = false;
+  let capabilityDetail = "no capability stored for this node";
+  try {
+    const cached = await store.load(nodeUrl);
+    if (cached === null) {
+      capabilityDetail = "no capability stored for this node";
+    } else {
+      const token = decodeCapabilityBlob(cached.blob);
+      if (token === null) {
+        capabilityDetail = "stored capability blob did not decode";
+      } else if (token.app_id !== FBRAIN_APP_ID) {
+        capabilityDetail = `stored capability is for app_id "${token.app_id}", not "${FBRAIN_APP_ID}"`;
+      } else if (!(await tokenIntegrityValid(token))) {
+        capabilityDetail = "stored capability failed JCS integrity check (tampered or stale)";
+      } else {
+        capabilityValid = true;
+      }
+    }
+  } catch (err) {
+    // The store path itself failed (keychain locked, file unreadable, …)
+    // — we can't tell if writes would work or not, so WARN.
+    verbose?.(
+      `write-ready: capability store load threw — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {
+      name: "write-ready",
+      ok: true,
+      tag: "WARN",
+      detail: `could not read capability store: ${err instanceof Error ? err.message : String(err)}`,
+      fix: "check OS keychain access and ~/.fbrain/capabilities.json, then re-run `fbrain doctor`",
+    };
+  }
+  verbose?.(`write-ready: capability=${capabilityValid ? "valid" : `absent (${capabilityDetail})`}`);
+
+  // (b) Node app-registration check — POST request-consent and read the
+  // status. We do NOT poll consent-status (that's an interactive grant).
+  // 202 → app is known; 404 → registry has no fbrain entry; anything else
+  // means we can't decide and the probe degrades to WARN.
+  let registered: boolean;
+  let registrationDetail = "";
+  try {
+    const res = await node.requestConsent(FBRAIN_APP_ID, "wildcard");
+    if (res.status === 202) {
+      registered = true;
+    } else if (res.status === 404) {
+      registered = false;
+      const err = bodyErrorString(res.body);
+      registrationDetail = err ?? "node returned 404 from /api/apps/request-consent";
+    } else {
+      verbose?.(`write-ready: consent dry-run returned HTTP ${res.status} — emitting WARN`);
+      return {
+        name: "write-ready",
+        ok: true,
+        tag: "WARN",
+        detail: `consent dry-run returned HTTP ${res.status}; cannot determine write-readiness`,
+        fix: "inspect the node log; once /api/apps/request-consent responds 202 / 404 cleanly, re-run `fbrain doctor`",
+      };
+    }
+  } catch (err) {
+    verbose?.(
+      `write-ready: consent dry-run threw — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {
+      name: "write-ready",
+      ok: true,
+      tag: "WARN",
+      detail: `consent dry-run threw: ${stripDoctorTip(err instanceof Error ? err.message : String(err))}`,
+      fix: "inspect the node log; the consent endpoint is rejecting fbrain's probe",
+    };
+  }
+
+  // Verdict — registration is the more actionable failure (capability is
+  // moot without it), so it sorts first.
+  if (!registered) {
+    return {
+      name: "write-blocked",
+      ok: false,
+      detail: `node does not recognise app "${FBRAIN_APP_ID}"${registrationDetail ? ` (${registrationDetail})` : ""}`,
+      fix:
+        "the node's app registry has no fbrain entry — every write will fail with `app_not_registered`. " +
+        "Restart the daemon to warm the registry, or wait for the app_identity publish path to land if you're mid-migration " +
+        "(`folddb-dev app publish --id fbrain` on the dev side).",
+    };
+  }
+  if (!capabilityValid) {
+    return {
+      name: "write-blocked",
+      ok: false,
+      detail: capabilityDetail,
+      fix:
+        "run `fbrain init` to grant consent and store a capability (or any write command — they all run the consent handshake on first use). " +
+        "On the daemon side the grant is confirmed with `folddb consent grant fbrain`.",
+    };
+  }
+  return {
+    name: "write-ready",
+    ok: true,
+    detail: "capability cached + JCS-valid for this node; consent dry-run returned 202",
+  };
+}
+
+// --write round-trip probe — the active proof that writes land end-to-end.
+// Puts a sentinel concept under a reserved `doctor-write-roundtrip-<nonce>`
+// slug, reads it back via findBySlug, then soft-deletes in a finally so a
+// thrown error mid-trip still cleans up. Uses the same capability-aware
+// write path the real `fbrain put` uses, so it actually exercises the
+// CapabilitySession → consent → mutate pipeline.
+export async function runWriteRoundtripProbe(
+  cfg: Config,
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  const conceptHash = cfg.schemaHashes.concept;
+  if (!conceptHash) {
+    return {
+      name: "write-roundtrip",
+      ok: false,
+      detail: 'config has no schemaHashes["concept"]',
+      fix: "re-run `fbrain init` so the config picks up all 8 schema hashes",
+    };
+  }
+
+  const nonce = (opts.nonceFn ?? defaultNonce)();
+  const slug = `doctor-write-roundtrip-${nonce}`;
+
+  const wnOpts: WriteNodeClientOptions = {
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+  };
+  if (verbose) wnOpts.verbose = verbose;
+  if (opts.capabilityStore) wnOpts.store = opts.capabilityStore;
+  const { node } = (opts.writeNodeFactory ?? newWriteNodeClient)(wnOpts);
+
+  let created = false;
+  try {
+    const now = nowIso();
+    await node.createRecord({
+      schemaHash: conceptHash,
+      keyHash: slug,
+      fields: {
+        slug,
+        title: `doctor write-roundtrip probe ${nonce}`,
+        body:
+          `Doctor --write round-trip probe. Slug: ${slug}. ` +
+          `Generated by \`fbrain doctor --write\` — safe to delete.`,
+        status: "active",
+        tags: [],
+        created_at: now,
+        updated_at: now,
+      },
+    });
+    created = true;
+
+    const echo = await findBySlug(node, "concept", conceptHash, slug);
+    if (!echo) {
+      return {
+        name: "write-roundtrip",
+        ok: false,
+        detail: `wrote ${slug} but a subsequent read returned null`,
+        fix: "the create reported success but the record isn't readable — inspect the node log",
+      };
+    }
+    return {
+      name: "write-roundtrip",
+      ok: true,
+      detail: `put → get → soft-delete round-trip succeeded under slug "${slug}"`,
+    };
+  } catch (err) {
+    return {
+      name: "write-roundtrip",
+      ok: false,
+      detail: stripDoctorTip(err instanceof Error ? err.message : String(err)),
+      fix: "the round-trip write failed — see the error above and the node log; check `fbrain doctor` for the write-ready / consent status",
+    };
+  } finally {
+    if (created) {
+      try {
+        const cleanupFields = buildTombstoneFields("concept", slug, nowIso(), nowIso());
+        await node.updateRecord({ schemaHash: conceptHash, fields: cleanupFields, keyHash: slug });
+      } catch (err) {
+        verbose?.(
+          `write-roundtrip cleanup failed for ${slug}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+}
+
+function bodyErrorString(body: unknown): string | undefined {
+  if (body && typeof body === "object" && "error" in body) {
+    const v = (body as Record<string, unknown>).error;
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
 }
