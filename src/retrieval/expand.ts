@@ -149,7 +149,11 @@ export function parseExpansions(raw: string, count: number): string[] {
     const cleaned = line
       .replace(/^\s*[-*•]\s+/, "")
       .replace(/^\s*\d+[.)]\s+/, "")
-      .replace(/^["'`]+|["'`]+$/g, "")
+      // Leading-whitespace allowance matches the bullet/number patterns above
+      // so an indented quoted phrasing like `  "foo"` doesn't survive with a
+      // leftover leading `"` after the trailing-quote half of the alternation
+      // strips on its own.
+      .replace(/^\s*["'`]+|["'`]+$/g, "")
       .trim();
     if (cleaned.length === 0) continue;
     out.push(cleaned);
