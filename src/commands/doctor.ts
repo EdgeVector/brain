@@ -39,6 +39,7 @@
 // Exit code 0 on all-green, 1 if any check fails.
 
 import {
+  CERT_REQUIRED_HINT,
   FbrainError,
   newNodeClient,
   newSchemaServiceClient,
@@ -51,6 +52,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { tryReadConfig, type Config } from "../config.ts";
+import { DEFAULT_SCHEMA_SERVICE_URL } from "./init.ts";
 import {
   findBySlug,
   nowIso,
@@ -138,6 +140,14 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       detail: "no ~/.fbrain/config.json",
       fix: "run `fbrain init`",
     });
+    // Break the init↔doctor dead-end: if init's step 3 keeps failing with
+    // `401 cert_required`, the user has no config to load — pre-this-PR
+    // doctor stopped here and told them to re-run init, which would loop
+    // forever. Probe the schema-service publish gate independently so the
+    // real cause surfaces with an actionable remedy instead of bouncing
+    // them back to a command that can't succeed.
+    const probe = await runSchemaPublishGateProbe(opts, verbose);
+    if (probe) checks.push(probe);
     return finalize(checks, print);
   }
   const cfgIssues = validateConfigShape(cfg);
@@ -1193,6 +1203,66 @@ export async function runWriteRoundtripProbe(
         );
       }
     }
+  }
+}
+
+// Schema-service publish-gate probe used when there is no config yet (init
+// hasn't completed). Issues one POST /v1/schemas against the configured
+// schema service and translates the discriminated `cert_required` response
+// into a structured FAIL with the same remedy text the init error carries.
+// Other outcomes are squashed to a single WARN so the probe never overstates
+// confidence on a network-flaky run — the real publish path is `fbrain init`.
+//
+// `schemaClientFactory` (from opts) lets tests stub the schema service; in
+// production we use the default factory pointed at the URL from opts.nodeUrl
+// / opts.schemaServiceUrl or the init defaults when the user has no config.
+export async function runSchemaPublishGateProbe(
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): Promise<CheckResult | null> {
+  const url = DEFAULT_SCHEMA_SERVICE_URL;
+  const factory = opts.schemaClientFactory ?? newSchemaServiceClient;
+  const client = factory(url, verbose);
+  // Pick a fbrain-namespaced schema with a stable hash; any of the 8 schemas
+  // would trip the same cert_required gate, since the schema service checks
+  // for a DevCert before deciding the operation is idempotent.
+  const probe = UNIQUE_SCHEMAS.find((s) => s.key === "design") ?? UNIQUE_SCHEMAS[0];
+  if (!probe) return null;
+  try {
+    await client.registerSchema(probe.schema);
+    // Should not normally land here without a config — init would have
+    // written one after a successful register. Silent PASS keeps doctor
+    // honest: if the probe succeeded, the publish gate isn't blocking.
+    verbose?.(`schema-publish-gate: probe unexpectedly succeeded`);
+    return {
+      name: "schema-publish-gate",
+      ok: true,
+      detail: `schema service at ${url} accepted a fbrain/* publish — re-run \`fbrain init\` to finish onboarding`,
+    };
+  } catch (err) {
+    if (err instanceof FbrainError && err.code === "schema_cert_required") {
+      verbose?.(`schema-publish-gate: cert_required FAIL`);
+      return {
+        name: "schema-publish-gate",
+        ok: false,
+        detail:
+          `schema service at ${url} requires a DevCert to (re)publish fbrain/* ` +
+          `(cert_required) — \`fbrain init\` cannot complete without it`,
+        fix: CERT_REQUIRED_HINT,
+      };
+    }
+    // Anything else (schema service unreachable, 5xx, unknown 401 body) —
+    // emit a WARN so the user sees we tried, without claiming we know what's
+    // wrong. The probe is a diagnostic, not a verdict.
+    verbose?.(
+      `schema-publish-gate: probe inconclusive — ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return {
+      name: "schema-publish-gate",
+      ok: true,
+      tag: "WARN",
+      detail: `could not probe schema service at ${url}: ${stripDoctorTip(err instanceof Error ? err.message : String(err))}`,
+    };
   }
 }
 

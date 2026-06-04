@@ -466,10 +466,112 @@ describe("doctor verdict logic", () => {
     const code = await doctor({
       configPath: join(dir, "config.json"),
       print: (l) => lines.push(l),
+      // Stub the publish-gate probe so this test stays a unit test (no
+      // network). The probe's own behavior is covered by the two tests
+      // below; here we just confirm the no-config FAIL still surfaces.
+      schemaClientFactory: () => ({
+        baseUrl: "mock",
+        async registerSchema() {
+          return { canonicalHash: "x", status: 200, replacedSchema: null };
+        },
+        async listSchemas() {
+          return { ok: true };
+        },
+        async getSchemaByHash() {
+          return null;
+        },
+        async rawCall() {
+          return { status: 200, headers: new Headers(), body: "", json: null };
+        },
+      }),
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("FAIL"))).toBe(true);
     expect(lines.some((l) => l.includes("fbrain init"))).toBe(true);
+  });
+
+  test("missing config + schema service returns cert_required → FAIL schema-publish-gate with remedy", async () => {
+    // Init↔doctor dead-end regression. Pre-this-PR, when init's step 3 kept
+    // failing with `401 cert_required`, no config was ever written and
+    // doctor stopped at "no ~/.fbrain/config.json → run `fbrain init`",
+    // bouncing the user back to the command that can't succeed. Doctor now
+    // probes the schema-service publish gate independently so the real
+    // cause surfaces with an actionable remedy.
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-doctor-cert-"));
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath: join(dir, "config.json"),
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => ({
+        baseUrl: "mock",
+        async registerSchema() {
+          throw new FbrainError({
+            code: "schema_cert_required",
+            message:
+              "Schema service /v1/schemas rejected publish with 401 cert_required — " +
+              "registering fbrain's namespaced schemas requires a one-time DevCert " +
+              "publish by a maintainer (this is expected for a fresh consumer) — " +
+              "run `fbrain doctor` for a full diagnosis.",
+            hint: "see CERT_REQUIRED_HINT",
+          });
+        },
+        async listSchemas() {
+          return { ok: true };
+        },
+        async getSchemaByHash() {
+          return null;
+        },
+        async rawCall() {
+          return { status: 200, headers: new Headers(), body: "", json: null };
+        },
+      }),
+    });
+    expect(code).toBe(1);
+    // No config FAIL line stays.
+    expect(lines.some((l) => l.includes("[FAIL] config"))).toBe(true);
+    // New publish-gate FAIL surfaces the real cause.
+    const gateLine = lines.find((l) => l.includes("[FAIL] schema-publish-gate"));
+    expect(gateLine).toBeDefined();
+    expect(gateLine!).toContain("cert_required");
+    expect(gateLine!).toContain("DevCert");
+    // The fix hint names a concrete remedy, not "re-run fbrain init".
+    expect(lines.some((l) => l.includes("FBRAIN_APP_IDENTITY_ENFORCE=off"))).toBe(true);
+    expect(lines.some((l) => l.includes("maintainer"))).toBe(true);
+  });
+
+  test("missing config + schema service unreachable → WARN schema-publish-gate", async () => {
+    // Inconclusive probes (network down, unexpected 5xx, …) must not become
+    // a FAIL — that'd flip the verdict to red on a transient connectivity
+    // issue. WARN keeps the no-config FAIL as the sole verdict driver.
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-doctor-warn-"));
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath: join(dir, "config.json"),
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => ({
+        baseUrl: "mock",
+        async registerSchema() {
+          throw new FbrainError({
+            code: "service_unreachable",
+            message: "schema service not reachable at https://example/v1 — run `fbrain doctor` for a full diagnosis.",
+          });
+        },
+        async listSchemas() {
+          return { ok: true };
+        },
+        async getSchemaByHash() {
+          return null;
+        },
+        async rawCall() {
+          return { status: 200, headers: new Headers(), body: "", json: null };
+        },
+      }),
+    });
+    expect(code).toBe(1); // still 1 because of the no-config FAIL
+    const warnLine = lines.find((l) => l.includes("[WARN] schema-publish-gate"));
+    expect(warnLine).toBeDefined();
+    // Circular doctor tip is stripped from the WARN detail.
+    expect(warnLine!).not.toContain("fbrain doctor");
   });
 
   test("invalid hash format → reports config FAIL but doctor keeps going", async () => {
