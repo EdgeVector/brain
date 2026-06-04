@@ -11,23 +11,27 @@ against a live `~/.fbrain/config.json`.
 
 ## A. Register with Claude Code
 
-From the repo root:
-
-```bash
-claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"
-```
-
-This writes an entry to your Claude Code MCP servers list. Restart any
-running Claude Code session so the new server is picked up.
-
-Alternative form once the project is installed globally (`bun link`):
+After the Quick start `bun link` (puts `fbrain-mcp` on your `PATH`),
+from any directory:
 
 ```bash
 claude mcp add fbrain fbrain-mcp
 ```
 
-The `fbrain-mcp` binary is published from `package.json`'s `bin` field
-and points at `src/mcp/main.ts`.
+This writes an entry to your Claude Code MCP servers list. Restart any
+running Claude Code session so the new server is picked up. The
+`fbrain-mcp` binary is published from `package.json`'s `bin` field and
+points at `src/mcp/main.ts`.
+
+Running from a source checkout without `bun link`? From the repo root:
+
+```bash
+claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"
+```
+
+That form bakes an absolute path to this clone into the MCP config —
+move or delete the clone and the registration breaks. Prefer the
+linked-binary form above.
 
 ## B. Verify the tools are discoverable
 
