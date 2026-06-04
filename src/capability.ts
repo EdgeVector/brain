@@ -377,6 +377,18 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
           message: "consent-status returned a capability that did not decode as a CapabilityToken.",
         });
       }
+      // Audience binding: the issued token must be bound to the app we asked
+      // for. `loadValidCached` enforces the same invariant on reuse, but the
+      // acquire path was trusting the response unchecked — a mismatch would
+      // get stored and replayed once before the next session caught it.
+      if (token.app_id !== appId) {
+        throw new FbrainError({
+          code: "consent_status_app_id_mismatch",
+          message:
+            `consent-status returned a capability bound to app "${token.app_id}", ` +
+            `but "${appId}" was requested.`,
+        });
+      }
       const stored: StoredCapability = {
         appId,
         nodeUrl: opts.nodeUrl,

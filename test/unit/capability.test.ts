@@ -233,6 +233,35 @@ describe("first-run consent acquisition", () => {
       }),
     ).rejects.toMatchObject({ code: "consent_timeout" });
   });
+
+  // Audience binding on acquire: the consent-status response is an external API
+  // boundary, and the only field that ties the issued capability to *this* app
+  // is the embedded `token.app_id`. If the node ever hands back a capability
+  // bound to a different app — a node-side bug, a request_id mix-up under load,
+  // or a substituted response — fbrain must reject it on the spot rather than
+  // store + replay it. (`loadValidCached` catches the mismatch on the *next*
+  // session start, but the in-flight session would happily adopt the wrong
+  // blob and burn a write attempt on an opaque node 403.)
+  test("rejects an acquired capability whose token.app_id does not match the request", async () => {
+    const wrongAppBlob = await mintTokenBlob({ appId: "other-app" });
+    const store = inMemoryCapabilityStore();
+    await expect(
+      acquireCapability({
+        appId: "fbrain",
+        nodeUrl: NODE_URL,
+        store,
+        transport: mockTransport({
+          consentStatus: () => ({ status: 200, body: { status: "granted", capability: wrongAppBlob } }),
+        }),
+        print: () => {},
+        pollIntervalMs: 1,
+        sleep: noSleep,
+      }),
+    ).rejects.toMatchObject({ code: "consent_status_app_id_mismatch" });
+    // Nothing got persisted — a future ensureCapability won't replay the bad
+    // blob, it'll restart the consent handshake clean.
+    expect(await store.load(NODE_URL)).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
