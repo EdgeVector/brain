@@ -18,8 +18,11 @@ export type FormatTableOptions = {
 };
 
 // Format a 2D grid into per-row strings with columns sized to the
-// widest cell in each column. The right-most column is never padded —
-// trailing whitespace on a terminal row is just visual noise.
+// widest cell in each column. Left-aligned cells in the right-most
+// column are not padded — padEnd would add trailing whitespace and a
+// terminal row doesn't need it. Right-aligned cells use padStart, which
+// only adds leading whitespace inside the column slot, so the right
+// edges still line up without trailing noise.
 //
 // Empty input returns an empty array; a row with fewer cells than the
 // widest row is padded with "" on the right.
@@ -51,11 +54,17 @@ export function formatTable(
     const parts: string[] = [];
     for (const c of keptCols) {
       const cell = row[c] ?? "";
-      if (c === lastKept) {
+      const align = options.align?.[c] ?? "left";
+      if (align === "right") {
+        // padStart adds spaces on the LEFT, so right-aligning the last
+        // column still doesn't introduce trailing whitespace.
+        parts.push(cell.padStart(widths[c]!));
+      } else if (c === lastKept) {
+        // Left-align on the last column skips padding — padEnd would
+        // add trailing whitespace and a terminal row doesn't need it.
         parts.push(cell);
       } else {
-        const align = options.align?.[c] ?? "left";
-        parts.push(align === "right" ? cell.padStart(widths[c]!) : cell.padEnd(widths[c]!));
+        parts.push(cell.padEnd(widths[c]!));
       }
     }
     return parts.join(gap);
