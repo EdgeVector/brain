@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // fbrain MCP server entrypoint — speaks the Model Context Protocol over
-// stdio. Register with Claude Code:
-//   claude mcp add fbrain bun /path/to/fbrain/src/mcp/main.ts
-// or as a `bin` (after install):
+// stdio. Register with Claude Code (after `bun link` from the README
+// Quick start, which puts `fbrain-mcp` on PATH):
 //   claude mcp add fbrain fbrain-mcp
+// Running from a source checkout without `bun link`? Path-based fallback:
+//   claude mcp add fbrain bun /path/to/fbrain/src/mcp/main.ts
 //
 // Reads ~/.fbrain/config.json (same as the CLI). Exits non-zero if the
 // config is missing — surface the error to the MCP client logs.

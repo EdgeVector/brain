@@ -342,7 +342,12 @@ in-process:
   read:  fbrain_search, fbrain_get, fbrain_list
   write: fbrain_put,    fbrain_delete, fbrain_link
 
-Register with Claude Code:
+Register with Claude Code (after \`bun link\` from the Quick start):
+  claude mcp add fbrain fbrain-mcp
+
+The \`fbrain-mcp\` bin is global once linked, so the command works from
+any directory. Running from a source checkout without \`bun link\`? Use
+the path-based form from the repo root:
   claude mcp add fbrain bun $(realpath src/mcp/main.ts)
 
 The server reads ~/.fbrain/config.json (same as the CLI). Exits non-zero

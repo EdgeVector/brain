@@ -338,12 +338,16 @@ The script retries each `get` up to five times (250 ms backoff) to ride out the 
 fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Six tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`.
 
 ```bash
-# Register fbrain with Claude Code (one-time, after `bun install`):
-claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"
+# Register fbrain with Claude Code (one-time, after the Quick start `bun link`):
+claude mcp add fbrain fbrain-mcp
 
 # Or run the server standalone (useful for testing with @modelcontextprotocol/inspector):
-bun run src/mcp/main.ts
+fbrain-mcp
 ```
+
+`bun link` (Quick start step 1) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting the clone.
+
+> **From a source checkout without `bun link`?** Use the path-based form from the repo root: `claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"`. This bakes an absolute path to the clone into the MCP config — move or delete the clone and the registration breaks.
 
 The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and re-uses the CLI's existing command functions in-process. See [`docs/mcp-smoketest.md`](docs/mcp-smoketest.md) for end-to-end verification (ask Claude to search, put, delete, link).
 
