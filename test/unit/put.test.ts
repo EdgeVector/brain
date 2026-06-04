@@ -54,6 +54,40 @@ describe("splitFrontmatter", () => {
     expect(r.frontmatter).toBe("type: design");
     expect(r.body).toBe("the body");
   });
+
+  // Pre-fix, an opened-but-not-closed frontmatter silently fell through to
+  // `frontmatter=null, body=<entire input verbatim>` — so the YAML-looking
+  // keys above the missing close fence were dropped from the parse AND
+  // pollute the body. A scripted put with `--type` set then wrote a record
+  // whose body contained literal `---\ntype: X\n…` text. Refuse instead.
+  test("opening `---` with no closing fence throws frontmatter_unclosed", () => {
+    expect(() =>
+      splitFrontmatter("---\ntype: concept\ntitle: My Thing\nbody after\n"),
+    ).toThrow(FbrainError);
+    expect(() =>
+      splitFrontmatter("---\ntype: concept\ntitle: My Thing\nbody after\n"),
+    ).toThrow(/frontmatter/i);
+  });
+
+  test("opening `---` alone (no closing, no content) throws frontmatter_unclosed", () => {
+    expect(() => splitFrontmatter("---\n")).toThrow(FbrainError);
+  });
+
+  test("CRLF opening with no closing also throws", () => {
+    expect(() =>
+      splitFrontmatter("---\r\ntype: design\r\nbody\r\n"),
+    ).toThrow(FbrainError);
+  });
+
+  // Empty frontmatter (`---\n---\n`) parses to an empty frontmatter string
+  // and a normal body. Pre-fix this fell through to "no frontmatter" and
+  // the fences leaked into the body — a minor sibling of the missing-close
+  // bug above, fixed by the same rewrite.
+  test("empty frontmatter (open then immediately close) → empty string + body", () => {
+    const r = splitFrontmatter("---\n---\nthe body\n");
+    expect(r.frontmatter).toBe("");
+    expect(r.body).toBe("the body");
+  });
 });
 
 describe("parseFrontmatter", () => {
@@ -510,6 +544,28 @@ describe("putCmd — pre-request validation + dispatch", () => {
     await expect(
       putCmd({ cfg, slug: "ws-only", input: "   \n\n  \n" }),
     ).rejects.toMatchObject({ code: "empty_stdin" });
+    expect(touched).toBe(false);
+  });
+
+  // Regression for the missing-closing-fence bug: pre-fix, this input plus a
+  // CLI `--type` override silently wrote a record whose body contained the
+  // unclosed `---` and the YAML-looking metadata, dropping the user's
+  // declared title from the parse. The pre-flight refusal must fire before
+  // any HTTP traffic.
+  test("opened-but-not-closed frontmatter is rejected before any HTTP traffic", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        slug: "unclosed",
+        typeOverride: "concept",
+        input: "---\ntype: concept\ntitle: My Thing\nbody text\n",
+      }),
+    ).rejects.toMatchObject({ code: "frontmatter_unclosed" });
     expect(touched).toBe(false);
   });
 

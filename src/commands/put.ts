@@ -267,12 +267,36 @@ export function splitFrontmatter(input: string): {
   frontmatter: string | null;
   body: string;
 } {
-  // Allow a trailing newline (or none) after the closing `---`.
-  // Don't anchor to the entire string — body may follow.
-  const match = input.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  if (!match) return { frontmatter: null, body: input.replace(/(?:\r?\n)+$/, "") };
-  const frontmatter = match[1] ?? "";
-  const body = input.slice(match[0].length).replace(/(?:\r?\n)+$/, "");
+  // No opening fence → no frontmatter; strip a trailing newline so the body
+  // round-trips cleanly when re-emitted.
+  const opening = input.match(/^---\r?\n/);
+  if (!opening) {
+    return { frontmatter: null, body: input.replace(/(?:\r?\n)+$/, "") };
+  }
+  // Two-step scan (open then close) rather than one big regex so an
+  // opened-but-not-closed fence is detectable. The old single regex used a
+  // lazy `[\s\S]*?\r?\n---` that ALSO required at least one newline of
+  // content between the fences — meaning `---\n---\n` (empty frontmatter)
+  // failed to match too. Both flavors fell through to "no frontmatter,
+  // body = entire input verbatim", which silently dropped the user's
+  // YAML keys and pasted the `---` text into the body — a script that
+  // truncates stdin then writes via `fbrain put <slug> --type X` saw a
+  // record with YAML-looking gunk in its body and no parsed title/type.
+  //
+  // Closing fence may sit at the very start of the remainder (empty
+  // frontmatter) or be preceded by a newline; trailed by a newline or EOF.
+  const after = input.slice(opening[0].length);
+  const close = after.match(/(?:^|\r?\n)---(?:\r?\n|$)/);
+  if (!close) {
+    throw new FbrainError({
+      code: "frontmatter_unclosed",
+      message: "Frontmatter opened with `---` but never closed.",
+      hint: "Add a closing `---` on its own line before the body, or drop the leading `---` if you didn't mean to write frontmatter.",
+    });
+  }
+  const closeStart = close.index!;
+  const frontmatter = after.slice(0, closeStart);
+  const body = after.slice(closeStart + close[0].length).replace(/(?:\r?\n)+$/, "");
   return { frontmatter, body };
 }
 
