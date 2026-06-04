@@ -199,7 +199,7 @@ of silently dropping.
 
 The LLM key is read from \$ANTHROPIC_API_KEY (preferred) or an
 optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
-  doctor: `fbrain doctor [--freshness] [--usage [--usage-window N] [--usage-path PATH]]
+  doctor: `fbrain doctor [--freshness] [--write] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
   - config valid (~/.fbrain/config.json + hex-64 hashes)
@@ -207,12 +207,21 @@ Live health checks:
   - node reachable + provisioned
   - schemas loaded into the node
   - schema drift between schemas.ts and the registered Design/Task schemas
+  - write-ready: a valid CapabilityToken is cached for this node AND
+    the node's app registry knows fbrain (a consent dry-run returns 202
+    rather than 404). FAIL is reported as "write-blocked" with a
+    next-step hint — distinguishes a missing grant from a cold registry.
 
 With --freshness, additionally runs the G3 retrieval-quality probes
 (see docs/phase-7-search-latency-spike.md):
   - freshness-probe: 5 trials of put → search assert score ≥ 0.5
   - pollution-probe: one broad query, classify hits as live / stale /
     orphan-schema. PASS at <25% polluted, WARN at 25-50%, FAIL above.
+
+With --write, additionally runs an idempotent put → get → soft-delete
+round-trip under a reserved \`doctor-write-roundtrip-<nonce>\` slug to
+prove writes actually land. OFF by default so plain \`fbrain doctor\`
+never mutates.
 
 With --usage, skips the health checks and prints a team-adoption
 telemetry report: write count by userHash (8-char prefix only)
@@ -384,6 +393,7 @@ const DOCTOR_OPTIONS = {
   usage: { type: "boolean", default: false },
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
+  write: { type: "boolean", default: false },
 } as const;
 const DELETE_OPTIONS = {
   type: { type: "string" },
@@ -951,6 +961,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   const dOpts: Parameters<typeof doctor>[0] = {};
   if (verbose) dOpts.verbose = verbose;
   if (values.freshness) dOpts.freshness = true;
+  if (values.write) dOpts.write = true;
   if (values.usage) {
     dOpts.usage = true;
     const windowArg = values["usage-window"];
