@@ -61,28 +61,44 @@ fbrain init                           # 5 steps; writes ~/.fbrain/config.json
                                       #  to the new cloud-Lambda default)
 ```
 
-### One-time consent grant (first write)
+### One-time consent grant (handled by `init`)
 
-fbrain is an **app** under fold_db's app-identity model, so your **first write**
-triggers a one-time consent handshake — the node owner (you) approves fbrain
-acting on your data. The write command prints:
+fbrain is an **app** under fold_db's app-identity model: the node owner (you)
+approves fbrain acting on your data with a one-time consent grant. **`fbrain init`
+now does this inline as its final step**, so the happy path needs no second
+terminal. After registering schemas, `init` prints:
+
+```
+[6/6] establishing consent (one-time grant for fbrain's namespace)
+fbrain wants read/write access to its namespace on this node. Grant now? [Y/n]
+```
+
+Press `y` and `init` shells out to `folddb consent grant fbrain --yes` for you
+(the `folddb` CLI ships in the same Homebrew formula, so it's already on your
+PATH), then waits until the capability is cached in your keychain. When `init`
+returns you have a ready-to-write capability — your first `fbrain put` /
+`design new` lands immediately. Re-running `init` is idempotent: it skips the
+prompt when a live capability already exists. (Running a local/dev node with
+`APP_IDENTITY_ENFORCE` off? Set `FBRAIN_APP_IDENTITY_ENFORCE=off` to skip
+consent entirely; writes land as NodeOwner.)
+
+**Fallback — granting from a second terminal.** You'll only hit this if you
+declined `init`'s prompt, ran `init` non-interactively (CI/scripts), or your
+capability was later revoked. In those cases the next write stalls with:
 
 ```
 First-run setup — run: `folddb consent grant fbrain` in your terminal.
 Waiting for you to grant access to this node (polling every 2s)…
 ```
 
-…and waits. **In a second terminal**, approve it once:
+Re-run `fbrain init` and accept the grant, or approve it once in a second
+terminal:
 
 ```bash
 folddb consent grant fbrain           # review the request, then `y` (or pass --yes)
 ```
 
-The original command then unblocks and the write lands. The granted capability
-is cached in your keychain, so every later write is silent — you only do this
-once per machine. (Running a local/dev node with `APP_IDENTITY_ENFORCE` off?
-Set `FBRAIN_APP_IDENTITY_ENFORCE=off` to skip consent entirely; writes land as
-NodeOwner.)
+The waiting command then unblocks and the write lands.
 
 ```bash
 # 3. drive it
@@ -372,7 +388,7 @@ schema service with `--node-url` / `--schema-service-url` on `fbrain init`
 Top errors you'll hit and the fix:
 
 - **Your first write hangs at `First-run setup — run: \`folddb consent grant fbrain\` … Waiting for you to grant access…`**  
-  This is expected, not a bug — fbrain is an app under fold_db's app-identity model and your first write needs a one-time consent grant. Leave the command waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-first-write). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
+  Rare now that `fbrain init` grants consent inline — you'll only see this if you declined init's consent prompt, ran `init` non-interactively, or your capability was revoked. Easiest fix: re-run `fbrain init` (idempotent) and accept the grant. Otherwise leave the write waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-handled-by-init). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
 
 - **`error: node not reachable at http://127.0.0.1:9001 — run \`fbrain doctor\` for a full diagnosis.`**  
   The homebrew `fold_db_node` daemon isn't running. Check with `brew services list` (look for `folddb` → `started`) and start it with `brew services start folddb` (or `folddb daemon start` if you prefer the foreground path). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
