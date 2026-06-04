@@ -83,6 +83,41 @@ describe("formatTable", () => {
     expect(out[1]).toContain("vec=4  Title B");
   });
 
+  test("honors align:right on the right-most kept column (no trailing whitespace)", () => {
+    // Regression: formatTable used to unconditionally skip padding for the
+    // last kept column to avoid trailing whitespace. That was correct for
+    // left-align (padEnd would add trailing spaces) but silently dropped
+    // right-align — padStart adds LEADING whitespace within the column's
+    // slot, so a numeric rightmost column should still right-align.
+    //
+    // Concrete repro: a 1-column score table with align:["right"] returned
+    // ["10", "5"] (left-aligned) instead of ["10", " 5"] (right edges
+    // align at column 1).
+    const out = formatTable(
+      [["10"], ["5"]],
+      { align: ["right"] },
+    );
+    expect(out).toEqual(["10", " 5"]);
+    // Right-alignment must not introduce TRAILING whitespace — only leading.
+    for (const line of out) expect(line).toBe(line.trimEnd());
+  });
+
+  test("honors align:right on a multi-column table's last column", () => {
+    // Right edges of the rightmost column align — "5" sits below the "0"
+    // of "100", not below the "1". The non-last "right" column (col 1)
+    // also right-aligns, matching the pre-existing behavior.
+    const out = formatTable(
+      [
+        ["alpha", "1", "100"],
+        ["bb", "20", "5"],
+      ],
+      { align: ["left", "right", "right"] },
+    );
+    expect(out[0]).toBe("alpha   1  100");
+    expect(out[1]).toBe("bb     20    5");
+    for (const line of out) expect(line).toBe(line.trimEnd());
+  });
+
   test("dynamic width handles the worst real-world slug length", () => {
     // The 54-char slug from the dogfood repro — the previous
     // `padEnd(28)` would have made every following column drift.
