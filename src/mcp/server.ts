@@ -42,9 +42,15 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Search fbrain",
       description:
-        "Semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Returns one line per match: `slug · score · type · title`.",
+        "Semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`.",
       inputSchema: {
         query: z.string().min(1).describe("Search query."),
+        type: typeEnum
+          .array()
+          .optional()
+          .describe(
+            "Restrict results to one or more record types. Omit to search all types.",
+          ),
         limit: z
           .number()
           .int()
@@ -71,6 +77,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       if (typeof args.limit === "number") sOpts.limit = args.limit;
       if (args.exact === true) sOpts.exact = true;
       if (typeof args.min_score === "number") sOpts.minScore = args.min_score;
+      if (args.type && args.type.length > 0) sOpts.types = args.type as RecordType[];
       try {
         await searchCmd(sOpts);
       } catch (err) {
