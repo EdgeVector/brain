@@ -24,26 +24,66 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 
 ## Prerequisites
 
+You only need two things to **download and use** fbrain — Bun and a running
+`fold_db_node`. No Rust toolchain, no building from source.
+
 - **Bun** ≥ 1.3.10 — `bun --version`.
-- **Rust toolchain** — only used by fold_db, but its first `./run.sh` invocation compiles the full Rust workspace. **Allow several minutes for the cold build** (cargo target/ is shared across runs once warmed). Subsequent runs are near-instant. `fbrain init` will print a "compiling Rust — give it a few minutes" hint and back off with retries if it hits the node before it's listening.
-- **A running `fold_db_node`** — fbrain defaults to the homebrew daemon at `http://127.0.0.1:9001`. The schema service is the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com` (no local schema_service to run; iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`). Override either with `--node-url` / `--schema-service-url` on `fbrain init` (e.g. to point at a worktree-spawned `./run.sh --local --dev` checkout).
+- **A running `fold_db_node`** — install the prebuilt daemon from the Homebrew tap (no Rust toolchain, no compile step):
+  ```bash
+  brew install edgevector/folddb/folddb   # one-time
+  folddb daemon start                     # serves the node on :9001
+  ```
+  fbrain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade folddb`, run `folddb daemon stop && folddb daemon start` so the new binary takes over the port.
+- **Network access to the schema service** — fbrain registers its 8 schemas with the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com`. There is **no local schema_service to run**. (Iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`.)
+
+> **Contributing to fold_db itself?** Instead of the Homebrew binary you can run a worktree-local node from source with `./run.sh` — that path *does* need a Rust toolchain and a multi-minute cold build the first time (cargo `target/` is shared once warmed). Point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`; `fbrain init` prints a "compiling Rust — give it a few minutes" hint and retries while the node comes up. Override either endpoint with `--node-url` / `--schema-service-url` on `fbrain init`.
 
 ## Quick start
 
-Assuming the homebrew `fold_db_node` daemon is running on `:9001` and you have
-network access to the prod schema-service Lambda, you'll be at "first record"
-in under a minute.
+From a clean machine to your first record in a few minutes (most of it is the
+one-time installs):
 
 ```bash
-# 1. install, link (one-time)
+# 0. install + start fold_db (one-time; prebuilt binary, no Rust)
+brew install edgevector/folddb/folddb
+folddb daemon start                   # serves the node on :9001
+
+# 1. install fbrain + link (one-time)
 git clone https://github.com/EdgeVector/fbrain && cd fbrain
 bun install
 bun link                              # exposes a global `fbrain` binary
 
-# 2. bootstrap + drive it
+# 2. bootstrap
 fbrain init                           # 5 steps; writes ~/.fbrain/config.json
                                       # (auto-heals a stale local-schema config
                                       #  to the new cloud-Lambda default)
+```
+
+### One-time consent grant (first write)
+
+fbrain is an **app** under fold_db's app-identity model, so your **first write**
+triggers a one-time consent handshake — the node owner (you) approves fbrain
+acting on your data. The write command prints:
+
+```
+First-run setup — run: `folddb consent grant fbrain` in your terminal.
+Waiting for you to grant access to this node (polling every 2s)…
+```
+
+…and waits. **In a second terminal**, approve it once:
+
+```bash
+folddb consent grant fbrain           # review the request, then `y` (or pass --yes)
+```
+
+The original command then unblocks and the write lands. The granted capability
+is cached in your keychain, so every later write is silent — you only do this
+once per machine. (Running a local/dev node with `APP_IDENTITY_ENFORCE` off?
+Set `FBRAIN_APP_IDENTITY_ENFORCE=off` to skip consent entirely; writes land as
+NodeOwner.)
+
+```bash
+# 3. drive it
 fbrain design new my-first-design --title "First design" --tag spike --body "the body that gets embedded"
 fbrain task new t1 --design my-first-design --title "first task"
 
@@ -328,6 +368,9 @@ schema service with `--node-url` / `--schema-service-url` on `fbrain init`
 ## Troubleshooting
 
 Top errors you'll hit and the fix:
+
+- **Your first write hangs at `First-run setup — run: \`folddb consent grant fbrain\` … Waiting for you to grant access…`**  
+  This is expected, not a bug — fbrain is an app under fold_db's app-identity model and your first write needs a one-time consent grant. Leave the command waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-first-write). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
 
 - **`error: node not reachable at http://127.0.0.1:9001 — run \`fbrain doctor\` for a full diagnosis.`**  
   The homebrew `fold_db_node` daemon isn't running. Start it (typically `folddb daemon start` or whatever your install procedure is). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
