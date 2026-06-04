@@ -236,6 +236,51 @@ describe("client error mapping", () => {
     expect(r.canonicalHash).toBe("deadbeef");
   });
 
+  test("schema service POST 401 cert_required → schema_cert_required with actionable hint", async () => {
+    // App-identity v3.1 publish gate: POSTing an `owner_app_id`-tagged schema
+    // without a DevCert is rejected `401 {"reason":"cert_required"}`. A fresh
+    // consumer following the docs (download fbrain → run init against the
+    // prod schema service) hits this every time, since the canonical hashes
+    // are already published by the maintainer. Without the discriminated
+    // mapping the user just sees "HTTP 401 — run fbrain doctor" and runs in
+    // a loop. Pin the friendly mapping.
+    installMock([{ status: 401, body: { reason: "cert_required" } }]);
+    const c = newSchemaServiceClient("https://schema.example/v1");
+    try {
+      await c.registerSchema({
+        schema: {
+          name: "Design",
+          owner_app_id: "fbrain",
+          descriptive_name: "Design",
+          schema_type: "Hash",
+          key: { hash_field: "slug" },
+          fields: ["slug"],
+          field_types: { slug: "String" },
+          field_descriptions: { slug: "x" },
+          field_data_classifications: {
+            slug: { sensitivity_level: 0, data_domain: "general" },
+          },
+        },
+        mutation_mappers: {},
+      });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("schema_cert_required");
+      // Message names the gate and the cause.
+      expect(fe.message).toContain("cert_required");
+      expect(fe.message).toContain("DevCert");
+      expect(fe.message).toContain("fresh consumer");
+      // No raw "HTTP 401" wording — that's the dead-end the brief calls out.
+      expect(fe.message).not.toMatch(/returned HTTP 401/);
+      // Hint includes all three remedy paths (a/b/c).
+      expect(fe.hint ?? "").toContain("254c4");
+      expect(fe.hint ?? "").toContain("maintainer");
+      expect(fe.hint ?? "").toContain("FBRAIN_APP_IDENTITY_ENFORCE=off");
+    }
+  });
+
   test("schema service POST without schema.name throws schema_register_no_hash", async () => {
     installMock([{ status: 201, body: { something: "weird" } }]);
     const c = newSchemaServiceClient("http://127.0.0.1:9102");

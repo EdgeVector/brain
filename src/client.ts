@@ -816,9 +816,42 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
   });
 }
 
-function mapSchemaServiceError(res: Response, body: unknown, path: string): FbrainError {
+// Shared explanation + remedy text for the schema-service publish gate, used
+// from both `mapSchemaServiceError` (init's step 3 raw error) and
+// `runSchemaPublishGateProbe` (doctor's stand-alone diagnosis). Keeping a
+// single source so the two surfaces never drift.
+export const CERT_REQUIRED_HINT =
+  "fbrain's 8 schemas under `fbrain/*` are namespaced — POSTing them to the " +
+  "schema service requires a DevCert held by a maintainer (per app_identity v3.1). " +
+  "A fresh consumer is expected to skip publishing entirely; this is filed upstream as " +
+  "fold task #254c4 (idempotent re-POST should be cert-free). " +
+  "Remedies, any one of: " +
+  "(a) wait for / pull the fold fix above so re-POST is cert-free; " +
+  "(b) ask a maintainer with a DevCert to run `fbrain init` once against this schema service so the canonical hashes are published; " +
+  "(c) for a local/dev node, set FBRAIN_APP_IDENTITY_ENFORCE=off and point at a node with APP_IDENTITY_ENFORCE off to skip the publish step.";
+
+export function mapSchemaServiceError(res: Response, body: unknown, path: string): FbrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
+  const reason = bodyStringField(body, "reason");
+  // App-identity v3.1 publish gate. The schema service rejects an
+  // `owner_app_id`-tagged schema POST from a caller without a DevCert with
+  // `401 {"reason":"cert_required"}`. For fbrain — whose 8 schemas under
+  // `fbrain/*` are pre-published org-wide — this is the canonical "fresh
+  // consumer following the documented path" failure: re-POSTing canonical
+  // hashes requires publish authority the consumer doesn't (and shouldn't) have.
+  // Surface a discriminated code + actionable remedy instead of a raw
+  // "HTTP 401" that gives the user nothing to act on.
+  if (res.status === 401 && reason === "cert_required") {
+    return new FbrainError({
+      code: "schema_cert_required",
+      message:
+        `Schema service ${path} rejected publish with 401 cert_required — ` +
+        `registering fbrain's namespaced schemas requires a one-time DevCert publish ` +
+        `by a maintainer (this is expected for a fresh consumer) ${DOCTOR_TIP}.`,
+      hint: CERT_REQUIRED_HINT,
+    });
+  }
   return new FbrainError({
     code: `schema_http_${res.status}`,
     message: `Schema service ${path} returned HTTP ${res.status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""} ${DOCTOR_TIP}.`,
