@@ -129,6 +129,74 @@ describe("fbrain_search tool", () => {
     expect(res.content[0]!.text).toContain("no matches");
   });
 
+  test("passes type filter through to the underlying client (single + multiple types)", async () => {
+    // The CLI restricts the wire-level search to the requested type's schema
+    // hashes by setting `schemas=<hash>`. Asserting the URL carries exactly
+    // those hashes proves `args.type` was threaded into `sOpts.types` and
+    // through to the client.
+    let lastSearchUrl = "";
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        lastSearchUrl = url;
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+
+    await tools.fbrain_search!({ query: "q", type: ["design"] });
+    expect(lastSearchUrl).toContain(`schemas=${TEST_HASHES.design}`);
+    expect(lastSearchUrl).not.toContain(TEST_HASHES.task);
+
+    await tools.fbrain_search!({ query: "q", type: ["design", "task"] });
+    expect(lastSearchUrl).toContain(TEST_HASHES.design);
+    expect(lastSearchUrl).toContain(TEST_HASHES.task);
+    expect(lastSearchUrl).not.toContain(TEST_HASHES.concept);
+
+    // Sanity check: without `type`, every fbrain schema hash is on the wire.
+    await tools.fbrain_search!({ query: "q" });
+    expect(lastSearchUrl).toContain(TEST_HASHES.design);
+    expect(lastSearchUrl).toContain(TEST_HASHES.task);
+    expect(lastSearchUrl).toContain(TEST_HASHES.concept);
+  });
+
+  test("type filter drops resolved hits whose type isn't requested", async () => {
+    // The shared MEMO schema returns rows for multiple Phase 6 types; the
+    // post-resolve filter in searchCmd should hide rows that aren't in the
+    // requested set. Here we ask for `concept` only — a `design` hit must
+    // not appear in the output.
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "alpha", range: null },
+                value: "fragment",
+                metadata: { score: 0.42, match_type: "semantic" },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha design")] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_search!({ query: "blueberry", type: ["concept"] });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).not.toContain("alpha");
+    expect(text).toContain("no matches");
+  });
+
   test("returns isError=true when the node call fails", async () => {
     installMock(() => ({
       status: 503,
