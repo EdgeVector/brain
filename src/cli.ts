@@ -157,20 +157,20 @@ type's status enum, updates updated_at, and writes back.
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
-  search: `fbrain search <query> [-n N] [--exact] [--min-score F] [--type T]...
+  search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]...
 
 Semantic search across indexed records. Dedupes fragment hits per record
 and skips stale hits (records deleted since indexing). Prints
 \`slug · score · type · title\` per match.
 
-  -n            max results
+  -n, --limit   max results (\`-n\` and \`--limit\` are aliases; last wins)
   --exact       exact-match mode (passes ?exact=true to the index)
   --min-score   server-side score floor (passes ?min_score=F)
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`).
                 One of: design | task | concept | preference | reference |
                 agent | project | spike. Omit to search across all 8 types.`,
-  ask: `fbrain ask <query> [--limit N] [--no-llm] [--explain] [--type T]...
+  ask: `fbrain ask <query> [-n N | --limit N] [--no-llm] [--explain] [--type T]...
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
 fused via Reciprocal Rank Fusion. By default an LLM generates 3 alternative
@@ -178,7 +178,8 @@ phrasings of the query; BM25 + vector run against original + 3 expansions
 and RRF fuses across all 8 lists. The 4-query × 2-ranker design lets
 paraphrase recall ride alongside rare-token / acronym recall.
 
-  --limit N     max results (default 5)
+  -n, --limit N max results (default 5; \`-n\` and \`--limit\` are aliases,
+                last wins)
   --no-llm      skip LLM expansion (BM25 + vector + RRF on the original
                 query only — useful offline or to save tokens).
                 Incompatible with --explain (there is nothing to explain
@@ -368,13 +369,13 @@ const LIST_OPTIONS = {
 } as const;
 const STATUS_OPTIONS = { type: { type: "string" } } as const;
 const SEARCH_OPTIONS = {
-  n: { type: "string" },
+  limit: { type: "string", short: "n" },
   exact: { type: "boolean", default: false },
   "min-score": { type: "string" },
   type: { type: "string", multiple: true },
 } as const;
 const ASK_OPTIONS = {
-  limit: { type: "string" },
+  limit: { type: "string", short: "n" },
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
   type: { type: "string", multiple: true },
@@ -843,7 +844,10 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
+  // `-n` and `--limit` are interchangeable aliases (see ASK_OPTIONS/SEARCH_OPTIONS).
+  // Validate whichever spelling the user typed.
   validatePositiveIntFlag(args, "-n", "invalid_limit");
+  validatePositiveIntFlag(args, "--limit", "invalid_limit");
   const { values, positionals } = parseArgs({
     args,
     strict: true,
@@ -878,7 +882,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
     minScore = n;
   }
   const cfg = readConfig();
-  const limit = values.n ? parseInt(values.n, 10) : undefined;
+  const limit = values.limit ? parseInt(values.limit, 10) : undefined;
   const sOpts: Parameters<typeof searchCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number" && Number.isFinite(limit)) sOpts.limit = limit;
   if (values.exact) sOpts.exact = true;
@@ -889,6 +893,9 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
+  // `-n` and `--limit` are interchangeable aliases. Validate whichever
+  // spelling the user typed.
+  validatePositiveIntFlag(args, "-n", "invalid_limit");
   validatePositiveIntFlag(args, "--limit", "invalid_limit");
   const { values, positionals } = parseArgs({
     args,

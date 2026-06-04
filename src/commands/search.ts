@@ -1,4 +1,4 @@
-// `fbrain search <query> [-n N] [--exact] [--min-score F]` — semantic search
+// `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F]` — semantic search
 // over the native index, with fragment→record resolution.
 //
 // The node's /api/native-index/search returns one row per indexed fragment
