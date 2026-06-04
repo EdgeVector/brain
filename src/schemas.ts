@@ -42,14 +42,36 @@ export function namespacedSchemaName(shortName: string): string {
   return `${OWNER_APP_ID}/${shortName}`;
 }
 
+// Bare-publish variant of an AddSchemaRequest used by remedy (c) of the
+// CERT_REQUIRED_HINT — the FBRAIN_APP_IDENTITY_ENFORCE=off dev escape hatch.
+// Drops `owner_app_id` entirely so the field is OMITTED from the JSON (not
+// sent as ""). The schema service distinguishes the two on the wire: a missing
+// owner_app_id keeps the legacy pre-app-identity passthrough on a stage with
+// no `APP_IDENTITY_ROOT_PUBKEYS` configured (no cert required), while `""`
+// would still be folded into the canonical hash via JCS.
+// On a roots-configured stage the bare publish is rejected with 400
+// `owner_app_id_required` — which is the documented dev-only contract for
+// this path (the hint tells callers to point at a node + schema service that
+// also have app-identity disabled).
+export function withoutOwnerAppId(req: AddSchemaRequest): AddSchemaRequest {
+  const { owner_app_id: _omitted, ...rest } = req.schema;
+  return {
+    schema: rest,
+    mutation_mappers: req.mutation_mappers,
+  };
+}
+
 export type FieldType = "String" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
   // App-identity ownership. The schema_service folds this into the identity
   // hash and stores the schema under the canonical name `{owner_app_id}/{name}`
-  // (= `fbrain/<Name>`). Required for every user schema under v3.1.
-  owner_app_id: string;
+  // (= `fbrain/<Name>`). Set on every user schema under v3.1; the field is
+  // optional in the TS type so the `FBRAIN_APP_IDENTITY_ENFORCE=off` dev path
+  // (`withoutOwnerAppId` + init step 3) can strip it to publish a bare
+  // un-owned variant against a schema service with no app-identity roots.
+  owner_app_id?: string;
   descriptive_name: string;
   // Phase A of dual-signal canonicalization (PR #303): the schema service
   // consults this alongside the structural signal at registration time.
