@@ -28,12 +28,13 @@ You only need two things to **download and use** fbrain — Bun and a running
 `fold_db_node`. No Rust toolchain, no building from source.
 
 - **Bun** ≥ 1.3.10 — `bun --version`.
-- **A running `fold_db_node`** — install the prebuilt daemon from the Homebrew tap (no Rust toolchain, no compile step):
+- **A running `fold_db_node`** — install the prebuilt daemon from the [`edgevector/folddb` Homebrew tap](https://github.com/EdgeVector/homebrew-folddb) (no Rust toolchain, no compile step):
   ```bash
-  brew install edgevector/folddb/folddb   # one-time
-  folddb daemon start                     # serves the node on :9001
+  brew install edgevector/folddb/folddb   # taps + installs `folddb` and `folddb_server`
+  brew services start folddb              # launchd: runs `folddb_server --port 9001` with keep_alive
+  curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
   ```
-  fbrain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade folddb`, run `folddb daemon stop && folddb daemon start` so the new binary takes over the port.
+  fbrain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade folddb`, run `brew services restart folddb` so the new binary takes over the port. (Prefer a foreground daemon for a quick try? `folddb daemon start` also works — `brew services` is just the keep-alive launchd path that survives crashes and reboots.)
 - **Network access to the schema service** — fbrain registers its 8 schemas with the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com`. There is **no local schema_service to run**. (Iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`.)
 
 > **Contributing to fold_db itself?** Instead of the Homebrew binary you can run a worktree-local node from source with `./run.sh` — that path *does* need a Rust toolchain and a multi-minute cold build the first time (cargo `target/` is shared once warmed). Point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`; `fbrain init` prints a "compiling Rust — give it a few minutes" hint and retries while the node comes up. Override either endpoint with `--node-url` / `--schema-service-url` on `fbrain init`.
@@ -46,7 +47,8 @@ one-time installs):
 ```bash
 # 0. install + start fold_db (one-time; prebuilt binary, no Rust)
 brew install edgevector/folddb/folddb
-folddb daemon start                   # serves the node on :9001
+brew services start folddb            # launchd: serves :9001, restarts on crash
+curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
 
 # 1. install fbrain + link (one-time)
 git clone https://github.com/EdgeVector/fbrain && cd fbrain
@@ -373,7 +375,7 @@ Top errors you'll hit and the fix:
   This is expected, not a bug — fbrain is an app under fold_db's app-identity model and your first write needs a one-time consent grant. Leave the command waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-first-write). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
 
 - **`error: node not reachable at http://127.0.0.1:9001 — run \`fbrain doctor\` for a full diagnosis.`**  
-  The homebrew `fold_db_node` daemon isn't running. Start it (typically `folddb daemon start` or whatever your install procedure is). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
+  The homebrew `fold_db_node` daemon isn't running. Check with `brew services list` (look for `folddb` → `started`) and start it with `brew services start folddb` (or `folddb daemon start` if you prefer the foreground path). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
 
 - **`error: Node not set up — run \`fbrain doctor\` for a full diagnosis.`**  
   The node is running but not provisioned. Run `fbrain init`.
