@@ -357,8 +357,18 @@ function yamlScalar(value: string): string {
   if (/^[A-Za-z0-9 _.\-]+$/.test(value) && !value.startsWith(" ") && !value.endsWith(" ")) {
     return value;
   }
-  // Use double quotes, escape embedded quotes and backslashes.
-  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  // Use double quotes, escape embedded quotes and backslashes. Also escape
+  // newlines / CRs as `\n` / `\r` — leaving them raw inside the quotes
+  // pushes the scalar across multiple physical lines, which the
+  // line-based frontmatter parser then reads as `key: "line one` followed
+  // by a continuation line that doesn't match `key: value` and throws
+  // `frontmatter_malformed`. Backslash MUST be escaped first; downstream
+  // `unescapeDoubleQuoted` reverses each pair from left to right.
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r");
   return `"${escaped}"`;
 }
 

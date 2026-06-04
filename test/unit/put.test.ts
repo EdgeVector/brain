@@ -151,6 +151,29 @@ describe("parseFrontmatter", () => {
     expect(r.tags).toEqual(['a"b', "a\\b", 'a"b,c']);
   });
 
+  // Regression companion: `yamlScalar` MCP serializer now escapes embedded
+  // newlines / CRs as `\n` / `\r` so a multi-line scalar doesn't spill
+  // across physical lines and break the line-based parser. The parser side
+  // mirrors `\\` / `\"` un-escape and additionally turns `\n` / `\r` back
+  // into newline / CR. Any other `\X` still passes through.
+  test("double-quoted scalar un-escapes \\n and \\r", () => {
+    const r = parseFrontmatter('title: "line one\\nline two\\r\\nline three"');
+    expect(r.title).toBe("line one\nline two\r\nline three");
+  });
+
+  test("inline tags list un-escapes \\n inside double-quoted scalars", () => {
+    const r = parseFrontmatter('tags: ["with\\nnewline", "plain"]');
+    expect(r.tags).toEqual(["with\nnewline", "plain"]);
+  });
+
+  test("unknown `\\X` escapes still pass through verbatim", () => {
+    // The serializer only emits `\\`, `\"`, `\n`, `\r`. Anything else
+    // (e.g. `\t`) is not part of the subset and round-trips as the
+    // literal backslash + char — matches the prior contract for `\X`.
+    const r = parseFrontmatter('title: "tab\\there"');
+    expect(r.title).toBe("tab\\there");
+  });
+
   test("block tags list", () => {
     const r = parseFrontmatter("tags:\n  - a\n  - b\n  - c");
     expect(r.tags).toEqual(["a", "b", "c"]);

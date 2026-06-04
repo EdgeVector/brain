@@ -566,11 +566,15 @@ function stripQuotes(value: string): string {
   return value;
 }
 
-// Reverse the `yamlScalar` MCP serializer: `\\` → `\`, `\"` → `"`. Pass any
-// other `\X` through unchanged (the serializer never emits them, and YAML's
-// fuller escape table — `\n`, `\t`, `\uXXXX`, … — is out of scope for this
-// subset). Without this, a tag like `a\b` round-trips as `a\\b` and `a"b`
-// round-trips as `a\"b`.
+// Reverse the `yamlScalar` MCP serializer: `\\` → `\`, `\"` → `"`,
+// `\n` → newline, `\r` → CR. Pass any other `\X` through unchanged (the
+// serializer never emits them, and YAML's fuller escape table — `\t`,
+// `\uXXXX`, … — is out of scope for this subset). Without `\n`/`\r`
+// unescaping, a multi-line title via MCP failed twice: the serializer
+// would have emitted a raw newline inside the quotes and broken the
+// line-based parser before getting here — that side is fixed in
+// `yamlScalar` by escaping newlines first. This side closes the round
+// trip so the unescaped value matches what the agent passed in.
 function unescapeDoubleQuoted(inner: string): string {
   let out = "";
   let i = 0;
@@ -580,6 +584,16 @@ function unescapeDoubleQuoted(inner: string): string {
       const next = inner.charAt(i + 1);
       if (next === "\\" || next === '"') {
         out += next;
+        i += 2;
+        continue;
+      }
+      if (next === "n") {
+        out += "\n";
+        i += 2;
+        continue;
+      }
+      if (next === "r") {
+        out += "\r";
         i += 2;
         continue;
       }
