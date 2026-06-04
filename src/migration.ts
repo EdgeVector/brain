@@ -139,6 +139,14 @@ export function schemaWithExtraField(opts: {
       // owner_app_id (app_identity v3.1).
       owner_app_id: base.schema.owner_app_id,
       descriptive_name: newDescriptiveName,
+      // Carry purpose_statement forward — the schema service's dual-signal
+      // canonicalization gate consults it alongside the structural signal
+      // (schemas.ts:54-59). Dropping it on migrate would let the new schema
+      // server-default to its descriptive_name and lose the semantic identity
+      // that keeps Phase 6's six 7-field kinds from collapsing onto one hash.
+      ...(base.schema.purpose_statement !== undefined
+        ? { purpose_statement: base.schema.purpose_statement }
+        : {}),
       schema_type: base.schema.schema_type,
       key: { ...base.schema.key },
       fields: [...base.schema.fields, fieldName, markerName],

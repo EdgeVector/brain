@@ -175,6 +175,41 @@ describe("schemaWithExtraField", () => {
     expect(conceptSchema.schema.fields).toEqual(beforeFields);
     expect("tmp_field" in conceptSchema.schema.field_types).toBe(false);
   });
+
+  // Regression: the schema service's dual-signal canonicalization gate
+  // consults purpose_statement alongside the structural signal (see
+  // schemas.ts:54-59). Dropping it on migrate means Concept_v2 would
+  // server-default to "Concept_v2" instead of carrying the original
+  // "Reusable framework, pattern, or protocol…" purpose — both data
+  // loss and a regression of the dual-signal protection that lets all
+  // six Phase 6 kinds share a 7-field shape without colliding.
+  test("carries purpose_statement forward from the base schema", () => {
+    expect(conceptSchema.schema.purpose_statement).toBeDefined();
+    const out = schemaWithExtraField({
+      base: conceptSchema,
+      fieldName: "urgency",
+      fieldType: "String",
+      description: "test field",
+      newDescriptiveName: "Concept_v2",
+    });
+    expect(out.schema.purpose_statement).toBe(conceptSchema.schema.purpose_statement);
+  });
+
+  test("omits purpose_statement when the base schema has none", () => {
+    const bareBase = {
+      ...conceptSchema,
+      schema: { ...conceptSchema.schema },
+    };
+    delete bareBase.schema.purpose_statement;
+    const out = schemaWithExtraField({
+      base: bareBase,
+      fieldName: "urgency",
+      fieldType: "String",
+      description: "test field",
+      newDescriptiveName: "Concept_v2",
+    });
+    expect("purpose_statement" in out.schema).toBe(false);
+  });
 });
 
 describe("versionMarkerField / versionMarkerValue", () => {
