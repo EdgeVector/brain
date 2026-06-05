@@ -838,6 +838,34 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   return 0;
 }
 
+// Re-throw a `not_found` from a slug-lookup command (get / status / delete)
+// with a `--type` hint when the user typed a known record type as the slug
+// (e.g. `fbrain get task` instead of `fbrain list --type task`). Other
+// errors pass through untouched. Only nudges when no record actually exists
+// with that slug — if a real concept slugged "task" lives in the brain, the
+// lookup succeeds and we never get here.
+export async function withTypeAsPositionalHint<T>(
+  slug: string,
+  inner: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await inner();
+  } catch (err) {
+    if (
+      err instanceof FbrainError &&
+      err.code === "not_found" &&
+      isRecordType(slug)
+    ) {
+      throw new FbrainError({
+        code: err.code,
+        message: err.message,
+        hint: `"${slug}" is a record type — did you mean \`fbrain list --type ${slug}\`?`,
+      });
+    }
+    throw err;
+  }
+}
+
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   const { values, positionals } = parseArgs({
     args,
@@ -854,18 +882,42 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
-  await getRecord(getOpts);
+  await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
   return 0;
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
   validatePositiveIntFlag(args, "-n", "invalid_limit");
-  const { values } = parseArgs({
-    args,
-    strict: true,
-    allowPositionals: false,
-    options: LIST_OPTIONS,
-  });
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      strict: true,
+      allowPositionals: false,
+      options: LIST_OPTIONS,
+    });
+  } catch (err) {
+    // A fresh user's instinct is `fbrain list task`, not `fbrain list --type
+    // task`. parseArgs rejects the positional with ERR_PARSE_ARGS_UNEXPECTED_
+    // POSITIONAL; when the rejected positional is a known record type, add a
+    // hint pointing at the `--type` form rather than dead-ending on parseArgs's
+    // bare message.
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL"
+    ) {
+      const positional = args.find((a) => !a.startsWith("-"));
+      if (positional && isRecordType(positional)) {
+        throw new FbrainError({
+          code: "unexpected_positional",
+          message: err.message,
+          hint: `did you mean \`fbrain list --type ${positional}\`?`,
+        });
+      }
+    }
+    throw err;
+  }
+  const { values } = parsed;
   const cfg = readConfig();
   const type = parseRecordType(values.type);
   const limit = values.n ? parseInt(values.n, 10) : undefined;
@@ -895,7 +947,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
   const sOpts: Parameters<typeof statusCmd>[0] = { cfg, slug, verbose };
   if (positionals[1]) sOpts.newStatus = positionals[1];
   if (type) sOpts.type = type;
-  await statusCmd(sOpts);
+  await withTypeAsPositionalHint(slug, () => statusCmd(sOpts));
   return 0;
 }
 
@@ -1092,7 +1144,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
   if (type) dOpts.type = type;
   if (values.force) dOpts.force = true;
-  await deleteRecord(dOpts);
+  await withTypeAsPositionalHint(slug, () => deleteRecord(dOpts));
   return 0;
 }
 
