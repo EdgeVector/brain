@@ -35,9 +35,20 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     (r) => r !== null,
   );
   if (!task) {
+    // `link` is directional — <task-slug> first, <design-slug> second — and
+    // reversing the two is the most common first-use mistake (the slug the
+    // user named as the "task" is really a design). Detect that case and say
+    // so explicitly with the corrected command, instead of a bare "No task"
+    // that gives no clue the argument order is wrong. Best-effort single
+    // lookup: a flaky page miss just falls through to the generic hint.
+    const asDesign = await findBySlug(node, "design", designHash, opts.taskSlug);
+    const hint = asDesign
+      ? `'${opts.taskSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${opts.designSlug} ${opts.taskSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
+      : `Create the task first (\`fbrain task new ${opts.taskSlug}\`) or check the slug with \`fbrain list --type task\` (usage: \`fbrain link <task-slug> <design-slug>\`).`;
     throw new FbrainError({
       code: "not_found",
       message: `No task: ${opts.taskSlug}`,
+      hint,
     });
   }
 

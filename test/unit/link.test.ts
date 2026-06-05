@@ -180,6 +180,27 @@ describe("linkCmd", () => {
     expect(mutations).toEqual([]);
   }, 30_000);
 
+  // Reversed-args DX: `link <design> <task>` is the most common first-use
+  // mistake. When the slug passed as the task is actually a design, the error
+  // must call that out and print the corrected command, not a bare "No task".
+  test("reversed args (design passed as task) hints at the correct order", async () => {
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        // No task named "d1"; a design named "d1" exists.
+        if (schema === DESIGN_HASH) return { status: 200, body: { ok: true, results: [designRow] } };
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    await expect(
+      linkCmd({ cfg, taskSlug: "d1", designSlug: "t1", print: () => {} }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      hint: expect.stringContaining("is a design, not a task"),
+    });
+  }, 30_000);
+
   test("a design that genuinely doesn't exist still errors with dangling_design_slug", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
