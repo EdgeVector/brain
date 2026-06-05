@@ -270,7 +270,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       checks.push({
         name: "schemas-loaded",
         ok: false,
-        detail: err instanceof Error ? err.message : String(err),
+        detail: errMsg(err),
         fix: "re-run `fbrain init`",
       });
       verbose?.(`schemas-loaded: FAIL`);
@@ -312,7 +312,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       const softened = softenDriftIfMigrated(driftCheck, entry.key, hash, allManifests);
       checks.push(softened);
       verbose?.(
-        `schema-drift[${label}]: ${softened.tag ?? (softened.ok ? "PASS" : "FAIL")} — ${softened.detail ?? ""}`,
+        `schema-drift[${label}]: ${tagOf(softened)} — ${softened.detail ?? ""}`,
       );
     }
   }
@@ -379,15 +379,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       const writeProbe = await runWriteRoundtripProbe(cfg, opts, verbose);
       checks.push(writeProbe);
       verbose?.(
-        `write-roundtrip: ${writeProbe.tag ?? (writeProbe.ok ? "PASS" : "FAIL")} — ${writeProbe.detail ?? ""}`,
+        `write-roundtrip: ${tagOf(writeProbe)} — ${writeProbe.detail ?? ""}`,
       );
     } else {
-      checks.push({
-        name: "write-roundtrip",
-        ok: false,
-        detail: "skipped — config or schemas-loaded did not pass",
-        fix: "resolve the earlier failures and retry",
-      });
+      checks.push(skippedByPrereqs("write-roundtrip"));
     }
   }
 
@@ -404,15 +399,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       const pollution = await runPollutionProbe(nodeClient, cfg, opts, verbose);
       checks.push(pollution);
       verbose?.(
-        `pollution-probe: ${pollution.tag ?? (pollution.ok ? "PASS" : "FAIL")} — ${pollution.detail ?? ""}`,
+        `pollution-probe: ${tagOf(pollution)} — ${pollution.detail ?? ""}`,
       );
     } else {
-      checks.push({
-        name: "freshness-probe",
-        ok: false,
-        detail: "skipped — config or schemas-loaded did not pass",
-        fix: "resolve the earlier failures and retry",
-      });
+      checks.push(skippedByPrereqs("freshness-probe"));
     }
   }
 
@@ -656,7 +646,7 @@ function doctorReachabilityDetail(err: unknown, which: string, baseUrl: string):
   if (err instanceof FbrainError && err.code === "service_unreachable") {
     return `${which} not reachable at ${baseUrl}`;
   }
-  return stripDoctorTip(err instanceof Error ? err.message : String(err));
+  return stripDoctorTip(errMsg(err));
 }
 
 function safeListManifests(): MigrationManifest[] {
@@ -685,7 +675,7 @@ export function validateConfigShape(cfg: Config): string[] {
 function finalize(checks: CheckResult[], print: (line: string) => void): number {
   const failures = checks.filter((c) => !c.ok);
   for (const check of checks) {
-    const tag = check.tag ?? (check.ok ? "PASS" : "FAIL");
+    const tag = tagOf(check);
     const detail = check.detail ? `  — ${check.detail}` : "";
     print(`[${tag}] ${check.name}${detail}`);
     if (check.fix && (tag === "FAIL" || tag === "WARN")) {
@@ -733,7 +723,7 @@ export async function runEmbeddingProbe(
     return {
       name: "embedding-runtime",
       ok: false,
-      detail: stripDoctorTip(err instanceof Error ? err.message : String(err)),
+      detail: stripDoctorTip(errMsg(err)),
       fix: "check the node log; the native-index search endpoint is rejecting our probe query",
     };
   }
@@ -806,7 +796,7 @@ export async function runFreshnessProbe(
         // the first failure as the probe's headline detail and stop trialing
         // — every subsequent trial would hit the same error. The `finally`
         // block still tombstones the records we already created.
-        searchError = err instanceof Error ? err.message : String(err);
+        searchError = errMsg(err);
         verbose?.(
           `freshness trial ${i + 1}/${trials}: search threw — ${searchError}`,
         );
@@ -832,7 +822,7 @@ export async function runFreshnessProbe(
         await node.updateRecord({ schemaHash: conceptHash, fields: cleanupFields, keyHash: slug });
       } catch (err) {
         verbose?.(
-          `freshness cleanup failed for ${slug}: ${err instanceof Error ? err.message : String(err)}`,
+          `freshness cleanup failed for ${slug}: ${errMsg(err)}`,
         );
       }
     }
@@ -891,7 +881,7 @@ export async function runPollutionProbe(
     return {
       name: "pollution-probe",
       ok: false,
-      detail: `search "${query}" failed: ${err instanceof Error ? err.message : String(err)}`,
+      detail: `search "${query}" failed: ${errMsg(err)}`,
       fix: "check the node log; the native-index search endpoint is rejecting our query",
     };
   }
@@ -928,7 +918,7 @@ export async function runPollutionProbe(
       record = await findBySlug(node, type, schemaHash, slug);
     } catch (err) {
       verbose?.(
-        `pollution: findBySlug threw for ${type}/${slug}: ${err instanceof Error ? err.message : String(err)} — counting as stale`,
+        `pollution: findBySlug threw for ${type}/${slug}: ${errMsg(err)} — counting as stale`,
       );
       stale++;
       continue;
@@ -1040,13 +1030,13 @@ export async function runWriteReadyProbe(
     // The store path itself failed (keychain locked, file unreadable, …)
     // — we can't tell if writes would work or not, so WARN.
     verbose?.(
-      `write-ready: capability store load threw — ${err instanceof Error ? err.message : String(err)}`,
+      `write-ready: capability store load threw — ${errMsg(err)}`,
     );
     return {
       name: "write-ready",
       ok: true,
       tag: "WARN",
-      detail: `could not read capability store: ${err instanceof Error ? err.message : String(err)}`,
+      detail: `could not read capability store: ${errMsg(err)}`,
       fix: "check OS keychain access and ~/.fbrain/capabilities.json, then re-run `fbrain doctor`",
     };
   }
@@ -1078,13 +1068,13 @@ export async function runWriteReadyProbe(
     }
   } catch (err) {
     verbose?.(
-      `write-ready: consent dry-run threw — ${err instanceof Error ? err.message : String(err)}`,
+      `write-ready: consent dry-run threw — ${errMsg(err)}`,
     );
     return {
       name: "write-ready",
       ok: true,
       tag: "WARN",
-      detail: `consent dry-run threw: ${stripDoctorTip(err instanceof Error ? err.message : String(err))}`,
+      detail: `consent dry-run threw: ${stripDoctorTip(errMsg(err))}`,
       fix: "inspect the node log; the consent endpoint is rejecting fbrain's probe",
     };
   }
@@ -1189,7 +1179,7 @@ export async function runWriteRoundtripProbe(
     return {
       name: "write-roundtrip",
       ok: false,
-      detail: stripDoctorTip(err instanceof Error ? err.message : String(err)),
+      detail: stripDoctorTip(errMsg(err)),
       fix: "the round-trip write failed — see the error above and the node log; check `fbrain doctor` for the write-ready / consent status",
     };
   } finally {
@@ -1199,7 +1189,7 @@ export async function runWriteRoundtripProbe(
         await node.updateRecord({ schemaHash: conceptHash, fields: cleanupFields, keyHash: slug });
       } catch (err) {
         verbose?.(
-          `write-roundtrip cleanup failed for ${slug}: ${err instanceof Error ? err.message : String(err)}`,
+          `write-roundtrip cleanup failed for ${slug}: ${errMsg(err)}`,
         );
       }
     }
@@ -1265,13 +1255,13 @@ export async function runSchemaPublishGateProbe(
     // emit a WARN so the user sees we tried, without claiming we know what's
     // wrong. The probe is a diagnostic, not a verdict.
     verbose?.(
-      `schema-publish-gate: probe inconclusive — ${err instanceof Error ? err.message : String(err)}`,
+      `schema-publish-gate: probe inconclusive — ${errMsg(err)}`,
     );
     return {
       name: "schema-publish-gate",
       ok: true,
       tag: "WARN",
-      detail: `could not probe schema service at ${url}: ${stripDoctorTip(err instanceof Error ? err.message : String(err))}`,
+      detail: `could not probe schema service at ${url}: ${stripDoctorTip(errMsg(err))}`,
     };
   }
 }
@@ -1282,4 +1272,21 @@ function bodyErrorString(body: unknown): string | undefined {
     if (typeof v === "string" && v.length > 0) return v;
   }
   return undefined;
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function tagOf(check: CheckResult): "PASS" | "WARN" | "FAIL" {
+  return check.tag ?? (check.ok ? "PASS" : "FAIL");
+}
+
+function skippedByPrereqs(name: string): CheckResult {
+  return {
+    name,
+    ok: false,
+    detail: "skipped — config or schemas-loaded did not pass",
+    fix: "resolve the earlier failures and retry",
+  };
 }
