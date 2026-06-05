@@ -83,7 +83,7 @@ Global flags:
 Run \`fbrain help <command>\` for per-command usage.`;
 
 export const COMMAND_HELP: Record<Command, string> = {
-  init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY]
+  init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
 persist ~/.fbrain/config.json with canonical hashes, then prompt once to
@@ -94,7 +94,11 @@ live capability is already on disk.
   --node-url             defaults to http://127.0.0.1:9001 (homebrew fold_db_node daemon)
   --schema-service-url   defaults to the prod cloud Lambda
                          (https://axo709qs11.execute-api.us-east-1.amazonaws.com)
-  --name                 bootstrap display name (default: fbrain)`,
+  --name                 bootstrap display name (default: fbrain)
+  --yes, --grant-consent grant fbrain consent inline without the interactive
+                         prompt — completes consent non-interactively (CI,
+                         scripts, agents) so your first write never stalls.
+                         Requires the folddb CLI on PATH.`,
   design: `fbrain design new <slug> [--title T] [--tag T]... [--body STR] [--force]
 
   --title     one-line name (defaults to slug)
@@ -369,6 +373,8 @@ const INIT_OPTIONS = {
   "node-url": { type: "string" },
   "schema-service-url": { type: "string" },
   name: { type: "string" },
+  yes: { type: "boolean", default: false },
+  "grant-consent": { type: "boolean", default: false },
 } as const;
 // design / task: applied after the `new` subcommand is consumed.
 const DESIGN_OPTIONS = {
@@ -687,6 +693,7 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   const initOpts: Parameters<typeof runInit>[0] = { bootstrapName: values.name, verbose };
   if (values["node-url"]) initOpts.nodeUrl = values["node-url"];
   if (values["schema-service-url"]) initOpts.schemaServiceUrl = values["schema-service-url"];
+  if (values.yes || values["grant-consent"]) initOpts.grantConsent = true;
   await runInit(initOpts);
   return 0;
 }

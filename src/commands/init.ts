@@ -46,6 +46,10 @@ export type InitOptions = {
   bootstrapName?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  // `fbrain init --yes` / `--grant-consent`: pre-approve the inline consent
+  // grant so it completes non-interactively (CI, scripts, agents) instead of
+  // skipping with the manual-grant note.
+  grantConsent?: boolean;
   // Tuning hooks (mainly for tests):
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
@@ -287,6 +291,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print,
   };
   if (verbose !== undefined) consentBase.verbose = verbose;
+  if (opts.grantConsent !== undefined) consentBase.grantConsent = opts.grantConsent;
   const consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
 
   print(`[init] ok`);

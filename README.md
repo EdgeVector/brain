@@ -78,13 +78,27 @@ Press `y` and `init` shells out to `folddb consent grant fbrain --yes` for you
 PATH), then waits until the capability is cached in your keychain. When `init`
 returns you have a ready-to-write capability — your first `fbrain put` /
 `design new` lands immediately. Re-running `init` is idempotent: it skips the
-prompt when a live capability already exists. (Running a local/dev node with
+prompt when a live capability already exists.
+
+**Non-interactive setup (CI / scripts / agents): `fbrain init --yes`.** When
+there's no TTY to answer the prompt, pass `--yes` (alias `--grant-consent`) and
+`init` runs the same inline grant without prompting — request consent, shell out
+to `folddb consent grant fbrain --yes`, and poll until the capability is stored.
+This is the *only* reliable way to establish consent unattended: a bare `folddb
+consent grant fbrain` issued **before** a write is polling does **not** satisfy
+that later write (the capability is only handed back through the poll that's
+matched while the grant runs), so the two-terminal fallback below requires the
+grant and the polling write to overlap. `--yes` orchestrates that overlap for
+you. (Requires the `folddb` CLI on PATH; if it's missing, `init --yes` says so
+and exits instead of polling forever.)
+
+(Running a local/dev node with
 `APP_IDENTITY_ENFORCE` off? Set `FBRAIN_APP_IDENTITY_ENFORCE=off` to skip
 consent entirely; init still resolves the same namespaced `fbrain/*` schema
 hashes from the node, and writes land as NodeOwner with no capability headers.)
 
 **Fallback — granting from a second terminal.** You'll only hit this if you
-declined `init`'s prompt, ran `init` non-interactively (CI/scripts), or your
+declined `init`'s prompt, ran `init` non-interactively without `--yes`, or your
 capability was later revoked. In those cases the next write stalls with:
 
 ```
@@ -393,7 +407,7 @@ schema service with `--node-url` / `--schema-service-url` on `fbrain init`
 Top errors you'll hit and the fix:
 
 - **Your first write hangs at `First-run setup — run: \`folddb consent grant fbrain\` … Waiting for you to grant access…`**  
-  Rare now that `fbrain init` grants consent inline — you'll only see this if you declined init's consent prompt, ran `init` non-interactively, or your capability was revoked. Easiest fix: re-run `fbrain init` (idempotent) and accept the grant. Otherwise leave the write waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-handled-by-init). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
+  Rare now that `fbrain init` grants consent inline — you'll only see this if you declined init's consent prompt, ran `init` non-interactively without `--yes`, or your capability was revoked. Easiest fix: re-run `fbrain init --yes` (idempotent; `--yes` completes consent even without a TTY). Otherwise leave the write waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-handled-by-init). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
 
 - **First write is slow (~5s) the first time on a headless / SSH / locked-keychain box, then fast after**  
   fbrain stores its capability in the macOS login keychain (best protection against co-resident exfiltration). When there's no GUI to answer a keychain-authorization prompt (SSH, CI, an automation agent, or a never-unlocked login keychain), the `security` call can't complete — fbrain now bounds it with a short timeout and transparently falls back to a `0600` file at `~/.fbrain/capabilities.json` instead of hanging. You'll see a one-time ~5s pause on that first write; subsequent writes read the cached file and are fast. To skip the keychain probe entirely on such hosts, set `FBRAIN_FORCE_FILE_KEYCHAIN=1`.

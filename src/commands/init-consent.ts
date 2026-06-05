@@ -57,6 +57,15 @@ export type EstablishConsentOptions = {
   runFolddbGrant?: (folddbPath: string, appId: string) => GrantResult;
   /** Treat the current process as a TTY (default: process.stdin.isTTY). */
   isTty?: () => boolean;
+  /**
+   * Pre-approve the consent grant (the `fbrain init --yes` / `--grant-consent`
+   * flag). When set, the interactive prompt is skipped and the inline grant
+   * runs even in a non-TTY shell (CI, scripts, agents) — the flag IS the
+   * explicit owner approval. This is the only ordering that actually works:
+   * a standing `folddb consent grant` issued *outside* an active poll does not
+   * satisfy a later write, so init must orchestrate request+grant+poll itself.
+   */
+  grantConsent?: boolean;
   // Consent polling tuning (forwarded to acquireCapability):
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -103,26 +112,48 @@ export async function establishConsentInline(
     return { state: "already_granted" };
   }
 
-  // Non-interactive (CI, scripted init): can't prompt — leave the in-write
-  // fallback to handle it on first write.
   const isTty = (opts.isTty ?? defaultIsTty)();
-  if (!isTty) {
+  const preApproved = opts.grantConsent === true;
+  const resolveFolddb = opts.resolveFolddb ?? defaultResolveFolddb;
+  const runFolddbGrant = opts.runFolddbGrant ?? defaultRunFolddbGrant;
+
+  // Non-interactive (CI, scripted init, agents): can't prompt. Without the
+  // `--yes`/`--grant-consent` flag we leave the in-write fallback to handle it
+  // — but that fallback is a footgun, because a `folddb consent grant` issued
+  // outside an active poll does NOT satisfy a later write (the capability is
+  // only handed back through the poll that's matched while the grant runs). So
+  // the flag is the supported way to make non-interactive consent actually
+  // land: init orchestrates request + grant + poll together.
+  if (!isTty && !preApproved) {
     print(
-      `        non-interactive shell — skipping consent prompt. Run \`folddb consent grant ${appId}\` before your first write.`,
+      `        non-interactive shell — skipping consent prompt. Re-run \`fbrain init --yes\` to grant consent inline, or run \`folddb consent grant ${appId}\` in a second terminal *while* your first write is polling.`,
     );
     return { state: "skipped", reason: "non_tty" };
   }
 
-  // Explicit one-time approval.
-  const ask = opts.ask ?? defaultAsk;
-  const answer = await ask(
-    `fbrain wants read/write access to its namespace on this node. Grant now? [Y/n] `,
-  );
-  if (!isAffirmative(answer)) {
-    print(
-      `        skipped — run \`folddb consent grant ${appId}\` later, or fbrain will prompt on first write.`,
+  // Explicit one-time approval — either the `--yes` flag (pre-approval, no
+  // prompt) or an interactive y/N.
+  if (!preApproved) {
+    const ask = opts.ask ?? defaultAsk;
+    const answer = await ask(
+      `fbrain wants read/write access to its namespace on this node. Grant now? [Y/n] `,
     );
-    return { state: "skipped", reason: "declined" };
+    if (!isAffirmative(answer)) {
+      print(
+        `        skipped — run \`folddb consent grant ${appId}\` later, or fbrain will prompt on first write.`,
+      );
+      return { state: "skipped", reason: "declined" };
+    }
+  }
+
+  // Fast-fail when pre-approved but `folddb` is not reachable, rather than
+  // entering the up-to-5-minute poll that can never complete in a non-TTY
+  // shell (nobody is there to grant in a second terminal).
+  if (preApproved && !isTty && resolveFolddb() === null) {
+    print(
+      `        \`${FOLDDB_BIN}\` not found on PATH — cannot complete \`--yes\` consent non-interactively. Install the folddb CLI (\`brew install edgevector/folddb/folddb\`) and re-run, or grant manually in a second terminal while your first write polls.`,
+    );
+    return { state: "skipped", reason: "non_tty" };
   }
 
   // Build the consent transport (request-consent + consent-status against the
@@ -131,9 +162,6 @@ export async function establishConsentInline(
   const transport =
     opts.transport ??
     transportFromNode(opts.nodeUrl, opts.userHash, opts.verbose);
-
-  const resolveFolddb = opts.resolveFolddb ?? defaultResolveFolddb;
-  const runFolddbGrant = opts.runFolddbGrant ?? defaultRunFolddbGrant;
 
   let folddbUsed = false;
   const acquireOpts: Parameters<typeof acquireCapability>[0] = {

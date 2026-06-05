@@ -316,6 +316,105 @@ describe("establishConsentInline — folddb present happy path", () => {
   });
 });
 
+describe("establishConsentInline — pre-approved (--yes / --grant-consent)", () => {
+  test("non-TTY + grantConsent → runs inline grant, polls, stores (no prompt)", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const grantInvocations: Array<{ path: string; appId: string }> = [];
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      grantConsent: true,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        throw new Error("ask must not be called when pre-approved via --yes");
+      },
+      isTty: ttyOff,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: (path, appId) => {
+        grantInvocations.push({ path, appId });
+        return { status: 0 };
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "granted_inline", folddbUsed: true });
+    expect(grantInvocations).toEqual([
+      { path: "/opt/homebrew/bin/folddb", appId: "fbrain" },
+    ]);
+    expect(transport.requestConsentCalls).toBe(1);
+    expect((await store.load(NODE_URL))?.blob).toBe(blob);
+  });
+
+  test("non-TTY + grantConsent + folddb missing → fast-fail skip (no infinite poll)", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      grantConsent: true,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        throw new Error("ask must not be called when pre-approved via --yes");
+      },
+      isTty: ttyOff,
+      resolveFolddb: () => null,
+      runFolddbGrant: () => {
+        throw new Error("runFolddbGrant must not run when folddb is missing");
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "skipped", reason: "non_tty" });
+    // Never entered the poll loop — no consent request was even made.
+    expect(transport.requestConsentCalls).toBe(0);
+    expect(transport.consentStatusCalls).toBe(0);
+    expect(lines.some((l) => l.includes("not found on PATH"))).toBe(true);
+  });
+
+  test("TTY + grantConsent → grants inline without the y/N prompt", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    let asked = false;
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      grantConsent: true,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        asked = true;
+        return "y";
+      },
+      isTty: ttyOn,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: () => ({ status: 0 }),
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "granted_inline", folddbUsed: true });
+    expect(asked).toBe(false);
+    expect((await store.load(NODE_URL))?.blob).toBe(blob);
+  });
+});
+
 describe("establishConsentInline — enforcement off", () => {
   test("FBRAIN_APP_IDENTITY_ENFORCE=false → skipped, no transport calls", async () => {
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "false";
