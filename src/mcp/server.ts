@@ -19,7 +19,7 @@ import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { statusCmd } from "../commands/status.ts";
 import { FbrainError, stripDoctorTip } from "../client.ts";
-import { isRecordType, RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
 export const FBRAIN_MCP_VERSION = "0.0.1";
@@ -67,24 +67,19 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe("Server-side score floor (?min_score=F)."),
       },
     },
-    async (args) => {
-      const lines: string[] = [];
-      const sOpts: Parameters<typeof searchCmd>[0] = {
-        cfg,
-        query: args.query,
-        print: (l) => lines.push(l),
-      };
-      if (typeof args.limit === "number") sOpts.limit = args.limit;
-      if (args.exact === true) sOpts.exact = true;
-      if (typeof args.min_score === "number") sOpts.minScore = args.min_score;
-      if (args.type && args.type.length > 0) sOpts.types = args.type as RecordType[];
-      try {
+    (args) =>
+      runTool(async (print) => {
+        const sOpts: Parameters<typeof searchCmd>[0] = {
+          cfg,
+          query: args.query,
+          print,
+        };
+        if (typeof args.limit === "number") sOpts.limit = args.limit;
+        if (args.exact === true) sOpts.exact = true;
+        if (typeof args.min_score === "number") sOpts.minScore = args.min_score;
+        if (args.type && args.type.length > 0) sOpts.types = args.type as RecordType[];
         await searchCmd(sOpts);
-      } catch (err) {
-        return errorResult(err);
-      }
-      return textResult(lines.join("\n"));
-    },
+      }),
   );
 
   server.registerTool(
@@ -102,21 +97,16 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           ),
       },
     },
-    async (args) => {
-      const lines: string[] = [];
-      const gOpts: Parameters<typeof getRecord>[0] = {
-        cfg,
-        slug: args.slug,
-        print: (l) => lines.push(l),
-      };
-      if (args.type) gOpts.type = args.type as RecordType;
-      try {
+    (args) =>
+      runTool(async (print) => {
+        const gOpts: Parameters<typeof getRecord>[0] = {
+          cfg,
+          slug: args.slug,
+          print,
+        };
+        if (args.type) gOpts.type = args.type as RecordType;
         await getRecord(gOpts);
-      } catch (err) {
-        return errorResult(err);
-      }
-      return textResult(lines.join("\n"));
-    },
+      }),
   );
 
   server.registerTool(
@@ -140,23 +130,18 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe("Max results."),
       },
     },
-    async (args) => {
-      const lines: string[] = [];
-      const lOpts: Parameters<typeof listCmd>[0] = {
-        cfg,
-        print: (l) => lines.push(l),
-      };
-      if (args.type) lOpts.type = args.type as RecordType;
-      if (args.status) lOpts.status = args.status;
-      if (args.tag) lOpts.tag = args.tag;
-      if (typeof args.limit === "number") lOpts.limit = args.limit;
-      try {
+    (args) =>
+      runTool(async (print) => {
+        const lOpts: Parameters<typeof listCmd>[0] = {
+          cfg,
+          print,
+        };
+        if (args.type) lOpts.type = args.type as RecordType;
+        if (args.status) lOpts.status = args.status;
+        if (args.tag) lOpts.tag = args.tag;
+        if (typeof args.limit === "number") lOpts.limit = args.limit;
         await listCmd(lOpts);
-      } catch (err) {
-        return errorResult(err);
-      }
-      return textResult(lines.join("\n"));
-    },
+      }),
   );
 
   server.registerTool(
@@ -206,26 +191,21 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           ),
       },
     },
-    async (args) => {
-      const lines: string[] = [];
-      try {
+    (args) =>
+      runTool(async (print) => {
         const input = buildPutInput(args);
         const result = await putCmd({ cfg, slug: args.slug, input });
-        lines.push(`${result.action} ${result.type} ${result.slug}`);
+        print(`${result.action} ${result.type} ${result.slug}`);
         if (typeof args.status === "string" && args.status.length > 0) {
           await statusCmd({
             cfg,
             slug: args.slug,
             type: result.type,
             newStatus: args.status,
-            print: (l) => lines.push(l),
+            print,
           });
         }
-      } catch (err) {
-        return errorResult(err);
-      }
-      return textResult(lines.join("\n"));
-    },
+      }),
   );
 
   server.registerTool(
@@ -256,22 +236,17 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           ),
       },
     },
-    async (args) => {
-      const lines: string[] = [];
-      const dOpts: Parameters<typeof deleteRecord>[0] = {
-        cfg,
-        slug: args.slug,
-        print: (l) => lines.push(l),
-      };
-      if (args.type) dOpts.type = args.type as RecordType;
-      if (args.force) dOpts.force = true;
-      try {
+    (args) =>
+      runTool(async (print) => {
+        const dOpts: Parameters<typeof deleteRecord>[0] = {
+          cfg,
+          slug: args.slug,
+          print,
+        };
+        if (args.type) dOpts.type = args.type as RecordType;
+        if (args.force) dOpts.force = true;
         await deleteRecord(dOpts);
-      } catch (err) {
-        return errorResult(err);
-      }
-      return textResult(lines.join("\n"));
-    },
+      }),
   );
 
   server.registerTool(
@@ -288,9 +263,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         to_slug: z.string().min(1).describe("Target slug (the design)."),
       },
     },
-    async (args) => {
-      const lines: string[] = [];
-      try {
+    (args) =>
+      runTool(async (print) => {
         if (args.from_type !== "task" || args.to_type !== "design") {
           throw new FbrainError({
             code: "unsupported_link_pair",
@@ -302,13 +276,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           cfg,
           taskSlug: args.from_slug,
           designSlug: args.to_slug,
-          print: (l) => lines.push(l),
+          print,
         });
-      } catch (err) {
-        return errorResult(err);
-      }
-      return textResult(lines.join("\n"));
-    },
+      }),
   );
 
   return server;
@@ -384,6 +354,21 @@ type ToolResult = {
   isError?: boolean;
 };
 
+// Every tool handler follows the same shape: collect printed lines from
+// the underlying command, return them as one text block, and map any
+// thrown error into an `isError` envelope. `runTool` is that shape.
+async function runTool(
+  fn: (print: (line: string) => void) => Promise<void>,
+): Promise<ToolResult> {
+  const lines: string[] = [];
+  try {
+    await fn((l) => lines.push(l));
+  } catch (err) {
+    return errorResult(err);
+  }
+  return textResult(lines.join("\n"));
+}
+
 function textResult(text: string): ToolResult {
   return {
     content: [{ type: "text", text: text.length === 0 ? "(empty)" : text }],
@@ -409,16 +394,4 @@ function errorResult(err: unknown): ToolResult {
     content: [{ type: "text", text: `error: ${message}` }],
     isError: true,
   };
-}
-
-// Exported so tests / callers can validate a `type` arg outside the SDK
-// schema layer. The SDK enforces the enum at parse time, but tests
-// bypass that path by calling the captured handler directly.
-export function ensureRecordType(raw: string | undefined): RecordType | undefined {
-  if (raw === undefined) return undefined;
-  if (isRecordType(raw)) return raw;
-  throw new FbrainError({
-    code: "invalid_type",
-    message: `type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,
-  });
 }
