@@ -1,0 +1,130 @@
+// `fbrain <type> new <slug>` — table-driven record creator.
+//
+// One creator for all 8 record types. Pre-Phase-6 only `design new` and
+// `task new` existed as ergonomic verbs; the other 6 (concept, preference,
+// reference, agent, project, spike) were reachable only via `fbrain put
+// --type <t>` even though their schemas were fully registered. This shared
+// implementation closes that gap without duplicating the slug-exists guard,
+// the /api/query top-100 read-flake hedge, or the parent-design dangling-ref
+// check across six near-identical copies.
+//
+// Only `task` has a per-type extra (`--design <slug>`); the others share the
+// common option set. The flag is rejected loudly on non-task types rather
+// than silently ignored.
+
+import { FbrainError, type Verbose } from "../client.ts";
+import { newWriteNodeClient } from "../write-context.ts";
+import type { Config } from "../config.ts";
+import {
+  findBySlug,
+  nowIso,
+  schemaHashFor,
+  validateSlug,
+  withReadRetry,
+} from "../record.ts";
+import { RECORDS, type RecordType } from "../schemas.ts";
+
+const HUMAN_NAME: Record<RecordType, string> = {
+  design: "Design",
+  task: "Task",
+  concept: "Concept",
+  preference: "Preference",
+  reference: "Reference",
+  agent: "Agent",
+  project: "Project",
+  spike: "Spike",
+};
+
+export type RecordNewOptions = {
+  cfg: Config;
+  type: RecordType;
+  slug: string;
+  title: string;
+  body: string;
+  tags: string[];
+  // Only valid for `task` (the one type with a `design_slug` field). Set
+  // on any other type and recordNew rejects with `design_flag_unsupported`
+  // before any I/O.
+  designSlug?: string;
+  force?: boolean;
+  verbose?: Verbose;
+};
+
+export async function recordNew(opts: RecordNewOptions): Promise<void> {
+  validateSlug(opts.slug);
+  const entry = RECORDS[opts.type];
+
+  if (opts.designSlug && opts.designSlug.length > 0 && !entry.hasDesignSlug) {
+    throw new FbrainError({
+      code: "design_flag_unsupported",
+      message: `--design is only valid for task records (got ${opts.type}).`,
+      hint: "Drop --design, or use `fbrain task new` to link a task to a parent design.",
+    });
+  }
+
+  const { node } = newWriteNodeClient({
+    baseUrl: opts.cfg.nodeUrl,
+    userHash: opts.cfg.userHash,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
+  const hash = schemaHashFor(opts.type, opts.cfg);
+
+  if (!opts.force) {
+    // /api/query returns a non-deterministic top-100 slice per schema, so
+    // a single findBySlug can miss an existing slug on a schema with >100
+    // rows. Without the retry the duplicate guard fails open ~40% of the
+    // time and the createRecord below silently overwrites the row. Same
+    // hedge put.ts and resolveBySlug use. See PR #53.
+    const existing = await withReadRetry(
+      () => findBySlug(node, opts.type, hash, opts.slug),
+      (r) => r !== null,
+    );
+    if (existing) {
+      throw new FbrainError({
+        code: "slug_already_exists",
+        message: `${HUMAN_NAME[opts.type]} with slug "${opts.slug}" already exists.`,
+        hint:
+          opts.type === "task"
+            ? "Use --force to overwrite, or pick a different slug."
+            : "Use --force to overwrite (re-creates with the values you passed), or pick a different slug.",
+      });
+    }
+  }
+
+  // Validate the design exists, if provided — same dangling-ref rule as link.
+  // Retry-hedged for the same /api/query truncation reason as above:
+  // without it, a valid parent on a >100-row design schema flakes to
+  // dangling_design_slug ~40% of the time.
+  if (entry.hasDesignSlug && opts.designSlug && opts.designSlug.length > 0) {
+    const designHash = schemaHashFor("design", opts.cfg);
+    const parent = await withReadRetry(
+      () => findBySlug(node, "design", designHash, opts.designSlug!),
+      (r) => r !== null,
+    );
+    if (!parent) {
+      throw new FbrainError({
+        code: "dangling_design_slug",
+        message: `Cannot link task "${opts.slug}" to design "${opts.designSlug}" — that design does not exist.`,
+        hint: "Create the design first (`fbrain design new ...`), or omit --design.",
+      });
+    }
+  }
+
+  // --force intentionally skips the lookup and stamps a fresh created_at.
+  // It's a deliberate "re-create from scratch" — callers wanting upsert
+  // semantics (preserve created_at) should use `fbrain put` instead.
+  const now = nowIso();
+  const fields: Record<string, unknown> = {
+    slug: opts.slug,
+    title: opts.title,
+    body: opts.body,
+    status: entry.defaultStatus,
+    tags: opts.tags,
+    created_at: now,
+    updated_at: now,
+  };
+  if (entry.hasDesignSlug) {
+    fields.design_slug = opts.designSlug ?? "";
+  }
+  await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
+}

@@ -11,8 +11,7 @@ import pkg from "../package.json" with { type: "json" };
 import { FbrainError } from "./client.ts";
 import { readConfig, ConfigMissingError } from "./config.ts";
 import { runInit } from "./commands/init.ts";
-import { designNew } from "./commands/design.ts";
-import { taskNew } from "./commands/task.ts";
+import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
 import { listCmd } from "./commands/list.ts";
 import { statusCmd } from "./commands/status.ts";
@@ -32,6 +31,12 @@ export const COMMANDS = [
   "init",
   "design",
   "task",
+  "concept",
+  "preference",
+  "reference",
+  "agent",
+  "project",
+  "spike",
   "put",
   "get",
   "list",
@@ -58,7 +63,13 @@ Usage:
 Commands:
   init           bootstrap a node + register schemas + write config
   design new     create a new Design
-  task new       create a new Task
+  task new       create a new Task (--design <slug> links to a parent design)
+  concept new    create a new Concept
+  preference new create a new Preference
+  reference new  create a new Reference
+  agent new      create a new Agent
+  project new    create a new Project
+  spike new      create a new Spike
   put            upsert any record type from stdin (frontmatter-aware; type: picks schema)
   get            print a record by slug
   list           list records, newest-first
@@ -82,6 +93,18 @@ Global flags:
 
 Run \`fbrain help <command>\` for per-command usage.`;
 
+// Shared help shape for the 7 record types that take the common
+// (--title/--tag/--body/--force) flag set. Task is the one type with an extra
+// --design parent-link arg, so it keeps its own bespoke help block.
+function simpleNewHelp(type: RecordType): string {
+  return `fbrain ${type} new <slug> [--title T] [--tag T]... [--body STR] [--force]
+
+  --title     one-line name (defaults to slug)
+  --tag       repeatable; tag value to attach
+  --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
+  --force     overwrite an existing slug`;
+}
+
 export const COMMAND_HELP: Record<Command, string> = {
   init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
@@ -102,12 +125,7 @@ live capability is already on disk.
                          a live capability already exists, or under
                          FBRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb
                          CLI on PATH (fast-fails with a clear message if not).`,
-  design: `fbrain design new <slug> [--title T] [--tag T]... [--body STR] [--force]
-
-  --title     one-line name (defaults to slug)
-  --tag       repeatable; tag value to attach
-  --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
-  --force     overwrite an existing slug`,
+  design: simpleNewHelp("design"),
   task: `fbrain task new <slug> [--title T] [--design D] [--tag T]... [--body STR] [--force]
 
   --title     one-line name (defaults to slug)
@@ -115,6 +133,12 @@ live capability is already on disk.
   --tag       repeatable; tag value to attach
   --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
   --force     overwrite an existing slug`,
+  concept: simpleNewHelp("concept"),
+  preference: simpleNewHelp("preference"),
+  reference: simpleNewHelp("reference"),
+  agent: simpleNewHelp("agent"),
+  project: simpleNewHelp("project"),
+  spike: simpleNewHelp("spike"),
   put: `fbrain put [<slug>] [--type T]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
@@ -445,6 +469,13 @@ export const CLI_SPEC = {
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
+  // The 6 Phase-6 types share design's flag set (no --design parent link).
+  concept: DESIGN_OPTIONS,
+  preference: DESIGN_OPTIONS,
+  reference: DESIGN_OPTIONS,
+  agent: DESIGN_OPTIONS,
+  project: DESIGN_OPTIONS,
+  spike: DESIGN_OPTIONS,
   put: PUT_OPTIONS,
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
@@ -522,7 +553,10 @@ function isCommand(s: string): s is Command {
   return (COMMANDS as readonly string[]).includes(s);
 }
 
-const COMPOUND_COMMANDS = ["design new", "task new"] as const;
+// Every record type has a `<type> new` subcommand. Derived from RECORD_TYPES
+// so adding a new record type wires up "Did you mean?" and `fbrain help
+// "<type> new"` automatically.
+const COMPOUND_COMMANDS: readonly string[] = RECORD_TYPES.map((t) => `${t} new`);
 
 // Suggest the closest valid command for an unknown input. `single` is matched
 // against every entry in COMMANDS; `compound` (e.g. `desogn new`) is matched
@@ -634,9 +668,14 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
     case "init":
       return runInitCmd(args, verboseFn);
     case "design":
-      return runDesign(args, verboseFn);
     case "task":
-      return runTask(args, verboseFn);
+    case "concept":
+    case "preference":
+    case "reference":
+    case "agent":
+    case "project":
+    case "spike":
+      return runRecordNew(cmd, args, verboseFn);
     case "put":
       return runPut(args, verboseFn);
     case "get":
@@ -703,18 +742,53 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   return 0;
 }
 
-async function runDesign(args: Argv, verbose: Verbose): Promise<number> {
+// Shared `<type> new` dispatcher. Handles all 8 record types — task is the
+// only one with a per-type extra (--design), so we branch the option set on
+// type rather than wiring six near-identical functions. The pre-Phase-6
+// runDesign/runTask functions did the same work copy-pasted; collapsing
+// them keeps the slug-validation / stdin-fallback / "created <type> <slug>"
+// envelope in one place.
+async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0];
   if (sub !== "new") {
-    const suggestion = sub ? suggestCommand({ compound: `design ${sub}` }) : null;
+    const suggestion = sub ? suggestCommand({ compound: `${type} ${sub}` }) : null;
     if (suggestion) {
-      console.error(`Unknown design subcommand: ${sub}. Did you mean: ${suggestion}?`);
+      console.error(`Unknown ${type} subcommand: ${sub}. Did you mean: ${suggestion}?`);
     } else {
-      console.error(`Unknown design subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP.design}`);
+      console.error(`Unknown ${type} subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP[type]}`);
     }
     return 1;
   }
   const rest = args.slice(1);
+  if (type === "task") {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      strict: true,
+      allowPositionals: true,
+      options: TASK_OPTIONS,
+    });
+    const slug = positionals[0];
+    if (!slug) {
+      console.error(COMMAND_HELP.task);
+      return 1;
+    }
+    const cfg = readConfig();
+    const body = values.body ?? (await maybeReadStdin());
+    const tnOpts: Parameters<typeof recordNew>[0] = {
+      cfg,
+      type: "task",
+      slug,
+      title: values.title ?? slug,
+      body,
+      tags: values.tag ?? [],
+      force: values.force,
+      verbose,
+    };
+    if (values.design) tnOpts.designSlug = values.design;
+    await recordNew(tnOpts);
+    console.log(`created task ${slug}`);
+    return 0;
+  }
   const { values, positionals } = parseArgs({
     args: rest,
     strict: true,
@@ -723,13 +797,14 @@ async function runDesign(args: Argv, verbose: Verbose): Promise<number> {
   });
   const slug = positionals[0];
   if (!slug) {
-    console.error(COMMAND_HELP.design);
+    console.error(COMMAND_HELP[type]);
     return 1;
   }
   const cfg = readConfig();
   const body = values.body ?? (await maybeReadStdin());
-  await designNew({
+  await recordNew({
     cfg,
+    type,
     slug,
     title: values.title ?? slug,
     body,
@@ -737,47 +812,7 @@ async function runDesign(args: Argv, verbose: Verbose): Promise<number> {
     force: values.force,
     verbose,
   });
-  console.log(`created design ${slug}`);
-  return 0;
-}
-
-async function runTask(args: Argv, verbose: Verbose): Promise<number> {
-  const sub = args[0];
-  if (sub !== "new") {
-    const suggestion = sub ? suggestCommand({ compound: `task ${sub}` }) : null;
-    if (suggestion) {
-      console.error(`Unknown task subcommand: ${sub}. Did you mean: ${suggestion}?`);
-    } else {
-      console.error(`Unknown task subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP.task}`);
-    }
-    return 1;
-  }
-  const rest = args.slice(1);
-  const { values, positionals } = parseArgs({
-    args: rest,
-    strict: true,
-    allowPositionals: true,
-    options: TASK_OPTIONS,
-  });
-  const slug = positionals[0];
-  if (!slug) {
-    console.error(COMMAND_HELP.task);
-    return 1;
-  }
-  const cfg = readConfig();
-  const body = values.body ?? (await maybeReadStdin());
-  const tnOpts: Parameters<typeof taskNew>[0] = {
-    cfg,
-    slug,
-    title: values.title ?? slug,
-    body,
-    tags: values.tag ?? [],
-    force: values.force,
-    verbose,
-  };
-  if (values.design) tnOpts.designSlug = values.design;
-  await taskNew(tnOpts);
-  console.log(`created task ${slug}`);
+  console.log(`created ${type} ${slug}`);
   return 0;
 }
 

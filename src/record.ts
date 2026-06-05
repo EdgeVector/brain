@@ -309,12 +309,32 @@ export function validateSlug(slug: string): void {
     });
   }
   if (!/^[a-z0-9][a-z0-9-_]*$/.test(slug)) {
+    // First-time-user trap: `fbrain design new "My Title"` lands the title
+    // in the slug positional. Spotting spaces or uppercase in an otherwise-
+    // free-form input is a strong hint they meant `--title`; surface the
+    // exact slug we'd suggest so they can copy-paste.
+    const looksLikeTitle = /\s/.test(slug) || /[A-Z]/.test(slug);
+    const hint = looksLikeTitle
+      ? `the first argument is a slug (identifier); pass your title with --title and use a slug like "${suggestSlug(slug)}".`
+      : "Slugs are lowercase, start with a letter or digit, and use [a-z0-9-_].";
     throw new FbrainError({
       code: "invalid_slug",
       message: `Slug "${slug}" is invalid.`,
-      hint: "Slugs are lowercase, start with a letter or digit, and use [a-z0-9-_].",
+      hint,
     });
   }
+}
+
+// Best-effort conversion of a free-form title to a valid slug for the hint.
+// Lowercase, collapse non-slug chars to `-`, trim leading/trailing `-`.
+// Falls back to "my-record" if nothing usable survives so the user never
+// sees `"".`
+function suggestSlug(raw: string): string {
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug.length > 0 ? slug : "my-record";
 }
 
 export function ensureStatus(type: RecordType, status: string): void {
