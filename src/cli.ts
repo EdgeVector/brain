@@ -821,6 +821,16 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   return 0;
 }
 
+// Best-effort recovery of `put`'s slug positional when parseArgs already
+// threw — we can't trust its output, so scan args BEFORE the offending flag
+// and pick the first non-flag token. If the user typed e.g.
+// `fbrain put --body X` with no slug, there's nothing before the flag and
+// we fall back to `<slug>` rather than mis-quoting the flag's VALUE.
+function recoverPutSlug(args: Argv, flag: string): string {
+  const idx = args.indexOf(flag);
+  return args.slice(0, idx).find((a) => !a.startsWith("-")) ?? "<slug>";
+}
+
 async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   let parsed;
   try {
@@ -831,31 +841,40 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
       options: PUT_OPTIONS,
     });
   } catch (err) {
-    // `put` is intentionally frontmatter-driven — title comes from the
-    // `title:` key or the first `# H1`. But every `<type> new` subcommand
-    // takes `--title`, so a fresh user reflexively types
-    // `fbrain put <slug> --title X` and dead-ends on parseArgs's bare
-    // "Unknown option '--title'" with no nudge toward the right form.
-    // Re-throw with a hint that points at `<type> new` instead.
     if (
       err instanceof Error &&
-      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" &&
-      args.includes("--title")
+      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
     ) {
-      // Best-effort recovery of the slug positional. We can't trust parseArgs
-      // (it just threw), so scan everything before `--title` and pick the
-      // first non-flag arg — that's the user's positional. If they typed
-      // `fbrain put --title X` with no slug, there's nothing before --title
-      // and we fall back to `<slug>` rather than mis-quoting `X`.
-      const titleIdx = args.indexOf("--title");
-      const slug =
-        args.slice(0, titleIdx).find((a) => !a.startsWith("-")) ?? "<slug>";
-      throw new FbrainError({
-        code: "unknown_option",
-        message:
-          "`put` does not accept --title. The title comes from frontmatter (`title:` between leading `---` lines) or the first `# H1` of the body.",
-        hint: `To set the title via a flag, use \`fbrain <type> new ${slug} --title "..."\` instead.`,
-      });
+      // `put` is intentionally frontmatter-driven — title comes from the
+      // `title:` key or the first `# H1`. But every `<type> new` subcommand
+      // takes `--title`, so a fresh user reflexively types
+      // `fbrain put <slug> --title X` and dead-ends on parseArgs's bare
+      // "Unknown option '--title'" with no nudge toward the right form.
+      // Re-throw with a hint that points at `<type> new` instead.
+      if (args.includes("--title")) {
+        const slug = recoverPutSlug(args, "--title");
+        throw new FbrainError({
+          code: "unknown_option",
+          message:
+            "`put` does not accept --title. The title comes from frontmatter (`title:` between leading `---` lines) or the first `# H1` of the body.",
+          hint: `To set the title via a flag, use \`fbrain <type> new ${slug} --title "..."\` instead.`,
+        });
+      }
+      // Same papercut for `--body` / `--content` / `--text`: a fresh user
+      // reflexively types `fbrain put my-note --type concept --body "..."`
+      // and dead-ends on parseArgs's bare "Unknown option". The body comes
+      // from stdin (with optional YAML frontmatter) — point them there.
+      const bodyFlag = ["--body", "--content", "--text"].find((f) =>
+        args.includes(f),
+      );
+      if (bodyFlag) {
+        const slug = recoverPutSlug(args, bodyFlag);
+        throw new FbrainError({
+          code: "unknown_option",
+          message: `\`put\` does not accept ${bodyFlag}. The record body comes from stdin (with optional YAML frontmatter).`,
+          hint: `Pipe the body in:  echo "..." | fbrain put ${slug} --type concept   (or:  fbrain put ${slug} --type concept < note.md)`,
+        });
+      }
     }
     throw err;
   }
