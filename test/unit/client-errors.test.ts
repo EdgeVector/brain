@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   FbrainError,
   isDefaultNodeUrl,
+  mapNodeError,
   newNodeClient,
   newSchemaServiceClient,
   nodeDownHint,
@@ -372,6 +373,69 @@ describe("client error mapping", () => {
       expect(fe.hint ?? "").toContain("DevCert");
       expect(fe.hint ?? "").toContain("resolves");
       expect(fe.hint ?? "").not.toContain("FBRAIN_APP_IDENTITY_ENFORCE=off");
+    }
+  });
+
+  // Pins the mapNodeError dispatch table itself — each tuple exercises one
+  // arm (or the generic fallthrough), so a future restructure that drops or
+  // reorders an arm fails here before it can ship.
+  test("mapNodeError dispatch table covers each arm + generic fallthrough", () => {
+    const cases: Array<{ name: string; status: number; body: unknown; expectedCode: string }> = [
+      {
+        name: "403 with reason → capability_403_<reason>",
+        status: 403,
+        body: { reason: "consent_required" },
+        expectedCode: "capability_403_consent_required",
+      },
+      {
+        name: "401 MISSING_USER_CONTEXT (discriminator in `code`)",
+        status: 401,
+        body: { code: "MISSING_USER_CONTEXT", error: "Authentication required." },
+        expectedCode: "missing_user_context",
+      },
+      {
+        name: "503 node_not_provisioned",
+        status: 503,
+        body: { error: "node_not_provisioned" },
+        expectedCode: "node_not_provisioned",
+      },
+      {
+        name: "409 ambiguous_schema_name",
+        status: 409,
+        body: { error: "ambiguous_schema_name", ambiguous_schemas: ["a", "b"] },
+        expectedCode: "ambiguous_schema_name",
+      },
+      {
+        name: "400 unknown_fields",
+        status: 400,
+        body: { error: "unknown_fields", message: "no field foo" },
+        expectedCode: "unknown_fields",
+      },
+      {
+        name: "400 model.onnx (error-field shape)",
+        status: 400,
+        body: {
+          error:
+            "Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx",
+        },
+        expectedCode: "embedding_model_unavailable",
+      },
+      {
+        name: "unmatched 500 → generic node_http_500",
+        status: 500,
+        body: { error: "boom" },
+        expectedCode: "node_http_500",
+      },
+      {
+        name: "403 without `reason` → generic node_http_403 (not capability)",
+        status: 403,
+        body: {},
+        expectedCode: "node_http_403",
+      },
+    ];
+    for (const c of cases) {
+      const err = mapNodeError(c.status, c.body, "/api/test");
+      expect(err.code, c.name).toBe(c.expectedCode);
     }
   });
 
