@@ -147,7 +147,16 @@ export function parseExpansions(raw: string, count: number): string[] {
   const out: string[] = [];
   for (const line of raw.split(/\r?\n/)) {
     const cleaned = line
-      .replace(/^\s*[-*•]\s+/, "")
+      // `(?:\s+|$)` instead of `\s+`: also strip when the bullet IS the
+      // entire content (line is just `-`, `*`, or `•`, optionally indented).
+      // Without the `$` alternative those bare-bullet lines didn't match
+      // any strip, survived `.trim()` as a single-character "expansion",
+      // and flowed into ask.ts as a wasteful vector query (`fbrain ask`
+      // would round-trip the node for a `-` search whose garbage hits
+      // then polluted the RRF fused ranking). Same shape as PR #119's
+      // quote-only-line skip — collapse to empty, let the existing
+      // empty-after-strip check drop the line.
+      .replace(/^\s*[-*•](?:\s+|$)/, "")
       .replace(/^\s*\d+[.)]\s+/, "")
       // Whitespace allowance on BOTH halves: the leading half handles an
       // indented quoted phrasing like `  "foo"`; the trailing half handles

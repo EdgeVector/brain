@@ -88,6 +88,55 @@ describe("parseExpansions", () => {
     ]);
   });
 
+  test("a line that is only a bullet character is treated as blank and skipped", () => {
+    // Mirror of the quote-only skip above. The bullet-strip regex used to be
+    // `^\s*[-*•]\s+` — the trailing `\s+` REQUIRED whitespace after the
+    // bullet, so a line consisting of just `-` (or `*`, or `•`) didn't match
+    // the bullet alternative, didn't match the number or quote alternatives
+    // either, and survived `.trim()` as the single-character "expansion"
+    // `"-"`. That bare-bullet line was then pushed into the expansions list,
+    // and ask.ts's per-query loop dutifully ran a vector search for `"-"` —
+    // a wasteful HTTP round-trip whose garbage hits then polluted the RRF
+    // fused ranking.
+    //
+    // Realistic trigger: the LLM hits max_tokens mid-bullet and the final
+    // line is a bare `-` (the content was truncated). Or the LLM emits an
+    // empty list item as filler when it can't think of a 3rd phrasing:
+    //   - first phrasing
+    //   - second phrasing
+    //   -
+    // The third "phrasing" used to leak in as `-`. After the fix, the
+    // bullet-strip regex also matches when the bullet is followed by
+    // end-of-string, so the line strips to empty and the existing
+    // empty-after-strip skip handles it — same shape of fix as PR #119's
+    // quote-only-line skip.
+    expect(parseExpansions("real phrasing\n-\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    expect(parseExpansions("real phrasing\n*\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    expect(parseExpansions("real phrasing\n•\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    // Whitespace + bare bullet (no trailing whitespace) — same shape, the
+    // leading `\s*` still permits the indent.
+    expect(parseExpansions("real phrasing\n   -\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    // Realistic max_tokens-truncation case: the 4th list entry collapses to
+    // a bare bullet. Pre-fix, that bare `-` ate the 4th expansion slot with
+    // garbage; post-fix, the slot stays empty and the caller's loop just
+    // sees 3 real phrasings.
+    expect(
+      parseExpansions("- first\n- second\n- third\n-", 4),
+    ).toEqual(["first", "second", "third"]);
+  });
+
   test("trailing whitespace inside a line is trimmed", () => {
     const raw = "  padded phrasing   \n\tindented with tab\t";
     expect(parseExpansions(raw, 2)).toEqual([
