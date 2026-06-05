@@ -395,16 +395,21 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
     });
   }
 
-  // Step 3: tell the user what to do. By default that's the manual
-  // "First-run setup — run: …" instruction; `fbrain init`'s inline flow
-  // overrides this hook to shell out to `folddb consent grant` directly so the
-  // brew happy path never requires a second terminal.
+  // Step 3: tell the user what to do, then frame the polling line to match.
+  // The inline flow (used by `fbrain init --grant-consent`) has already shelled
+  // out to `folddb consent grant`, so the poll is just confirming the grant
+  // landed — printing "Waiting for you to grant access" there would contradict
+  // the "Granted access…" line the inline grant just printed. The manual
+  // fallback genuinely needs the human to act in another terminal, so it keeps
+  // the original wording.
+  const pollSeconds = Math.round(pollIntervalMs / 1000);
   if (opts.onConsentRequested) {
     await opts.onConsentRequested({ appId, requestId, print });
+    print(`Confirming the grant landed (polling every ${pollSeconds}s)…`);
   } else {
     print(`First-run setup — run: \`folddb consent grant ${appId}\` in your terminal.`);
+    print(`Waiting for you to grant access to this node (polling every ${pollSeconds}s)…`);
   }
-  print(`Waiting for you to grant access to this node (polling every ${Math.round(pollIntervalMs / 1000)}s)…`);
 
   const deadline = Date.now() + maxWaitMs;
   for (;;) {
