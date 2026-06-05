@@ -317,6 +317,48 @@ describe("migrateCmd post-registration sanity check", () => {
       stub.restore();
     }
   });
+
+  // Regression for the "marker-not-checked" gap: the per-migration version
+  // marker (`_<descriptive_name_to>_marker`) is the field that's SUPPOSED to
+  // make our registration structurally distinct from any prior schema
+  // (src/migration.ts:118 — "each migration's field set is unambiguously
+  // distinct"). If overlap-merge nevertheless collapses our new schema onto
+  // an existing canonical hash whose fields happen to include `fieldName`,
+  // the old single-field check passed silently — even though the returned
+  // schema lacked our marker. We'd then write records under the wrong hash
+  // with a marker field the schema does not declare. The check must verify
+  // the marker too.
+  test("errors when overlap-merge keeps our fieldName but drops our version marker", async () => {
+    const cfg = buildTestCfg();
+    writeStartingConfig(cfg);
+    const stub = stubFetch({
+      queries: {},
+      // The schema service returned a canonical hash whose field set DOES
+      // include "priority" (so the old fieldName-only check would pass) but
+      // lacks `_Design_v2_marker` — the marker that should have guaranteed
+      // structural distinctness from any other Design_vN registration.
+      postRegisteredFields: [
+        "slug", "title", "body", "status", "tags", "created_at", "updated_at",
+        "priority",
+        // _Design_v2_marker absent: this is a different schema, not ours.
+      ],
+    });
+    try {
+      await expect(
+        migrateCmd({
+          cfg,
+          mode: { kind: "add-field", type: "design", fieldName: "priority", fieldSpec: "String", defaultRaw: "P0" },
+          print: () => {},
+          migrationsDir: tmpMigrations,
+          configPath,
+        }),
+      ).rejects.toThrow(/Schema service collapsed.*marker/s);
+      // We bailed before any record writes hit the node.
+      expect(stub.mutations.length).toBe(0);
+    } finally {
+      stub.restore();
+    }
+  });
 });
 
 describe("migrateCmd --add-field", () => {
