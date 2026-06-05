@@ -299,6 +299,35 @@ describe("first-run consent acquisition", () => {
     // blob, it'll restart the consent handshake clean.
     expect(await store.load(NODE_URL)).toBeNull();
   });
+
+  // Integrity binding on acquire (parallel to the audience-binding check above,
+  // and to the JCS check `loadValidCached` runs on cache reuse). The acquire
+  // path was decoding the consent-status payload and trusting envelope
+  // .payload_hash unchecked — so a token whose hash does not match
+  // sha256(JCS(token-minus-envelope)) (node-side mint bug, MITM tamper, or a
+  // substituted response) would be stored and replayed once. The node would
+  // then 403 capability_bad_sig and the in-flight session would burn the
+  // write attempt on what fbrain itself could have caught at the boundary.
+  test("rejects an acquired capability whose JCS payload hash doesn't match", async () => {
+    const tamperedBlob = await mintTokenBlob({ corruptHash: true });
+    const store = inMemoryCapabilityStore();
+    await expect(
+      acquireCapability({
+        appId: "fbrain",
+        nodeUrl: NODE_URL,
+        store,
+        transport: mockTransport({
+          consentStatus: () => ({ status: 200, body: { status: "granted", capability: tamperedBlob } }),
+        }),
+        print: () => {},
+        pollIntervalMs: 1,
+        sleep: noSleep,
+      }),
+    ).rejects.toMatchObject({ code: "consent_status_bad_capability_integrity" });
+    // Same persistence invariant as the app_id-mismatch case: a tampered blob
+    // never lands in the store, so the next session starts clean.
+    expect(await store.load(NODE_URL)).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
