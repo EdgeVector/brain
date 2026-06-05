@@ -214,9 +214,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       rank: h.rank,
     }));
     rankers.push({ label: `bm25:${tag}`, hits: bm25Ranked });
-    const bm25Map = new Map<string, number>();
-    for (const r of bm25Ranked) bm25Map.set(r.id, r.rank);
-    perQueryBm25TopId.set(qi, bm25Map);
+    perQueryBm25TopId.set(qi, rankMap(bm25Ranked));
     opts.verbose?.(`bm25:${tag} → ${bm25Hits.length} hit(s)`);
 
     // Vector over this query.
@@ -257,9 +255,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       rank: i + 1,
     }));
     rankers.push({ label: `vector:${tag}`, hits: vectorRanked });
-    const vMap = new Map<string, number>();
-    for (const r of vectorRanked) vMap.set(r.id, r.rank);
-    perQueryVectorTopId.set(qi, vMap);
+    perQueryVectorTopId.set(qi, rankMap(vectorRanked));
     // Record per-doc top vector score for display.
     for (const v of vectorHits) {
       const prior = vectorScoreById.get(v.id);
@@ -480,6 +476,10 @@ export function collapseFragments(hits: NativeIndexHit[]): NativeIndexHit[] {
   return Array.from(best.values());
 }
 
+function rankMap(ranked: Array<{ id: string; rank: number }>): Map<string, number> {
+  return new Map(ranked.map((r) => [r.id, r.rank]));
+}
+
 function collectExpansionHits(
   f: FusedHit,
   bm25: Map<number, Map<string, number>>,
@@ -487,16 +487,18 @@ function collectExpansionHits(
 ): Array<{ idx: number; ranker: "bm25" | "vector"; rank: number }> {
   const out: Array<{ idx: number; ranker: "bm25" | "vector"; rank: number }> = [];
   // Expansion queries are at indices 1, 2, 3, ... — anything > 0.
-  for (const [qi, m] of bm25) {
-    if (qi === 0) continue;
-    const r = m.get(f.id);
-    if (r !== undefined) out.push({ idx: qi - 1, ranker: "bm25", rank: r });
-  }
-  for (const [qi, m] of vector) {
-    if (qi === 0) continue;
-    const r = m.get(f.id);
-    if (r !== undefined) out.push({ idx: qi - 1, ranker: "vector", rank: r });
-  }
+  const collect = (
+    src: Map<number, Map<string, number>>,
+    ranker: "bm25" | "vector",
+  ): void => {
+    for (const [qi, byId] of src) {
+      if (qi === 0) continue;
+      const r = byId.get(f.id);
+      if (r !== undefined) out.push({ idx: qi - 1, ranker, rank: r });
+    }
+  };
+  collect(bm25, "bm25");
+  collect(vector, "vector");
   return out;
 }
 
