@@ -289,7 +289,7 @@ for the full evidence and the conditions under which this command can
 become a real share.
 
 Prints a pointer and exits 1.`,
-  delete: `fbrain delete <slug> [--type T] [--force]
+  delete: `fbrain delete <slug> [--type T] [--force] [--yes]
 
 Soft-deletes the record. fold_db's mutation pipeline is append-only — see
 docs/phase-5-delete-spike.md — so the workaround overwrites every user
@@ -305,8 +305,10 @@ Deleting a design that still has live tasks linked to it is blocked
 design). Re-link or delete those tasks first, or pass --force to delete
 anyway — the tasks' design references are then left dangling.
 
-  --type    design | task | concept | preference | reference | agent | project | spike
-  --force   delete a design even if live tasks still link to it
+  --type      design | task | concept | preference | reference | agent | project | spike
+  --force     delete a design even if live tasks still link to it
+  --yes, -y   harmless no-op; delete is non-interactive so no confirmation
+              prompt is shown. Accepted so scripts can pass \`-y\` uniformly.
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
@@ -452,6 +454,12 @@ const DOCTOR_OPTIONS = {
 const DELETE_OPTIONS = {
   type: { type: "string" },
   force: { type: "boolean", default: false },
+  // `--yes` / `-y` is a documented no-op. delete is non-interactive (no
+  // confirmation prompt), but apt / npm / rm muscle memory reaches for
+  // `-y` to suppress one — and a script that uniformly passes `-y` to
+  // destructive commands shouldn't dead-end on parseArgs's bare
+  // "Unknown option '--yes'". Accept it silently so the invocation works.
+  yes: { type: "boolean", short: "y", default: false },
 } as const;
 const REINDEX_OPTIONS = {
   type: { type: "string" },
@@ -819,12 +827,44 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
 }
 
 async function runPut(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: PUT_OPTIONS,
-  });
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: PUT_OPTIONS,
+    });
+  } catch (err) {
+    // `put` is intentionally frontmatter-driven — title comes from the
+    // `title:` key or the first `# H1`. But every `<type> new` subcommand
+    // takes `--title`, so a fresh user reflexively types
+    // `fbrain put <slug> --title X` and dead-ends on parseArgs's bare
+    // "Unknown option '--title'" with no nudge toward the right form.
+    // Re-throw with a hint that points at `<type> new` instead.
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" &&
+      args.includes("--title")
+    ) {
+      // Best-effort recovery of the slug positional. We can't trust parseArgs
+      // (it just threw), so scan everything before `--title` and pick the
+      // first non-flag arg — that's the user's positional. If they typed
+      // `fbrain put --title X` with no slug, there's nothing before --title
+      // and we fall back to `<slug>` rather than mis-quoting `X`.
+      const titleIdx = args.indexOf("--title");
+      const slug =
+        args.slice(0, titleIdx).find((a) => !a.startsWith("-")) ?? "<slug>";
+      throw new FbrainError({
+        code: "unknown_option",
+        message:
+          "`put` does not accept --title. The title comes from frontmatter (`title:` between leading `---` lines) or the first `# H1` of the body.",
+        hint: `To set the title via a flag, use \`fbrain <type> new ${slug} --title "..."\` instead.`,
+      });
+    }
+    throw err;
+  }
+  const { values, positionals } = parsed;
   const cfg = readConfig();
   const input = await maybeReadStdin();
   // Slug is optional at the CLI boundary — putCmd resolves it from the
