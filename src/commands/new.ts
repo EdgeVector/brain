@@ -17,6 +17,7 @@ import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlug,
+  findExistingForWrite,
   nowIso,
   schemaHashFor,
   validateSlug,
@@ -70,15 +71,14 @@ export async function recordNew(opts: RecordNewOptions): Promise<void> {
   const hash = schemaHashFor(opts.type, opts.cfg);
 
   if (!opts.force) {
-    // /api/query returns a non-deterministic top-100 slice per schema, so
-    // a single findBySlug can miss an existing slug on a schema with >100
-    // rows. Without the retry the duplicate guard fails open ~40% of the
-    // time and the createRecord below silently overwrites the row. Same
-    // hedge put.ts and resolveBySlug use. See PR #53.
-    const existing = await withReadRetry(
-      () => findBySlug(node, opts.type, hash, opts.slug),
-      (r) => r !== null,
-    );
+    // Duplicate guard. `findExistingForWrite` rides out the daemon's
+    // empty-result `/api/query` flake (which would otherwise let the guard
+    // fail open and the createRecord below silently overwrite the row) but
+    // short-circuits on a populated page that lacks the slug — so creating a
+    // genuinely-new record doesn't burn the full retry budget (~1.1s) on
+    // every `<type> new`. Same helper put.ts uses; see its comment in
+    // record.ts (supersedes the per-call withReadRetry hedge from PR #53).
+    const existing = await findExistingForWrite(node, opts.type, hash, opts.slug);
     if (existing) {
       throw new FbrainError({
         code: "slug_already_exists",

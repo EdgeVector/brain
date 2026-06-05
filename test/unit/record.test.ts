@@ -4,6 +4,7 @@ import {
   computeBackoffMs,
   ensureStatus,
   fieldsFor,
+  findExistingForWrite,
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
   resolveBySlug,
@@ -273,6 +274,86 @@ describe("withReadRetry", () => {
       ),
     ).rejects.toThrow("ECONNREFUSED");
     expect(calls).toBe(1);
+  });
+});
+
+// findExistingForWrite is the create-vs-update existence check used by `put`
+// and `<type> new`. Unlike the read-path retry, it short-circuits on a
+// populated-but-missing page so a genuinely-new slug doesn't burn the whole
+// retry budget — while still riding out the daemon's empty-result flake for
+// rows that actually exist.
+describe("findExistingForWrite", () => {
+  // A node whose queryAll returns each entry of `pages` in turn (last entry
+  // repeats once exhausted), counting how many times it was called.
+  function seqNode(pages: Array<Array<{ slug: string; tags?: string[] }>>) {
+    let calls = 0;
+    const node = {
+      baseUrl: "mock",
+      userHash: "uh",
+      async queryAll(): Promise<QueryResponse> {
+        const page = pages[Math.min(calls, pages.length - 1)] ?? [];
+        calls++;
+        const results = page.map((r) => ({
+          fields: {
+            slug: r.slug,
+            title: "T",
+            body: "B",
+            status: "active",
+            tags: r.tags ?? [],
+            created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-01T00:00:00Z",
+          },
+          key: { hash: r.slug, range: null },
+        }));
+        return {
+          ok: true,
+          results,
+          total_count: results.length,
+          returned_count: results.length,
+        };
+      },
+    } as unknown as NodeClient;
+    return { node, calls: () => calls };
+  }
+  const noSleep = { sleep: async () => {} };
+
+  test("populated page without the slug → null after ONE query (no retry burn)", async () => {
+    const { node, calls } = seqNode([[{ slug: "other-a" }, { slug: "other-b" }]]);
+    const r = await findExistingForWrite(node, "concept", "h", "brand-new", noSleep);
+    expect(r).toBeNull();
+    // The whole point: a genuinely-new slug short-circuits instead of looping
+    // READ_RETRY_ATTEMPTS times.
+    expect(calls()).toBe(1);
+  });
+
+  test("slug present and live → returns the record on first query", async () => {
+    const { node, calls } = seqNode([[{ slug: "mine" }, { slug: "other" }]]);
+    const r = await findExistingForWrite(node, "concept", "h", "mine", noSleep);
+    expect(r?.slug).toBe("mine");
+    expect(calls()).toBe(1);
+  });
+
+  test("slug present but tombstoned → treated as absent, short-circuits", async () => {
+    const { node, calls } = seqNode([[{ slug: "gone", tags: [TOMBSTONE_TAG] }]]);
+    const r = await findExistingForWrite(node, "concept", "h", "gone", noSleep);
+    expect(r).toBeNull();
+    // Populated page (one tombstoned row) is still authoritative — no retry.
+    expect(calls()).toBe(1);
+  });
+
+  test("empty schema → rides out the budget then returns null (slug is new)", async () => {
+    const { node, calls } = seqNode([[]]);
+    const r = await findExistingForWrite(node, "concept", "h", "first-ever", noSleep);
+    expect(r).toBeNull();
+    // Empty page is ambiguous (flake vs. empty schema) → spends the budget.
+    expect(calls()).toBe(READ_RETRY_ATTEMPTS);
+  });
+
+  test("empty → empty → populated-with-slug → returns the hit (flake ride-out)", async () => {
+    const { node, calls } = seqNode([[], [], [{ slug: "exists" }]]);
+    const r = await findExistingForWrite(node, "concept", "h", "exists", noSleep);
+    expect(r?.slug).toBe("exists");
+    expect(calls()).toBe(3);
   });
 });
 

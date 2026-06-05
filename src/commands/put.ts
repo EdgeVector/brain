@@ -23,11 +23,10 @@ import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   ensureStatus,
-  findBySlug,
+  findExistingForWrite,
   nowIso,
   schemaHashFor,
   validateSlug,
-  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import {
@@ -88,17 +87,16 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const hash = schemaHashFor(type, opts.cfg);
-  // The fold_db_node `/api/query` endpoint returns a non-deterministic
-  // top-100 slice of records per schema, so a single findBySlug call on a
-  // schema with >100 rows can miss a slug that genuinely exists (~40%
-  // miss rate empirically on a 168-row concept schema). That miss made
-  // put fall through to `createRecord`, which re-stamped `created_at` and
-  // printed "created" for what was actually an update. withReadRetry is
-  // the same hedge `resolveBySlug` already applies to get/status/delete.
-  const existing = await withReadRetry(
-    () => findBySlug(node, type, hash, slug),
-    (r) => r !== null,
-  );
+  // Decide create-vs-update. A naive single `findBySlug` could miss an
+  // existing slug when the daemon's `/api/query` flakes its schema to an
+  // empty result, falling through to `createRecord` (which re-stamps
+  // `created_at` and prints "created" for what was actually an update).
+  // `findExistingForWrite` rides out that empty-result flake but — unlike a
+  // blanket `withReadRetry(findBySlug, r => r !== null)` — short-circuits on
+  // a populated page that simply lacks the slug, so a genuinely-new slug
+  // doesn't burn the whole retry budget (~1.1s) on every create. See the
+  // helper's comment in record.ts.
+  const existing = await findExistingForWrite(node, type, hash, slug);
   const now = nowIso();
 
   const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, existing, now);
