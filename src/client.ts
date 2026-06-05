@@ -800,91 +800,123 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
   });
 }
 
-function mapNodeError(status: number, body: unknown, path: string): FbrainError {
-  const errCode = bodyError(body);
-  const msg = bodyMessage(body);
+// Context fields read by the node-error dispatch table. Built once per call so
+// each rule's `match` and `build` can stay declarative.
+type NodeErrorContext = {
+  status: number;
+  body: unknown;
+  path: string;
+  errCode: string | undefined;
+  msg: string | undefined;
   // Discriminator field for several fold_db_node error responses (e.g.
   // missing_user_context_response in fold_db_node/src/utils/http_errors.rs
   // returns `{code:"MISSING_USER_CONTEXT", error:"<human sentence>", ...}`).
   // `error` carries the human-readable message there, NOT the machine
   // token — so the discriminator lives in `code` and must be checked
   // separately from `bodyError`.
-  const codeField = bodyStringField(body, "code");
-  // Discriminated capability 403 (app_identity v3.1). The body is verbatim
+  codeField: string | undefined;
+  reason: string | undefined;
+  // Concatenated msg+errCode used by the embedding-model regex. The homebrew
+  // daemon puts the failure text in `error`; future daemons may move it to
+  // `message` — we grep both so the mapping survives that move.
+  onnxBlob: string;
+};
+
+type FbrainErrorInit = ConstructorParameters<typeof FbrainError>[0];
+
+type NodeErrorRule = {
+  match: (ctx: NodeErrorContext) => boolean;
+  build: (ctx: NodeErrorContext) => FbrainErrorInit;
+};
+
+// Ordered dispatch table for node HTTP errors. First match wins; some arms are
+// intentionally more specific than later ones, so order is load-bearing. A
+// tuple that matches nothing falls through to the generic `node_http_${status}`
+// mapping in `mapNodeError`.
+const NODE_ERROR_RULES: NodeErrorRule[] = [
+  // Discriminated capability 403 (app_identity v3.1). Body is verbatim
   // `{"status":403,"reason":"<reason>", ...}`. Carry the reason + any detail
   // on the FbrainError so the capability layer can apply the contract behavior
   // (discard / re-acquire / retry-once / surface). A 403 without a recognised
   // `reason` falls through to the generic mapping below.
-  if (status === 403) {
-    const reason = bodyStringField(body, "reason");
-    if (reason !== undefined) {
+  {
+    match: (ctx) => ctx.status === 403 && ctx.reason !== undefined,
+    build: (ctx) => {
+      const reason = ctx.reason as string;
       const detail: Capability403Detail = {};
-      const schema = bodyStringField(body, "schema");
+      const schema = bodyStringField(ctx.body, "schema");
       if (schema !== undefined) detail.schema = schema;
-      const capabilityId = bodyStringField(body, "capability_id");
+      const capabilityId = bodyStringField(ctx.body, "capability_id");
       if (capabilityId !== undefined) detail.capabilityId = capabilityId;
-      const skew = bodyNumberField(body, "timestamp_skew_secs");
+      const skew = bodyNumberField(ctx.body, "timestamp_skew_secs");
       if (skew !== undefined) detail.timestampSkewSecs = skew;
-      return new FbrainError({
+      return {
         code: `capability_403_${reason}`,
-        message: `Node rejected ${path}: capability denied (${reason}).`,
+        message: `Node rejected ${ctx.path}: capability denied (${reason}).`,
         capabilityReason: reason,
         capabilityDetail: detail,
-      });
-    }
-  }
-  if (
-    status === 401 &&
-    (codeField === "MISSING_USER_CONTEXT" ||
-      errCode === "MISSING_USER_CONTEXT" ||
-      msg?.includes("Authentication"))
-  ) {
-    return new FbrainError({
+      };
+    },
+  },
+  {
+    match: (ctx) =>
+      ctx.status === 401 &&
+      (ctx.codeField === "MISSING_USER_CONTEXT" ||
+        ctx.errCode === "MISSING_USER_CONTEXT" ||
+        ctx.msg?.includes("Authentication") === true),
+    build: (ctx) => ({
       code: "missing_user_context",
-      message: `Node rejected ${path}: missing X-User-Hash ${DOCTOR_TIP}.`,
+      message: `Node rejected ${ctx.path}: missing X-User-Hash ${DOCTOR_TIP}.`,
       hint: "Re-run `fbrain init` so the config's userHash is regenerated.",
-    });
-  }
-  if (status === 503 && errCode === "node_not_provisioned") {
-    return new FbrainError({
+    }),
+  },
+  {
+    match: (ctx) => ctx.status === 503 && ctx.errCode === "node_not_provisioned",
+    build: () => ({
       code: "node_not_provisioned",
       message: `Node not set up ${DOCTOR_TIP}.`,
       hint: "Run `fbrain init` to bootstrap the node.",
-    });
-  }
-  if (status === 409 && errCode === "ambiguous_schema_name") {
-    const candidates = bodyAmbiguous(body);
-    return new FbrainError({
-      code: "ambiguous_schema_name",
-      message:
-        `Node rejected ${path}: schema collision (canonical hashes ${candidates.join(", ")}); ` +
-        `fbrain config out of date — run \`fbrain init\` ${DOCTOR_TIP}.`,
-      hint: "Re-run `fbrain init` — config will pick up the current canonical hash.",
-    });
-  }
-  if (status === 400 && (errCode === "unknown_fields" || msg?.includes("unknown"))) {
-    return new FbrainError({
+    }),
+  },
+  {
+    match: (ctx) => ctx.status === 409 && ctx.errCode === "ambiguous_schema_name",
+    build: (ctx) => {
+      const candidates = bodyAmbiguous(ctx.body);
+      return {
+        code: "ambiguous_schema_name",
+        message:
+          `Node rejected ${ctx.path}: schema collision (canonical hashes ${candidates.join(", ")}); ` +
+          `fbrain config out of date — run \`fbrain init\` ${DOCTOR_TIP}.`,
+        hint: "Re-run `fbrain init` — config will pick up the current canonical hash.",
+      };
+    },
+  },
+  {
+    match: (ctx) =>
+      ctx.status === 400 && (ctx.errCode === "unknown_fields" || ctx.msg?.includes("unknown") === true),
+    build: (ctx) => ({
       code: "unknown_fields",
-      message: `Node rejected ${path}: ${msg ?? "unknown field name"} ${DOCTOR_TIP}.`,
+      message: `Node rejected ${ctx.path}: ${ctx.msg ?? "unknown field name"} ${DOCTOR_TIP}.`,
       hint: "Compare fbrain's schemas.ts against the registered schema; re-run `fbrain init` after editing.",
-    });
-  }
+    }),
+  },
   // The fold_db_node's embedding subsystem lazily loads `model.onnx` from a
   // local cache on the first semantic-search call. After certain restarts
-  // (notably `brew upgrade folddb`) the cache can be partially
-  // populated, and the node returns a 400 whose body carries
-  // "...Failed to init embedding model: Failed to retrieve model.onnx"
-  // — sometimes under `message`, sometimes under `error` (the homebrew
-  // daemon currently puts the full text in `error`). Without translation
-  // the user sees an opaque error on `fbrain search` / `fbrain ask`;
-  // with translation they get a single, actionable recovery command.
-  const onnxBlob = [msg, errCode].filter((s): s is string => typeof s === "string").join(" ");
-  if (status === 400 && /Failed to (init embedding model|retrieve model\.onnx)/i.test(onnxBlob)) {
-    return new FbrainError({
+  // (notably `brew upgrade folddb`) the cache can be partially populated, and
+  // the node returns a 400 whose body carries
+  // "...Failed to init embedding model: Failed to retrieve model.onnx" —
+  // sometimes under `message`, sometimes under `error`. Without translation
+  // the user sees an opaque error on `fbrain search` / `fbrain ask`; with
+  // translation they get a single, actionable recovery command.
+  {
+    match: (ctx) =>
+      ctx.status === 400 &&
+      /Failed to (init embedding model|retrieve model\.onnx)/i.test(ctx.onnxBlob),
+    build: (ctx) => ({
       code: "embedding_model_unavailable",
       message:
         `Semantic search is unavailable — the fold_db node failed to load its embedding model ` +
-        `(${onnxBlob.trim()}) ${DOCTOR_TIP}.`,
+        `(${ctx.onnxBlob.trim()}) ${DOCTOR_TIP}.`,
       hint:
         "Restart the node so it re-fetches the ONNX file from the embedding cache " +
         "(homebrew: `folddb daemon stop && folddb daemon start`). " +
@@ -893,7 +925,25 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
       agentHint:
         "This is a node-side issue, not something this tool can fix — ask the " +
         "operator to restart the fold_db node, then retry.",
-    });
+    }),
+  },
+];
+
+export function mapNodeError(status: number, body: unknown, path: string): FbrainError {
+  const errCode = bodyError(body);
+  const msg = bodyMessage(body);
+  const ctx: NodeErrorContext = {
+    status,
+    body,
+    path,
+    errCode,
+    msg,
+    codeField: bodyStringField(body, "code"),
+    reason: bodyStringField(body, "reason"),
+    onnxBlob: [msg, errCode].filter((s): s is string => typeof s === "string").join(" "),
+  };
+  for (const rule of NODE_ERROR_RULES) {
+    if (rule.match(ctx)) return new FbrainError(rule.build(ctx));
   }
   return new FbrainError({
     code: `node_http_${status}`,
