@@ -3,7 +3,14 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { FbrainError, newNodeClient, newSchemaServiceClient } from "../../src/client.ts";
+import {
+  FbrainError,
+  isDefaultNodeUrl,
+  newNodeClient,
+  newSchemaServiceClient,
+  nodeDownHint,
+  schemaDownHint,
+} from "../../src/client.ts";
 
 type MockResponse = { status: number; body?: unknown };
 
@@ -201,6 +208,53 @@ describe("client error mapping", () => {
       // here we pin that connectionError still appends it for everyone else.
       expect((err as FbrainError).message).toContain("fbrain doctor");
     }
+  });
+
+  // DX: a downloaded user who simply forgot to start their daemon must be
+  // told to `brew services start folddb`, NOT to compile Rust from source.
+  test("node-down hint leads with `brew services` for the default :9001 daemon", () => {
+    expect(isDefaultNodeUrl("http://127.0.0.1:9001")).toBe(true);
+    expect(isDefaultNodeUrl("http://localhost:9001")).toBe(true);
+    const hint = nodeDownHint("http://127.0.0.1:9001");
+    expect(hint).toContain("brew services start folddb");
+    // The from-source path is still mentioned, but only as the secondary
+    // contributor note — it must not lead.
+    expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
+    expect(hint).not.toContain("compiling Rust");
+  });
+
+  test("node-down hint keeps the from-source/compile framing for a non-default node URL", () => {
+    expect(isDefaultNodeUrl("http://127.0.0.1:9101")).toBe(false);
+    const hint = nodeDownHint("http://127.0.0.1:9101");
+    expect(hint).toContain("run.sh");
+    expect(hint).toContain("compiles Rust");
+    expect(hint).not.toContain("brew services");
+  });
+
+  test("connectionError node hint mentions `brew services` for the default daemon", async () => {
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof globalThis.fetch;
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.autoIdentity();
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).hint ?? "").toContain("brew services start folddb");
+    }
+  });
+
+  // DX: a downloaded user has no local schema_service to "start" — an
+  // unreachable cloud Lambda is a network/outage issue, not a missing
+  // local process.
+  test("schema-down hint reflects the cloud Lambda (no local schema_service) for a non-localhost URL", () => {
+    const hint = schemaDownHint("https://axo709qs11.execute-api.us-east-1.amazonaws.com");
+    expect(hint).toContain("cloud schema service");
+    expect(hint).not.toContain("run.sh");
+  });
+
+  test("schema-down hint keeps the local-schema note for a localhost URL", () => {
+    expect(schemaDownHint("http://127.0.0.1:8080")).toContain("run.sh");
   });
 
   test("schema service POST returns canonical hash", async () => {
