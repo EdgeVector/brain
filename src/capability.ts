@@ -441,6 +441,20 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
             `but "${appId}" was requested.`,
         });
       }
+      // Integrity binding: parallel to the audience check, and to the JCS
+      // check `loadValidCached` runs on cache reuse. Without this gate, a
+      // token whose `envelope.payload_hash` doesn't match the JCS of the
+      // token's signing payload (node-side mint bug, MITM tamper, or a
+      // substituted response) would be stored and replayed once before the
+      // node's signature check 403'd it as `capability_bad_sig`.
+      if (!(await tokenIntegrityValid(token))) {
+        throw new FbrainError({
+          code: "consent_status_bad_capability_integrity",
+          message:
+            "consent-status returned a capability that failed JCS integrity check " +
+            "(envelope.payload_hash != sha256(JCS(token-minus-envelope))).",
+        });
+      }
       const stored: StoredCapability = {
         appId,
         nodeUrl: opts.nodeUrl,
