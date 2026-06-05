@@ -168,10 +168,33 @@ export async function findBySlugRaw(
 export const READ_RETRY_ATTEMPTS = 5;
 export const READ_RETRY_BACKOFF_MS = 250;
 
+// Empty-page retry cap for the fast-miss helper (`findBySlugWithFastMiss`).
+// Separate from READ_RETRY_ATTEMPTS because the fast-miss loop ONLY retries
+// on an empty page — every other branch (populated-with-hit, populated-
+// without-hit) returns on the first attempt. On a fresh / sparsely-populated
+// node, every record type's page is empty until its first record lands, so
+// burning the full 5×250 ms budget on every "first-write-of-a-type" turned
+// the new-developer Quick-Start into a ~1.2 s-per-write cliff (measured
+// 2026-06-05). On `fbrain get`/`delete`, the cost compounds across the
+// 8-type resolution sweep + the dangling-ref validators — ~56 queries to
+// fetch one record when 5 of the 8 type pages are empty.
+//
+// Cap = 2 keeps a single retry for the documented saturated-daemon empty-
+// result flake (the row exists but `/api/query` returns []) while making the
+// fresh-node case cost ~1 extra query (~250 ms) instead of ~1100 ms.
+// Verify-after-write callers that *expect* the row to exist still go through
+// `withReadRetry` with the full budget — they are not affected.
+export const EMPTY_PAGE_RETRY_ATTEMPTS = 2;
+
 export type ReadRetryOptions = {
   maxAttempts?: number;
   backoffMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  // Cap on retries when the queried page comes back empty (the only branch
+  // that retries inside `findBySlugWithFastMiss`). Defaults to
+  // `EMPTY_PAGE_RETRY_ATTEMPTS`. Tests override this together with `sleep`
+  // to pin the count without paying real backoff.
+  emptyPageAttempts?: number;
 };
 
 // Pure schedule: how long to wait *before* attempt N (1-based). Constant
@@ -218,14 +241,24 @@ export async function withReadRetry<T>(
 // Used by both the write existence check (`findExistingForWrite`) and the
 // read sweep (`resolveBySlug`). See `findExistingForWrite` below for the
 // motivating analysis — the same logic applies to `fbrain get` / `status` /
-// `delete` of a typo'd slug, which otherwise burns the full 5×250 ms retry
-// budget before surfacing "No record".
+// `delete` of a typo'd slug, which otherwise burns the full retry budget
+// before surfacing "No record".
 //
 // Behavior: a NON-EMPTY page that lacks the slug is authoritative (server-side
 // pagination is fixed; the only remaining read flake is empty-result on a
 // saturated daemon), so return null immediately without retrying. Only an
 // EMPTY page is ambiguous (flake vs. legitimately-empty schema) and spends
-// the retry budget.
+// a CAPPED retry budget (`EMPTY_PAGE_RETRY_ATTEMPTS`, default 2) — not the
+// full 5×250 ms `READ_RETRY_ATTEMPTS` window. Capping is the fix for the
+// first-write-of-a-type cliff: on a fresh node every type's page starts
+// empty, and `<type> new` / `get` / `delete` would otherwise burn ~1.1 s
+// of pure backoff per type before falling through. The single retry still
+// absorbs a one-off saturated-daemon flake; deeper double-flakes on a row
+// that exists fall through to "not found" (the caller can re-run, and the
+// affected paths — write existence check, dangling-ref validators, untyped
+// slug sweep — recover gracefully). Verify-after-write paths that *expect*
+// the row to exist (list sweep, delete-verify) still use the full retry
+// budget via `withReadRetry` and are unaffected.
 //
 // The `raw` flag mirrors `findBySlug` vs `findBySlugRaw`. When false,
 // tombstoned matches count as ABSENT (same as `findBySlug`) but still
@@ -243,7 +276,7 @@ async function findBySlugWithFastMiss(
   raw: boolean,
   options?: ReadRetryOptions,
 ): Promise<FbrainRecord | null> {
-  const maxAttempts = options?.maxAttempts ?? READ_RETRY_ATTEMPTS;
+  const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -254,7 +287,9 @@ async function findBySlugWithFastMiss(
     if (match && (raw || !isTombstoned(match))) return match;
     // Populated page without our (live) slug ⇒ authoritative miss: stop early.
     if (list.length > 0) return null;
-    // Empty page ⇒ ambiguous; loop to ride out the saturated-daemon flake.
+    // Empty page ⇒ ambiguous; loop up to EMPTY_PAGE_RETRY_ATTEMPTS to ride
+    // out a single saturated-daemon flake without compounding the first-
+    // write-of-a-type latency on a fresh node.
   }
   return null;
 }
@@ -269,6 +304,15 @@ async function findBySlugWithFastMiss(
 // for every new slug, so each create burned the FULL retry budget (~1.1s of
 // pure backoff sleep) before falling through to `createRecord`. Measured
 // 2026-06-05: create ~1200 ms vs. update ~95 ms, purely from this.
+//
+// Follow-up (2026-06-05): the populated-page fast-miss above closed the
+// "create with EXISTING siblings in the same type" case (~95 ms), but the
+// EMPTY-page branch still burned the full READ_RETRY_ATTEMPTS budget on a
+// fresh node — making the first write of every type ~7× slower than every
+// subsequent write (~1230 ms vs ~170 ms). The empty branch now caps at
+// EMPTY_PAGE_RETRY_ATTEMPTS (default 2) so a fresh-node first-write costs
+// ~one extra query (~250 ms worst case) instead of ~1.1 s of backoff, while
+// still absorbing a single saturated-daemon flake.
 //
 // `resolveBySlug` (read sweep) shares the same fix via the same helper —
 // `fbrain get <typo>` had the symmetric problem (~1.1s before "No record")

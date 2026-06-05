@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   computeBackoffMs,
+  EMPTY_PAGE_RETRY_ATTEMPTS,
   ensureStatus,
   fieldsFor,
   findBySlugFast,
@@ -373,19 +374,55 @@ describe("findExistingForWrite", () => {
     expect(calls()).toBe(1);
   });
 
-  test("empty schema → rides out the budget then returns null (slug is new)", async () => {
+  test("empty schema → stops after EMPTY_PAGE_RETRY_ATTEMPTS, returns null (first-write-of-type)", async () => {
+    // The first-write-of-a-type cliff fix (2026-06-05). Pre-fix this case
+    // burned the full READ_RETRY_ATTEMPTS=5 budget (~1.1 s of backoff) on
+    // every `<type> new` against a fresh node, because the empty branch
+    // is the only one that retries and there was no separate cap. The
+    // cap (default 2) keeps a single retry to absorb a one-off saturated-
+    // daemon flake while making the worst-case fresh-node cost ~one extra
+    // query (~250 ms) instead of ~1.1 s.
     const { node, calls } = seqNode([[]]);
     const r = await findExistingForWrite(node, "concept", "h", "first-ever", noSleep);
     expect(r).toBeNull();
-    // Empty page is ambiguous (flake vs. empty schema) → spends the budget.
-    expect(calls()).toBe(READ_RETRY_ATTEMPTS);
+    expect(calls()).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
+    // Belt-and-braces: the cap MUST be strictly less than the verify-after-
+    // write budget, or the cliff is back. If a future change wants to raise
+    // the cap, the new-developer dogfood timing must be re-measured first.
+    expect(EMPTY_PAGE_RETRY_ATTEMPTS).toBeLessThan(READ_RETRY_ATTEMPTS);
   });
 
-  test("empty → empty → populated-with-slug → returns the hit (flake ride-out)", async () => {
-    const { node, calls } = seqNode([[], [], [{ slug: "exists" }]]);
+  test("empty → populated-with-slug → returns the hit (single-flake ride-out)", async () => {
+    // The cap-at-2 design preserves recovery from a SINGLE saturated-daemon
+    // empty-result flake on a row that exists — same property the original
+    // 5x budget guarded, just without burning the full window when the row
+    // truly does not exist. Deeper triple+-flake recovery was the trade-off
+    // accepted for the first-write-of-type latency win.
+    const { node, calls } = seqNode([[], [{ slug: "exists" }]]);
     const r = await findExistingForWrite(node, "concept", "h", "exists", noSleep);
     expect(r?.slug).toBe("exists");
-    expect(calls()).toBe(3);
+    expect(calls()).toBe(2);
+  });
+
+  test("empty schema → sleeps at most ONE backoff (the cliff-fix budget)", async () => {
+    // Pin the WALL-CLOCK budget separately from the query count: pre-fix
+    // every fresh-node first-write paid (READ_RETRY_ATTEMPTS - 1) × 250 ms
+    // ≈ 1000 ms of pure backoff. Post-fix that has to drop to at most
+    // (EMPTY_PAGE_RETRY_ATTEMPTS - 1) backoffs (default = 1) so the
+    // dogfood measurement (~1.2 s → ~0.2 s) actually lands. Asserting on
+    // sleep totals — not wall-clock — keeps the test deterministic on CI.
+    const sleeps: number[] = [];
+    const { node } = seqNode([[]]);
+    await findExistingForWrite(node, "concept", "h", "first-ever", {
+      sleep: async (ms) => void sleeps.push(ms),
+    });
+    expect(sleeps.length).toBeLessThanOrEqual(EMPTY_PAGE_RETRY_ATTEMPTS - 1);
+    const totalBackoff = sleeps.reduce((a, b) => a + b, 0);
+    // < READ_RETRY_ATTEMPTS×ceiling is the contract: if a future change
+    // ever pushes this past the old 1000 ms ceiling, the cliff is back.
+    expect(totalBackoff).toBeLessThan(
+      (READ_RETRY_ATTEMPTS - 1) * READ_RETRY_BACKOFF_MS,
+    );
   });
 });
 
@@ -479,19 +516,24 @@ describe("findBySlugFast (read-context fast-miss for dangling-ref validators)", 
     expect(calls()).toBe(1);
   });
 
-  test("empty schema → still rides out the saturated-daemon flake budget", async () => {
-    // Symmetric to findExistingForWrite's empty-page test. An empty page is
-    // ambiguous (flake vs. legitimately-empty schema) so the helper spends the
-    // budget — we must NOT regress to short-circuiting on empty pages, or a
-    // valid parent on a >100-row design schema that flaked to 0 results would
-    // be misreported as a `dangling_design_slug` (the exact bug withReadRetry
-    // was added to fix in PR #53).
+  test("empty schema → stops after EMPTY_PAGE_RETRY_ATTEMPTS (capped flake-recovery)", async () => {
+    // Symmetric to findExistingForWrite's empty-page test post-cliff-fix
+    // (2026-06-05). An empty page is still ambiguous (flake vs. legitimately-
+    // empty schema) so the helper retries — but only EMPTY_PAGE_RETRY_ATTEMPTS
+    // times, not the full READ_RETRY_ATTEMPTS=5 it used to. The single retry
+    // preserves recovery for the PR #53 case (a valid parent on a >100-row
+    // schema that flaked to 0 on the first slice). What we trade away is
+    // recovery from a double+-flake on the same call — the affected paths
+    // (task new --design, link, get/search dangling-ref) re-run cleanly and
+    // a fresh-node `fbrain get` no longer pays ~56 × full-budget queries on
+    // empty type pages (each empty type page was burning ~5 queries × 8
+    // types × 2 passes = ~80 wasted reads before the cliff fix).
     const { node, calls } = countingNode([[]]);
     const r = await findBySlugFast(node, "design", "designhash", "anything", {
       sleep: async () => {},
     });
     expect(r).toBeNull();
-    expect(calls()).toBe(READ_RETRY_ATTEMPTS);
+    expect(calls()).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
   });
 });
 
@@ -900,13 +942,17 @@ describe("resolveBySlug", () => {
       }
     });
 
-    test("real row whose schema flakes to 0 is still found via empty-page retry", async () => {
-      // Mirror of findExistingForWrite's empty→empty→hit test: a real row
-      // whose schema temporarily flakes to 0 results must still be ridden out
-      // by the retry budget. Only the empty-page branch retries; the typo'd-
-      // slug case short-circuits.
+    test("real row whose schema flakes to 0 ONCE is still found (single-flake ride-out)", async () => {
+      // Mirror of findExistingForWrite's empty→hit test post-cliff-fix
+      // (2026-06-05): a real row whose schema flakes to 0 results on the
+      // first slice is still surfaced on the next attempt. The cliff fix
+      // capped that retry at EMPTY_PAGE_RETRY_ATTEMPTS (default 2) so the
+      // single-flake case is recovered but a triple+-flake on the same
+      // call falls through to "not found" — see the helper's doc-comment
+      // for why that trade-off is the correct one given how dominant the
+      // first-write-of-a-type cost was on a fresh node.
       const { node, calls } = countingNode({
-        designhash: [[], [], [{ slug: "real" }]],
+        designhash: [[], [{ slug: "real" }]],
       });
       const r = await resolveBySlug({
         node,
@@ -917,7 +963,37 @@ describe("resolveBySlug", () => {
       });
       expect(r.type).toBe("design");
       expect(r.record.slug).toBe("real");
-      expect(calls()["designhash"]).toBe(3);
+      expect(calls()["designhash"]).toBe(2);
+    });
+
+    test("untyped not-found across EMPTY schemas → at most EMPTY_PAGE_RETRY_ATTEMPTS queries per type (fresh-node get/delete cliff fix)", async () => {
+      // The brief's "the read path is the more frequent new-dev operation
+      // and the bigger win" assertion, pinned. `fbrain get <slug>` on a
+      // fresh node sweeps all 8 type pages — pre-fix every EMPTY type page
+      // burned the full READ_RETRY_ATTEMPTS=5 budget, so a `get` for one
+      // record cost ~56 `/api/query` calls (and the dangling-ref validators
+      // doubled this). Post-fix every empty page is capped at
+      // EMPTY_PAGE_RETRY_ATTEMPTS, collapsing the fresh-node `get`/`delete`
+      // cost from ~1.2 s to ~0.2 s in the dogfood measurement. Pin the
+      // per-type query count here so a future change that loosens the cap
+      // (or reroutes resolveBySlug back through `withReadRetry`) re-trips
+      // the cliff and the test catches it before it ships.
+      const allHashes = Array.from(
+        new Set(RECORD_TYPES.map((t) => cfg.schemaHashes[t]!)),
+      );
+      const seed: Record<string, Array<Array<{ slug: string }>>> = {};
+      for (const h of allHashes) seed[h] = [[]];
+      const { node, calls } = countingNode(seed);
+      await expect(
+        resolveBySlug({ node, cfg, slug: "nope-on-fresh-node", retryOptions: noSleep }),
+      ).rejects.toMatchObject({ code: "not_found" });
+      for (const h of allHashes) {
+        expect(calls()[h]).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
+        // Stronger contract: never re-grow back to the pre-fix budget. This
+        // is the assertion that protects the cliff from coming back via a
+        // change that bumps the cap rather than a refactor.
+        expect(calls()[h]).toBeLessThan(READ_RETRY_ATTEMPTS);
+      }
     });
 
     test("raw mode: populated page with a tombstoned matching slug → one query, not_found", async () => {
