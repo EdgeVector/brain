@@ -83,7 +83,7 @@ Global flags:
 Run \`fbrain help <command>\` for per-command usage.`;
 
 export const COMMAND_HELP: Record<Command, string> = {
-  init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent]
+  init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
 persist ~/.fbrain/config.json with canonical hashes, then prompt once to
@@ -95,12 +95,13 @@ live capability is already on disk.
   --schema-service-url   defaults to the prod cloud Lambda
                          (https://axo709qs11.execute-api.us-east-1.amazonaws.com)
   --name                 bootstrap display name (default: fbrain)
-  --grant-consent        complete the one-time consent grant non-interactively
+  --grant-consent, --yes complete the one-time consent grant non-interactively
                          (no TTY needed). Use this in scripted / CI / agent
                          installs: init shells out to folddb consent grant
                          and polls until the capability is cached. No-op when
                          a live capability already exists, or under
-                         FBRAIN_APP_IDENTITY_ENFORCE=off.`,
+                         FBRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb
+                         CLI on PATH (fast-fails with a clear message if not).`,
   design: `fbrain design new <slug> [--title T] [--tag T]... [--body STR] [--force]
 
   --title     one-line name (defaults to slug)
@@ -376,6 +377,9 @@ const INIT_OPTIONS = {
   "schema-service-url": { type: "string" },
   name: { type: "string" },
   "grant-consent": { type: "boolean", default: false },
+  // `--yes` is a conventional alias for `--grant-consent` (apt/npm style) —
+  // the first thing most users reach for to skip a y/N prompt.
+  yes: { type: "boolean", default: false },
 } as const;
 // design / task: applied after the `new` subcommand is consumed.
 const DESIGN_OPTIONS = {
@@ -694,7 +698,7 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   const initOpts: Parameters<typeof runInit>[0] = { bootstrapName: values.name, verbose };
   if (values["node-url"]) initOpts.nodeUrl = values["node-url"];
   if (values["schema-service-url"]) initOpts.schemaServiceUrl = values["schema-service-url"];
-  if (values["grant-consent"]) initOpts.grantConsent = true;
+  if (values["grant-consent"] || values.yes) initOpts.grantConsent = true;
   await runInit(initOpts);
   return 0;
 }

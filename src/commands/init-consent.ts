@@ -123,6 +123,24 @@ export async function establishConsentInline(
     return { state: "already_granted" };
   }
 
+  const resolveFolddb = opts.resolveFolddb ?? defaultResolveFolddb;
+
+  // --grant-consent in a non-TTY shell relies entirely on shelling out to
+  // `folddb consent grant` — there's no human to grant in a second terminal.
+  // If `folddb` isn't on PATH, the inline grant can never fire and the poll
+  // would run for the full consent TTL (~5 min) before failing. Fast-fail with
+  // an actionable message instead.
+  if (
+    opts.nonInteractiveGrant &&
+    !(opts.isTty ?? defaultIsTty)() &&
+    resolveFolddb() === null
+  ) {
+    print(
+      `        \`${FOLDDB_BIN}\` not found on PATH — cannot complete \`--grant-consent\` non-interactively. Install the folddb CLI (\`brew install edgevector/folddb/folddb\`) and re-run, or grant manually in a second terminal while your first write polls.`,
+    );
+    return { state: "skipped", reason: "non_tty" };
+  }
+
   // --grant-consent: the operator typed the flag, so we skip the [Y/n] ask
   // and the non-TTY skip. Falls through to the inline grant block below.
   if (!opts.nonInteractiveGrant) {
@@ -156,7 +174,6 @@ export async function establishConsentInline(
     opts.transport ??
     transportFromNode(opts.nodeUrl, opts.userHash, opts.verbose);
 
-  const resolveFolddb = opts.resolveFolddb ?? defaultResolveFolddb;
   const runFolddbGrant = opts.runFolddbGrant ?? defaultRunFolddbGrant;
 
   let folddbUsed = false;
