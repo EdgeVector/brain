@@ -94,4 +94,28 @@ describe("JCS determinism + edge cases", () => {
   test("negative zero collapses to 0 (matches JSON.stringify)", () => {
     expect(canonicalize({ n: -0 })).toBe('{"n":0}');
   });
+
+  // RFC 8785 §3.2.2.2 defers to ECMA-262 QuoteJSONString, which (post-ES2019,
+  // "well-formed JSON.stringify") escapes every code unit in the surrogate
+  // range that is not part of a valid pair. Without escaping, the lone
+  // surrogate survives `serializeString` and `TextEncoder.encode` silently
+  // substitutes U+FFFD on the byte path — producing a payload_hash that
+  // disagrees with both `JSON.stringify` and any conformant JCS verifier.
+  test("escapes lone surrogates as \\u-escape (RFC 8785 §3.2.2.2)", () => {
+    expect(canonicalize({ k: "\uD800" })).toBe('{"k":"\\ud800"}');
+    expect(canonicalize({ k: "\uDC00" })).toBe('{"k":"\\udc00"}');
+    expect(canonicalize({ k: "\uD800X" })).toBe('{"k":"\\ud800X"}');
+    expect(canonicalize({ k: "X\uDC00" })).toBe('{"k":"X\\udc00"}');
+    // Two adjacent highs are both lone (neither is followed by a low).
+    expect(canonicalize({ k: "\uD800\uD800" })).toBe('{"k":"\\ud800\\ud800"}');
+    // Output must match well-formed JSON.stringify byte-for-byte.
+    expect(canonicalize({ k: "\uD800" })).toBe(JSON.stringify({ k: "\uD800" }));
+  });
+
+  test("valid surrogate pair passes through raw (UTF-8 of the codepoint)", () => {
+    // U+1F600 = 😀 — a well-formed pair must NOT be escaped.
+    expect(canonicalize({ k: "😀" })).toBe('{"k":"😀"}');
+    // U+10000 = 𐀀 — boundary of the supplementary plane.
+    expect(canonicalize({ k: "𐀀" })).toBe('{"k":"\u{10000}"}');
+  });
 });

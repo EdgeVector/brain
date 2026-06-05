@@ -15,9 +15,10 @@
 //   - Object keys sorted lexicographically by UTF-16 code unit.
 //   - No insignificant whitespace.
 //   - Strings serialized as UTF-8 with the minimal escape set (RFC 8785
-//     §3.2.2.2 / ECMAScript JSON.stringify): only `"`, `\`, and the C0
-//     control chars are escaped; everything else (incl. non-ASCII) passes
-//     through verbatim.
+//     §3.2.2.2 / ECMAScript QuoteJSONString): `"`, `\`, the C0 control
+//     chars, and any UTF-16 code unit in the surrogate range that is NOT
+//     part of a well-formed pair are escaped. Valid surrogate pairs and
+//     all other non-ASCII chars pass through as their literal UTF-8.
 //   - Numbers in ECMAScript `Number.prototype.toString()` (shortest
 //     round-trip) form — which is exactly what `JSON.stringify` emits for a
 //     finite JS number, including normalizing `1.0e2` → `100`.
@@ -85,11 +86,13 @@ function serializeNumber(n: number): string {
 }
 
 // Escape exactly the characters RFC 8785 requires (same set as ECMAScript
-// JSON.stringify): the two structural chars `"` and `\`, plus the C0 control
-// block U+0000..U+001F. The five "short escapes" (\b \t \n \f \r) use their
-// two-char form; any other control char uses the six-char \u00XX form.
-// Non-control, non-ASCII characters (café, em dash, 漢字, emoji) pass through
-// as their literal UTF-8 bytes — NEVER \u-escaped.
+// QuoteJSONString): the two structural chars `"` and `\`, the C0 control
+// block U+0000..U+001F, and any UTF-16 code unit in the surrogate range
+// that is NOT part of a well-formed pair. The five "short escapes" (\b \t
+// \n \f \r) use their two-char form; any other escaped code unit uses the
+// six-char \u00XX form. Non-control, non-surrogate characters (café, em
+// dash, 漢字, emoji) pass through as their literal UTF-8 bytes — NEVER
+// \u-escaped.
 function serializeString(s: string): string {
   let out = '"';
   for (let i = 0; i < s.length; i++) {
@@ -119,10 +122,21 @@ function serializeString(s: string): string {
       default:
         if (ch < 0x20) {
           out += "\\u" + ch.toString(16).padStart(4, "0");
+        } else if (ch >= 0xd800 && ch <= 0xdfff) {
+          // Surrogate range (U+D800..U+DFFF). ECMA-262 QuoteJSONString /
+          // RFC 8785 §3.2.2.2 emit a well-formed pair as the raw UTF-8 of
+          // its codepoint, but escape any unpaired surrogate as \uXXXX —
+          // otherwise TextEncoder substitutes U+FFFD on the byte path, so
+          // sha256(canonical) would not round-trip through a conformant
+          // verifier.
+          const next = ch <= 0xdbff && i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+          if (next >= 0xdc00 && next <= 0xdfff) {
+            out += s[i]! + s[i + 1]!;
+            i++;
+          } else {
+            out += "\\u" + ch.toString(16).padStart(4, "0");
+          }
         } else {
-          // Append the raw code unit. Surrogate pairs are preserved as-is and
-          // the final TextEncoder pass turns them into the correct 4-byte
-          // UTF-8 sequence — identical to what serde_json emits.
           out += s[i];
         }
     }
