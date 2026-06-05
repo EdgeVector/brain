@@ -16,7 +16,7 @@ import {
   type ResolvedRecord,
 } from "../../src/record.ts";
 import { FbrainError, type NodeClient, type QueryResponse } from "../../src/client.ts";
-import type { RecordType } from "../../src/schemas.ts";
+import { RECORD_TYPES, type RecordType } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const cfg = buildTestCfg({
@@ -644,5 +644,163 @@ describe("resolveBySlug", () => {
     const r = await resolveBySlug({ node, cfg, slug: "solo", type: "design" });
     expect(r.type).toBe("design");
     expect(r.record.slug).toBe("solo");
+  });
+
+  // Fast-miss tests mirror the findExistingForWrite ones above: a typo'd slug
+  // on a populated schema must surface "No record" in one query, not after
+  // burning the full 5×250 ms retry budget. The per-type retry budget is
+  // still spent on an empty page (saturated-daemon flake) so a real row whose
+  // schema flakes to 0 is still found.
+  describe("fast-miss on populated pages", () => {
+    function countingNode(
+      perHashPages: Record<string, Array<Array<{ slug: string; tags?: string[] }>>>,
+    ): { node: NodeClient; calls: () => Record<string, number> } {
+      const callCounts: Record<string, number> = {};
+      const node: NodeClient = {
+        baseUrl: "mock",
+        userHash: "uh",
+        async autoIdentity() {
+          return { provisioned: true, userHash: "uh" };
+        },
+        async bootstrap() {
+          return { userHash: "uh" };
+        },
+        async requestConsent() {
+          return { status: 202, body: { request_id: "r" } };
+        },
+        async consentStatus() {
+          return { status: 200, body: { status: "granted" } };
+        },
+        async listLoadedSchemas() {
+          return [];
+        },
+        async loadSchemas() {
+          return {
+            available_schemas_loaded: 0,
+            schemas_loaded_to_db: 0,
+            failed_schemas: [],
+          };
+        },
+        async createRecord() {},
+        async updateRecord() {},
+        async deleteRecord() {},
+        async queryAll({ schemaHash }): Promise<QueryResponse> {
+          const pages = perHashPages[schemaHash] ?? [[]];
+          const idx = Math.min(callCounts[schemaHash] ?? 0, pages.length - 1);
+          callCounts[schemaHash] = (callCounts[schemaHash] ?? 0) + 1;
+          const page = pages[idx] ?? [];
+          const results = page.map((r) => ({
+            fields: {
+              slug: r.slug,
+              title: "T",
+              body: "B",
+              status: "draft",
+              tags: r.tags ?? [],
+              created_at: "2026-05-01T00:00:00Z",
+              updated_at: "2026-05-01T00:00:00Z",
+            },
+            key: { hash: r.slug, range: null },
+          }));
+          return {
+            ok: true,
+            results,
+            total_count: results.length,
+            returned_count: results.length,
+          };
+        },
+        async search() {
+          return [];
+        },
+        async rawCall() {
+          return { status: 200, headers: new Headers(), body: "", json: null };
+        },
+      };
+      return { node, calls: () => callCounts };
+    }
+    const noSleep = { sleep: async () => {} };
+
+    test("typed not-found on a populated schema → one query, no retry burn", async () => {
+      // The whole point of the read-path fix: `fbrain get <typo>` against a
+      // populated schema must error in ~one round-trip, not after the full
+      // 5×250 ms budget. Pre-fix the `r !== null` retry predicate was
+      // unreachable so each typo'd lookup slept ~1.1 s before "No record".
+      const { node, calls } = countingNode({
+        designhash: [[{ slug: "other-a" }, { slug: "other-b" }]],
+      });
+      await expect(
+        resolveBySlug({
+          node,
+          cfg,
+          slug: "ghost",
+          type: "design",
+          retryOptions: noSleep,
+        }),
+      ).rejects.toMatchObject({ code: "not_found" });
+      expect(calls()["designhash"]).toBe(1);
+    });
+
+    test("untyped not-found across populated schemas → one query per type", async () => {
+      // Same fix at the untyped sweep level — every type's lookup
+      // short-circuits on its own populated page. Pre-fix this burned
+      // 5 retries × every schema in parallel (~1.1 s wall-clock).
+      // The describe-block cfg overrides design+task hashes; concepts and the
+      // remaining six MEMO-backed types share TEST_HASHES.concept. Seed every
+      // hash that any registered type would query.
+      const allHashes = Array.from(
+        new Set(RECORD_TYPES.map((t) => cfg.schemaHashes[t]!)),
+      );
+      const seed: Record<string, Array<Array<{ slug: string }>>> = {};
+      for (const h of allHashes) {
+        seed[h] = [[{ slug: `existing-in-${h}` }]];
+      }
+      const { node, calls } = countingNode(seed);
+      await expect(
+        resolveBySlug({ node, cfg, slug: "nope", retryOptions: noSleep }),
+      ).rejects.toMatchObject({ code: "not_found" });
+      for (const h of allHashes) {
+        expect(calls()[h]).toBe(1);
+      }
+    });
+
+    test("real row whose schema flakes to 0 is still found via empty-page retry", async () => {
+      // Mirror of findExistingForWrite's empty→empty→hit test: a real row
+      // whose schema temporarily flakes to 0 results must still be ridden out
+      // by the retry budget. Only the empty-page branch retries; the typo'd-
+      // slug case short-circuits.
+      const { node, calls } = countingNode({
+        designhash: [[], [], [{ slug: "real" }]],
+      });
+      const r = await resolveBySlug({
+        node,
+        cfg,
+        slug: "real",
+        type: "design",
+        retryOptions: noSleep,
+      });
+      expect(r.type).toBe("design");
+      expect(r.record.slug).toBe("real");
+      expect(calls()["designhash"]).toBe(3);
+    });
+
+    test("raw mode: populated page with a tombstoned matching slug → one query, not_found", async () => {
+      // Symmetric to findExistingForWrite's tombstone test, but routed through
+      // the raw path that delete.ts takes. resolveBySlug must still drop the
+      // tombstone post-hoc and short-circuit (the page is populated → no
+      // retry burn).
+      const { node, calls } = countingNode({
+        designhash: [[{ slug: "doomed", tags: [TOMBSTONE_TAG] }]],
+      });
+      await expect(
+        resolveBySlug({
+          node,
+          cfg,
+          slug: "doomed",
+          type: "design",
+          raw: true,
+          retryOptions: noSleep,
+        }),
+      ).rejects.toMatchObject({ code: "not_found" });
+      expect(calls()["designhash"]).toBe(1);
+    });
   });
 });
