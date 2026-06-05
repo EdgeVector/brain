@@ -157,7 +157,15 @@ export function parseExpansions(raw: string, count: number): string[] {
       // quote-only-line skip — collapse to empty, let the existing
       // empty-after-strip check drop the line.
       .replace(/^\s*[-*•](?:\s+|$)/, "")
-      .replace(/^\s*\d+[.)]\s+/, "")
+      // `(?:\s+|$)` instead of `\s+`: same shape as the bullet-strip fix above,
+      // applied one regex over. A line that is just `3.` or `2)` (LLM hit
+      // max_tokens mid-numbered-list, or emitted an empty numbered item as
+      // filler) used to survive `.trim()` as a two-character "expansion" like
+      // `"3."`, get pushed into the expansions list, and waste a per-query
+      // BM25+vector round-trip whose garbage hits then polluted the RRF fused
+      // ranking. Letting the trailing `\s+` also match end-of-string collapses
+      // the line to empty so the existing empty-after-strip check drops it.
+      .replace(/^\s*\d+[.)](?:\s+|$)/, "")
       // Whitespace allowance on BOTH halves: the leading half handles an
       // indented quoted phrasing like `  "foo"`; the trailing half handles
       // a phrasing emitted with trailing whitespace like `"foo"   ` — common

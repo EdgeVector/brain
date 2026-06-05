@@ -137,6 +137,52 @@ describe("parseExpansions", () => {
     ).toEqual(["first", "second", "third"]);
   });
 
+  test("a line that is only a number-bullet (e.g. '3.' or '2)') is treated as blank and skipped", () => {
+    // Sibling regression to the bare `-`/`*`/`•` case above, one regex over.
+    // The number-strip regex used to be `^\s*\d+[.)]\s+` — the trailing `\s+`
+    // REQUIRED whitespace after the punctuator, so a line consisting of just
+    // `3.` (or `2)`) didn't match the number alternative, didn't match the
+    // bullet or quote alternatives either, and survived `.trim()` as the
+    // two-character "expansion" `"3."`. That bare-number line was then pushed
+    // into the expansions list, and ask.ts's per-query loop dutifully ran a
+    // vector search for `"3."` — a wasteful HTTP round-trip whose garbage
+    // hits then polluted the RRF fused ranking. Same failure mode as the
+    // bare-`-` case PR #155 fixed; same shape of fix (allow the trailing
+    // `\s+` to also match end-of-string).
+    //
+    // Realistic trigger: the LLM hits max_tokens mid-numbered-list and the
+    // final line is a bare `3.`:
+    //   1. first phrasing
+    //   2. second phrasing
+    //   3.
+    // Or it emits an empty numbered item as filler when it can't think of a
+    // 3rd phrasing. The system prompt explicitly asks for "no numbering",
+    // but models ignore that — which is why we already strip well-formed
+    // numbering on the happy path, and must drop bare numbering on the
+    // truncated path for parity.
+    expect(parseExpansions("real phrasing\n3.\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    expect(parseExpansions("real phrasing\n2)\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    // Whitespace + bare number (no trailing whitespace) — same shape, the
+    // leading `\s*` still permits the indent.
+    expect(parseExpansions("real phrasing\n   3.\nanother phrasing", 5)).toEqual([
+      "real phrasing",
+      "another phrasing",
+    ]);
+    // Realistic max_tokens-truncation case: the 4th list entry collapses to
+    // a bare `4.`. Pre-fix, that bare `4.` ate the 4th expansion slot with
+    // garbage; post-fix, the slot stays empty and the caller's loop just
+    // sees 3 real phrasings.
+    expect(
+      parseExpansions("1. first\n2. second\n3. third\n4.", 4),
+    ).toEqual(["first", "second", "third"]);
+  });
+
   test("trailing whitespace inside a line is trimmed", () => {
     const raw = "  padded phrasing   \n\tindented with tab\t";
     expect(parseExpansions(raw, 2)).toEqual([
