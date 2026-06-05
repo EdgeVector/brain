@@ -174,13 +174,13 @@ Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (prints all matches first).
 
   --type    design | task | concept | preference | reference | agent | project | spike`,
-  list: `fbrain list [--type T] [--status S] [--tag T] [-n N]
+  list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N]
 
-  --type      design | task | concept | preference | reference | agent | project | spike
-              (omit to list across all types)
-  --status    filter by status enum
-  --tag       filter by tag membership
-  -n          max results (newest-first)`,
+  --type        design | task | concept | preference | reference | agent | project | spike
+                (omit to list across all types)
+  --status      filter by status enum
+  --tag         filter by tag membership
+  -n, --limit   max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)`,
   status: `fbrain status <slug> [<new-status>] [--type T]
 
 Bare form prints current status. With a new-status, validates against the
@@ -425,7 +425,9 @@ const LIST_OPTIONS = {
   type: { type: "string" },
   status: { type: "string" },
   tag: { type: "string" },
-  n: { type: "string" },
+  // `--limit` with `-n` short alias — mirrors SEARCH_OPTIONS / ASK_OPTIONS so a
+  // user who learned `search --limit N` doesn't hit "Unknown option" on list.
+  limit: { type: "string", short: "n" },
 } as const;
 const STATUS_OPTIONS = { type: { type: "string" } } as const;
 const SEARCH_OPTIONS = {
@@ -888,6 +890,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
   validatePositiveIntFlag(args, "-n", "invalid_limit");
+  validatePositiveIntFlag(args, "--limit", "invalid_limit");
   let parsed;
   try {
     parsed = parseArgs({
@@ -920,7 +923,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parsed;
   const cfg = readConfig();
   const type = parseRecordType(values.type);
-  const limit = values.n ? parseInt(values.n, 10) : undefined;
+  const limit = values.limit ? parseInt(values.limit, 10) : undefined;
   const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose };
   if (type) lOpts.type = type;
   if (values.status) lOpts.status = values.status;
