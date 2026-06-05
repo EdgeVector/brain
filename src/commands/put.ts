@@ -147,35 +147,44 @@ function buildFields(
   return base;
 }
 
+// Two optional sources, must agree if both set, at least one required —
+// the contract behind both slug (positional vs frontmatter) and type
+// (--type vs frontmatter). Callers own their error envelopes.
+function resolveDualSource<T>(
+  a: T | undefined,
+  b: T | undefined,
+  conflictErr: (a: T, b: T) => FbrainError,
+  missingErr: () => FbrainError,
+): T {
+  if (a !== undefined && b !== undefined && a !== b) throw conflictErr(a, b);
+  const chosen = a ?? b;
+  if (chosen === undefined) throw missingErr();
+  return chosen;
+}
+
 function resolveSlug(
   positional: string | undefined,
   fromFrontmatter: string | undefined,
 ): string {
-  // Mirror the resolveRecordType contract: positional and frontmatter are
-  // peers — either one supplies the value, both must agree if both are set,
-  // and missing-from-both is a specific error (not a usage dump).
-  const posTrim = positional?.trim() ?? "";
-  const fmTrim = fromFrontmatter?.trim() ?? "";
-  const pos = posTrim.length > 0 ? posTrim : undefined;
-  const fm = fmTrim.length > 0 ? fmTrim : undefined;
-
-  if (pos && fm && pos !== fm) {
-    throw new FbrainError({
-      code: "slug_conflict",
-      message:
-        `positional slug "${pos}" conflicts with frontmatter \`slug: ${fm}\`.`,
-      hint: "Drop one — they must agree. Frontmatter and the positional arg can't be set to different slugs.",
-    });
-  }
-  const chosen = pos ?? fm;
-  if (chosen === undefined) {
-    throw new FbrainError({
-      code: "missing_slug",
-      message: "fbrain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
-      hint: "Example: `fbrain put my-note` OR include `slug: my-note` in the YAML frontmatter.",
-    });
-  }
-  return chosen;
+  const pos = positional?.trim() || undefined;
+  const fm = fromFrontmatter?.trim() || undefined;
+  return resolveDualSource(
+    pos,
+    fm,
+    (p, f) =>
+      new FbrainError({
+        code: "slug_conflict",
+        message:
+          `positional slug "${p}" conflicts with frontmatter \`slug: ${f}\`.`,
+        hint: "Drop one — they must agree. Frontmatter and the positional arg can't be set to different slugs.",
+      }),
+    () =>
+      new FbrainError({
+        code: "missing_slug",
+        message: "fbrain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
+        hint: "Example: `fbrain put my-note` OR include `slug: my-note` in the YAML frontmatter.",
+      }),
+  );
 }
 
 function resolveRecordType(
@@ -189,25 +198,24 @@ function resolveRecordType(
   // `type:` or a `--type` flag.
   const fmType = normaliseType(fromFrontmatter);
   const ovType = normaliseType(override);
-
-  if (fmType && ovType && fmType !== ovType) {
-    throw new FbrainError({
-      code: "type_conflict",
-      message:
-        `--type ${ovType} conflicts with frontmatter \`type: ${fmType}\`.`,
-      hint: "Drop one — they must agree. Frontmatter and --type can't both be set to different types.",
-    });
-  }
-  const chosen = fmType ?? ovType;
-  if (chosen === undefined) {
-    throw new FbrainError({
-      code: "missing_type",
-      message:
-        "fbrain put requires a `type:` field in frontmatter (or pass --type <T>).",
-      hint: "One of: design | task | concept | preference | reference | agent | project | spike.",
-    });
-  }
-  return chosen;
+  return resolveDualSource(
+    fmType,
+    ovType,
+    (fm, ov) =>
+      new FbrainError({
+        code: "type_conflict",
+        message:
+          `--type ${ov} conflicts with frontmatter \`type: ${fm}\`.`,
+        hint: "Drop one — they must agree. Frontmatter and --type can't both be set to different types.",
+      }),
+    () =>
+      new FbrainError({
+        code: "missing_type",
+        message:
+          "fbrain put requires a `type:` field in frontmatter (or pass --type <T>).",
+        hint: "One of: design | task | concept | preference | reference | agent | project | spike.",
+      }),
+  );
 }
 
 function normaliseType(raw: string | undefined): RecordType | undefined {
@@ -298,6 +306,30 @@ export function splitFrontmatter(input: string): {
   return { frontmatter, body };
 }
 
+// One place that maps a parsed YAML key to its typed slot. Used by both
+// the inline-scalar and block-scalar branches (and below: inline-list /
+// block-list-opener for `tags`) so the mapping isn't repeated per branch.
+function assignScalarField(
+  out: ParsedFrontmatter,
+  key: string,
+  value: string,
+): void {
+  out.raw[key] = value;
+  if (key === "slug") out.slug = value;
+  else if (key === "type") out.type = value;
+  else if (key === "title") out.title = value;
+  else if (key === "status") out.status = value;
+}
+
+function assignListField(
+  out: ParsedFrontmatter,
+  key: string,
+  items: string[],
+): void {
+  out.raw[key] = items;
+  if (key === "tags") out.tags = items;
+}
+
 export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
   const out: ParsedFrontmatter = {
     slug: undefined,
@@ -310,13 +342,11 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
   if (raw === null || raw.trim().length === 0) return out;
 
   const lines = raw.split(/\r?\n/);
-  let currentListKey: string | null = null;
   let currentList: string[] | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (line.trim().length === 0) {
-      currentListKey = null;
       currentList = null;
       continue;
     }
@@ -350,9 +380,7 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
           : splitInlineListItems(inner)
               .map((s) => stripQuotes(s.trim()))
               .filter((s) => s.length > 0);
-      out.raw[key] = items;
-      if (key === "tags") out.tags = items;
-      currentListKey = null;
+      assignListField(out, key, items);
       currentList = null;
       continue;
     }
@@ -401,12 +429,7 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
       i = j - 1;
 
       const folded = foldBlockScalar(style, chomp, bodyLines);
-      out.raw[key] = folded;
-      if (key === "slug") out.slug = folded;
-      else if (key === "type") out.type = folded;
-      else if (key === "title") out.title = folded;
-      else if (key === "status") out.status = folded;
-      currentListKey = null;
+      assignScalarField(out, key, folded);
       currentList = null;
       continue;
     }
@@ -414,25 +437,15 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
     if (value.length === 0) {
       // Block-list opener — subsequent indented `- item` lines belong here.
       const list: string[] = [];
-      out.raw[key] = list;
-      if (key === "tags") out.tags = list;
-      currentListKey = key;
+      assignListField(out, key, list);
       currentList = list;
       continue;
     }
 
-    const stripped = stripQuotes(value);
-    out.raw[key] = stripped;
-    if (key === "slug") out.slug = stripped;
-    else if (key === "type") out.type = stripped;
-    else if (key === "title") out.title = stripped;
-    else if (key === "status") out.status = stripped;
-    currentListKey = null;
+    assignScalarField(out, key, stripQuotes(value));
     currentList = null;
   }
 
-  // Suppress unused-var warning while preserving meaning.
-  void currentListKey;
   return out;
 }
 
