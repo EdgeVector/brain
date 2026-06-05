@@ -178,8 +178,45 @@ describe("first-run consent acquisition", () => {
     expect(stored.nodePubkey).toBe(NODE_PUBKEY);
     // The exact, single, actionable console instruction (design step 3).
     expect(lines.some((l) => l.includes("folddb consent grant fbrain"))).toBe(true);
+    // Manual-fallback framing: the human really does need to act in another
+    // terminal, so the polling line tells them so.
+    expect(lines.some((l) => l.includes("Waiting for you to grant access"))).toBe(true);
+    expect(lines.some((l) => l.includes("Confirming the grant landed"))).toBe(false);
     // It persisted to the store, keyed by node.
     expect((await store.load(NODE_URL))?.blob).toBe(blob);
+  });
+
+  // Inline-grant framing: when `fbrain init --grant-consent` (or any caller
+  // that supplies `onConsentRequested`) has already shelled out to
+  // `folddb consent grant`, the poll is just confirming the grant landed.
+  // Printing the manual "Waiting for you to grant access" wording there would
+  // contradict the "Granted access…" line the inline grant already printed —
+  // see the [6/6] block in the kanban brief.
+  test("inline-grant path prints 'Confirming the grant landed', not 'Waiting for you…'", async () => {
+    const blob = await mintTokenBlob();
+    const lines: string[] = [];
+    const transport = mockTransport({
+      consentStatus: () => ({ status: 200, body: { status: "granted", capability: blob } }),
+    });
+
+    await acquireCapability({
+      nodeUrl: NODE_URL,
+      transport,
+      store: inMemoryCapabilityStore(),
+      print: (l) => lines.push(l),
+      pollIntervalMs: 2000,
+      sleep: noSleep,
+      onConsentRequested: ({ print }) => {
+        // Mirrors what the inline `fbrain init --grant-consent` path prints
+        // after it shells out to `folddb consent grant fbrain --yes`.
+        print(`Granted access to "fbrain". The app can now read and write under its namespace.`);
+      },
+    });
+
+    expect(lines.some((l) => l.includes("Confirming the grant landed (polling every 2s)"))).toBe(true);
+    expect(lines.some((l) => l.includes("Waiting for you to grant access"))).toBe(false);
+    // Manual instruction must NOT also fire — the inline path replaces it.
+    expect(lines.some((l) => l.includes("First-run setup"))).toBe(false);
   });
 
   test("404 unknown app surfaces app_not_registered", async () => {
