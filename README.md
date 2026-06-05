@@ -150,8 +150,8 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | Command | What it does |
 |---|---|
 | `fbrain init` | Bootstraps the node + registers schemas + writes `~/.fbrain/config.json` with canonical hashes |
-| `fbrain design new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a Design |
-| `fbrain task new <slug> [--title T] [--design D] [--tag T]… [--body STR] [--force]` | Creates a Task (rejects dangling `--design`) |
+| `fbrain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 8 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`. Status defaults to the type's first enum value |
+| `fbrain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
 | `fbrain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
 | `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it prints all matches before erroring so you can pick one |
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
@@ -188,7 +188,16 @@ Slug uniqueness is now per-type — a `concept` and a `preference` can share the
 
 Default status on create (used when frontmatter omits `status:`): first value of each enum (so `active` for most types, `planning` for project, `draft` for design, `open` for task).
 
-Example: pipe a concept through `fbrain put`:
+Every type has an ergonomic `<type> new` verb:
+
+```bash
+fbrain concept new idempotency --title "Idempotency" --body "mutations are keyed by canonical hash"
+fbrain preference new no-emojis --title "No emojis in code"
+fbrain spike new vectors-eval --title "Evaluating vector ranker quality"
+# …same shape for reference / agent / project / spike
+```
+
+Or pipe a body (with optional YAML frontmatter) through `fbrain put`:
 
 ```bash
 cat <<'NOTE' | fbrain put my-concept
