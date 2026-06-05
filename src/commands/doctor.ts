@@ -43,6 +43,7 @@ import {
   FbrainError,
   newNodeClient,
   newSchemaServiceClient,
+  nodeDownHint,
   recordTypeForHash,
   stripDoctorTip,
   type NativeIndexHit,
@@ -240,7 +241,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       name: "node-reachable",
       ok: false,
       detail: doctorReachabilityDetail(err, "node", cfg.nodeUrl),
-      fix: "start a fold node (e.g. `cd fold/fold_db_node && ./run.sh --local --local-schema`)",
+      fix: nodeDownHint(cfg.nodeUrl),
     });
     verbose?.(`node-reachable: FAIL`);
   }

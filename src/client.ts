@@ -743,15 +743,49 @@ async function readJson(res: Response): Promise<unknown> {
   }
 }
 
+// True when a node URL is the default homebrew daemon (`:9001` on
+// loopback). A downloaded user runs exactly this; a fold contributor
+// running `./run.sh` from source gets an auto-slotted port (9101+) or
+// passes a custom `--node-url`.
+export function isDefaultNodeUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "9001"
+    );
+  } catch {
+    return false;
+  }
+}
+
+// "Your node isn't reachable — start it" guidance. Downloaded users (the
+// default `:9001` daemon) get the Homebrew action first; the from-source
+// `./run.sh` + "compiling Rust" framing is only right for a non-default
+// node URL (a contributor slot or custom port), so it stays secondary.
+export function nodeDownHint(url: string): string {
+  if (isDefaultNodeUrl(url)) {
+    return "Start it: `brew services start folddb` (or `brew services restart folddb` after a `brew upgrade`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
+  }
+  return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
+}
+
+// fbrain talks to a deployed cloud schema-service Lambda by default —
+// there is no local schema_service to "start" unless you're a fold
+// contributor pointing at localhost. So an unreachable schema service is
+// almost always a network/outage issue for a downloaded user.
+export function schemaDownHint(url: string): string {
+  if (/localhost|127\.0\.0\.1/.test(url)) {
+    return "Start fold's schema service (`./run.sh --local --local-schema` runs both).";
+  }
+  return "fbrain uses a cloud schema service (no local schema_service to run) — check your network connection or for a service outage.";
+}
+
 function connectionError(baseUrl: string, service: "node" | "schema", cause: unknown): FbrainError {
   const which = service === "node" ? "node" : "schema service";
   return new FbrainError({
     code: "service_unreachable",
     message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
-    hint:
-      service === "node"
-        ? "Start a fold node, e.g. `cd fold/fold_db_node && ./run.sh --local --local-schema`."
-        : "Start fold's schema service (`./run.sh --local --local-schema` runs both).",
+    hint: service === "node" ? nodeDownHint(baseUrl) : schemaDownHint(baseUrl),
     cause,
   });
 }
