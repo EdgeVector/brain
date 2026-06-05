@@ -524,6 +524,15 @@ export async function main(argv: Argv): Promise<number> {
     return 0;
   }
   if (!isCommand(cmd)) {
+    // A `-`-prefixed token in command position is an option in the wrong slot —
+    // the global flags (`--verbose`, `--version`/`-V`, `--help`/`-h`) were
+    // already consumed above. Tell the user about flag placement instead of
+    // mislabeling the option as a "command".
+    if (cmd.startsWith("-")) {
+      console.error(`error: \`${cmd}\` looks like an option, but it's in the command position.`);
+      console.error(`hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`);
+      return 1;
+    }
     const suggestion = suggestCommand({
       single: cmd,
       compound: stripped[1] ? `${cmd} ${stripped[1]}` : undefined,
