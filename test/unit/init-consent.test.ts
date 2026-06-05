@@ -388,6 +388,38 @@ describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () 
     expect(lines.some((l) => l.includes("non-interactive shell — skipping"))).toBe(false);
   });
 
+  test("non-TTY + nonInteractiveGrant + folddb missing → fast-fail, no poll", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        throw new Error("ask must not be called when nonInteractiveGrant is set");
+      },
+      isTty: ttyOff,
+      nonInteractiveGrant: true,
+      resolveFolddb: () => null,
+      runFolddbGrant: () => {
+        throw new Error("runFolddbGrant must not run when folddb is missing");
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "skipped", reason: "non_tty" });
+    // Crucially: never entered the up-to-5-min poll loop.
+    expect(transport.requestConsentCalls).toBe(0);
+    expect(transport.consentStatusCalls).toBe(0);
+    expect(lines.some((l) => l.includes("not found on PATH"))).toBe(true);
+  });
+
   test("live capability + nonInteractiveGrant → already_granted (idempotent re-run in scripts)", async () => {
     const blob = await mintTokenBlob();
     const store = inMemoryCapabilityStore();
