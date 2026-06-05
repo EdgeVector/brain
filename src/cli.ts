@@ -1327,31 +1327,58 @@ async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
   return rawCmd(rOpts);
 }
 
+// Case-insensitive on the way in: every display surface (doctor, --help,
+// list/ask/get output) Capitalizes the type name, so users naturally reach
+// for `--type Design`. Mirrors `put.ts normaliseType` — keep the canonical
+// RECORD_TYPES lowercase and normalize input here.
 function parseRecordType(raw: string | undefined): RecordType | undefined {
   if (raw === undefined) return undefined;
-  if (isRecordType(raw)) return raw;
+  const normalised = raw.trim().toLowerCase();
+  if (isRecordType(normalised)) return normalised;
   throw new FbrainError({
     code: "invalid_type",
     message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,
+    hint: suggestRecordTypeHint(normalised),
   });
 }
 
 // Repeatable `--type` (search / ask). Validates every value against the 8
 // record types and dedupes. Returns undefined when the flag is absent so
-// callers can leave the filter unset.
+// callers can leave the filter unset. Case-insensitive — see parseRecordType.
 function parseRecordTypeList(raw: string[] | undefined): RecordType[] | undefined {
   if (raw === undefined || raw.length === 0) return undefined;
   const seen = new Set<RecordType>();
   for (const v of raw) {
-    if (!isRecordType(v)) {
+    const normalised = v.trim().toLowerCase();
+    if (!isRecordType(normalised)) {
       throw new FbrainError({
         code: "invalid_type",
         message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${v}").`,
+        hint: suggestRecordTypeHint(normalised),
       });
     }
-    seen.add(v);
+    seen.add(normalised);
   }
   return Array.from(seen);
+}
+
+// Mirrors the `Did you mean: <cmd>?` UX from suggestCommand — same Levenshtein
+// threshold (max(2, floor(len/3))). Returns undefined when no candidate is
+// close enough, so the caller keeps the bare "must be one of" error.
+function suggestRecordTypeHint(normalised: string): string | undefined {
+  if (normalised.length === 0) return undefined;
+  let best: RecordType | null = null;
+  let bestDist = Infinity;
+  for (const t of RECORD_TYPES) {
+    const d = levenshtein(normalised, t);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  if (best === null) return undefined;
+  const threshold = Math.max(2, Math.floor(normalised.length / 3));
+  return bestDist <= threshold ? `did you mean \`--type ${best}\`?` : undefined;
 }
 
 async function maybeReadStdin(): Promise<string> {
