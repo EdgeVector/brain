@@ -654,6 +654,13 @@ function validatePositiveIntFlag(
   }
 }
 
+// `-n` and `--limit` are interchangeable aliases across list/search/ask.
+// Validate whichever spelling the user typed before parseArgs runs.
+function validateLimitFlag(argv: Argv): void {
+  validatePositiveIntFlag(argv, "-n", "invalid_limit");
+  validatePositiveIntFlag(argv, "--limit", "invalid_limit");
+}
+
 function printHelpFor(name: string): number {
   if (!isCommand(name)) {
     console.error(`Unknown command: ${name}`);
@@ -753,11 +760,12 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 // Shared `<type> new` dispatcher. Handles all 8 record types — task is the
-// only one with a per-type extra (--design), so we branch the option set on
-// type rather than wiring six near-identical functions. The pre-Phase-6
-// runDesign/runTask functions did the same work copy-pasted; collapsing
-// them keeps the slug-validation / stdin-fallback / "created <type> <slug>"
-// envelope in one place.
+// only one with a per-type extra (--design), so we pick the option set on
+// type but funnel everything through one parse + envelope. The pre-Phase-6
+// runDesign/runTask functions did the same work copy-pasted; keeping the
+// slug-validation / stdin-fallback / "created <type> <slug>" envelope in
+// one place lets future per-type flags slot in by extending the options
+// alone.
 async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0];
   if (sub !== "new") {
@@ -770,40 +778,13 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     return 1;
   }
   const rest = args.slice(1);
-  if (type === "task") {
-    const { values, positionals } = parseArgs({
-      args: rest,
-      strict: true,
-      allowPositionals: true,
-      options: TASK_OPTIONS,
-    });
-    const slug = positionals[0];
-    if (!slug) {
-      console.error(COMMAND_HELP.task);
-      return 1;
-    }
-    const cfg = readConfig();
-    const body = values.body ?? (await maybeReadStdin());
-    const tnOpts: Parameters<typeof recordNew>[0] = {
-      cfg,
-      type: "task",
-      slug,
-      title: values.title ?? slug,
-      body,
-      tags: values.tag ?? [],
-      force: values.force,
-      verbose,
-    };
-    if (values.design) tnOpts.designSlug = values.design;
-    await recordNew(tnOpts);
-    console.log(`created task ${slug}`);
-    return 0;
-  }
+  // TASK_OPTIONS is DESIGN_OPTIONS + --design; for non-task types parseArgs
+  // will reject --design via its strict-unknown-option check.
   const { values, positionals } = parseArgs({
     args: rest,
     strict: true,
     allowPositionals: true,
-    options: DESIGN_OPTIONS,
+    options: type === "task" ? TASK_OPTIONS : DESIGN_OPTIONS,
   });
   const slug = positionals[0];
   if (!slug) {
@@ -812,7 +793,7 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   }
   const cfg = readConfig();
   const body = values.body ?? (await maybeReadStdin());
-  await recordNew({
+  const opts: Parameters<typeof recordNew>[0] = {
     cfg,
     type,
     slug,
@@ -821,7 +802,12 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     tags: values.tag ?? [],
     force: values.force,
     verbose,
-  });
+  };
+  // --design is only reachable on TASK_OPTIONS; cast scopes the field access
+  // without widening the parseArgs return type.
+  const designSlug = (values as { design?: string }).design;
+  if (designSlug) opts.designSlug = designSlug;
+  await recordNew(opts);
   console.log(`created ${type} ${slug}`);
   return 0;
 }
@@ -929,8 +915,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
-  validatePositiveIntFlag(args, "-n", "invalid_limit");
-  validatePositiveIntFlag(args, "--limit", "invalid_limit");
+  validateLimitFlag(args);
   let parsed;
   try {
     parsed = parseArgs({
@@ -1013,10 +998,7 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
-  // `-n` and `--limit` are interchangeable aliases (see ASK_OPTIONS/SEARCH_OPTIONS).
-  // Validate whichever spelling the user typed.
-  validatePositiveIntFlag(args, "-n", "invalid_limit");
-  validatePositiveIntFlag(args, "--limit", "invalid_limit");
+  validateLimitFlag(args);
   const { values, positionals } = parseArgs({
     args,
     strict: true,
@@ -1062,10 +1044,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
-  // `-n` and `--limit` are interchangeable aliases. Validate whichever
-  // spelling the user typed.
-  validatePositiveIntFlag(args, "-n", "invalid_limit");
-  validatePositiveIntFlag(args, "--limit", "invalid_limit");
+  validateLimitFlag(args);
   const { values, positionals } = parseArgs({
     args,
     strict: true,
@@ -1349,15 +1328,9 @@ function parseRecordTypeList(raw: string[] | undefined): RecordType[] | undefine
   if (raw === undefined || raw.length === 0) return undefined;
   const seen = new Set<RecordType>();
   for (const v of raw) {
-    const normalised = v.trim().toLowerCase();
-    if (!isRecordType(normalised)) {
-      throw new FbrainError({
-        code: "invalid_type",
-        message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${v}").`,
-        hint: suggestRecordTypeHint(normalised),
-      });
-    }
-    seen.add(normalised);
+    // parseRecordType throws on invalid input and never returns undefined
+    // for a defined string, so the `!` is safe here.
+    seen.add(parseRecordType(v)!);
   }
   return Array.from(seen);
 }
