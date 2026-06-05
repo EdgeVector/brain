@@ -543,10 +543,17 @@ export function buildMigratedFields(
 }
 
 // Confirm the schema returned by registerSchema actually carries our
-// requested field. fold_db's schema service can silently collapse a
-// new registration onto an existing canonical hash whose field set
-// differs (the well-known overlap-merge behavior). When that happens
-// we fail fast with a hint pointing the user at the playbook.
+// requested field AND our per-migration version marker. fold_db's
+// schema service can silently collapse a new registration onto an
+// existing canonical hash whose field set differs (the well-known
+// overlap-merge behavior). The fieldName check alone is insufficient:
+// if overlap-merge lands on a schema that already happens to expose
+// `fieldName`, we'd proceed silently and write records under the wrong
+// hash with a marker field the schema does not declare. The marker
+// (built from our freshly-bumped descriptive_name — see migration.ts
+// `versionMarkerField`) is unique to this migration and cannot exist on
+// any prior schema, so its absence is the authoritative signature of
+// overlap-merge.
 async function assertFieldRegistered(
   schemaClient: ReturnType<typeof newSchemaServiceClient>,
   hash: string,
@@ -561,12 +568,17 @@ async function assertFieldRegistered(
       hint: "Check the schema service logs — registration claimed success but lookup returned 404.",
     });
   }
-  if (!registered.fields.includes(fieldName)) {
+  const markerName = versionMarkerField(descriptiveName);
+  const missing: string[] = [];
+  if (!registered.fields.includes(fieldName)) missing.push(fieldName);
+  if (!registered.fields.includes(markerName)) missing.push(markerName);
+  if (missing.length > 0) {
     throw new FbrainError({
       code: "schema_overlap_merge",
       message:
         `Schema service collapsed "${descriptiveName}" onto an existing canonical hash ` +
-        `(${hash}) whose field set does NOT include "${fieldName}". ` +
+        `(${hash}); its field set is missing the migration's distinctness marker ` +
+        `and/or new field: ${missing.join(", ")}. ` +
         `Registered fields: ${registered.fields.join(", ")}.`,
       hint:
         "This is the fold_db `/api/schemas/load` overlap-merge bug (see " +
