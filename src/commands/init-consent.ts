@@ -209,9 +209,20 @@ export async function establishConsentInline(
         ctx.print(
           `        \`${FOLDDB_BIN} consent grant\` exited with status ${result.status ?? "unknown"}${detail}.`,
         );
-        ctx.print(
-          `        retry manually with \`${FOLDDB_BIN} consent grant ${ctx.appId}\` while this command keeps polling.`,
-        );
+        // Targeted diagnostic for the Lane-D durable-autostart pattern: the
+        // node was provisioned with a plist-pinned FOLDDB_MASTER_KEY, but this
+        // shell doesn't have the key exported, so the subprocess can't decrypt
+        // the on-disk node identity. The raw folddb error names the env var
+        // but not what fbrain operators should actually run — guide them.
+        if (looksLikeMasterKeyFailure(result.stderr)) {
+          ctx.print(
+            `        this node was provisioned with \`FOLDDB_MASTER_KEY\` — re-run as \`FOLDDB_MASTER_KEY=<hex> fbrain init --grant-consent\`, or run \`${FOLDDB_BIN} consent grant ${ctx.appId}\` in a shell that has the key exported.`,
+          );
+        } else {
+          ctx.print(
+            `        retry manually with \`${FOLDDB_BIN} consent grant ${ctx.appId}\` while this command keeps polling.`,
+          );
+        }
       }
     },
   };
@@ -337,4 +348,19 @@ export function loopbackPortFromUrl(nodeUrl: string): number | null {
 function isLoopbackHost(hostname: string): boolean {
   const h = hostname.toLowerCase();
   return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]";
+}
+
+/**
+ * Heuristic for the `folddb consent grant` failure where the target node was
+ * provisioned with `FOLDDB_MASTER_KEY` (its on-disk identity is encrypted)
+ * but the shell running `fbrain init` doesn't have the key exported — the
+ * exact Lane-D durable-autostart shape. Matches on either the env-var name
+ * or the keychain-feature phrasing so we catch the message regardless of
+ * minor wording drift in folddb's error text.
+ *
+ * Exported for tests.
+ */
+export function looksLikeMasterKeyFailure(stderr: string | undefined): boolean {
+  if (!stderr) return false;
+  return stderr.includes("FOLDDB_MASTER_KEY") || stderr.includes("os-keychain");
 }

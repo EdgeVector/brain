@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   establishConsentInline,
   loopbackPortFromUrl,
+  looksLikeMasterKeyFailure,
   type GrantResult,
 } from "../../src/commands/init-consent.ts";
 import {
@@ -314,6 +315,77 @@ describe("establishConsentInline — folddb present happy path", () => {
     expect(
       lines.some((l) => l.includes("retry manually with `folddb consent grant fbrain`")),
     ).toBe(true);
+  });
+
+  // Repro from the brief: an enforced node started with FOLDDB_MASTER_KEY
+  // (Lane-D durable-autostart shape), but the shell running `fbrain init`
+  // doesn't have the key exported, so `folddb consent grant` exits 1 with
+  // the encrypted-node-identity / keychain error. We want an fbrain-level
+  // hint naming FOLDDB_MASTER_KEY — not the raw folddb error leaking with
+  // only the generic "retry manually" line.
+  test("folddb stderr names FOLDDB_MASTER_KEY → emits targeted master-key hint instead of the generic retry line", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const masterKeyStderr =
+      "error: Cannot read existing node identity:\n" +
+      "Encrypted node identity exists on disk, but this binary was built without the os-keychain\n" +
+      "feature. Run from a build that has keychain access (the Tauri app), or set\n" +
+      "FOLDDB_MASTER_KEY=<64-hex-bytes> to decrypt explicitly.";
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      ask: yesAsk,
+      isTty: ttyOn,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: (): GrantResult => ({ status: 1, stderr: masterKeyStderr }),
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "granted_inline", folddbUsed: false });
+    // The targeted hint MUST appear and name both the env var and the
+    // re-run shape an operator can copy-paste.
+    expect(
+      lines.some(
+        (l) =>
+          l.includes("FOLDDB_MASTER_KEY") &&
+          l.includes("fbrain init --grant-consent"),
+      ),
+    ).toBe(true);
+    // The generic "retry manually" line MUST NOT appear on this branch —
+    // re-running `folddb consent grant` in the same shell would fail the
+    // same way, so leaking that hint is actively misleading.
+    expect(
+      lines.some((l) => l.includes("retry manually with `folddb consent grant fbrain`")),
+    ).toBe(false);
+  });
+});
+
+describe("looksLikeMasterKeyFailure", () => {
+  test("matches the env-var name in folddb's keychain error", () => {
+    expect(
+      looksLikeMasterKeyFailure("...set FOLDDB_MASTER_KEY=<64-hex-bytes>..."),
+    ).toBe(true);
+  });
+
+  test("matches the os-keychain feature phrasing (wording drift safety net)", () => {
+    expect(
+      looksLikeMasterKeyFailure("built without the os-keychain feature"),
+    ).toBe(true);
+  });
+
+  test("returns false for unrelated failures so we don't mis-route the generic hint", () => {
+    expect(looksLikeMasterKeyFailure("permission denied")).toBe(false);
+    expect(looksLikeMasterKeyFailure("connection refused")).toBe(false);
+    expect(looksLikeMasterKeyFailure("")).toBe(false);
+    expect(looksLikeMasterKeyFailure(undefined)).toBe(false);
   });
 });
 
