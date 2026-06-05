@@ -151,7 +151,23 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     });
   }
 
-  resolved.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+  // Sort by score DESC, ties broken by (type::slug) ASC (code-unit order). Without
+  // the id key, equal-score hits keep `dedupeHits`'s Map insertion order — which
+  // is the order each (schema_name, slug) first appeared in the server's fragment
+  // response. With `--limit N` the slice would then keep the top N in server-
+  // fragment order rather than a canonical lexicographic order, so the same
+  // corpus + query could shift across re-indexes / daemon restarts. Especially
+  // load-bearing on the score-missing path: the `?? -1` default maps every
+  // score-less hit into a wholesale tie at -1, where `slice(0, limit)` would
+  // otherwise pick whichever N the server happened to emit first. Same shape as
+  // the rrf.ts (PR #79), bm25.ts (PR #101), and ask.ts vector-rank tie-break.
+  resolved.sort((a, b) => {
+    const scoreDelta = (b.score ?? -1) - (a.score ?? -1);
+    if (scoreDelta !== 0) return scoreDelta;
+    const aId = `${a.type}::${a.slug}`;
+    const bId = `${b.type}::${b.slug}`;
+    return aId < bId ? -1 : aId > bId ? 1 : 0;
+  });
 
   const trimmed = opts.limit && opts.limit > 0 ? resolved.slice(0, opts.limit) : resolved;
 

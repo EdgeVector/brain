@@ -352,6 +352,128 @@ describe("searchCmd", () => {
     expect(lines[0]).toContain("—");
   });
 
+  test("ties in score break by (type::slug) ASC so the limit slice is canonical, not server-order-dependent", async () => {
+    // Regression: resolved.sort was `(b.score ?? -1) - (a.score ?? -1)` with
+    // NO tie-break. JS sort is stable, so equal-score hits kept the dedupe-Map
+    // insertion order — which is the order each (schema_name, slug) FIRST
+    // appeared in the server's fragment response. With --limit N the slice
+    // then kept the top N in server-fragment order rather than a canonical
+    // lexicographic order, so the SAME corpus + SAME query could yield
+    // different displayed results across re-indexes / daemon restarts /
+    // any change to the server's tied-fragment ordering. Especially load-
+    // bearing on the score-missing path (`metadata.score === undefined`),
+    // where the `?? -1` default maps every score-less hit into a wholesale
+    // tie at -1 and `slice(0, limit)` picks whichever N the server happened
+    // to emit first.
+    //
+    // Same shape as the rrf.ts (PR #79) and bm25.ts (PR #101) tie-break and
+    // the ask.ts vector-rank tie-break — every score-ordered layer in the
+    // retrieval pipeline must break ties deterministically; search.ts was
+    // the lone holdout.
+    const rows = ["zebra", "beta", "alpha"].map((slug) => ({
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    }));
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            // Server returns in REVERSE-ID order with IDENTICAL scores. Without
+            // the tie-break, slice(0, 2) keeps ["zebra", "beta"] (server's
+            // first 2). With the tie-break, slice(0, 2) keeps ["alpha", "beta"]
+            // — the two lexicographically smallest IDs.
+            results: [
+              hit({ slug: "zebra", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.5 } }),
+              hit({ slug: "beta", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.5 } }),
+              hit({ slug: "alpha", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.5 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "x", limit: 2, print: (l) => lines.push(l) });
+    expect(lines).toHaveLength(2);
+    // Canonical order: lexicographically smallest "(type::slug)" IDs first.
+    // alpha < beta < zebra under "design::<slug>".
+    expect(lines[0]).toContain("alpha");
+    expect(lines[1]).toContain("beta");
+    // And the dropped hit ("zebra") must not have leaked into either line.
+    expect(lines.join("\n")).not.toContain("zebra");
+  });
+
+  test("score-missing tie at -1 still produces a canonical (id ASC) ordering", async () => {
+    // Companion to the score-tie case above. When the server omits
+    // metadata.score on every hit, `resolved.sort` defaults each side to -1,
+    // every comparison resolves to 0 (wholesale tie), and the pre-fix sort
+    // is a stable no-op over server order. The tie-break must kick in here
+    // exactly as it does for genuine equal scores.
+    const rows = ["zebra", "alpha"].map((slug) => ({
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    }));
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "zebra", range: null },
+                value: "fragment",
+                // no metadata.score on either hit
+              },
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "alpha", range: null },
+                value: "fragment",
+              },
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "x", print: (l) => lines.push(l) });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("alpha");
+    expect(lines[1]).toContain("zebra");
+  });
+
   test("applies -n limit", async () => {
     const rows = ["a", "b", "c", "d"].map((slug) => ({
       fields: {
