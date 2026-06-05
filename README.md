@@ -83,9 +83,29 @@ prompt when a live capability already exists. (Running a local/dev node with
 consent entirely; init still resolves the same namespaced `fbrain/*` schema
 hashes from the node, and writes land as NodeOwner with no capability headers.)
 
+**Scripted / CI / agent install (no TTY).** Pass `--grant-consent` and `init`
+runs the same handshake non-interactively — request-consent, shell out to
+`folddb consent grant fbrain --yes`, poll until the capability is cached —
+so the very next `fbrain put` lands without a second terminal:
+
+```bash
+brew install edgevector/folddb/folddb
+brew services start folddb
+git clone https://github.com/EdgeVector/fbrain && cd fbrain
+bun install && bun link
+
+fbrain init --grant-consent </dev/null         # ready-to-write in one shot
+echo "hello scripted brain" | fbrain put my-first-note --type concept
+```
+
+The flag is idempotent (no-op when a live capability already exists) and a
+friendly no-op under `FBRAIN_APP_IDENTITY_ENFORCE=off` (no capability needed
+in that mode — writes land as NodeOwner).
+
 **Fallback — granting from a second terminal.** You'll only hit this if you
-declined `init`'s prompt, ran `init` non-interactively (CI/scripts), or your
-capability was later revoked. In those cases the next write stalls with:
+declined `init`'s prompt, ran `init` non-interactively without
+`--grant-consent`, or your capability was later revoked. In those cases the
+next write stalls with:
 
 ```
 First-run setup — run: `folddb consent grant fbrain` in your terminal.

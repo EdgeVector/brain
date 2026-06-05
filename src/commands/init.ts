@@ -49,6 +49,14 @@ export type InitOptions = {
   // Tuning hooks (mainly for tests):
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Drive Step 6's consent grant non-interactively (no TTY required) —
+   * surfaced as `fbrain init --grant-consent`. Scripted / CI / agent
+   * installs use this to reach a ready-to-write state in one shot. No-op
+   * under FBRAIN_APP_IDENTITY_ENFORCE=off (printed clearly) and idempotent
+   * when a live capability is already cached.
+   */
+  grantConsent?: boolean;
   // Inline consent (Step 6/6) injection seam for tests. When omitted, init
   // runs the real `establishConsentInline` against the configured node.
   consent?: Pick<
@@ -287,6 +295,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print,
   };
   if (verbose !== undefined) consentBase.verbose = verbose;
+  if (opts.grantConsent) consentBase.nonInteractiveGrant = true;
   const consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
 
   print(`[init] ok`);

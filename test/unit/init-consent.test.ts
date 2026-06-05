@@ -343,3 +343,122 @@ describe("establishConsentInline — enforcement off", () => {
     expect(lines.some((l) => l.includes("enforcement off"))).toBe(true);
   });
 });
+
+// nonInteractiveGrant is the engine behind `fbrain init --grant-consent`:
+// scripted / CI / agent installs that have no TTY but still need to reach a
+// ready-to-write state in one shot. The flag itself is the operator's
+// explicit approval (they typed it on the install command line), so we skip
+// the [Y/n] ask and the non-TTY skip — but enforce-off and the
+// already-granted idempotency still hold.
+describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () => {
+  test("non-TTY + nonInteractiveGrant → shells out, polls, stores; never calls ask", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const grantInvocations: Array<{ path: string; appId: string }> = [];
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        throw new Error("ask must not be called when nonInteractiveGrant is set");
+      },
+      isTty: ttyOff,
+      nonInteractiveGrant: true,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: (path, appId) => {
+        grantInvocations.push({ path, appId });
+        return { status: 0 };
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "granted_inline", folddbUsed: true });
+    expect(grantInvocations).toEqual([
+      { path: "/opt/homebrew/bin/folddb", appId: "fbrain" },
+    ]);
+    expect(transport.requestConsentCalls).toBe(1);
+    expect((await store.load(NODE_URL))?.blob).toBe(blob);
+    // The non-TTY "skip" line MUST NOT appear when the operator opted in.
+    expect(lines.some((l) => l.includes("non-interactive shell — skipping"))).toBe(false);
+  });
+
+  test("live capability + nonInteractiveGrant → already_granted (idempotent re-run in scripts)", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    await store.save({
+      appId: "fbrain",
+      nodeUrl: NODE_URL,
+      nodePubkey: NODE_PUBKEY,
+      capabilityId: "cap-init-1",
+      blob,
+    });
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        throw new Error("ask must not run when already granted");
+      },
+      isTty: ttyOff,
+      nonInteractiveGrant: true,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: () => {
+        throw new Error("runFolddbGrant must not run when already granted");
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "already_granted" });
+    expect(transport.requestConsentCalls).toBe(0);
+    expect(lines.some((l) => l.includes("already granted"))).toBe(true);
+  });
+
+  test("enforce-off + nonInteractiveGrant → skipped with a friendly no-op note (not silent failure)", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "false";
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      ask: async () => {
+        throw new Error("ask must not run when enforcement is off");
+      },
+      isTty: ttyOff,
+      nonInteractiveGrant: true,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: () => {
+        throw new Error("runFolddbGrant must not run when enforcement is off");
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "skipped", reason: "enforce_off" });
+    expect(transport.requestConsentCalls).toBe(0);
+    // The operator typed --grant-consent; tell them it was a no-op so they
+    // don't think the flag silently failed.
+    expect(
+      lines.some(
+        (l) => l.includes("enforcement off") && l.includes("--grant-consent is a no-op"),
+      ),
+    ).toBe(true);
+  });
+});
