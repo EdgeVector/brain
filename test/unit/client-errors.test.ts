@@ -328,10 +328,15 @@ describe("client error mapping", () => {
       expect(fe.message).toContain("fresh consumer");
       // No raw "HTTP 401" wording — that's the dead-end the brief calls out.
       expect(fe.message).not.toMatch(/returned HTTP 401/);
-      // Hint includes all three remedy paths (a/b/c).
-      expect(fe.hint ?? "").toContain("254c4");
+      // Hint names the load-bearing remedies: ask a DevCert maintainer to
+      // publish, or repoint at a schema service that already has them. The
+      // pre-fix bare-publish escape hatch (FBRAIN_APP_IDENTITY_ENFORCE=off)
+      // is gone — enforce-off now follows the same resolve-from-node path
+      // as enforce-on and hits the same 401 — so it's no longer a remedy.
       expect(fe.hint ?? "").toContain("maintainer");
-      expect(fe.hint ?? "").toContain("FBRAIN_APP_IDENTITY_ENFORCE=off");
+      expect(fe.hint ?? "").toContain("DevCert");
+      expect(fe.hint ?? "").toContain("resolves");
+      expect(fe.hint ?? "").not.toContain("FBRAIN_APP_IDENTITY_ENFORCE=off");
     }
   });
 

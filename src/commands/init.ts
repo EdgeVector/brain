@@ -20,7 +20,7 @@
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, isDefaultNodeUrl, type Verbose } from "../client.ts";
-import { UNIQUE_SCHEMAS, withoutOwnerAppId, resolveOwnedSchemaHash } from "../schemas.ts";
+import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
@@ -168,28 +168,28 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Concept/Preference/Reference/Agent/Project/Spike. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   //
-  // FBRAIN_APP_IDENTITY_ENFORCE=off is the documented dev escape hatch
-  // (remedy (c) of `CERT_REQUIRED_HINT`). When enforcement is off we strip
-  // `owner_app_id` so the bare un-owned publish lands on a schema service
-  // with no `APP_IDENTITY_ROOT_PUBKEYS` (the dev-local stack) WITHOUT the
-  // 401 cert_required gate — the env var would otherwise be inert here
-  // (it's only consulted by writes/consent) and the hint would be lying.
-  // On a roots-configured schema service the bare POST is rejected
-  // instead with 400 `owner_app_id_required`, which is the documented
-  // dev-only contract: remedy (c) tells callers to point at a node +
-  // schema service that also have app-identity disabled.
-  // For a fresh consumer (no DevCert) the fbrain/* schemas are pre-published
-  // org-wide, so a re-POST is rejected with `401 cert_required`. That is the
-  // EXPECTED, documented state — not a fatal error. Rather than dead-end, we
-  // record each cert-gated schema and RESOLVE its authoritative canonical hash
-  // from the node after the cert-free catalog load below (the node's
-  // `identity_hash` IS the published canonical hash). A maintainer who DOES
-  // hold a DevCert still publishes here (POST 200) on the same code path.
+  // The fbrain/* schemas are pre-published org-wide on the canonical schema
+  // service, so for a fresh consumer (no DevCert) the re-POST is rejected
+  // with `401 cert_required`. That is the EXPECTED, documented state — not a
+  // fatal error. Rather than dead-end, we record each cert-gated schema and
+  // RESOLVE its authoritative canonical hash from the node after the
+  // cert-free catalog load below (the node's `identity_hash` IS the published
+  // canonical hash). A maintainer who DOES hold a DevCert still publishes
+  // here (POST 200) on the same code path.
+  //
+  // `FBRAIN_APP_IDENTITY_ENFORCE=off` does NOT change the schema identity:
+  // bare (un-namespaced) publishing would produce hashes that don't match the
+  // fbrain/* schemas the node already loaded, and is rejected outright by any
+  // schema service with `APP_IDENTITY_ROOT_PUBKEYS` set (i.e. the cloud
+  // service, which is the only allowed one). Enforce-off only governs the
+  // WRITE side — no consent step, no capability headers, writes land as
+  // NodeOwner — so on this read-side step it follows the same
+  // namespaced-publish-or-resolve path as enforce-on.
   const enforceOn = appIdentityEnforceEnabled();
   print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas`);
   if (!enforceOn) {
     print(
-      `        FBRAIN_APP_IDENTITY_ENFORCE=off → registering bare (no owner_app_id) — schemas will NOT be namespaced under fbrain/*`,
+      `        FBRAIN_APP_IDENTITY_ENFORCE=off → namespaced fbrain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
     );
   }
   const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
@@ -197,19 +197,18 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const schemaHashes: Record<string, string> = {};
   const certBlocked: typeof UNIQUE_SCHEMAS = [];
   for (const entry of UNIQUE_SCHEMAS) {
-    const req = enforceOn ? entry.schema : withoutOwnerAppId(entry.schema);
     try {
-      const reg = await schemaClient.registerSchema(req);
+      const reg = await schemaClient.registerSchema(entry.schema);
       for (const type of entry.types) {
         schemaHashes[type] = reg.canonicalHash;
       }
       print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
     } catch (err) {
       // Cert-gated re-POST of an already-published fbrain/* schema — defer it
-      // and resolve the canonical hash from the node catalog after load.
-      // Only the namespaced (enforce-on) path has this fallback; a bare
-      // publish failure under enforce-off is still fatal.
-      if (enforceOn && err instanceof FbrainError && err.code === "schema_cert_required") {
+      // and resolve the canonical hash from the node catalog after load. Same
+      // behavior under enforce-on and enforce-off; the schema identity is
+      // identical, only the write-time auth differs.
+      if (err instanceof FbrainError && err.code === "schema_cert_required") {
         certBlocked.push(entry);
         print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → published already (cert-gated re-POST skipped; resolving from node)`);
       } else {

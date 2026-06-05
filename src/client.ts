@@ -887,12 +887,12 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
 export const CERT_REQUIRED_HINT =
   "fbrain's 8 schemas under `fbrain/*` are namespaced — POSTing them to the " +
   "schema service requires a DevCert held by a maintainer (per app_identity v3.1). " +
-  "A fresh consumer is expected to skip publishing entirely; this is filed upstream as " +
-  "fold task #254c4 (idempotent re-POST should be cert-free). " +
-  "Remedies, any one of: " +
-  "(a) wait for / pull the fold fix above so re-POST is cert-free; " +
-  "(b) ask a maintainer with a DevCert to run `fbrain init` once against this schema service so the canonical hashes are published; " +
-  "(c) for a local/dev stack, set FBRAIN_APP_IDENTITY_ENFORCE=off and re-run `fbrain init` against a node + schema service that ALSO have app-identity disabled (no APP_IDENTITY_ROOT_PUBKEYS) — fbrain then publishes bare un-owned variants of its schemas, bypassing the cert gate. Bare hashes won't match production fbrain/* hashes, so this is a dev-only escape hatch.";
+  "A fresh consumer is expected to skip publishing entirely; init resolves the " +
+  "already-published canonical hashes from the node after the cert-free catalog " +
+  "load. You'll only see this error if the schemas have not yet been published " +
+  "to this schema service at all. Remedies, any one of: " +
+  "(a) ask a maintainer with a DevCert to run `fbrain init` once against this schema service so the canonical hashes are published; " +
+  "(b) point fbrain at a different schema service that already has fbrain/* published (e.g. the prod cloud Lambda — the default).";
 
 export function mapSchemaServiceError(res: Response, body: unknown, path: string): FbrainError {
   const errCode = bodyError(body);
