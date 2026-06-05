@@ -168,6 +168,9 @@ function mockNodeClient(opts: {
     async consentStatus() {
       return { status: 200, body: { status: "granted" } };
     },
+    async listLoadedSchemas() {
+      return [];
+    },
     async loadSchemas() {
       if (opts.loadOk === false) throw new Error("load failed");
       return {

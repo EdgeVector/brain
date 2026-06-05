@@ -24,6 +24,7 @@ import {
 } from "../../src/commands/init.ts";
 import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import { FbrainError } from "../../src/client.ts";
+import { UNIQUE_SCHEMAS } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 describe("resolveUrls", () => {
@@ -235,5 +236,88 @@ describe("runInit — Option C recovery from stuck-provisioned node", () => {
       expect(fe.message).not.toContain("should probe");
       expect(fe.hint ?? "").not.toContain("should probe");
     }
+  });
+});
+
+describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from the node", () => {
+  const realFetch = globalThis.fetch;
+  // The suite preload (test/setup.ts) forces enforcement OFF; this path is
+  // the enforce-ON (namespaced) one, so opt back in for these tests.
+  const priorEnforce = process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+  let tmpDir: string | null = null;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (priorEnforce === undefined) delete process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+    else process.env.FBRAIN_APP_IDENTITY_ENFORCE = priorEnforce;
+    if (tmpDir) {
+      rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = null;
+    }
+  });
+
+  function jsonResponse(status: number, body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Models a fresh consumer (no DevCert) against a node whose catalog already
+  // carries the published fbrain/* schemas: every `POST /v1/schemas` is
+  // rejected with 401 cert_required, but the node's GET /api/schemas exposes
+  // each schema's authoritative identity_hash. init must resolve, not die.
+  function installCertGatedMock(): void {
+    const loaded = UNIQUE_SCHEMAS.map((e, i) => ({
+      descriptive_name: e.schema.schema.descriptive_name,
+      owner_app_id: e.schema.schema.owner_app_id,
+      identity_hash: `resolvedhash${i}` + "0".repeat(52 - String(i).length),
+    }));
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "fresh-consumer-userhash-0001" });
+      }
+      if (url.endsWith("/v1/schemas") && method === "POST") {
+        return jsonResponse(401, { reason: "cert_required" });
+      }
+      if (url.endsWith("/api/schemas/load")) {
+        return jsonResponse(200, {
+          available_schemas_loaded: loaded.length,
+          schemas_loaded_to_db: loaded.length,
+          failed_schemas: [],
+        });
+      }
+      if (url.endsWith("/api/schemas") && method === "GET") {
+        return jsonResponse(200, { ok: true, schemas: loaded });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  test("cert_required POST → resolves all 8 namespaced hashes from GET /api/schemas, no throw", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-resolve-"));
+    const configPath = join(tmpDir, "config.json");
+    installCertGatedMock();
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      // skip the interactive consent step in this unit test
+      consent: { isTty: () => false },
+    });
+
+    // Every record type resolved to a node-provided hash — none left blank.
+    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
+      expect(result.config.schemaHashes[t]).toMatch(/^resolvedhash\d/);
+    }
+    expect(lines.some((l) => l.includes("resolving from node"))).toBe(true);
+    expect(lines.some((l) => l.includes("no DevCert needed"))).toBe(true);
+
+    const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as Config;
+    expect(onDisk.schemaHashes.design).toMatch(/^resolvedhash/);
   });
 });

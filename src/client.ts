@@ -177,6 +177,15 @@ export type SchemaServiceClient = {
 // without rebuilding the client.
 export type CapabilityProvider = () => string | null;
 
+// One entry of `GET /api/schemas` — a schema loaded into the node's DB.
+// `identity_hash` is the canonical (owner-namespaced) hash the node computed;
+// `owner_app_id` is present on app-owned schemas (e.g. `"fbrain"`).
+export type LoadedSchema = {
+  descriptive_name?: string;
+  owner_app_id?: string;
+  identity_hash?: string;
+};
+
 export type NodeClient = {
   baseUrl: string;
   userHash: string;
@@ -195,6 +204,11 @@ export type NodeClient = {
     schemas_loaded_to_db: number;
     failed_schemas: string[];
   }>;
+  // GET /api/schemas — the schemas currently loaded into this node's DB,
+  // each carrying the authoritative `identity_hash` the node computed. Used
+  // by `fbrain init` to RESOLVE an already-published `fbrain/*` schema's
+  // canonical hash without a cert-gated re-POST (the fresh-consumer path).
+  listLoadedSchemas(): Promise<LoadedSchema[]>;
   createRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -414,6 +428,22 @@ export function newNodeClient(opts: {
         schemas_loaded_to_db: numField(b, "schemas_loaded_to_db"),
         failed_schemas: failed,
       };
+    },
+    async listLoadedSchemas() {
+      const { status, body } = await callJson("/api/schemas", "GET");
+      if (status !== 200) throw mapNodeError(status, body, "/api/schemas");
+      const arr =
+        body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).schemas)
+          ? ((body as Record<string, unknown>).schemas as unknown[])
+          : [];
+      return arr
+        .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+        .map((s) => ({
+          descriptive_name:
+            typeof s.descriptive_name === "string" ? s.descriptive_name : undefined,
+          owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : undefined,
+          identity_hash: typeof s.identity_hash === "string" ? s.identity_hash : undefined,
+        }));
     },
     async createRecord({ schemaHash, fields, keyHash }) {
       await mutate("create", schemaHash, fields, keyHash, callJson, capability);

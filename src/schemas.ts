@@ -438,6 +438,31 @@ export const UNIQUE_SCHEMAS: Array<{
   { key: "spike", schema: spikeSchema, types: ["spike"] },
 ];
 
+// Resolve an already-published fbrain schema's canonical hash from the set
+// the node loaded out of the schema-service catalog (GET /api/schemas). The
+// match key is (descriptive_name, owner_app_id) — exactly the two signals the
+// schema service folds into a namespaced identity. This is the fresh-consumer
+// path: the 8 `fbrain/*` schemas are pre-published org-wide, so init reads
+// their canonical hashes here instead of re-POSTing (which needs a DevCert).
+export function resolveOwnedSchemaHash(
+  req: AddSchemaRequest,
+  loaded: ReadonlyArray<{ descriptive_name?: string; owner_app_id?: string; identity_hash?: string }>,
+): string | null {
+  const wantName = req.schema.descriptive_name;
+  const wantOwner = req.schema.owner_app_id;
+  for (const s of loaded) {
+    if (
+      s.descriptive_name === wantName &&
+      s.owner_app_id === wantOwner &&
+      typeof s.identity_hash === "string" &&
+      s.identity_hash.length > 0
+    ) {
+      return s.identity_hash;
+    }
+  }
+  return null;
+}
+
 export function isRecordType(s: string): s is RecordType {
   return (RECORD_TYPES as readonly string[]).includes(s);
 }

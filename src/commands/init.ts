@@ -4,8 +4,11 @@
 // 6 steps:
 //   0. probe /api/system/auto-identity
 //   1. POST /api/setup/bootstrap if 503
-//   2. register all 8 schemas via schema service → capture canonical hashes
-//   3. POST /api/schemas/load
+//   2. obtain all 8 canonical hashes: POST each schema (maintainer w/ DevCert)
+//      OR, when the cert gate returns 401 for a fresh consumer, defer and
+//      resolve the already-published fbrain/* hashes from the node (step 3)
+//   3. POST /api/schemas/load, then resolve any cert-gated hashes via
+//      GET /api/schemas (the node's identity_hash IS the canonical hash)
 //   4. verify failed_schemas empty + persist config
 //   5. inline app-identity consent grant (prompt → folddb consent grant → poll)
 //
@@ -16,8 +19,8 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
-import { UNIQUE_SCHEMAS, withoutOwnerAppId } from "../schemas.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, type Verbose } from "../client.ts";
+import { UNIQUE_SCHEMAS, withoutOwnerAppId, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
@@ -175,6 +178,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // instead with 400 `owner_app_id_required`, which is the documented
   // dev-only contract: remedy (c) tells callers to point at a node +
   // schema service that also have app-identity disabled.
+  // For a fresh consumer (no DevCert) the fbrain/* schemas are pre-published
+  // org-wide, so a re-POST is rejected with `401 cert_required`. That is the
+  // EXPECTED, documented state — not a fatal error. Rather than dead-end, we
+  // record each cert-gated schema and RESOLVE its authoritative canonical hash
+  // from the node after the cert-free catalog load below (the node's
+  // `identity_hash` IS the published canonical hash). A maintainer who DOES
+  // hold a DevCert still publishes here (POST 200) on the same code path.
   const enforceOn = appIdentityEnforceEnabled();
   print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas`);
   if (!enforceOn) {
@@ -183,19 +193,34 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     );
   }
   const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
+  const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
   const schemaHashes: Record<string, string> = {};
+  const certBlocked: typeof UNIQUE_SCHEMAS = [];
   for (const entry of UNIQUE_SCHEMAS) {
     const req = enforceOn ? entry.schema : withoutOwnerAppId(entry.schema);
-    const reg = await schemaClient.registerSchema(req);
-    for (const type of entry.types) {
-      schemaHashes[type] = reg.canonicalHash;
+    try {
+      const reg = await schemaClient.registerSchema(req);
+      for (const type of entry.types) {
+        schemaHashes[type] = reg.canonicalHash;
+      }
+      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
+    } catch (err) {
+      // Cert-gated re-POST of an already-published fbrain/* schema — defer it
+      // and resolve the canonical hash from the node catalog after load.
+      // Only the namespaced (enforce-on) path has this fallback; a bare
+      // publish failure under enforce-off is still fatal.
+      if (enforceOn && err instanceof FbrainError && err.code === "schema_cert_required") {
+        certBlocked.push(entry);
+        print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → published already (cert-gated re-POST skipped; resolving from node)`);
+      } else {
+        throw err;
+      }
     }
-    print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
   }
 
-  // Step 3/6: load schemas into the node
+  // Step 3/6: load schemas into the node. This pulls the published catalog —
+  // including every fbrain/* schema — into the node's DB with no cert needed.
   print(`[4/${STEPS}] loading schemas into the node`);
-  const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
   const loadResult = await nodeClient.loadSchemas();
   if (loadResult.failed_schemas.length > 0) {
     throw new Error(
@@ -206,6 +231,35 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     `        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} schemas` +
       ` (failed_schemas empty ✓)`,
   );
+
+  // Resolve every cert-gated schema from the node's authoritative hashes.
+  // This is the fresh-consumer happy path: no DevCert, no re-POST, the real
+  // namespaced fbrain/* canonical hashes (NOT the bare enforce-off variants).
+  if (certBlocked.length > 0) {
+    const loaded = await nodeClient.listLoadedSchemas();
+    const stillMissing: string[] = [];
+    for (const entry of certBlocked) {
+      const hash = resolveOwnedSchemaHash(entry.schema, loaded);
+      if (hash) {
+        for (const type of entry.types) {
+          schemaHashes[type] = hash;
+        }
+        print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published fbrain/* schema; no DevCert needed)`);
+      } else {
+        stillMissing.push(entry.schema.schema.descriptive_name);
+      }
+    }
+    if (stillMissing.length > 0) {
+      throw new FbrainError({
+        code: "schema_cert_required",
+        message:
+          `Schema service rejected publish with 401 cert_required, and these schemas are not yet ` +
+          `published on this schema service — so their canonical hashes could not be resolved from ` +
+          `the node either: ${stillMissing.join(", ")}. A maintainer must publish them once.`,
+        hint: CERT_REQUIRED_HINT,
+      });
+    }
+  }
 
   // Step 4/6: persist config (config file written before consent so a Ctrl-C
   // mid-grant doesn't lose schema state — the next init re-runs the consent

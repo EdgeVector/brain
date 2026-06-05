@@ -86,6 +86,9 @@ function mockNodeWithRows(rows: FakeRow[]): NodeClient {
     async bootstrap() { return { userHash: "uh" }; },
     async requestConsent() { return { status: 202, body: { request_id: "r" } }; },
     async consentStatus() { return { status: 200, body: { status: "granted" } }; },
+    async listLoadedSchemas() {
+      return [];
+    },
     async loadSchemas() {
       return { available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] };
     },

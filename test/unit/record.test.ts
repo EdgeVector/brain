@@ -302,6 +302,9 @@ describe("resolveBySlug", () => {
       async consentStatus() {
         return { status: 200, body: { status: "granted" } };
       },
+      async listLoadedSchemas() {
+        return [];
+      },
       async loadSchemas() {
         return { available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] };
       },
@@ -442,6 +445,9 @@ describe("resolveBySlug", () => {
         },
         async consentStatus() {
           return { status: 200, body: { status: "granted" } };
+        },
+        async listLoadedSchemas() {
+          return [];
         },
         async loadSchemas() {
           return {
