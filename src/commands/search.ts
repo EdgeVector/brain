@@ -17,10 +17,9 @@ import {
 import type { Config } from "../config.ts";
 import { formatTable } from "../format.ts";
 import {
-  findBySlug,
+  findBySlugFast,
   schemaHashFor,
   uniqueSchemaHashes,
-  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -122,14 +121,13 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     const schemaHash = schemaHashFor(type, opts.cfg);
     // /api/query returns a non-deterministic top-100 slice per schema, so a
     // single findBySlug can miss a slug that genuinely exists (~1/5 of the
-    // time on a saturated daemon — same flake link.ts / put.ts / resolveBySlug
-    // already hedge with this retry). Without it a transient empty read
-    // mislabels a live record as a stale hit and silently drops it from the
-    // search output. See PR #98 (link) and docs/phase-7-search-latency-spike.md.
-    const record = await withReadRetry(
-      () => findBySlug(node, type, schemaHash, slug),
-      (r) => r !== null,
-    );
+    // time on a saturated daemon). The fast-miss helper rides out that
+    // empty-page flake (so a live record isn't silently dropped as "stale")
+    // but short-circuits on a populated-but-missing page — so a genuinely
+    // stale hit (record deleted since indexing) skips in ~one query instead
+    // of burning the full 5×250 ms retry budget serially per stale result.
+    // See PR #98 (link), PRs #154/#156, and docs/phase-7-search-latency-spike.md.
+    const record = await findBySlugFast(node, type, schemaHash, slug);
     if (!record) {
       // Stale hit — record deleted since the index was written.
       opts.verbose?.(`skip stale: ${type}/${slug} not found in current store`);

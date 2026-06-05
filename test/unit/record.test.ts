@@ -4,6 +4,7 @@ import {
   computeBackoffMs,
   ensureStatus,
   fieldsFor,
+  findBySlugFast,
   findExistingForWrite,
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
@@ -385,6 +386,112 @@ describe("findExistingForWrite", () => {
     const r = await findExistingForWrite(node, "concept", "h", "exists", noSleep);
     expect(r?.slug).toBe("exists");
     expect(calls()).toBe(3);
+  });
+});
+
+// findBySlugFast is the read-context alias for the same fast-miss helper
+// findExistingForWrite uses. It is the dangling-reference / liveness validator
+// behind `task new --design <slug>` (new.ts), `fbrain link` (link.ts ×2),
+// `fbrain get` of a task with a deleted parent (get.ts), and stale-hit drop
+// inside `fbrain search` (search.ts). The validators previously wrapped
+// findBySlug in withReadRetry(fn, r => r !== null), which made the predicate
+// unreachable for a slug that genuinely does not exist — every miss burned the
+// full 5×250 ms retry budget. This block pins the contract: a populated page
+// without the slug ⇒ one queryAll, zero sleeps. Sibling tests of
+// findExistingForWrite above cover the empty-page ride-out and tombstone
+// behaviour; findBySlugFast delegates to the same loop, so we only pin the
+// fast-miss + zero-sleep guarantee here (plus a smoke test of the hit path).
+describe("findBySlugFast (read-context fast-miss for dangling-ref validators)", () => {
+  function countingNode(pages: Array<Array<{ slug: string; tags?: string[] }>>): {
+    node: NodeClient;
+    calls: () => number;
+  } {
+    let calls = 0;
+    const node = {
+      baseUrl: "mock",
+      userHash: "uh",
+      async queryAll(): Promise<QueryResponse> {
+        const page = pages[Math.min(calls, pages.length - 1)] ?? [];
+        calls++;
+        const results = page.map((r) => ({
+          fields: {
+            slug: r.slug,
+            title: "T",
+            body: "B",
+            status: "draft",
+            tags: r.tags ?? [],
+            created_at: "2026-06-05T00:00:00Z",
+            updated_at: "2026-06-05T00:00:00Z",
+          },
+          key: { hash: r.slug, range: null },
+        }));
+        return {
+          ok: true,
+          results,
+          total_count: results.length,
+          returned_count: results.length,
+        };
+      },
+    } as unknown as NodeClient;
+    return { node, calls: () => calls };
+  }
+
+  test("dangling slug on a populated schema → ONE queryAll, ZERO sleeps", async () => {
+    // The regression: pre-fix `withReadRetry(fn, r => r !== null)` slept the
+    // full 5×250 ms budget on a genuinely-missing slug because the predicate
+    // was unreachable. Every `task new --design <typo>`, every `fbrain link
+    // <typo>`, every `fbrain get` of a task whose parent design was deleted,
+    // and every stale `fbrain search` hit paid ~1.1 s of wasted backoff. The
+    // contract is now: populated page without the slug ⇒ one queryAll, no
+    // sleeps. Sleep is asserted on the sleep-callback side rather than wall
+    // clock so a slow CI doesn't flake the test.
+    const sleeps: number[] = [];
+    const { node, calls } = countingNode([
+      [{ slug: "other-a" }, { slug: "other-b" }, { slug: "other-c" }],
+    ]);
+    const r = await findBySlugFast(node, "design", "designhash", "no-such-design", {
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    expect(r).toBeNull();
+    // The two regression assertions — both must hold or the fix has regressed.
+    expect(calls()).toBe(1);
+    expect(sleeps).toEqual([]);
+    // Belt-and-braces: even with the production backoff, the helper must not
+    // burn the budget on this shape. computeBackoffMs(1) is 0 and we should
+    // have stopped before attempt 2, so this is a guard against any future
+    // change that drops the first-attempt skip.
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(0);
+  });
+
+  test("hit on the first populated page → returns the record, ONE queryAll", async () => {
+    // Smoke test for the happy path so a future refactor that breaks the hit
+    // branch (e.g. flips the find predicate) is caught here, not only via the
+    // command-level tests.
+    const { node, calls } = countingNode([
+      [{ slug: "other" }, { slug: "real-design" }],
+    ]);
+    const r = await findBySlugFast(node, "design", "designhash", "real-design", {
+      sleep: async () => {},
+    });
+    expect(r?.slug).toBe("real-design");
+    expect(calls()).toBe(1);
+  });
+
+  test("empty schema → still rides out the saturated-daemon flake budget", async () => {
+    // Symmetric to findExistingForWrite's empty-page test. An empty page is
+    // ambiguous (flake vs. legitimately-empty schema) so the helper spends the
+    // budget — we must NOT regress to short-circuiting on empty pages, or a
+    // valid parent on a >100-row design schema that flaked to 0 results would
+    // be misreported as a `dangling_design_slug` (the exact bug withReadRetry
+    // was added to fix in PR #53).
+    const { node, calls } = countingNode([[]]);
+    const r = await findBySlugFast(node, "design", "designhash", "anything", {
+      sleep: async () => {},
+    });
+    expect(r).toBeNull();
+    expect(calls()).toBe(READ_RETRY_ATTEMPTS);
   });
 });
 

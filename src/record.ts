@@ -285,6 +285,28 @@ export async function findExistingForWrite(
   return findBySlugWithFastMiss(node, type, schemaHash, slug, false, options);
 }
 
+// Read-context alias for the same fast-miss helper. The dangling-reference /
+// liveness validators in `new`, `link`, `get`, and `search` previously wrapped
+// `findBySlug` in `withReadRetry(fn, r => r !== null)` to ride out the daemon's
+// empty-result flake — but on a slug that genuinely does not exist (a typo'd
+// `--design`, a stale search hit, a deleted parent), the `r !== null` predicate
+// is unreachable and every miss burns the full 5×250 ms retry budget. The
+// fast-miss loop short-circuits on a populated-but-missing page (authoritative
+// miss) while still spending the budget on an empty page (saturated-daemon
+// flake), so it is strictly better than the old pattern: same flake recovery,
+// no wasted budget on a real miss, identical behavior on a hit. The `*ForWrite`
+// name reads wrong in a validator, so this alias names the read-context
+// callers — semantics are identical.
+export async function findBySlugFast(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+  options?: ReadRetryOptions,
+): Promise<FbrainRecord | null> {
+  return findBySlugWithFastMiss(node, type, schemaHash, slug, false, options);
+}
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -16,12 +16,11 @@ import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
-  findBySlug,
+  findBySlugFast,
   findExistingForWrite,
   nowIso,
   schemaHashFor,
   validateSlug,
-  withReadRetry,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
 
@@ -92,15 +91,14 @@ export async function recordNew(opts: RecordNewOptions): Promise<void> {
   }
 
   // Validate the design exists, if provided — same dangling-ref rule as link.
-  // Retry-hedged for the same /api/query truncation reason as above:
-  // without it, a valid parent on a >100-row design schema flakes to
-  // dangling_design_slug ~40% of the time.
+  // Uses the fast-miss helper so a real `dangling_design_slug` errors in ~one
+  // query (populated design schema, slug absent ⇒ authoritative miss) instead
+  // of burning the full 5×250 ms read-retry budget; an empty design page still
+  // rides out the saturated-daemon flake, so a valid parent on a >100-row
+  // schema is still found. Same helper put.ts uses for its existence check.
   if (entry.hasDesignSlug && opts.designSlug && opts.designSlug.length > 0) {
     const designHash = schemaHashFor("design", opts.cfg);
-    const parent = await withReadRetry(
-      () => findBySlug(node, "design", designHash, opts.designSlug!),
-      (r) => r !== null,
-    );
+    const parent = await findBySlugFast(node, "design", designHash, opts.designSlug);
     if (!parent) {
       throw new FbrainError({
         code: "dangling_design_slug",

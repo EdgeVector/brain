@@ -5,10 +5,9 @@
 import { newNodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
-  findBySlug,
+  findBySlugFast,
   resolveBySlug,
   schemaHashFor,
-  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
@@ -43,16 +42,16 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   // Flag a dangling design reference. A task's design_slug is validated on
   // write (task new / link), so a now-missing parent means the design was
   // deleted out from under it — surface that instead of printing a live-
-  // looking pointer. Retry-hedged so a transient empty read doesn't mislabel
-  // a live design as deleted (same flake task new's parent lookup guards).
+  // looking pointer. Uses the fast-miss helper so a deleted parent surfaces
+  // in ~one query (populated design schema, parent absent ⇒ authoritative
+  // miss) instead of burning the full 5×250 ms read-retry budget on EVERY
+  // `fbrain get` of an orphaned task; empty design page still rides out the
+  // saturated-daemon flake, so a live parent isn't mislabeled as deleted.
   let designMissing = false;
   const designSlug = found.record.design_slug;
   if (RECORDS[found.type].hasDesignSlug && designSlug && designSlug.length > 0) {
     const designHash = schemaHashFor("design", opts.cfg);
-    const parent = await withReadRetry(
-      () => findBySlug(node, "design", designHash, designSlug),
-      (r) => r !== null,
-    );
+    const parent = await findBySlugFast(node, "design", designHash, designSlug);
     designMissing = parent === null;
   }
 
