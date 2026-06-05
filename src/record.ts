@@ -102,12 +102,17 @@ function stringField(f: Record<string, unknown>, key: string): string {
 
 function arrayStringField(f: Record<string, unknown>, key: string): string[] {
   const v = f[key];
-  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string");
   // Mirror put.ts's inline-list parser (`.filter(s => s.length > 0)`): the
-  // write path treats empty strings as non-tags, so the read fallback must
-  // too — otherwise a trailing/empty-middle comma or whitespace-only field
-  // leaks phantom empty tags that surface as stray `,` separators in
-  // `fbrain get` / `fbrain list` and inflate tag counts.
+  // write path treats empty strings as non-tags, so the read path must too —
+  // otherwise a phantom empty tag from the server (legacy data, the block-list
+  // parser's unfiltered branch, or a non-fbrain client) surfaces as a stray
+  // `,` separator in `fbrain get` / `fbrain list`, inflates `r.tags.length`,
+  // and — worst — propagates back to the server on the next `put` / `link`
+  // / `migrate`, since those write paths preserve `existing.tags` verbatim
+  // (`put.ts:buildFields` `tags: tags ?? existing?.tags ?? []`).
+  if (Array.isArray(v)) {
+    return v.filter((x): x is string => typeof x === "string" && x.length > 0);
+  }
   if (typeof v === "string" && v.length > 0) {
     return v
       .split(",")

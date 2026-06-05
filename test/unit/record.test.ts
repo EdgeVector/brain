@@ -129,6 +129,37 @@ describe("record", () => {
     }
   });
 
+  test("rowToRecord drops empty entries when tags comes back as an array", () => {
+    // Same invariant as the comma-split fallback above — but for the
+    // common-case array shape the node actually returns. Pre-fix this branch
+    // (`Array.isArray(v)`) returned the server's array verbatim, so an empty
+    // string in the array slipped through to `r.tags`. Two consequences:
+    //   1. `fbrain get` / `fbrain list` show a stray `,` separator and
+    //      `r.tags.length` is inflated past the "real" tag count.
+    //   2. The write paths preserve `existing.tags` verbatim on update
+    //      (put.ts `tags: tags ?? existing?.tags ?? []`; link.ts/migrate.ts
+    //      similarly), so the phantom empty propagates BACK to the node on
+    //      the next mutation — empties persist across the record's lifecycle
+    //      instead of getting cleaned up.
+    // The fix filters on `length > 0` to match the inline-parser contract
+    // ("empty strings are non-tags") regardless of which shape the server
+    // emits.
+    const cases: Array<[unknown[], string[]]> = [
+      [["a", "", "b"], ["a", "b"]],
+      [[""], []],
+      [["", "", ""], []],
+      [["foo"], ["foo"]],
+      [["a", 0, "b"], ["a", "b"]], // non-strings still dropped (pre-existing)
+    ];
+    for (const [raw, expected] of cases) {
+      const r = rowToRecord(
+        { fields: { tags: raw }, key: { hash: "x", range: null } },
+        "design",
+      );
+      expect(r.tags).toEqual(expected);
+    }
+  });
+
   test("ensureStatus accepts valid status", () => {
     expect(() => ensureStatus("design", "draft")).not.toThrow();
     expect(() => ensureStatus("task", "in_progress")).not.toThrow();
