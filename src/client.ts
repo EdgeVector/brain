@@ -353,6 +353,54 @@ export function newNodeClient(opts: {
     return { status: res.status, body: parsed };
   };
 
+  // Common 200-or-throw wrapper around `callJson`. Endpoints that branch on
+  // specific non-200 statuses (autoIdentity 503, bootstrap 410) and the
+  // raw-passthrough endpoints (requestConsent / consentStatus / rawCall) stay
+  // on `callJson` directly. `search` also stays on `callJson` so its error
+  // tag can intentionally strip the query string from the path.
+  const callJsonOk = async (
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<unknown> => {
+    const { status, body: parsed } = await callJson(path, method, body, extraHeaders);
+    if (status !== 200) throw mapNodeError(status, parsed, path);
+    return parsed;
+  };
+
+  // App-identity v3.1: attach the verbatim base64 capability blob plus a fresh
+  // unix-epoch-seconds timestamp on every mutation. The timestamp is recomputed
+  // per call so a token cached for hours still lands inside the node's ±60s
+  // replay window. No capability provider, or a provider returning null, sends
+  // neither header — the node treats the caller as NodeOwner (or, under
+  // enforcement, 403s with `consent_required`).
+  const mutate = async (
+    kind: "create" | "update" | "delete",
+    schemaHash: string,
+    fields: Record<string, unknown>,
+    keyHash: string,
+  ): Promise<void> => {
+    const extraHeaders: Record<string, string> = {};
+    const blob = capability?.() ?? null;
+    if (blob !== null) {
+      extraHeaders[APP_CAPABILITY_HEADER] = blob;
+      extraHeaders[CAPABILITY_TS_HEADER] = String(Math.floor(Date.now() / 1000));
+    }
+    await callJsonOk(
+      "/api/mutation",
+      "POST",
+      {
+        type: "mutation",
+        schema: schemaHash,
+        fields_and_values: fields,
+        key_value: { hash: keyHash, range: null },
+        mutation_type: kind,
+      },
+      extraHeaders,
+    );
+  };
+
   return {
     baseUrl: url,
     userHash,
@@ -419,8 +467,7 @@ export function newNodeClient(opts: {
       );
     },
     async loadSchemas() {
-      const { status, body } = await callJson("/api/schemas/load", "POST");
-      if (status !== 200) throw mapNodeError(status, body, "/api/schemas/load");
+      const body = await callJsonOk("/api/schemas/load", "POST");
       const b = body as Record<string, unknown>;
       const failed = Array.isArray(b.failed_schemas) ? (b.failed_schemas as string[]) : [];
       return {
@@ -430,8 +477,7 @@ export function newNodeClient(opts: {
       };
     },
     async listLoadedSchemas() {
-      const { status, body } = await callJson("/api/schemas", "GET");
-      if (status !== 200) throw mapNodeError(status, body, "/api/schemas");
+      const body = await callJsonOk("/api/schemas", "GET");
       const arr =
         body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).schemas)
           ? ((body as Record<string, unknown>).schemas as unknown[])
@@ -446,17 +492,17 @@ export function newNodeClient(opts: {
         }));
     },
     async createRecord({ schemaHash, fields, keyHash }) {
-      await mutate("create", schemaHash, fields, keyHash, callJson, capability);
+      await mutate("create", schemaHash, fields, keyHash);
     },
     async updateRecord({ schemaHash, fields, keyHash }) {
-      await mutate("update", schemaHash, fields, keyHash, callJson, capability);
+      await mutate("update", schemaHash, fields, keyHash);
     },
     async deleteRecord({ schemaHash, keyHash }) {
       // Empty fields_and_values is the minimal body — see
       // docs/phase-5-delete-spike.md, Probe B. The orchestrator's earlier
       // smoketest passed `{slug: keyHash}` which has the side-effect of
       // writing a no-op atom rewriting the slug field with itself.
-      await mutate("delete", schemaHash, {}, keyHash, callJson, capability);
+      await mutate("delete", schemaHash, {}, keyHash);
     },
     async queryAll({ schemaHash, fields }) {
       // The node's /api/query handler silently defaults to limit=100
@@ -493,13 +539,12 @@ export function newNodeClient(opts: {
       let offset = 0;
       let lastTotalCount: number | null = null;
       for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-        const { status, body } = await callJson("/api/query", "POST", {
+        const body = await callJsonOk("/api/query", "POST", {
           schema_name: schemaHash,
           fields,
           limit: QUERY_PAGE_SIZE,
           offset,
         });
-        if (status !== 200) throw mapNodeError(status, body, "/api/query");
         const b = body as Record<string, unknown>;
         const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
         if (typeof b.total_count === "number") lastTotalCount = b.total_count;
@@ -581,41 +626,6 @@ export function newNodeClient(opts: {
       return { status: res.status, headers: res.headers, body: text, json };
     },
   };
-}
-
-async function mutate(
-  kind: "create" | "update" | "delete",
-  schemaHash: string,
-  fields: Record<string, unknown>,
-  keyHash: string,
-  callJson: (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ) => Promise<{ status: number; body: unknown }>,
-  capability: CapabilityProvider | undefined,
-): Promise<void> {
-  // App-identity v3.1: attach the verbatim base64 capability blob plus a fresh
-  // unix-epoch-seconds timestamp on every mutation. The timestamp is recomputed
-  // per call so a token cached for hours still lands inside the node's ±60s
-  // replay window. No capability provider, or a provider returning null, sends
-  // neither header — the node treats the caller as NodeOwner (or, under
-  // enforcement, 403s with `consent_required`).
-  const extraHeaders: Record<string, string> = {};
-  const blob = capability?.() ?? null;
-  if (blob !== null) {
-    extraHeaders[APP_CAPABILITY_HEADER] = blob;
-    extraHeaders[CAPABILITY_TS_HEADER] = String(Math.floor(Date.now() / 1000));
-  }
-  const { status, body } = await callJson("/api/mutation", "POST", {
-    type: "mutation",
-    schema: schemaHash,
-    fields_and_values: fields,
-    key_value: { hash: keyHash, range: null },
-    mutation_type: kind,
-  }, extraHeaders);
-  if (status !== 200) throw mapNodeError(status, body, "/api/mutation");
 }
 
 // String identity for a QueryRow's record key, used by queryAll to
