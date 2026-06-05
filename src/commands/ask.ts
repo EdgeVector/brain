@@ -235,7 +235,23 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         return { id, score };
       })
       .filter((x): x is { id: string; score: number } => x !== null);
-    vectorHits.sort((a, b) => b.score - a.score);
+    // Sort by score DESC, ties broken by id ASC (code-unit order). Without
+    // the id key, equal-score vector hits keep `collapseFragments` insertion
+    // order — which depends on the order the daemon returned the underlying
+    // fragments. That order then flowed into RRF as the per-doc vector rank,
+    // and a tied doc that landed at rank 1 in one response ordering and
+    // rank 2 in another came out with different fused scores (1/61 vs 1/62)
+    // — flipping the top result for the same query + corpus + hit set just
+    // because the server happened to return tied fragments in the opposite
+    // order. Same shape as the rrf.ts (PR #79) and bm25.ts (PR #101)
+    // tie-breaks, applied one layer up — vector rank assignment is the
+    // third score-ordered layer on the ask pipeline and must be invariant
+    // too. Especially load-bearing on the score-missing path, where the
+    // default-to-0 maps every score-less hit into a wholesale tie.
+    vectorHits.sort(
+      (a, b) =>
+        b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
     const vectorRanked = vectorHits.slice(0, RANKER_LIMIT).map((h, i) => ({
       id: h.id,
       rank: i + 1,
