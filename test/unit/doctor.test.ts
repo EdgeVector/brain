@@ -493,13 +493,16 @@ describe("doctor verdict logic", () => {
     expect(lines.some((l) => l.includes("fbrain init"))).toBe(true);
   });
 
-  test("missing config + schema service returns cert_required → FAIL schema-publish-gate with remedy", async () => {
-    // Init↔doctor dead-end regression. Pre-this-PR, when init's step 3 kept
-    // failing with `401 cert_required`, no config was ever written and
-    // doctor stopped at "no ~/.fbrain/config.json → run `fbrain init`",
-    // bouncing the user back to the command that can't succeed. Doctor now
-    // probes the schema-service publish gate independently so the real
-    // cause surfaces with an actionable remedy.
+  test("missing config + schema service returns cert_required → PASS schema-publish-gate (expected consumer state, not a blocker)", async () => {
+    // `cert_required` is the EXPECTED state for a fresh consumer: the schema
+    // service gates publishing `fbrain/*` behind a DevCert, but `fbrain init`
+    // never publishes — it resolves the already-published canonical hashes
+    // from the node (see init.ts "cert_required POST → resolves all 8 hashes,
+    // no throw"). Reporting this as a FAIL with "init cannot complete" was a
+    // false dead-end that scared fresh adopters away before running init.
+    // The no-config `[FAIL] config` line still drives the red verdict and
+    // tells them to run `fbrain init` — the publish-gate probe must NOT add
+    // a phantom blocker on top of it.
     const dir = mkdtempSync(join(tmpdir(), "fbrain-doctor-cert-"));
     const lines: string[] = [];
     const code = await doctor({
@@ -529,20 +532,19 @@ describe("doctor verdict logic", () => {
         },
       }),
     });
+    // Still red overall, but solely because of the no-config FAIL.
     expect(code).toBe(1);
-    // No config FAIL line stays.
     expect(lines.some((l) => l.includes("[FAIL] config"))).toBe(true);
-    // New publish-gate FAIL surfaces the real cause.
-    const gateLine = lines.find((l) => l.includes("[FAIL] schema-publish-gate"));
+    // cert_required is the healthy consumer state — surfaced as a PASS, never
+    // a FAIL, and never claims "init cannot complete".
+    expect(lines.some((l) => l.includes("[FAIL] schema-publish-gate"))).toBe(false);
+    const gateLine = lines.find((l) => l.includes("schema-publish-gate"));
     expect(gateLine).toBeDefined();
+    expect(gateLine!).toContain("[PASS]");
     expect(gateLine!).toContain("cert_required");
-    expect(gateLine!).toContain("DevCert");
-    // The fix hint names a concrete remedy, not "re-run fbrain init". The
-    // enforce-off path used to be listed as remedy (c); after the namespaced-
-    // identity unification it hits the exact same 401, so the hint only names
-    // remedies that actually work.
-    expect(lines.some((l) => l.includes("maintainer"))).toBe(true);
-    expect(lines.some((l) => l.includes("DevCert"))).toBe(true);
+    expect(gateLine!).toContain("expected for a consumer");
+    // The old false dead-end wording must be gone.
+    expect(lines.some((l) => l.includes("cannot complete"))).toBe(false);
   });
 
   test("missing config + schema service unreachable → WARN schema-publish-gate", async () => {
