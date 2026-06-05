@@ -80,7 +80,8 @@ returns you have a ready-to-write capability — your first `fbrain put` /
 `design new` lands immediately. Re-running `init` is idempotent: it skips the
 prompt when a live capability already exists. (Running a local/dev node with
 `APP_IDENTITY_ENFORCE` off? Set `FBRAIN_APP_IDENTITY_ENFORCE=off` to skip
-consent entirely; writes land as NodeOwner.)
+consent entirely; init still resolves the same namespaced `fbrain/*` schema
+hashes from the node, and writes land as NodeOwner with no capability headers.)
 
 **Fallback — granting from a second terminal.** You'll only hit this if you
 declined `init`'s prompt, ran `init` non-interactively (CI/scripts), or your

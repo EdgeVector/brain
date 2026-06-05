@@ -537,9 +537,12 @@ describe("doctor verdict logic", () => {
     expect(gateLine).toBeDefined();
     expect(gateLine!).toContain("cert_required");
     expect(gateLine!).toContain("DevCert");
-    // The fix hint names a concrete remedy, not "re-run fbrain init".
-    expect(lines.some((l) => l.includes("FBRAIN_APP_IDENTITY_ENFORCE=off"))).toBe(true);
+    // The fix hint names a concrete remedy, not "re-run fbrain init". The
+    // enforce-off path used to be listed as remedy (c); after the namespaced-
+    // identity unification it hits the exact same 401, so the hint only names
+    // remedies that actually work.
     expect(lines.some((l) => l.includes("maintainer"))).toBe(true);
+    expect(lines.some((l) => l.includes("DevCert"))).toBe(true);
   });
 
   test("missing config + schema service unreachable → WARN schema-publish-gate", async () => {

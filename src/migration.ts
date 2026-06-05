@@ -136,9 +136,9 @@ export function schemaWithExtraField(opts: {
       name: newDescriptiveName,
       // Carry the owning app forward so the migrated schema stays in the same
       // `fbrain/*` namespace and its identity hash continues to fold in
-      // owner_app_id (app_identity v3.1). Spread-with-guard so that — when the
-      // base schema was a bare un-owned publish (init's enforce-off dev path)
-      // — the migrated schema also stays bare and we don't emit `undefined`.
+      // owner_app_id (app_identity v3.1). Spread-with-guard so an externally-
+      // loaded schema definition without `owner_app_id` doesn't get
+      // `owner_app_id: undefined` emitted into the migrated schema.
       ...(base.schema.owner_app_id !== undefined
         ? { owner_app_id: base.schema.owner_app_id }
         : {}),
