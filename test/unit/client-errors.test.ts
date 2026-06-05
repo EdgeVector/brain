@@ -54,6 +54,41 @@ describe("client error mapping", () => {
     }
   });
 
+  // Regression: the real fold_db_node's missing_user_context_response()
+  // (fold_db_node/src/utils/http_errors.rs) puts the discriminator in `code`
+  // and a human sentence in `error`:
+  //   { ok:false, code:"MISSING_USER_CONTEXT", error:"Authentication required. Please provide X-User-Hash header.", next:"GET /api/system/auto-identity" }
+  // mapNodeError was reading the `error` field for the literal token
+  // "MISSING_USER_CONTEXT" — which the real node NEVER sends in `error`;
+  // that field carries the human sentence. The msg-side fallback
+  // (`msg?.includes("Authentication")`) reads `message`, but the node
+  // doesn't populate `message` either. Net effect: every real 401 from
+  // a deployed daemon fell through to the generic `node_http_401` mapping
+  // and the actionable "Re-run `fbrain init`" hint never reached the
+  // user. Pin the real shape so the discriminator lands.
+  test("node 401 with the real fold_db_node body shape (discriminator in `code`) maps to missing_user_context", async () => {
+    installMock([{
+      status: 401,
+      body: {
+        ok: false,
+        code: "MISSING_USER_CONTEXT",
+        error: "Authentication required. Please provide X-User-Hash header.",
+        next: "GET /api/system/auto-identity",
+      },
+    }]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
+    try {
+      await c.loadSchemas();
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("missing_user_context");
+      expect(fe.message).toContain("missing X-User-Hash");
+      expect(fe.hint ?? "").toContain("fbrain init");
+    }
+  });
+
   test("node 409 ambiguous_schema_name maps to ambiguous_schema_name", async () => {
     installMock([
       {

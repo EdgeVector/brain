@@ -793,6 +793,13 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
 function mapNodeError(status: number, body: unknown, path: string): FbrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
+  // Discriminator field for several fold_db_node error responses (e.g.
+  // missing_user_context_response in fold_db_node/src/utils/http_errors.rs
+  // returns `{code:"MISSING_USER_CONTEXT", error:"<human sentence>", ...}`).
+  // `error` carries the human-readable message there, NOT the machine
+  // token — so the discriminator lives in `code` and must be checked
+  // separately from `bodyError`.
+  const codeField = bodyStringField(body, "code");
   // Discriminated capability 403 (app_identity v3.1). The body is verbatim
   // `{"status":403,"reason":"<reason>", ...}`. Carry the reason + any detail
   // on the FbrainError so the capability layer can apply the contract behavior
@@ -816,7 +823,12 @@ function mapNodeError(status: number, body: unknown, path: string): FbrainError 
       });
     }
   }
-  if (status === 401 && (errCode === "MISSING_USER_CONTEXT" || msg?.includes("Authentication"))) {
+  if (
+    status === 401 &&
+    (codeField === "MISSING_USER_CONTEXT" ||
+      errCode === "MISSING_USER_CONTEXT" ||
+      msg?.includes("Authentication"))
+  ) {
     return new FbrainError({
       code: "missing_user_context",
       message: `Node rejected ${path}: missing X-User-Hash ${DOCTOR_TIP}.`,
