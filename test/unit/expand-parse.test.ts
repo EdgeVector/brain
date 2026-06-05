@@ -152,4 +152,39 @@ describe("parseExpansions", () => {
       "another phrasing",
     ]);
   });
+
+  test("trailing whitespace after a closing quote is stripped along with the quote", () => {
+    // Mirror of the leading-whitespace fix. The quote-strip regex was
+    // `^\s*["'\`]+|["'\`]+$` — the leading half allows a `\s*` prefix, but
+    // the trailing half had NO trailing-whitespace allowance. So a line like
+    // `"foo"   ` (closing quote followed by spaces / tab) leaked a stray
+    // trailing `"`: the leading half stripped the opening `"`, the trailing
+    // half couldn't match because `$` was after the spaces, and the final
+    // `.trim()` only removed the spaces — leaving `foo"`. That corrupted
+    // phrasing then flows into vector search (raw query string sent to
+    // embeddings) and silently degrades ask quality, same shape as the
+    // pre-fix leading-whitespace regression.
+    //
+    // Realistic trigger: an LLM emits the bullet list with trailing spaces
+    // on each line — common in mass-produced output:
+    //   "first phrasing"   ␊
+    //   "second phrasing"  ␊
+    //   "third phrasing"\t␊
+    const raw = '"first phrasing"   \n"second phrasing"  \n"third phrasing"\t';
+    expect(parseExpansions(raw, 3)).toEqual([
+      "first phrasing",
+      "second phrasing",
+      "third phrasing",
+    ]);
+  });
+
+  test("leading + trailing whitespace both stripped around quoted phrasings", () => {
+    // The combined symmetric case — leading whitespace + quote + content +
+    // quote + trailing whitespace. Both halves of the quote-strip regex must
+    // permit surrounding whitespace.
+    const raw = '   "  padded phrasing  "   ';
+    // Outer quotes + surrounding whitespace strip; the inner whitespace
+    // inside the quoted content is preserved up to the final `.trim()`.
+    expect(parseExpansions(raw, 1)).toEqual(["padded phrasing"]);
+  });
 });

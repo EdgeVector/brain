@@ -149,11 +149,15 @@ export function parseExpansions(raw: string, count: number): string[] {
     const cleaned = line
       .replace(/^\s*[-*•]\s+/, "")
       .replace(/^\s*\d+[.)]\s+/, "")
-      // Leading-whitespace allowance matches the bullet/number patterns above
-      // so an indented quoted phrasing like `  "foo"` doesn't survive with a
-      // leftover leading `"` after the trailing-quote half of the alternation
-      // strips on its own.
-      .replace(/^\s*["'`]+|["'`]+$/g, "")
+      // Whitespace allowance on BOTH halves: the leading half handles an
+      // indented quoted phrasing like `  "foo"`; the trailing half handles
+      // a phrasing emitted with trailing whitespace like `"foo"   ` — common
+      // when an LLM right-pads a bullet list. Without the trailing `\s*`
+      // the closing-quote regex couldn't reach `$` (whitespace sat between
+      // the quote and end-of-string), the leading half stripped only the
+      // opening quote, and the final `.trim()` left a stray trailing `"` —
+      // same shape of corruption as the pre-fix leading-whitespace case.
+      .replace(/^\s*["'`]+|["'`]+\s*$/g, "")
       .trim();
     if (cleaned.length === 0) continue;
     out.push(cleaned);
