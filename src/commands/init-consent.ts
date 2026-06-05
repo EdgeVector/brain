@@ -19,10 +19,17 @@
 //      polling loop still completes when the user runs it.
 //   5. Non-TTY (CI/scripts) or declined prompt: skip with a one-line note;
 //      the existing in-write polling path stays as the fallback.
+//   6. `nonInteractiveGrant: true` (driven by `fbrain init --grant-consent`):
+//      same handshake without a TTY — request-consent, shell out, poll —
+//      so scripted / CI / agent installs reach a ready-to-write state in
+//      one shot. The flag IS the explicit approval (the operator typed it),
+//      so the [Y/n] prompt is bypassed but enforcement-off + already-granted
+//      idempotency still hold.
 //
-// Security: consent stays EXPLICIT and owner-approved. The prompt is the
-// one-time explicit approval; the shell-out only fires after the user said
-// yes. We never auto-grant silently.
+// Security: consent stays EXPLICIT and owner-approved. The interactive
+// prompt is one form of explicit approval; the `--grant-consent` flag is
+// another (the operator typed it on the install command line). Neither path
+// auto-grants silently — both fire only after the operator opts in.
 
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
@@ -57,6 +64,13 @@ export type EstablishConsentOptions = {
   runFolddbGrant?: (folddbPath: string, appId: string) => GrantResult;
   /** Treat the current process as a TTY (default: process.stdin.isTTY). */
   isTty?: () => boolean;
+  /**
+   * Drive the inline grant without a TTY (the operator's --grant-consent on
+   * the install command line IS the explicit approval). Skips the [Y/n] ask
+   * and the non-TTY skip; still honours enforce-off (no-op message) and the
+   * already-granted idempotency.
+   */
+  nonInteractiveGrant?: boolean;
   // Consent polling tuning (forwarded to acquireCapability):
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -91,38 +105,48 @@ export async function establishConsentInline(
   const store = opts.store ?? defaultCapabilityStore();
 
   // Enforcement off (FBRAIN_APP_IDENTITY_ENFORCE=false): no capability needed.
+  // --grant-consent is a no-op here; print a friendly note so the operator
+  // doesn't think the flag silently failed.
   if (!appIdentityEnforceEnabled()) {
-    print(`        app-identity enforcement off — skipping consent step.`);
+    if (opts.nonInteractiveGrant) {
+      print(`        app-identity enforcement off — --grant-consent is a no-op (no capability needed).`);
+    } else {
+      print(`        app-identity enforcement off — skipping consent step.`);
+    }
     return { state: "skipped", reason: "enforce_off" };
   }
 
   // Idempotency: a live capability on disk → silent no-op so re-running init
-  // never re-prompts.
+  // never re-prompts (and --grant-consent is safe to re-run in scripts).
   if (await hasValidCachedCapability(store, opts.nodeUrl, appId)) {
     print(`        ${appId} consent already granted — skipping.`);
     return { state: "already_granted" };
   }
 
-  // Non-interactive (CI, scripted init): can't prompt — leave the in-write
-  // fallback to handle it on first write.
-  const isTty = (opts.isTty ?? defaultIsTty)();
-  if (!isTty) {
-    print(
-      `        non-interactive shell — skipping consent prompt. Run \`folddb consent grant ${appId}\` before your first write.`,
-    );
-    return { state: "skipped", reason: "non_tty" };
-  }
+  // --grant-consent: the operator typed the flag, so we skip the [Y/n] ask
+  // and the non-TTY skip. Falls through to the inline grant block below.
+  if (!opts.nonInteractiveGrant) {
+    // Non-interactive (CI, scripted init) without --grant-consent: can't
+    // prompt — leave the in-write fallback to handle it on first write.
+    const isTty = (opts.isTty ?? defaultIsTty)();
+    if (!isTty) {
+      print(
+        `        non-interactive shell — skipping consent prompt. Run \`folddb consent grant ${appId}\` before your first write, or re-run \`fbrain init --grant-consent\`.`,
+      );
+      return { state: "skipped", reason: "non_tty" };
+    }
 
-  // Explicit one-time approval.
-  const ask = opts.ask ?? defaultAsk;
-  const answer = await ask(
-    `fbrain wants read/write access to its namespace on this node. Grant now? [Y/n] `,
-  );
-  if (!isAffirmative(answer)) {
-    print(
-      `        skipped — run \`folddb consent grant ${appId}\` later, or fbrain will prompt on first write.`,
+    // Explicit one-time approval.
+    const ask = opts.ask ?? defaultAsk;
+    const answer = await ask(
+      `fbrain wants read/write access to its namespace on this node. Grant now? [Y/n] `,
     );
-    return { state: "skipped", reason: "declined" };
+    if (!isAffirmative(answer)) {
+      print(
+        `        skipped — run \`folddb consent grant ${appId}\` later, or fbrain will prompt on first write.`,
+      );
+      return { state: "skipped", reason: "declined" };
+    }
   }
 
   // Build the consent transport (request-consent + consent-status against the
