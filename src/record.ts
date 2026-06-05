@@ -209,6 +209,54 @@ export async function withReadRetry<T>(
   return result;
 }
 
+// Existence check for the WRITE path (`fbrain put`, `<type> new`). The write
+// must decide create-vs-update by asking "does this slug already exist?" — but
+// unlike a read (`get`/`status`/`delete`), where the user asserts the row
+// exists and a `withReadRetry(findBySlug, r => r !== null)` rides out the
+// daemon's read flake before surfacing not-found, the write has no such
+// assertion: a brand-new slug is *expected* to be absent. Wrapping the write's
+// existence check in the same retry made the `r !== null` predicate unreachable
+// for every new slug, so each create burned the FULL retry budget (~1.1s of
+// pure backoff sleep) before falling through to `createRecord`. Measured
+// 2026-06-05: create ~1200 ms vs. update ~95 ms, purely from this.
+//
+// The fix keys on the flake's actual shape. The `/api/query` offset
+// overlaps/misses that could drop one row out of a *populated* page were fixed
+// server-side (internal-cap fetch + in-memory slice + has_more); the remaining
+// read flake only ever manifests as an EMPTY result set on a saturated daemon
+// (docs/phase-7-search-latency-spike.md, H2). So a NON-EMPTY page that lacks
+// the slug is authoritative — the slug is genuinely new, create immediately
+// without retrying. Only an EMPTY page is ambiguous (saturated-daemon flake vs.
+// legitimately-empty schema), and only that case spends the retry budget; if it
+// stays empty across the budget we treat the slug as new. Net effect: a create
+// against an already-populated schema costs one round-trip instead of the whole
+// budget, while the flake defense for existing rows is preserved (a real row
+// that flakes its schema to 0 is still ridden out). Tombstoned rows count as
+// absent, mirroring `findBySlug`, so re-creating a soft-deleted slug still
+// lands a fresh record.
+export async function findExistingForWrite(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+  options?: ReadRetryOptions,
+): Promise<FbrainRecord | null> {
+  const maxAttempts = options?.maxAttempts ?? READ_RETRY_ATTEMPTS;
+  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
+  const sleep = options?.sleep ?? defaultSleep;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
+    const list = await listRecords(node, type, schemaHash);
+    const hit = list.find((r) => r.slug === slug && !isTombstoned(r));
+    if (hit) return hit;
+    // Populated page without our (live) slug ⇒ authoritative miss: stop early.
+    if (list.length > 0) return null;
+    // Empty page ⇒ ambiguous; loop to ride out the saturated-daemon flake.
+  }
+  return null;
+}
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
