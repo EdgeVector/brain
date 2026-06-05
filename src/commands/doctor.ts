@@ -39,7 +39,6 @@
 // Exit code 0 on all-green, 1 if any check fails.
 
 import {
-  CERT_REQUIRED_HINT,
   FbrainError,
   newNodeClient,
   newSchemaServiceClient,
@@ -1242,14 +1241,24 @@ export async function runSchemaPublishGateProbe(
     };
   } catch (err) {
     if (err instanceof FbrainError && err.code === "schema_cert_required") {
-      verbose?.(`schema-publish-gate: cert_required FAIL`);
+      // `cert_required` is the EXPECTED state for a fresh consumer, NOT a
+      // blocker. The schema service gates POST /v1/schemas behind a DevCert
+      // for the namespaced `fbrain/*` schemas — but `fbrain init` never needs
+      // to publish: it loads the cert-free catalog and resolves the
+      // already-published canonical hashes from the node (proven by the
+      // init.ts "cert_required POST → resolves all 8 hashes, no throw" path).
+      // Reporting this as a FAIL with "init cannot complete" is a false
+      // dead-end that scares fresh adopters away before they've even run
+      // init. Surface it as a calm PASS; the no-config `[FAIL] config` line
+      // (→ "run `fbrain init`") already drives doctor's red verdict.
+      verbose?.(`schema-publish-gate: cert_required (expected consumer state) PASS`);
       return {
         name: "schema-publish-gate",
-        ok: false,
+        ok: true,
         detail:
-          `schema service at ${url} requires a DevCert to (re)publish fbrain/* ` +
-          `(cert_required) — \`fbrain init\` cannot complete without it`,
-        fix: CERT_REQUIRED_HINT,
+          `schema service at ${url} gates fbrain/* publishing behind a DevCert ` +
+          `(cert_required) — expected for a consumer; \`fbrain init\` resolves the ` +
+          `already-published canonical hashes from the node, no DevCert needed`,
       };
     }
     // Anything else (schema service unreachable, 5xx, unknown 401 body) —
