@@ -4,7 +4,7 @@
 import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteNodeClient } from "../write-context.ts";
 import type { Config } from "../config.ts";
-import { findBySlug, nowIso, schemaHashFor, withReadRetry } from "../record.ts";
+import { findBySlug, findBySlugFast, nowIso, schemaHashFor } from "../record.ts";
 
 export type LinkOptions = {
   cfg: Config;
@@ -27,13 +27,12 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
 
   // /api/query returns a non-deterministic top-100 slice per schema, so a
   // single findBySlug can miss an existing slug on a schema with >100 rows.
-  // Without the retry, link rejects a real task/design with `not_found` or
-  // `dangling_design_slug` ~40% of the time on a saturated daemon. Same
-  // hedge `task new` / `design new` / put.ts / resolveBySlug already apply.
-  const task = await withReadRetry(
-    () => findBySlug(node, "task", taskHash, opts.taskSlug),
-    (r) => r !== null,
-  );
+  // The fast-miss helper rides out the saturated-daemon empty-page flake
+  // (so a real task on a >100-row schema is still found) but short-circuits
+  // on a populated-but-missing page, so a typo'd <task-slug> errors in ~one
+  // query instead of burning the full 5×250 ms retry budget. Same helper
+  // put.ts / new.ts / resolveBySlug use.
+  const task = await findBySlugFast(node, "task", taskHash, opts.taskSlug);
   if (!task) {
     // `link` is directional — <task-slug> first, <design-slug> second — and
     // reversing the two is the most common first-use mistake (the slug the
@@ -52,10 +51,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     });
   }
 
-  const design = await withReadRetry(
-    () => findBySlug(node, "design", designHash, opts.designSlug),
-    (r) => r !== null,
-  );
+  const design = await findBySlugFast(node, "design", designHash, opts.designSlug);
   if (!design) {
     throw new FbrainError({
       code: "dangling_design_slug",
