@@ -60,8 +60,17 @@ export type EstablishConsentOptions = {
   ask?: (question: string) => Promise<string>;
   /** Locate the folddb CLI; default scans PATH. */
   resolveFolddb?: () => string | null;
-  /** Invoke `folddb consent grant`; default `spawnSync`-shells out. */
-  runFolddbGrant?: (folddbPath: string, appId: string) => GrantResult;
+  /**
+   * Invoke `folddb consent grant`. Receives the fbrain `--node-url` so the
+   * default implementation can pin `FOLDDB_PORT` and avoid the grant landing on
+   * a sibling daemon (see defaultRunFolddbGrant). Default: `spawnSync`-shells
+   * out.
+   */
+  runFolddbGrant?: (
+    folddbPath: string,
+    appId: string,
+    nodeUrl: string,
+  ) => GrantResult;
   /** Treat the current process as a TTY (default: process.stdin.isTTY). */
   isTty?: () => boolean;
   /**
@@ -175,7 +184,7 @@ export async function establishConsentInline(
         return;
       }
       ctx.print(`        running \`${FOLDDB_BIN} consent grant ${ctx.appId} --yes\``);
-      const result = runFolddbGrant(folddb, ctx.appId);
+      const result = runFolddbGrant(folddb, ctx.appId, opts.nodeUrl);
       if (result.status === 0) {
         folddbUsed = true;
       } else {
@@ -251,16 +260,64 @@ function defaultResolveFolddb(): string | null {
   return path.length > 0 ? path : null;
 }
 
-function defaultRunFolddbGrant(folddbPath: string, appId: string): GrantResult {
+function defaultRunFolddbGrant(
+  folddbPath: string,
+  appId: string,
+  nodeUrl: string,
+): GrantResult {
+  // Pin `FOLDDB_PORT` when fbrain is talking to a local node on a parseable
+  // port — otherwise `folddb consent grant` discovers its target by reading
+  // `$FOLDDB_HOME/port`, which reflects the LAST daemon started under that
+  // HOME, not the one fbrain init was pointed at. Without this, running
+  // `fbrain init --node-url http://127.0.0.1:<slot>` while a brew daemon is
+  // also up on 9001 silently grants on 9001 and fbrain's first write stalls.
+  //
+  // Defensive: only pin when nodeUrl is loopback with a numeric port. Remote
+  // hosts and unparseable URLs fall back to today's discovery behavior so we
+  // don't break setups where pinning would be wrong (e.g. an SSH-tunneled
+  // node whose local port doesn't match the daemon's own port).
+  const env = { ...process.env };
+  const port = loopbackPortFromUrl(nodeUrl);
+  if (port !== null) {
+    env.FOLDDB_PORT = String(port);
+  }
   // Inherit stdio so the user sees folddb's own progress + any TUI it emits
   // (the grant is fast but the daemon may print a one-line confirmation).
   const res = spawnSync(folddbPath, ["consent", "grant", appId, "--yes"], {
     stdio: ["ignore", "inherit", "pipe"],
     encoding: "utf8",
+    env,
   });
   const out: GrantResult = { status: res.status };
   if (typeof res.stderr === "string" && res.stderr.length > 0) {
     out.stderr = res.stderr;
   }
   return out;
+}
+
+/**
+ * Return the numeric port from a loopback `nodeUrl` (127.0.0.1 / ::1 /
+ * localhost). Returns null if the URL is unparseable, points at a non-loopback
+ * host, or has no explicit numeric port — those cases keep folddb's portfile
+ * discovery in charge.
+ *
+ * Exported for tests.
+ */
+export function loopbackPortFromUrl(nodeUrl: string): number | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(nodeUrl);
+  } catch {
+    return null;
+  }
+  if (!isLoopbackHost(parsed.hostname)) return null;
+  if (parsed.port === "") return null;
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null;
+  return port;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]";
 }

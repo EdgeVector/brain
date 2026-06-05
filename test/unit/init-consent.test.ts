@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import {
   establishConsentInline,
+  loopbackPortFromUrl,
   type GrantResult,
 } from "../../src/commands/init-consent.ts";
 import {
@@ -250,7 +251,7 @@ describe("establishConsentInline — folddb present happy path", () => {
     const transport = scriptedTransport(blob);
     const lines: string[] = [];
 
-    const grantInvocations: Array<{ path: string; appId: string }> = [];
+    const grantInvocations: Array<{ path: string; appId: string; nodeUrl: string }> = [];
     const result = await establishConsentInline({
       nodeUrl: NODE_URL,
       userHash: USER_HASH,
@@ -260,8 +261,8 @@ describe("establishConsentInline — folddb present happy path", () => {
       ask: yesAsk,
       isTty: ttyOn,
       resolveFolddb: () => "/opt/homebrew/bin/folddb",
-      runFolddbGrant: (path, appId) => {
-        grantInvocations.push({ path, appId });
+      runFolddbGrant: (path, appId, nodeUrl) => {
+        grantInvocations.push({ path, appId, nodeUrl });
         return { status: 0 };
       },
       sleep: noSleep,
@@ -270,7 +271,7 @@ describe("establishConsentInline — folddb present happy path", () => {
 
     expect(result).toEqual({ state: "granted_inline", folddbUsed: true });
     expect(grantInvocations).toEqual([
-      { path: "/opt/homebrew/bin/folddb", appId: "fbrain" },
+      { path: "/opt/homebrew/bin/folddb", appId: "fbrain", nodeUrl: NODE_URL },
     ]);
     expect(transport.requestConsentCalls).toBe(1);
     expect((await store.load(NODE_URL))?.blob).toBe(blob);
@@ -357,7 +358,7 @@ describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () 
     const transport = scriptedTransport(blob);
     const lines: string[] = [];
 
-    const grantInvocations: Array<{ path: string; appId: string }> = [];
+    const grantInvocations: Array<{ path: string; appId: string; nodeUrl: string }> = [];
     const result = await establishConsentInline({
       nodeUrl: NODE_URL,
       userHash: USER_HASH,
@@ -370,8 +371,8 @@ describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () 
       isTty: ttyOff,
       nonInteractiveGrant: true,
       resolveFolddb: () => "/opt/homebrew/bin/folddb",
-      runFolddbGrant: (path, appId) => {
-        grantInvocations.push({ path, appId });
+      runFolddbGrant: (path, appId, nodeUrl) => {
+        grantInvocations.push({ path, appId, nodeUrl });
         return { status: 0 };
       },
       sleep: noSleep,
@@ -380,7 +381,7 @@ describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () 
 
     expect(result).toEqual({ state: "granted_inline", folddbUsed: true });
     expect(grantInvocations).toEqual([
-      { path: "/opt/homebrew/bin/folddb", appId: "fbrain" },
+      { path: "/opt/homebrew/bin/folddb", appId: "fbrain", nodeUrl: NODE_URL },
     ]);
     expect(transport.requestConsentCalls).toBe(1);
     expect((await store.load(NODE_URL))?.blob).toBe(blob);
@@ -460,5 +461,98 @@ describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () 
         (l) => l.includes("enforcement off") && l.includes("--grant-consent is a no-op"),
       ),
     ).toBe(true);
+  });
+});
+
+// The regression we're guarding: without threading nodeUrl into the grant
+// shell-out, `folddb consent grant` discovers its target by reading
+// `$FOLDDB_HOME/port` — which can point at a sibling daemon, leaving fbrain's
+// first write stalled forever. We propagate the URL through the seam so the
+// default impl can pin FOLDDB_PORT at the right daemon.
+describe("establishConsentInline — node targeting", () => {
+  test("runFolddbGrant receives the fbrain --node-url so the default impl can pin FOLDDB_PORT", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const slottedNode = "http://127.0.0.1:9123";
+
+    const seenUrls: string[] = [];
+    await establishConsentInline({
+      nodeUrl: slottedNode,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: () => {},
+      ask: yesAsk,
+      isTty: ttyOn,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: (_path, _appId, nodeUrl) => {
+        seenUrls.push(nodeUrl);
+        return { status: 0 };
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(seenUrls).toEqual([slottedNode]);
+    // loopbackPortFromUrl is what defaultRunFolddbGrant uses to derive
+    // FOLDDB_PORT — assert it gives the slotted port, not 9001 (the brew
+    // default that the portfile would point at).
+    expect(loopbackPortFromUrl(slottedNode)).toBe(9123);
+  });
+
+  test("--grant-consent path also threads nodeUrl into runFolddbGrant", async () => {
+    // The non-interactive path is the one most likely to run on ephemeral /
+    // slotted nodes (CI, agents), so it's the place the misrouting hurts most.
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const slottedNode = "http://127.0.0.1:19999";
+
+    const seenUrls: string[] = [];
+    await establishConsentInline({
+      nodeUrl: slottedNode,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: () => {},
+      isTty: ttyOff,
+      nonInteractiveGrant: true,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: (_path, _appId, nodeUrl) => {
+        seenUrls.push(nodeUrl);
+        return { status: 0 };
+      },
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(seenUrls).toEqual([slottedNode]);
+  });
+});
+
+describe("loopbackPortFromUrl", () => {
+  test("returns the port for loopback hosts with an explicit port", () => {
+    expect(loopbackPortFromUrl("http://127.0.0.1:9001")).toBe(9001);
+    expect(loopbackPortFromUrl("http://127.0.0.1:9123")).toBe(9123);
+    expect(loopbackPortFromUrl("http://localhost:9001")).toBe(9001);
+    expect(loopbackPortFromUrl("http://LOCALHOST:9001")).toBe(9001);
+    expect(loopbackPortFromUrl("http://[::1]:9001")).toBe(9001);
+  });
+
+  test("returns null for non-loopback hosts (don't break remote-node setups)", () => {
+    expect(loopbackPortFromUrl("http://node.example.com:9001")).toBeNull();
+    expect(loopbackPortFromUrl("http://10.0.0.5:9001")).toBeNull();
+    expect(loopbackPortFromUrl("http://192.168.1.10:9001")).toBeNull();
+  });
+
+  test("returns null when no port is set (fall back to folddb portfile discovery)", () => {
+    expect(loopbackPortFromUrl("http://127.0.0.1")).toBeNull();
+    expect(loopbackPortFromUrl("http://localhost/")).toBeNull();
+  });
+
+  test("returns null for unparseable URLs", () => {
+    expect(loopbackPortFromUrl("not a url")).toBeNull();
+    expect(loopbackPortFromUrl("")).toBeNull();
   });
 });
