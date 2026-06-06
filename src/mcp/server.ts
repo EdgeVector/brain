@@ -18,7 +18,6 @@ import { listCmd } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
-import { statusCmd } from "../commands/status.ts";
 import { FbrainError, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
@@ -179,8 +178,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Status enum value for the type. Set in a follow-up `status` " +
-              "mutation after the put. Validated against the type's enum.",
+            "Status enum value for the type. Synthesized into the put's " +
+              "frontmatter so it lands atomically in the same mutation and " +
+              "is validated against the type's enum BEFORE any HTTP write — " +
+              "an invalid status errors out without persisting a partial " +
+              "record. Ignored when raw `frontmatter` is supplied (set " +
+              "`status:` in the frontmatter directly).",
           ),
         tags: z
           .array(z.string())
@@ -200,15 +203,6 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         const input = buildPutInput(args);
         const result = await putCmd({ cfg, slug: args.slug, input });
         print(`${result.action} ${result.type} ${result.slug}`);
-        if (typeof args.status === "string" && args.status.length > 0) {
-          await statusCmd({
-            cfg,
-            slug: args.slug,
-            type: result.type,
-            newStatus: args.status,
-            print,
-          });
-        }
       }),
   );
 
@@ -327,6 +321,19 @@ export function buildPutInput(args: PutArgs): string {
   if (args.tags !== undefined) {
     const items = args.tags.map((t) => yamlScalar(t)).join(", ");
     lines.push(`tags: [${items}]`);
+  }
+  // Status rides into the same frontmatter so putCmd's pre-flight
+  // `ensureStatus(type, parsed.status)` validates the value BEFORE any
+  // mutation lands. Pre-fix the MCP handler synthesized frontmatter
+  // without status and fired a follow-up `statusCmd` to apply it — on an
+  // invalid status the put had already committed (with the type's default
+  // status) by the time the validation threw, leaving a record behind that
+  // the agent never saw mention of (`runTool` drops the accumulated
+  // `created <type> <slug>` line on a thrown second step). One atomic
+  // write, validated up-front, matches the tool's documented "Returns one
+  // line: `created|updated <type> <slug>`" contract.
+  if (args.status !== undefined && args.status.length > 0) {
+    lines.push(`status: ${yamlScalar(args.status)}`);
   }
   return `---\n${lines.join("\n")}\n---\n${body}`;
 }

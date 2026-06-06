@@ -466,6 +466,21 @@ describe("buildPutInput", () => {
     expect(input).toContain('tags: ["has, comma", ok-tag]');
   });
 
+  test("synthesizes status into frontmatter so the put applies it in a single mutation", () => {
+    // Status used to be wired through a follow-up `statusCmd` after the
+    // put. The atomic contract puts it in the synthesized frontmatter so
+    // putCmd's pre-flight `ensureStatus(type, parsed.status)` validates it
+    // BEFORE any mutation lands — see the "invalid status arg" tool test.
+    const input = buildPutInput({
+      slug: "x",
+      type: "design",
+      title: "Hello",
+      status: "reviewed",
+      body: "b",
+    });
+    expect(input).toBe("---\ntype: design\ntitle: Hello\nstatus: reviewed\n---\nb");
+  });
+
   test("raw frontmatter passthrough overrides synthesis", () => {
     const input = buildPutInput({
       slug: "x",
@@ -607,41 +622,18 @@ describe("fbrain_put tool", () => {
     expect("kind" in fields).toBe(false);
   });
 
-  test("status arg fires a follow-up status update after the put", async () => {
+  test("status arg lands atomically in the put's single mutation (no follow-up update)", async () => {
+    // Pre-fix this fired TWO mutations: the put (with the type's default
+    // status) followed by a `statusCmd` update to apply the requested
+    // value. That was wasteful (an extra round trip on every status-bearing
+    // put) and split-brain on errors (see the "invalid status arg" test).
+    // The atomic contract: status rides into the put's frontmatter so a
+    // single mutation carries the requested value and the tool's
+    // documented "Returns one line: `created|updated <type> <slug>`"
+    // contract holds.
     const mutations: Array<Record<string, unknown>> = [];
-    // putCmd's pre-existence check now retries through withReadRetry —
-    // it must see "no row" through the entire retry budget so the put
-    // routes to createRecord (not updateRecord). After the create
-    // mutation lands, the status command's findBySlug must see the row.
-    // Gate the mock on whether a mutation has happened, not on query
-    // index — the latter is brittle to retry-count changes.
     installMock((url, init) => {
-      if (url.endsWith("/api/query")) {
-        if (mutations.length === 0) {
-          return { status: 200, body: { ok: true, results: [] } };
-        }
-        return {
-          status: 200,
-          body: {
-            ok: true,
-            results: [
-              {
-                fields: {
-                  slug: "with-status",
-                  title: "T",
-                  body: "b",
-                  status: "draft",
-                  tags: [],
-                  kind: null,
-                  created_at: "2026-01-01T00:00:00Z",
-                  updated_at: "2026-01-01T00:00:00Z",
-                },
-                key: { hash: "with-status", range: null },
-              },
-            ],
-          },
-        };
-      }
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
         return { status: 200, body: { ok: true } };
@@ -657,47 +649,30 @@ describe("fbrain_put tool", () => {
       status: "reviewed",
     });
     expect(res.isError).toBeFalsy();
-    // Two mutations: the put's create, then the status update.
-    expect(mutations.length).toBe(2);
+    // Exactly one mutation — the put — with the requested status applied.
+    expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("create");
-    expect(mutations[1]!.mutation_type).toBe("update");
-    const updatedFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-    expect(updatedFields.status).toBe("reviewed");
-    const text = res.content[0]!.text ?? "";
-    expect(text).toContain("created design with-status");
-    expect(text).toContain("design with-status: draft → reviewed");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.status).toBe("reviewed");
+    // One-line output, matching the tool's documented contract.
+    expect(res.content[0]!.text).toBe("created design with-status");
   });
 
-  test("invalid status arg errors and surfaces through MCP isError", async () => {
+  test("invalid status arg errors atomically — no mutation lands before the status validation throws", async () => {
+    // Pre-fix, `fbrain_put` synthesized frontmatter WITHOUT the status arg
+    // and fired a SECOND mutation via `statusCmd` to apply it. On an invalid
+    // status, the put already committed (with the type's default status)
+    // before `statusCmd`'s `ensureStatus` validation threw. `runTool`'s
+    // try/catch dropped the accumulated `created <type> <slug>` line and
+    // returned `isError: true` — so the agent saw a clean error envelope but
+    // a record had silently landed in the DB with the wrong status. Atomic
+    // contract: a single mutation carries the status, validated up-front by
+    // putCmd's pre-flight `ensureStatus`, so an invalid status never lands a
+    // partial write.
     const mutations: Array<Record<string, unknown>> = [];
-    // Same gating as the "fires a follow-up status update" test above:
-    // putCmd's pre-existence check retries, so we can't condition on
-    // queryCount === 1. Use mutation-fired as the boundary instead.
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
-        if (mutations.length === 0) {
-          return { status: 200, body: { ok: true, results: [] } };
-        }
-        return {
-          status: 200,
-          body: {
-            ok: true,
-            results: [
-              {
-                fields: {
-                  slug: "bad-status",
-                  title: "T",
-                  body: "b",
-                  status: "draft",
-                  tags: [],
-                  created_at: "2026-01-01T00:00:00Z",
-                  updated_at: "2026-01-01T00:00:00Z",
-                },
-                key: { hash: "bad-status", range: null },
-              },
-            ],
-          },
-        };
+        return { status: 200, body: { ok: true, results: [] } };
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
@@ -714,6 +689,10 @@ describe("fbrain_put tool", () => {
     });
     expect(res.isError).toBe(true);
     expect(res.content[0]!.text ?? "").toContain("not a valid design status");
+    // The fix: an invalid status must not leave a record behind. Pre-fix
+    // a `create` mutation fired before the status check ever ran, so the
+    // record landed with the default status — invisible to the agent.
+    expect(mutations).toHaveLength(0);
   });
 
   test("invalid slug errors before any HTTP traffic", async () => {
