@@ -424,6 +424,13 @@ export type ResolvedRecord = {
   record: FbrainRecord;
 };
 
+// Canonical typed not_found wording shared by `get` and `delete` so the literal
+// lives in one place. `resolveBySlug`'s built-in fallback intentionally stays
+// the more generic `No record with slug "<s>".` (see record.test.ts).
+export const NOT_FOUND_TYPED = {
+  typed: (t: RecordType, s: string) => `No ${t}: ${s}`,
+} as const;
+
 export interface ResolveBySlugOpts {
   node: NodeClient;
   cfg: Config;

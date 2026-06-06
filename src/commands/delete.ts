@@ -35,6 +35,7 @@ import {
   isTombstoned,
   listRecords,
   nowIso,
+  NOT_FOUND_TYPED,
   resolveBySlug,
   schemaHashFor,
   TOMBSTONE_TAG,
@@ -137,7 +138,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     slug,
     type: opts.type,
     raw: true,
-    notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
+    notFoundMessage: NOT_FOUND_TYPED,
   });
   const { type, record } = resolved;
 
