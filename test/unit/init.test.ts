@@ -321,3 +321,117 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
     expect(onDisk.schemaHashes.design).toMatch(/^resolvedhash/);
   });
 });
+
+describe("runInit — recovers from a corrupt existing config", () => {
+  // ConfigInvalidError messages tell the user to "Re-run `fbrain init`", but
+  // pre-fix `runInit` itself called `tryReadConfig` at the top and the throw
+  // propagated before any bootstrap work could run — leaving the user in a
+  // dead-end loop where the documented remedy couldn't recover. `fbrain init`'s
+  // whole purpose is to write a valid config; a corrupt existing file should
+  // be treated as a fresh init (with a clear notice that we discarded it),
+  // not as a hard failure.
+
+  const realFetch = globalThis.fetch;
+  let tmpDir: string | null = null;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (tmpDir) {
+      rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = null;
+    }
+  });
+
+  function jsonResponse(status: number, body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // Models a clean fresh-init path: auto-identity returns 200 already
+  // provisioned, schemas register + load cleanly.
+  function installCleanInitMock(): void {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "recovered-userhash-0001" });
+      }
+      if (url.endsWith("/v1/schemas") && method === "POST") {
+        const hash = "abc123def456" + "0".repeat(52);
+        return jsonResponse(201, {
+          schema: { name: hash, descriptive_name: "x" },
+          replaced_schema: null,
+        });
+      }
+      if (url.endsWith("/api/schemas/load")) {
+        return jsonResponse(200, {
+          available_schemas_loaded: 8,
+          schemas_loaded_to_db: 8,
+          failed_schemas: [],
+        });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  test("truncated JSON on disk → init treats as fresh and writes a valid config", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-corrupt-"));
+    const configPath = join(tmpDir, "config.json");
+    // A real-world failure mode: power loss / SIGKILL mid-write left the file
+    // half-written. JSON.parse throws → readConfig throws ConfigInvalidError.
+    writeFileSync(configPath, '{"configVersion": 4, "nodeUrl": "http', "utf8");
+
+    installCleanInitMock();
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+    });
+
+    // Init reached the bootstrap path and produced a fresh config — the
+    // recovery is the whole point.
+    expect(result.config.userHash).toBe("recovered-userhash-0001");
+    expect(result.config.configVersion).toBe(CONFIG_VERSION);
+    // User must see why we discarded their on-disk file — silent overwrite of
+    // user data is worse than the dead-end loop.
+    expect(lines.some((l) => l.includes("corrupt") || l.includes("invalid"))).toBe(true);
+
+    const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as Config;
+    expect(onDisk.userHash).toBe("recovered-userhash-0001");
+  });
+
+  test("config from a future fbrain (unknown configVersion) → init recovers fresh", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-future-"));
+    const configPath = join(tmpDir, "config.json");
+    // Models a downgrade: future fbrain wrote configVersion: 999, current
+    // fbrain doesn't recognise it. assertConfigShape throws — init must still
+    // be able to overwrite with a current-version config rather than dead-end.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        configVersion: 999,
+        nodeUrl: "http://127.0.0.1:9001",
+        schemaServiceUrl: "https://schema.example/v1",
+        userHash: "from-future-fbrain",
+        schemaHashes: { ...TEST_HASHES },
+        designSchemaHash: TEST_HASHES.design,
+        taskSchemaHash: TEST_HASHES.task,
+      }),
+      "utf8",
+    );
+
+    installCleanInitMock();
+
+    const result = await runInit({
+      configPath,
+      print: () => {},
+    });
+
+    expect(result.config.configVersion).toBe(CONFIG_VERSION);
+    const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as Config;
+    expect(onDisk.configVersion).toBe(CONFIG_VERSION);
+  });
+});

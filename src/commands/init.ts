@@ -23,6 +23,7 @@ import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT,
 import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
+  ConfigInvalidError,
   defaultConfigPath,
   tryReadConfig,
   writeConfig,
@@ -114,7 +115,26 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const bootstrapName = opts.bootstrapName ?? "fbrain";
   const configPath = opts.configPath ?? defaultConfigPath();
 
-  const existing = tryReadConfig(configPath);
+  // `tryReadConfig` returns null when the file is absent but THROWS when it
+  // exists with malformed contents (truncated JSON, missing field, unknown
+  // configVersion from a downgrade, …). Without this catch the throw escapes
+  // before any bootstrap work runs — and ConfigInvalidError's own message
+  // tells the user to "Re-run `fbrain init`", trapping them in a dead-end
+  // loop where the documented remedy can't recover. Init's whole job is to
+  // write a valid config, so treat a corrupt existing file as a fresh init
+  // (with a visible notice — silently overwriting user data is worse than
+  // the loop).
+  let existing: Config | null;
+  try {
+    existing = tryReadConfig(configPath);
+  } catch (err) {
+    if (err instanceof ConfigInvalidError) {
+      print(`[init] existing config at ${configPath} is invalid (${err.message}) — discarding and re-initializing`);
+      existing = null;
+    } else {
+      throw err;
+    }
+  }
   if (existing) {
     print(`[init] existing config at ${configPath} — verifying`);
   }
