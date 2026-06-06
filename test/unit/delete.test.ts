@@ -827,6 +827,137 @@ describe("deleteRecord — design linked-task guard", () => {
   });
 });
 
+// Key-normalization parity with `put`. `put`'s slug resolver silently
+// trims surrounding whitespace (put.ts: `resolveSlug` → `.trim()`), so a
+// record created via `fbrain put " foo "` lands under slug "foo". Pre-fix,
+// `fbrain delete " foo "` then failed with not_found because the lookup
+// compared the untrimmed input against the trimmed stored slug — leaving
+// the row uncleanable from the CLI on the same input that created it.
+describe("deleteRecord — slug whitespace trim (parity with put)", () => {
+  test("`delete \" foo \"` resolves and deletes the row stored under \"foo\"", async () => {
+    // State machine: the row sits under slug "foo" (how put would have
+    // written it after trimming " foo "). Once the update mutation lands,
+    // subsequent /api/query reads see it tombstoned — modelling current
+    // fold_db's per-field tombstone filter.
+    let mutated = false;
+    const captured: { update?: Record<string, unknown>; delete?: Record<string, unknown> } = {};
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.designSchemaHash) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (mutated) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [{ fields: designRow("foo"), key: { hash: "foo", range: null } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.mutation_type === "update") {
+          captured.update = body;
+          mutated = true;
+        }
+        if (body.mutation_type === "delete") captured.delete = body;
+        return new Response(JSON.stringify({ ok: true, success: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      // Note the surrounding whitespace — what a shell autocomplete or
+      // copy-paste might leave on the slug. `put " foo "` stored slug "foo".
+      await deleteRecord({
+        cfg,
+        slug: " foo ",
+        type: "design",
+        print: (l) => lines.push(l),
+      });
+      // The mutations target the trimmed key, so they actually land on the
+      // stored row instead of pointing at " foo " (which fold_db would treat
+      // as a different key entirely).
+      const u = captured.update as { key_value: { hash: string }; fields_and_values: { slug: string } };
+      expect(u.key_value.hash).toBe("foo");
+      expect(u.fields_and_values.slug).toBe("foo");
+      const d = captured.delete as { key_value: { hash: string } };
+      expect(d.key_value.hash).toBe("foo");
+      // Success line uses the trimmed slug — consistent with how put echoes it.
+      // The captured mutation keys above already prove the trim landed on
+      // the wire; this just pins the user-facing wording.
+      expect(lines.join("\n")).toContain("deleted design foo");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("untyped sweep also trims (the resolver picks the right row across types)", async () => {
+    // Same parity: `put " bar "` (no --type, from frontmatter) stores under
+    // "bar"; `delete " bar "` (no --type) must trim before the cross-type
+    // probe so it locates the stored row.
+    let mutated = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.taskSchemaHash) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (mutated) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [{ fields: taskRow("bar"), key: { hash: "bar", range: null } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.mutation_type === "update") mutated = true;
+        return new Response(JSON.stringify({ ok: true, success: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      // No --type → resolver sweeps all 8 schemas with the trimmed slug.
+      await deleteRecord({ cfg, slug: "  bar  ", print: (l) => lines.push(l) });
+      expect(lines.join("\n")).toContain("deleted task bar");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 // Touch the unused mock helpers so the test file doesn't accumulate
 // orphan exports as new cases are added.
 void newMockState;
