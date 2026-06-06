@@ -233,6 +233,47 @@ describe("parseFrontmatter", () => {
     expect(r.tags).toEqual(["first", "second"]);
   });
 
+  // Regression: `tags:` written as a bare scalar (the most natural form a
+  // user types, and the form the `--tag` CLI flag accepts) used to land in
+  // `raw["tags"]` but never reach the typed `out.tags` slot — the scalar
+  // branch only mapped slug/type/title/status. A `tags: onboarding` line in
+  // frontmatter silently became zero tags on the created record, while the
+  // exact same intent via `--tag onboarding` worked. Treat the scalar value
+  // as an inline-list inner: split on commas (respecting quoted scalars)
+  // so single-tag and comma-CSV forms both round-trip.
+  test("scalar tags single value → one-element list", () => {
+    const r = parseFrontmatter("tags: docs");
+    expect(r.tags).toEqual(["docs"]);
+  });
+
+  test("scalar tags comma-separated → split list", () => {
+    const r = parseFrontmatter("tags: docs, fold");
+    expect(r.tags).toEqual(["docs", "fold"]);
+  });
+
+  test("scalar tags empty double-quoted → empty list (explicit clear)", () => {
+    const r = parseFrontmatter('tags: ""');
+    expect(r.tags).toEqual([]);
+  });
+
+  test("scalar tags empty single-quoted → empty list (explicit clear)", () => {
+    const r = parseFrontmatter("tags: ''");
+    expect(r.tags).toEqual([]);
+  });
+
+  // The comma-split lives ONLY on the tags scalar path — title/status/slug/type
+  // with commas must still round-trip as one scalar. Without this guard,
+  // a title like `Hello, world` would be torn into two pieces.
+  test("scalar title with comma is not split (comma-split is tags-only)", () => {
+    const r = parseFrontmatter("title: Hello, world");
+    expect(r.title).toBe("Hello, world");
+  });
+
+  test("scalar status with comma is not split (comma-split is tags-only)", () => {
+    const r = parseFrontmatter("status: a, b");
+    expect(r.status).toBe("a, b");
+  });
+
   test("quoted scalar values are unquoted", () => {
     const r = parseFrontmatter('title: "Quoted Title"\ntype: \'task\'');
     expect(r.title).toBe("Quoted Title");

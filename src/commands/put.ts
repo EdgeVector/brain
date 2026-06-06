@@ -495,6 +495,24 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
       continue;
     }
 
+    // `tags:` as a bare scalar — single (`tags: docs`) or comma-CSV
+    // (`tags: docs, fold`) — is a list, not a scalar: the `--tag` CLI flag
+    // and the inline `[a, b]` form already treat it that way. Pre-fix the
+    // scalar branch routed the raw string into `raw["tags"]` only, never
+    // populating `out.tags`, so every tag a user typed in this shape was
+    // silently dropped. Reusing `splitInlineListItems` makes the scalar
+    // path byte-identical to the inline `[..]` path — including treating
+    // `tags: ""` / `tags: ''` as an explicit empty list (commas inside a
+    // quoted scalar still belong to the scalar).
+    if (key === "tags") {
+      const items = splitInlineListItems(value)
+        .map((s) => stripQuotes(s.trim()))
+        .filter((s) => s.length > 0);
+      assignListField(out, key, items);
+      currentList = null;
+      continue;
+    }
+
     assignScalarField(out, key, stripQuotes(value));
     currentList = null;
   }
