@@ -1,7 +1,7 @@
 # G0 — fbrain replacement-readiness gate
 
-**Last updated:** 2026-05-25
-**Status:** criteria defined; **10 of 11 acceptance items green** (gate items #3-ask, #5, #8, #10) — only the dogfood items (#5 mirror-flip, #6 second-user, #8 rollback) remain (see §7 + §8). The G5 `fbrain ask` ship (PR #23) flipped #3-ask and #10 green on 2026-05-25.
+**Last updated:** 2026-06-06
+**Status:** criteria defined; **10 of 10 acceptance items green or outstanding** (gate items #3-ask, #5, #8, #10) — only the dogfood items (#5 mirror-flip, #8 rollback) remain (see §7 + §8). The G5 `fbrain ask` ship (PR #23) flipped #3-ask and #10 green on 2026-05-25. Item **#6 (second-user dogfood) was retired 2026-06-06** as false-premise — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Item numbers preserved for link integrity.
 **Owner:** Tom Tang.
 **Hard deadline:** 2026-08-23 — if the gate isn't green by then, the README's archive-review clause fires.
 
@@ -52,7 +52,7 @@ Replacement is scoped to the **daily read/write/agent-integration surface** — 
 
 **Primary AI users (today):** Claude Code and Codex sessions running on Tom's machine — writes go through the gbrain mirror hook to both stores; reads go through gbrain (or `fbrain mcp` after G6).
 
-**Replacement-readiness target:** **one named teammate** (TBD — to be identified in the G14 follow-up) with their own `userHash`, writing > 0 records per day for **7 consecutive days**. Per the Phase 1 CEO subagent finding: without a second `userHash` writing, "shipped" is undefined.
+**Replacement-readiness target:** ~~one named teammate with their own `userHash`, writing > 0 records per day for 7 consecutive days.~~ **Retired 2026-06-06** — `userHash` is the node's provisioned identity, not a per-human identity, so the original criterion was architecturally unsatisfiable. The CEO-subagent finding's underlying question ("is fbrain usable by someone who isn't Tom?") is answered by items #5 (mirror-flip 7-day) and the future G16 (cross-node visibility). See [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md).
 
 **Explicit non-users for v1:** end-users outside engineering; web UI consumers; multi-tenant ACL users; any flow requiring fold_db's cloud sync transport (see §6).
 
@@ -90,13 +90,13 @@ The Phase 3 memo's "not reachable from a localhost-only spike" was a statement a
 2. **Positive end-to-end validation.** Nobody has yet run "A writes a record → B's subscription pulls it through S3 → B reads it." Phase 3 was explicit that this was out of scope; it remains to be done. Until then, multi-device + share is *theoretically* supported.
 3. **`fbrain share` CLI implementation.** The CLI command is still a memo-pointer that exits 1. A real implementation drives `/api/sharing/rules` + `/invite` + `/accept`, gated on `exemem-status: connected:true`.
 
-The gate's stance does not change: **multi-machine + team-sharing remain NOT gate prerequisites.** The G14 second-user dogfood (gate item #6) is still scoped to *separate fbrain installs writing to the same prod node*, not actual cross-node sharing. The clarification here is to stop the docs from implying the transport itself is missing — it isn't; it's just unsigned-into and unvalidated.
+The gate's stance does not change: **multi-machine + team-sharing remain NOT gate prerequisites.** ~~The G14 second-user dogfood (gate item #6) is still scoped to *separate fbrain installs writing to the same prod node*, not actual cross-node sharing.~~ (Item #6 was retired 2026-06-06 — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Same-node multi-userHash is architecturally impossible.) The clarification here is to stop the docs from implying the transport itself is missing — it isn't; it's just unsigned-into and unvalidated.
 
 | Sync surface | Today | Gate requirement |
 |---|---|---|
 | Single-machine (Tom's laptop) | Works — `fbrain` on homebrew daemon at `:9001`. | The whole gate is scoped to this slice. ✅ baseline. |
 | Multi-machine (Tom's laptop ↔ desktop) | One forked brain per daemon. Transport exists in fold_db code + exemem lambdas; nothing has been wired up to use it yet. | **NOT a gate prerequisite.** `fbrain doctor` emits a WARN: "single-machine slice — record set is local to this daemon". G16 owns wiring up `fbrain pull` (or equivalent) over the existing sync-log primitives. |
-| Team-sharing (Tom ↔ teammate, different machines) | Sharing-metadata API works (Phase 3 memo). Cross-node data transport exists (fold_db sync engine + exemem lambdas, both deployed) but is unsigned-into on Tom's daemon and unvalidated end-to-end. `fbrain share` is a memo-pointer stub. | **NOT a gate prerequisite.** Doctor WARN: "no team-sync transport — `fbrain share` is a placeholder until cloud sync is signed in and validated end-to-end". G14 second-user dogfood (gate item #6) uses separate fbrain installs writing to the same prod node — not cross-node sharing. Cloud sign-in path is tracked in [`docs/cloud-signin-spike-plan.md`](cloud-signin-spike-plan.md). |
+| Team-sharing (Tom ↔ teammate, different machines) | Sharing-metadata API works (Phase 3 memo). Cross-node data transport exists (fold_db sync engine + exemem lambdas, both deployed) but is unsigned-into on Tom's daemon and unvalidated end-to-end. `fbrain share` is a memo-pointer stub. | **NOT a gate prerequisite.** Doctor WARN: "no team-sync transport — `fbrain share` is a placeholder until cloud sync is signed in and validated end-to-end". (Item #6 — the "G14 second-user dogfood" on the same prod node — was retired 2026-06-06, see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md); cross-human proof now flows through G16.) Cloud sign-in path is tracked in [`docs/cloud-signin-spike-plan.md`](cloud-signin-spike-plan.md). |
 
 ## 7. Org-deploy acceptance tests — the 11-item checklist
 
@@ -107,16 +107,16 @@ Each item is measurable, automatable where possible, and links the kanban task /
 3. **Retrieval relevance.** G3b/G17 eval shows fbrain `search` (and `ask`, once G5 ships) P@5 ≥ vector-only baseline on the 20-pair labeled set. — ✅ G3b shipped (kanban `c312a`, PR #10); ✅ G5 shipped (PR #23). 2026-05-25 eval: `search` P@5=0.36, `ask --no-llm` P@5=0.73, `ask` P@5=0.59 (both clear baseline).
 4. **MCP read surface.** Claude Code skill calls `fbrain_search` → retrieves a known slug. — ✅ G6 (kanban `95d87`, PR #13), [`mcp-smoketest.md`](mcp-smoketest.md).
 5. **Mirror-flip dogfood.** `~/.claude/brain-config.json` flipped to `primary: fbrain` for **7 consecutive days** on Tom's machine with **zero** failed reverse-mirrors. Logged via `gbrain-upsert.ts`. — ❌ outstanding (cannot start until #1, #10, #11 are green).
-6. **Second-user dogfood (G14).** One named teammate writes > 0 records to fbrain over 7 consecutive days under their own `userHash`. — ❌ **OUTSTANDING — playbook ready, teammate TBD.** Onboarding steps + monitor live at [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) and [`../scripts/dogfood-monitor.sh`](../scripts/dogfood-monitor.sh). Human-driven step: Tom picks the teammate and runs the playbook off-band.
-7. **Telemetry signal (G13).** `fbrain doctor --usage` shows write count by `userHash` over 7d (≥ 2 hashes). — ✅ flag shipped — PR #16. (Meeting the **≥ 2 hashes** criterion itself is gate item #6's deliverable; this item gates only on the flag existing.)
+6. **Second-user dogfood (G14).** — 🗑️ **RETIRED 2026-06-06.** The success criterion ("two distinct `userHash` values land in the same fold_db store") was based on a false model of `userHash` as per-human identity; in fact `userHash` is the node's provisioned identity, so two installs against one node always produce one hash. See [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). The supporting [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) carries an OBSOLETE banner. Item number preserved for link integrity.
+7. **Telemetry signal (G13).** `fbrain doctor --usage` shows write count by `userHash` over 7d. — ✅ flag shipped — PR #16. (The "≥ 2 hashes" sub-criterion was dropped 2026-06-06 alongside #6's retirement; the v0 trust model is "one daemon, one team, one userHash," so a single-hash `--usage` report is the expected shape. The flag-exists bar is what this item gates on.)
 8. **Rollback rehearsal.** Mirror-flip-back per §5 performed once on Tom's machine; verified writes land in both stores for 24h post-rehearsal. — ❌ outstanding (chained off #5).
 9. **Doctor surfaces multi-machine + sharing limits.** `fbrain doctor` emits explicit WARN lines for the single-machine and no-team-sync conditions per §6. — ✅ shipped — `single-machine-slice` + `no-team-sync` probes in `src/commands/doctor.ts`; always-WARN, exit unchanged.
 10. **Hybrid `fbrain ask` (G5).** Lands before the flip. Vector-only `fbrain search` is a daily-use regression vs. `gbrain ask`'s RRF + expansion path; **Tom won't ship that regression.** Eval-gated on the G3b/G17 baseline. — ✅ shipped — PR #23 (`feat: fbrain ask — hybrid retrieval (BM25 + vector + RRF + LLM expansion)`). 2026-05-25 eval clears baseline (see #3).
 11. **Minion bus path settled.** The kanban-agent skill's `gbrain jobs submit minion-checkpoint` dependency has a documented + implemented disposition before the mirror flips. Disposition: stay on gbrain — gbrain is dual-purpose post-flip (legacy knowledge brain, replaced; kanban minion-bus infra, not replaced). See [`decisions/minion-bus-path.md`](decisions/minion-bus-path.md). — ✅ shipped.
 
-**Items 1, 2, 3, 4, 7, 9, 10, 11 are green.** Items 5, 6, 8 are outstanding (all dogfood-shaped — mirror flip, second-user, rollback rehearsal).
+**Items 1, 2, 3, 4, 7, 9, 10, 11 are green.** Items 5, 8 are outstanding (both dogfood-shaped — mirror flip, rollback rehearsal). Item 6 is retired (2026-06-06) — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md).
 
-## 8. Status snapshot — 2026-05-25
+## 8. Status snapshot — 2026-06-06
 
 | # | Gate item | State |
 |---|---|---|
@@ -126,16 +126,15 @@ Each item is measurable, automatable where possible, and links the kanban task /
 | 3 | Retrieval relevance — `ask` | ✅ (PR #23; eval 2026-05-25 — `ask` P@5=0.59, `ask --no-llm` P@5=0.73, baseline `search` P@5=0.36) |
 | 4 | MCP read (G6) | ✅ |
 | 5 | Mirror-flip dogfood (7 days) | ❌ outstanding — **now unblocked** (#1, #10, #11 all green) |
-| 6 | Second-user dogfood (G14) | ❌ outstanding — **playbook + monitor ready, teammate TBD** ([`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md), [`../scripts/dogfood-monitor.sh`](../scripts/dogfood-monitor.sh)) |
-| 7 | Telemetry — write count by userHash (G13) | ✅ flag shipped (PR #16); ≥ 2-hash criterion tracked under #6 |
+| 6 | Second-user dogfood (G14) | 🗑️ **retired 2026-06-06** — false-premise (`userHash` is the node's identity, not per-human); see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Supporting [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) carries OBSOLETE banner. |
+| 7 | Telemetry — write count by userHash (G13) | ✅ flag shipped (PR #16); "≥ 2-hash" sub-criterion dropped with #6's retirement |
 | 8 | Rollback rehearsal | ❌ outstanding (chained off #5) |
 | 9 | Doctor disclosure WARNs | ✅ |
 | 10 | Hybrid `fbrain ask` (G5) | ✅ shipped — PR #23 |
 | 11 | Minion bus path settled | ✅ ([`decisions/minion-bus-path.md`](decisions/minion-bus-path.md) — option (a): gbrain stays as the minion bus, append-only telemetry) |
 
-**Score: 10 / 11 green.** Only the dogfood-shaped items remain:
+**Score: 10 / 10 green or outstanding** (item #6 retired 2026-06-06; original denominator was 11). Item numbers preserved for link integrity (PR descriptions, in-flight references). Only the dogfood-shaped items remain:
 - #5 (mirror-flip, 7 days) — now unblocked; ready to start.
-- #6 (second-user, G14) — playbook ready, awaiting teammate selection (human-step).
 - #8 (rollback rehearsal) — chained off #5.
 
 ### G5 follow-up — LLM expansion regression on labeled set
