@@ -29,6 +29,7 @@
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import {
   type FbrainRecord,
   findBySlugRaw,
@@ -120,7 +121,7 @@ export function buildTombstoneFields(
 }
 
 export async function deleteRecord(opts: DeleteOptions): Promise<void> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 

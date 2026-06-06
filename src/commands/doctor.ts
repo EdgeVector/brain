@@ -52,6 +52,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { tryReadConfig, type Config } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import { DEFAULT_SCHEMA_SERVICE_URL } from "./init.ts";
 import {
   findBySlug,
@@ -125,7 +126,7 @@ type CheckResult = {
 };
 
 export async function doctor(opts: DoctorOptions = {}): Promise<number> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
 
   const checks: CheckResult[] = [];

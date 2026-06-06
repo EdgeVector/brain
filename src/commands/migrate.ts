@@ -48,6 +48,7 @@ import {
   readConfig,
   type Config,
 } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import {
   listRecords,
   nowIso,
@@ -101,7 +102,7 @@ export type MigrateResult = {
 };
 
 export async function migrateCmd(opts: MigrateOptions): Promise<MigrateResult> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
 
   if (opts.mode.kind === "status") {

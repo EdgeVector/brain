@@ -26,6 +26,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { type Config } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import { fieldsFor, stringField } from "../record.ts";
 import {
   UNIQUE_SCHEMAS,
@@ -61,7 +62,7 @@ export async function runUsageReport(
   cfg: Config,
   opts: UsageOptions = {},
 ): Promise<UsageReport> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
   const windowDays = opts.windowDays ?? 7;
   const now = opts.now ?? new Date();
