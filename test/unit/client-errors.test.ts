@@ -6,10 +6,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   FbrainError,
   isDefaultNodeUrl,
+  isNodeReachableButErroring,
   mapNodeError,
   newNodeClient,
   newSchemaServiceClient,
   nodeDownHint,
+  nodeHttpErrorHint,
   schemaDownHint,
 } from "../../src/client.ts";
 
@@ -293,6 +295,59 @@ describe("client error mapping", () => {
     } catch (err) {
       expect((err as FbrainError).hint ?? "").toContain("brew services start folddb");
     }
+  });
+
+  // DX regression (29ced): a node that is REACHABLE but returns an HTTP
+  // error (e.g. 500 because it can't decrypt its identity) must NOT be told
+  // to "start the node" — it plainly answered. The error is a real
+  // FbrainError (mapped from the node's 500), so isNodeReachableButErroring
+  // is true and the caller should use nodeHttpErrorHint, not nodeDownHint.
+  test("a transport failure is NOT classified as reachable-but-erroring", async () => {
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof globalThis.fetch;
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.autoIdentity();
+      throw new Error("did not throw");
+    } catch (err) {
+      // Transport failure → service_unreachable → still "start the node".
+      expect(isNodeReachableButErroring(err)).toBe(false);
+    }
+  });
+
+  test("an HTTP 500 from a reachable node IS classified as reachable-but-erroring", async () => {
+    installMock([
+      {
+        status: 500,
+        body: {
+          error:
+            "Failed to initialize node identity: Security error: Encrypted node identity exists on disk, but this binary was built without the os-keychain feature. Set FOLDDB_MASTER_KEY=<64-hex-bytes> to decrypt explicitly.",
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.autoIdentity();
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(isNodeReachableButErroring(err)).toBe(true);
+      const hint = nodeHttpErrorHint(err);
+      // The reachable-but-erroring hint must NOT carry the nodeDownHint
+      // "start a process that isn't running" remedies.
+      expect(hint).not.toContain("brew services");
+      expect(hint).not.toContain("run.sh");
+      // It recognises the identity/master-key failure and points at the fix.
+      expect(hint).toContain("FOLDDB_MASTER_KEY");
+    }
+  });
+
+  test("nodeHttpErrorHint falls back to a generic 'up but erroring' message for a non-identity HTTP error", () => {
+    const err = new FbrainError({ code: "node_http_502", message: "Node /x returned HTTP 502." });
+    const hint = nodeHttpErrorHint(err);
+    expect(hint).not.toContain("brew services");
+    expect(hint).not.toContain("run.sh");
+    expect(hint).toContain("502");
   });
 
   // DX: a downloaded user has no local schema_service to "start" — an

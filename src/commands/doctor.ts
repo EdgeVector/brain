@@ -40,9 +40,11 @@
 
 import {
   FbrainError,
+  isNodeReachableButErroring,
   newNodeClient,
   newSchemaServiceClient,
   nodeDownHint,
+  nodeHttpErrorHint,
   recordTypeForHash,
   stripDoctorTip,
   type NativeIndexHit,
@@ -237,11 +239,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       verbose?.(`node-provisioned: FAIL — ${identity.reason}`);
     }
   } catch (err) {
+    // Distinguish a node that is genuinely DOWN (transport failure → "start
+    // it") from one that is UP but returned an HTTP error (4xx/5xx → don't say
+    // "start it"; the node answered, its own message is the real fix). The old
+    // code lumped both into nodeDownHint, so a reachable node that 500s on
+    // identity decryption was told to `brew services start folddb` even though
+    // schema-service + every schema-drift check (same node) passed. (29ced)
     checks.push({
       name: "node-reachable",
       ok: false,
       detail: doctorReachabilityDetail(err, "node", cfg.nodeUrl),
-      fix: nodeDownHint(cfg.nodeUrl),
+      fix: isNodeReachableButErroring(err) ? nodeHttpErrorHint(err) : nodeDownHint(cfg.nodeUrl),
     });
     verbose?.(`node-reachable: FAIL`);
   }
