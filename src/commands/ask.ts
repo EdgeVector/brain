@@ -203,8 +203,26 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const perQueryVectorTopId = new Map<number, Map<string, number>>();
   const perQueryBm25TopId = new Map<number, Map<string, number>>();
 
+  // Dedupe queries by exact string. When the LLM emits an expansion identical
+  // to the original (or to another expansion — the system prompt asks for
+  // "exactly 3 alternative phrasings" but models occasionally repeat
+  // themselves, especially under tight max_tokens or when they ran out of
+  // genuine variations), the pre-fix loop ran each duplicate through BM25 +
+  // vector and pushed IDENTICAL ranked lists into RRF. Each ranker input
+  // then summed the same `1/(k+rank)` contribution, inflating any hit's
+  // fused score by the count of duplicate phrasings and biasing the top-K
+  // toward whichever string the LLM happened to repeat. Preserve the FIRST
+  // occurrence so the original query's "orig" label survives any expansion
+  // that echoes it; later duplicates are skipped wholesale (no per-query
+  // ranker input, no extra HTTP, and no entry in `perQuery*TopId` so the
+  // `expansionHits` collection correctly attributes contributions only to
+  // the unique queries that actually ran).
+  const seenQueries = new Set<string>();
+
   for (let qi = 0; qi < queries.length; qi++) {
     const q = queries[qi]!;
+    if (seenQueries.has(q)) continue;
+    seenQueries.add(q);
     const tag = qi === 0 ? "orig" : `exp${qi - 1}`;
 
     // BM25 over this query. We re-tokenize here (cheap) to distinguish
