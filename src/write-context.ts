@@ -23,6 +23,7 @@ import {
   type Verbose,
 } from "./client.ts";
 import { CapabilitySession } from "./capability-session.ts";
+import type { Config } from "./config.ts";
 import {
   defaultCapabilityStore,
 } from "./keychain.ts";
@@ -140,4 +141,24 @@ function buildSessionOpts(
   if (opts.sleep !== undefined) sessionOpts.sleep = opts.sleep;
   if (opts.maxWaitMs !== undefined) sessionOpts.maxWaitMs = opts.maxWaitMs;
   return sessionOpts;
+}
+
+// Thin convenience wrapper: every plain write call site (`status`,
+// `reindex`, `<type> new`, `link`, `delete`, `put`, plus migrate's two
+// internal phases) was spelling out the same `{ baseUrl: cfg.nodeUrl,
+// userHash: cfg.userHash, ...(verbose ? { verbose } : {}) }` literal
+// verbatim. Collapse that boilerplate so call sites read as "open a
+// write client from this config" in one line. Callers that need to set
+// `appId` / `scope` / `store` / consent-poll tuning (`doctor --write`)
+// still reach for `newWriteNodeClient` directly.
+export function newWriteClientFromCfg(
+  cfg: Config,
+  verbose?: Verbose,
+): WriteNodeClient {
+  const opts: WriteNodeClientOptions = {
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+  };
+  if (verbose !== undefined) opts.verbose = verbose;
+  return newWriteNodeClient(opts);
 }

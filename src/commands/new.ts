@@ -13,7 +13,7 @@
 // than silently ignored.
 
 import { FbrainError, type Verbose } from "../client.ts";
-import { newWriteNodeClient } from "../write-context.ts";
+import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlugFast,
@@ -62,11 +62,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<void> {
     });
   }
 
-  const { node } = newWriteNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const hash = schemaHashFor(opts.type, opts.cfg);
 
   if (!opts.force) {

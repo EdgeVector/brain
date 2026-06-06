@@ -2,7 +2,7 @@
 // Rejects a non-existent design (no dangling refs).
 
 import { FbrainError, type Verbose } from "../client.ts";
-import { newWriteNodeClient } from "../write-context.ts";
+import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { findBySlug, findBySlugFast, nowIso, schemaHashFor } from "../record.ts";
 
@@ -28,11 +28,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   // mutation's keyHash, and the success line.
   const taskSlug = opts.taskSlug.trim();
   const designSlug = opts.designSlug.trim();
-  const { node } = newWriteNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
   const taskHash = schemaHashFor("task", opts.cfg);
   const designHash = schemaHashFor("design", opts.cfg);

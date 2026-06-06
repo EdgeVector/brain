@@ -19,7 +19,7 @@
 // An unrecognised `type:` errors as `unsupported_type`.
 
 import { FbrainError, type Verbose } from "../client.ts";
-import { newWriteNodeClient } from "../write-context.ts";
+import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   ensureStatus,
@@ -87,11 +87,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // racks up a network round-trip. Mirrors validateSlug's pre-flight.
   if (parsed.status !== undefined) ensureStatus(type, parsed.status);
 
-  const { node } = newWriteNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const hash = schemaHashFor(type, opts.cfg);
   // Decide create-vs-update. A naive single `findBySlug` could miss an
   // existing slug when the daemon's `/api/query` flakes its schema to an

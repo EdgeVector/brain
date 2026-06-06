@@ -20,7 +20,7 @@
 // records reindexed.
 
 import { type Verbose } from "../client.ts";
-import { newWriteNodeClient } from "../write-context.ts";
+import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   isTombstoned,
@@ -90,11 +90,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
   // --dry-run issues no writes, so it never invokes the capability provider
   // and never triggers consent; a real reindex acquires on its first update.
-  const { node } = newWriteNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const result: ReindexResult = {

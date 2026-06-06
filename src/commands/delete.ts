@@ -27,7 +27,7 @@
 // tag" raises delete_not_applied.
 
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
-import { newWriteNodeClient } from "../write-context.ts";
+import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   type FbrainRecord,
@@ -127,11 +127,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // untrimmed input against the trimmed stored slug — an asymmetric
   // key-normalization that left some records uncleanable from the CLI.
   const slug = opts.slug.trim();
-  const { node } = newWriteNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
   // raw mode bypasses tombstone filtering at the lookup layer; resolveBySlug
   // drops tombstones inside the helper afterward.
