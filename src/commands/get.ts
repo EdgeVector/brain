@@ -7,6 +7,7 @@
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
+  compareByUpdatedThenSlug,
   findBySlugFast,
   findChildTasksByDesign,
   NOT_FOUND_TYPED,
@@ -132,10 +133,7 @@ export function recordToJson(
 function sortChildrenByUpdated(
   children: ReadonlyArray<FbrainRecord>,
 ): FbrainRecord[] {
-  return [...children].sort((a, b) => {
-    const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
-    return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
-  });
+  return [...children].sort(compareByUpdatedThenSlug);
 }
 
 export function formatRecord(

@@ -4,6 +4,7 @@ import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
+  compareByUpdatedThenSlug,
   isTombstoned,
   listRecords,
   schemaHashFor,
@@ -83,15 +84,19 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // millisecond-resolution so any two `put` / `status` / `link` calls in
   // the same ms collide. (type, slug) is globally unique — slugs aren't
   // unique across types but type+slug is — so the order is fully pinned.
+  //
+  // The (updated_at desc, slug asc) edges are shared with `fbrain get`'s
+  // child-task sort and live in `compareByUpdatedThenSlug`; the type
+  // tie-break is unique to `list` (get only ever sorts a single type) so
+  // it's injected between the date and slug edges here.
   filtered.sort((a, b) => {
-    const d = Date.parse(b.record.updated_at) - Date.parse(a.record.updated_at);
-    if (d !== 0) return d;
-    if (a.type !== b.type) return a.type < b.type ? -1 : 1;
-    return a.record.slug < b.record.slug
-      ? -1
-      : a.record.slug > b.record.slug
-        ? 1
-        : 0;
+    if (a.type !== b.type) {
+      const d =
+        Date.parse(b.record.updated_at) - Date.parse(a.record.updated_at);
+      if (d !== 0) return d;
+      return a.type < b.type ? -1 : 1;
+    }
+    return compareByUpdatedThenSlug(a.record, b.record);
   });
 
   // Genuinely-empty result wins over the truncation path — print
