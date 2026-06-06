@@ -824,30 +824,43 @@ export function isNodeReachableButErroring(err: unknown): boolean {
   return err instanceof FbrainError && err.code !== "service_unreachable";
 }
 
+// Returns the FOLDDB_MASTER_KEY remedy when the node's error text names the
+// node-identity / master-key / keychain decryption path (the homebrew daemon's
+// most common "up but 500" failure), else null. Shared by `nodeHttpErrorHint`
+// (used by `fbrain doctor`'s reachability check) and `mapNodeError`'s generic
+// 5xx fallthrough (used by runtime commands: search/list/put/get/…) so the
+// heuristic + wording live in exactly one place.
+function identityFailureRemedy(msg: string): string | null {
+  if (
+    !/keychain|master[ _-]?key|node identity|decrypt|foldd?b_master_key|os-keychain/.test(
+      msg.toLowerCase(),
+    )
+  ) {
+    return null;
+  }
+  return (
+    "The node is up but can't decrypt its identity. Ensure the node process " +
+    "has `FOLDDB_MASTER_KEY=<64-hex-bytes>` set in its environment (e.g. in " +
+    "its launchd/systemd unit), or run a keychain-enabled build. The node's " +
+    "own message above names the exact cause — restart the node after fixing it."
+  );
+}
+
 // Hint for a node that is REACHABLE but returned an HTTP error (4xx/5xx) — the
 // opposite of `nodeDownHint`. Telling such a user to "start the node" is wrong
 // and wastes their time: the node is plainly up (it answered), and its own
 // error body already names the real cause. The error's `detail` already
 // surfaces the node's message verbatim, so this only supplies the actionable
-// remedy. A light, well-commented heuristic upgrades the generic remedy when
-// the node's message points at the node-identity / master-key / keychain
-// decryption path (the homebrew daemon's most common "up but 500" failure).
+// remedy. Used by `fbrain doctor`'s reachability check — do NOT add a `fbrain
+// doctor` pointer here, since doctor consumes this string as its own `fix`.
 export function nodeHttpErrorHint(err: unknown): string {
-  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  const msg = err instanceof Error ? err.message : String(err);
   // Status, when the generic `node_http_<status>` code carried it.
   const code = err instanceof FbrainError ? err.code : "";
   const statusMatch = /^node_http_(\d+)$/.exec(code);
   const status = statusMatch ? statusMatch[1] : undefined;
-  const identityFailure =
-    /keychain|master[ _-]?key|node identity|decrypt|foldd?b_master_key|os-keychain/.test(msg);
-  if (identityFailure) {
-    return (
-      "The node is up but can't decrypt its identity. Ensure the node process " +
-      "has `FOLDDB_MASTER_KEY=<64-hex-bytes>` set in its environment (e.g. in " +
-      "its launchd/systemd unit), or run a keychain-enabled build. The node's " +
-      "own message above names the exact cause — restart the node after fixing it."
-    );
-  }
+  const identityRemedy = identityFailureRemedy(msg);
+  if (identityRemedy) return identityRemedy;
   return (
     `The node is up but returned an HTTP error${status ? ` (${status})` : ""} — ` +
     "this is not a 'start the node' problem. The node's message above is the " +
@@ -892,10 +905,11 @@ type NodeErrorContext = {
   // separately from `bodyError`.
   codeField: string | undefined;
   reason: string | undefined;
-  // Concatenated msg+errCode used by the embedding-model regex. The homebrew
+  // Concatenated msg+errCode — the node's free-form failure text. The homebrew
   // daemon puts the failure text in `error`; future daemons may move it to
-  // `message` — we grep both so the mapping survives that move.
-  onnxBlob: string;
+  // `message` — we grep both so heuristics survive that move. Used by the
+  // embedding-model 400 regex and by the identity-failure 5xx heuristic.
+  messageBlob: string;
 };
 
 type FbrainErrorInit = ConstructorParameters<typeof FbrainError>[0];
@@ -987,12 +1001,12 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
   {
     match: (ctx) =>
       ctx.status === 400 &&
-      /Failed to (init embedding model|retrieve model\.onnx)/i.test(ctx.onnxBlob),
+      /Failed to (init embedding model|retrieve model\.onnx)/i.test(ctx.messageBlob),
     build: (ctx) => ({
       code: "embedding_model_unavailable",
       message:
         `Semantic search is unavailable — the fold_db node failed to load its embedding model ` +
-        `(${ctx.onnxBlob.trim()}) ${DOCTOR_TIP}.`,
+        `(${ctx.messageBlob.trim()}) ${DOCTOR_TIP}.`,
       hint:
         "Restart the node so it re-fetches the ONNX file from the embedding cache " +
         "(homebrew: `folddb daemon stop && folddb daemon start`). " +
@@ -1016,15 +1030,28 @@ export function mapNodeError(status: number, body: unknown, path: string): Fbrai
     msg,
     codeField: bodyStringField(body, "code"),
     reason: bodyStringField(body, "reason"),
-    onnxBlob: [msg, errCode].filter((s): s is string => typeof s === "string").join(" "),
+    messageBlob: [msg, errCode].filter((s): s is string => typeof s === "string").join(" "),
   };
   for (const rule of NODE_ERROR_RULES) {
     if (rule.match(ctx)) return new FbrainError(rule.build(ctx));
   }
+  // Build a 5xx hint that names the real cause when the body text points at
+  // the node-identity / master-key / keychain decrypt path (the homebrew
+  // daemon's most common "up but 500" failure — PR #227 fixed this for
+  // `fbrain doctor`, but runtime commands like search/list/put/get all
+  // funnel through this generic mapping and need the same actionable fix).
+  // Non-identity 5xx points the user at `fbrain doctor` since they probably
+  // ran search/list/get and have no other diagnostic surface to fall back on.
+  let hint: string | undefined;
+  if (status >= 500) {
+    const identityRemedy = identityFailureRemedy(ctx.messageBlob);
+    hint = identityRemedy
+      ?? "Check the node log; this looks like a node-side bug. Run `fbrain doctor` for a full diagnosis.";
+  }
   return new FbrainError({
     code: `node_http_${status}`,
     message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
-    hint: status >= 500 ? "Check the node log; this looks like a node-side bug." : undefined,
+    hint,
   });
 }
 
