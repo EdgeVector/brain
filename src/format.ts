@@ -88,7 +88,17 @@ export function resolvePrintSinks(opts: {
   printErr?: (line: string) => void;
 }): PrintSinks {
   return {
-    print: opts.print ?? ((line: string) => console.log(line)),
+    print: resolvePrintSink(opts),
     printErr: opts.printErr ?? ((line: string) => console.error(line)),
   };
+}
+
+// Resolve the `print` sink alone, for commands that only emit to stdout
+// (get, status, link, delete, reindex, usage, migrate, doctor, init,
+// init-consent). Same default as resolvePrintSinks().print so the two
+// can't drift.
+export function resolvePrintSink(opts: {
+  print?: (line: string) => void;
+}): (line: string) => void {
+  return opts.print ?? ((line: string) => console.log(line));
 }

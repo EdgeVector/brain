@@ -4,6 +4,7 @@
 import { type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import {
   ensureStatus,
   normalizeSlug,
@@ -23,7 +24,7 @@ export type StatusOptions = {
 };
 
 export async function statusCmd(opts: StatusOptions): Promise<void> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
   // Reads through this client never touch the capability provider; the bare
   // `status <slug>` getter therefore stays read-only and does NOT trigger

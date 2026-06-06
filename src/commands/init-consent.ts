@@ -43,6 +43,7 @@ import {
 } from "../capability.ts";
 import { defaultCapabilityStore } from "../keychain.ts";
 import { newNodeClient, type Verbose } from "../client.ts";
+import { resolvePrintSink } from "../format.ts";
 import { appIdentityEnforceEnabled } from "../write-context.ts";
 
 export type EstablishConsentOptions = {
@@ -109,7 +110,7 @@ const FOLDDB_BIN = "folddb";
 export async function establishConsentInline(
   opts: EstablishConsentOptions,
 ): Promise<EstablishConsentResult> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const appId = opts.appId ?? FBRAIN_APP_ID;
   const store = opts.store ?? defaultCapabilityStore();
 

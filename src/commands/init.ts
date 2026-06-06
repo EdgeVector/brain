@@ -34,6 +34,7 @@ import {
   type EstablishConsentOptions,
   type EstablishConsentResult,
 } from "./init-consent.ts";
+import { resolvePrintSink } from "../format.ts";
 import { appIdentityEnforceEnabled } from "../write-context.ts";
 
 export type InitOptions = {
@@ -110,7 +111,7 @@ export type InitResult = {
 const STEPS = 6;
 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
   const bootstrapName = opts.bootstrapName ?? "fbrain";
   const configPath = opts.configPath ?? defaultConfigPath();

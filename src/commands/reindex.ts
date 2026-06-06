@@ -22,6 +22,7 @@
 import { type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
@@ -87,7 +88,7 @@ export function pickRepairedTitle(
 }
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   // --dry-run issues no writes, so it never invokes the capability provider
   // and never triggers consent; a real reindex acquires on its first update.
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);

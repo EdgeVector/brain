@@ -6,6 +6,7 @@
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
+import { resolvePrintSink } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
   findBySlugFast,
@@ -31,7 +32,7 @@ export type GetOptions = {
 };
 
 export async function getRecord(opts: GetOptions): Promise<void> {
-  const print = opts.print ?? ((line: string) => console.log(line));
+  const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
