@@ -211,7 +211,7 @@ and skips stale hits (records deleted since indexing). Prints
   --json        emit a JSON array of \`{slug, score, type, title}\` on stdout
                 (parseable by \`jq\`). Empty result is \`[]\`. Weak-match
                 advisory and empty-result hint route to stderr.`,
-  ask: `fbrain ask <query> [-n N | --limit N] [--no-llm] [--explain] [--type T]...
+  ask: `fbrain ask <query> [-n N | --limit N] [--no-llm] [--explain] [--type T]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
 fused via Reciprocal Rank Fusion. By default an LLM generates 3 alternative
@@ -232,6 +232,10 @@ paraphrase recall ride alongside rare-token / acronym recall.
                 corpus and the vector schemas filter.
                 One of: design | task | concept | preference | reference |
                 agent | project | spike. Omit to search across all 8 types.
+  --json        emit a JSON array of \`{slug, score, type, title}\` on stdout
+                (parseable by \`jq\`). Empty result is \`[]\`. Advisory notes,
+                no-key / expansion-failure notices, and the \`--explain\`
+                expansions block all route to stderr.
 
 Cost: 1 LLM call per invocation. Run with the global --verbose to see
 token + USD estimates and per-ranker debug. Missing ANTHROPIC_API_KEY
@@ -462,6 +466,9 @@ const ASK_OPTIONS = {
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
   type: { type: "string", multiple: true },
+  // Machine-readable mode: emit a JSON array of `{slug, score, type, title}`
+  // on stdout; advisory notes and --explain expansions route to stderr.
+  json: { type: "boolean", default: false },
 } as const;
 const DOCTOR_OPTIONS = {
   freshness: { type: "boolean", default: false },
@@ -1226,6 +1233,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   if (values["no-llm"]) aOpts.noLlm = true;
   if (values.explain) aOpts.explain = true;
   if (askTypes) aOpts.types = askTypes;
+  if (values.json) aOpts.json = true;
   await askCmd(aOpts);
   return 0;
 }
