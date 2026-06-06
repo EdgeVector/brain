@@ -18,11 +18,12 @@ export type FormatTableOptions = {
 };
 
 // Format a 2D grid into per-row strings with columns sized to the
-// widest cell in each column. Left-aligned cells in the right-most
-// column are not padded — padEnd would add trailing whitespace and a
-// terminal row doesn't need it. Right-aligned cells use padStart, which
+// widest cell in each column. Right-aligned cells use padStart, which
 // only adds leading whitespace inside the column slot, so the right
-// edges still line up without trailing noise.
+// edges still line up without trailing noise. Left-aligned cells use
+// padEnd; any trailing whitespace that adds to the last column (or to
+// rows whose last cell is empty / missing) is stripped from the joined
+// line so no row carries a tail.
 //
 // Empty input returns an empty array; a row with fewer cells than the
 // widest row is padded with "" on the right.
@@ -49,29 +50,18 @@ export function formatTable(
   const keptCols: number[] = [];
   for (let c = 0; c < cols; c++) if (widths[c]! > 0) keptCols.push(c);
   if (keptCols.length === 0) return rows.map(() => "");
-  const lastKept = keptCols[keptCols.length - 1]!;
   return rows.map((row) => {
     const parts: string[] = [];
     for (const c of keptCols) {
       const cell = row[c] ?? "";
       const align = options.align?.[c] ?? "left";
-      if (align === "right") {
-        // padStart adds spaces on the LEFT, so right-aligning the last
-        // column still doesn't introduce trailing whitespace.
-        parts.push(cell.padStart(widths[c]!));
-      } else if (c === lastKept) {
-        // Left-align on the last column skips padding — padEnd would
-        // add trailing whitespace and a terminal row doesn't need it.
-        parts.push(cell);
-      } else {
-        parts.push(cell.padEnd(widths[c]!));
-      }
+      // padStart adds LEADING whitespace inside the column slot, so
+      // right-aligned columns never contribute trailing whitespace.
+      // padEnd does, but trimEnd below collapses that uniformly — for
+      // the last column's own padding and for ragged / sparse rows
+      // whose last cell is "" or missing.
+      parts.push(align === "right" ? cell.padStart(widths[c]!) : cell.padEnd(widths[c]!));
     }
-    // Rows whose last kept cell is empty (ragged input, or a sparsely-
-    // populated rightmost column) would otherwise carry a "gap + empty
-    // padding" tail past the join. The documented contract is no
-    // trailing whitespace; trim defensively so it holds for every row,
-    // not just the rows whose last cell happens to be non-empty.
     return parts.join(gap).trimEnd();
   });
 }
