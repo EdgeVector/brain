@@ -16,6 +16,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import type { Config } from "../config.ts";
+import { resolvePrintSinks } from "../format.ts";
 
 export const RAW_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 export type RawMethod = (typeof RAW_METHODS)[number];
@@ -32,8 +33,7 @@ export type RawOptions = {
 };
 
 export async function rawCmd(opts: RawOptions): Promise<number> {
-  const print = opts.print ?? ((line: string) => console.log(line));
-  const printErr = opts.printErr ?? ((line: string) => console.error(line));
+  const { print, printErr } = resolvePrintSinks(opts);
   const method = normalizeMethod(opts.method);
   const target = pickService(opts.path);
   const body = await resolveBody(opts.body, opts.readStdin);

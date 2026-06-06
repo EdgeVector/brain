@@ -14,7 +14,7 @@ import {
   recordTypeForHash,
 } from "../client.ts";
 import type { Config } from "../config.ts";
-import { capitalize, formatTable } from "../format.ts";
+import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
 import {
   findBySlugFast,
   schemaHashFor,
@@ -59,8 +59,7 @@ export type ResolvedHit = {
 };
 
 export async function searchCmd(opts: SearchOptions): Promise<void> {
-  const print = opts.print ?? ((line: string) => console.log(line));
-  const printErr = opts.printErr ?? ((line: string) => console.error(line));
+  const { print, printErr } = resolvePrintSinks(opts);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const clientOpts: ClientSearchOptions = {};
