@@ -201,6 +201,43 @@ describe("linkCmd", () => {
     });
   }, 30_000);
 
+  // Regression: `put`'s slug resolver silently trims surrounding whitespace
+  // (put.ts: `resolveSlug` → `.trim()`), so `fbrain put " t1 "` stores the
+  // row under slug "t1". Pre-fix, `fbrain link " t1 " " d1 "` then compared
+  // the verbatim input against the trimmed stored slugs and errored with
+  // `not_found` (or `dangling_design_slug`) on records that genuinely exist
+  // — same asymmetric key-normalization #184 just fixed for `delete`.
+  // Mirror that fix here: trim both slugs at the top of linkCmd and thread
+  // the normalized values through the lookups, the update mutation, and the
+  // success line.
+  test("trims surrounding whitespace on both slugs to match put's normalization", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        if (schema === TASK_HASH) return { status: 200, body: { ok: true, results: [taskRow] } };
+        if (schema === DESIGN_HASH) return { status: 200, body: { ok: true, results: [designRow] } };
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await linkCmd({ cfg, taskSlug: "  t1  ", designSlug: "\td1\n", print: () => {} });
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.mutation_type).toBe("update");
+    const keyValue = mutations[0]!.key_value as { hash: string };
+    expect(keyValue.hash).toBe("t1");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.slug).toBe("t1");
+    // The written parent reference is the trimmed design slug, not the
+    // padded input — otherwise the task row's design_slug points at a
+    // value `findBySlug` (which compares verbatim) will never match.
+    expect(fields.design_slug).toBe("d1");
+  });
+
   test("a design that genuinely doesn't exist still errors with dangling_design_slug", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {

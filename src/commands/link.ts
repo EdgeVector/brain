@@ -16,6 +16,18 @@ export type LinkOptions = {
 
 export async function linkCmd(opts: LinkOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
+  // Trim surrounding whitespace on both slugs to mirror `put`'s silent
+  // normalization (put.ts: `resolveSlug` calls `.trim()` on both the
+  // positional arg and the frontmatter `slug:`). Without this, a task
+  // created via `fbrain put " t1 "` is stored under slug "t1" but
+  // `fbrain link " t1 " " d1 "` fails with `not_found` /
+  // `dangling_design_slug` because the lookup compares the untrimmed input
+  // against the trimmed stored slugs — the same asymmetric key-normalization
+  // PR #184 just fixed for `delete`. Trim once at the top and thread the
+  // normalized values through the lookups, the parent-ref write, the update
+  // mutation's keyHash, and the success line.
+  const taskSlug = opts.taskSlug.trim();
+  const designSlug = opts.designSlug.trim();
   const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
@@ -32,7 +44,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   // on a populated-but-missing page, so a typo'd <task-slug> errors in ~one
   // query instead of burning the full 5×250 ms retry budget. Same helper
   // put.ts / new.ts / resolveBySlug use.
-  const task = await findBySlugFast(node, "task", taskHash, opts.taskSlug);
+  const task = await findBySlugFast(node, "task", taskHash, taskSlug);
   if (!task) {
     // `link` is directional — <task-slug> first, <design-slug> second — and
     // reversing the two is the most common first-use mistake (the slug the
@@ -40,22 +52,22 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     // so explicitly with the corrected command, instead of a bare "No task"
     // that gives no clue the argument order is wrong. Best-effort single
     // lookup: a flaky page miss just falls through to the generic hint.
-    const asDesign = await findBySlug(node, "design", designHash, opts.taskSlug);
+    const asDesign = await findBySlug(node, "design", designHash, taskSlug);
     const hint = asDesign
-      ? `'${opts.taskSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${opts.designSlug} ${opts.taskSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
-      : `Create the task first (\`fbrain task new ${opts.taskSlug}\`) or check the slug with \`fbrain list --type task\` (usage: \`fbrain link <task-slug> <design-slug>\`).`;
+      ? `'${taskSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${designSlug} ${taskSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
+      : `Create the task first (\`fbrain task new ${taskSlug}\`) or check the slug with \`fbrain list --type task\` (usage: \`fbrain link <task-slug> <design-slug>\`).`;
     throw new FbrainError({
       code: "not_found",
-      message: `No task: ${opts.taskSlug}`,
+      message: `No task: ${taskSlug}`,
       hint,
     });
   }
 
-  const design = await findBySlugFast(node, "design", designHash, opts.designSlug);
+  const design = await findBySlugFast(node, "design", designHash, designSlug);
   if (!design) {
     throw new FbrainError({
       code: "dangling_design_slug",
-      message: `No design: ${opts.designSlug}`,
+      message: `No design: ${designSlug}`,
       hint: "Create the design first (`fbrain design new ...`).",
     });
   }
@@ -66,7 +78,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     title: task.title,
     body: task.body,
     status: task.status,
-    design_slug: opts.designSlug,
+    design_slug: designSlug,
     tags: task.tags,
     created_at: task.created_at,
     updated_at: now,
@@ -74,9 +86,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
 
   await node.updateRecord({
     schemaHash: taskHash,
-    keyHash: opts.taskSlug,
+    keyHash: taskSlug,
     fields,
   });
 
-  print(`linked task ${opts.taskSlug} → design ${opts.designSlug}`);
+  print(`linked task ${taskSlug} → design ${designSlug}`);
 }
