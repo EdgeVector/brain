@@ -1010,14 +1010,19 @@ describe("createFbrainMcpServer", () => {
 });
 
 describe("FBRAIN_MCP_VERSION", () => {
-  // Anti-drift pin: `fbrain --version` (src/cli.ts) reads pkg.version, and
-  // MCP `serverInfo.version` echoes FBRAIN_MCP_VERSION. Before this was
+  // Anti-drift pin: `fbrain --version` (src/cli.ts) and MCP
+  // `serverInfo.version` both flow through getFbrainVersion(), which
+  // returns `<pkg.version>` optionally suffixed with ` (<sha>[-dirty])`
+  // when the running source lives in a git checkout. Before this was
   // single-sourced, the constant was a hardcoded "0.0.1" literal that sat
   // unchanged across ~175 merged PRs while package.json was already meant
   // to be the source of truth. Pin agreement so a future package.json bump
   // can't leave the MCP surface behind.
-  test("equals package.json version (single-sourced from pkg.version)", () => {
-    expect(FBRAIN_MCP_VERSION).toBe(pkg.version);
+  test("starts with package.json version (single-sourced via getFbrainVersion)", () => {
+    expect(FBRAIN_MCP_VERSION.startsWith(pkg.version)).toBe(true);
+    // Either bare version or version + space-paren build identifier.
+    const rest = FBRAIN_MCP_VERSION.slice(pkg.version.length);
+    expect(rest === "" || /^ \([0-9a-f]{7,}(-dirty)?\)$/.test(rest)).toBe(true);
   });
 
   test("is not the historical 0.0.1 placeholder", () => {

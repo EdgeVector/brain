@@ -3,6 +3,11 @@
 // Regression guard for the original dogfood report where these flags were
 // unrecognized and dumped help to stderr with exit 1.
 //
+// The CLI also appends a `(shortSha[-dirty])` build identifier when the
+// running source lives in a git checkout — this test runs inside one, so
+// stdout matches `fbrain <pkg.version> (<sha>[-dirty])`. The bare-version
+// fallback (no git) is covered by version-helper.test.ts.
+//
 // Short form is `-V` (uppercase) to match bun/node/cargo convention and
 // to leave `-v` free for a future `--verbose` short alias.
 
@@ -28,18 +33,30 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
   return { code, stdout, stderr };
 }
 
+// Matches `fbrain <pkg.version>` optionally followed by ` (<sha>[-dirty])`.
+// The SHA segment is `[0-9a-f]{7,}` — git defaults short SHAs to 7 chars
+// but `core.abbrev` can widen them, so accept 7+. Anchored end-to-end so
+// trailing junk fails.
+const VERSION_PATTERN = new RegExp(
+  `^fbrain ${escapeForRegex(pkg.version)}( \\([0-9a-f]{7,}(-dirty)?\\))?$`,
+);
+
+function escapeForRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 describe("fbrain --version / -V", () => {
-  test("--version prints `fbrain <package.json version>` and exits 0", async () => {
+  test("--version prints `fbrain <pkg.version> [(sha[-dirty])]` and exits 0", async () => {
     const { code, stdout, stderr } = await runCli(["--version"]);
     expect(code).toBe(0);
-    expect(stdout.trim()).toBe(`fbrain ${pkg.version}`);
+    expect(stdout.trim()).toMatch(VERSION_PATTERN);
     expect(stderr).toBe("");
   });
 
-  test("-V prints `fbrain <package.json version>` and exits 0", async () => {
+  test("-V prints `fbrain <pkg.version> [(sha[-dirty])]` and exits 0", async () => {
     const { code, stdout, stderr } = await runCli(["-V"]);
     expect(code).toBe(0);
-    expect(stdout.trim()).toBe(`fbrain ${pkg.version}`);
+    expect(stdout.trim()).toMatch(VERSION_PATTERN);
     expect(stderr).toBe("");
   });
 });

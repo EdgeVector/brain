@@ -10,7 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import pkg from "../../package.json" with { type: "json" };
+import { getFbrainVersion } from "../version.ts";
 import type { Config } from "../config.ts";
 import { searchCmd } from "../commands/search.ts";
 import { getRecord } from "../commands/get.ts";
@@ -22,10 +22,11 @@ import { FbrainError, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
-// Single-sourced from package.json so `fbrain --version` (cli.ts) and the MCP
-// `serverInfo.version` reported here can't drift. Bump the version in
-// package.json — both surfaces follow.
-export const FBRAIN_MCP_VERSION: string = pkg.version;
+// Single-sourced via getFbrainVersion() so `fbrain --version` (cli.ts) and
+// the MCP `serverInfo.version` reported here can't drift. Includes the git
+// short-SHA suffix when the running source lives in a git checkout, so MCP
+// clients (Claude Code, Codex) see the same build identifier the CLI does.
+export const FBRAIN_MCP_VERSION: string = getFbrainVersion();
 
 export type CreateServerOptions = {
   cfg: Config;
