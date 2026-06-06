@@ -65,3 +65,10 @@ export function formatTable(
     return parts.join(gap).trimEnd();
   });
 }
+
+// Uppercase the first character of `s`. Used to render record-type
+// display names (e.g. `task` → `Task`) in `search` and `ask` output.
+export function capitalize(s: string): string {
+  if (s.length === 0) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}

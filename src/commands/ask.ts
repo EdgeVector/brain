@@ -25,7 +25,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import type { Config } from "../config.ts";
-import { formatTable } from "../format.ts";
+import { capitalize, formatTable } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
@@ -391,11 +391,6 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     bm25CorpusSize: docs.length,
     bm25CacheHit,
   };
-}
-
-function capitalize(s: string): string {
-  if (s.length === 0) return s;
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 // Single source of truth for cost rendering in --verbose lines. When the
