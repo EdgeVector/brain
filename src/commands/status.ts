@@ -2,7 +2,7 @@
 // `fbrain status <slug> <new-status>` — update.
 
 import { type Verbose } from "../client.ts";
-import { newWriteNodeClient } from "../write-context.ts";
+import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   ensureStatus,
@@ -26,11 +26,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   // Reads through this client never touch the capability provider; the bare
   // `status <slug>` getter therefore stays read-only and does NOT trigger
   // consent. Only the update path below (node.updateRecord) acquires.
-  const { node } = newWriteNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
   const only = await resolveBySlug({
     node,
