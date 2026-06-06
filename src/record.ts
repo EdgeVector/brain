@@ -351,6 +351,40 @@ export async function findBySlugFast(
   return findBySlugWithFastMiss(node, type, schemaHash, slug, false, options);
 }
 
+// Reverse-direction lookup: live (non-tombstoned) tasks whose `design_slug`
+// matches the given parent. Mirrors `findBySlugWithFastMiss`'s cost discipline
+// — a populated task page is authoritative (return the filtered slice with no
+// retry, even if zero rows match), only an EMPTY task page retries (capped at
+// `EMPTY_PAGE_RETRY_ATTEMPTS`) to ride out the saturated-daemon empty-result
+// flake. Without that cap, every `fbrain get <design>` on a fresh node — where
+// the task schema page is legitimately empty until its first task lands —
+// would burn the full 5×250 ms read-retry budget just to confirm "no children",
+// re-introducing the first-write-of-a-type latency cliff that
+// `findBySlugWithFastMiss` fixed for the forward direction.
+export async function findChildTasksByDesign(
+  node: NodeClient,
+  taskSchemaHash: string,
+  designSlug: string,
+  options?: ReadRetryOptions,
+): Promise<FbrainRecord[]> {
+  const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
+  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
+  const sleep = options?.sleep ?? defaultSleep;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
+    const list = await listRecords(node, "task", taskSchemaHash);
+    if (list.length > 0) {
+      return list.filter(
+        (r) => !isTombstoned(r) && r.design_slug === designSlug,
+      );
+    }
+    // Empty page ⇒ ambiguous (fresh node vs. saturated-daemon flake); retry
+    // up to EMPTY_PAGE_RETRY_ATTEMPTS before declaring "no children".
+  }
+  return [];
+}
+
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -6,6 +6,7 @@ import { newNodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlugFast,
+  findChildTasksByDesign,
   resolveBySlug,
   schemaHashFor,
   type FbrainRecord,
@@ -55,13 +56,30 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     designMissing = parent === null;
   }
 
-  print(formatRecord(found.record, found.type, designMissing));
+  // Reverse direction of the same link: when the record IS a design, list its
+  // child tasks so the parent ↔ child relationship is visible both ways. Gated
+  // on `found.type === "design"` so the other 7 record types pay zero
+  // additional cost; `findChildTasksByDesign` shares the empty-page cap with
+  // the forward dangling-ref probe above, so a childless design on a fresh
+  // node stays cheap (no full 5× retry burn).
+  let designChildren: FbrainRecord[] | undefined;
+  if (found.type === "design") {
+    const taskHash = schemaHashFor("task", opts.cfg);
+    designChildren = await findChildTasksByDesign(
+      node,
+      taskHash,
+      found.record.slug,
+    );
+  }
+
+  print(formatRecord(found.record, found.type, designMissing, designChildren));
 }
 
 export function formatRecord(
   r: FbrainRecord,
   type: RecordType,
   designMissing = false,
+  children?: ReadonlyArray<FbrainRecord>,
 ): string {
   const lines = [
     `[${type}] ${r.slug}`,
@@ -75,6 +93,20 @@ export function formatRecord(
       ? `${r.design_slug}${designMissing ? " (deleted)" : ""}`
       : "(none)";
     lines.push(`design:     ${designValue}`);
+  }
+  if (type === "design" && children !== undefined) {
+    if (children.length === 0) {
+      lines.push("tasks:      (none)");
+    } else {
+      const sorted = [...children].sort((a, b) => {
+        const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
+        return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
+      });
+      const rendered = sorted
+        .map((t) => `${t.slug} (${t.status})`)
+        .join(", ");
+      lines.push(`tasks:      ${rendered}`);
+    }
   }
   lines.push(`created_at: ${r.created_at}`);
   lines.push(`updated_at: ${r.updated_at}`);
