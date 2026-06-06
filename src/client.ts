@@ -813,6 +813,48 @@ export function nodeDownHint(
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
 }
 
+// Discriminator for "node is UP but returned an HTTP error response" — as
+// opposed to a transport failure (connection refused / DNS / timeout), which
+// `connectionError` tags `service_unreachable`. Every node HTTP non-2xx flows
+// through `mapNodeError`, which tags unmatched errors `node_http_<status>`;
+// matched rules carry their own codes. We treat anything that is NOT
+// `service_unreachable` as "reachable but erroring" so the caller can avoid
+// the misleading "start the node" hint. See nodeHttpErrorHint.
+export function isNodeReachableButErroring(err: unknown): boolean {
+  return err instanceof FbrainError && err.code !== "service_unreachable";
+}
+
+// Hint for a node that is REACHABLE but returned an HTTP error (4xx/5xx) — the
+// opposite of `nodeDownHint`. Telling such a user to "start the node" is wrong
+// and wastes their time: the node is plainly up (it answered), and its own
+// error body already names the real cause. The error's `detail` already
+// surfaces the node's message verbatim, so this only supplies the actionable
+// remedy. A light, well-commented heuristic upgrades the generic remedy when
+// the node's message points at the node-identity / master-key / keychain
+// decryption path (the homebrew daemon's most common "up but 500" failure).
+export function nodeHttpErrorHint(err: unknown): string {
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  // Status, when the generic `node_http_<status>` code carried it.
+  const code = err instanceof FbrainError ? err.code : "";
+  const statusMatch = /^node_http_(\d+)$/.exec(code);
+  const status = statusMatch ? statusMatch[1] : undefined;
+  const identityFailure =
+    /keychain|master[ _-]?key|node identity|decrypt|foldd?b_master_key|os-keychain/.test(msg);
+  if (identityFailure) {
+    return (
+      "The node is up but can't decrypt its identity. Ensure the node process " +
+      "has `FOLDDB_MASTER_KEY=<64-hex-bytes>` set in its environment (e.g. in " +
+      "its launchd/systemd unit), or run a keychain-enabled build. The node's " +
+      "own message above names the exact cause — restart the node after fixing it."
+    );
+  }
+  return (
+    `The node is up but returned an HTTP error${status ? ` (${status})` : ""} — ` +
+    "this is not a 'start the node' problem. The node's message above is the " +
+    "actionable cause; check the node log if it isn't self-explanatory."
+  );
+}
+
 // fbrain talks to a deployed cloud schema-service Lambda by default —
 // there is no local schema_service to "start" unless you're a fold
 // contributor pointing at localhost. So an unreachable schema service is

@@ -641,6 +641,60 @@ describe("doctor verdict logic", () => {
     expect(failLine).toContain("node not reachable at http://127.0.0.1:9001");
   });
 
+  // DX regression (29ced): a node that is REACHABLE but returns an HTTP 500
+  // (e.g. it can't decrypt its identity) was told to `brew services start
+  // folddb` even though it plainly answered (schema-service + every
+  // schema-drift check, same node, PASS). The fix must surface the node's own
+  // cause, NOT "start the node".
+  test("node up but HTTP 500 → node-reachable fix does NOT say 'start the node'", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    // Shape matches mapNodeError's generic fallthrough for an unmatched 500:
+    // code node_http_500, message carrying the node's identity-decrypt text.
+    const http500 = new FbrainError({
+      code: "node_http_500",
+      message:
+        "Node /api/system/auto-identity returned HTTP 500: Failed to initialize node identity: Security error: Encrypted node identity exists on disk, but this binary was built without the os-keychain feature. Set FOLDDB_MASTER_KEY=<64-hex-bytes> to decrypt explicitly.",
+      hint: "Check the node log; this looks like a node-side bug.",
+    });
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ identityThrows: http500 }),
+    });
+    expect(code).toBe(1);
+    const out = lines.join("\n");
+    expect(out).toContain("[FAIL] node-reachable");
+    // The node's own message is surfaced as the detail.
+    expect(out).toContain("returned HTTP 500");
+    // The fix must NOT tell the user to start a node that is plainly up.
+    expect(out).not.toContain("brew services start folddb");
+    // Identity-failure heuristic points at the real remedy.
+    expect(out).toContain("FOLDDB_MASTER_KEY");
+  });
+
+  // The complementary half: a genuinely DOWN node (transport failure) MUST
+  // still get the "start the node" hint.
+  test("node genuinely down (service_unreachable) → node-reachable fix still says 'start it'", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const unreachable = new FbrainError({
+      code: "service_unreachable",
+      message: "node not reachable at http://127.0.0.1:9001.",
+    });
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ identityThrows: unreachable }),
+    });
+    expect(code).toBe(1);
+    const out = lines.join("\n");
+    expect(out).toContain("[FAIL] node-reachable");
+    expect(out).toContain("brew services start folddb");
+  });
+
   // Regression: the `--usage` short-circuit (doctor.ts:149) used to propagate
   // err.message verbatim — including connectionError()'s DOCTOR_TIP suffix —
   // so `fbrain doctor --usage` with no node running printed "run `fbrain
