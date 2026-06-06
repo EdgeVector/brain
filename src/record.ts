@@ -78,6 +78,22 @@ export function uniqueSchemaHashes(
   );
 }
 
+// Shared by `ask` and `search`: turn an optional `--type` selection into a
+// membership Set plus the canonical-order RecordType list to walk. Undefined
+// or empty `types` returns `null` filter + all 8 RECORD_TYPES so callers can
+// branch on the null instead of a length check. `activeTypes` preserves
+// RECORD_TYPES order regardless of the order the user passed `--type` in.
+export function resolveTypeFilter(types?: readonly RecordType[]): {
+  typeFilter: Set<RecordType> | null;
+  activeTypes: readonly RecordType[];
+} {
+  const typeFilter = types && types.length > 0 ? new Set(types) : null;
+  const activeTypes: readonly RecordType[] = typeFilter
+    ? RECORD_TYPES.filter((t) => typeFilter.has(t))
+    : RECORD_TYPES;
+  return { typeFilter, activeTypes };
+}
+
 export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
   const f = (row.fields ?? {}) as Record<string, unknown>;
   const base: FbrainRecord = {
