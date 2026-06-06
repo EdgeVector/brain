@@ -1,6 +1,8 @@
 // `fbrain get <slug> [--type T]` — print a record.
-// If --type is omitted, queries every registered schema. If found in
-// multiple schemas, prints all matches and tells the user to specify --type.
+// If --type is omitted, queries every registered schema. If the slug exists in
+// multiple schemas, throws `ambiguous_slug` (stderr-only, exit 1, no stdout) —
+// byte-consistent with `status` / `delete`, so a script doing
+// `r=$(fbrain get foo)` either captures one record cleanly or sees a failure.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -31,9 +33,6 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     slug: opts.slug,
     type: opts.type,
     notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
-    onAmbiguous: (matches) => {
-      for (const { type, record } of matches) print(formatRecord(record, type));
-    },
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on

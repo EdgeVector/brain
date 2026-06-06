@@ -171,7 +171,7 @@ Examples:
   get: `fbrain get <slug> [--type T]
 
 Without --type, queries every registered schema. Errors if the slug
-exists in multiple types (prints all matches first).
+exists in multiple types (specify --type to disambiguate).
 
   --type    design | task | concept | preference | reference | agent | project | spike`,
   list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N]
