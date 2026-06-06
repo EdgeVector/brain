@@ -19,7 +19,7 @@ import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { FbrainError, stripDoctorTip } from "../client.ts";
-import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { RECORD_TYPES } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
 // Single-sourced from package.json so `fbrain --version` (cli.ts) and the MCP
@@ -71,18 +71,17 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
-        const sOpts: Parameters<typeof searchCmd>[0] = {
+      runTool((print) =>
+        searchCmd({
           cfg,
           query: args.query,
           print,
-        };
-        if (typeof args.limit === "number") sOpts.limit = args.limit;
-        if (args.exact === true) sOpts.exact = true;
-        if (typeof args.min_score === "number") sOpts.minScore = args.min_score;
-        if (args.type && args.type.length > 0) sOpts.types = args.type as RecordType[];
-        await searchCmd(sOpts);
-      }),
+          limit: args.limit,
+          exact: args.exact,
+          minScore: args.min_score,
+          types: args.type,
+        }),
+      ),
   );
 
   server.registerTool(
@@ -101,15 +100,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
-        const gOpts: Parameters<typeof getRecord>[0] = {
+      runTool((print) =>
+        getRecord({
           cfg,
           slug: args.slug,
           print,
-        };
-        if (args.type) gOpts.type = args.type as RecordType;
-        await getRecord(gOpts);
-      }),
+          type: args.type,
+        }),
+      ),
   );
 
   server.registerTool(
@@ -134,17 +132,16 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
-        const lOpts: Parameters<typeof listCmd>[0] = {
+      runTool((print) =>
+        listCmd({
           cfg,
           print,
-        };
-        if (args.type) lOpts.type = args.type as RecordType;
-        if (args.status) lOpts.status = args.status;
-        if (args.tag) lOpts.tag = args.tag;
-        if (typeof args.limit === "number") lOpts.limit = args.limit;
-        await listCmd(lOpts);
-      }),
+          type: args.type,
+          status: args.status,
+          tag: args.tag,
+          limit: args.limit,
+        }),
+      ),
   );
 
   server.registerTool(
@@ -235,16 +232,15 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
-        const dOpts: Parameters<typeof deleteRecord>[0] = {
+      runTool((print) =>
+        deleteRecord({
           cfg,
           slug: args.slug,
           print,
-        };
-        if (args.type) dOpts.type = args.type as RecordType;
-        if (args.force) dOpts.force = true;
-        await deleteRecord(dOpts);
-      }),
+          type: args.type,
+          force: args.force,
+        }),
+      ),
   );
 
   server.registerTool(
