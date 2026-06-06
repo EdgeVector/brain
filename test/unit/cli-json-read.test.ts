@@ -480,6 +480,163 @@ describe("searchCmd --json", () => {
     expect(err[0]).toContain("fbrain ask <query> --no-llm");
   });
 
+  test("rounds the score to 6 decimals; perfect f32 cosine serializes as 1, not 1.0000001192092896", async () => {
+    // The native index ships cosines as f32 and the node promotes back to
+    // f64 on the wire, so a perfect match arrives as 1.0000001192092896
+    // (= f32(1.0)). Left raw, a consumer filtering on the natural cosine
+    // contract `score <= 1.0` silently drops the single best hit. Pin
+    // both the >1.0 bug and the 6-dp noise strip.
+    const rows = [
+      {
+        fields: {
+          slug: "perfect",
+          title: "Exact match",
+          body: "",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "perfect", range: null },
+      },
+      {
+        fields: {
+          slug: "noisy",
+          title: "Sub-1 match",
+          body: "",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "noisy", range: null },
+      },
+    ];
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "perfect",
+                schemaName: TEST_HASHES.design,
+                schema_display_name: "Design",
+                score: 1.0000001192092896,
+              }),
+              hit({
+                slug: "noisy",
+                schemaName: TEST_HASHES.design,
+                schema_display_name: "Design",
+                score: 0.3730545341968536,
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: rows,
+            total_count: rows.length,
+            returned_count: rows.length,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const out: string[] = [];
+    const err: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "exact",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!) as Array<{ slug: string; score: number }>;
+    expect(parsed).toHaveLength(2);
+    const perfect = parsed.find((p) => p.slug === "perfect")!;
+    const noisy = parsed.find((p) => p.slug === "noisy")!;
+    // The bug: raw f32-promoted-to-f64 exceeds the cosine contract.
+    expect(perfect.score).toBe(1);
+    expect(perfect.score).toBeLessThanOrEqual(1);
+    // 6-decimal rounding strips the 17-digit float noise.
+    expect(noisy.score).toBe(0.373055);
+    // Raw value must NOT appear in the serialized document.
+    expect(out[0]).not.toContain("1.0000001192092896");
+    expect(out[0]).not.toContain("0.3730545341968536");
+  });
+
+  test("preserves a null score as null (not 0) under --json", async () => {
+    // `hit.score` is `number | null` (search.ts:56,146). A score-less hit
+    // must round-trip as JSON null, not collapse to 0 via the rounding path.
+    const recordRow = {
+      fields: {
+        slug: "no-score",
+        title: "Unscored",
+        body: "",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "no-score", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: TEST_HASHES.design,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "no-score", range: null },
+                value: "fragment text",
+                // No `score` key — metadata.score is undefined, so
+                // search.ts:146 routes through to `score: null`.
+                metadata: { match_type: "semantic" },
+              },
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [recordRow],
+            total_count: 1,
+            returned_count: 1,
+          },
+        };
+      }
+      return { status: 404, body: {} };
+    });
+    const out: string[] = [];
+    const err: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "anything",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+    const parsed = JSON.parse(out[0]!) as Array<{ slug: string; score: number | null }>;
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.score).toBeNull();
+  });
+
   test("weak top score routes the `note:` advisory to stderr", async () => {
     // Score < 0.35 triggers the weak-match note. Under --json that
     // advisory must NOT contaminate the stdout JSON document.
