@@ -120,13 +120,19 @@ export function recordToJson(
     if (designMissing) out.design_missing = true;
   }
   if (type === "design" && children !== undefined) {
-    const sorted = [...children].sort((a, b) => {
-      const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
-      return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
-    });
+    const sorted = sortChildrenByUpdated(children);
     out.children = sorted.map((t) => ({ slug: t.slug, status: t.status }));
   }
   return out;
+}
+
+function sortChildrenByUpdated(
+  children: ReadonlyArray<FbrainRecord>,
+): FbrainRecord[] {
+  return [...children].sort((a, b) => {
+    const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
+    return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
+  });
 }
 
 export function formatRecord(
@@ -152,10 +158,7 @@ export function formatRecord(
     if (children.length === 0) {
       lines.push("tasks:      (none)");
     } else {
-      const sorted = [...children].sort((a, b) => {
-        const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
-        return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
-      });
+      const sorted = sortChildrenByUpdated(children);
       const rendered = sorted
         .map((t) => `${t.slug} (${t.status})`)
         .join(", ");
