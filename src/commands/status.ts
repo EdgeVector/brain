@@ -6,6 +6,7 @@ import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   ensureStatus,
+  normalizeSlug,
   nowIso,
   resolveBySlug,
   schemaHashFor,
@@ -23,15 +24,7 @@ export type StatusOptions = {
 
 export async function statusCmd(opts: StatusOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  // Trim surrounding whitespace to mirror `put`'s silent normalization
-  // (put.ts: `resolveSlug` calls `.trim()` on both the positional arg and
-  // the frontmatter `slug:`). Without this, a record created via
-  // `fbrain put " foo "` is stored under slug "foo" but the update path
-  // below built `keyHash` from the untrimmed input — so the mutation
-  // landed on a different key from the one the resolver (which normalizes)
-  // had just read, and the status change silently didn't stick on the
-  // canonical record. Same fix delete / link / put already carry.
-  const slug = opts.slug.trim();
+  const slug = normalizeSlug(opts.slug);
   // Reads through this client never touch the capability provider; the bare
   // `status <slug>` getter therefore stays read-only and does NOT trigger
   // consent. Only the update path below (node.updateRecord) acquires.

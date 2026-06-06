@@ -34,6 +34,7 @@ import {
   findBySlugRaw,
   isTombstoned,
   listRecords,
+  normalizeSlug,
   nowIso,
   NOT_FOUND_TYPED,
   resolveBySlug,
@@ -120,14 +121,7 @@ export function buildTombstoneFields(
 
 export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  // Trim surrounding whitespace to mirror `put`'s silent normalization
-  // (put.ts: `resolveSlug` calls `.trim()` on both the positional arg and
-  // the frontmatter `slug:`). Without this, a record created via
-  // `fbrain put " foo "` is stored under slug "foo" but `fbrain delete
-  // " foo "` fails with not_found because the lookup compares the
-  // untrimmed input against the trimmed stored slug — an asymmetric
-  // key-normalization that left some records uncleanable from the CLI.
-  const slug = opts.slug.trim();
+  const slug = normalizeSlug(opts.slug);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
   // raw mode bypasses tombstone filtering at the lookup layer; resolveBySlug
