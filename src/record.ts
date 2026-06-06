@@ -93,7 +93,7 @@ export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
   return base;
 }
 
-function stringField(f: Record<string, unknown>, key: string): string {
+export function stringField(f: Record<string, unknown>, key: string): string {
   const v = f[key];
   if (typeof v === "string") return v;
   if (v == null) return "";

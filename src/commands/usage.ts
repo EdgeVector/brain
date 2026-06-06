@@ -26,7 +26,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { type Config } from "../config.ts";
-import { fieldsFor } from "../record.ts";
+import { fieldsFor, stringField } from "../record.ts";
 import {
   UNIQUE_SCHEMAS,
   type RecordType,
@@ -221,13 +221,6 @@ function utcMidnight(d: Date): Date {
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function stringField(f: Record<string, unknown> | undefined, key: string): string {
-  if (!f) return "";
-  const v = f[key];
-  if (typeof v === "string") return v;
-  return "";
 }
 
 function mapToRecord(m: Map<RecordType, number>): Record<RecordType, number> {
