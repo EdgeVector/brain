@@ -20,7 +20,6 @@
 import {
   newReadClientFromCfg,
   recordTypeForHash,
-  type NativeIndexHit,
   type NodeClient,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
@@ -43,6 +42,7 @@ import {
   tokenize,
   type BM25Document,
 } from "../retrieval/bm25.ts";
+import { dedupeHits } from "../retrieval/dedupe.ts";
 import {
   reciprocalRankFusion,
   RRF_DEFAULT_K,
@@ -218,7 +218,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     const clientOpts: ClientSearchOptions = {};
     if (fbrainSchemas.length > 0) clientOpts.schemas = fbrainSchemas;
     const raw = await node.search(q, clientOpts);
-    const collapsed = collapseFragments(raw);
+    const collapsed = dedupeHits(raw);
     const vectorHits = collapsed
       .map((h) => {
         const slug = h.key_value.hash;
@@ -231,7 +231,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       })
       .filter((x): x is { id: string; score: number } => x !== null);
     // Sort by score DESC, ties broken by id ASC (code-unit order). Without
-    // the id key, equal-score vector hits keep `collapseFragments` insertion
+    // the id key, equal-score vector hits keep `dedupeHits` insertion
     // order — which depends on the order the daemon returned the underlying
     // fragments. That order then flowed into RRF as the per-doc vector rank,
     // and a tied doc that landed at rank 1 in one response ordering and
@@ -454,23 +454,6 @@ export function parseDocId(id: string): { type: RecordType; slug: string } | nul
 
 function isRecordType(s: string): s is RecordType {
   return (RECORD_TYPES as readonly string[]).includes(s);
-}
-
-// Collapse multi-fragment vector hits to one per (schema, slug), keeping
-// the highest score. Same shape as search.ts's dedupeHits but returns the
-// raw NativeIndexHit kept per (schema, slug) — caller resolves to record.
-export function collapseFragments(hits: NativeIndexHit[]): NativeIndexHit[] {
-  const best = new Map<string, NativeIndexHit>();
-  for (const h of hits) {
-    const slug = h.key_value.hash;
-    if (!slug) continue;
-    const key = `${h.schema_name}::${slug}`;
-    const score = typeof h.metadata?.score === "number" ? h.metadata.score : -1;
-    const prior = best.get(key);
-    const priorScore = typeof prior?.metadata?.score === "number" ? prior.metadata.score : -1;
-    if (!prior || score > priorScore) best.set(key, h);
-  }
-  return Array.from(best.values());
 }
 
 function rankMap(ranked: Array<{ id: string; rank: number }>): Map<string, number> {
