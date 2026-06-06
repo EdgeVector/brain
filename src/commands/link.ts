@@ -5,6 +5,7 @@ import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { findBySlug, findBySlugFast, nowIso, schemaHashFor } from "../record.ts";
+import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type LinkOptions = {
   cfg: Config;
@@ -61,6 +62,25 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
 
   const design = await findBySlugFast(node, "design", designHash, designSlug);
   if (!design) {
+    // Wrong-type detection: if `designSlug` names a record of another type
+    // (concept/reference/project/...), telling the user to "create the
+    // design first" is actively misleading — `fbrain get <slug>` returns
+    // the row. Sweep the non-design types and, on a hit, say WHICH type
+    // the slug is so the user can pick a real design instead. Best-effort:
+    // each lookup swallows its own flake / missing-hash error and falls
+    // through to the existing generic message, matching the defensive
+    // style of the task-side `findBySlug(design)` fallback above.
+    // Messaging only — `link` is still strictly task → design.
+    const wrongType = await findOtherTypeForSlug(node, opts.cfg, designSlug);
+    if (wrongType !== null) {
+      throw new FbrainError({
+        code: "dangling_design_slug",
+        message: `'${designSlug}' is a ${wrongType}, not a design.`,
+        hint:
+          "`link` only attaches a task to its parent design (a task's `design_slug`). " +
+          "Pick a design (`fbrain list --type design`), or create one with `fbrain design new <slug>`.",
+      });
+    }
     throw new FbrainError({
       code: "dangling_design_slug",
       message: `No design: ${designSlug}`,
@@ -87,4 +107,30 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   });
 
   print(`linked task ${taskSlug} → design ${designSlug}`);
+}
+
+// Best-effort cross-type lookup: returns the first non-design type the slug
+// resolves under, or null if it resolves nowhere (or only flakes). Each per-
+// type query is wrapped so a missing schema hash or a thrown lookup doesn't
+// crash the wrong-type hint — a flake just falls through to the existing
+// "No design / Create the design first" message, preserving the pre-fix UX
+// on the unhappy path while improving it on the happy one.
+async function findOtherTypeForSlug(
+  node: Parameters<typeof findBySlug>[0],
+  cfg: Config,
+  slug: string,
+): Promise<RecordType | null> {
+  const otherTypes = RECORD_TYPES.filter((t): t is RecordType => t !== "design");
+  const matches = await Promise.all(
+    otherTypes.map(async (t) => {
+      try {
+        const hash = schemaHashFor(t, cfg);
+        const row = await findBySlug(node, t, hash, slug);
+        return row ? t : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return matches.find((t): t is RecordType => t !== null) ?? null;
 }

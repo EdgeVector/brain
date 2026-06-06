@@ -256,7 +256,67 @@ describe("linkCmd", () => {
     });
     await expect(
       linkCmd({ cfg, taskSlug: "t1", designSlug: "ghost-design", print: () => {} }),
-    ).rejects.toMatchObject({ code: "dangling_design_slug" });
+    ).rejects.toMatchObject({
+      code: "dangling_design_slug",
+      message: expect.stringContaining("No design: ghost-design"),
+      hint: expect.stringContaining("Create the design first"),
+    });
+    expect(mutations).toEqual([]);
+  }, 30_000);
+
+  // Wrong-type DX: a slug that EXISTS as another record type (concept,
+  // reference, project, etc.) must surface that fact rather than telling
+  // the user to create a record that already exists. Symmetric to the
+  // reversed-args hint #149 added to the task-side `!task` branch — that
+  // one detects "you named a design as a task"; this one detects "you
+  // named a non-design as a design".
+  test("wrong-type design arg surfaces the actual type, not 'create the design first'", async () => {
+    const conceptRow = {
+      fields: {
+        slug: "fold-overview",
+        title: "Fold overview",
+        body: "Fold is a local-first vector database.",
+        status: "active",
+        tags: [],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+      key: { hash: "fold-overview", range: null },
+    };
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        if (schema === TASK_HASH) {
+          return { status: 200, body: { ok: true, results: [taskRow] } };
+        }
+        if (schema === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    let caught: { message?: unknown; hint?: unknown; code?: unknown } | undefined;
+    try {
+      await linkCmd({ cfg, taskSlug: "t1", designSlug: "fold-overview", print: () => {} });
+    } catch (e) {
+      caught = e as { message?: unknown; hint?: unknown; code?: unknown };
+    }
+    expect(caught).toBeDefined();
+    expect(typeof caught!.message).toBe("string");
+    // The message must name the actual type and contrast it against "design"
+    // — telling the user the slug exists but is the wrong kind of record.
+    expect(caught!.message as string).toContain("concept");
+    expect(caught!.message as string).toContain("not a design");
+    // The hint must NOT keep the misleading "Create the design first" advice,
+    // since the slug already names an existing record.
+    expect(typeof caught!.hint).toBe("string");
+    expect(caught!.hint as string).not.toContain("Create the design first");
     expect(mutations).toEqual([]);
   }, 30_000);
 });
