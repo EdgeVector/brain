@@ -25,7 +25,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import type { Config } from "../config.ts";
-import { capitalize, formatTable } from "../format.ts";
+import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
@@ -127,8 +127,7 @@ export type AskResult = {
 };
 
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
-  const print = opts.print ?? ((line: string) => console.log(line));
-  const printErr = opts.printErr ?? ((line: string) => console.error(line));
+  const { print, printErr } = resolvePrintSinks(opts);
   const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
   const typeFilter =
     opts.types && opts.types.length > 0 ? new Set(opts.types) : null;

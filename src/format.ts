@@ -1,4 +1,4 @@
-// Output formatting helpers shared by `list`, `search`, and `ask`.
+// Output helpers shared by `list`, `search`, `ask`, and `raw`.
 //
 // `padEnd(28)` made columns drift the moment a slug like
 // `agent-pr-events-2026-05-25-091310-pr-created-master` (54 chars)
@@ -71,4 +71,24 @@ export function formatTable(
 export function capitalize(s: string): string {
   if (s.length === 0) return s;
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Resolve the (print, printErr) sink pair from a command's options
+// object, defaulting to console.log / console.error. The four commands
+// that route advisory `note:` lines to stderr (ask, search, list, raw)
+// all need the same defaults so `<cmd> q 2>/dev/null` stays parseable;
+// keep it in one place so the defaults can't drift across commands.
+export type PrintSinks = {
+  print: (line: string) => void;
+  printErr: (line: string) => void;
+};
+
+export function resolvePrintSinks(opts: {
+  print?: (line: string) => void;
+  printErr?: (line: string) => void;
+}): PrintSinks {
+  return {
+    print: opts.print ?? ((line: string) => console.log(line)),
+    printErr: opts.printErr ?? ((line: string) => console.error(line)),
+  };
 }
