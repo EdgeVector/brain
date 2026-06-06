@@ -367,10 +367,67 @@ const realFetch = globalThis.fetch;
 
 type MockHandler = (url: string, init?: RequestInit) => { status: number; body?: unknown };
 
+// Auto-stateful fetch mock. Tracks create/update mutations the test fires
+// and, when the test's own handler returns an empty `/api/query` page for a
+// matching `schema_name`, splices the written row into the response. This
+// mirrors how real fold_db behaves on a warm node — once propagation lands,
+// the row IS queryable — so the put-side verify-after-write step
+// (`verifyRecordVisible` in record.ts) sees the row without each test
+// growing its own "post-mutation, return the row" branch. Tests that
+// explicitly seed an existing row (handler already returns a populated
+// page) are left alone: the splice fires only on the empty-page branch.
+type TrackedWrite = {
+  schema: string;
+  key: string;
+  fields: Record<string, unknown>;
+};
+
 function installMock(handler: MockHandler): void {
+  const writes: TrackedWrite[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
     const out = handler(url, init);
+    if (url.endsWith("/api/mutation") && typeof init?.body === "string") {
+      try {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        const kind = body.mutation_type;
+        if (kind === "create" || kind === "update") {
+          const keyVal = body.key_value as Record<string, unknown> | undefined;
+          writes.push({
+            schema: String(body.schema ?? ""),
+            key: String(keyVal?.hash ?? ""),
+            fields: (body.fields_and_values as Record<string, unknown>) ?? {},
+          });
+        }
+      } catch {
+        // Body wasn't JSON — ignore; tests that fire non-JSON bodies don't
+        // care about the splice path.
+      }
+    }
+    if (
+      url.endsWith("/api/query") &&
+      out.status === 200 &&
+      typeof init?.body === "string"
+    ) {
+      const handlerResults = (out.body as Record<string, unknown> | undefined)?.results;
+      if (Array.isArray(handlerResults) && handlerResults.length === 0) {
+        try {
+          const qBody = JSON.parse(init.body) as Record<string, unknown>;
+          const schema = String(qBody.schema_name ?? "");
+          const matches = writes
+            .filter((w) => w.schema === schema)
+            .map((w) => ({ fields: w.fields, key: { hash: w.key, range: null } }));
+          if (matches.length > 0) {
+            return new Response(
+              JSON.stringify({ ...(out.body as object), results: matches }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+        } catch {
+          // Same as above — non-JSON query bodies fall through.
+        }
+      }
+    }
     return new Response(JSON.stringify(out.body ?? {}), {
       status: out.status,
       headers: { "Content-Type": "application/json" },
@@ -1223,6 +1280,263 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.tags).toEqual([]);
+  });
+
+  // Read-your-writes regression — task 920a3. After `createRecord` /
+  // `updateRecord` resolves, putCmd must read the row back via
+  // `verifyRecordVisible` (full `withReadRetry` budget) before reporting
+  // "created"/"updated". Without this guard, a tight put→get loop (worst
+  // case: MCP-agent stdio, same warm process, no cold-start delay) saw
+  // "No record" for a row that did, in fact, just land — because
+  // fold_db's `/api/mutation` is not RYW-consistent and the `findBySlugFast`
+  // authoritative-miss on a populated page (capped at 2 by #174 for
+  // typo'd reads) returns null with zero retry. This case is distinct
+  // from the #174 latency tradeoff: the caller of a put→get is NOT
+  // expected to re-run; they conclude the data is gone.
+  describe("verify-after-write — read-your-writes regression (920a3)", () => {
+    // No-op sleep so the test doesn't pay the real 250 ms backoff schedule.
+    // The verify budget is what we're asserting on; the schedule is pinned
+    // separately by computeBackoffMs tests.
+    const noopSleep = (): Promise<void> => Promise.resolve();
+
+    test("after createRecord, putCmd retries the verify-read until the row appears", async () => {
+      // Drop the auto-splice from the shared `installMock` for this test:
+      // we are simulating fold_db's visibility lag, where /api/query returns
+      // empty for the first few attempts AFTER the mutation lands. We
+      // count the verify-reads and surface the row only after some retries.
+      let queryCallsAfterMutation = 0;
+      let mutationFired = false;
+      const visibleRow = {
+        fields: {
+          slug: "ryw-visible",
+          title: "Visible at last",
+          body: "the body",
+          status: "active",
+          tags: [],
+          created_at: "2026-06-05T00:00:00.000Z",
+          updated_at: "2026-06-05T00:00:00.000Z",
+        },
+        key: { hash: "ryw-visible", range: null },
+      };
+      const mutations: Array<Record<string, unknown>> = [];
+      const realFetch2 = globalThis.fetch;
+      try {
+        globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+          const url = typeof input === "string" ? input : String(input);
+          if (url.endsWith("/api/mutation")) {
+            mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+            mutationFired = true;
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (url.endsWith("/api/query")) {
+            // Pre-create existence check: row absent. Post-create
+            // verify-reads: empty for 2 attempts (fold_db's visibility lag
+            // window), then the row surfaces. With the verify path wired,
+            // putCmd MUST keep reading until the row appears.
+            if (mutationFired) {
+              queryCallsAfterMutation++;
+              if (queryCallsAfterMutation <= 2) {
+                return new Response(
+                  JSON.stringify({ ok: true, results: [] }),
+                  { status: 200, headers: { "Content-Type": "application/json" } },
+                );
+              }
+              return new Response(
+                JSON.stringify({ ok: true, results: [visibleRow] }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+              );
+            }
+            return new Response(
+              JSON.stringify({ ok: true, results: [] }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return new Response("{}", { status: 404 });
+        }) as unknown as typeof globalThis.fetch;
+        const r = await putCmd({
+          cfg,
+          slug: "ryw-visible",
+          input: "---\ntype: concept\ntitle: T\n---\nbody",
+          verifyOptions: { sleep: noopSleep },
+        });
+        expect(r.action).toBe("created");
+        expect(mutations[0]!.mutation_type).toBe("create");
+        // 2 empty-page misses + 1 hit = at least 3 verify-reads. The
+        // capped `findBySlugFast` (#174) would have given up after 2.
+        expect(queryCallsAfterMutation).toBeGreaterThanOrEqual(3);
+      } finally {
+        globalThis.fetch = realFetch2;
+      }
+    });
+
+    test("verify-after-write uses the FULL retry budget, not the capped empty-page budget", async () => {
+      // Wire the verify to spend EXACTLY 5 attempts (the documented full
+      // `READ_RETRY_ATTEMPTS` budget — see record.ts). If putCmd routed the
+      // verify through the capped `findBySlugFast` budget (2) instead, the
+      // 4th-attempt success would never be observed.
+      let queryCallsAfterMutation = 0;
+      let mutationFired = false;
+      const visibleRow = {
+        fields: {
+          slug: "ryw-budget",
+          title: "T",
+          body: "b",
+          status: "active",
+          tags: [],
+          created_at: "2026-06-05T00:00:00.000Z",
+          updated_at: "2026-06-05T00:00:00.000Z",
+        },
+        key: { hash: "ryw-budget", range: null },
+      };
+      const realFetch2 = globalThis.fetch;
+      try {
+        globalThis.fetch = (async (input: unknown): Promise<Response> => {
+          const url = typeof input === "string" ? input : String(input);
+          if (url.endsWith("/api/mutation")) {
+            mutationFired = true;
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (url.endsWith("/api/query")) {
+            if (mutationFired) {
+              queryCallsAfterMutation++;
+              const results = queryCallsAfterMutation >= 4 ? [visibleRow] : [];
+              return new Response(
+                JSON.stringify({ ok: true, results }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+              );
+            }
+            return new Response(
+              JSON.stringify({ ok: true, results: [] }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return new Response("{}", { status: 404 });
+        }) as unknown as typeof globalThis.fetch;
+        const r = await putCmd({
+          cfg,
+          slug: "ryw-budget",
+          input: "---\ntype: concept\ntitle: T\n---\nbody",
+          verifyOptions: { sleep: noopSleep },
+        });
+        expect(r.action).toBe("created");
+        expect(queryCallsAfterMutation).toBeGreaterThanOrEqual(4);
+      } finally {
+        globalThis.fetch = realFetch2;
+      }
+    });
+
+    test("putCmd throws put_not_visible when the verify-read never sees the row", async () => {
+      // Mutation succeeds but the verify-reads ALL return empty — fold_db
+      // is reporting the write as committed without ever making it
+      // queryable. putCmd must refuse to silently report "created", since
+      // the caller would then conclude the data is gone.
+      let mutationFired = false;
+      const realFetch2 = globalThis.fetch;
+      try {
+        globalThis.fetch = (async (input: unknown): Promise<Response> => {
+          const url = typeof input === "string" ? input : String(input);
+          if (url.endsWith("/api/mutation")) {
+            mutationFired = true;
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (url.endsWith("/api/query")) {
+            return new Response(
+              JSON.stringify({ ok: true, results: [] }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return new Response("{}", { status: 404 });
+        }) as unknown as typeof globalThis.fetch;
+        await expect(
+          putCmd({
+            cfg,
+            slug: "ryw-never",
+            input: "---\ntype: concept\ntitle: T\n---\nbody",
+            verifyOptions: { sleep: noopSleep, maxAttempts: 3 },
+          }),
+        ).rejects.toMatchObject({ code: "put_not_visible" });
+        expect(mutationFired).toBe(true);
+      } finally {
+        globalThis.fetch = realFetch2;
+      }
+    });
+
+    test("update path also verifies — row visible AFTER update is the success condition", async () => {
+      // The brief asks for verify-after-write on the create path "and ideally
+      // updateRecord". Pin that: an update fires, then the verify-read sees
+      // the freshly-updated row (with the new title). Without the verify, an
+      // update→get loop could observe the OLD title or "No record" depending
+      // on which side of the propagation window we land — same RYW gap, just
+      // less load-bearing than the create case.
+      let mutationFired = false;
+      const existing = {
+        fields: {
+          slug: "ryw-update",
+          title: "OLD title",
+          body: "old",
+          status: "active",
+          tags: [],
+          created_at: "2026-06-01T00:00:00.000Z",
+          updated_at: "2026-06-01T00:00:00.000Z",
+        },
+        key: { hash: "ryw-update", range: null },
+      };
+      const updated = {
+        fields: {
+          ...existing.fields,
+          title: "NEW title",
+          body: "new",
+          updated_at: "2026-06-05T00:00:00.000Z",
+        },
+        key: { hash: "ryw-update", range: null },
+      };
+      const mutations: Array<Record<string, unknown>> = [];
+      const realFetch2 = globalThis.fetch;
+      try {
+        globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+          const url = typeof input === "string" ? input : String(input);
+          if (url.endsWith("/api/mutation")) {
+            mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+            mutationFired = true;
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (url.endsWith("/api/query")) {
+            // Pre-update: row visible with the OLD fields (drives the
+            // update branch). Post-update: row visible with NEW fields.
+            const body = mutationFired
+              ? { ok: true, results: [updated] }
+              : { ok: true, results: [existing] };
+            return new Response(JSON.stringify(body), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response("{}", { status: 404 });
+        }) as unknown as typeof globalThis.fetch;
+        const r = await putCmd({
+          cfg,
+          slug: "ryw-update",
+          input: "---\ntype: concept\ntitle: NEW title\n---\nnew",
+          verifyOptions: { sleep: noopSleep },
+        });
+        expect(r.action).toBe("updated");
+        expect(mutations[0]!.mutation_type).toBe("update");
+      } finally {
+        globalThis.fetch = realFetch2;
+      }
+    });
   });
 
   test("genuine first put still creates after retry budget (record never existed)", async () => {

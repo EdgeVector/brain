@@ -25,8 +25,10 @@ import {
   ensureStatus,
   findExistingForWrite,
   nowIso,
+  type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
+  verifyRecordVisible,
   type FbrainRecord,
 } from "../record.ts";
 import {
@@ -49,6 +51,10 @@ export type PutOptions = {
   typeOverride?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  // Tunables for the post-write verify-read. Production callers leave this
+  // unset and inherit the full `withReadRetry` budget (5×250 ms). Tests pin
+  // attempt count + replace real sleep so they don't pay backoff.
+  verifyOptions?: ReadRetryOptions;
 };
 
 export type PutResult = {
@@ -101,12 +107,35 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
 
   const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, existing, now);
 
+  const action: "created" | "updated" = existing ? "updated" : "created";
   if (existing) {
     await node.updateRecord({ schemaHash: hash, fields, keyHash: slug });
-    return { type, slug, action: "updated" };
+  } else {
+    await node.createRecord({ schemaHash: hash, fields, keyHash: slug });
   }
-  await node.createRecord({ schemaHash: hash, fields, keyHash: slug });
-  return { type, slug, action: "created" };
+  // Read-your-writes guard. fold_db's `/api/mutation` is not RYW-consistent:
+  // the write returns before the row is queryable, so a tight put→get in the
+  // same warm process (MCP-agent path is the worst case — no bun cold-start
+  // to mask the visibility window) can return "No record" for a row that
+  // did, in fact, just land. Without this, `putCmd` would report
+  // "created"/"updated" before the row is readable; an agent then concludes
+  // its own write is lost. The verify uses the full `withReadRetry` budget
+  // (5×250 ms) because we *expect* the row to exist — same precedent as
+  // `deleteRecord`'s post-write verify. Self-tuning: on a warm node the
+  // first read hits, no backoff spent; only a real propagation lag burns any
+  // of the budget. See `verifyRecordVisible` in record.ts.
+  const visible = await verifyRecordVisible(node, type, hash, slug, opts.verifyOptions);
+  if (visible === null) {
+    throw new FbrainError({
+      code: "put_not_visible",
+      message:
+        `${action === "created" ? "Created" : "Updated"} ${type} "${slug}" but the row was not visible to a follow-up read within the retry budget.`,
+      hint:
+        "fold_db reported the mutation succeeded, but a verify-read kept seeing the row as absent through the full retry budget. " +
+        "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
+    });
+  }
+  return { type, slug, action };
 }
 
 function buildFields(

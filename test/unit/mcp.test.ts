@@ -20,10 +20,61 @@ const realFetch = globalThis.fetch;
 
 type MockResponse = { status: number; body?: unknown };
 
+// See test/unit/put.test.ts `installMock` for the rationale: auto-track
+// create/update mutations and splice the row into a subsequent empty-page
+// `/api/query` so the put-side verify-after-write (`verifyRecordVisible`)
+// sees the row in tests that don't explicitly script the post-write echo.
+type TrackedWrite = {
+  schema: string;
+  key: string;
+  fields: Record<string, unknown>;
+};
+
 function installMock(handler: (url: string, init?: RequestInit) => MockResponse): void {
+  const writes: TrackedWrite[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
     const next = handler(url, init);
+    if (url.endsWith("/api/mutation") && typeof init?.body === "string") {
+      try {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        const kind = body.mutation_type;
+        if (kind === "create" || kind === "update") {
+          const keyVal = body.key_value as Record<string, unknown> | undefined;
+          writes.push({
+            schema: String(body.schema ?? ""),
+            key: String(keyVal?.hash ?? ""),
+            fields: (body.fields_and_values as Record<string, unknown>) ?? {},
+          });
+        }
+      } catch {
+        // Non-JSON body — splice path doesn't apply.
+      }
+    }
+    if (
+      url.endsWith("/api/query") &&
+      next.status === 200 &&
+      typeof init?.body === "string"
+    ) {
+      const handlerResults = (next.body as Record<string, unknown> | undefined)?.results;
+      if (Array.isArray(handlerResults) && handlerResults.length === 0) {
+        try {
+          const qBody = JSON.parse(init.body) as Record<string, unknown>;
+          const schema = String(qBody.schema_name ?? "");
+          const matches = writes
+            .filter((w) => w.schema === schema)
+            .map((w) => ({ fields: w.fields, key: { hash: w.key, range: null } }));
+          if (matches.length > 0) {
+            return new Response(
+              JSON.stringify({ ...(next.body as object), results: matches }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+        } catch {
+          // Non-JSON body — splice path doesn't apply.
+        }
+      }
+    }
     return new Response(JSON.stringify(next.body ?? {}), {
       status: next.status,
       headers: { "Content-Type": "application/json" },
@@ -708,6 +759,44 @@ describe("fbrain_put tool", () => {
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text).toBe("created concept fm-typed");
     expect(mutations).toHaveLength(1);
+  });
+
+  // Read-your-writes regression — task 920a3. The MCP path is the bite-y
+  // case: a `fbrain_put` followed by an immediate `fbrain_get` runs in the
+  // SAME warm process, with no bun cold-start delay to mask fold_db's
+  // mutation→query visibility lag. Pre-fix, the put returned "created"
+  // before the row was queryable and the next-millisecond get returned
+  // "No record". With the verify-after-write wired into putCmd, this loop
+  // must be RYW-consistent: the get sees the same row the put just created.
+  test("put then immediate get sees the row (read-your-writes via MCP)", async () => {
+    // Drive both tools through the auto-stateful `installMock` — its
+    // mutation-tracking + empty-page splice mirrors a warm fold_db: after
+    // the put's create lands, the next /api/query for the same schema
+    // surfaces the row. Without the put-side verify, the put would still
+    // report "created" even on a flaky daemon; the regression test in
+    // test/unit/put.test.ts pins that retry behavior. Here we just pin the
+    // user-visible loop: put → get returns the just-written row.
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        // Body is consumed by the wrapper's splice; no need to capture.
+        void init;
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const putRes = await tools.fbrain_put!({
+      slug: "ryw-mcp",
+      type: "concept",
+      title: "Hello",
+      body: "world",
+    });
+    expect(putRes.isError).toBeFalsy();
+    expect(putRes.content[0]!.text).toBe("created concept ryw-mcp");
+    const getRes = await tools.fbrain_get!({ slug: "ryw-mcp", type: "concept" });
+    expect(getRes.isError).toBeFalsy();
+    expect(getRes.content[0]!.text ?? "").toContain("ryw-mcp");
   });
 });
 
