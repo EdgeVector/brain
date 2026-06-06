@@ -186,9 +186,19 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // user can tell "showing the closest we found" apart from "this nailed it".
   // Server-side `--min-score` (and explicit `--min-score 0`) are unchanged.
   // Score-null is treated as "unmeasurable", not "weak", so we don't annotate.
+  //
+  // `--exact` opts out: fold_db_node's `filter_by_exact_substring` keeps only
+  // hits whose hydrated value contains the query as a case-insensitive
+  // substring (handlers/query.rs), so every surviving hit is a literal text
+  // match by construction. The cosine carried on the wire is the semantic
+  // relatedness of the fragment to the query — a query word buried in a long
+  // doc can sit at cosine 0.15 while still being a real, "this nailed it"
+  // hit — so the threshold is meaningless in this mode. Worse, the note
+  // points at `fbrain ask <query>` for keyword search, which is hybrid
+  // semantic + BM25 + RRF — exactly the surface the user opted out of.
   const WEAK_SCORE_THRESHOLD = 0.35;
   const topScore = trimmed[0]?.score ?? null;
-  if (topScore !== null && topScore < WEAK_SCORE_THRESHOLD) {
+  if (!opts.exact && topScore !== null && topScore < WEAK_SCORE_THRESHOLD) {
     print(
       `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`,
     );
