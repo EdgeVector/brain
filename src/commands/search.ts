@@ -14,7 +14,7 @@ import {
   recordTypeForHash,
 } from "../client.ts";
 import type { Config } from "../config.ts";
-import { formatTable } from "../format.ts";
+import { capitalize, formatTable } from "../format.ts";
 import {
   findBySlugFast,
   schemaHashFor,
@@ -252,9 +252,3 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   );
   for (const line of lines) print(line);
 }
-
-function capitalize(s: string): string {
-  if (s.length === 0) return s;
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
