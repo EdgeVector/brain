@@ -800,6 +800,21 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     console.error(COMMAND_HELP[type]);
     return 1;
   }
+  // `fbrain <type> new <slug>` accepts exactly one positional. Without this
+  // guard, `fbrain task new my-slug --tag a b` silently dropped `b` (parseArgs
+  // consumed `a` as the --tag value, then `b` became positional[1] which the
+  // dispatcher ignored — the record was created with tags=["a"] while the
+  // user thought both landed). Same for unquoted titles: `--title two words`
+  // dropped `words`. Worst kind of silent drop because writes succeeded with
+  // a partial-truth payload. Same papercut shape as PRs #177 / #181 / #112
+  // (put / link / delete extra-positional guards).
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `${type} new takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: `Title, body, and tags are flags, not positionals. Wrap multi-word titles in quotes: \`--title "..."\`. Repeat \`--tag\` per tag: \`--tag a --tag b\`.`,
+    });
+  }
   const cfg = readConfig();
   const body = values.body ?? (await maybeReadStdin());
   const opts: Parameters<typeof recordNew>[0] = {
