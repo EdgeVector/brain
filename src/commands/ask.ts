@@ -29,11 +29,12 @@ import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
+  resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
-import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { isRecordType, type RecordType } from "../schemas.ts";
 import {
   BM25Index,
   computeFingerprint,
@@ -129,11 +130,7 @@ export type AskResult = {
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const { print, printErr } = resolvePrintSinks(opts);
   const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
-  const typeFilter =
-    opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
-  const activeTypes: readonly RecordType[] = typeFilter
-    ? RECORD_TYPES.filter((t) => typeFilter.has(t))
-    : RECORD_TYPES;
+  const { activeTypes } = resolveTypeFilter(opts.types);
 
   // ── Stage 0: query expansion ─────────────────────────────────────────
   let expansions: string[] = [];
@@ -479,10 +476,6 @@ export function parseDocId(id: string): { type: RecordType; slug: string } | nul
   const slug = id.slice(idx + 2);
   if (!isRecordType(type) || slug.length === 0) return null;
   return { type, slug };
-}
-
-function isRecordType(s: string): s is RecordType {
-  return (RECORD_TYPES as readonly string[]).includes(s);
 }
 
 function rankMap(ranked: Array<{ id: string; rank: number }>): Map<string, number> {

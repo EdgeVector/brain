@@ -17,12 +17,13 @@ import type { Config } from "../config.ts";
 import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
 import {
   findBySlugFast,
+  resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
-import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { type RecordType } from "../schemas.ts";
 
 export { dedupeHits };
 
@@ -82,10 +83,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // spike) that share the unified MEMO hash, the server filter alone can't
   // tell e.g. concept from preference — it'll return any record on that
   // hash. The post-filter on resolved hits (below) finishes the job.
-  const typeFilter = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
-  const activeTypes: readonly RecordType[] = typeFilter
-    ? RECORD_TYPES.filter((t) => typeFilter.has(t))
-    : RECORD_TYPES;
+  const { typeFilter, activeTypes } = resolveTypeFilter(opts.types);
   const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
   if (fbrainSchemas.length > 0) {
     clientOpts.schemas = fbrainSchemas;
