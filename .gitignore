@@ -20,6 +20,11 @@ config.json
 # ignore a file literally named "~" deeper in the tree.
 /~/
 
+# fold_db node datadir: `folddb daemon start` (README "quick try" path) defaults
+# its sled DB to a RELATIVE ./data — keep that stray sled tree out of git.
+# Directory-rooted so a future src/data/ or test/data/ stays trackable.
+/data/
+
 # editor
 .vscode/
 .idea/
