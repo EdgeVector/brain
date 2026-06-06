@@ -18,9 +18,10 @@
 // API key -> auto-fallback to BM25 + vector + RRF only (one-line notice).
 
 import {
-  newNodeClient,
+  newReadClientFromCfg,
   recordTypeForHash,
   type NativeIndexHit,
+  type NodeClient,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
 } from "../client.ts";
@@ -166,11 +167,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const queries = [opts.query, ...expansions];
 
   // ── Stage 1: BM25 corpus build (cached) ──────────────────────────────
-  const node = newNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
-  });
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const { docs, liveById } = await loadBm25Documents(node, opts.cfg, activeTypes);
   let index = loadCachedIndex(opts.cfg.userHash);
@@ -411,7 +408,7 @@ export function formatCost(usd: number | null, model: string): string {
 }
 
 async function loadBm25Documents(
-  node: ReturnType<typeof newNodeClient>,
+  node: NodeClient,
   cfg: Config,
   types: readonly RecordType[],
 ): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {

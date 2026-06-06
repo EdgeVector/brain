@@ -9,7 +9,7 @@
 //                     JSON if you want the server to parse it as JSON)
 
 import {
-  newNodeClient,
+  newReadClientFromCfg,
   newSchemaServiceClient,
   FbrainError,
   type RawResponse,
@@ -40,11 +40,7 @@ export async function rawCmd(opts: RawOptions): Promise<number> {
 
   let res: RawResponse;
   if (target === "node") {
-    const node = newNodeClient({
-      baseUrl: opts.cfg.nodeUrl,
-      userHash: opts.cfg.userHash,
-      verbose: opts.verbose,
-    });
+    const node = newReadClientFromCfg(opts.cfg, opts.verbose);
     res = await node.rawCall(method, opts.path, body);
   } else {
     const schema = newSchemaServiceClient(opts.cfg.schemaServiceUrl, opts.verbose);
