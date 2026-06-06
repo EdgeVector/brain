@@ -28,12 +28,18 @@ export type ListOptions = {
   // Must be a positive integer when set — non-positive values are
   // rejected by the CLI before they reach here.
   limit?: number;
+  // Machine-readable mode. Emits a single JSON array document via
+  // `print` (one call) and routes any advisory "K more" hint to
+  // `printErr` so stdout remains pure JSON parseable by `jq`.
+  json?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
+  printErr?: (line: string) => void;
 };
 
 export async function listCmd(opts: ListOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
+  const printErr = opts.printErr ?? ((line: string) => console.error(line));
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
@@ -93,7 +99,11 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // `no records` even when the implicit default cap would have taken
   // effect. (Iron: the cap is a UX guard against floods, not a signal.)
   if (filtered.length === 0) {
-    print("no records");
+    if (opts.json) {
+      print("[]");
+    } else {
+      print("no records");
+    }
     return;
   }
 
@@ -103,6 +113,25 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   const effectiveLimit = opts.limit ?? DEFAULT_LIST_LIMIT;
   const trimmed = filtered.slice(0, effectiveLimit);
   const truncated = filtered.length - trimmed.length;
+
+  if (opts.json) {
+    // One JSON document on stdout — exact same field set the human
+    // table surfaces, plus created_at/updated_at and the optional
+    // design_slug parent link. Body intentionally omitted to keep
+    // list payloads compact; consumers can `fbrain get <slug> --json`
+    // for the full record.
+    const payload = trimmed.map(({ type, record }) => recordSummary(type, record));
+    print(JSON.stringify(payload));
+    // Truncation advisory still useful for `jq` users — they may
+    // wonder why the array is shorter than expected — but it must
+    // never appear on stdout under --json. Route to stderr instead.
+    if (opts.limit === undefined && truncated > 0) {
+      printErr(
+        `note:  ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
+      );
+    }
+    return;
+  }
 
   const lines = formatTable(
     trimmed.map(({ type, record }) => {
@@ -120,4 +149,29 @@ export async function listCmd(opts: ListOptions): Promise<void> {
       `… ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
     );
   }
+}
+
+type RecordSummary = {
+  type: RecordType;
+  slug: string;
+  title: string;
+  status: string;
+  tags: string[];
+  design_slug?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+function recordSummary(type: RecordType, r: FbrainRecord): RecordSummary {
+  const out: RecordSummary = {
+    type,
+    slug: r.slug,
+    title: r.title,
+    status: r.status,
+    tags: r.tags,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+  if (r.design_slug !== undefined) out.design_slug = r.design_slug;
+  return out;
 }

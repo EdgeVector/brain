@@ -1,0 +1,548 @@
+// `--json` machine-readable output mode on the three read commands
+// (`fbrain list`, `fbrain get`, `fbrain search`). Pins:
+//
+//   - Stdout is exactly one parseable JSON document — no human-formatted
+//     table rows, no `note:` lines, no truncation hints.
+//   - The documented field set is present (and matches what the human
+//     surface shows, minus body in `list`).
+//   - Advisory lines (truncation hint on list, weak-match note +
+//     empty-result hint on search) route to stderr via `printErr` so
+//     `jq` pipelines see clean stdout.
+//   - Empty results emit `[]` instead of the human "no records" /
+//     "no matches" sentinel.
+
+import { afterEach, describe, expect, test } from "bun:test";
+
+import { listCmd } from "../../src/commands/list.ts";
+import { getRecord } from "../../src/commands/get.ts";
+import { searchCmd } from "../../src/commands/search.ts";
+import { TEST_HASHES, buildTestCfg } from "../util.ts";
+
+const cfg = buildTestCfg({ userHash: "uh" });
+
+type Fields = Record<string, unknown>;
+
+const realFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+function queryResp(results: unknown[]): Response {
+  return new Response(JSON.stringify({ ok: true, results }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function asRow(slug: string, fields: Fields) {
+  return { fields, key: { hash: slug, range: null } };
+}
+
+function spikeFields(slug: string, over: Fields = {}): Fields {
+  return {
+    slug,
+    title: `T ${slug}`,
+    body: `body of ${slug}`,
+    status: "exploring",
+    tags: [],
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-26T00:00:00Z",
+    ...over,
+  };
+}
+
+function designFields(slug: string, over: Fields = {}): Fields {
+  return {
+    slug,
+    title: `D ${slug}`,
+    body: `body of ${slug}`,
+    status: "draft",
+    tags: [],
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:00:00Z",
+    ...over,
+  };
+}
+
+function taskFields(slug: string, over: Fields = {}): Fields {
+  return {
+    slug,
+    title: `Task ${slug}`,
+    body: `body of ${slug}`,
+    status: "open",
+    tags: [],
+    design_slug: "",
+    created_at: "2026-05-01T00:00:00Z",
+    updated_at: "2026-05-01T00:00:00Z",
+    ...over,
+  };
+}
+
+describe("listCmd --json", () => {
+  test("emits a JSON array on stdout with the documented field set", async () => {
+    const row = spikeFields("alpha", { tags: ["a", "b"] });
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.spike) {
+        return queryResp([asRow("alpha", row)]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    const err: string[] = [];
+    await listCmd({
+      cfg,
+      type: "spike",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+
+    // Exactly one stdout line — the JSON document — and it parses.
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toEqual({
+      type: "spike",
+      slug: "alpha",
+      title: "T alpha",
+      status: "exploring",
+      tags: ["a", "b"],
+      created_at: "2026-05-01T00:00:00Z",
+      updated_at: "2026-05-26T00:00:00Z",
+    });
+    // No advisories triggered (well under DEFAULT_LIST_LIMIT).
+    expect(err).toEqual([]);
+  });
+
+  test("empty result emits `[]`, not 'no records'", async () => {
+    globalThis.fetch = (async () => queryResp([])) as unknown as typeof fetch;
+    const out: string[] = [];
+    const err: string[] = [];
+    await listCmd({
+      cfg,
+      type: "spike",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+    expect(out).toEqual(["[]"]);
+    expect(JSON.parse(out[0]!)).toEqual([]);
+    expect(err).toEqual([]);
+  });
+
+  test("truncation hint routes to stderr, not stdout", async () => {
+    // 25 spike rows, no explicit -n → default cap of 20 trims 5.
+    // Under --json the trimmed array goes to stdout and the "K more"
+    // advisory MUST go to stderr so jq still sees a clean array.
+    const rows = Array.from({ length: 25 }, (_, i) =>
+      spikeFields(`slug-${String(i).padStart(2, "0")}`, {
+        updated_at: `2026-05-${String(1 + i).padStart(2, "0")}T00:00:00Z`,
+      }),
+    );
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.spike) {
+        return queryResp(rows.map((r) => asRow(String(r.slug), r)));
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    const err: string[] = [];
+    await listCmd({
+      cfg,
+      type: "spike",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed).toHaveLength(20);
+    // The advisory is on stderr and NOT polluting the JSON document.
+    expect(err.length).toBe(1);
+    expect(err[0]).toContain("5 more");
+    // Sanity: stdout has no human "more" sentinel.
+    expect(out[0]).not.toContain("more (use");
+  });
+
+  test("design_slug is included for types that carry it", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow("t1", taskFields("t1", { design_slug: "auth" })),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    await listCmd({
+      cfg,
+      type: "task",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: () => {},
+    });
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed[0].design_slug).toBe("auth");
+  });
+});
+
+describe("getRecord --json", () => {
+  test("emits a JSON object on stdout with body included", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.spike) {
+        return queryResp([
+          asRow(
+            "my-spike",
+            spikeFields("my-spike", {
+              title: "Hello",
+              body: "this is the body",
+              tags: ["x", "y"],
+            }),
+          ),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "my-spike",
+      type: "spike",
+      json: true,
+      print: (l) => out.push(l),
+    });
+
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed).toEqual({
+      type: "spike",
+      slug: "my-spike",
+      title: "Hello",
+      status: "exploring",
+      tags: ["x", "y"],
+      created_at: "2026-05-01T00:00:00Z",
+      updated_at: "2026-05-26T00:00:00Z",
+      body: "this is the body",
+    });
+    // No human-formatted lines like `[spike] my-spike` mixed in.
+    expect(out[0]).not.toContain("[spike]");
+    expect(out[0]).not.toContain("title:");
+  });
+
+  test("task with live design link surfaces design_slug without design_missing", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow("child", taskFields("child", { design_slug: "live-design" })),
+        ]);
+      }
+      if (body.schema_name === TEST_HASHES.design) {
+        return queryResp([asRow("live-design", designFields("live-design"))]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "child",
+      type: "task",
+      json: true,
+      print: (l) => out.push(l),
+    });
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed.design_slug).toBe("live-design");
+    expect(parsed.design_missing).toBeUndefined();
+  });
+
+  test("task with dangling design link flags design_missing: true", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow(
+            "orphan",
+            taskFields("orphan", { design_slug: "gone-design" }),
+          ),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "orphan",
+      type: "task",
+      json: true,
+      print: (l) => out.push(l),
+    });
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed.design_slug).toBe("gone-design");
+    expect(parsed.design_missing).toBe(true);
+  }, 30_000);
+
+  test("design carries `children: [{slug, status}]` for its tasks", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.design) {
+        return queryResp([asRow("auth", designFields("auth"))]);
+      }
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow(
+            "wire-oauth",
+            taskFields("wire-oauth", {
+              design_slug: "auth",
+              status: "in_progress",
+              updated_at: "2026-05-02T00:00:00Z",
+            }),
+          ),
+          asRow(
+            "login-ui",
+            taskFields("login-ui", {
+              design_slug: "auth",
+              status: "open",
+              updated_at: "2026-05-03T00:00:00Z",
+            }),
+          ),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const out: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "auth",
+      type: "design",
+      json: true,
+      print: (l) => out.push(l),
+    });
+    const parsed = JSON.parse(out[0]!);
+    // login-ui has the newer updated_at, so it sorts first.
+    expect(parsed.children).toEqual([
+      { slug: "login-ui", status: "open" },
+      { slug: "wire-oauth", status: "in_progress" },
+    ]);
+  });
+});
+
+type MockResponse = { status: number; body?: unknown };
+
+function installSequencedMock(
+  handler: (url: string, init?: RequestInit) => MockResponse,
+): void {
+  globalThis.fetch = (async (
+    input: unknown,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url = typeof input === "string" ? input : String(input);
+    const next = handler(url, init);
+    return new Response(JSON.stringify(next.body ?? {}), {
+      status: next.status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof globalThis.fetch;
+}
+
+function hit(opts: {
+  slug: string;
+  schemaName: string;
+  score?: number;
+  schema_display_name?: string | null;
+}) {
+  return {
+    schema_name: opts.schemaName,
+    schema_display_name: opts.schema_display_name ?? null,
+    field: "body",
+    key_value: { hash: opts.slug, range: null },
+    value: "fragment text",
+    metadata: { score: opts.score ?? 0.5, match_type: "semantic" },
+  };
+}
+
+describe("searchCmd --json", () => {
+  test("emits a JSON array of {slug, score, type, title} hits", async () => {
+    const recordRow = {
+      fields: {
+        slug: "alpha",
+        title: "Alpha design",
+        body: "blueberry octopus",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: "alpha", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "alpha",
+                schemaName: TEST_HASHES.design,
+                schema_display_name: "Design",
+                score: 0.42,
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [recordRow],
+            total_count: 1,
+            returned_count: 1,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const out: string[] = [];
+    const err: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "blueberry",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed).toEqual([
+      { slug: "alpha", score: 0.42, type: "design", title: "Alpha design" },
+    ]);
+    // 0.42 is above the 0.35 weak-match threshold — no advisory.
+    expect(err).toEqual([]);
+    // Sanity: no human table padding in the JSON document.
+    expect(out[0]).not.toContain("0.420");
+    expect(out[0]).not.toContain("Alpha design  ");
+  });
+
+  test("empty result emits `[]` on stdout; hint moves to stderr", async () => {
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: { ok: true, results: [], user_hash: cfg.userHash },
+        };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const out: string[] = [];
+    const err: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "ghost",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+    expect(out).toEqual(["[]"]);
+    expect(JSON.parse(out[0]!)).toEqual([]);
+    // The empty-result hint stays useful for interactive users — pin it
+    // to stderr so it doesn't pollute jq.
+    expect(err.length).toBe(1);
+    expect(err[0]).toContain("fbrain ask <query> --no-llm");
+  });
+
+  test("weak top score routes the `note:` advisory to stderr", async () => {
+    // Score < 0.35 triggers the weak-match note. Under --json that
+    // advisory must NOT contaminate the stdout JSON document.
+    const recordRow = {
+      fields: {
+        slug: "weak",
+        title: "Distant match",
+        body: "",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "weak", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "weak",
+                schemaName: TEST_HASHES.design,
+                schema_display_name: "Design",
+                score: 0.2,
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [recordRow],
+            total_count: 1,
+            returned_count: 1,
+          },
+        };
+      }
+      return { status: 404, body: {} };
+    });
+    const out: string[] = [];
+    const err: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "gibberish",
+      json: true,
+      print: (l) => out.push(l),
+      printErr: (l) => err.push(l),
+    });
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].score).toBe(0.2);
+    expect(parsed[0].type).toBe("design");
+    // Note went to stderr, NOT stdout.
+    expect(err.length).toBe(1);
+    expect(err[0]).toContain("no strong matches");
+    expect(out[0]).not.toContain("note:");
+  });
+});
