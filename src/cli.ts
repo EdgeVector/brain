@@ -168,19 +168,24 @@ search). Empty body is valid as long as the type is set.
 Examples:
   cat note.md | fbrain put my-note --type concept
   echo "---\\ntype: concept\\nslug: concept-idempotency\\ntitle: Idempotency\\n---\\nbody" | fbrain put`,
-  get: `fbrain get <slug> [--type T]
+  get: `fbrain get <slug> [--type T] [--json]
 
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
-  --type    design | task | concept | preference | reference | agent | project | spike`,
-  list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N]
+  --type    design | task | concept | preference | reference | agent | project | spike
+  --json    emit the resolved record as a single JSON object on stdout
+            (parseable by \`jq\`). Errors still print to stderr.`,
+  list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N] [--json]
 
   --type        design | task | concept | preference | reference | agent | project | spike
                 (omit to list across all types)
   --status      filter by status enum
   --tag         filter by tag membership
-  -n, --limit   max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)`,
+  -n, --limit   max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
+  --json        emit a JSON array of record summaries on stdout
+                ({type, slug, title, status, tags, design_slug?, created_at,
+                updated_at}); truncation hint routes to stderr.`,
   status: `fbrain status <slug> [<new-status>] [--type T]
 
 Bare form prints current status. With a new-status, validates against the
@@ -190,7 +195,7 @@ type's status enum, updates updated_at, and writes back.
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
-  search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]...
+  search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
 
 Semantic search across indexed records. Dedupes fragment hits per record
 and skips stale hits (records deleted since indexing). Prints
@@ -202,7 +207,10 @@ and skips stale hits (records deleted since indexing). Prints
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`).
                 One of: design | task | concept | preference | reference |
-                agent | project | spike. Omit to search across all 8 types.`,
+                agent | project | spike. Omit to search across all 8 types.
+  --json        emit a JSON array of \`{slug, score, type, title}\` on stdout
+                (parseable by \`jq\`). Empty result is \`[]\`. Weak-match
+                advisory and empty-result hint route to stderr.`,
   ask: `fbrain ask <query> [-n N | --limit N] [--no-llm] [--explain] [--type T]...
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
@@ -422,7 +430,12 @@ const TASK_OPTIONS = {
   force: { type: "boolean", default: false },
 } as const;
 const PUT_OPTIONS = { type: { type: "string" } } as const;
-const GET_OPTIONS = { type: { type: "string" } } as const;
+const GET_OPTIONS = {
+  type: { type: "string" },
+  // Machine-readable mode: emit the resolved record as a single JSON
+  // object on stdout. Mirrors LIST_OPTIONS / SEARCH_OPTIONS.
+  json: { type: "boolean", default: false },
+} as const;
 const LIST_OPTIONS = {
   type: { type: "string" },
   status: { type: "string" },
@@ -430,6 +443,9 @@ const LIST_OPTIONS = {
   // `--limit` with `-n` short alias — mirrors SEARCH_OPTIONS / ASK_OPTIONS so a
   // user who learned `search --limit N` doesn't hit "Unknown option" on list.
   limit: { type: "string", short: "n" },
+  // Machine-readable mode: emit a JSON array of record summaries on
+  // stdout. Truncation hint moves to stderr so `jq` pipelines stay clean.
+  json: { type: "boolean", default: false },
 } as const;
 const STATUS_OPTIONS = { type: { type: "string" } } as const;
 const SEARCH_OPTIONS = {
@@ -437,6 +453,9 @@ const SEARCH_OPTIONS = {
   exact: { type: "boolean", default: false },
   "min-score": { type: "string" },
   type: { type: "string", multiple: true },
+  // Machine-readable mode: emit a JSON array of `{slug, score, type, title}`
+  // on stdout; weak-match note and empty-result hint move to stderr.
+  json: { type: "boolean", default: false },
 } as const;
 const ASK_OPTIONS = {
   limit: { type: "string", short: "n" },
@@ -1030,6 +1049,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
+  if (values.json) getOpts.json = true;
   await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
   return 0;
 }
@@ -1074,6 +1094,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   if (values.status) lOpts.status = values.status;
   if (values.tag) lOpts.tag = values.tag;
   if (typeof limit === "number" && Number.isFinite(limit)) lOpts.limit = limit;
+  if (values.json) lOpts.json = true;
   await listCmd(lOpts);
   return 0;
 }
@@ -1171,6 +1192,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   if (values.exact) sOpts.exact = true;
   if (minScore !== undefined) sOpts.minScore = minScore;
   if (searchTypes) sOpts.types = searchTypes;
+  if (values.json) sOpts.json = true;
   await searchCmd(sOpts);
   return 0;
 }

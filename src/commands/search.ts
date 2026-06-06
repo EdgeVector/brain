@@ -35,8 +35,13 @@ export type SearchOptions = {
   // Restrict results to these record types. Undefined / empty = all 8 types.
   // Repeatable on the CLI via `--type T` (e.g. `--type design --type task`).
   types?: readonly RecordType[];
+  // Machine-readable mode. Emits a single JSON array document via
+  // `print` (one call); empty-result hint and weak-match advisory
+  // are routed to `printErr` so stdout stays pure JSON.
+  json?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
+  printErr?: (line: string) => void;
 };
 
 export type ResolvedHit = {
@@ -51,6 +56,7 @@ export type ResolvedHit = {
 
 export async function searchCmd(opts: SearchOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
+  const printErr = opts.printErr ?? ((line: string) => console.error(line));
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const clientOpts: ClientSearchOptions = {};
@@ -170,6 +176,15 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const trimmed = opts.limit && opts.limit > 0 ? resolved.slice(0, opts.limit) : resolved;
 
   if (trimmed.length === 0) {
+    if (opts.json) {
+      // Stdout is just `[]` so jq pipelines see a parseable empty
+      // array rather than the "no matches" sentinel.
+      print("[]");
+      printErr(
+        "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query> --no-llm` (BM25 fallback) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
+      );
+      return;
+    }
     print("no matches");
     print(
       "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query> --no-llm` (BM25 fallback) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
@@ -200,11 +215,26 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // semantic + BM25 + RRF — exactly the surface the user opted out of.
   const WEAK_SCORE_THRESHOLD = 0.35;
   const topScore = trimmed[0]?.score ?? null;
-  if (!opts.exact && topScore !== null && topScore < WEAK_SCORE_THRESHOLD) {
-    print(
-      `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`,
-    );
+  const weakMatch =
+    !opts.exact && topScore !== null && topScore < WEAK_SCORE_THRESHOLD;
+  const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`;
+
+  if (opts.json) {
+    // {slug, score, type, title} per hit — type is the canonical
+    // lowercase RecordType (not the capitalized human display name)
+    // so consumers can match against `--type` values verbatim.
+    const payload = trimmed.map((hit) => ({
+      slug: hit.slug,
+      score: hit.score,
+      type: hit.type,
+      title: hit.record.title,
+    }));
+    print(JSON.stringify(payload));
+    if (weakMatch) printErr(weakMatchNote);
+    return;
   }
+
+  if (weakMatch) print(weakMatchNote);
 
   const lines = formatTable(
     trimmed.map((hit) => [

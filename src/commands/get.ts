@@ -19,6 +19,10 @@ export type GetOptions = {
   cfg: Config;
   slug: string;
   type?: RecordType;
+  // Machine-readable mode. Emits a single JSON object via `print` (one
+  // call) covering the same fields the human surface shows plus the
+  // body.
+  json?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -67,7 +71,62 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     );
   }
 
+  if (opts.json) {
+    print(JSON.stringify(recordToJson(found.record, found.type, designMissing, designChildren)));
+    return;
+  }
+
   print(formatRecord(found.record, found.type, designMissing, designChildren));
+}
+
+export type RecordJson = {
+  type: RecordType;
+  slug: string;
+  title: string;
+  status: string;
+  tags: string[];
+  design_slug?: string;
+  // Only set when the type carries a design link and the referenced
+  // design has been deleted since the link was written. Same signal
+  // the human output flags as "(deleted)".
+  design_missing?: boolean;
+  // Only present for type=design — child task summaries for the
+  // reverse-direction parent ↔ child link the human surface renders
+  // on the `tasks:` line.
+  children?: Array<{ slug: string; status: string }>;
+  created_at: string;
+  updated_at: string;
+  body: string;
+};
+
+export function recordToJson(
+  r: FbrainRecord,
+  type: RecordType,
+  designMissing = false,
+  children?: ReadonlyArray<FbrainRecord>,
+): RecordJson {
+  const out: RecordJson = {
+    type,
+    slug: r.slug,
+    title: r.title,
+    status: r.status,
+    tags: r.tags,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    body: r.body,
+  };
+  if (RECORDS[type].hasDesignSlug) {
+    out.design_slug = r.design_slug ?? "";
+    if (designMissing) out.design_missing = true;
+  }
+  if (type === "design" && children !== undefined) {
+    const sorted = [...children].sort((a, b) => {
+      const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
+      return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
+    });
+    out.children = sorted.map((t) => ({ slug: t.slug, status: t.status }));
+  }
+  return out;
 }
 
 export function formatRecord(
