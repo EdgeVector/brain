@@ -251,7 +251,10 @@ describe("client error mapping", () => {
   test("node-down hint leads with `brew services` for the default :9001 daemon", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9001")).toBe(true);
     expect(isDefaultNodeUrl("http://localhost:9001")).toBe(true);
-    const hint = nodeDownHint("http://127.0.0.1:9001");
+    // :9001 is always brew-first, regardless of whether the prebuilt binary
+    // is detected — pin the binary probe to `false` so the assertion holds
+    // even on hosts that don't have `folddb` on PATH.
+    const hint = nodeDownHint("http://127.0.0.1:9001", () => false);
     expect(hint).toContain("brew services start folddb");
     // The from-source path is still mentioned, but only as the secondary
     // contributor note — it must not lead.
@@ -259,12 +262,24 @@ describe("client error mapping", () => {
     expect(hint).not.toContain("compiling Rust");
   });
 
-  test("node-down hint keeps the from-source/compile framing for a non-default node URL", () => {
+  test("node-down hint keeps the from-source/compile framing for a non-default node URL when no prebuilt binary is installed", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9101")).toBe(false);
-    const hint = nodeDownHint("http://127.0.0.1:9101");
+    const hint = nodeDownHint("http://127.0.0.1:9101", () => false);
     expect(hint).toContain("run.sh");
     expect(hint).toContain("compiles Rust");
     expect(hint).not.toContain("brew services");
+  });
+
+  // DX regression: a downloaded user whose `folddb` is on a non-9001 port
+  // (port conflict, two nodes, custom `--node-url` at init) must STILL be
+  // sent to `brew services start folddb` — not asked to clone the fold
+  // monorepo and compile Rust. The prebuilt binary on PATH is the signal.
+  test("node-down hint leads with `brew services` for a non-9001 port when the prebuilt binary is on PATH", () => {
+    expect(isDefaultNodeUrl("http://127.0.0.1:9050")).toBe(false);
+    const hint = nodeDownHint("http://127.0.0.1:9050", () => true);
+    expect(hint).toContain("brew services start folddb");
+    expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
+    expect(hint).not.toContain("compiles Rust");
   });
 
   test("connectionError node hint mentions `brew services` for the default daemon", async () => {
