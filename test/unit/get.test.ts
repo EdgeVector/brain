@@ -14,6 +14,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { getRecord } from "../../src/commands/get.ts";
 import { EMPTY_PAGE_RETRY_ATTEMPTS } from "../../src/record.ts";
+import { FbrainError } from "../../src/client.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
@@ -251,5 +252,92 @@ describe("getRecord — design's child tasks listing", () => {
     await getRecord({ cfg, slug: "loner", type: "task", print: (l) => lines.push(l) });
     expect(lines.join("\n")).toContain("[task] loner");
     expect(taskQueries).toBe(1);
+  });
+});
+
+// Ambiguous-slug contract. Before this fix, `fbrain get <slug>` on a slug that
+// existed under multiple types printed EVERY matching record's full body to
+// stdout AND THEN errored — contradictory output that broke `r=$(fbrain get
+// foo)` scripts (two record bodies on stdout, exit 1). Now `get` defers to the
+// same single clean `ambiguous_slug` throw `status` and `delete` already emit:
+// nothing on stdout, the error on stderr, exit 1.
+describe("getRecord — ambiguous slug", () => {
+  test("ambiguous slug throws ambiguous_slug AND writes nothing via print", async () => {
+    // Same slug under TWO schemas (task + concept) — the dogfood evidence
+    // case. Pre-fix: print fired twice with full record bodies before the
+    // throw. Post-fix: print MUST NOT fire — stdout stays empty.
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([asRow("t1", taskFields("t1", { title: "first task" }))]);
+      }
+      if (body.schema_name === TEST_HASHES.concept) {
+        return queryResp([
+          asRow("t1", {
+            slug: "t1",
+            title: "T",
+            body: "",
+            status: "draft",
+            tags: [],
+            created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-01T00:00:00Z",
+          }),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+    const lines: string[] = [];
+    let err: unknown;
+    try {
+      await getRecord({ cfg, slug: "t1", print: (l) => lines.push(l) });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(FbrainError);
+    expect((err as FbrainError).code).toBe("ambiguous_slug");
+    expect((err as FbrainError).message).toContain(
+      'Slug "t1" exists in multiple schemas',
+    );
+    // The bug: stdout (here, print) emitted both record bodies before the
+    // throw. The fix's whole point — assert zero writes.
+    expect(lines).toEqual([]);
+  }, 30_000);
+
+  test("--type disambiguates: prints the one matching record, no throw", async () => {
+    // No regression on the documented escape hatch. `fbrain get t1 --type task`
+    // must still resolve cleanly and print exactly the task record.
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([asRow("t1", taskFields("t1", { title: "first task" }))]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+    const lines: string[] = [];
+    await getRecord({ cfg, slug: "t1", type: "task", print: (l) => lines.push(l) });
+    const out = lines.join("\n");
+    expect(out).toContain("[task] t1");
+    expect(out).toContain("title:      first task");
+  });
+
+  test("unique slug across all schemas: prints the one record, no throw", async () => {
+    // No regression on the common path: a slug present in exactly one schema
+    // resolves cleanly under untyped `get`.
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([asRow("unique", taskFields("unique"))]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+    const lines: string[] = [];
+    await getRecord({ cfg, slug: "unique", print: (l) => lines.push(l) });
+    expect(lines.join("\n")).toContain("[task] unique");
   });
 });

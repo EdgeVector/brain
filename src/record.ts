@@ -444,9 +444,6 @@ export interface ResolveBySlugOpts {
     typed?: (t: RecordType, slug: string) => string;
     untyped?: (slug: string) => string;
   };
-  // Side-effect that runs with the matches just before an ambiguous_slug
-  // throw — used by `fbrain get` to print each match before erroring.
-  onAmbiguous?: (matches: ResolvedRecord[]) => void;
   // Forwarded to the per-type lookup loop so tests can mock sleep / shrink
   // the budget without paying the real backoff schedule. Production callers
   // leave it unset and inherit the smoketest-tuned defaults.
@@ -507,7 +504,6 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   }
 
   if (matches.length > 1) {
-    opts.onAmbiguous?.(matches);
     const matchedTypes = matches.map((m) => m.type).join(", ");
     throw new FbrainError({
       code: "ambiguous_slug",

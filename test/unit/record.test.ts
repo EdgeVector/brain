@@ -15,7 +15,6 @@ import {
   TOMBSTONE_TAG,
   withReadRetry,
   type FbrainRecord,
-  type ResolvedRecord,
 } from "../../src/record.ts";
 import { FbrainError, type NodeClient, type QueryResponse } from "../../src/client.ts";
 import { RECORD_TYPES, type RecordType } from "../../src/schemas.ts";
@@ -540,7 +539,7 @@ describe("findBySlugFast (read-context fast-miss for dangling-ref validators)", 
 // resolveBySlug consolidates the slug-resolution sweep used by `fbrain get`,
 // `status`, and `delete`. These tests pin the contract — typed/untyped
 // not-found wording, ambiguous error, raw mode tombstone drop, filter
-// callback, onAmbiguous side-effect.
+// callback.
 describe("resolveBySlug", () => {
   type Row = { fields: Record<string, unknown> };
   // Each entry maps a schemaHash → list of rows the mock node returns for
@@ -657,25 +656,17 @@ describe("resolveBySlug", () => {
     });
   });
 
-  test("ambiguous slug across two types throws ambiguous_slug and runs onAmbiguous first", async () => {
+  test("ambiguous slug across two types throws ambiguous_slug naming both", async () => {
     const node = mockNode({
       designhash: [row("dual")],
       taskhash: [row("dual", { status: "open", design_slug: "" })],
     });
-    const seen: ResolvedRecord[] = [];
     await expect(
-      resolveBySlug({
-        node,
-        cfg,
-        slug: "dual",
-        onAmbiguous: (matches) => {
-          seen.push(...matches);
-        },
-      }),
+      resolveBySlug({ node, cfg, slug: "dual" }),
     ).rejects.toMatchObject({
       code: "ambiguous_slug",
+      message: 'Slug "dual" exists in multiple schemas (design, task). Specify a `type`.',
     });
-    expect(seen.map((m) => m.type).sort()).toEqual(["design", "task"]);
   });
 
   test(
@@ -762,21 +753,15 @@ describe("resolveBySlug", () => {
           return { status: 200, headers: new Headers(), body: "", json: null };
         },
       };
-      const seen: ResolvedRecord[] = [];
       await expect(
-        resolveBySlug({
-          node,
-          cfg,
-          slug: "alpha",
-          onAmbiguous: (matches) => {
-            seen.push(...matches);
-          },
-        }),
-      ).rejects.toMatchObject({ code: "ambiguous_slug" });
+        resolveBySlug({ node, cfg, slug: "alpha" }),
+      ).rejects.toMatchObject({
+        code: "ambiguous_slug",
+        message: 'Slug "alpha" exists in multiple schemas (design, task). Specify a `type`.',
+      });
       // Confirms the task lookup retried past the flake instead of giving
       // up after the first empty slice.
       expect(taskQueryCalls).toBeGreaterThanOrEqual(2);
-      expect(seen.map((m) => m.type).sort()).toEqual(["design", "task"]);
     },
     10_000,
   );
