@@ -179,6 +179,25 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     return;
   }
 
+  // Weak-match advisory. Without a confidence signal, a gibberish query that
+  // matches NOTHING still returns the brain ranked by tiny cosine scores —
+  // indistinguishable from a real hit list. Clean-room dogfood on a 3-record
+  // brain (2026-06-06) showed clean separation: real top matches ~0.45–0.59,
+  // pure-noise tops out ~0.24. 0.35 sits in the middle of that gap — well
+  // above the noise band, comfortably below the real-match band. This is
+  // STRICTLY ADDITIVE: we never drop a row, so a real-but-distant match in a
+  // large brain is still shown — we just flag the hit list as weak so the
+  // user can tell "showing the closest we found" apart from "this nailed it".
+  // Server-side `--min-score` (and explicit `--min-score 0`) are unchanged.
+  // Score-null is treated as "unmeasurable", not "weak", so we don't annotate.
+  const WEAK_SCORE_THRESHOLD = 0.35;
+  const topScore = trimmed[0]?.score ?? null;
+  if (topScore !== null && topScore < WEAK_SCORE_THRESHOLD) {
+    print(
+      `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`,
+    );
+  }
+
   const lines = formatTable(
     trimmed.map((hit) => [
       hit.slug,

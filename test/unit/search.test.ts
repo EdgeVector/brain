@@ -760,6 +760,137 @@ describe("searchCmd", () => {
     expect(lines[0]).toContain("0.600");
   });
 
+  test("annotates with a weak-match note when the top score is below the confidence line", async () => {
+    // Without a confidence signal a gibberish query that matches NOTHING
+    // still returns the user's brain ranked by tiny cosine scores —
+    // indistinguishable from a real hit list. Clean-room dogfood (3 records,
+    // 2026-06-06) showed pure noise tops out ~0.24 while real matches sit
+    // ~0.45+, so when the TOP score is below 0.35 we prepend a note that
+    // tells the user the rows are weak. We never drop rows (Option A), so a
+    // real-but-distant match in a large brain is still surfaced; the note
+    // just disambiguates "showing the closest we found" from "this nailed it".
+    const recordRow = {
+      fields: {
+        slug: "ship-it",
+        title: "Ship the thing",
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "ship-it", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "ship-it",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.24 },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow] } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "qwxz pqrlmn vbnghj", print: (l) => lines.push(l) });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^note:\s/);
+    expect(lines[0]).toContain("no strong matches");
+    expect(lines[0]).toContain("qwxz pqrlmn vbnghj");
+    expect(lines[0]).toContain("fbrain ask");
+    // The row itself is still printed; the note is strictly additive.
+    expect(lines[1]).toContain("ship-it");
+    expect(lines[1]).toContain("0.240");
+  });
+
+  test("does NOT annotate when the top score is above the confidence line (no false positive on a real match)", async () => {
+    // Companion: a genuinely good top match must NOT trigger the weak-match
+    // note. Pin a real-match-band score (0.579 from the same dogfood — a
+    // concept hit on "OAuth security tokens") and assert the note is absent
+    // even if lower-ranked rows fall under the threshold. Threshold is
+    // evaluated against the TOP score only.
+    const rows = ["my-first-note", "auth-redesign", "ship-it"].map((slug) => ({
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    }));
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({ slug: "my-first-note", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.579 } }),
+              hit({ slug: "auth-redesign", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.445 } }),
+              hit({ slug: "ship-it", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.102 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "OAuth security tokens", print: (l) => lines.push(l) });
+    // Three rows, NO note.
+    expect(lines).toHaveLength(3);
+    for (const line of lines) {
+      expect(line).not.toMatch(/^note:\s/);
+    }
+    expect(lines[0]).toContain("my-first-note");
+  });
+
+  test("explicit --min-score still filters server-side and the empty-state path is unchanged", async () => {
+    // Sanity check that the weak-note path doesn't displace the existing
+    // explicit `--min-score` contract: the value still rides the wire on
+    // `?min_score=...`, and when the server returns zero rows the existing
+    // "no matches" + reindex hint is what the user sees.
+    let capturedUrl = "";
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        capturedUrl = url;
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const lines: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "qwxz pqrlmn vbnghj",
+      minScore: 0.4,
+      print: (l) => lines.push(l),
+    });
+    expect(capturedUrl).toContain("min_score=0.4");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no matches");
+    expect(lines[1]).toMatch(/^hint:\s/);
+    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+  });
+
   test("omits ?schemas when the config carries no schema hashes", async () => {
     // A pathological empty-config case shouldn't send `schemas=` at all
     // (that would be a no-op on fold, but it pollutes the URL and obscures
