@@ -521,6 +521,14 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   return matches[0]!;
 }
 
+// Single source of truth for slug input normalization. Mirrors `put`'s
+// silent normalization (put.ts: `resolveSlug` calls `.trim()` on both the
+// positional arg and the frontmatter `slug:`), so reads/updates/links keyed
+// on `" foo "` resolve the same record `put` stored under `"foo"`.
+export function normalizeSlug(slug: string): string {
+  return slug.trim();
+}
+
 export function validateSlug(slug: string): void {
   if (slug.length === 0) {
     throw new FbrainError({

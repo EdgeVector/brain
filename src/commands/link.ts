@@ -4,7 +4,13 @@
 import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
-import { findBySlug, findBySlugFast, nowIso, schemaHashFor } from "../record.ts";
+import {
+  findBySlug,
+  findBySlugFast,
+  normalizeSlug,
+  nowIso,
+  schemaHashFor,
+} from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export type LinkOptions = {
@@ -17,18 +23,8 @@ export type LinkOptions = {
 
 export async function linkCmd(opts: LinkOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  // Trim surrounding whitespace on both slugs to mirror `put`'s silent
-  // normalization (put.ts: `resolveSlug` calls `.trim()` on both the
-  // positional arg and the frontmatter `slug:`). Without this, a task
-  // created via `fbrain put " t1 "` is stored under slug "t1" but
-  // `fbrain link " t1 " " d1 "` fails with `not_found` /
-  // `dangling_design_slug` because the lookup compares the untrimmed input
-  // against the trimmed stored slugs — the same asymmetric key-normalization
-  // PR #184 just fixed for `delete`. Trim once at the top and thread the
-  // normalized values through the lookups, the parent-ref write, the update
-  // mutation's keyHash, and the success line.
-  const taskSlug = opts.taskSlug.trim();
-  const designSlug = opts.designSlug.trim();
+  const taskSlug = normalizeSlug(opts.taskSlug);
+  const designSlug = normalizeSlug(opts.designSlug);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
   const taskHash = schemaHashFor("task", opts.cfg);
