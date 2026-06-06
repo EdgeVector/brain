@@ -341,3 +341,82 @@ describe("getRecord — ambiguous slug", () => {
     expect(lines.join("\n")).toContain("[task] unique");
   });
 });
+
+// Key-normalization parity with `put` (and the matching fixes already on
+// `delete` / `link` / `status`). `put`'s slug resolver silently trims, so a
+// record created via `fbrain put " foo "` lands under slug "foo". Pre-fix,
+// `fbrain get " foo "` then failed with `No <type>: foo` because the lookup
+// compared the untrimmed input against the trimmed stored slug — leaving
+// the row unreadable from the CLI on the same input that created it.
+describe("getRecord — slug whitespace trim (parity with put/delete/link/status)", () => {
+  test("`get \" foo \"` resolves the row stored under \"foo\"", async () => {
+    // The row sits under slug "foo" (how put would have written it after
+    // trimming " foo "). The fix is the trim at the call site — without it,
+    // findBySlug compares " foo " strictly against the stored "foo" and
+    // misses. Pin via a typed lookup so the assertion isolates the trim
+    // behavior from the untyped cross-schema sweep.
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([asRow("foo", taskFields("foo", { title: "trimmed" }))]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+    const lines: string[] = [];
+    // Note the surrounding whitespace — what a shell autocomplete or
+    // copy-paste might leave on the slug. `put " foo "` stored slug "foo".
+    await getRecord({
+      cfg,
+      slug: "  foo  ",
+      type: "task",
+      print: (l) => lines.push(l),
+    });
+    const out = lines.join("\n");
+    expect(out).toContain("[task] foo");
+    expect(out).toContain("title:      trimmed");
+  });
+
+  test("untyped sweep also trims (resolver finds the right row across types)", async () => {
+    // Same parity: `put " bar "` (no --type, e.g. from frontmatter) stores
+    // under "bar"; `get " bar "` (no --type) must trim before the cross-type
+    // sweep so the resolver locates the stored row.
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([asRow("bar", taskFields("bar"))]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+    const lines: string[] = [];
+    await getRecord({ cfg, slug: "  bar  ", print: (l) => lines.push(l) });
+    expect(lines.join("\n")).toContain("[task] bar");
+  });
+
+  test("not-found message uses the trimmed slug (consistent display)", async () => {
+    // When the row genuinely doesn't exist, the error should echo the
+    // trimmed form — matches what delete / status / link print, so a user
+    // copying the error string back into another command doesn't carry the
+    // padding forward.
+    globalThis.fetch = (async (_input: unknown, _init?: RequestInit) => {
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+    let err: unknown;
+    try {
+      await getRecord({
+        cfg,
+        slug: "  missing  ",
+        type: "task",
+        print: () => {},
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(FbrainError);
+    expect((err as FbrainError).code).toBe("not_found");
+    expect((err as FbrainError).message).toBe("No task: missing");
+  }, 30_000);
+});

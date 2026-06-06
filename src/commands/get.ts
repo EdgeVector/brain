@@ -29,12 +29,22 @@ export type GetOptions = {
 
 export async function getRecord(opts: GetOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
+  // Trim surrounding whitespace to mirror `put`'s silent normalization
+  // (put.ts: `resolveSlug` calls `.trim()` on both the positional arg and
+  // the frontmatter `slug:`). Without this, a record created via
+  // `fbrain put " foo "` is stored under slug "foo" but `fbrain get
+  // " foo "` fails with not_found because the lookup compares the
+  // untrimmed input against the trimmed stored slug — an asymmetric
+  // key-normalization that left some records unreadable from the CLI on
+  // the same input that created them. Same fix delete / link / status
+  // already carry.
+  const slug = opts.slug.trim();
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const found = await resolveBySlug({
     node,
     cfg: opts.cfg,
-    slug: opts.slug,
+    slug,
     type: opts.type,
     notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
   });
