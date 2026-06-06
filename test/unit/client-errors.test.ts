@@ -350,6 +350,57 @@ describe("client error mapping", () => {
     expect(hint).toContain("502");
   });
 
+  // DX regression (e2925): runtime commands (search/list/put/get/…) that hit a
+  // reachable-but-500ing node funnel through mapNodeError's generic 5xx
+  // fallthrough — NOT through doctor's nodeHttpErrorHint path. Before this
+  // fix the user saw the dead-end "Check the node log; this looks like a
+  // node-side bug." for an identity decrypt failure that has a known one-line
+  // fix. The identity heuristic now lives in a shared helper used by both
+  // surfaces, so a runtime `fbrain search` hits the same FOLDDB_MASTER_KEY
+  // remedy `fbrain doctor` already surfaces.
+  test("mapNodeError 5xx identity body → hint names FOLDDB_MASTER_KEY (not 'node-side bug')", () => {
+    const err = mapNodeError(
+      500,
+      {
+        error:
+          "Failed to initialize user context: Security error: Encrypted node identity exists on disk, but this binary was built without the os-keychain feature. Set FOLDDB_MASTER_KEY=<64-hex-bytes> to decrypt explicitly.",
+      },
+      "/api/native-index/search",
+    );
+    expect(err.code).toBe("node_http_500");
+    expect(err.hint ?? "").toContain("FOLDDB_MASTER_KEY");
+    // The old dead-end wording must be gone for this body — the actionable
+    // remedy now lives in its place.
+    expect(err.hint ?? "").not.toContain("node-side bug");
+    // And it must not steer the user toward "start the node" — the node
+    // plainly answered.
+    expect(err.hint ?? "").not.toContain("brew services");
+    expect(err.hint ?? "").not.toContain("run.sh");
+  });
+
+  test("mapNodeError 5xx non-identity body → hint points the user at `fbrain doctor`", () => {
+    // A 5xx whose body does not name the identity path falls back to a
+    // generic remedy that still gives the user somewhere to go — `fbrain
+    // doctor` runs the full diagnosis. Before this fix the hint was a
+    // dead-end "Check the node log" with no pointer at the diagnostic.
+    const err = mapNodeError(500, { error: "internal server error: out of memory" }, "/api/query");
+    expect(err.code).toBe("node_http_500");
+    expect(err.hint ?? "").toContain("fbrain doctor");
+    // The generic remedy doesn't accidentally trigger the identity heuristic
+    // — the FOLDDB_MASTER_KEY wording is reserved for actual identity bodies.
+    expect(err.hint ?? "").not.toContain("FOLDDB_MASTER_KEY");
+  });
+
+  // 4xx errors that fall through to the generic mapping should not carry the
+  // 5xx-only `fbrain doctor` pointer — the brief constrains this change to
+  // the 5xx fallthrough, and 4xx bodies typically already carry their own
+  // actionable detail (validation errors, bad input, etc.).
+  test("mapNodeError 4xx generic fallthrough leaves the hint undefined", () => {
+    const err = mapNodeError(418, { error: "teapot" }, "/api/x");
+    expect(err.code).toBe("node_http_418");
+    expect(err.hint).toBeUndefined();
+  });
+
   // DX: a downloaded user has no local schema_service to "start" — an
   // unreachable cloud Lambda is a network/outage issue, not a missing
   // local process.
