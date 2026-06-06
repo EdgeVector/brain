@@ -879,6 +879,24 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     throw err;
   }
   const { values, positionals } = parsed;
+  // `fbrain put <slug>` accepts exactly one positional (type is `--type
+  // <T>`). Without this guard, `fbrain put design storage-decision --type
+  // concept` silently dropped `storage-decision` and created a concept
+  // slugged `design` — wrong-slug data, no warning. Mirror delete's
+  // extra-positional guard. When the first surplus token is a known
+  // record type, the user almost certainly tried `put <type> <slug>`
+  // (the git/kubectl shape), so route them at the right form.
+  if (positionals.length > 1) {
+    const first = positionals[0]!;
+    const hint = isRecordType(first)
+      ? `"${first}" is a record type — did you mean \`fbrain put ${positionals[1]} --type ${first}\`, or \`fbrain ${first} new ${positionals[1]}\`? Slug is the only positional on \`put\` — type is \`--type <T>\`.`
+      : "Run `fbrain put <slug> --type <T>` (slug is the only positional).";
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `put takes one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint,
+    });
+  }
   const cfg = readConfig();
   const input = await maybeReadStdin();
   // Slug is optional at the CLI boundary — putCmd resolves it from the
@@ -889,7 +907,31 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   if (positionals[0]) pOpts.slug = positionals[0];
   if (values.type !== undefined) pOpts.typeOverride = values.type;
   if (verbose) pOpts.verbose = verbose;
-  const result = await putCmd(pOpts);
+  let result;
+  try {
+    result = await putCmd(pOpts);
+  } catch (err) {
+    // `fbrain put design` (single type-name positional, no --type, no
+    // frontmatter `type:`) lands here. Without this re-throw, the user
+    // gets the generic "list of valid types" hint and never notices that
+    // their first arg already IS a valid type — the same gap fixed for
+    // get/status/delete via withTypeAsPositionalHint. The catch is gated
+    // on `missing_type` only, so a real record slugged "design" (whose
+    // frontmatter resolves a type) is unaffected.
+    if (
+      err instanceof FbrainError &&
+      err.code === "missing_type" &&
+      positionals[0] &&
+      isRecordType(positionals[0])
+    ) {
+      throw new FbrainError({
+        code: err.code,
+        message: err.message,
+        hint: `"${positionals[0]}" is a record type — did you mean \`fbrain put <slug> --type ${positionals[0]}\`, or \`fbrain ${positionals[0]} new <slug>\`?`,
+      });
+    }
+    throw err;
+  }
   console.log(`${result.action} ${result.type} ${result.slug}`);
   return 0;
 }
