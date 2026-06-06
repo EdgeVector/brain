@@ -9,6 +9,7 @@ import type { Config } from "../config.ts";
 import {
   findBySlugFast,
   findChildTasksByDesign,
+  NOT_FOUND_TYPED,
   resolveBySlug,
   schemaHashFor,
   type FbrainRecord,
@@ -46,7 +47,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     cfg: opts.cfg,
     slug,
     type: opts.type,
-    notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
+    notFoundMessage: NOT_FOUND_TYPED,
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on
