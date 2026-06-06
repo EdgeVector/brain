@@ -125,7 +125,9 @@ describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudg
     expect(code).toBe(1);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("frontmatter");
-    expect(stderr).toContain("fbrain <type> new foo --title");
+    // No `--type` in args → falls back to the concrete `concept` example
+    // (copy-pasteable; the literal `<type>` placeholder is never emitted).
+    expect(stderr).toContain("fbrain concept new foo --title");
     // And critically, the put-title path must NOT have been swallowed by the
     // generic node-url helper (no node-url leak in the title message).
     expect(stderr).not.toContain("--node-url");
