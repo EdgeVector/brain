@@ -348,6 +348,17 @@ export type AcquireOptions = {
   maxWaitMs?: number;
   /** See {@link OnConsentRequested}. */
   onConsentRequested?: OnConsentRequested;
+  /**
+   * Treat this process as interactive. Default: `process.stdin.isTTY`. The
+   * manual-fallback branch (no `onConsentRequested`) needs a human in another
+   * terminal to run `folddb consent grant`; in a non-interactive shell — the
+   * agent/CI install path — the poll would wait the full consent TTL (~5 min)
+   * for a grant that can never arrive. When this returns false in the manual
+   * fallback, acquireCapability fast-fails with `consent_required_non_interactive`
+   * instead. The `onConsentRequested` branch (inline `init --grant-consent`)
+   * is unaffected — it has already shelled out to grant.
+   */
+  isTty?: () => boolean;
 };
 
 /**
@@ -362,6 +373,28 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   const sleep = opts.sleep ?? defaultSleep;
   const pollIntervalMs = opts.pollIntervalMs ?? CONSENT_POLL_INTERVAL_MS;
   const maxWaitMs = opts.maxWaitMs ?? 5 * 60 * 1000; // matches the node's 5-min consent TTL
+  const isTty = opts.isTty ?? defaultIsTty;
+
+  // Manual-fallback fast-fail: with no `onConsentRequested`, this branch's
+  // only way to land a grant is "human runs `folddb consent grant` in another
+  // terminal" — meaningless in a non-interactive shell (agent / CI / piped
+  // stdin). Without this gate, the agent install path freezes for the full
+  // 5-min consent TTL on first write. Mirrors the same isTty pin
+  // `establishConsentInline` already uses to skip the prompt at init time.
+  // The `onConsentRequested` branch (inline `init --grant-consent` shelling
+  // out to `folddb consent grant <appId> --yes`) is unaffected — that path
+  // can complete the grant without a TTY and the poll is just confirming.
+  if (opts.onConsentRequested === undefined && !isTty()) {
+    throw new FbrainError({
+      code: "consent_required_non_interactive",
+      message:
+        `No consent capability cached for "${appId}" and this is a non-interactive shell, ` +
+        `so fbrain can't prompt for a grant.`,
+      hint:
+        `Run \`folddb consent grant ${appId}\` (or \`fbrain init --grant-consent\`) once, then retry. ` +
+        `Set FBRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
+    });
+  }
 
   const req = await opts.transport.requestConsent(appId, scope);
   if (req.status === 404) {
@@ -505,4 +538,13 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// Mirror `defaultIsTty` in src/commands/init-consent.ts so both consent paths
+// agree on what "interactive" means. fbrain init's prompt branch and the
+// in-write fast-fail branch must trigger on the same shell shape — otherwise
+// you'd get an init that silently skips the prompt followed by a first write
+// that polls (or vice versa).
+function defaultIsTty(): boolean {
+  return Boolean(process.stdin.isTTY);
 }

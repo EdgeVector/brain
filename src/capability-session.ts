@@ -39,6 +39,11 @@ export type CapabilitySessionOptions = {
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
+  /**
+   * Forwarded to acquireCapability so the in-write consent path fast-fails
+   * in a non-interactive shell instead of polling. Default = real TTY check.
+   */
+  isTty?: () => boolean;
 };
 
 export class CapabilitySession {
@@ -116,6 +121,7 @@ export class CapabilitySession {
     if (this.opts.pollIntervalMs !== undefined) acquireOpts.pollIntervalMs = this.opts.pollIntervalMs;
     if (this.opts.sleep !== undefined) acquireOpts.sleep = this.opts.sleep;
     if (this.opts.maxWaitMs !== undefined) acquireOpts.maxWaitMs = this.opts.maxWaitMs;
+    if (this.opts.isTty !== undefined) acquireOpts.isTty = this.opts.isTty;
     const stored = await acquireCapability(acquireOpts);
     this.blob = stored.blob;
   }

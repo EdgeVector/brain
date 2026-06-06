@@ -96,6 +96,13 @@ function mockTransport(script: {
 
 const noSleep = async (): Promise<void> => {};
 
+// Existing tests were written before the non-TTY fast-fail gate. Bun's test
+// runner has no TTY, so the real `process.stdin.isTTY` is undefined and the
+// gate would trip on every manual-fallback acquire. Pin them to interactive
+// so they keep exercising the polling path they always did; the new
+// non-interactive fast-fail tests explicitly pass `isTty: () => false`.
+const interactive = (): boolean => true;
+
 // ---------------------------------------------------------------------------
 // Token decode + JCS integrity
 // ---------------------------------------------------------------------------
@@ -172,6 +179,7 @@ describe("first-run consent acquisition", () => {
       print: (l) => lines.push(l),
       pollIntervalMs: 1,
       sleep: noSleep,
+      isTty: interactive,
     });
 
     expect(stored.blob).toBe(blob);
@@ -219,6 +227,92 @@ describe("first-run consent acquisition", () => {
     expect(lines.some((l) => l.includes("First-run setup"))).toBe(false);
   });
 
+  // Non-TTY fast-fail: the manual-fallback branch of acquireCapability (no
+  // `onConsentRequested`, i.e. the in-write fallback that the agent install
+  // path actually hits) used to print "Waiting for you to grant access" and
+  // poll for the full 5-min consent TTL — but in a non-interactive shell
+  // there's no human to grant in another terminal. The brief's repro is a
+  // first `fbrain put` after `fbrain init` (no --yes) that hung for 70s
+  // before being killed. The gate below makes that case throw immediately,
+  // before any consent traffic, with an actionable hint.
+  test("non-interactive shell + manual fallback: fast-fails before polling", async () => {
+    let requestCalls = 0;
+    let statusCalls = 0;
+    const transport: ConsentTransport = {
+      async requestConsent() {
+        requestCalls++;
+        return { status: 202, body: { request_id: "should-never-be-reached" } };
+      },
+      async consentStatus() {
+        statusCalls++;
+        return { status: 200, body: {} };
+      },
+    };
+
+    const start = Date.now();
+    await expect(
+      acquireCapability({
+        appId: "fbrain",
+        nodeUrl: NODE_URL,
+        store: inMemoryCapabilityStore(),
+        transport,
+        print: () => {},
+        // 5-min default would mask a regression — keep maxWaitMs short so a
+        // future bug that re-enters the poll surfaces as a fast timeout, not
+        // a hung test.
+        pollIntervalMs: 1,
+        sleep: noSleep,
+        maxWaitMs: 50,
+        isTty: () => false,
+      }),
+    ).rejects.toMatchObject({
+      code: "consent_required_non_interactive",
+    });
+    // The throw lands before the poll loop, and (since we fast-fail before
+    // request-consent too) before any /api/apps/* traffic.
+    expect(statusCalls).toBe(0);
+    expect(requestCalls).toBe(0);
+    // And it's truly fast — well under maxWaitMs, let alone the 5-min default.
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
+  // Init --grant-consent path: caller supplies `onConsentRequested` (which
+  // shells out to `folddb consent grant <appId> --yes`), so the poll is just
+  // confirming the grant landed — and it must keep working in a non-TTY
+  // shell (that's the whole point of --grant-consent for scripted installs).
+  // The new isTty gate must NOT trip here.
+  test("non-interactive shell + onConsentRequested: still polls (init --grant-consent path unaffected)", async () => {
+    const blob = await mintTokenBlob();
+    let statusCalls = 0;
+    const transport: ConsentTransport = {
+      async requestConsent() {
+        return { status: 202, body: { request_id: "req-1" } };
+      },
+      async consentStatus() {
+        statusCalls++;
+        return { status: 200, body: { status: "granted", capability: blob } };
+      },
+    };
+
+    const stored = await acquireCapability({
+      appId: "fbrain",
+      nodeUrl: NODE_URL,
+      store: inMemoryCapabilityStore(),
+      transport,
+      print: () => {},
+      pollIntervalMs: 1,
+      sleep: noSleep,
+      isTty: () => false,
+      // The inline grant has already shelled out by the time we get here; the
+      // hook itself is a no-op in this test because all we want to verify is
+      // that the poll is *entered*.
+      onConsentRequested: () => {},
+    });
+
+    expect(statusCalls).toBeGreaterThan(0); // poll WAS entered
+    expect(stored.blob).toBe(blob);
+  });
+
   test("404 unknown app surfaces app_not_registered", async () => {
     await expect(
       acquireCapability({
@@ -227,6 +321,7 @@ describe("first-run consent acquisition", () => {
         transport: mockTransport({ requestConsent: () => ({ status: 404, body: { error: "unknown" } }) }),
         print: () => {},
         sleep: noSleep,
+        isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "app_not_registered" });
   });
@@ -240,6 +335,7 @@ describe("first-run consent acquisition", () => {
         print: () => {},
         pollIntervalMs: 1,
         sleep: noSleep,
+        isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "consent_denied" });
   });
@@ -253,6 +349,7 @@ describe("first-run consent acquisition", () => {
         print: () => {},
         pollIntervalMs: 1,
         sleep: noSleep,
+        isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "consent_expired" });
   });
@@ -267,6 +364,7 @@ describe("first-run consent acquisition", () => {
         pollIntervalMs: 1,
         sleep: noSleep,
         maxWaitMs: 0, // first pending check already past the deadline
+        isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "consent_timeout" });
   });
@@ -293,6 +391,7 @@ describe("first-run consent acquisition", () => {
         print: () => {},
         pollIntervalMs: 1,
         sleep: noSleep,
+        isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "consent_status_app_id_mismatch" });
     // Nothing got persisted — a future ensureCapability won't replay the bad
@@ -322,6 +421,7 @@ describe("first-run consent acquisition", () => {
         print: () => {},
         pollIntervalMs: 1,
         sleep: noSleep,
+        isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "consent_status_bad_capability_integrity" });
     // Same persistence invariant as the app_id-mismatch case: a tampered blob
@@ -386,6 +486,7 @@ describe("CapabilitySession.ensureCapability", () => {
       print: () => {},
       pollIntervalMs: 1,
       sleep: noSleep,
+      isTty: interactive,
     });
     await session.ensureCapability();
     expect(session.current()).toBe(fresh); // corrupt discarded, fresh acquired
@@ -509,6 +610,7 @@ async function sessionWithGrant(blob: string): Promise<{ session: CapabilitySess
     print: () => {},
     pollIntervalMs: 1,
     sleep: noSleep,
+    isTty: interactive,
   });
   return { session, store };
 }
@@ -628,6 +730,7 @@ describe("wrong-node detection", () => {
       print: () => {},
       pollIntervalMs: 1,
       sleep: noSleep,
+      isTty: interactive,
     });
     await session.ensureCapability(); // adopts the cached old token
 
