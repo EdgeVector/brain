@@ -329,6 +329,41 @@ export async function findExistingForWrite(
   return findBySlugWithFastMiss(node, type, schemaHash, slug, false, options);
 }
 
+// Verify-after-write helper. Used by `fbrain put` after `createRecord` /
+// `updateRecord` resolves: read the row back with the FULL withReadRetry
+// budget (5×250 ms) before reporting "created"/"updated" to the caller. The
+// underlying fold_db `/api/mutation` is not read-your-writes consistent —
+// the write returns before the row is queryable — so a tight put→get loop
+// (especially the MCP-agent path, where get fires in the same warm process
+// with no bun cold-start to mask the visibility window) saw the just-
+// written row as "No record". The capped `findBySlugFast` short-circuits
+// on a populated page that lacks the slug (#174's fix for the typo'd-read
+// latency cliff), which is correct for an unknown read but wrong for a
+// verify after our own write — we *expect* the row to exist, so spending
+// the full budget is the right tradeoff. Self-tuning: on a warm node the
+// first read succeeds with no backoff; only when propagation actually lags
+// do we burn any of the budget. Mirrors `deleteRecord`'s
+// `withReadRetry(findBySlugRaw, ...)` — the existing in-repo precedent for
+// "I just wrote it, prove it's visible".
+//
+// Uses `findBySlug` (tombstone-filtered), not `findBySlugRaw`: a successful
+// `put` writes a non-tombstoned row, so a tombstoned read implies either a
+// concurrent delete (rare; surfaces as `put_not_visible`, which is honest)
+// or a serious daemon bug we should not paper over.
+export async function verifyRecordVisible(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+  options?: ReadRetryOptions,
+): Promise<FbrainRecord | null> {
+  return withReadRetry(
+    () => findBySlug(node, type, schemaHash, slug),
+    (r) => r !== null,
+    options,
+  );
+}
+
 // Read-context alias for the same fast-miss helper. The dangling-reference /
 // liveness validators in `new`, `link`, `get`, and `search` previously wrapped
 // `findBySlug` in `withReadRetry(fn, r => r !== null)` to ride out the daemon's
