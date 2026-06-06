@@ -7,7 +7,7 @@
 
 import { parseArgs, type ParseArgsConfig } from "node:util";
 
-import pkg from "../package.json" with { type: "json" };
+import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
 import { readConfig, ConfigMissingError } from "./config.ts";
 import { runInit } from "./commands/init.ts";
@@ -535,7 +535,7 @@ export async function main(argv: Argv): Promise<number> {
   const stripped = argv.slice();
   const verbose = consumeFlag(stripped, "--verbose");
   if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-V")) {
-    console.log(`fbrain ${pkg.version}`);
+    console.log(`fbrain ${getFbrainVersion()}`);
     return 0;
   }
   if (consumeFlag(stripped, "--help") || consumeFlag(stripped, "-h")) {
