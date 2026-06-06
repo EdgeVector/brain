@@ -74,7 +74,12 @@ export type AskOptions = {
   // is server-side schema-scoped, so both rankers see the narrowed slice.
   types?: readonly RecordType[];
   verbose?: Verbose;
+  // Result rows sink (stdout). Default: console.log.
   print?: (line: string) => void;
+  // Advisory `note:` lines sink (stderr). Kept separate from `print` so
+  // `fbrain ask q 2>/dev/null` yields only the parseable result rows.
+  // Default: console.error.
+  printErr?: (line: string) => void;
   // For tests: stub the expansion HTTP call.
   fetchImpl?: typeof fetch;
 };
@@ -118,6 +123,7 @@ export type AskResult = {
 
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const print = opts.print ?? ((line: string) => console.log(line));
+  const printErr = opts.printErr ?? ((line: string) => console.error(line));
   const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
   const typeFilter =
     opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
@@ -135,7 +141,8 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     const key = resolveAnthropicKey();
     if (!key) {
       // Auto-fallback: behave as --no-llm with a single notice line.
-      print(
+      // Advisory → stderr so `fbrain ask q 2>/dev/null` stays parseable.
+      printErr(
         "note: ANTHROPIC_API_KEY not set; running ask without query expansion (BM25+vector+RRF only).",
       );
       expansionStatus = { kind: "no-key" };
@@ -157,8 +164,8 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       } catch (err) {
         const msg = err instanceof ExpansionError ? err.message : String(err);
         // Soft-fail: a flaky expansion shouldn't break ask. Print and continue
-        // with just the original query.
-        print(`note: query expansion failed (${msg}); continuing without expansion.`);
+        // with just the original query. Advisory → stderr.
+        printErr(`note: query expansion failed (${msg}); continuing without expansion.`);
         expansionStatus = { kind: "failed", reason: msg };
       }
     }
@@ -271,7 +278,8 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     // original phrasing alone produced nothing. Always shown, including
     // in --verbose mode — see the task's OUT OF SCOPE note.
     if (qi === 0 && bm25Tokens.length === 0 && vectorRanked.length === 0) {
-      print(
+      // Advisory → stderr so `fbrain ask q 2>/dev/null` stays parseable.
+      printErr(
         "note: query tokenized to zero terms (all stopwords or too short); try more specific words.",
       );
     }

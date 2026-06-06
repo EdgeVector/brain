@@ -804,16 +804,28 @@ describe("searchCmd", () => {
       }
       return { status: 404 };
     });
-    const lines: string[] = [];
-    await searchCmd({ cfg, query: "qwxz pqrlmn vbnghj", print: (l) => lines.push(l) });
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(/^note:\s/);
-    expect(lines[0]).toContain("no strong matches");
-    expect(lines[0]).toContain("qwxz pqrlmn vbnghj");
-    expect(lines[0]).toContain("fbrain ask");
-    // The row itself is still printed; the note is strictly additive.
-    expect(lines[1]).toContain("ship-it");
-    expect(lines[1]).toContain("0.240");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "qwxz pqrlmn vbnghj",
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+    // Stdout must contain ONLY the parseable result row — the advisory
+    // `note:` line goes to stderr so `fbrain search q 2>/dev/null` (or
+    // `| head -1`, or any line-oriented parse) doesn't see it as the
+    // first "result".
+    expect(stdout).toHaveLength(1);
+    expect(stdout[0]).not.toMatch(/^note:\s/);
+    expect(stdout[0]).toContain("ship-it");
+    expect(stdout[0]).toContain("0.240");
+    // Note lands on stderr.
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toMatch(/^note:\s/);
+    expect(stderr[0]).toContain("no strong matches");
+    expect(stderr[0]).toContain("qwxz pqrlmn vbnghj");
+    expect(stderr[0]).toContain("fbrain ask");
   });
 
   test("does NOT annotate when the top score is above the confidence line (no false positive on a real match)", async () => {
@@ -854,14 +866,21 @@ describe("searchCmd", () => {
       }
       return { status: 404 };
     });
-    const lines: string[] = [];
-    await searchCmd({ cfg, query: "OAuth security tokens", print: (l) => lines.push(l) });
-    // Three rows, NO note.
-    expect(lines).toHaveLength(3);
-    for (const line of lines) {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "OAuth security tokens",
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+    // Three rows on stdout, NO note on either sink.
+    expect(stdout).toHaveLength(3);
+    for (const line of stdout) {
       expect(line).not.toMatch(/^note:\s/);
     }
-    expect(lines[0]).toContain("my-first-note");
+    expect(stderr).toHaveLength(0);
+    expect(stdout[0]).toContain("my-first-note");
   });
 
   test("--exact suppresses the weak-match note even when cosine scores fall below the confidence line", async () => {
@@ -922,18 +941,22 @@ describe("searchCmd", () => {
       }
       return { status: 404 };
     });
-    const lines: string[] = [];
+    const stdout: string[] = [];
+    const stderr: string[] = [];
     await searchCmd({
       cfg,
       query: "blueberry",
       exact: true,
-      print: (l) => lines.push(l),
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
     });
     // The row is printed; the weak-match note is suppressed in --exact mode.
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("long-design");
-    expect(lines[0]).toContain("0.150");
-    for (const line of lines) {
+    expect(stdout).toHaveLength(1);
+    expect(stdout[0]).toContain("long-design");
+    expect(stdout[0]).toContain("0.150");
+    // No advisory note on either sink.
+    expect(stderr).toHaveLength(0);
+    for (const line of stdout) {
       expect(line).not.toMatch(/^note:\s/);
       expect(line).not.toContain("no strong matches");
       expect(line).not.toContain("fbrain ask");
