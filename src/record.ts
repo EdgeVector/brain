@@ -375,16 +375,11 @@ export async function verifyRecordVisible(
 // flake), so it is strictly better than the old pattern: same flake recovery,
 // no wasted budget on a real miss, identical behavior on a hit. The `*ForWrite`
 // name reads wrong in a validator, so this alias names the read-context
-// callers — semantics are identical.
-export async function findBySlugFast(
-  node: NodeClient,
-  type: RecordType,
-  schemaHash: string,
-  slug: string,
-  options?: ReadRetryOptions,
-): Promise<FbrainRecord | null> {
-  return findBySlugWithFastMiss(node, type, schemaHash, slug, false, options);
-}
+// callers — semantics are identical, so it's a literal reference to the same
+// function rather than a re-wrap of `findBySlugWithFastMiss` (which used to
+// duplicate the wrapper verbatim and risked the two sides drifting under a
+// future tweak to the args).
+export const findBySlugFast = findExistingForWrite;
 
 // Reverse-direction lookup: live (non-tombstoned) tasks whose `design_slug`
 // matches the given parent. Mirrors `findBySlugWithFastMiss`'s cost discipline
