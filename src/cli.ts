@@ -5,7 +5,7 @@
 // canonical schema hash being targeted — per the Phase 0 spike's
 // debugging guidance.
 
-import { parseArgs } from "node:util";
+import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
 import { FbrainError } from "./client.ts";
@@ -670,6 +670,41 @@ function validateLimitFlag(argv: Argv): void {
   validatePositiveIntFlag(argv, "--limit", "invalid_limit");
 }
 
+// Single funnel for every non-init command's parseArgs. Wraps the call so a
+// muscle-memory `fbrain <cmd> --node-url <URL>` / `--schema-service-url <URL>`
+// (the user re-using the flag they learned at `init`) becomes an actionable
+// nudge instead of parseArgs's bare "Unknown option" — or, worse on commands
+// that take positionals like `get`, its actively-misleading
+// `-- "--node-url"` advice. The node and schema-service are pinned in
+// `~/.fbrain/config.json` at init time and not overridable per-command; the
+// hint points at the right path to change them. `init` itself does NOT go
+// through this helper — it accepts both flags via INIT_OPTIONS and we must
+// not regress that.
+function parseCommandArgs<T extends ParseArgsConfig>(config: T) {
+  try {
+    return parseArgs(config);
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
+    ) {
+      const args = config.args ?? [];
+      if (
+        args.includes("--node-url") ||
+        args.includes("--schema-service-url")
+      ) {
+        throw new FbrainError({
+          code: "node_url_is_init_only",
+          message:
+            "--node-url / --schema-service-url are only accepted by `fbrain init`. The node and schema-service are pinned in ~/.fbrain/config.json at init time.",
+          hint: "To point fbrain at a different node, re-run `fbrain init --node-url <URL> [--schema-service-url <URL>]` (or edit ~/.fbrain/config.json directly).",
+        });
+      }
+    }
+    throw err;
+  }
+}
+
 function printHelpFor(name: string): number {
   if (!isCommand(name)) {
     console.error(`Unknown command: ${name}`);
@@ -789,7 +824,7 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   const rest = args.slice(1);
   // TASK_OPTIONS is DESIGN_OPTIONS + --design; for non-task types parseArgs
   // will reject --design via its strict-unknown-option check.
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args: rest,
     strict: true,
     allowPositionals: true,
@@ -849,7 +884,7 @@ function recoverPutSlug(args: Argv, flag: string): string {
 async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   let parsed;
   try {
-    parsed = parseArgs({
+    parsed = parseCommandArgs({
       args,
       strict: true,
       allowPositionals: true,
@@ -980,7 +1015,7 @@ export async function withTypeAsPositionalHint<T>(
 }
 
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1003,7 +1038,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
   let parsed;
   try {
-    parsed = parseArgs({
+    parsed = parseCommandArgs({
       args,
       strict: true,
       allowPositionals: false,
@@ -1044,7 +1079,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1065,7 +1100,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runLink(args: Argv, verbose: Verbose): Promise<number> {
-  const { positionals } = parseArgs({
+  const { positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1096,7 +1131,7 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1142,7 +1177,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1175,7 +1210,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   validatePositiveIntFlag(args, "--usage-window", "invalid_usage_window");
-  const { values } = parseArgs({
+  const { values } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: false,
@@ -1229,12 +1264,12 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runShare(args: Argv): Promise<number> {
-  parseArgs({ args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS });
+  parseCommandArgs({ args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS });
   return shareCmd();
 }
 
 async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1268,7 +1303,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runMcpCmd(args: Argv): Promise<number> {
-  parseArgs({ args, strict: true, allowPositionals: false, options: EMPTY_OPTIONS });
+  parseCommandArgs({ args, strict: true, allowPositionals: false, options: EMPTY_OPTIONS });
   // Lazy-import so the SDK only loads when the user runs `fbrain mcp`.
   // Keeps CLI startup fast for non-MCP commands.
   const { runMcp } = await import("./mcp/main.ts");
@@ -1283,7 +1318,7 @@ async function runMcpCmd(args: Argv): Promise<number> {
 }
 
 async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
-  const { values } = parseArgs({
+  const { values } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: false,
@@ -1300,7 +1335,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
@@ -1379,7 +1414,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
-  const { positionals } = parseArgs({
+  const { positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
