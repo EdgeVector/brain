@@ -1,6 +1,6 @@
 {
   "name": "fbrain",
-  "version": "0.0.1",
+  "version": "0.8.0",
   "description": "fbrain prototype — CLI brain over fold_db",
   "private": true,
   "type": "module",
