@@ -721,3 +721,136 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
     expect(stderr[0]).toContain("ANTHROPIC_API_KEY not set");
   });
 });
+
+describe("askCmd --json", () => {
+  test("emits a single JSON array of {slug, score, type, title} on stdout", async () => {
+    // Mirrors the `searchCmd --json` regression in cli-json-read.test.ts —
+    // ask is the retrieval sibling of search with the same default column
+    // shape, so its JSON payload must match search's verbatim. Pins:
+    //   - stdout is exactly one parseable JSON document
+    //   - each entry has {slug, score, type, title}; type is canonical
+    //     lowercase RecordType (not the capitalized human display name)
+    //   - no human table padding / `note:` lines leak onto stdout
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: {
+        [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")],
+        [TEST_HASHES.task]: [],
+      },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 }),
+      ],
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(stdout).toHaveLength(1);
+    const parsed = JSON.parse(stdout[0]!);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
+    for (const entry of parsed) {
+      expect(Object.keys(entry).sort()).toEqual(
+        ["score", "slug", "title", "type"],
+      );
+      expect(typeof entry.slug).toBe("string");
+      expect(typeof entry.score).toBe("number");
+      expect(typeof entry.title).toBe("string");
+      // Canonical lowercase RecordType, never the capitalized display.
+      expect(entry.type).toBe(entry.type.toLowerCase());
+    }
+    const d1 = parsed.find((e: { slug: string }) => e.slug === "d1");
+    expect(d1).toBeDefined();
+    expect(d1.type).toBe("design");
+    expect(d1.title).toBe("T-d1");
+    // No human table padding on stdout (fusedScore.toFixed(4) → "0.0328")
+    // — only the raw number lands in JSON.
+    expect(stdout[0]).not.toMatch(/\bDesign\b/);
+  });
+
+  test("empty result emits `[]` on stdout — not the 'no matches' human sentinel", async () => {
+    // Matches search's empty-result discipline (search.ts:183-192). A jq
+    // pipeline must see a parseable empty array, not the string "no matches".
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "ghost",
+      noLlm: true,
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(stdout).toEqual(["[]"]);
+    expect(JSON.parse(stdout[0]!)).toEqual([]);
+    // No stdout contamination from human sentinels.
+    expect(stdout.some((l) => l.includes("no matches"))).toBe(false);
+  });
+
+  test("advisory notes route to stderr — stdout stays pure JSON under --json", async () => {
+    // Cross-stream discipline (PRs #200/#209): every `note:` line on
+    // stderr, so `fbrain ask q --json | jq ...` sees only the array.
+    // The all-stopword path is the easiest advisory to provoke deterministically.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "the and or",
+      noLlm: true,
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    // Stdout: pure JSON, no `note:` lines.
+    expect(stdout).toEqual(["[]"]);
+    expect(stdout.some((l) => l.startsWith("note:"))).toBe(false);
+    // Stderr: the tokenized-to-zero-terms advisory.
+    expect(
+      stderr.some((l) => l.includes("query tokenized to zero terms")),
+    ).toBe(true);
+  });
+
+  test("--json + --explain routes the expansions block to stderr", async () => {
+    // --json + --explain still works — explanations just land on stderr
+    // so stdout stays parseable. Without this routing, `fbrain ask q
+    // --json --explain | jq ...` would dead-end on a leading
+    // "(no expansions — LLM disabled via --no-llm)" line.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "anything",
+      noLlm: true,
+      explain: true,
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    // Stdout: only the JSON document.
+    expect(stdout).toEqual(["[]"]);
+    // Stderr: the --explain `(no expansions ...)` notice.
+    expect(
+      stderr.some((l) => l.includes("LLM disabled via --no-llm")),
+    ).toBe(true);
+  });
+});

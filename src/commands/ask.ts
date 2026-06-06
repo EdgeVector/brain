@@ -73,6 +73,11 @@ export type AskOptions = {
   // BM25 corpus is built only over the requested types and the vector call
   // is server-side schema-scoped, so both rankers see the narrowed slice.
   types?: readonly RecordType[];
+  // Machine-readable mode. Emits a single JSON array document via `print`
+  // (one call); empty-result sentinel becomes `[]`, the `--explain`
+  // expansions block and every advisory `note:` line route to `printErr`
+  // so stdout stays pure JSON — matches `fbrain search --json` discipline.
+  json?: boolean;
   verbose?: Verbose;
   // Result rows sink (stdout). Default: console.log.
   print?: (line: string) => void;
@@ -317,28 +322,47 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }
 
   // ── Stage 5: print ───────────────────────────────────────────────────
+  // In --json mode, stdout MUST be pure JSON: the --explain expansions
+  // block routes to stderr (matches the #200/#209 stdout-discipline
+  // already applied to ask/search `note:` lines). --json + --explain
+  // still works — explanations just land on stderr where jq can't see
+  // them but a human reading stderr can.
+  const explainSink = opts.json ? printErr : print;
   if (opts.explain) {
     // --explain must say something in every expansion path, otherwise an
     // operator running it on the offline path sees output identical to a
     // plain --no-llm run and concludes --explain is broken.
     if (expansionStatus.kind === "failed") {
-      print(`expansion failed: ${expansionStatus.reason}`);
-      print("");
+      explainSink(`expansion failed: ${expansionStatus.reason}`);
+      explainSink("");
     } else if (expansionStatus.kind === "disabled") {
-      print("(no expansions — LLM disabled via --no-llm)");
-      print("");
+      explainSink("(no expansions — LLM disabled via --no-llm)");
+      explainSink("");
     } else if (expansionStatus.kind === "no-key") {
-      print(
+      explainSink(
         "(no expansions — ANTHROPIC_API_KEY not set; running BM25 + vector on original query only)",
       );
-      print("");
+      explainSink("");
     } else if (expansions.length > 0) {
-      print(`expansions:`);
-      for (const e of expansions) print(`  - ${e}`);
-      print("");
+      explainSink(`expansions:`);
+      for (const e of expansions) explainSink(`  - ${e}`);
+      explainSink("");
     }
   }
-  if (resolved.length === 0) {
+  if (opts.json) {
+    // {slug, score, type, title} per hit — type is the canonical lowercase
+    // RecordType (not the capitalized human display name) so consumers
+    // can match against `--type` values verbatim. Same shape as
+    // `fbrain search --json` (search.ts:226-238). Empty result is `[]`
+    // rather than the human "no matches" sentinel.
+    const payload = resolved.map((h) => ({
+      slug: h.slug,
+      score: h.fusedScore,
+      type: h.type,
+      title: h.record.title,
+    }));
+    print(JSON.stringify(payload));
+  } else if (resolved.length === 0) {
     print("no matches");
   } else if (opts.verbose) {
     // Verbose: per-ranker debug columns (bm25=, vec=, +exp[...]).
