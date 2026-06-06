@@ -355,9 +355,12 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     // can match against `--type` values verbatim. Same shape as
     // `fbrain search --json` (search.ts:226-238). Empty result is `[]`
     // rather than the human "no matches" sentinel.
+    //
+    // Score rounded to 6 decimals to match search --json's discipline and
+    // strip RRF's float noise — output-only; sort/rank ran on full precision.
     const payload = resolved.map((h) => ({
       slug: h.slug,
-      score: h.fusedScore,
+      score: Math.round(h.fusedScore * 1e6) / 1e6,
       type: h.type,
       title: h.record.title,
     }));

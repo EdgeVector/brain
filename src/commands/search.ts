@@ -227,9 +227,16 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     // {slug, score, type, title} per hit — type is the canonical
     // lowercase RecordType (not the capitalized human display name)
     // so consumers can match against `--type` values verbatim.
+    //
+    // Score is rounded to 6 decimals before serializing. The native index
+    // ships cosines as f32 and the node promotes back to f64 on the wire,
+    // so a perfect match arrives as 1.0000001192092896 (= f32(1.0)). Left
+    // raw, a consumer filtering on the natural cosine contract `score <=
+    // 1.0` silently drops the single best hit. Rounding is OUTPUT-ONLY —
+    // the sort above ran on the full-precision value. Null stays null.
     const payload = trimmed.map((hit) => ({
       slug: hit.slug,
-      score: hit.score,
+      score: hit.score == null ? null : Math.round(hit.score * 1e6) / 1e6,
       type: hit.type,
       title: hit.record.title,
     }));

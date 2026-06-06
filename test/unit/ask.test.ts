@@ -826,6 +826,49 @@ describe("askCmd --json", () => {
     ).toBe(true);
   });
 
+  test("rounds the score to ≤6 decimals — matches search --json's discipline", async () => {
+    // RRF's fusedScore is bounded < 1 (no >1.0 footgun), but the raw
+    // value carries f64 float noise that pollutes a jq pipeline if left
+    // unrounded. Same 6-decimal rounding as `search --json` for
+    // sibling-command consistency.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: {
+        [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")],
+        [TEST_HASHES.task]: [],
+      },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 }),
+      ],
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    const parsed = JSON.parse(stdout[0]!) as Array<{
+      slug: string;
+      score: number;
+    }>;
+    expect(parsed.length).toBeGreaterThan(0);
+    for (const entry of parsed) {
+      // After rounding to 1e6, the scaled value must be an integer.
+      // (Float exactness: integers up to 2^53 round-trip cleanly.)
+      const scaled = entry.score * 1e6;
+      expect(Number.isFinite(scaled)).toBe(true);
+      expect(scaled).toBeCloseTo(Math.round(scaled), 9);
+      // And no 17-digit float-noise leaks into the serialized document.
+      expect(String(entry.score).length).toBeLessThanOrEqual(10);
+    }
+  });
+
   test("--json + --explain routes the expansions block to stderr", async () => {
     // --json + --explain still works — explanations just land on stderr
     // so stdout stays parseable. Without this routing, `fbrain ask q
