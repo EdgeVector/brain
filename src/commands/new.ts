@@ -15,6 +15,7 @@
 import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
+import { capitalize } from "../format.ts";
 import {
   findBySlugFast,
   findExistingForWrite,
@@ -23,17 +24,6 @@ import {
   validateSlug,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
-
-const HUMAN_NAME: Record<RecordType, string> = {
-  design: "Design",
-  task: "Task",
-  concept: "Concept",
-  preference: "Preference",
-  reference: "Reference",
-  agent: "Agent",
-  project: "Project",
-  spike: "Spike",
-};
 
 export type RecordNewOptions = {
   cfg: Config;
@@ -77,7 +67,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<void> {
     if (existing) {
       throw new FbrainError({
         code: "slug_already_exists",
-        message: `${HUMAN_NAME[opts.type]} with slug "${opts.slug}" already exists.`,
+        message: `${capitalize(opts.type)} with slug "${opts.slug}" already exists.`,
         hint:
           opts.type === "task"
             ? "Use --force to overwrite, or pick a different slug."
