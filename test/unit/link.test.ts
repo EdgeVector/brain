@@ -181,13 +181,15 @@ describe("linkCmd", () => {
   }, 30_000);
 
   // Reversed-args DX: `link <design> <task>` is the most common first-use
-  // mistake. When the slug passed as the task is actually a design, the error
-  // must call that out and print the corrected command, not a bare "No task".
-  test("reversed args (design passed as task) hints at the correct order", async () => {
+  // mistake. When the slug passed as the task is actually a design AND the
+  // 2nd arg is a real task, the error must call that out and print the
+  // corrected command, not a bare "No task".
+  test("reversed args (design passed as task, real task as 2nd arg) hints at the correct swap command", async () => {
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
         const schema = querySchema(init);
-        // No task named "d1"; a design named "d1" exists.
+        // A task named "t1" exists; a design named "d1" exists.
+        if (schema === TASK_HASH) return { status: 200, body: { ok: true, results: [taskRow] } };
         if (schema === DESIGN_HASH) return { status: 200, body: { ok: true, results: [designRow] } };
         return { status: 200, body: { ok: true, results: [] } };
       }
@@ -199,6 +201,92 @@ describe("linkCmd", () => {
       code: "not_found",
       hint: expect.stringContaining("is a design, not a task"),
     });
+    // The swap suggestion must explicitly contain the corrected command.
+    let caught: { hint?: unknown } | undefined;
+    try {
+      await linkCmd({ cfg, taskSlug: "d1", designSlug: "t1", print: () => {} });
+    } catch (e) {
+      caught = e as { hint?: unknown };
+    }
+    expect(typeof caught!.hint).toBe("string");
+    expect(caught!.hint as string).toContain("fbrain link t1 d1");
+  }, 30_000);
+
+  // Regression: when the 1st arg names a design AND the 2nd arg is the
+  // SAME slug, the old hint blindly suggested `fbrain link <slug> <slug>`
+  // — the IDENTICAL failing command. The fix must never print a swap
+  // suggestion that re-runs the failure.
+  test("wrong-type 1st arg with same-slug 2nd arg does not suggest the identical failing command", async () => {
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        // No tasks exist; a design named "d1" exists.
+        if (schema === DESIGN_HASH) return { status: 200, body: { ok: true, results: [designRow] } };
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    let caught: { hint?: unknown; code?: unknown; message?: unknown } | undefined;
+    try {
+      await linkCmd({ cfg, taskSlug: "d1", designSlug: "d1", print: () => {} });
+    } catch (e) {
+      caught = e as { hint?: unknown; code?: unknown; message?: unknown };
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.code).toBe("not_found");
+    expect(caught!.message).toBe("No task: d1");
+    expect(typeof caught!.hint).toBe("string");
+    // Must still identify the wrong-type problem.
+    expect(caught!.hint as string).toContain("is a design, not a task");
+    // Must NOT suggest the identical failing command.
+    expect(caught!.hint as string).not.toContain("fbrain link d1 d1");
+  }, 30_000);
+
+  // Regression: when the 1st arg is a design and the 2nd arg is ALSO a
+  // design (or any non-task), the old hint suggested `link <2nd> <1st>`
+  // which still has no task in the task position and re-fails with
+  // `No task: <2nd>`. The fix must omit the concrete `fbrain link ...`
+  // re-failing command in this case.
+  test("wrong-type 1st arg with a non-task 2nd arg does not print a concrete re-failing fbrain link command", async () => {
+    const otherDesignRow = {
+      fields: {
+        slug: "d-beta",
+        title: "Design beta",
+        body: "body",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+      key: { hash: "d-beta", range: null },
+    };
+    const dAlphaRow = { ...designRow, fields: { ...designRow.fields, slug: "d-alpha" }, key: { hash: "d-alpha", range: null } };
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        // No tasks; two designs.
+        if (schema === DESIGN_HASH) {
+          return { status: 200, body: { ok: true, results: [dAlphaRow, otherDesignRow] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    let caught: { hint?: unknown; code?: unknown } | undefined;
+    try {
+      await linkCmd({ cfg, taskSlug: "d-alpha", designSlug: "d-beta", print: () => {} });
+    } catch (e) {
+      caught = e as { hint?: unknown; code?: unknown };
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.code).toBe("not_found");
+    expect(typeof caught!.hint).toBe("string");
+    // Must still identify the wrong-type problem.
+    expect(caught!.hint as string).toContain("is a design, not a task");
+    // Must NOT print the would-be-re-failing swap command.
+    expect(caught!.hint as string).not.toContain("fbrain link d-beta d-alpha");
+    // And must not echo the original failing command either.
+    expect(caught!.hint as string).not.toContain("fbrain link d-alpha d-beta");
   }, 30_000);
 
   // Regression: `put`'s slug resolver silently trims surrounding whitespace

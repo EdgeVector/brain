@@ -50,9 +50,27 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     // that gives no clue the argument order is wrong. Best-effort single
     // lookup: a flaky page miss just falls through to the generic hint.
     const asDesign = await findBySlug(node, "design", designHash, taskSlug);
-    const hint = asDesign
-      ? `'${taskSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${designSlug} ${taskSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
-      : `Create the task first (\`fbrain task new ${taskSlug}\`) or check the slug with \`fbrain list --type task\` (usage: \`fbrain link <task-slug> <design-slug>\`).`;
+    let hint: string;
+    if (asDesign) {
+      // Only print the swap suggestion when the 2nd arg actually names a
+      // task. Otherwise the "corrected" command echoes the failure: the
+      // same-slug case (`link d1 d1`) suggests the IDENTICAL failing
+      // command, and the two-designs case (`link dA dB`) suggests
+      // `link dB dA` which still has no task in the task position and
+      // re-fails with `No task: dB`. Skip the lookup when both slugs
+      // match — we already know taskSlug isn't a task (it failed
+      // findBySlugFast above). Best-effort: a flaky page miss falls
+      // through to the no-concrete-command variant.
+      const asTask =
+        designSlug === taskSlug
+          ? null
+          : await findBySlug(node, "task", taskHash, designSlug);
+      hint = asTask
+        ? `'${taskSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${designSlug} ${taskSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
+        : `'${taskSlug}' is a design, not a task — \`link\` takes a TASK first. Name a real task (\`fbrain list --type task\`), then the design (usage: \`fbrain link <task-slug> <design-slug>\`).`;
+    } else {
+      hint = `Create the task first (\`fbrain task new ${taskSlug}\`) or check the slug with \`fbrain list --type task\` (usage: \`fbrain link <task-slug> <design-slug>\`).`;
+    }
     throw new FbrainError({
       code: "not_found",
       message: `No task: ${taskSlug}`,
