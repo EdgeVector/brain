@@ -628,3 +628,114 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(1);
   });
 });
+
+// Deterministic ordering when multiple records share an `updated_at`. The
+// node's `/api/query` row order is documented to be unstable
+// (fold_db_node/src/handlers/query.rs `.skip(offset).take(limit)` over an
+// unordered set — see the queryAll comment in src/client.ts), so a sort by
+// `updated_at` alone leaves tied records in whatever order the node served
+// them. With `-n N` truncation that means `fbrain list` can swap WHICH rows
+// it shows across invocations on the same store. Ties are realistic in
+// practice: `fbrain migrate` / `init` seed batches stamp identical
+// timestamps, and `nowIso()` is millisecond-resolution so any two
+// `put` / `status` / `link` calls in the same ms collide.
+describe("listCmd — deterministic ordering on tied updated_at", () => {
+  test("same rows in different input orders produce identical list output", async () => {
+    // 10 spikes, all sharing the same updated_at. Feed them to the
+    // listCmd in ascending and descending input orders (the two
+    // adversarial orderings the node could pick). With a stable sort by
+    // updated_at only, the post-sort output mirrors the input — so the
+    // top-5 slice differs between runs. With a slug tie-breaker it does
+    // not. The test asserts equality between the two runs' outputs.
+    const sharedTs = "2026-05-26T00:00:00Z";
+    const ascending: Fields[] = Array.from({ length: 10 }, (_, i) =>
+      spikeRow(`slug-${String(i).padStart(2, "0")}`, { updated_at: sharedTs }),
+    );
+    const descending = [...ascending].reverse();
+
+    const runOnce = async (rows: Fields[]): Promise<string[]> => {
+      const responses = new Map<string, Array<Fields[]>>([
+        [TEST_HASHES.spike, [rows]],
+      ]);
+      const { restore } = stubFetch(responses);
+      const lines: string[] = [];
+      try {
+        await listCmd({
+          cfg,
+          type: "spike",
+          limit: 5,
+          print: (l) => lines.push(l),
+        });
+      } finally {
+        restore();
+      }
+      return lines;
+    };
+
+    const fromAsc = await runOnce(ascending);
+    const fromDesc = await runOnce(descending);
+    expect(fromAsc.length).toBe(5);
+    expect(fromDesc.length).toBe(5);
+    // The two runs must produce the same ordered output — anything else
+    // means the node's row order is leaking into the user-visible list.
+    expect(fromAsc).toEqual(fromDesc);
+  });
+
+  test("ties on updated_at break by slug ascending", async () => {
+    // Pin the tie-breaker direction so a future change to the sort
+    // (e.g. flipping slug direction) trips the test loudly instead of
+    // silently changing what `fbrain list -n N` shows.
+    const sharedTs = "2026-05-26T00:00:00Z";
+    const rows: Fields[] = [
+      spikeRow("slug-99", { updated_at: sharedTs }),
+      spikeRow("slug-00", { updated_at: sharedTs }),
+      spikeRow("slug-50", { updated_at: sharedTs }),
+    ];
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [rows]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines.length).toBe(3);
+    expect(lines[0]).toContain("slug-00");
+    expect(lines[1]).toContain("slug-50");
+    expect(lines[2]).toContain("slug-99");
+  });
+
+  test("newer updated_at still wins over the tie-breaker", async () => {
+    // Guard against a regression that drops the primary sort and ranks
+    // by slug only. The newer row must still come first regardless of
+    // alphabetical slug order.
+    const rows: Fields[] = [
+      // Alphabetically earlier slug but OLDER — must NOT appear first.
+      spikeRow("aaa-older", { updated_at: "2026-05-01T00:00:00Z" }),
+      spikeRow("zzz-newer", { updated_at: "2026-05-26T00:00:00Z" }),
+    ];
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [rows]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines.length).toBe(2);
+    expect(lines[0]).toContain("zzz-newer");
+    expect(lines[1]).toContain("aaa-older");
+  });
+});
