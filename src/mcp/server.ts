@@ -76,6 +76,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           cfg,
           query: args.query,
           print,
+          // MCP bundles every printed line into one text block — fold
+          // CLI-stderr advisories back into the same sink so agents still
+          // see the weak-match note inline. The CLI uses its own default
+          // (console.error) when no override is passed.
+          printErr: print,
           limit: args.limit,
           exact: args.exact,
           minScore: args.min_score,

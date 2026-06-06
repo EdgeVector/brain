@@ -195,6 +195,7 @@ describe("askCmd expansion failure observability (--explain)", () => {
       process.env.ANTHROPIC_API_KEY = "test-key-not-real";
 
       const printed: string[] = [];
+      const stderr: string[] = [];
       const throwingFetch = (async () => {
         throw new Error("simulated network outage");
       }) as unknown as typeof fetch;
@@ -204,6 +205,7 @@ describe("askCmd expansion failure observability (--explain)", () => {
         query: "anything",
         explain: true,
         print: (line) => printed.push(line),
+        printErr: (line) => stderr.push(line),
         fetchImpl: throwingFetch,
       });
 
@@ -220,11 +222,17 @@ describe("askCmd expansion failure observability (--explain)", () => {
       expect(result.expansion).toBeNull();
       expect(result.expansions).toEqual([]);
 
-      // --explain branch surfaces the reason on its own line. Match a
-      // literal prefix so this doesn't depend on the wrap format.
+      // --explain branch surfaces the reason on its own line (stdout). Match
+      // a literal prefix so this doesn't depend on the wrap format.
       const explainLine = printed.find((l) => l.startsWith("expansion failed:"));
       expect(explainLine).toBeDefined();
       expect(explainLine).toContain("simulated network outage");
+      // The transient `note: query expansion failed (...)` advisory rides
+      // stderr so a script doing `fbrain ask q 2>/dev/null` doesn't see it
+      // interleaved with the result rows.
+      const noteLine = stderr.find((l) => l.startsWith("note: query expansion failed"));
+      expect(noteLine).toBeDefined();
+      expect(noteLine).toContain("simulated network outage");
     },
   );
 
@@ -297,15 +305,32 @@ describe("askCmd expansion failure observability (--explain)", () => {
     delete process.env.ANTHROPIC_API_KEY;
 
     const printed: string[] = [];
+    const stderr: string[] = [];
     const result = await askCmd({
       cfg,
       query: "anything",
       explain: true,
       print: (line) => printed.push(line),
+      printErr: (line) => stderr.push(line),
     });
 
     expect(result.expansionStatus.kind).toBe("no-key");
-    expect(printed.some((l) => l.includes("ANTHROPIC_API_KEY not set"))).toBe(true);
+    // Top-of-run `note:` line is an advisory → stderr.
+    expect(
+      stderr.some(
+        (l) =>
+          l.startsWith("note:") && l.includes("ANTHROPIC_API_KEY not set"),
+      ),
+    ).toBe(true);
+    // --explain summary stays on stdout so `--explain` debug output is
+    // self-contained on its own stream.
+    expect(
+      printed.some(
+        (l) =>
+          l.startsWith("(no expansions") &&
+          l.includes("ANTHROPIC_API_KEY not set"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -407,18 +432,25 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       vectorHits: [],
     });
 
-    const lines: string[] = [];
+    const stdout: string[] = [];
+    const stderr: string[] = [];
     const result = await askCmd({
       cfg,
       query: "the and or",
       noLlm: true,
-      print: (line) => lines.push(line),
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
     });
 
     expect(result.hits.length).toBe(0);
+    // The notice is advisory → stderr, not stdout, so a script doing
+    // `fbrain ask q 2>/dev/null` parses cleanly.
     expect(
-      lines.some((l) => l.includes("query tokenized to zero terms")),
+      stderr.some((l) => l.includes("query tokenized to zero terms")),
     ).toBe(true);
+    expect(
+      stdout.some((l) => l.includes("query tokenized to zero terms")),
+    ).toBe(false);
   });
 
   test("--type design narrows BM25 corpus + vector schemas filter, dropping concept noise", async () => {
@@ -646,5 +678,46 @@ describe("askCmd output column gating (default vs --verbose)", () => {
     const row = lines.find((l) => l.includes("d1") && l.includes("bm25="));
     expect(row).toBeDefined();
     expect(row).toContain("vec=");
+  });
+});
+
+describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
+  test("no-key path: stdout has ONLY parseable result rows; the `note:` advisory rides stderr", async () => {
+    // Regression for the bug the brief calls out: a script doing
+    //   env -u ANTHROPIC_API_KEY fbrain ask 'merges' | head -1
+    // used to grab `note: ANTHROPIC_API_KEY not set; ...` as the first
+    // "result" because the advisory was emitted on the same sink as the
+    // result rows. The fix routes notes through printErr (default
+    // console.error) so stdout stays clean and line-oriented parsers
+    // see only the result table.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")] },
+      vectorHits: [vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 })],
+    });
+    // beforeEach already deletes ANTHROPIC_API_KEY — re-assert here so this
+    // test stays meaningful if the suite-level setup ever changes.
+    delete process.env.ANTHROPIC_API_KEY;
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const result = await askCmd({
+      cfg,
+      query: "octopus",
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(result.expansionStatus.kind).toBe("no-key");
+
+    // Stdout: exactly one result row, no `note:` line interleaved.
+    expect(stdout).toHaveLength(1);
+    expect(stdout[0]).not.toMatch(/^note:\s/);
+    expect(stdout[0]).toContain("d1");
+
+    // Stderr: the no-key advisory.
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toMatch(/^note:\s/);
+    expect(stderr[0]).toContain("ANTHROPIC_API_KEY not set");
   });
 });

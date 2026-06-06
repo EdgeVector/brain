@@ -40,7 +40,11 @@ export type SearchOptions = {
   // are routed to `printErr` so stdout stays pure JSON.
   json?: boolean;
   verbose?: Verbose;
+  // Result rows sink (stdout). Default: console.log.
   print?: (line: string) => void;
+  // Advisory `note:` lines sink (stderr). Kept separate from `print` so
+  // `fbrain search q 2>/dev/null` yields only the parseable result rows.
+  // Default: console.error.
   printErr?: (line: string) => void;
 };
 
@@ -234,7 +238,8 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     return;
   }
 
-  if (weakMatch) print(weakMatchNote);
+  // Advisory → stderr so `fbrain search q 2>/dev/null` stays parseable.
+  if (weakMatch) printErr(weakMatchNote);
 
   const lines = formatTable(
     trimmed.map((hit) => [
