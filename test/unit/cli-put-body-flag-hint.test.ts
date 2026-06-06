@@ -65,6 +65,24 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
     });
   }
 
+  test("`fbrain put foo --type design --body X` threads the user's type into the hint", async () => {
+    // The hint must reflect the `--type <T>` the user actually typed, not a
+    // hardcoded `concept` — otherwise the suggested command contradicts the
+    // intent. Mirrors the `--title` branch's recoverPutType() behavior.
+    const { code, stderr } = await runCli([
+      "put",
+      "foo",
+      "--type",
+      "design",
+      "--body",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain put foo --type design");
+    expect(stderr).not.toContain("--type concept");
+    expect(stderr).not.toContain("Unknown option");
+  });
+
   test("`fbrain put --body X` (no slug) falls back to `<slug>` in the hint", async () => {
     // The slug-recovery scan only looks at args BEFORE the body flag. With
     // no positional, it falls back to the literal `<slug>` placeholder

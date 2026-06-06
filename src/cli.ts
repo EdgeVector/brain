@@ -966,10 +966,15 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
       );
       if (bodyFlag) {
         const slug = recoverPutSlug(args, bodyFlag);
+        // Thread through the user's `--type <T>` (falling back to `concept`)
+        // so the hint stays copy-pasteable — mirrors the `--title` branch
+        // above. Without this, `put x --type design --body "..."` wrongly
+        // suggested `--type concept`, contradicting what the user typed.
+        const type = recoverPutType(args);
         throw new FbrainError({
           code: "unknown_option",
           message: `\`put\` does not accept ${bodyFlag}. The record body comes from stdin (with optional YAML frontmatter).`,
-          hint: `Pipe the body in:  echo "..." | fbrain put ${slug} --type concept   (or:  fbrain put ${slug} --type concept < note.md)`,
+          hint: `Pipe the body in:  echo "..." | fbrain put ${slug} --type ${type}   (or:  fbrain put ${slug} --type ${type} < note.md)`,
         });
       }
     }
