@@ -1,7 +1,15 @@
 # G14 second-user dogfood — playbook
 
-**Status:** ready to execute. Teammate TBD.
-**Gate item:** #6 in [`g0-replacement-readiness-gate.md`](g0-replacement-readiness-gate.md).
+> **🗑️ OBSOLETE (2026-06-06).** This playbook described a dogfood flow that
+> cannot work as written — `userHash` is the *node's* provisioned identity,
+> not a per-install identity, so two fbrain installs pointed at the same
+> already-provisioned node produce **one** `userHash`, not two. The gate
+> item this playbook served ([`g0-replacement-readiness-gate.md`](g0-replacement-readiness-gate.md) #6) has been retired
+> as false-premise. See [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md).
+> File retained for history; do not execute the steps below.
+
+**Status:** ~~ready to execute. Teammate TBD.~~ OBSOLETE — see banner above.
+**Gate item:** ~~#6 in [`g0-replacement-readiness-gate.md`](g0-replacement-readiness-gate.md).~~ Retired.
 **Owner:** Tom Tang (the human onboarding step is not delegable).
 
 ## What the gate requires
