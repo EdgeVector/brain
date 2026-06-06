@@ -82,7 +82,9 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
     // `--title` handler covered by cli-put-title-flag-hint.test.ts.
     const { code, stderr } = await runCli(["put", "foo", "--title", "X"]);
     expect(code).toBe(1);
-    expect(stderr).toContain("fbrain <type> new foo --title");
+    // No `--type` in args → the title hint falls back to the concrete
+    // `concept` example (copy-pasteable, not the literal `<type>`).
+    expect(stderr).toContain("fbrain concept new foo --title");
     expect(stderr).toContain("frontmatter");
     expect(stderr).not.toContain("Unknown option");
     // And it must not mention stdin / body — that's a different papercut.

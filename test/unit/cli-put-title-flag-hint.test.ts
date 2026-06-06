@@ -44,7 +44,7 @@ async function runCli(
 }
 
 describe("fbrain put --title → frontmatter hint", () => {
-  test("`fbrain put foo --title X` exits 1 with a frontmatter + `<type> new foo` hint", async () => {
+  test("`fbrain put foo --title X` exits 1 with a frontmatter + concrete-type hint", async () => {
     const { code, stderr } = await runCli(["put", "foo", "--title", "X"]);
     expect(code).toBe(1);
     // The bare parseArgs error must be replaced — not just appended to.
@@ -54,16 +54,20 @@ describe("fbrain put --title → frontmatter hint", () => {
     // Explains why --title isn't accepted on `put`.
     expect(stderr).toContain("frontmatter");
     expect(stderr).toContain("H1");
-    // Nudges at the right invocation, with the user's slug threaded in.
-    expect(stderr).toContain("fbrain <type> new foo --title");
+    // With no `--type` in args, the hint falls back to a concrete example
+    // (`concept`) so the suggestion is copy-pasteable. The literal `<type>`
+    // placeholder must NEVER appear — a fresh user would copy it verbatim.
+    expect(stderr).toContain("fbrain concept new foo --title");
+    expect(stderr).not.toContain("<type>");
     // Fires before readConfig — the empty-HOME would otherwise produce a
     // config-missing error and shadow the hint.
     expect(stderr).not.toMatch(/config not found/i);
   });
 
-  test("hint also nudges when --type is interleaved before --title", async () => {
-    // `fbrain put my-slug --type concept --title X` — same papercut, the
-    // hint still finds the slug (scans args before `--title`).
+  test("hint threads the user's `--type <T>` into the suggested form", async () => {
+    // `fbrain put my-slug --type concept --title X` — the actual type is
+    // RIGHT THERE in the args; the hint must use it verbatim so the
+    // suggestion is copy-pasteable.
     const { code, stderr } = await runCli([
       "put",
       "my-slug",
@@ -73,19 +77,73 @@ describe("fbrain put --title → frontmatter hint", () => {
       "X",
     ]);
     expect(code).toBe(1);
-    expect(stderr).toContain("fbrain <type> new my-slug --title");
+    expect(stderr).toContain("fbrain concept new my-slug --title");
+    expect(stderr).not.toContain("<type>");
     expect(stderr).not.toContain("Unknown option");
   });
 
-  test("`fbrain put --title X` (no slug) falls back to `<slug>` in the hint", async () => {
+  test("hint threads a non-default `--type <T>` (design) verbatim too", async () => {
+    // Sanity: any of the 8 record types should thread through, not just
+    // the `concept` fallback.
+    const { code, stderr } = await runCli([
+      "put",
+      "my-slug",
+      "--type",
+      "design",
+      "--title",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain design new my-slug --title");
+    expect(stderr).not.toContain("<type>");
+  });
+
+  test("`--type=<T>` (equals form) also threads through to the hint", async () => {
+    // parseArgs accepts `--type=concept` as a synonym for `--type concept`;
+    // the recovery scan must handle both forms or the hint regresses to the
+    // fallback when users use the equals shape.
+    const { code, stderr } = await runCli([
+      "put",
+      "my-slug",
+      "--type=design",
+      "--title",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain design new my-slug --title");
+    expect(stderr).not.toContain("<type>");
+  });
+
+  test("an invalid `--type <T>` falls back to the concrete `concept` example", async () => {
+    // `--type bogus` is not a real record type — the recovery scan would
+    // otherwise emit a garbage suggestion. Fall back to the `concept`
+    // example instead so the hint stays copy-pasteable.
+    const { code, stderr } = await runCli([
+      "put",
+      "my-slug",
+      "--type",
+      "bogus",
+      "--title",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain concept new my-slug --title");
+    expect(stderr).not.toContain("fbrain bogus new");
+    expect(stderr).not.toContain("<type>");
+  });
+
+  test("`fbrain put --title X` (no slug) falls back to `<slug>` and `concept` in the hint", async () => {
     // The slug-recovery scan only looks at args BEFORE `--title`. With no
     // positional, it falls back to the literal `<slug>` placeholder rather
-    // than mis-treating the `--title` VALUE ("X") as a slug.
+    // than mis-treating the `--title` VALUE ("X") as a slug. The type, with
+    // no `--type` in args, falls back to the concrete `concept` example.
     const { code, stderr } = await runCli(["put", "--title", "X"]);
     expect(code).toBe(1);
-    expect(stderr).toContain("fbrain <type> new <slug> --title");
+    expect(stderr).toContain("fbrain concept new <slug> --title");
     // Critically, the title VALUE ("X") must not appear as a slug suggestion.
-    expect(stderr).not.toContain("fbrain <type> new X");
+    expect(stderr).not.toContain("fbrain concept new X");
+    // And the literal `<type>` placeholder must never leak through.
+    expect(stderr).not.toContain("<type>");
     expect(stderr).not.toContain("Unknown option");
   });
 

@@ -907,6 +907,26 @@ function recoverPutSlug(args: Argv, flag: string): string {
   return args.slice(0, idx).find((a) => !a.startsWith("-")) ?? "<slug>";
 }
 
+// Best-effort recovery of `put`'s `--type <T>` value when parseArgs already
+// threw — used by the `--title` recovery hint so the suggested
+// `fbrain <T> new <slug> --title "..."` is copy-pasteable. If the user already
+// typed `--type concept`, thread it through; otherwise fall back to a concrete
+// example (`concept`), mirroring the sibling `--body` hint. Never emit the
+// literal `<type>` placeholder — a fresh user would copy it verbatim.
+function recoverPutType(args: Argv): RecordType {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--type" && i + 1 < args.length) {
+      const v = args[i + 1];
+      if (v && isRecordType(v)) return v;
+    } else if (a?.startsWith("--type=")) {
+      const v = a.slice("--type=".length);
+      if (isRecordType(v)) return v;
+    }
+  }
+  return "concept";
+}
+
 async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   let parsed;
   try {
@@ -929,11 +949,12 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
       // Re-throw with a hint that points at `<type> new` instead.
       if (args.includes("--title")) {
         const slug = recoverPutSlug(args, "--title");
+        const type = recoverPutType(args);
         throw new FbrainError({
           code: "unknown_option",
           message:
             "`put` does not accept --title. The title comes from frontmatter (`title:` between leading `---` lines) or the first `# H1` of the body.",
-          hint: `To set the title via a flag, use \`fbrain <type> new ${slug} --title "..."\` instead.`,
+          hint: `To set the title via a flag, use \`fbrain ${type} new ${slug} --title "..."\` instead.`,
         });
       }
       // Same papercut for `--body` / `--content` / `--text`: a fresh user
