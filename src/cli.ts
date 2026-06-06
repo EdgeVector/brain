@@ -1062,6 +1062,18 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.link);
     return 1;
   }
+  // `fbrain link <task-slug> <design-slug>` accepts exactly two positionals.
+  // Without this check, `fbrain link t1 d1 t2 d2` silently linked only
+  // t1→d1 and dropped the trailing pair, while the user thought both pairs
+  // landed — same silent partial-action shape delete (PR #112) and put
+  // (PR #177) already fixed. Reject loudly before any I/O.
+  if (positionals.length > 2) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `link takes exactly two positionals: <task-slug> <design-slug> (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain link <task-slug> <design-slug>` once per pair; bulk linking is not supported.",
+    });
+  }
   const cfg = readConfig();
   await linkCmd({ cfg, taskSlug, designSlug, verbose });
   return 0;
