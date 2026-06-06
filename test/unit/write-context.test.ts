@@ -131,6 +131,43 @@ describe("newWriteNodeClient — enforcement ON", () => {
   });
 });
 
+describe("newWriteNodeClient — non-interactive consent fast-fail", () => {
+  // End-to-end thread-through test for the non-TTY fast-fail. Without a cached
+  // capability and with `isTty: () => false`, the FIRST mutation should reject
+  // immediately with `consent_required_non_interactive` instead of polling for
+  // 5 minutes against /api/apps/consent-status. Regression pin for the agent /
+  // CI install path (the actual fbrain consumption pattern).
+  test("first mutation rejects with consent_required_non_interactive when isTty returns false", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    const captured: Captured[] = [];
+    captureFetch(captured);
+
+    const { node } = newWriteNodeClient({
+      baseUrl: NODE_URL,
+      userHash: "u",
+      store: inMemoryCapabilityStore(), // empty: no cached capability
+      print: () => {},
+      isTty: () => false,
+      // Belt-and-suspenders: if a regression slipped in and the poll WAS
+      // entered, a tiny maxWaitMs makes it fail as a timeout fast rather
+      // than hanging the test.
+      pollIntervalMs: 1,
+      sleep: async () => {},
+      maxWaitMs: 50,
+    });
+
+    const start = Date.now();
+    await expect(
+      node.createRecord({ schemaHash: "h", fields: { slug: "s" }, keyHash: "s" }),
+    ).rejects.toMatchObject({ code: "consent_required_non_interactive" });
+    // Fast-fail truly fast — well under the 5-min default we're protecting
+    // against, and under the test's own maxWaitMs.
+    expect(Date.now() - start).toBeLessThan(50);
+    // And no consent traffic was generated.
+    expect(captured.some((c) => c.url.includes("/api/apps/"))).toBe(false);
+  });
+});
+
 describe("newWriteNodeClient — enforcement OFF", () => {
   test("sends no capability headers and runs no consent handshake", async () => {
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "false";

@@ -44,6 +44,11 @@ export type WriteNodeClientOptions = {
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
+  /**
+   * Forwarded to the CapabilitySession so the in-write consent path fast-fails
+   * in a non-interactive shell instead of polling. Default = real TTY check.
+   */
+  isTty?: () => boolean;
 };
 
 export type WriteNodeClient = {
@@ -140,6 +145,7 @@ function buildSessionOpts(
   if (opts.pollIntervalMs !== undefined) sessionOpts.pollIntervalMs = opts.pollIntervalMs;
   if (opts.sleep !== undefined) sessionOpts.sleep = opts.sleep;
   if (opts.maxWaitMs !== undefined) sessionOpts.maxWaitMs = opts.maxWaitMs;
+  if (opts.isTty !== undefined) sessionOpts.isTty = opts.isTty;
   return sessionOpts;
 }
 
