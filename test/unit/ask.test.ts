@@ -897,3 +897,63 @@ describe("askCmd --json", () => {
     ).toBe(true);
   });
 });
+
+describe("askCmd query deduplication", () => {
+  test("an expansion identical to the original query is not double-counted in RRF fusion", async () => {
+    // Regression: when the LLM emits an expansion identical to the original
+    // query (or to another expansion — e.g. the model repeats itself when
+    // asked for "exactly 3 phrasings"), the pre-fix per-query loop ran BOTH
+    // through BM25 + vector and pushed IDENTICAL ranked lists into RRF
+    // twice. RRF then summed the same (id, rank=1) contribution twice and
+    // any hit's fused score was inflated by the count of duplicate
+    // phrasings — biasing the top-K toward whichever phrasing the LLM
+    // happened to repeat.
+    //
+    // The fix dedupes queries by exact string before invoking the per-query
+    // rankers, preserving the FIRST occurrence so the original query's
+    // "orig" label survives any expansion that happens to echo it.
+    const cfg = buildTestCfg();
+
+    // One live record on the concept schema; BM25 + vector both put it at
+    // rank 1 for query "foo".
+    const stub = installFetchStub({
+      queries: { [TEST_HASHES.concept]: [noteRow("r1", "concept", "foo bar")] },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.concept, slug: "r1", score: 0.9 }),
+      ],
+    });
+
+    process.env.ANTHROPIC_API_KEY = "test-key-not-real";
+    // Stub LLM to return one expansion equal to the original query.
+    const llmFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "foo" }],
+          usage: { input_tokens: 0, output_tokens: 0 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+    const result = await askCmd({
+      cfg,
+      query: "foo",
+      print: () => {},
+      fetchImpl: llmFetch,
+    });
+
+    // Sanity: the LLM returned exactly the duplicate phrasing.
+    expect(result.expansions).toEqual(["foo"]);
+    expect(result.hits.length).toBe(1);
+
+    // Both BM25 and vector return r1 at rank 1 for "foo". With one
+    // duplicate phrasing the queries list is ["foo", "foo"]. Pre-fix each
+    // query contributed 1/(60+1) from BM25 AND 1/(60+1) from vector, and
+    // RRF summed all four contributions → 4/61 ≈ 0.0656. Post-fix the
+    // duplicate is skipped and only the original's two rankers contribute
+    // → 2/61 ≈ 0.0328.
+    expect(result.hits[0]!.fusedScore).toBeCloseTo(2 / 61, 5);
+    // And no wasted HTTP: the duplicate expansion does NOT trigger a
+    // second vector call. Pre-fix this was 2.
+    expect(stub.searchCalls).toBe(1);
+  });
+});
