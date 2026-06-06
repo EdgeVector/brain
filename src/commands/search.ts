@@ -8,7 +8,7 @@
 // and silently skip stale hits (record deleted since indexing).
 
 import {
-  newNodeClient,
+  newReadClientFromCfg,
   type NativeIndexHit,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
@@ -49,11 +49,7 @@ export type ResolvedHit = {
 
 export async function searchCmd(opts: SearchOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  const node = newNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
-  });
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const clientOpts: ClientSearchOptions = {};
   if (opts.exact) clientOpts.exact = true;

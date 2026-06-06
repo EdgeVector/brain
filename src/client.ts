@@ -7,6 +7,7 @@
 
 import { createHash } from "node:crypto";
 
+import type { Config } from "./config.ts";
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
 
 export type Verbose = (msg: string) => void;
@@ -626,6 +627,23 @@ export function newNodeClient(opts: {
       return { status: res.status, headers: res.headers, body: text, json };
     },
   };
+}
+
+// Thin convenience wrapper mirroring `newWriteClientFromCfg`: every plain
+// read call site (`ask`, `get`, `list`, `search`, `raw`) was spelling out
+// the same `{ baseUrl: cfg.nodeUrl, userHash: cfg.userHash, verbose }`
+// literal verbatim. Collapse that boilerplate so call sites read as "open
+// a read client from this config" in one line. Callers that need to set
+// `capability` (init-consent's null-provider transport) or use a non-cfg
+// `userHash` (init's pre-bootstrap probe) still reach for `newNodeClient`
+// directly.
+export function newReadClientFromCfg(cfg: Config, verbose?: Verbose): NodeClient {
+  const opts: Parameters<typeof newNodeClient>[0] = {
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+  };
+  if (verbose !== undefined) opts.verbose = verbose;
+  return newNodeClient(opts);
 }
 
 // String identity for a QueryRow's record key, used by queryAll to

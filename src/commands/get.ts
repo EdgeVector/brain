@@ -2,7 +2,7 @@
 // If --type is omitted, queries every registered schema. If found in
 // multiple schemas, prints all matches and tells the user to specify --type.
 
-import { newNodeClient, type Verbose } from "../client.ts";
+import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
   findBySlugFast,
@@ -23,11 +23,7 @@ export type GetOptions = {
 
 export async function getRecord(opts: GetOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  const node = newNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
-  });
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const found = await resolveBySlug({
     node,

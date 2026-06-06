@@ -1,6 +1,6 @@
 // `fbrain list [--type T] [--status S] [--tag T] [-n N]` — newest-first list with filters.
 
-import { newNodeClient, type Verbose } from "../client.ts";
+import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { formatTable } from "../format.ts";
 import {
@@ -34,11 +34,7 @@ export type ListOptions = {
 
 export async function listCmd(opts: ListOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
-  const node = newNodeClient({
-    baseUrl: opts.cfg.nodeUrl,
-    userHash: opts.cfg.userHash,
-    verbose: opts.verbose,
-  });
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const sweep = async () => {
