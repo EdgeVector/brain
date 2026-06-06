@@ -529,6 +529,23 @@ export function normalizeSlug(slug: string): string {
   return slug.trim();
 }
 
+// Shared "newest first, then slug ascending" record comparator. Both
+// `fbrain get` (sorting a design's child tasks) and `fbrain list` (sorting
+// the global sweep) need the same updated_at-desc + slug-asc ordering — the
+// `list` sort additionally splits ties by `type` because (type, slug) is
+// globally unique, but the date and final slug comparisons are identical.
+// Standardized on `localeCompare` for the slug tie-break — slugs are
+// kebab-case ASCII, so the result matches a plain `<`/`>` compare for any
+// in-repo input. The function operates on bare records; callers wrapping
+// records in `{type, record}` adapt at the call site (see `listCmd`).
+export function compareByUpdatedThenSlug(
+  a: FbrainRecord,
+  b: FbrainRecord,
+): number {
+  const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
+  return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
+}
+
 export function validateSlug(slug: string): void {
   if (slug.length === 0) {
     throw new FbrainError({
