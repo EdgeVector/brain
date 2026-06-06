@@ -72,9 +72,26 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     return true;
   });
 
-  filtered.sort(
-    (a, b) => Date.parse(b.record.updated_at) - Date.parse(a.record.updated_at),
-  );
+  // Primary: newest updated_at first. Tie-breakers: type then slug, both
+  // ascending — needed because the node's `/api/query` row order is
+  // unstable (see queryAll in ../client.ts), so a tie on updated_at would
+  // otherwise resolve in whatever order the daemon happened to serve the
+  // rows. With `-n N` truncation that lets `fbrain list` swap WHICH rows
+  // it shows across invocations. Ties are realistic: `migrate` / `init`
+  // seed batches stamp identical timestamps, and `nowIso()` is
+  // millisecond-resolution so any two `put` / `status` / `link` calls in
+  // the same ms collide. (type, slug) is globally unique — slugs aren't
+  // unique across types but type+slug is — so the order is fully pinned.
+  filtered.sort((a, b) => {
+    const d = Date.parse(b.record.updated_at) - Date.parse(a.record.updated_at);
+    if (d !== 0) return d;
+    if (a.type !== b.type) return a.type < b.type ? -1 : 1;
+    return a.record.slug < b.record.slug
+      ? -1
+      : a.record.slug > b.record.slug
+        ? 1
+        : 0;
+  });
 
   // Genuinely-empty result wins over the truncation path — print
   // `no records` even when the implicit default cap would have taken
