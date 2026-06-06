@@ -864,6 +864,82 @@ describe("searchCmd", () => {
     expect(lines[0]).toContain("my-first-note");
   });
 
+  test("--exact suppresses the weak-match note even when cosine scores fall below the confidence line", async () => {
+    // Regression: the weak-match note classifies a hit list "no strong matches"
+    // by the TOP cosine score (< WEAK_SCORE_THRESHOLD = 0.35). That heuristic
+    // is meaningful for semantic search — a gibberish query that hits nothing
+    // semantically still gets ranked by tiny cosines. It is meaningless for
+    // `--exact`: the daemon's exact filter (fold_db_node/handlers/query.rs
+    // `filter_by_exact_substring`) is a strict case-insensitive substring keep
+    // applied AFTER the semantic top-50 cut, so every surviving hit is by
+    // definition a literal text match. The cosine carried on the wire is the
+    // semantic relatedness of that fragment to the query, not a confidence
+    // signal about the match — a query word buried in a long doc can land at
+    // cosine 0.15 while still being a real, exact, "this nailed it" hit.
+    //
+    // Pre-fix the search command annotated such hits with
+    //   note: no strong matches for "foo" — showing closest by similarity.
+    //   Try different terms or `fbrain ask <query>` for keyword search.
+    // — flatly contradicting the user (they DID find the literal term) and
+    // recommending the hybrid-semantic `fbrain ask` (the WRONG tool when the
+    // user already opted out of semantic recall via --exact).
+    const recordRow = {
+      fields: {
+        slug: "long-design",
+        title: "An essay on something else",
+        body: "a long body that happens to mention blueberry once near the end",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "long-design", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "long-design",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                value: "a long body that happens to mention blueberry once near the end",
+                // Semantic cosine is below the weak-match threshold even though
+                // the daemon's `filter_by_exact_substring` already certified
+                // the value contains "blueberry".
+                metadata: { score: 0.15, match_type: "semantic" },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow] } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "blueberry",
+      exact: true,
+      print: (l) => lines.push(l),
+    });
+    // The row is printed; the weak-match note is suppressed in --exact mode.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("long-design");
+    expect(lines[0]).toContain("0.150");
+    for (const line of lines) {
+      expect(line).not.toMatch(/^note:\s/);
+      expect(line).not.toContain("no strong matches");
+      expect(line).not.toContain("fbrain ask");
+    }
+  });
+
   test("explicit --min-score still filters server-side and the empty-state path is unchanged", async () => {
     // Sanity check that the weak-note path doesn't displace the existing
     // explicit `--min-score` contract: the value still rides the wire on
