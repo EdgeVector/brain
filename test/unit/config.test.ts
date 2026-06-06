@@ -156,6 +156,27 @@ describe("config", () => {
     }
   });
 
+  test("v1 missing taskSchemaHash → ConfigInvalidError on migration", () => {
+    // Pins the mirror-field validation behavior for the v1 path: both
+    // designSchemaHash AND taskSchemaHash are required to seed schemaHashes.
+    const { dir, path } = tmpPath();
+    try {
+      const broken = {
+        configVersion: 1,
+        nodeUrl: "http://127.0.0.1:9101",
+        schemaServiceUrl: "http://127.0.0.1:9102",
+        userHash: "uh-v1",
+        designSchemaHash: "d".repeat(64),
+      };
+      writeFileSync(path, JSON.stringify(broken));
+      expect(() => readConfig(path)).toThrow(
+        /field "taskSchemaHash" not a non-empty string/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("v3 → v4: __legacy_note__ schemaHash entry is auto-stripped on read", () => {
     // v3 configs registered FbrainKindNote alongside the per-kind canonicals.
     // v4 drops the legacy schema entirely; the entry is silently removed so
