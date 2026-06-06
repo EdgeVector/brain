@@ -175,6 +175,21 @@ export function parseExpansions(raw: string, count: number): string[] {
       // opening quote, and the final `.trim()` left a stray trailing `"` —
       // same shape of corruption as the pre-fix leading-whitespace case.
       .replace(/^\s*["'`]+|["'`]+\s*$/g, "")
+      // Re-run bullet/number strip after the outer quotes come off: a line
+      // like `"1. foo"` or `"- foo"` (LLM wraps a numbered/bulleted list
+      // in outer quotes — system prompt asks for neither but models combine
+      // both) used to leak the `1.`/`-` prefix into the cleaned phrasing.
+      // The leading `"` blocked the prefix-strips up top, and by the time
+      // the quote-strip exposed the bare prefix the strips above had already
+      // run and wouldn't re-fire. That noise flowed verbatim into the vector
+      // embedder as the per-expansion query string and silently degraded
+      // recall — its ranks then leaked into the RRF fused ordering. BM25
+      // absorbed the prefix via its length-< 2 token filter so the bug was
+      // vector-only, the kind of partial regression that's invisible without
+      // a targeted test. Same shape as PR #155 (bare bullet) / PR #166 (bare
+      // number), one quote-layer in.
+      .replace(/^\s*[-*•](?:\s+|$)/, "")
+      .replace(/^\s*\d+[.)](?:\s+|$)/, "")
       .trim();
     if (cleaned.length === 0) continue;
     out.push(cleaned);

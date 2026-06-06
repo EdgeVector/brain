@@ -282,4 +282,62 @@ describe("parseExpansions", () => {
     // inside the quoted content is preserved up to the final `.trim()`.
     expect(parseExpansions(raw, 1)).toEqual(["padded phrasing"]);
   });
+
+  test("bullet/number prefix inside outer quotes is stripped (peel quotes, then re-strip)", () => {
+    // Regression: bullet-strip and number-strip ran BEFORE quote-strip, so a
+    // line like `"1. foo"` or `"- foo"` survived as `1. foo` / `- foo` — the
+    // leading `"` blocked the prefix-strips, and by the time the quote-strip
+    // exposed the bare `1.`/`-`, the prefix-strips had already run and
+    // wouldn't re-fire. That stray prefix flowed verbatim into the vector
+    // embedder as the per-expansion query string and silently degraded
+    // recall for that ranker — its ranks then leaked into the RRF fused
+    // ordering, shifting `fbrain ask`'s top-N for quoted-list-style LLM
+    // outputs. BM25 absorbed the noise via its length-< 2 token filter
+    // (single-char `1`, `-` are dropped) so the bug was vector-only —
+    // exactly the kind of partial regression that's invisible in a unit
+    // suite and only surfaces as "ask got mysteriously worse".
+    //
+    // Realistic trigger: the system prompt asks for "no numbering, no
+    // quotes" but models routinely combine both — they emit a numbered
+    // list inside outer quotes (or a bulleted list inside outer quotes)
+    // when they treat the answer as a structured block:
+    //   "1. user authentication system"
+    //   "2. login flow design"
+    //   "- session management"
+    // Each line pre-fix leaked the `1.`/`2.`/`-` into the cleaned
+    // phrasing. After the fix the inner prefix is stripped once the outer
+    // quotes are peeled, so quoted and unquoted forms converge on the
+    // same content — same contract as PR #155 (bare bullet) / PR #166
+    // (bare number), one layer in.
+    expect(
+      parseExpansions(
+        '"1. first phrasing"\n"2) second phrasing"\n"- third phrasing"\n"* fourth phrasing"\n"• fifth phrasing"',
+        5,
+      ),
+    ).toEqual([
+      "first phrasing",
+      "second phrasing",
+      "third phrasing",
+      "fourth phrasing",
+      "fifth phrasing",
+    ]);
+    // Combined with the leading-whitespace allowance from PR #119: indented
+    // and quoted lines with an inner prefix must also collapse to the bare
+    // content, no leftover `1.`/`-`.
+    expect(parseExpansions('  "1. indented quoted numbered"', 1)).toEqual([
+      "indented quoted numbered",
+    ]);
+    // The closing quote can also be padded with trailing whitespace (PR #138)
+    // — fix must compose with both halves of the existing quote-strip.
+    expect(parseExpansions('"- trailing-padded bulleted"   ', 1)).toEqual([
+      "trailing-padded bulleted",
+    ]);
+    // A quoted line that is JUST a number-bullet `"3."` or bare-bullet `"-"`
+    // collapses to empty after the inner prefix-strip and is skipped —
+    // same shape as PR #155 (bare `-`) / PR #166 (bare `3.`), now applied
+    // through one layer of outer quotes.
+    expect(
+      parseExpansions("real phrasing\n\"-\"\n\"3.\"\nanother phrasing", 5),
+    ).toEqual(["real phrasing", "another phrasing"]);
+  });
 });
