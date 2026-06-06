@@ -8,7 +8,12 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { buildPutInput, createFbrainMcpServer } from "../../src/mcp/server.ts";
+import pkg from "../../package.json" with { type: "json" };
+import {
+  buildPutInput,
+  createFbrainMcpServer,
+  FBRAIN_MCP_VERSION,
+} from "../../src/mcp/server.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -1022,5 +1027,22 @@ describe("createFbrainMcpServer", () => {
       "fbrain_put",
       "fbrain_search",
     ]);
+  });
+});
+
+describe("FBRAIN_MCP_VERSION", () => {
+  // Anti-drift pin: `fbrain --version` (src/cli.ts) reads pkg.version, and
+  // MCP `serverInfo.version` echoes FBRAIN_MCP_VERSION. Before this was
+  // single-sourced, the constant was a hardcoded "0.0.1" literal that sat
+  // unchanged across ~175 merged PRs while package.json was already meant
+  // to be the source of truth. Pin agreement so a future package.json bump
+  // can't leave the MCP surface behind.
+  test("equals package.json version (single-sourced from pkg.version)", () => {
+    expect(FBRAIN_MCP_VERSION).toBe(pkg.version);
+  });
+
+  test("is not the historical 0.0.1 placeholder", () => {
+    // Cheap guard against a future hand-edit that re-pins the literal.
+    expect(FBRAIN_MCP_VERSION).not.toBe("0.0.1");
   });
 });

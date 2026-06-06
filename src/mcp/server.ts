@@ -10,6 +10,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+import pkg from "../../package.json" with { type: "json" };
 import type { Config } from "../config.ts";
 import { searchCmd } from "../commands/search.ts";
 import { getRecord } from "../commands/get.ts";
@@ -22,7 +23,10 @@ import { FbrainError, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
-export const FBRAIN_MCP_VERSION = "0.0.1";
+// Single-sourced from package.json so `fbrain --version` (cli.ts) and the MCP
+// `serverInfo.version` reported here can't drift. Bump the version in
+// package.json — both surfaces follow.
+export const FBRAIN_MCP_VERSION: string = pkg.version;
 
 export type CreateServerOptions = {
   cfg: Config;
