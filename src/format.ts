@@ -67,6 +67,11 @@ export function formatTable(
         parts.push(cell.padEnd(widths[c]!));
       }
     }
-    return parts.join(gap);
+    // Rows whose last kept cell is empty (ragged input, or a sparsely-
+    // populated rightmost column) would otherwise carry a "gap + empty
+    // padding" tail past the join. The documented contract is no
+    // trailing whitespace; trim defensively so it holds for every row,
+    // not just the rows whose last cell happens to be non-empty.
+    return parts.join(gap).trimEnd();
   });
 }

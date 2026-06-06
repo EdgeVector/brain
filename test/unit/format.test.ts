@@ -64,7 +64,33 @@ describe("formatTable", () => {
     // Row 0 keeps its three columns; row 1's missing trailing cell
     // doesn't blow up. Column widths still come from the widest row.
     expect(out[0]).toBe("a   b   c");
-    expect(out[1]!.startsWith("aa  bb")).toBe(true);
+    // Pin the exact string — the previous `startsWith` assertion
+    // tolerated a trailing "  " on row 1 from the missing last cell,
+    // which silently broke the "no trailing whitespace" contract.
+    expect(out[1]).toBe("aa  bb");
+  });
+
+  test("an empty or missing rightmost cell never carries trailing whitespace", () => {
+    // Two flavors of the same shape: (a) a ragged row that's shorter
+    // than the widest, and (b) a row whose last cell is "" while
+    // sibling rows have content. Both used to leave a "gap + padding"
+    // tail on the empty/missing row even though the documented
+    // contract is "never pads the right-most column" — pin both.
+    const ragged = formatTable([
+      ["a", "title"],
+      ["bb"], // last col missing entirely
+    ]);
+    expect(ragged[0]).toBe("a   title");
+    expect(ragged[1]).toBe("bb");
+    for (const line of ragged) expect(line).toBe(line.trimEnd());
+
+    const sparseEmpty = formatTable([
+      ["a", "long-title"],
+      ["bb", ""], // last col present but empty
+    ]);
+    expect(sparseEmpty[0]).toBe("a   long-title");
+    expect(sparseEmpty[1]).toBe("bb");
+    for (const line of sparseEmpty) expect(line).toBe(line.trimEnd());
   });
 
   test("drops columns that are entirely empty across every row", () => {
