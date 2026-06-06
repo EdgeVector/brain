@@ -88,6 +88,55 @@ describe("splitFrontmatter", () => {
     expect(r.frontmatter).toBe("");
     expect(r.body).toBe("the body");
   });
+
+  // Regression for the un-fenced-frontmatter trap: pre-fix, input whose first
+  // lines were `type: …` / `slug: …` but lacked the leading `---` fence fell
+  // through to "no frontmatter, body = entire input", then bubbled up as
+  // `missing_slug` / `missing_type` — telling the user to "set `slug:` in
+  // frontmatter" when they LITERALLY had. Diagnose the missing fence instead.
+  test("unfenced input starting with `type:` throws frontmatter_unfenced (not missing_type)", () => {
+    expect(() =>
+      splitFrontmatter("type: concept\ntitle: OAuth PKCE\n---\nUse PKCE.\n"),
+    ).toThrow(FbrainError);
+    try {
+      splitFrontmatter("type: concept\ntitle: OAuth PKCE\n---\nUse PKCE.\n");
+    } catch (err) {
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("frontmatter_unfenced");
+      expect(fe.message).toMatch(/---/);
+      expect(fe.hint ?? "").toMatch(/---/);
+    }
+  });
+
+  test("unfenced input starting with `slug:` throws frontmatter_unfenced (not missing_slug)", () => {
+    expect(() =>
+      splitFrontmatter("slug: oauth-pkce\ntype: concept\n---\nbody\n"),
+    ).toThrow(FbrainError);
+    try {
+      splitFrontmatter("slug: oauth-pkce\ntype: concept\n---\nbody\n");
+    } catch (err) {
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("frontmatter_unfenced");
+    }
+  });
+
+  // No false positive: prose with no key-looking first line still parses as
+  // "no frontmatter, body = the prose verbatim", so downstream missing-type
+  // / missing-slug errors still fire on a typeless/slugless body. Only the
+  // YAML-key-shaped first line triggers the new targeted diagnosis.
+  test("prose with no key-looking first line still parses as no-frontmatter", () => {
+    const r = splitFrontmatter("just some text\n");
+    expect(r.frontmatter).toBeNull();
+    expect(r.body).toBe("just some text");
+  });
+
+  test("body starting with `# heading:` is not mistaken for unfenced frontmatter", () => {
+    // `# heading: text` is a Markdown H1, not a YAML key — UNFENCED_KEY_PATTERN
+    // only matches `slug|type|title|tags|status:` at the very start of the line.
+    const r = splitFrontmatter("# heading: text\nbody\n");
+    expect(r.frontmatter).toBeNull();
+    expect(r.body).toBe("# heading: text\nbody");
+  });
 });
 
 describe("parseFrontmatter", () => {
@@ -721,6 +770,26 @@ describe("putCmd — pre-request validation + dispatch", () => {
     await expect(
       putCmd({ cfg, slug: "ws-only", input: "   \n\n  \n" }),
     ).rejects.toMatchObject({ code: "empty_stdin" });
+    expect(touched).toBe(false);
+  });
+
+  // Regression for the un-fenced-frontmatter trap: pre-fix, piping key-looking
+  // content without the `---` fence silently folded those keys into the body
+  // and surfaced as `missing_slug` — the hint then told the user to "set
+  // `slug:` in frontmatter", which is exactly what they wrote. Refusal must
+  // fire before any HTTP traffic.
+  test("un-fenced-frontmatter input is rejected with frontmatter_unfenced before any HTTP traffic", async () => {
+    let touched = false;
+    installMock(() => {
+      touched = true;
+      return { status: 500 };
+    });
+    await expect(
+      putCmd({
+        cfg,
+        input: "type: concept\nslug: oauth-pkce\ntitle: OAuth PKCE\n---\nUse PKCE.\n",
+      }),
+    ).rejects.toMatchObject({ code: "frontmatter_unfenced" });
     expect(touched).toBe(false);
   });
 

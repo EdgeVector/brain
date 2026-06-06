@@ -298,6 +298,12 @@ export type ParsedFrontmatter = {
   raw: Record<string, string | string[]>;
 };
 
+// Recognised frontmatter keys whose presence on the first non-empty line of
+// an unfenced input is treated as a strong signal that the user MEANT to
+// write frontmatter but forgot the opening `---`. Mirrors the keys
+// `parseFrontmatter` assigns into the typed slots — keep in sync.
+const UNFENCED_KEY_PATTERN = /^(slug|type|title|tags|status)\s*:/i;
+
 export function splitFrontmatter(input: string): {
   frontmatter: string | null;
   body: string;
@@ -306,6 +312,28 @@ export function splitFrontmatter(input: string): {
   // round-trips cleanly when re-emitted.
   const opening = input.match(/^---\r?\n/);
   if (!opening) {
+    // Catch the un-fenced-frontmatter footgun before falling through: when
+    // the first non-empty line looks like a frontmatter key, the user almost
+    // certainly intended to write frontmatter and forgot the leading `---`.
+    // Without this, the YAML-key lines get folded into the body and the
+    // downstream `missing_slug` / `missing_type` errors tell the user to
+    // "set `slug:` in frontmatter" — which is exactly what they thought
+    // they did. Mirrors the targeted `frontmatter_unclosed` diagnosis.
+    const firstNonEmpty = input.split(/\r?\n/).find((l) => l.trim().length > 0);
+    if (firstNonEmpty && UNFENCED_KEY_PATTERN.test(firstNonEmpty.trimStart())) {
+      throw new FbrainError({
+        code: "frontmatter_unfenced",
+        message:
+          "It looks like you wrote frontmatter keys but didn't fence them with `---`.",
+        hint:
+          "Frontmatter must open AND close with a `---` line on its own:\n" +
+          "  ---\n" +
+          "  type: concept\n" +
+          "  slug: my-note\n" +
+          "  ---\n" +
+          "  body text here",
+      });
+    }
     return { frontmatter: null, body: input.replace(/(?:\r?\n)+$/, "") };
   }
   // Two-step scan (open then close) rather than one big regex so an
