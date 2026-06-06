@@ -119,6 +119,14 @@ export function buildTombstoneFields(
 
 export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const print = opts.print ?? ((line: string) => console.log(line));
+  // Trim surrounding whitespace to mirror `put`'s silent normalization
+  // (put.ts: `resolveSlug` calls `.trim()` on both the positional arg and
+  // the frontmatter `slug:`). Without this, a record created via
+  // `fbrain put " foo "` is stored under slug "foo" but `fbrain delete
+  // " foo "` fails with not_found because the lookup compares the
+  // untrimmed input against the trimmed stored slug — an asymmetric
+  // key-normalization that left some records uncleanable from the CLI.
+  const slug = opts.slug.trim();
   const { node } = newWriteNodeClient({
     baseUrl: opts.cfg.nodeUrl,
     userHash: opts.cfg.userHash,
@@ -130,7 +138,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const resolved = await resolveBySlug({
     node,
     cfg: opts.cfg,
-    slug: opts.slug,
+    slug,
     type: opts.type,
     raw: true,
     notFoundMessage: { typed: (t, s) => `No ${t}: ${s}` },
@@ -144,7 +152,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // this is a design-only concern. Runs before any mutation: a blocked delete
   // leaves the design untouched.
   if (type === "design") {
-    const linked = await findLinkedTaskSlugs(node, opts.cfg, opts.slug);
+    const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
     if (linked.length > 0) {
       const n = linked.length;
       const noun = n === 1 ? "task" : "tasks";
@@ -152,27 +160,27 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       if (!opts.force) {
         throw new FbrainError({
           code: "design_has_linked_tasks",
-          message: `Cannot delete design "${opts.slug}" — ${n} ${noun} still ${verb} to it: ${linked.join(", ")}.`,
+          message: `Cannot delete design "${slug}" — ${n} ${noun} still ${verb} to it: ${linked.join(", ")}.`,
           hint: "Re-link those tasks to another design (`fbrain link <task> <design>`) or delete them first (`fbrain delete <task> --type task`), or pass --force to delete anyway (their design references will dangle).",
         });
       }
       print(
-        `warning: ${n} ${noun} still ${verb} to design "${opts.slug}" (${linked.join(", ")}); after this delete their design references will dangle.`,
+        `warning: ${n} ${noun} still ${verb} to design "${slug}" (${linked.join(", ")}); after this delete their design references will dangle.`,
       );
     }
   }
 
   const schemaHash = schemaHashFor(type, opts.cfg);
 
-  const fields = buildTombstoneFields(type, opts.slug, record.created_at, nowIso());
+  const fields = buildTombstoneFields(type, slug, record.created_at, nowIso());
 
-  await node.updateRecord({ schemaHash, fields, keyHash: opts.slug });
+  await node.updateRecord({ schemaHash, fields, keyHash: slug });
   // Fire fold_db's own delete mutation so the sync-log marker + per-field
   // tombstone (current fold_db) are written. When the spike was authored
   // this was a no-op at the storage layer (Probe B); current fold_db
   // repurposes it as a per-field tombstone write that hides the row from
   // default queries — which the verify below tolerates.
-  await node.deleteRecord({ schemaHash, keyHash: opts.slug });
+  await node.deleteRecord({ schemaHash, keyHash: slug });
 
   // Verify the soft-delete landed. A successful delete leaves the row in
   // one of two states:
@@ -189,19 +197,19 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // the page-flake hedge from PR #53 still absorbs a transient
   // un-tombstoned read on a saturated daemon.
   const verify = await withReadRetry(
-    () => findBySlugRaw(node, type, schemaHash, opts.slug),
+    () => findBySlugRaw(node, type, schemaHash, slug),
     (r) => r === null || isTombstoned(r),
   );
   if (verify !== null && !isTombstoned(verify)) {
     throw new FbrainError({
       code: "delete_not_applied",
-      message: `Soft-delete did not stick for ${type} ${opts.slug}.`,
+      message: `Soft-delete did not stick for ${type} ${slug}.`,
       hint:
         "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read still shows the record without the tombstone tag.",
     });
   }
 
   print(
-    `deleted ${type} ${opts.slug} (soft — fold_db is append-only; see docs/phase-5-delete-spike.md)`,
+    `deleted ${type} ${slug} (soft — fold_db is append-only; see docs/phase-5-delete-spike.md)`,
   );
 }
