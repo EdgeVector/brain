@@ -5,6 +5,7 @@
 // every Error Registry row maps to an actionable message in exactly
 // one place.
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 import type { Config } from "./config.ts";
@@ -786,12 +787,27 @@ export function isDefaultNodeUrl(url: string): boolean {
   }
 }
 
-// "Your node isn't reachable — start it" guidance. Downloaded users (the
-// default `:9001` daemon) get the Homebrew action first; the from-source
-// `./run.sh` + "compiling Rust" framing is only right for a non-default
-// node URL (a contributor slot or custom port), so it stays secondary.
-export function nodeDownHint(url: string): string {
-  if (isDefaultNodeUrl(url)) {
+// True when the prebuilt `folddb` binary is on PATH (Homebrew install or
+// `FBRAIN_FOLDDB_BIN` override). Mirrors the probe in init-consent.ts so
+// callers don't need to reach across modules. Injectable in `nodeDownHint`
+// for tests so the assertion doesn't depend on the host PATH.
+export function defaultIsFolddbBinaryInstalled(): boolean {
+  const override = process.env.FBRAIN_FOLDDB_BIN;
+  if (override && override.length > 0) return true;
+  const probe = spawnSync("/bin/sh", ["-c", "command -v folddb"], { encoding: "utf8" });
+  return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
+}
+
+// "Your node isn't reachable — start it" guidance. A downloaded user — port
+// `:9001` OR the prebuilt `folddb` binary on PATH — gets the Homebrew action
+// first; the from-source `./run.sh` + "compiling Rust" framing is only right
+// when the user has no prebuilt binary (a genuine fold contributor running
+// from source against a custom port).
+export function nodeDownHint(
+  url: string,
+  isFolddbBinaryInstalled: () => boolean = defaultIsFolddbBinaryInstalled,
+): string {
+  if (isDefaultNodeUrl(url) || isFolddbBinaryInstalled()) {
     return "Start it: `brew services start folddb` (or `brew services restart folddb` after a `brew upgrade`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
   }
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
