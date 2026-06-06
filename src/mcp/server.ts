@@ -40,6 +40,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   });
 
   const typeEnum = z.enum(RECORD_TYPES);
+  const requiredText = (description: string) =>
+    z.string().min(1).describe(description);
 
   server.registerTool(
     "fbrain_search",
@@ -48,7 +50,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       description:
         "Semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`.",
       inputSchema: {
-        query: z.string().min(1).describe("Search query."),
+        query: requiredText("Search query."),
         type: typeEnum
           .array()
           .optional()
@@ -97,7 +99,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       description:
         "Print a single fbrain record by slug. Without `type`, queries every registered schema and errors if the slug exists in multiple types.",
       inputSchema: {
-        slug: z.string().min(1).describe("Record slug."),
+        slug: requiredText("Record slug."),
         type: typeEnum
           .optional()
           .describe(
@@ -162,7 +164,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "synthesized from `type`, `title`, `tags`, and `status`. Returns " +
         "one line: `created|updated <type> <slug>`.",
       inputSchema: {
-        slug: z.string().min(1).describe("Record slug (lowercase, [a-z0-9-_])."),
+        slug: requiredText("Record slug (lowercase, [a-z0-9-_])."),
         type: typeEnum
           .optional()
           .describe(
@@ -221,7 +223,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "by live tasks is blocked unless `force` is set (the slug becomes " +
         "reusable after delete).",
       inputSchema: {
-        slug: z.string().min(1).describe("Record slug."),
+        slug: requiredText("Record slug."),
         type: typeEnum
           .optional()
           .describe(
@@ -258,9 +260,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "any other type pair errors with `unsupported_link_pair`.",
       inputSchema: {
         from_type: typeEnum.describe("Source record type (must be `task`)."),
-        from_slug: z.string().min(1).describe("Source slug (the task)."),
+        from_slug: requiredText("Source slug (the task)."),
         to_type: typeEnum.describe("Target record type (must be `design`)."),
-        to_slug: z.string().min(1).describe("Target slug (the design)."),
+        to_slug: requiredText("Target slug (the design)."),
       },
     },
     (args) =>
