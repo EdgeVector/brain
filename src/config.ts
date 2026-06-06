@@ -118,38 +118,32 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
 
   const version = r.configVersion;
-  if (version === 1) {
-    // v1 → current: derive schemaHashes from legacy fields, then bump.
-    for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
-      if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
-        throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
-      }
-    }
-    return {
-      configVersion: CONFIG_VERSION,
-      nodeUrl: r.nodeUrl as string,
-      schemaServiceUrl: r.schemaServiceUrl as string,
-      userHash: r.userHash as string,
-      schemaHashes: {
-        design: r.designSchemaHash as string,
-        task: r.taskSchemaHash as string,
-      },
-      designSchemaHash: r.designSchemaHash as string,
-      taskSchemaHash: r.taskSchemaHash as string,
-    };
-  }
-
-  // v2/v3 → v4 are shape-compatible: same fields, same types. We bump
-  // the in-memory version so the rest of the validator runs the unified
-  // path. The URL auto-heal (v2→v3) lives in runInit so user overrides
-  // survive; the v3→v4 legacy-key strip happens below.
-  if (version === 2 || version === 3 || version === CONFIG_VERSION) {
-    // fall through to the shared validation + return below
-  } else {
+  if (version !== 1 && version !== 2 && version !== 3 && version !== CONFIG_VERSION) {
     throw new ConfigInvalidError(
       path,
       `configVersion ${String(version)} != ${CONFIG_VERSION}`,
     );
+  }
+
+  // The two legacy mirror fields must be present on every supported
+  // version. For v1 they additionally seed schemaHashes; for v2+ they
+  // exist as a redundant on-disk mirror that v1 readers still consult.
+  // The URL auto-heal (v2→v3) lives in runInit so user overrides
+  // survive; the v3→v4 legacy-key strip happens in the schemaHashes
+  // loop below.
+  for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
+    if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
+      throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
+    }
+  }
+
+  // v1 → current: synthesize schemaHashes from the legacy mirror fields
+  // so the shared validation + return below runs unmodified for v1.
+  if (version === 1) {
+    r.schemaHashes = {
+      design: r.designSchemaHash as string,
+      task: r.taskSchemaHash as string,
+    };
   }
 
   if (!("schemaHashes" in r)) {
@@ -170,13 +164,6 @@ function assertConfigShape(path: string, raw: unknown): Config {
     // an unregistered hash.
     if (k === LEGACY_NOTE_SCHEMA_KEY_V3) continue;
     schemaHashes[k] = v;
-  }
-
-  // The two legacy mirror fields must be present (we always write them).
-  for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
-    if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
-      throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
-    }
   }
 
   return {
