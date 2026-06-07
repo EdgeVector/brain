@@ -194,6 +194,23 @@ export class BM25Index {
     if (!Array.isArray(obj.docLengths)) return null;
     if (typeof obj.avgDocLength !== "number") return null;
     if (!obj.postings || typeof obj.postings !== "object") return null;
+    // Cross-array structural checks: the cache file is written
+    // non-atomically, so a truncated write or stale-schema file can pass
+    // the field-type guards above and still produce an index whose
+    // postings point at doc indices that don't exist. search() then
+    // crashes on `documents[d].type` instead of the corrupt-cache path
+    // (loadCachedIndex → null → rebuild) the file's contract promises.
+    const N = obj.documents.length;
+    if (obj.docLengths.length !== N) return null;
+    for (const list of Object.values(obj.postings)) {
+      if (!Array.isArray(list)) return null;
+      for (const p of list) {
+        if (!p || typeof p !== "object") return null;
+        const d = (p as { d?: unknown }).d;
+        if (typeof d !== "number" || !Number.isInteger(d)) return null;
+        if (d < 0 || d >= N) return null;
+      }
+    }
     return new BM25Index({
       version: 1,
       fingerprint: obj.fingerprint,
