@@ -312,6 +312,26 @@ describe("manifest IO", () => {
     const list = listManifests();
     expect(list.length).toBe(1);
   });
+
+  // Regression: the original comparator `(a, b) => a.applied_at < b.applied_at
+  // ? 1 : -1` returned -1 for ties — V8/Bun's TimSort interprets that as
+  // "swap on every pairwise comparison" and *reverses* the order of tied
+  // entries instead of preserving it. Observable in `fbrain migrate --status`
+  // when two migrations land in the same millisecond (scripted runs, or any
+  // future change that builds the timestamp at coarser resolution): the
+  // displayed order rotates relative to the on-disk order. The fix returns 0
+  // for ties so the stable sort leaves them in readdir order.
+  test("listManifests preserves readdir order when applied_at ties (no swap)", () => {
+    const ts = "2026-06-06T00:00:00.000Z";
+    writeManifest(manifest({ id: "tied-a", applied_at: ts }));
+    writeManifest(manifest({ id: "tied-b", applied_at: ts }));
+    writeManifest(manifest({ id: "tied-c", applied_at: ts }));
+    const readOrder = readdirSync(tmpDir)
+      .filter((n) => n.endsWith(".json"))
+      .map((n) => n.replace(/\.json$/, ""));
+    const list = listManifests();
+    expect(list.map((m) => m.id)).toEqual(readOrder);
+  });
 });
 
 describe("shortHash + formatStatusTable", () => {
