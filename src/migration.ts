@@ -89,8 +89,17 @@ export function listManifests(dir: string = defaultMigrationsDir()): MigrationMa
       // skip malformed manifests; doctor + migrate --status surface them
     }
   }
-  // Newest first by applied_at.
-  out.sort((a, b) => (a.applied_at < b.applied_at ? 1 : -1));
+  // Newest first by applied_at. Return 0 on ties — the previous
+  // `a < b ? 1 : -1` shape returned -1 for ties, which TimSort treats as
+  // "swap" and ends up rotating tied entries out of readdir order. With a
+  // correct comparator the stable sort leaves ties in readdir order, so
+  // `fbrain migrate --status` shows a deterministic display order for any
+  // migrations sharing an applied_at millisecond.
+  out.sort((a, b) => {
+    if (a.applied_at < b.applied_at) return 1;
+    if (a.applied_at > b.applied_at) return -1;
+    return 0;
+  });
   return out;
 }
 
