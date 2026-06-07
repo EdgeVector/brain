@@ -95,6 +95,30 @@ describe("JCS determinism + edge cases", () => {
     expect(canonicalize({ n: -0 })).toBe('{"n":0}');
   });
 
+  // The 12 golden vectors include `1.0e2 → 100` — i.e. scientific *input*
+  // normalizing to decimal output. They never exercise the regime where the
+  // *output itself* is scientific notation. ECMA-262 NumberToString (the
+  // algorithm RFC 8785 §3.2.2.3 defers to, and that Rust json_canon emits
+  // via ryu_js) is non-obvious at the boundaries: positive exponents get an
+  // explicit `+`, negative get `-`, and the decimal/scientific crossover
+  // sits at |n| ≥ 1e21 (above → scientific) and |n| < 1e-6 (below →
+  // scientific). A formatter swap that dropped the `+` (e.g. moving from
+  // `JSON.stringify` to a generic `n.toString()` port) would silently break
+  // byte-parity with Rust on any payload whose number falls in this regime
+  // — and nothing else in this file would catch it.
+  test("scientific-notation boundary matches ECMA-262 (Rust ryu_js parity)", () => {
+    // |n| ≥ 1e21 → scientific with explicit `+` on the positive exponent.
+    expect(canonicalize({ n: 1e21 })).toBe('{"n":1e+21}');
+    expect(canonicalize({ n: 1e22 })).toBe('{"n":1e+22}');
+    expect(canonicalize({ n: -1e21 })).toBe('{"n":-1e+21}');
+    // |n| < 1e-6 → scientific with `-` (no `+` on negative exponents).
+    expect(canonicalize({ n: 1e-7 })).toBe('{"n":1e-7}');
+    // Decimal side of each crossover — pins that we don't slip into
+    // scientific too eagerly.
+    expect(canonicalize({ n: 1e20 })).toBe('{"n":100000000000000000000}');
+    expect(canonicalize({ n: 1e-6 })).toBe('{"n":0.000001}');
+  });
+
   // RFC 8785 §3.2.2.2 defers to ECMA-262 QuoteJSONString, which (post-ES2019,
   // "well-formed JSON.stringify") escapes every code unit in the surrogate
   // range that is not part of a valid pair. Without escaping, the lone
