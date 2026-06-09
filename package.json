@@ -3,6 +3,7 @@
   "version": "0.8.0",
   "description": "fbrain prototype — CLI brain over fold_db",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "fbrain": "src/cli.ts",
