@@ -32,6 +32,24 @@ export type CreateServerOptions = {
   cfg: Config;
 };
 
+// Recovery hint surfaced when a required field arrives `undefined` — i.e. the
+// tool was called with no value for it. The bite-y case is an empty `{}`: an
+// MCP client occasionally delivers a tool call whose real arguments were
+// dropped before reaching the server (observed repeatedly with large
+// `fbrain_put` bodies in long agent sessions — the call lands with every
+// field undefined). zod is the ONLY layer that sees this: the MCP SDK
+// validates a tool's `inputSchema` and returns a JSON-RPC -32602 BEFORE the
+// tool handler ever runs, so a handler-level guard would never fire on the
+// real path. Putting the hint on the schema means the agent gets an
+// actionable message instead of a bare "expected string, received undefined".
+export const DROPPED_INPUT_HINT =
+  "fbrain received no value for a required field — the tool arguments were " +
+  "likely dropped before reaching the server. This happens when a call's " +
+  "arguments are large (e.g. a long `fbrain_put` body) in a long agent " +
+  "session. Recover by writing the content to a file and piping it through " +
+  "the CLI (e.g. `fbrain put <slug> --type <type> < body.md`), or split the " +
+  "write into smaller records.";
+
 export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   const { cfg } = opts;
   const server = new McpServer({
@@ -40,8 +58,20 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   });
 
   const typeEnum = z.enum(RECORD_TYPES);
+  // Required, non-empty string. A *missing* value (`undefined`) means the
+  // call arrived without this argument — almost always dropped input rather
+  // than a deliberate omission — so swap the opaque "received undefined" for
+  // DROPPED_INPUT_HINT. An empty string or a wrong type falls through to
+  // zod's default message (returning `undefined` from the error map yields to
+  // the next error source).
   const requiredText = (description: string) =>
-    z.string().min(1).describe(description);
+    z
+      .string({
+        error: (issue) =>
+          issue.input === undefined ? DROPPED_INPUT_HINT : undefined,
+      })
+      .min(1)
+      .describe(description);
 
   server.registerTool(
     "fbrain_search",
