@@ -7,11 +7,13 @@
 // don't stand up a real node.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { z } from "zod";
 
 import pkg from "../../package.json" with { type: "json" };
 import {
   buildPutInput,
   createFbrainMcpServer,
+  DROPPED_INPUT_HINT,
   FBRAIN_MCP_VERSION,
 } from "../../src/mcp/server.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
@@ -992,6 +994,52 @@ describe("fbrain_link tool", () => {
     });
     expect(res.isError).toBe(true);
     expect(res.content[0]!.text ?? "").toContain("No design: missing");
+  });
+});
+
+describe("empty/dropped tool input guard", () => {
+  // The bite-y real-world failure: an MCP client delivers a tool call whose
+  // arguments were dropped before reaching the server (observed repeatedly
+  // with large `fbrain_put` bodies in long agent sessions — the call lands as
+  // an empty `{}`). The MCP SDK validates a tool's `inputSchema` and returns a
+  // -32602 BEFORE the handler runs, so the only layer that can improve the
+  // message is the zod schema itself. These tests parse the *registered*
+  // inputSchema directly (what the SDK validates against), not the handler,
+  // so they exercise that real path.
+  function inputSchemaOf(name: string): unknown {
+    const server = createFbrainMcpServer({ cfg });
+    const map = (server as unknown as {
+      _registeredTools: Record<string, { inputSchema: unknown }>;
+    })._registeredTools;
+    return map[name]!.inputSchema;
+  }
+
+  for (const name of ["fbrain_put", "fbrain_get", "fbrain_delete"]) {
+    test(`${name}: empty {} input yields the dropped-input recovery hint`, () => {
+      const res = z.safeParse(inputSchemaOf(name) as never, {});
+      expect(res.success).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]!.message).toBe(DROPPED_INPUT_HINT);
+      }
+    });
+  }
+
+  test("a valid fbrain_put still parses cleanly (no regression)", () => {
+    const res = z.safeParse(inputSchemaOf("fbrain_put") as never, {
+      slug: "ok-slug",
+      type: "concept",
+      body: "b",
+    });
+    expect(res.success).toBe(true);
+  });
+
+  test("an empty-string slug keeps zod's default message — the hint is for missing/dropped input only", () => {
+    const res = z.safeParse(inputSchemaOf("fbrain_put") as never, { slug: "" });
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]!.message).not.toBe(DROPPED_INPUT_HINT);
+      expect(res.error.issues[0]!.message).toContain("Too small");
+    }
   });
 });
 
