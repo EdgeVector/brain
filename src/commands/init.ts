@@ -302,6 +302,15 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     designSchemaHash: schemaHashes.design ?? "",
     taskSchemaHash: schemaHashes.task ?? "",
   };
+  // Persist an explicit owner-session socket override (app-isolation flip,
+  // fold#739) when one was provided via `FBRAIN_FOLDDB_SOCKET` — so later
+  // commands attest against the same non-default node without re-supplying the
+  // env. Unset → omitted, and attestation falls back to the default
+  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
+  const socketOverride = process.env.FBRAIN_FOLDDB_SOCKET;
+  if (socketOverride && socketOverride.length > 0) {
+    config.nodeSocketPath = socketOverride;
+  }
   writeConfig(config, configPath);
   print(`        wrote config v${CONFIG_VERSION}`);
 

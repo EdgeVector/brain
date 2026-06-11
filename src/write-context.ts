@@ -33,6 +33,10 @@ export type WriteNodeClientOptions = {
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
+  // Override the node's UDS control-socket path for owner-session attestation
+  // (app-isolation flip, fold#739). Forwarded verbatim to `newNodeClient`.
+  // Unset → the default `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
+  socketPath?: string;
   // Override the keychain store (tests inject an in-memory / file store).
   store?: CapabilityStore;
   appId?: string;
@@ -87,6 +91,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
       userHash: opts.userHash,
     };
     if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
+    if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
     const plain = newNodeClient(plainOpts);
     const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
     return { node: plain, session: idleSession };
@@ -101,6 +106,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
     capability: session.provider(),
   };
   if (opts.verbose !== undefined) baseOpts.verbose = opts.verbose;
+  if (opts.socketPath !== undefined) baseOpts.socketPath = opts.socketPath;
   const base = newNodeClient(baseOpts);
 
   // Wrap the three mutation methods so each runs under the capability
@@ -166,5 +172,6 @@ export function newWriteClientFromCfg(
     userHash: cfg.userHash,
   };
   if (verbose !== undefined) opts.verbose = verbose;
+  if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;
   return newWriteNodeClient(opts);
 }
