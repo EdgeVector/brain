@@ -17,6 +17,9 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import {
   CapabilityDeniedError,
@@ -52,6 +55,115 @@ const noopVerbose: Verbose = () => {};
 // without a circular dependency.
 export const APP_CAPABILITY_HEADER = "X-App-Capability";
 export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
+
+// Owner-session attestation header (the OWNER-session axis, distinct from the
+// X-App-Capability / X-Capability-Ts third-party-app axis above). fbrain runs
+// as the node owner; post app-isolation-flip (fold#739) the node's owner verbs
+// and owner-isolation bypass require an ATTESTED transport. fbrain mints a
+// one-time pairing code over the node's UDS control socket, exchanges it for a
+// session token over TCP, and presents that token here on every request — the
+// exact pairing the CLI's `attest_owner_session` performs (fold_db_node
+// `src/bin/folddb/commands/ui.rs`). Must match the node's session header name.
+export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
+
+// The node's body discriminator for "this transport is not attested" — fold's
+// owner-verb gate returns `403 {"error":"transport_not_attested"}`. fbrain
+// re-pairs once and retries when it sees this (a restarted node invalidates the
+// in-memory session token).
+export const TRANSPORT_NOT_ATTESTED = "transport_not_attested";
+
+// Filename of the node's Unix-domain control socket — must match
+// `fold_db_node::server::uds::SOCKET_FILE_NAME` ("folddb.sock"), the same
+// constant the CLI's attest path uses.
+const SOCKET_FILE_NAME = "folddb.sock";
+
+// Resolve the node's UDS control-socket path. Mirrors the CLI: the socket lives
+// at `<storage>/folddb.sock`, and the :9001 brain's data dir is
+// `${FOLDDB_HOME ?? ~/.folddb}/data`. An explicit override (config field /
+// FBRAIN_FOLDDB_SOCKET env) wins for ephemeral / non-default nodes.
+export function defaultFolddbSocketPath(override?: string): string {
+  // Precedence: the FBRAIN_FOLDDB_SOCKET env wins (the ad-hoc / test override),
+  // then an explicit config-supplied path, then the default
+  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
+  const envOverride = process.env.FBRAIN_FOLDDB_SOCKET;
+  if (envOverride && envOverride.length > 0) return envOverride;
+  if (override && override.length > 0) return override;
+  const home = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
+  return join(home, "data", SOCKET_FILE_NAME);
+}
+
+// Mint a one-time pairing code over the node's UDS control socket, then
+// exchange it over TCP for an owner-session token. Returns the token, or `null`
+// on ANY failure (no socket, mint refused, exchange non-2xx, parse error) —
+// null means "proceed unattested", exactly the CLI's behavior on a default
+// (non-isolation) build where nothing is gated and the control socket is absent.
+//
+// Mirrors `attest_owner_session` + `mint_pairing_code` in fold_db_node's
+// `src/bin/folddb/commands/ui.rs`. We guard on `existsSync(socketPath)` BEFORE
+// issuing any fetch (just as the Rust path checks `socket.exists()` first) so
+// that on a socketless node — and in the unit suite, where no socket exists —
+// no HTTP request is made and the caller degrades cleanly.
+export async function attestOwnerSession(
+  nodeUrl: string,
+  socketPath: string,
+  verbose: Verbose = noopVerbose,
+): Promise<string | null> {
+  if (!existsSync(socketPath)) {
+    verbose(`owner-session attestation skipped: no control socket at ${socketPath}`);
+    return null;
+  }
+  // Mint over the UDS control socket (a verb that exists ONLY on the
+  // owner-attested channel). Bun's fetch speaks HTTP over a Unix socket via the
+  // `unix` option, keeping fbrain on its single global-fetch HTTP stack.
+  let pairingCode: string;
+  try {
+    // trace-egress: loopback (UDS control socket on the local machine; pairing
+    // mint, never leaves the host)
+    const res = await fetch("http://localhost/control/browser-pairing-code", {
+      method: "POST",
+      unix: socketPath,
+    } as RequestInit & { unix: string });
+    if (!res.ok) {
+      verbose(`owner-session mint refused (HTTP ${res.status})`);
+      return null;
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const code = body.pairing_code;
+    if (typeof code !== "string" || code.length === 0) {
+      verbose("owner-session mint response missing pairing_code");
+      return null;
+    }
+    pairingCode = code;
+  } catch (err) {
+    verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  // Exchange the code over TCP for a session token.
+  try {
+    // trace-egress: loopback (local daemon TCP listener; pairing-code exchange,
+    // never leaves the host)
+    const res = await fetch(`${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: pairingCode }),
+    });
+    if (!res.ok) {
+      verbose(`owner-session exchange refused (HTTP ${res.status})`);
+      return null;
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const token = body.session_token;
+    if (typeof token !== "string" || token.length === 0) {
+      verbose("owner-session exchange response missing session_token");
+      return null;
+    }
+    verbose("owner-session attested");
+    return token;
+  } catch (err) {
+    verbose(`owner-session exchange failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
 
 export type NativeIndexHit = {
   schema_name: string;
@@ -372,12 +484,46 @@ export function newNodeClient(opts: {
   // The canonical app id the SDK client acts as on the consent + mutation
   // paths. Defaults to "fbrain" (the only app this CLI is).
   appId?: string;
+  // Path to the node's UDS control socket, used to mint the owner-session
+  // pairing code (see `attestOwnerSession`). Defaults to
+  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock` (overridable via the
+  // `FBRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
+  // socket is absent (a non-isolation node — the current :9001 default) mint
+  // fails fast and fbrain proceeds unattested, exactly as today.
+  socketPath?: string;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
   const capability = opts.capability;
   const appId = opts.appId ?? "fbrain";
+  const socketPath = defaultFolddbSocketPath(opts.socketPath);
+
+  // Owner-session attestation (app-isolation flip, fold#739). Attest ONCE per
+  // client: the first node request that needs the token resolves a shared
+  // promise; subsequent requests reuse the cached token. On a node whose
+  // control socket is absent (current :9001 default) this resolves to `null`
+  // and no `X-Folddb-Session` header is ever attached — fbrain behaves exactly
+  // as before. `invalidateSession()` clears the cache so a `transport_not_
+  // attested` 403 (a restarted node dropped its in-memory session) triggers a
+  // single re-pair on retry.
+  let sessionTokenPromise: Promise<string | null> | null = null;
+  const sessionToken = (): Promise<string | null> => {
+    if (sessionTokenPromise === null) {
+      sessionTokenPromise = attestOwnerSession(url, socketPath, verbose);
+    }
+    return sessionTokenPromise;
+  };
+  const invalidateSession = (): void => {
+    sessionTokenPromise = null;
+  };
+  // Build the X-Folddb-Session header for the next request, omitting it when
+  // unattested (token null). Resolved per request so a re-pair after a 403 is
+  // picked up without rebuilding the client.
+  const sessionHeader = async (): Promise<Record<string, string>> => {
+    const token = await sessionToken();
+    return token ? { [FOLDDB_SESSION_HEADER]: token } : {};
+  };
 
   // The SDK transport carries X-User-Hash on every request (the production
   // node's HTTP server is stateless — identity comes from the header; gap #1,
@@ -388,7 +534,12 @@ export function newNodeClient(opts: {
   // uses (and the same one the unit suite stubs to capture outgoing
   // requests — the SDK's node:http transport would bypass that stub and leak
   // test traffic onto real sockets).
-  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash });
+  //
+  // The session header is injected dynamically (a per-request supplier) so the
+  // owner-session token attaches to the SDK's consent/mutation calls too, and
+  // an invalidation-after-403 re-pair is reflected without rebuilding the
+  // transport.
+  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash }, sessionHeader);
 
   // SDK clients constructed here never use the SDK's capability store —
   // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
@@ -421,9 +572,24 @@ export function newNodeClient(opts: {
     body?: unknown,
     extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> => {
-    const res = await callNodeRaw(url, path, method, body, userHash, verbose, extraHeaders);
-    const parsed = await readJson(res);
-    return { status: res.status, body: parsed };
+    const send = async (): Promise<{ status: number; body: unknown }> => {
+      const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
+      const res = await callNodeRaw(url, path, method, body, userHash, verbose, headers);
+      const parsed = await readJson(res);
+      return { status: res.status, body: parsed };
+    };
+    const first = await send();
+    // Re-pair once on a stale-session 403. A restarted node drops its in-memory
+    // session token, so a request that was attested moments ago now returns
+    // `403 {"error":"transport_not_attested"}`. Invalidate the cached token and
+    // retry exactly once; if we were unattested to begin with (no socket → null
+    // token), re-pair yields null again and the 403 surfaces unchanged.
+    if (first.status === 403 && bodyError(first.body) === TRANSPORT_NOT_ATTESTED) {
+      verbose(`← NODE ${method} ${path} 403 transport_not_attested — re-pairing once`);
+      invalidateSession();
+      return send();
+    }
+    return first;
   };
 
   // Common 200-or-throw wrapper around `callJson`. Endpoints that branch on
@@ -441,6 +607,25 @@ export function newNodeClient(opts: {
     const { status, body: parsed } = await callJson(path, method, body, extraHeaders);
     if (status !== 200) throw mapNodeError(status, parsed, path);
     return parsed;
+  };
+
+  // Run an SDK-backed node call, re-pairing the owner session once if it 403s
+  // with `transport_not_attested`. Mirrors the raw-path retry in `callJson`:
+  // the SDK surfaces a stale-session 403 as a typed PermissionDenied/Unexpected
+  // error whose reason/body carries `transport_not_attested`. On match we
+  // invalidate the cached token (so the next `sessionHeader()` re-mints) and
+  // retry the thunk exactly once; everything else propagates untouched.
+  const withSessionRepair = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isTransportNotAttested(err)) {
+        verbose("SDK call 403 transport_not_attested — re-pairing once");
+        invalidateSession();
+        return fn();
+      }
+      throw err;
+    }
   };
 
   // App-identity v3.1: the mutation rides the SDK client, which attaches the
@@ -461,11 +646,13 @@ export function newNodeClient(opts: {
     const blob = capability?.() ?? null;
     verbose(`→ NODE POST ${url}/api/mutation (sdk) schema=${schemaHash} type=${kind}`);
     try {
-      await sdkClient(blob).mutate(schemaHash, {
-        mutationType: kind,
-        fields: fields as Record<string, SdkJsonValue>,
-        key: { hash: keyHash, range: null },
-      });
+      await withSessionRepair(() =>
+        sdkClient(blob).mutate(schemaHash, {
+          mutationType: kind,
+          fields: fields as Record<string, SdkJsonValue>,
+          key: { hash: keyHash, range: null },
+        }),
+      );
       verbose(`← NODE POST ${url}/api/mutation status=200`);
     } catch (err) {
       throw mapSdkDataError(err, url, "/api/mutation");
@@ -533,7 +720,9 @@ export function newNodeClient(opts: {
       // consent contract.
       verbose(`→ NODE POST ${url}/api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
       try {
-        const r = await sdkClient(null, consentAppId).requestConsent(parseScope(scope));
+        const r = await withSessionRepair(() =>
+          sdkClient(null, consentAppId).requestConsent(parseScope(scope)),
+        );
         verbose(`← NODE POST ${url}/api/apps/request-consent status=202`);
         return {
           status: 202,
@@ -566,7 +755,7 @@ export function newNodeClient(opts: {
       // body} shapes the node serves (200 granted / 202 pending / 403
       // denied|revoked / 408 expired / 404 unknown).
       try {
-        const blob = await sdkClient(null).pollConsentOnce(requestId);
+        const blob = await withSessionRepair(() => sdkClient(null).pollConsentOnce(requestId));
         if (blob === null) return { status: 202, body: { status: "pending" } };
         return { status: 200, body: { status: "granted", capability: blob } };
       } catch (err) {
@@ -745,7 +934,7 @@ export function newNodeClient(opts: {
       return hits;
     },
     async rawCall(method, path, body) {
-      const res = await callNodeRaw(url, path, method, body, userHash, verbose);
+      const res = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader());
       const text = await res.text();
       const json = parseJsonSafe(text);
       return { status: res.status, headers: res.headers, body: text, json };
@@ -767,6 +956,7 @@ export function newReadClientFromCfg(cfg: Config, verbose?: Verbose): NodeClient
     userHash: cfg.userHash,
   };
   if (verbose !== undefined) opts.verbose = verbose;
+  if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;
   return newNodeClient(opts);
 }
 
@@ -1027,6 +1217,12 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
 function fetchTransport(
   baseUrl: string,
   defaultHeaders: Record<string, string>,
+  // Optional per-request header supplier — used to inject the owner-session
+  // `X-Folddb-Session` token (resolved fresh each call so an
+  // invalidate-after-403 re-pair is reflected). Resolves to `{}` when
+  // unattested. Awaited per send so the SDK's consent/mutation calls carry the
+  // same owner-session attestation the raw node path does.
+  dynamicHeaders?: () => Promise<Record<string, string>>,
 ): SdkTransport {
   return {
     target: baseUrl,
@@ -1037,6 +1233,7 @@ function fetchTransport(
     ) {
       const headers: Record<string, string> = {
         ...defaultHeaders,
+        ...(dynamicHeaders ? await dynamicHeaders() : {}),
         ...(options.headers ?? {}),
       };
       const bodyStr =
@@ -1106,6 +1303,25 @@ function parseScope(scope: string): ConsentScope {
  * - `TransportError` → fbrain's `service_unreachable` with the start-the-node
  *   hint.
  */
+// True when an @folddb/app-sdk error represents the node's
+// `transport_not_attested` 403 — the signal that this transport's owner session
+// is stale (a restarted node dropped its in-memory token). The node may carry
+// the discriminator in either `reason` (→ PermissionDeniedError) or `error` (→
+// UnexpectedResponseError body), so check both shapes. A match drives a single
+// re-pair + retry (see `withSessionRepair`); anything else is left untouched.
+function isTransportNotAttested(err: unknown): boolean {
+  if (err instanceof PermissionDeniedError && err.reason === TRANSPORT_NOT_ATTESTED) {
+    return true;
+  }
+  if (err instanceof UnexpectedResponseError && err.status === 403) {
+    return (
+      bodyError(err.body) === TRANSPORT_NOT_ATTESTED ||
+      bodyStringField(err.body, "reason") === TRANSPORT_NOT_ATTESTED
+    );
+  }
+  return false;
+}
+
 function mapSdkDataError(err: unknown, baseUrl: string, path: string): FbrainError {
   // NB: CapabilityDeniedError subclasses PermissionDeniedError — order matters.
   if (err instanceof CapabilityDeniedError) {
