@@ -22,15 +22,20 @@ proving the node owner consented to fbrain acting on their data.
 
 ## Where the code lives
 
+As of the `@folddb/app-sdk` port, the capability PRIMITIVES (JCS, token
+decode/verify, the eight-reason 403 table + reaction flags, the keychain
+store, and the consent + mutation wire client) come from the SDK; the fbrain
+modules below adapt them and own the UX/orchestration on top.
+
 | File | Responsibility |
 |---|---|
-| `src/jcs.ts` | RFC 8785 JCS canonicalization. Byte-matches the Rust `app_identity_crypto` golden vectors (`test/unit/jcs.test.ts`). |
-| `src/hash.ts` | Lowercase-hex SHA-256 (Web Crypto). |
-| `src/capability.ts` | Token type/decode, JCS integrity check, per-write header builder, the 403-reason table (`reactionFor`), and `acquireCapability` (the consent handshake). |
-| `src/keychain.ts` | `CapabilityStore` — macOS `security` keychain with a 0600 file fallback under `~/.fbrain/`. |
-| `src/capability-session.ts` | `CapabilitySession`: load-or-acquire, the `provider()` wired into the node client, and `runWrite` (applies the 403 contract). |
+| `src/jcs.ts` | Re-exports the SDK's RFC 8785 JCS canonicalizer. Still byte-matched against the Rust `app_identity_crypto` golden vectors (`test/unit/jcs.test.ts`). |
+| `src/hash.ts` | Re-exports the SDK's lowercase-hex SHA-256. |
+| `src/capability.ts` | Re-exports the SDK token decode/verify + 403-reason list; fbrain-worded `surface` messages over the SDK reaction flags (`reactionFor`); per-write header builder; and `acquireCapability` (the consent handshake UX: prints, inline-grant hook, non-TTY fast-fail). |
+| `src/keychain.ts` | Adapter over the SDK's keychain-with-file-fallback store (service `com.edgevector.fbrain.capability`, file fallback under `~/.fbrain/capabilities/`), with the one-shot migration of pre-SDK entries (legacy keychain account / `~/.fbrain/capabilities.json`). |
+| `src/capability-session.ts` | `CapabilitySession`: load-or-acquire (cache validated via the SDK's `verifyCapabilityBlob`), the `provider()` wired into the node client, and `runWrite` (applies the 403 contract). |
 | `src/write-context.ts` | `newWriteNodeClient` — a capability-aware NodeClient that write commands use in place of `newNodeClient`. Honors the `FBRAIN_APP_IDENTITY_ENFORCE` kill switch. |
-| `src/client.ts` | Header constants, the `CapabilityProvider` hook on `newNodeClient`, consent endpoints (`requestConsent`/`consentStatus`), and the 403-reason parsing in `mapNodeError`. |
+| `src/client.ts` | Header constants, the `CapabilityProvider` hook on `newNodeClient`, the SDK `FoldDbClient` glue (consent endpoints + `/api/mutation` ride the SDK client over a fetch-backed Transport; SDK typed errors translate back into the FbrainError registry), and the 403-reason parsing in `mapNodeError`. |
 
 ## Consent acquisition (first run)
 

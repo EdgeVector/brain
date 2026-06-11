@@ -17,10 +17,9 @@
 import {
   FBRAIN_APP_ID,
   acquireCapability,
-  decodeCapabilityBlob,
   isCapability403Reason,
   reactionFor,
-  tokenIntegrityValid,
+  verifyCapabilityBlob,
   type CapabilityStore,
   type ConsentTransport,
   type StoredCapability,
@@ -83,24 +82,15 @@ export class CapabilitySession {
   }
 
   // Load the cached capability and validate it. Returns null (discarding the
-  // cache) if it's absent, structurally broken, fails the JCS integrity check,
-  // or is bound to a different node than this one.
+  // cache) if it's absent, structurally broken, bound to a different app, or
+  // fails the JCS integrity check. The validation is the SDK's
+  // `verifyCapabilityBlob` — decode + audience binding + the integrity
+  // binding (payload_hash == sha256(JCS(token-minus-envelope))) — so a
+  // tampered/truncated cache is discarded before we replay a doomed token.
   private async loadValidCached(): Promise<StoredCapability | null> {
     const cached = await this.opts.store.load(this.opts.nodeUrl);
     if (cached === null) return null;
-    const token = decodeCapabilityBlob(cached.blob);
-    if (token === null) {
-      // Corrupt cache — discard so we don't replay garbage.
-      await this.opts.store.clear(this.opts.nodeUrl);
-      return null;
-    }
-    if (token.app_id !== this.appId) {
-      await this.opts.store.clear(this.opts.nodeUrl);
-      return null;
-    }
-    // The integrity binding (payload_hash == sha256(JCS(token-minus-envelope)))
-    // catches tampering/truncation before we replay a doomed token.
-    if (!(await tokenIntegrityValid(token))) {
+    if (!verifyCapabilityBlob(cached.blob, this.appId).ok) {
       await this.opts.store.clear(this.opts.nodeUrl);
       return null;
     }

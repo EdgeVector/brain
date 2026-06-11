@@ -19,6 +19,7 @@
     "typescript": "^5.6.0"
   },
   "dependencies": {
+    "@folddb/app-sdk": "file:./vendor/folddb-app-sdk-0.1.0-f49da10.tgz",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.4.3"
   }

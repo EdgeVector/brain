@@ -19,9 +19,28 @@
 // JCS-based integrity check on a cached token (the "or invalid" branch of step
 // 1) so a corrupt / tampered cache is discarded rather than replayed into a
 // guaranteed `capability_bad_sig`.
+//
+// As of the @folddb/app-sdk port, the capability PRIMITIVES live in the SDK
+// and are re-exported here: token decode (`decodeCapabilityBlob`), the JCS
+// integrity binding (`tokenIntegrityValid` / `verifyCapabilityBlob`), the
+// eight-reason discriminated-403 list + guard, and the contract reaction
+// FLAGS (`capabilityDenialReaction`). What stays fbrain's own is the UX
+// orchestration: the consent handshake loop (prints, the inline-grant hook,
+// the non-TTY fast-fail), fbrain-worded `surface` messages (they name
+// `folddb consent grant fbrain`), and the FbrainError code vocabulary.
 
-import { canonicalize, type JsonValue } from "./jcs.ts";
-import { sha256Hex } from "./hash.ts";
+import {
+  capabilityDenialReaction,
+  decodeCapabilityBlob,
+  isCapabilityDenialReason,
+  tokenIntegrityValid,
+  verifyCapabilityBlob,
+  CAPABILITY_DENIAL_REASONS,
+  type CapabilityDenialReason,
+  type CapabilityToken,
+  type SignatureEnvelope,
+} from "@folddb/app-sdk";
+
 import {
   APP_CAPABILITY_HEADER,
   CAPABILITY_TS_HEADER,
@@ -39,36 +58,14 @@ export { APP_CAPABILITY_HEADER, CAPABILITY_TS_HEADER };
 /** Poll interval for consent-status, per the design contract (every 2s). */
 export const CONSENT_POLL_INTERVAL_MS = 2000;
 
-// SignatureEnvelope as it crosses the wire — mirrors
-// app_identity_crypto::SignatureEnvelope. fbrain only reads `purpose`,
-// `payload_hash`, and `sig` (for the integrity check); the rest is opaque.
-export type SignatureEnvelope = {
-  version: number;
-  purpose: string; // "capability_grant" for a CapabilityToken
-  alg: string; // "Ed25519"
-  key_id: string;
-  issued_at: string;
-  expires_at?: string;
-  env: string; // "dev" | "prod"
-  payload_hash: string; // hex sha256 of JCS(token-minus-envelope)
-  sig?: string;
-};
-
-// CapabilityToken as it crosses the wire — mirrors
-// fold_db/crates/core/src/access/caller_context.rs::CapabilityToken. fbrain
-// decodes it only to read `node_pubkey` (wrong-node detection) + `app_id` and
-// to run the payload-hash integrity check. Everything else is replayed
-// verbatim via the original base64 blob.
-export type CapabilityToken = {
-  envelope: SignatureEnvelope;
-  capability_id: string;
-  app_id: string;
-  scope: unknown; // CapabilityScope — opaque to the client
-  granted_ops: unknown[];
-  granted_at: string;
-  expires_at?: string;
-  node_pubkey: string; // base64 Ed25519 public key the grant is bound to
-};
+// Token wire types + decode + the JCS integrity check come from the SDK — the
+// exact same shapes and checks every FoldDB app runs (and the same the Rust
+// node mints against). Re-exported so fbrain call sites keep this module as
+// their single import surface. NB `tokenIntegrityValid` is synchronous in the
+// SDK (node:crypto) where fbrain's old implementation was async; existing
+// `await tokenIntegrityValid(...)` call sites are unaffected.
+export { decodeCapabilityBlob, tokenIntegrityValid, verifyCapabilityBlob };
+export type { CapabilityToken, SignatureEnvelope };
 
 /**
  * What fbrain persists per (app_id, node). The base64 blob is the source of
@@ -77,7 +74,7 @@ export type CapabilityToken = {
  */
 export type StoredCapability = {
   appId: string;
-  /** Base64 of the node URL this grant was acquired against (for keying). */
+  /** The node URL this grant was acquired against (for keying). */
   nodeUrl: string;
   /** The node's base64 Ed25519 pubkey the grant is bound to. */
   nodePubkey: string;
@@ -93,71 +90,16 @@ export type StoredCapability = {
 
 /**
  * Where a capability is stored. The design mandates the OS keychain with a
- * file fallback only on headless Linux; in practice fbrain runs on macOS
- * (Tom's dev node) so the primary store is the macOS keychain via the
- * built-in `security` CLI (no native module — works under bun). Other
- * platforms, headless sessions, or a keychain failure fall back to a 0600
- * file under ~/.fbrain/.
+ * file fallback only on headless Linux. The implementation behind this
+ * interface is the @folddb/app-sdk capability store (macOS `security` CLI
+ * with a 0600-file fallback, every call timeout-bounded), adapted in
+ * `keychain.ts` — which also performs the one-shot migration of pre-SDK
+ * entries so an existing install keeps its grant.
  */
 export interface CapabilityStore {
   load(nodeUrl: string): Promise<StoredCapability | null>;
   save(cap: StoredCapability): Promise<void>;
   clear(nodeUrl: string): Promise<void>;
-}
-
-// ---------------------------------------------------------------------------
-// Token decode + validity
-// ---------------------------------------------------------------------------
-
-/** Decode the base64 CapabilityToken blob to its parsed JSON. */
-export function decodeCapabilityBlob(blob: string): CapabilityToken | null {
-  let json: unknown;
-  try {
-    const text = Buffer.from(blob, "base64").toString("utf8");
-    json = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!isCapabilityToken(json)) return null;
-  return json;
-}
-
-function isCapabilityToken(v: unknown): v is CapabilityToken {
-  if (v === null || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  if (typeof o.capability_id !== "string") return false;
-  if (typeof o.app_id !== "string") return false;
-  if (typeof o.node_pubkey !== "string") return false;
-  const env = o.envelope;
-  if (env === null || typeof env !== "object") return false;
-  const e = env as Record<string, unknown>;
-  return typeof e.payload_hash === "string" && typeof e.purpose === "string";
-}
-
-/**
- * Verify the *integrity binding* of a decoded token: the envelope's
- * `payload_hash` must equal `sha256(JCS(token-minus-envelope))`, computed with
- * the same JCS the Rust node uses (this is exactly fold_db_node's
- * `signature_is_valid` minus the Ed25519 step, which needs the node's key).
- *
- * This is the JCS-load-bearing path: a tampered or truncated cached blob fails
- * here and is discarded, so fbrain never replays a token guaranteed to 403.
- * It is NOT a substitute for the node's signature check — the node still
- * verifies the Ed25519 signature on every write.
- */
-export async function tokenIntegrityValid(token: CapabilityToken): Promise<boolean> {
-  if (token.envelope.purpose !== "capability_grant") return false;
-  // Reconstruct signing_payload = the token JSON minus its `envelope` key,
-  // exactly as the Rust `CapabilityToken::signing_payload` does.
-  const payload = { ...(token as unknown as Record<string, JsonValue>) };
-  delete payload.envelope;
-  let recomputed: string;
-  try {
-    recomputed = await sha256Hex(canonicalize(payload as JsonValue));
-  } catch {
-    return false;
-  }
-  return recomputed === token.envelope.payload_hash;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,20 +125,13 @@ export function capabilityHeaders(
 // 403-reason classification (design "403 handling (contract)" table)
 // ---------------------------------------------------------------------------
 
-export const CAPABILITY_403_REASONS = [
-  "capability_revoked",
-  "capability_expired",
-  "capability_unknown",
-  "capability_out_of_scope",
-  "capability_replay",
-  "capability_bad_sig",
-  "capability_for_wrong_node",
-  "consent_required",
-] as const;
-export type Capability403Reason = (typeof CAPABILITY_403_REASONS)[number];
+// The eight-reason list + guard are the SDK's — fbrain keeps its historical
+// names as aliases so call sites and tests read unchanged.
+export const CAPABILITY_403_REASONS = CAPABILITY_DENIAL_REASONS;
+export type Capability403Reason = CapabilityDenialReason;
 
 export function isCapability403Reason(s: string): s is Capability403Reason {
-  return (CAPABILITY_403_REASONS as readonly string[]).includes(s);
+  return isCapabilityDenialReason(s);
 }
 
 /**
@@ -216,70 +151,65 @@ export type Reaction = {
   surface?: string;
 };
 
+/**
+ * The contract reaction for a discriminated 403 reason. The FLAGS
+ * (discard / re-acquire / retry-once) come from the SDK's
+ * `capabilityDenialReaction` — the canonical port of this table — while the
+ * `surface` strings stay fbrain's own: they name fbrain and the exact
+ * remediation command (`folddb consent grant fbrain`) a user of THIS app
+ * should run, which a generic SDK message cannot.
+ */
 export function reactionFor(
   reason: Capability403Reason,
   detail?: { schema?: string; capabilityId?: string; timestampSkewSecs?: number },
 ): Reaction {
+  const base = capabilityDenialReaction(reason, detail ?? {});
+  const reaction: Reaction = {
+    reason,
+    discardToken: base.discardToken,
+    reacquire: base.reacquire,
+    retryOnce: base.retryOnce,
+  };
+  const surface = fbrainSurfaceFor(reason, detail);
+  if (surface !== undefined) reaction.surface = surface;
+  return reaction;
+}
+
+// fbrain's user/developer-facing wording for the reasons whose contract says
+// "surface". Kept app-side deliberately (see the reactionFor docstring). The
+// set of reasons that carry a surface message must stay aligned with the
+// SDK's table — the flags above are the single source of truth for WHAT to
+// do; this is only the wording.
+function fbrainSurfaceFor(
+  reason: Capability403Reason,
+  detail?: { schema?: string; capabilityId?: string; timestampSkewSecs?: number },
+): string | undefined {
   switch (reason) {
     case "capability_revoked":
-      // Discard, but DO NOT auto-re-prompt — the user revoked deliberately.
-      return {
-        reason,
-        discardToken: true,
-        reacquire: false,
-        retryOnce: false,
-        surface:
-          "fbrain's access to this node was revoked. Ask the node owner to re-grant: " +
-          "`folddb consent grant fbrain`.",
-      };
-    case "capability_expired":
-      // Discard + silently re-acquire.
-      return { reason, discardToken: true, reacquire: true, retryOnce: false };
-    case "capability_unknown":
-      // Likely client-state bug — discard + re-acquire.
-      return { reason, discardToken: true, reacquire: true, retryOnce: false };
-    case "consent_required":
-      // Same as capability_unknown (no capability presented at all).
-      return { reason, discardToken: true, reacquire: true, retryOnce: false };
-    case "capability_for_wrong_node":
-      // User switched nodes — discard + re-acquire against the new node.
-      return { reason, discardToken: true, reacquire: true, retryOnce: false };
+      return (
+        "fbrain's access to this node was revoked. Ask the node owner to re-grant: " +
+        "`folddb consent grant fbrain`."
+      );
     case "capability_out_of_scope":
-      // Spec mismatch — surface to the developer, do not re-prompt.
-      return {
-        reason,
-        discardToken: false,
-        reacquire: false,
-        retryOnce: false,
-        surface:
-          `fbrain's capability does not cover ${detail?.schema ?? "this schema"} — ` +
-          "the declared scope and the attempted write disagree. This is a developer bug.",
-      };
+      return (
+        `fbrain's capability does not cover ${detail?.schema ?? "this schema"} — ` +
+        "the declared scope and the attempted write disagree. This is a developer bug."
+      );
     case "capability_replay":
-      // Clock skew — retry once with a fresh timestamp.
-      return {
-        reason,
-        discardToken: false,
-        reacquire: false,
-        retryOnce: true,
-        surface:
-          `fbrain's capability timestamp was rejected as a replay` +
-          (detail?.timestampSkewSecs !== undefined
-            ? ` (skew ${detail.timestampSkewSecs}s)`
-            : "") +
-          ". Check this machine's clock.",
-      };
+      return (
+        `fbrain's capability timestamp was rejected as a replay` +
+        (detail?.timestampSkewSecs !== undefined
+          ? ` (skew ${detail.timestampSkewSecs}s)`
+          : "") +
+        ". Check this machine's clock."
+      );
     case "capability_bad_sig":
-      // Implementation bug — surface to the developer.
-      return {
-        reason,
-        discardToken: true,
-        reacquire: false,
-        retryOnce: false,
-        surface:
-          "fbrain's capability signature failed verification on the node. " +
-          "This is a developer bug — the stored token is malformed.",
-      };
+      return (
+        "fbrain's capability signature failed verification on the node. " +
+        "This is a developer bug — the stored token is malformed."
+      );
+    default:
+      return undefined;
   }
 }
 
@@ -301,10 +231,7 @@ export async function hasValidCachedCapability(
 ): Promise<boolean> {
   const cached = await store.load(nodeUrl);
   if (cached === null) return false;
-  const token = decodeCapabilityBlob(cached.blob);
-  if (token === null) return false;
-  if (token.app_id !== appId) return false;
-  return await tokenIntegrityValid(token);
+  return verifyCapabilityBlob(cached.blob, appId).ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,32 +382,29 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
           message: "consent-status returned 200 granted but no capability blob.",
         });
       }
-      const token = decodeCapabilityBlob(blob);
-      if (token === null) {
-        throw new FbrainError({
-          code: "consent_status_bad_capability",
-          message: "consent-status returned a capability that did not decode as a CapabilityToken.",
-        });
-      }
-      // Audience binding: the issued token must be bound to the app we asked
-      // for. `loadValidCached` enforces the same invariant on reuse, but the
-      // acquire path was trusting the response unchecked — a mismatch would
-      // get stored and replayed once before the next session caught it.
-      if (token.app_id !== appId) {
-        throw new FbrainError({
-          code: "consent_status_app_id_mismatch",
-          message:
-            `consent-status returned a capability bound to app "${token.app_id}", ` +
-            `but "${appId}" was requested.`,
-        });
-      }
-      // Integrity binding: parallel to the audience check, and to the JCS
-      // check `loadValidCached` runs on cache reuse. Without this gate, a
-      // token whose `envelope.payload_hash` doesn't match the JCS of the
-      // token's signing payload (node-side mint bug, MITM tamper, or a
-      // substituted response) would be stored and replayed once before the
-      // node's signature check 403'd it as `capability_bad_sig`.
-      if (!(await tokenIntegrityValid(token))) {
+      // The full client-side validation an app must apply before adopting a
+      // granted blob — decode, audience binding (the issued token must be
+      // bound to the app we asked for), and the JCS integrity binding
+      // (envelope.payload_hash == sha256(JCS(token-minus-envelope))) — is the
+      // SDK's `verifyCapabilityBlob`. Without these gates, a mis-minted or
+      // substituted token would be stored and replayed once before the node's
+      // signature check 403'd it as `capability_bad_sig`.
+      const verification = verifyCapabilityBlob(blob, appId);
+      if (!verification.ok) {
+        if (verification.problem === "malformed") {
+          throw new FbrainError({
+            code: "consent_status_bad_capability",
+            message: "consent-status returned a capability that did not decode as a CapabilityToken.",
+          });
+        }
+        if (verification.problem === "audience_mismatch") {
+          throw new FbrainError({
+            code: "consent_status_app_id_mismatch",
+            message:
+              `consent-status returned a capability bound to app "${verification.tokenAppId ?? "?"}", ` +
+              `but "${appId}" was requested.`,
+          });
+        }
         throw new FbrainError({
           code: "consent_status_bad_capability_integrity",
           message:
@@ -488,6 +412,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
             "(envelope.payload_hash != sha256(JCS(token-minus-envelope))).",
         });
       }
+      const token = verification.token;
       const stored: StoredCapability = {
         appId,
         nodeUrl: opts.nodeUrl,
