@@ -36,6 +36,7 @@ import { renameSync, writeFileSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 
 import {
+  approveOwnSchemas,
   newSchemaServiceClient,
   FbrainError,
   type NodeClient,
@@ -219,6 +220,11 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
       hint: "check the node logs; the new schema is registered but not loaded.",
     });
   }
+  // Approve the freshly registered target schema (and any of fbrain's other
+  // schemas that fell back to `available`) so the migrated records show up in
+  // the node UI. `/api/schemas/load` leaves schemas `available`, which the UI
+  // hides. Idempotent — only `available` schemas are touched.
+  await approveOwnSchemas(node, [...Object.values(cfg.schemaHashes), toHash]);
 
   // 6. Build manifest + persist as in_progress.
   const fromHash = schemaHashFor(scope.affectedTypes[0]!, cfg);

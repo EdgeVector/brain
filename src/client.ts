@@ -195,6 +195,17 @@ export type NodeClient = {
     schemas_loaded_to_db: number;
     failed_schemas: string[];
   }>;
+  // Map of schema canonical-name (identity hash) → lifecycle state
+  // ("available" | "approved" | "blocked"), per GET /api/schemas. Used to
+  // decide which of fbrain's schemas still need approving.
+  schemaStates(): Promise<Record<string, string>>;
+  // Promote a schema from `available` to `approved`. The node UI only
+  // surfaces `approved` schemas in its Browse/Query/Schemas views, so a
+  // freshly loaded (but unapproved) schema's records are invisible there
+  // even though they are fully queryable. POST /api/schema/{name}/approve.
+  // The node rejects approving anything not currently `available`, so call
+  // this only for schemas in that state (see approveOwnSchemas).
+  approveSchema(schemaName: string): Promise<void>;
   createRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
@@ -415,6 +426,26 @@ export function newNodeClient(opts: {
         failed_schemas: failed,
       };
     },
+    async schemaStates() {
+      const { status, body } = await callJson("/api/schemas", "GET");
+      if (status !== 200) throw mapNodeError(status, body, "/api/schemas");
+      const list =
+        body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).schemas)
+          ? ((body as Record<string, unknown>).schemas as Array<Record<string, unknown>>)
+          : [];
+      const states: Record<string, string> = {};
+      for (const s of list) {
+        const name = typeof s.name === "string" ? s.name : null;
+        const state = typeof s.state === "string" ? s.state : null;
+        if (name && state) states[name] = state;
+      }
+      return states;
+    },
+    async approveSchema(schemaName) {
+      const path = `/api/schema/${encodeURIComponent(schemaName)}/approve`;
+      const { status, body } = await callJson(path, "POST", {});
+      if (status !== 200) throw mapNodeError(status, body, path);
+    },
     async createRecord({ schemaHash, fields, keyHash }) {
       await mutate("create", schemaHash, fields, keyHash, callJson, capability);
     },
@@ -551,6 +582,49 @@ export function newNodeClient(opts: {
       return { status: res.status, headers: res.headers, body: text, json };
     },
   };
+}
+
+export type ApproveSchemasResult = {
+  // Schemas this call promoted available → approved.
+  approved: string[];
+  // Schemas already in `approved` state — nothing to do.
+  alreadyApproved: string[];
+  // Hashes fbrain owns but the node doesn't list (not loaded), or that are
+  // in some non-approvable state (e.g. blocked). Left untouched.
+  skipped: string[];
+};
+
+// Ensure fbrain's own schemas are `approved` on the node so their records
+// show up in the FoldDB UI's Browse/Query/Schemas views. `/api/schemas/load`
+// leaves schemas in `available`, and the UI hides `available` schemas (it
+// filters them out alongside the ~1000 schema.org starter-seed schemas the
+// node loads at boot), so without this step fbrain content is invisible in
+// the UI even though it is fully written and queryable.
+//
+// Idempotent: only schemas currently in `available` are approved (the node
+// rejects approving anything else), so re-running is a no-op once green.
+export async function approveOwnSchemas(
+  node: NodeClient,
+  hashes: string[],
+): Promise<ApproveSchemasResult> {
+  const states = await node.schemaStates();
+  const result: ApproveSchemasResult = { approved: [], alreadyApproved: [], skipped: [] };
+  const seen = new Set<string>();
+  for (const hash of hashes) {
+    if (seen.has(hash)) continue; // multiple record-types can share one hash
+    seen.add(hash);
+    const state = (states[hash] ?? "").toLowerCase();
+    if (state === "approved") {
+      result.alreadyApproved.push(hash);
+    } else if (state === "available") {
+      await node.approveSchema(hash);
+      result.approved.push(hash);
+    } else {
+      // Missing from the node listing, or blocked — not safely approvable here.
+      result.skipped.push(hash);
+    }
+  }
+  return result;
 }
 
 async function mutate(

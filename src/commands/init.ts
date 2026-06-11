@@ -15,7 +15,7 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
+import { approveOwnSchemas, newNodeClient, newSchemaServiceClient, FbrainError, type Verbose } from "../client.ts";
 import { UNIQUE_SCHEMAS } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -173,6 +173,19 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   print(
     `        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} schemas` +
       ` (failed_schemas empty ✓)`,
+  );
+
+  // Step 3b: approve the schemas so they surface in the FoldDB UI.
+  // `/api/schemas/load` leaves them `available`, and the node UI hides
+  // `available` schemas (filtered out alongside the node's ~1000 starter-seed
+  // schemas) — so without this, fbrain's records are invisible in
+  // Browse/Query/Schemas even though they are written and queryable.
+  const approval = await approveOwnSchemas(nodeClient, Object.values(schemaHashes));
+  print(
+    `        approved ${approval.approved.length} schema(s)` +
+      ` (${approval.alreadyApproved.length} already approved` +
+      (approval.skipped.length > 0 ? `, ${approval.skipped.length} skipped` : "") +
+      `)`,
   );
 
   // Step 4/5: persist config

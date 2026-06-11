@@ -27,6 +27,7 @@
 // Exit code 0 on all-green, 1 if any check fails.
 
 import {
+  approveOwnSchemas,
   FbrainError,
   newNodeClient,
   newSchemaServiceClient,
@@ -229,6 +230,51 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         fix: "re-run `fbrain init`",
       });
       verbose?.(`schemas-loaded: FAIL`);
+    }
+  }
+
+  // 5b. schemas approved — self-heal. `/api/schemas/load` leaves schemas in
+  // `available`, and the node UI hides `available` schemas, so fbrain's
+  // records stay invisible in the Browse/Query/Schemas views until the
+  // schemas are promoted to `approved`. This can regress on a node restart
+  // or upgrade, so doctor re-approves any that have fallen back. Approving
+  // only touches `available` schemas, so it is a no-op once green.
+  if (provisioned && schemasLoadedOk) {
+    const hashes = Object.values(cfg.schemaHashes);
+    if (hashes.length === 0) {
+      checks.push({
+        name: "schemas-approved",
+        ok: false,
+        detail: "config.schemaHashes is empty",
+        fix: "re-run `fbrain init`",
+      });
+      verbose?.(`schemas-approved: FAIL — no hashes in config`);
+    } else {
+      try {
+        const approval = await approveOwnSchemas(nodeClient, hashes);
+        const repaired = approval.approved.length;
+        const detail =
+          `${approval.alreadyApproved.length + repaired}/${new Set(hashes).size} approved` +
+          (repaired > 0 ? ` (repaired ${repaired})` : "") +
+          (approval.skipped.length > 0 ? `, ${approval.skipped.length} not approvable` : "");
+        // Skipped schemas mean a hash fbrain owns isn't `available`/`approved`
+        // on the node (missing or blocked) — surface as WARN, don't fail.
+        checks.push({
+          name: "schemas-approved",
+          ok: true,
+          ...(approval.skipped.length > 0 ? { tag: "WARN" as const } : {}),
+          detail,
+        });
+        verbose?.(`schemas-approved: ok (${detail})`);
+      } catch (err) {
+        checks.push({
+          name: "schemas-approved",
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err),
+          fix: "ensure the node is reachable and re-run `fbrain doctor`",
+        });
+        verbose?.(`schemas-approved: FAIL`);
+      }
     }
   }
 
