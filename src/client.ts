@@ -4,9 +4,40 @@
 // `401 MISSING_USER_CONTEXT`). All errors flow through `mapError` so
 // every Error Registry row maps to an actionable message in exactly
 // one place.
+//
+// As of the @folddb/app-sdk port, the consent handshake
+// (`/api/apps/request-consent` + `/api/apps/consent-status`) and the mutation
+// path (`/api/mutation`, with the per-write capability headers) ride the
+// SDK's `FoldDbClient` — the same wire client every FoldDB app uses — with
+// the SDK's typed errors translated back into fbrain's FbrainError registry
+// (see `mapSdkDataError`). The rest of the node surface stays hand-rolled
+// because the SDK deliberately does not cover it (native-index search,
+// schemas/load, bootstrap, auto-identity, raw) or cannot express it yet
+// (`queryAll`'s limit/offset pagination loop + per-page dedup guards).
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+
+import {
+  CapabilityDeniedError,
+  FoldDbClient,
+  PermissionDeniedError,
+  RequestRejectedError,
+  TransportError,
+  UnexpectedResponseError,
+  UnknownAppError,
+  AppInSandboxError,
+  InvalidScopeError,
+  ConsentDeniedError,
+  CapabilityRevokedError,
+  ConsentExpiredError,
+  ConsentRequestNotFoundError,
+  capabilityStoreKey,
+  type CapabilityStore as SdkCapabilityStore,
+  type ConsentScope,
+  type JsonValue as SdkJsonValue,
+  type Transport as SdkTransport,
+} from "@folddb/app-sdk";
 
 import type { Config } from "./config.ts";
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
@@ -338,11 +369,51 @@ export function newNodeClient(opts: {
   // provider is only consulted on the mutation path. Returning null sends no
   // capability headers (NodeOwner fallback / enforcement off).
   capability?: CapabilityProvider;
+  // The canonical app id the SDK client acts as on the consent + mutation
+  // paths. Defaults to "fbrain" (the only app this CLI is).
+  appId?: string;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
   const capability = opts.capability;
+  const appId = opts.appId ?? "fbrain";
+
+  // The SDK transport carries X-User-Hash on every request (the production
+  // node's HTTP server is stateless — identity comes from the header; gap #1,
+  // fold_dev_node #127). One transport is shared by every SDK client this
+  // node client mints. It is a fetch-backed implementation of the SDK's
+  // Transport seam rather than the SDK's node:http default, so fbrain keeps
+  // exactly one HTTP stack: the same global `fetch` every other node call
+  // uses (and the same one the unit suite stubs to capture outgoing
+  // requests — the SDK's node:http transport would bypass that stub and leak
+  // test traffic onto real sockets).
+  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash });
+
+  // SDK clients constructed here never use the SDK's capability store —
+  // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
+  // hands the current blob in per call. A no-op store keeps the SDK from ever
+  // touching a real keychain on this path.
+  const sdkStore: SdkCapabilityStore = {
+    async store() {},
+    async load() {
+      return null;
+    },
+    async remove() {},
+  };
+
+  // A fresh, cheap SDK client per call: construction is pure object wiring
+  // (no IO), and per-call construction is how the per-write capability blob
+  // (re-acquired mid-session by CapabilitySession) stays current.
+  const sdkClient = (blob: string | null, forAppId: string = appId): FoldDbClient =>
+    new FoldDbClient(
+      forAppId,
+      sdkTransport,
+      sdkStore,
+      blob,
+      safeStoreKey(forAppId, sdkTransport.target),
+      sdkTransport.target,
+    );
 
   const callJson = async (
     path: string,
@@ -356,10 +427,11 @@ export function newNodeClient(opts: {
   };
 
   // Common 200-or-throw wrapper around `callJson`. Endpoints that branch on
-  // specific non-200 statuses (autoIdentity 503, bootstrap 410) and the
-  // raw-passthrough endpoints (requestConsent / consentStatus / rawCall) stay
-  // on `callJson` directly. `search` also stays on `callJson` so its error
-  // tag can intentionally strip the query string from the path.
+  // specific non-200 statuses (autoIdentity 503, bootstrap 410) and `rawCall`
+  // stay on `callJson` directly; `search` also stays on `callJson` so its
+  // error tag can intentionally strip the query string from the path. The
+  // consent endpoints (requestConsent / consentStatus) and mutations ride the
+  // SDK client above instead.
   const callJsonOk = async (
     path: string,
     method: "GET" | "POST",
@@ -371,36 +443,33 @@ export function newNodeClient(opts: {
     return parsed;
   };
 
-  // App-identity v3.1: attach the verbatim base64 capability blob plus a fresh
-  // unix-epoch-seconds timestamp on every mutation. The timestamp is recomputed
-  // per call so a token cached for hours still lands inside the node's ±60s
-  // replay window. No capability provider, or a provider returning null, sends
-  // neither header — the node treats the caller as NodeOwner (or, under
-  // enforcement, 403s with `consent_required`).
+  // App-identity v3.1: the mutation rides the SDK client, which attaches the
+  // verbatim base64 capability blob plus a fresh unix-epoch-seconds timestamp
+  // (`X-App-Capability` + `X-Capability-Ts`) on every call. The timestamp is
+  // recomputed per call so a token cached for hours still lands inside the
+  // node's ±60s replay window. No capability provider, or a provider
+  // returning null, sends neither header — the node treats the caller as
+  // NodeOwner (or, under enforcement, 403s with `consent_required`). The
+  // provider is resolved per write so a CapabilitySession re-acquire is
+  // picked up without rebuilding the client.
   const mutate = async (
     kind: "create" | "update" | "delete",
     schemaHash: string,
     fields: Record<string, unknown>,
     keyHash: string,
   ): Promise<void> => {
-    const extraHeaders: Record<string, string> = {};
     const blob = capability?.() ?? null;
-    if (blob !== null) {
-      extraHeaders[APP_CAPABILITY_HEADER] = blob;
-      extraHeaders[CAPABILITY_TS_HEADER] = String(Math.floor(Date.now() / 1000));
+    verbose(`→ NODE POST ${url}/api/mutation (sdk) schema=${schemaHash} type=${kind}`);
+    try {
+      await sdkClient(blob).mutate(schemaHash, {
+        mutationType: kind,
+        fields: fields as Record<string, SdkJsonValue>,
+        key: { hash: keyHash, range: null },
+      });
+      verbose(`← NODE POST ${url}/api/mutation status=200`);
+    } catch (err) {
+      throw mapSdkDataError(err, url, "/api/mutation");
     }
-    await callJsonOk(
-      "/api/mutation",
-      "POST",
-      {
-        type: "mutation",
-        schema: schemaHash,
-        fields_and_values: fields,
-        key_value: { hash: keyHash, range: null },
-        mutation_type: kind,
-      },
-      extraHeaders,
-    );
   };
 
   return {
@@ -457,16 +526,70 @@ export function newNodeClient(opts: {
       }
       throw mapNodeError(status, body, "/api/setup/bootstrap");
     },
-    async requestConsent(appId, scope) {
-      // Returns the raw {status, body} so the capability layer can branch on
-      // 202 / 404 / 400 per the consent contract.
-      return callJson("/api/apps/request-consent", "POST", { app_id: appId, scope });
+    async requestConsent(consentAppId, scope) {
+      // Rides the SDK client's consent flow, translated back to the raw
+      // {status, body} contract the capability layer (and `fbrain doctor`'s
+      // write-ready probe) branches on — 202 / 404 / 403 / 400 per the
+      // consent contract.
+      verbose(`→ NODE POST ${url}/api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
+      try {
+        const r = await sdkClient(null, consentAppId).requestConsent(parseScope(scope));
+        verbose(`← NODE POST ${url}/api/apps/request-consent status=202`);
+        return {
+          status: 202,
+          body: { request_id: r.requestId, expires_at: r.expiresAt },
+        };
+      } catch (err) {
+        if (err instanceof UnknownAppError) {
+          return { status: 404, body: { error: err.message, app_id: consentAppId } };
+        }
+        if (err instanceof AppInSandboxError) {
+          return {
+            status: 403,
+            body: { reason: "app_in_sandbox", app_id: consentAppId, error: err.message },
+          };
+        }
+        if (err instanceof InvalidScopeError) {
+          return { status: 400, body: { error: err.message } };
+        }
+        if (err instanceof UnexpectedResponseError) {
+          return { status: err.status, body: err.body };
+        }
+        if (err instanceof TransportError) {
+          throw connectionError(url, "node", err);
+        }
+        throw err;
+      }
     },
     async consentStatus(requestId) {
-      return callJson(
-        `/api/apps/consent-status/${encodeURIComponent(requestId)}`,
-        "GET",
-      );
+      // One SDK consent-status poll, translated back to the raw {status,
+      // body} shapes the node serves (200 granted / 202 pending / 403
+      // denied|revoked / 408 expired / 404 unknown).
+      try {
+        const blob = await sdkClient(null).pollConsentOnce(requestId);
+        if (blob === null) return { status: 202, body: { status: "pending" } };
+        return { status: 200, body: { status: "granted", capability: blob } };
+      } catch (err) {
+        if (err instanceof CapabilityRevokedError) {
+          return { status: 403, body: { status: "revoked" } };
+        }
+        if (err instanceof ConsentDeniedError) {
+          return { status: 403, body: { status: "denied" } };
+        }
+        if (err instanceof ConsentExpiredError) {
+          return { status: 408, body: { status: "expired" } };
+        }
+        if (err instanceof ConsentRequestNotFoundError) {
+          return { status: 404, body: { status: "unknown" } };
+        }
+        if (err instanceof UnexpectedResponseError) {
+          return { status: err.status, body: err.body };
+        }
+        if (err instanceof TransportError) {
+          throw connectionError(url, "node", err);
+        }
+        throw err;
+      }
     },
     async loadSchemas() {
       const body = await callJsonOk("/api/schemas/load", "POST");
@@ -886,6 +1009,131 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
     message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
     hint: service === "node" ? nodeDownHint(baseUrl) : schemaDownHint(baseUrl),
     cause,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// @folddb/app-sdk glue
+// ---------------------------------------------------------------------------
+
+/**
+ * A fetch-backed implementation of the SDK's pluggable Transport. The SDK's
+ * built-in `httpTransport` rides node:http; fbrain deliberately injects this
+ * one so that (a) every HTTP request fbrain makes — SDK paths included — goes
+ * through the same global `fetch` (which the unit suite stubs to capture
+ * outgoing requests), and (b) a non-JSON body degrades to `body: null`
+ * instead of a hard transport error, matching fbrain's tolerant `readJson`.
+ */
+function fetchTransport(
+  baseUrl: string,
+  defaultHeaders: Record<string, string>,
+): SdkTransport {
+  return {
+    target: baseUrl,
+    async send(
+      method: "GET" | "POST",
+      path: string,
+      options: { headers?: Record<string, string>; body?: unknown } = {},
+    ) {
+      const headers: Record<string, string> = {
+        ...defaultHeaders,
+        ...(options.headers ?? {}),
+      };
+      const bodyStr =
+        options.body === undefined ? undefined : JSON.stringify(options.body);
+      if (bodyStr !== undefined) headers["Content-Type"] = "application/json";
+      let res: Response;
+      try {
+        res = await fetch(`${baseUrl}${path}`, { method, headers, body: bodyStr });
+      } catch (err) {
+        throw new TransportError(
+          `request to ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const text = await res.text();
+      let parsed: unknown = null;
+      if (text.length > 0) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = null;
+        }
+      }
+      return { status: res.status, body: parsed };
+    },
+  };
+}
+
+// `capabilityStoreKey` validates the app-id shape; fbrain's SDK clients never
+// persist through the SDK store (no-op store), so an out-of-shape app id must
+// not turn into a client-side throw where the node used to answer. Fall back
+// to the raw app id as the (unused) key.
+function safeStoreKey(appId: string, target: string): string {
+  try {
+    return capabilityStoreKey(appId, target);
+  } catch {
+    return appId;
+  }
+}
+
+// fbrain's consent layer carries scope as the node's wire string; the SDK
+// takes the structured ConsentScope and serializes it back to the same
+// string. Only "wildcard" is used today; "explicit:a,b" maps onto the SDK's
+// explicit form. Anything else is forwarded as a single explicit entry so the
+// node stays the authority on rejecting it.
+function parseScope(scope: string): ConsentScope {
+  if (scope === "wildcard") return "wildcard";
+  if (scope.startsWith("explicit:")) {
+    return { explicit: scope.slice("explicit:".length).split(",") };
+  }
+  return { explicit: [scope] };
+}
+
+/**
+ * Translate an @folddb/app-sdk typed error back into fbrain's FbrainError
+ * registry. The SDK discriminates exactly what `mapNodeError`'s dispatch
+ * table reads off the raw response, so each arm reconstructs the body shape
+ * the node sent and funnels through `mapNodeError` — keeping the registry the
+ * single source of error wording:
+ *
+ * - `CapabilityDeniedError` carries the node's verbatim discriminated reason
+ *   + detail (the eight-reason capability-403 contract, SDK gap #4) — rebuilt
+ *   as `{status: 403, reason, ...detail}`.
+ * - `UnexpectedResponseError` carries the raw {status, body} — lossless.
+ * - `RequestRejectedError` (400) carries the node's `kind` + `error` text.
+ * - `PermissionDeniedError` (403 without a reason) carries the node's
+ *   discriminated reason text.
+ * - `TransportError` → fbrain's `service_unreachable` with the start-the-node
+ *   hint.
+ */
+function mapSdkDataError(err: unknown, baseUrl: string, path: string): FbrainError {
+  // NB: CapabilityDeniedError subclasses PermissionDeniedError — order matters.
+  if (err instanceof CapabilityDeniedError) {
+    const body: Record<string, unknown> = { status: 403, reason: err.reason };
+    if (err.detail.schema !== undefined) body.schema = err.detail.schema;
+    if (err.detail.capabilityId !== undefined) body.capability_id = err.detail.capabilityId;
+    if (err.detail.timestampSkewSecs !== undefined) {
+      body.timestamp_skew_secs = err.detail.timestampSkewSecs;
+    }
+    return mapNodeError(403, body, path);
+  }
+  if (err instanceof PermissionDeniedError) {
+    return mapNodeError(403, { kind: "permission_denied", error: err.reason }, path);
+  }
+  if (err instanceof RequestRejectedError) {
+    return mapNodeError(400, { kind: err.kind, error: err.message }, path);
+  }
+  if (err instanceof UnexpectedResponseError) {
+    return mapNodeError(err.status, err.body, path);
+  }
+  if (err instanceof TransportError) {
+    return connectionError(baseUrl, "node", err);
+  }
+  if (err instanceof FbrainError) return err;
+  return new FbrainError({
+    code: "sdk_error",
+    message: `SDK call to ${path} failed: ${err instanceof Error ? err.message : String(err)}.`,
+    cause: err,
   });
 }
 
