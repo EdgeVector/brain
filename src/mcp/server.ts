@@ -9,6 +9,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { readFileSync } from "node:fs";
 
 import { getFbrainVersion } from "../version.ts";
 import type { Config } from "../config.ts";
@@ -46,9 +47,10 @@ export const DROPPED_INPUT_HINT =
   "fbrain received no value for a required field — the tool arguments were " +
   "likely dropped before reaching the server. This happens when a call's " +
   "arguments are large (e.g. a long `fbrain_put` body) in a long agent " +
-  "session. Recover by writing the content to a file and piping it through " +
-  "the CLI (e.g. `fbrain put <slug> --type <type> < body.md`), or split the " +
-  "write into smaller records.";
+  "session. Recover by staging the body to a file and passing its path as " +
+  "`body_path` (a short path survives where a large inline `body` is " +
+  "dropped), or via the CLI `fbrain put <slug> --type <type> < body.md`, or " +
+  "split the write into smaller records.";
 
 export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   const { cfg } = opts;
@@ -191,7 +193,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "One of `type` or a `type:` field in `frontmatter` is required — " +
         "there is NO silent default. If `frontmatter` is provided it is " +
         "used verbatim (without the `---` fences); otherwise frontmatter is " +
-        "synthesized from `type`, `title`, `tags`, and `status`. Returns " +
+        "synthesized from `type`, `title`, `tags`, and `status`. For a large " +
+        "body, stage it to a file and pass `body_path` instead of inlining " +
+        "`body` — a long inline `body` can be silently dropped in transit in " +
+        "long sessions, whereas a short path always survives. Returns " +
         "one line: `created|updated <type> <slug>`.",
       inputSchema: {
         slug: requiredText("Record slug (lowercase, [a-z0-9-_])."),
@@ -208,7 +213,21 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         body: z
           .string()
           .optional()
-          .describe("Markdown body (indexed for search). Defaults to empty."),
+          .describe(
+            "Markdown body (indexed for search). Defaults to empty. For a " +
+              "large body prefer `body_path` — a long inline `body` can be " +
+              "dropped in transit. Mutually exclusive with `body_path`.",
+          ),
+        body_path: z
+          .string()
+          .optional()
+          .describe(
+            "Absolute path to a UTF-8 file whose contents become the body. " +
+              "Use this instead of `body` for large records: a path is a " +
+              "short argument that survives the input-dropping that truncates " +
+              "a long inline `body` in long agent sessions. Mutually " +
+              "exclusive with `body`.",
+          ),
         status: z
           .string()
           .optional()
@@ -235,7 +254,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     },
     (args) =>
       runTool(async (print) => {
-        const input = buildPutInput(args);
+        const input = buildPutInput(resolvePutBody(args));
         const result = await putCmd({ cfg, slug: args.slug, input });
         print(`${result.action} ${result.type} ${result.slug}`);
       }),
@@ -325,6 +344,37 @@ type PutArgs = {
   tags?: string[];
   frontmatter?: string;
 };
+
+// When `body_path` is set, read the body from that file. A path is a short
+// string immune to the large-inline-argument truncation that silently drops a
+// long `body` before it reaches the server (the case DROPPED_INPUT_HINT warns
+// about) — so an arbitrarily large record can always be written by staging it
+// to a file first. `body` and `body_path` are mutually exclusive. Returns a
+// normalized PutArgs (no `body_path`) so buildPutInput stays a pure function.
+export function resolvePutBody(args: PutArgs & { body_path?: string }): PutArgs {
+  const { body_path, ...rest } = args;
+  if (body_path === undefined) return rest;
+  if (rest.body !== undefined) {
+    throw new FbrainError({
+      code: "body_and_body_path",
+      message: "fbrain_put: pass either `body` or `body_path`, not both.",
+      hint: "Use `body_path` alone for large bodies; inline `body` for small ones.",
+    });
+  }
+  let body: string;
+  try {
+    body = readFileSync(body_path, "utf8");
+  } catch (err) {
+    throw new FbrainError({
+      code: "body_path_unreadable",
+      message:
+        `fbrain_put: could not read body_path '${body_path}': ` +
+        (err instanceof Error ? err.message : String(err)),
+      hint: "Pass an absolute path to a readable UTF-8 file.",
+    });
+  }
+  return { ...rest, body };
+}
 
 export function buildPutInput(args: PutArgs): string {
   const body = args.body ?? "";
