@@ -21,19 +21,30 @@ import {
 } from "../../src/client.ts";
 
 const realFetch = globalThis.fetch;
+// The unit-suite preload (test/setup.ts) points FBRAIN_FOLDDB_SOCKET at a
+// nonexistent path so attestation stays inert by default. Capture that suite
+// default so each test that opts into a real fixture socket can restore it.
+const suiteSocketEnv = process.env.FBRAIN_FOLDDB_SOCKET;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  if (suiteSocketEnv === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+  else process.env.FBRAIN_FOLDDB_SOCKET = suiteSocketEnv;
 });
 
 // A throwaway path that exists on disk (so existsSync passes) standing in for
 // the node's control socket. We never actually speak UDS — the mint fetch is
 // stubbed — but the helper guards on existsSync(socketPath) before fetching,
-// so the path must be real for the mint branch to run.
+// so the path must be real for the mint branch to run. The env override is the
+// highest-precedence socket selector (it wins over opts.socketPath and the
+// default), so point it at this fixture: the suite preload pins it elsewhere
+// to stay hermetic, and a test that wants attestation to actually fire must
+// re-point it here. afterEach restores the suite default.
 function fakeSocket(): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "fbrain-sock-"));
   const path = join(dir, "folddb.sock");
   writeFileSync(path, "");
+  process.env.FBRAIN_FOLDDB_SOCKET = path;
   return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
