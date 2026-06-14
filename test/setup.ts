@@ -16,3 +16,22 @@
 if (process.env.FBRAIN_APP_IDENTITY_ENFORCE === undefined) {
   process.env.FBRAIN_APP_IDENTITY_ENFORCE = "false";
 }
+
+// Keep the unit suite hermetic w.r.t. owner-session attestation (fold#739).
+// `attestOwnerSession` fires a real UDS `fetch` whenever a control socket
+// exists on disk at the resolved path (default `~/.folddb/data/folddb.sock`).
+// On any dev machine running the daemon — exactly what the README tells a new
+// contributor to do (`brew services start folddb`) — that socket EXISTS, so
+// the attestation fetch lands on the global-`fetch` stub the unit tests
+// install, silently consuming the first canned response and shifting every
+// later assertion (HTTP 500 fall-through, dropped pagination rows, etc.). CI
+// passes only because no socket exists there. Default the socket path to a
+// guaranteed-nonexistent file so `existsSync` is false and no attestation
+// fetch is ever issued — making the suite pass identically with or without a
+// live folddb on the machine. Tests that specifically exercise attestation
+// (test/unit/owner-session-attest.test.ts) point this env at a real fixture
+// socket for their duration; the env override is the documented highest-
+// precedence socket selector, so it cleanly wins for those.
+if (process.env.FBRAIN_FOLDDB_SOCKET === undefined) {
+  process.env.FBRAIN_FOLDDB_SOCKET = "/nonexistent/fbrain-unit-suite-no-socket.sock";
+}
