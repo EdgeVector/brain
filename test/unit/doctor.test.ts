@@ -16,9 +16,11 @@ import {
 } from "../../src/commands/doctor.ts";
 import {
   RECORDS,
+  RECORD_TYPES,
   designSchema,
   projectSchema,
   type AddSchemaRequest,
+  type RecordType,
 } from "../../src/schemas.ts";
 import { type Config } from "../../src/config.ts";
 import {
@@ -132,6 +134,15 @@ function mockNodeClient(opts: {
   provisioned?: boolean;
   loadOk?: boolean;
   failedSchemas?: string[];
+  // Record types to OMIT from listLoadedSchemas() — simulates schemas not yet
+  // loaded into the node DB, which drives the read-path schemas-loaded FAIL.
+  missingFromNode?: RecordType[];
+  // Override the identity_hash listLoadedSchemas() reports for a given type —
+  // for tests that point a config entry at a non-default hash and need the
+  // node to report that same hash as loaded.
+  loadedHashOverrides?: Partial<Record<RecordType, string>>;
+  // When set, listLoadedSchemas() throws — exercises the check's catch path.
+  listSchemasThrows?: Error;
   identityThrows?: Error;
   // Freshness probe: receives the slug of the most recently created probe
   // and returns an optional self-hit. Returning null simulates "fresh
@@ -169,7 +180,17 @@ function mockNodeClient(opts: {
       return { status: 200, body: { status: "granted" } };
     },
     async listLoadedSchemas() {
-      return [];
+      if (opts.listSchemasThrows) throw opts.listSchemasThrows;
+      const omit = new Set<RecordType>(opts.missingFromNode ?? []);
+      // Return fbrain's 8 schemas under the same canonical hashes the test
+      // config writes against (TEST_HASHES), so the read-path schemas-loaded
+      // check sees them as present. Omit any caller-requested types to drive
+      // a FAIL.
+      return RECORD_TYPES.filter((t) => !omit.has(t)).map((t) => ({
+        descriptive_name: t.charAt(0).toUpperCase() + t.slice(1),
+        owner_app_id: "fbrain",
+        identity_hash: opts.loadedHashOverrides?.[t] ?? TEST_HASHES[t],
+      }));
     },
     async loadSchemas() {
       if (opts.loadOk === false) throw new Error("load failed");
@@ -806,18 +827,18 @@ describe("doctor verdict logic", () => {
     expect(lines.some((l) => l.includes("fbrain init"))).toBe(true);
   });
 
-  test("failed_schemas non-empty → schemas-loaded FAIL", async () => {
+  test("schema absent from the node DB → schemas-loaded FAIL", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
       configPath,
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
-      nodeClientFactory: () => mockNodeClient({ failedSchemas: ["BrokenSchema"] }),
+      nodeClientFactory: () => mockNodeClient({ missingFromNode: ["concept"] }),
     });
     expect(code).toBe(1);
     expect(
-      lines.some((l) => l.includes("[FAIL] schemas-loaded") && l.includes("BrokenSchema")),
+      lines.some((l) => l.includes("[FAIL] schemas-loaded") && l.includes("Concept")),
     ).toBe(true);
   });
 
@@ -981,7 +1002,8 @@ describe("doctor verdict logic", () => {
       configPath,
       print: (l) => lines.push(l),
       schemaClientFactory: () => wrapped,
-      nodeClientFactory: () => mockNodeClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({ loadedHashOverrides: { project: customProjectHash } }),
     });
     expect(code).toBe(0);
     expect(lookups).toContain(customProjectHash);
@@ -1297,7 +1319,7 @@ describe("doctor --freshness probes", () => {
       freshness: true,
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
-      nodeClientFactory: () => mockNodeClient({ failedSchemas: ["BrokenSchema"] }),
+      nodeClientFactory: () => mockNodeClient({ missingFromNode: ["concept"] }),
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] freshness-probe") && l.includes("skipped"))).toBe(true);
@@ -1734,7 +1756,7 @@ describe("doctor --write round-trip probe", () => {
       write: true,
       capabilityStore: inMemoryCapabilityStore(),
       schemaClientFactory: () => mockSchemaClient({}),
-      nodeClientFactory: () => mockNodeClient({ failedSchemas: ["BrokenSchema"] }),
+      nodeClientFactory: () => mockNodeClient({ missingFromNode: ["concept"] }),
     });
     expect(code).toBe(1);
     expect(

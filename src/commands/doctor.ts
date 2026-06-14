@@ -5,7 +5,8 @@
 //   2. schema service reachable (GET /v1/schemas → 200)
 //   3. node reachable (GET /api/system/auto-identity → 200 or 503)
 //   4. node provisioned (auto-identity → 200, body has user_hash)
-//   5. schemas loaded into the node (POST /api/schemas/load → failed_schemas empty)
+//   5. schemas loaded into the node (read-only: GET /api/schemas → each of
+//      fbrain's 8 canonical hashes is present in the node DB)
 //   6. schema drift — for Design + Task: GET /v1/schema/<canonicalHash>,
 //      compare descriptive_name + fields + field_types against schemas.ts.
 //   7. embedding-runtime — one-token search forces ONNX load.
@@ -254,26 +255,49 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     verbose?.(`node-reachable: FAIL`);
   }
 
-  // 5. schemas loaded
+  // 5. schemas loaded — verified via the READ path (GET /api/schemas), NOT by
+  // POSTing /api/schemas/load. Two reasons the old active-reload was wrong:
+  //   (a) A health check must not mutate. This file's own contract (see the
+  //       header + the `--write` gate) is that plain `fbrain doctor` never
+  //       writes; an unconditional /api/schemas/load violated that.
+  //   (b) Since the app-isolation flip (fold#739), /api/schemas/load is an
+  //       owner-attested verb. On a node whose owner-session attestation is
+  //       unavailable — a stale daemon with a wedged control socket, or fbrain
+  //       pointed at a node with no reachable local socket — the POST returns
+  //       `403 transport_not_attested` and the old check misdiagnosed a fully
+  //       healthy, fully-loaded node as "schemas not loaded — re-run init"
+  //       (re-running init can't fix a wedged socket). The read path needs
+  //       only X-User-Hash, so it answers the real question — "are fbrain's 8
+  //       schemas present in the node's DB under the exact hashes we write
+  //       against?" — accurately regardless of attestation state.
   if (provisioned) {
     try {
-      const loaded = await nodeClient.loadSchemas();
-      if (loaded.failed_schemas.length === 0) {
+      const loaded = await nodeClient.listLoadedSchemas();
+      const loadedHashes = new Set(
+        loaded
+          .map((s) => s.identity_hash)
+          .filter((h): h is string => typeof h === "string" && h.length > 0),
+      );
+      const missing = UNIQUE_SCHEMAS.filter((entry) => {
+        const hash = cfg.schemaHashes[entry.key];
+        return !hash || !loadedHashes.has(hash);
+      }).map((entry) => entry.schema.schema.descriptive_name);
+      if (missing.length === 0) {
         schemasLoadedOk = true;
         checks.push({
           name: "schemas-loaded",
           ok: true,
-          detail: `${loaded.schemas_loaded_to_db}/${loaded.available_schemas_loaded} loaded`,
+          detail: `${UNIQUE_SCHEMAS.length}/${UNIQUE_SCHEMAS.length} fbrain schemas present in the node DB`,
         });
-        verbose?.(`schemas-loaded: ok (${loaded.schemas_loaded_to_db}/${loaded.available_schemas_loaded})`);
+        verbose?.(`schemas-loaded: ok (${UNIQUE_SCHEMAS.length}/${UNIQUE_SCHEMAS.length})`);
       } else {
         checks.push({
           name: "schemas-loaded",
           ok: false,
-          detail: `failed_schemas: ${loaded.failed_schemas.join(", ")}`,
-          fix: "re-run `fbrain init`; if it persists, check the schema service logs",
+          detail: `not loaded into the node: ${missing.join(", ")}`,
+          fix: "re-run `fbrain init` (it loads fbrain's schemas into the node)",
         });
-        verbose?.(`schemas-loaded: FAIL — ${loaded.failed_schemas.join(", ")}`);
+        verbose?.(`schemas-loaded: FAIL — ${missing.join(", ")}`);
       }
     } catch (err) {
       checks.push({
