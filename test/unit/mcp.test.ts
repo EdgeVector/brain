@@ -15,9 +15,13 @@ import {
   createFbrainMcpServer,
   DROPPED_INPUT_HINT,
   FBRAIN_MCP_VERSION,
+  resolvePutBody,
 } from "../../src/mcp/server.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -567,6 +571,46 @@ describe("buildPutInput", () => {
     const tagInput = buildPutInput({ slug: "x", type: "concept", tags });
     const tagParsed = parseFrontmatter(splitFrontmatter(tagInput).frontmatter);
     expect(tagParsed.tags).toEqual(tags);
+  });
+});
+
+describe("resolvePutBody", () => {
+  // body_path is the durable fix for the large-inline-body drop: a path is a
+  // short string the transport never truncates, so a big record can always be
+  // written by staging it to a file. resolvePutBody reads it back into `body`
+  // before buildPutInput runs, keeping that serializer pure.
+  let dir: string;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("passes args through untouched when body_path is absent", () => {
+    const args = { slug: "x", type: "concept", body: "inline" } as const;
+    expect(resolvePutBody({ ...args })).toEqual(args);
+  });
+
+  test("reads the body from body_path when set", () => {
+    dir = mkdtempSync(join(tmpdir(), "fbrain-bodypath-"));
+    const p = join(dir, "body.md");
+    const big = "# Title\n\n" + "x".repeat(50_000);
+    writeFileSync(p, big, "utf8");
+    const resolved = resolvePutBody({ slug: "x", type: "reference", body_path: p });
+    expect(resolved.body).toBe(big);
+    expect("body_path" in resolved).toBe(false);
+    // And it serializes through buildPutInput like any other body.
+    expect(buildPutInput(resolved)).toBe(`---\ntype: reference\n---\n${big}`);
+  });
+
+  test("rejects passing both body and body_path", () => {
+    expect(() =>
+      resolvePutBody({ slug: "x", type: "concept", body: "a", body_path: "/tmp/b.md" }),
+    ).toThrow(/either `body` or `body_path`, not both/);
+  });
+
+  test("errors clearly when body_path is unreadable", () => {
+    expect(() =>
+      resolvePutBody({ slug: "x", type: "concept", body_path: "/no/such/file-xyz.md" }),
+    ).toThrow(/could not read body_path/);
   });
 });
 
