@@ -32,7 +32,7 @@ Replacement is scoped to the **daily read/write/agent-integration surface** — 
 | `gbrain list [--type / --tag / -n]` | Tom | `fbrain list [--type / --tag / -n]` | Same filters return overlapping results (mod tombstones). | ✅ shipped — Phase 2 |
 | `gbrain delete <slug>` | Tom | `fbrain delete <slug>` (soft tombstone) | Deleted slug invisible to all read paths; slug reusable. **Note: soft, not hard** — fold_db is append-only. | ✅ shipped — Phase 5 ([`phase-5-delete-spike.md`](phase-5-delete-spike.md)) |
 | `gbrain search <q>` (tsvector keyword) | Tom | `fbrain search <q>` (vector) | G3a freshness probe green (5/5 trials at score ≥ 0.5) **AND** G3b eval P@5 ≥ vector-only baseline on the 20-pair labeled set. | ✅ shipped — G3a (PR #11), G3b (kanban `c312a`, PR #10) |
-| `gbrain query / gbrain ask <q>` (hybrid RRF + LLM expansion) | Tom | `fbrain ask` | G3b/G17 eval shows fbrain `ask` ≥ vector-only baseline on the labeled set. | ✅ shipped — G5 (PR #23). Eval 2026-05-25: `ask` P@5=0.59, `ask --no-llm` P@5=0.73, vector-only `search` P@5=0.36. Both ask variants clear the baseline. See follow-up note on LLM-expansion regression under §8. |
+| `gbrain query / gbrain ask <q>` (hybrid RRF + LLM expansion) | Tom | `fbrain ask` | G3b/G17 eval shows fbrain `ask` ≥ vector-only baseline on the labeled set. | ✅ shipped — G5 (PR #23). Eval 2026-05-25: `ask` (expansion) P@5=0.59, `ask --no-llm` P@5=0.73, vector-only `search` P@5=0.36. **2026-06-15: default flipped to no-expansion (the eval winner); LLM expansion moved behind `--expand`** — see §8 (resolved). |
 | `gbrain doctor` | Tom | `fbrain doctor [--freshness]` | doctor green on the same machine where `gbrain doctor` is green. | ✅ shipped — Phase 2 + G3a |
 | `gbrain tag / untag / tags <slug>` | Tom (light) | frontmatter `tags:` via `fbrain put` | Round-trip on the same 20 slugs preserves tag set. | ✅ shipped — Phase 4 |
 | `gbrain link / backlinks / graph <slug>` | Tom (light), agents (none) | none | Typed-relation parity via a native `relation_link` schema (NOT Markdown regex). | ❌ MISSING — G7/G8 (T3), **gate-OPTIONAL** (deferred; can ship without). |
@@ -137,6 +137,35 @@ Each item is measurable, automatable where possible, and links the kanban task /
 - #5 (mirror-flip, 7 days) — now unblocked; ready to start.
 - #8 (rollback rehearsal) — chained off #5.
 
-### G5 follow-up — LLM expansion regression on labeled set
+### G5 follow-up — LLM expansion regression on labeled set — RESOLVED 2026-06-15
 
-The 2026-05-25 eval shows `ask` (with LLM expansion, P@5=0.59) **underperforms** `ask --no-llm` (P@5=0.73, MRR 0.60 vs 0.46). Both clear the vector-only baseline, so the gate is met, but the expansion is pulling in noise on the current 20-pair labeled set. Two interpretations: either (a) the labeled set's queries are already close to the indexed text and paraphrasing dilutes specificity, or (b) expansion needs prompt tuning / temperature lowering. Filed as a follow-up — does NOT block gate. Track separately if the gap persists once the labeled set grows beyond 20 pairs.
+**Decision: LLM query expansion is now OFF by default; `fbrain ask` runs the
+plain hybrid path (BM25 + vector + RRF on the original query). Expansion is
+opt-in via `--expand` (alias `--llm`).**
+
+The 2026-05-25 eval showed `ask` (with LLM expansion, P@5=0.59) **underperforms**
+`ask --no-llm` (P@5=0.73, MRR 0.60 vs 0.46) — expansion pulls in noise. Filed as
+a follow-up at the time. The 2026-06-15 re-run on the live `:9001` brain (now a
+22-pair labeled set, seeded harness, k=10) **confirms the regression and is the
+basis for the flip**:
+
+| mode | P@1 | P@3 | P@5 | MRR |
+|---|---|---|---|---|
+| `search` (vector-only) | 0.682 | 0.727 | 0.727 | 0.697 |
+| `ask` default (no expansion) | 0.591 | 0.682 | **0.727** | **0.645** |
+| `ask --expand` (LLM expansion) | 0.409 | 0.636 | **0.636** | **0.520** |
+
+The no-expansion default beats `--expand` on every metric (P@5 0.727 ≥ 0.636,
+MRR 0.645 ≥ 0.520), so the worse, costlier path is no longer the default. New
+devs get the best, fastest, key-free results out of the box; anyone who wants
+the wider paraphrase recall keeps it via `--expand`. This does **not** regress
+checklist item #10: that line forbids regressing to *vector-only* `search`
+(P@5=0.36 historically; the live re-run happens to show 0.727 too, but the
+guard is about the path, not the number) — the default `ask` is still the full
+**hybrid BM25 + vector + RRF** path, the eval winner. (See PR landing this card;
+default-flip implemented in `src/commands/ask.ts` + `src/cli.ts`.)
+
+Caveat retained for honesty: the labeled set is 22 pairs. If a substantially
+larger labeled set later shows expansion winning, re-open this and flip back —
+the default is data-driven, not dogmatic. For now the data is unambiguous in
+both the original and the re-run.

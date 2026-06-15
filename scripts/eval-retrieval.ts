@@ -111,9 +111,10 @@ function parseArgs(argv: string[]): Args {
     limit: 10,
     format: "table+json",
     out: null,
-    // Default: compare vector-only `search` against `ask --no-llm`.
-    // `ask` (with LLM) is opt-in via --modes to avoid spending tokens on
-    // every CI run; once a key is wired into CI we'll default-include it.
+    // Default: compare vector-only `search` against the default `ask`
+    // (BM25 + vector + RRF, no LLM — labeled `ask-no-llm` here for clarity).
+    // `ask` with LLM expansion is opt-in via --modes to avoid spending tokens
+    // on every CI run; once a key is wired into CI we'll default-include it.
     modes: ["search", "ask-no-llm"],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -166,8 +167,8 @@ function printHelp(): void {
       "low scores — gating is a future TODO once we have a baseline.\n\n" +
       "Modes (default: search,ask-no-llm):\n" +
       "  search       vector-only `fbrain search`\n" +
-      "  ask-no-llm   `fbrain ask --no-llm` (BM25 + vector + RRF)\n" +
-      "  ask          `fbrain ask` (adds LLM query expansion — costs Anthropic tokens)\n",
+      "  ask-no-llm   default `fbrain ask` (BM25 + vector + RRF, no LLM)\n" +
+      "  ask          `fbrain ask --expand` (adds LLM query expansion — costs Anthropic tokens)\n",
   );
 }
 
@@ -313,7 +314,9 @@ async function rankForPair(
         limit,
         print: (l) => lines.push(l),
       };
-      if (mode === "ask-no-llm") aOpts.noLlm = true;
+      // `ask` opts into LLM expansion; `ask-no-llm` is now the DEFAULT ask
+      // path (BM25 + vector + RRF, no LLM) so it needs no flag.
+      if (mode === "ask") aOpts.expand = true;
       await askCmd(aOpts);
     }
   } catch (err) {
