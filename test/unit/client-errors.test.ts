@@ -553,11 +553,35 @@ describe("client error mapping", () => {
         body: {},
         expectedCode: "node_http_403",
       },
+      {
+        name: "403 transport_not_attested (error-field shape) → attestation arm",
+        status: 403,
+        body: { error: "transport_not_attested" },
+        expectedCode: "transport_not_attested",
+      },
     ];
     for (const c of cases) {
       const err = mapNodeError(c.status, c.body, "/api/test");
       expect(err.code, c.name).toBe(c.expectedCode);
     }
+  });
+
+  // The owner-verb attestation 403 (fold#739) bites the documented contributor
+  // path: a from-source `./run.sh` node keeps its control socket off the default
+  // `~/.folddb/data/` path, so `fbrain init` step 4/6 (`/api/schemas/load`) 403s.
+  // Before the dedicated arm this surfaced as an opaque `node_http_403` with no
+  // hint. Pin that the user now gets the env-var remedy + the resolved socket
+  // path, on both the CLI (`hint`) and agent (`agentHint`) channels.
+  test("mapNodeError transport_not_attested → actionable socket remedy on both channels", () => {
+    const err = mapNodeError(403, { error: "transport_not_attested" }, "/api/schemas/load");
+    expect(err.code).toBe("transport_not_attested");
+    expect(err.message).toContain("attested transport");
+    expect(err.message).toContain("/api/schemas/load");
+    // Both channels must name the one env var that fixes it.
+    expect(err.hint).toContain("FBRAIN_FOLDDB_SOCKET");
+    expect(err.agentHint).toContain("FBRAIN_FOLDDB_SOCKET");
+    // …and reference folddb.sock so the user knows what to point at.
+    expect(err.hint).toContain("folddb.sock");
   });
 
   test("schema service POST without schema.name throws schema_register_no_hash", async () => {

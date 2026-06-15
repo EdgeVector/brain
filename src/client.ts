@@ -1388,6 +1388,52 @@ type NodeErrorRule = {
 // tuple that matches nothing falls through to the generic `node_http_${status}`
 // mapping in `mapNodeError`.
 const NODE_ERROR_RULES: NodeErrorRule[] = [
+  // Owner-verb attestation 403 (app-isolation flip, fold#739). The node gates
+  // owner verbs — `/api/schemas/load`, owner-isolation bypass, etc. — behind an
+  // attested transport and returns `403 {"error":"transport_not_attested"}` to
+  // bare loopback TCP. fbrain attests by minting a pairing code over the node's
+  // UDS control socket (see `attestOwnerSession`); when it can't find that
+  // socket it proceeds unattested and the verb 403s. The bite is the documented
+  // CONTRIBUTOR path: README tells devs to run a from-source node via `./run.sh`
+  // (a non-default data dir, so its socket is NOT at `~/.folddb/data/folddb.sock`)
+  // and then `fbrain init --node-url …`. Without this rule that lands as an
+  // opaque `node_http_403` at init step 4/6 with zero guidance. Resolve the
+  // socket path the client would have used (env/HOME-derived; a config-supplied
+  // `nodeSocketPath` override isn't visible to this pure mapper) and tell the
+  // user whether it was even present, plus the one env var that fixes it.
+  // Placed first: `transport_not_attested` arrives in the `error` field, so
+  // `ctx.reason` is undefined and the capability-403 rule below won't catch it —
+  // but ordering it ahead keeps the precedence explicit.
+  {
+    match: (ctx) => ctx.status === 403 && ctx.errCode === TRANSPORT_NOT_ATTESTED,
+    build: (ctx) => {
+      const socketPath = defaultFolddbSocketPath();
+      const found = existsSync(socketPath);
+      const where = found
+        ? `fbrain found a control socket at ${socketPath} but the node rejected the session it minted there`
+        : `fbrain found no control socket at ${socketPath}`;
+      return {
+        code: "transport_not_attested",
+        message:
+          `Node rejected ${ctx.path}: this owner verb requires an attested transport ` +
+          `(app-isolation flip, fold#739) and bare loopback TCP can't drive it — ${where}.`,
+        hint:
+          (found
+            ? "The socket exists but attestation failed — the node may have restarted (its in-memory " +
+              "session dropped) or it isn't the node serving your --node-url. "
+            : "fbrain attests by minting a pairing code over the node's UDS control socket, which lives at " +
+              "`<node-data-dir>/folddb.sock` — for the default `:9001` brain that's `~/.folddb/data/folddb.sock`. " +
+              "A from-source node (`./run.sh`) or one launched with a custom `FOLDDB_HOME` keeps its socket elsewhere. ") +
+          "Point fbrain at the right socket with `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+          "(or `FOLDDB_HOME=<node-home>`), then re-run. The socket is created by the OS user that " +
+          "owns the node, so run fbrain as that user on the same machine.",
+        agentHint:
+          `This node gates owner verbs behind an attested UDS control socket (fold#739). ${where}. ` +
+          "Set the FBRAIN_FOLDDB_SOCKET env to the node's `<data-dir>/folddb.sock` (default brain: " +
+          "`~/.folddb/data/folddb.sock`) and retry. fbrain must run as the OS user that owns the node.",
+      };
+    },
+  },
   // Discriminated capability 403 (app_identity v3.1). Body is verbatim
   // `{"status":403,"reason":"<reason>", ...}`. Carry the reason + any detail
   // on the FbrainError so the capability layer can apply the contract behavior
