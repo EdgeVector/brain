@@ -19,9 +19,11 @@ import {
   DEFAULT_NODE_URL,
   DEFAULT_SCHEMA_SERVICE_URL,
   hasUsableExistingConfig,
+  printNextSteps,
   resolveUrls,
   runInit,
 } from "../../src/commands/init.ts";
+import type { EstablishConsentResult } from "../../src/commands/init-consent.ts";
 import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import { FbrainError } from "../../src/client.ts";
 import { UNIQUE_SCHEMAS } from "../../src/schemas.ts";
@@ -403,6 +405,28 @@ describe("runInit — recovers from a corrupt existing config", () => {
     expect(onDisk.userHash).toBe("recovered-userhash-0001");
   });
 
+  test("fresh init prints the next-steps nudge after [init] ok", async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-nudge-"));
+    const configPath = join(tmpDir, "config.json");
+    installCleanInitMock();
+
+    const lines: string[] = [];
+    await runInit({ configPath, print: (l) => lines.push(l) });
+
+    const okIdx = lines.findIndex((l) => l.includes("[init] ok"));
+    expect(okIdx).toBeGreaterThanOrEqual(0);
+    // The nudge must come AFTER the terminal [init] ok marker so machine
+    // consumers that key off `[init] ok` see it before the guidance.
+    const after = lines.slice(okIdx + 1).join("\n");
+    expect(after).toContain("Next steps");
+    expect(after).toContain("fbrain design new");
+    expect(after).toContain("fbrain list");
+    expect(after).toContain("fbrain search");
+    expect(after).toContain("fbrain doctor");
+    // Tells the user where their data lives.
+    expect(after).toContain(DEFAULT_NODE_URL);
+  });
+
   test("config from a future fbrain (unknown configVersion) → init recovers fresh", async () => {
     tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-future-"));
     const configPath = join(tmpDir, "config.json");
@@ -433,5 +457,68 @@ describe("runInit — recovers from a corrupt existing config", () => {
     expect(result.config.configVersion).toBe(CONFIG_VERSION);
     const onDisk = JSON.parse(readFileSync(configPath, "utf8")) as Config;
     expect(onDisk.configVersion).toBe(CONFIG_VERSION);
+  });
+});
+
+describe("printNextSteps", () => {
+  const GRANTED: EstablishConsentResult = { state: "already_granted" };
+
+  test("fresh init → full walkthrough with node URL + config path", () => {
+    const lines: string[] = [];
+    printNextSteps((l) => lines.push(l), {
+      nodeUrl: "http://127.0.0.1:9001",
+      configPath: "/home/dev/.fbrain/config.json",
+      consent: GRANTED,
+      reinitialized: false,
+    });
+    const out = lines.join("\n");
+    expect(out).toContain("Next steps");
+    expect(out).toContain("fbrain design new my-first-idea");
+    expect(out).toContain("fbrain list");
+    expect(out).toContain("fbrain search");
+    expect(out).toContain("fbrain ask");
+    expect(out).toContain("fbrain doctor");
+    expect(out).toContain("http://127.0.0.1:9001");
+    expect(out).toContain("/home/dev/.fbrain/config.json");
+  });
+
+  test("re-run (already initialized) → terse variant, no full walkthrough", () => {
+    const lines: string[] = [];
+    printNextSteps((l) => lines.push(l), {
+      nodeUrl: DEFAULT_NODE_URL,
+      configPath: "/home/dev/.fbrain/config.json",
+      consent: GRANTED,
+      reinitialized: true,
+    });
+    const out = lines.join("\n");
+    expect(out).toContain("Already initialized");
+    expect(out).toContain("fbrain list");
+    // The full first-record walkthrough is suppressed on a re-run.
+    expect(out).not.toContain("Next steps");
+    expect(out).not.toContain("fbrain design new");
+  });
+
+  test("non-interactive (non_tty skip) → points at --grant-consent", () => {
+    const lines: string[] = [];
+    printNextSteps((l) => lines.push(l), {
+      nodeUrl: DEFAULT_NODE_URL,
+      configPath: "/home/dev/.fbrain/config.json",
+      consent: { state: "skipped", reason: "non_tty" },
+      reinitialized: false,
+    });
+    const out = lines.join("\n");
+    expect(out).toContain("Next steps");
+    expect(out).toContain("--grant-consent");
+  });
+
+  test("consent granted → no --grant-consent note (writes already authorized)", () => {
+    const lines: string[] = [];
+    printNextSteps((l) => lines.push(l), {
+      nodeUrl: DEFAULT_NODE_URL,
+      configPath: "/home/dev/.fbrain/config.json",
+      consent: GRANTED,
+      reinitialized: false,
+    });
+    expect(lines.join("\n")).not.toContain("--grant-consent");
   });
 });
