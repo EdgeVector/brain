@@ -329,7 +329,57 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
 
   print(`[init] ok`);
+
+  // Close the onboarding loop: a brand-new developer who reaches `[init] ok`
+  // should know their very next move without leaving the terminal to re-read
+  // the README. Emit a concise next-steps block on the same print stream.
+  // Kept off any machine-parsed surface — init's structured result is the
+  // return value; this is purely human guidance.
+  printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
+
   return { config, bootstrapped, consent };
+}
+
+/**
+ * Print the post-init "you're ready — here's your first record" nudge.
+ *
+ * Exported so tests can assert the exact guidance without re-running a full
+ * init. Lines are emitted on init's `print` sink (stderr-class human output),
+ * never on the machine-parsed result, so scripts/CI that consume stdout are
+ * unaffected. Re-running init against an already-configured node prints a
+ * shorter variant instead of the full first-record walkthrough.
+ */
+export function printNextSteps(
+  print: (line: string) => void,
+  ctx: {
+    nodeUrl: string;
+    configPath: string;
+    consent: EstablishConsentResult;
+    reinitialized: boolean;
+  },
+): void {
+  // Already-configured re-run: keep it terse — the full walkthrough is noise.
+  if (ctx.reinitialized) {
+    print(``);
+    print(`Already initialized — try \`fbrain list\` to see your records, or \`fbrain doctor\` to re-check health.`);
+    return;
+  }
+
+  print(``);
+  print(`You're ready. Next steps:`);
+  print(`  1. Create your first record:  fbrain design new my-first-idea --title "My first idea"`);
+  print(`        (also: concept/preference/reference/agent/project/spike new, or pipe markdown to \`fbrain put <slug>\`)`);
+  print(`  2. See what you've got:        fbrain list`);
+  print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
+  print(`  4. Re-check health anytime:    fbrain doctor`);
+  print(`  Data lives on the node at ${ctx.nodeUrl} (config: ${ctx.configPath}).`);
+
+  // When consent wasn't established (non-TTY scripted/CI run without
+  // --grant-consent), the first write will need a grant — point at the
+  // one-shot path so the operator isn't surprised mid-script.
+  if (ctx.consent.state === "skipped" && ctx.consent.reason === "non_tty") {
+    print(`  Note: running non-interactively — re-run \`fbrain init --grant-consent\` to authorize writes in one shot.`);
+  }
 }
 
 type ProbeResult = Awaited<ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>>;
