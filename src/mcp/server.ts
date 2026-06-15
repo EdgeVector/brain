@@ -129,7 +129,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Get fbrain record",
       description:
-        "Print a single fbrain record by slug. Without `type`, queries every registered schema and errors if the slug exists in multiple types.",
+        "Print a single fbrain record by slug. The ONLY lookup key is `slug` " +
+        "(plus optional `type`) — there is no `query`/`key`/`id` argument; for " +
+        "text or fuzzy lookup use `fbrain_search` instead. Without `type`, " +
+        "queries every registered schema and errors if the slug exists in " +
+        "multiple types.",
       inputSchema: {
         slug: requiredText("Record slug."),
         type: typeEnum
@@ -232,12 +236,22 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Status enum value for the type. Synthesized into the put's " +
-              "frontmatter so it lands atomically in the same mutation and " +
-              "is validated against the type's enum BEFORE any HTTP write — " +
-              "an invalid status errors out without persisting a partial " +
-              "record. Ignored when raw `frontmatter` is supplied (set " +
-              "`status:` in the frontmatter directly).",
+            "Status enum value for the type. Valid values DIFFER per type — " +
+              "`active` is accepted by concept/preference/reference/agent/spike " +
+              "but is NOT valid for project, design, or task. Per type: " +
+              "design = draft|reviewed|approved|implemented|archived; " +
+              "task = open|in_progress|blocked|done|cancelled; " +
+              "project = planning|in_progress|done|archived; " +
+              "concept/agent = active|archived; " +
+              "preference = active|superseded; " +
+              "reference = active|broken|archived; " +
+              "spike = active|concluded. Omit to use the type's default " +
+              "(first enum value). Synthesized into the put's frontmatter so " +
+              "it lands atomically in the same mutation and is validated " +
+              "against the type's enum BEFORE any HTTP write — an invalid " +
+              "status errors out without persisting a partial record. Ignored " +
+              "when raw `frontmatter` is supplied (set `status:` in the " +
+              "frontmatter directly).",
           ),
         tags: z
           .array(z.string())
