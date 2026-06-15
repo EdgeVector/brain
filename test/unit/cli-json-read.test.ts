@@ -477,7 +477,7 @@ describe("searchCmd --json", () => {
     // The empty-result hint stays useful for interactive users — pin it
     // to stderr so it doesn't pollute jq.
     expect(err.length).toBe(1);
-    expect(err[0]).toContain("fbrain ask <query> --no-llm");
+    expect(err[0]).toContain("fbrain ask <query>");
   });
 
   test("rounds the score to 6 decimals; perfect f32 cosine serializes as 1, not 1.0000001192092896", async () => {

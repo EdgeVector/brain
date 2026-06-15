@@ -182,13 +182,13 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       // array rather than the "no matches" sentinel.
       print("[]");
       printErr(
-        "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query> --no-llm` (BM25 fallback) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
+        "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
       );
       return;
     }
     print("no matches");
     print(
-      "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query> --no-llm` (BM25 fallback) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
+      "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
     );
     return;
   }

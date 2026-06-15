@@ -1,11 +1,11 @@
 // `fbrain ask <query>` — hybrid retrieval.
 //
 // Pipeline:
-//   1. (optional) LLM expands the query into 3 alternative phrasings via
-//      Anthropic.  Original + 3 = 4 query strings.
+//   1. (opt-in, --expand) LLM expands the query into 3 alternative phrasings
+//      via Anthropic.  Original + 3 = 4 query strings.
 //   2. For each query string, run BM25 (client-side index over all live
 //      records) AND vector (node native-index, schema-scoped per G3d).
-//      That's 8 ranked lists when expansion is on, 2 when --no-llm.
+//      That's 2 ranked lists by default, 8 when --expand is on.
 //   3. RRF fuses all lists. The fused top-K is the answer.
 //   4. The chosen records get resolved to full FbrainRecord rows.
 //
@@ -13,9 +13,17 @@
 // outpacing"); BM25 handles rare-token / acronym matches the embedding
 // model never trained on.  RRF needs no score calibration between rankers.
 //
-// Cost guardrail: 1 LLM call per invocation when expansion is on. The
-// expansion is logged to --verbose with token + USD estimate. Missing
-// API key -> auto-fallback to BM25 + vector + RRF only (one-line notice).
+// Default = no LLM. The 2026-05-25 labeled eval (docs/g0-replacement-
+// readiness-gate.md §8) showed LLM query expansion REDUCED relevance vs.
+// the plain hybrid path (P@5 0.59 vs 0.73, MRR 0.46 vs 0.60). So expansion
+// is OFF by default — `ask` runs BM25 + vector + RRF on the original query,
+// which is the eval winner and needs no API key. Expansion is opt-in via
+// `--expand` (alias `--llm`) for callers who want the wider paraphrase recall.
+//
+// Cost guardrail: 1 LLM call per invocation ONLY when --expand is set. The
+// expansion is logged to --verbose with token + USD estimate. Missing API
+// key under --expand -> falls back to BM25 + vector + RRF only (one-line
+// notice).
 
 import {
   newReadClientFromCfg,
@@ -67,6 +75,14 @@ export type AskOptions = {
   cfg: Config;
   query: string;
   limit?: number;
+  // Opt-in LLM query expansion (Stage 0). Default OFF — the 2026-05-25
+  // labeled eval showed expansion REDUCES relevance vs. the plain hybrid
+  // path (see §8 of the gate doc), so the eval-winning, key-free path is
+  // the default and expansion is explicit.
+  expand?: boolean;
+  // Back-compat no-op. `--no-llm` used to disable an on-by-default expansion;
+  // expansion is now off by default, so passing this changes nothing. Kept
+  // so existing scripts/agents don't break. Ignored when `expand` is set.
   noLlm?: boolean;
   explain?: boolean;
   // Restrict results to these record types. Undefined / empty = all 8 types.
@@ -111,7 +127,7 @@ export type AskHit = {
 // callers use on the success path.
 export type ExpansionStatus =
   | { kind: "ok" }
-  | { kind: "disabled" } // --no-llm
+  | { kind: "disabled" } // expansion not requested (default; or --no-llm no-op)
   | { kind: "no-key" } // ANTHROPIC_API_KEY not resolvable
   | { kind: "failed"; reason: string };
 
@@ -136,7 +152,8 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   let expansions: string[] = [];
   let expansion: ExpansionResult | null = null;
   let expansionStatus: ExpansionStatus;
-  if (opts.noLlm) {
+  if (!opts.expand) {
+    // Default path: no LLM. (Also covers the back-compat --no-llm no-op.)
     expansionStatus = { kind: "disabled" };
   } else {
     const key = resolveAnthropicKey();
@@ -350,7 +367,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       explainSink(`expansion failed: ${expansionStatus.reason}`);
       explainSink("");
     } else if (expansionStatus.kind === "disabled") {
-      explainSink("(no expansions — LLM disabled via --no-llm)");
+      explainSink("(no expansions — LLM expansion not enabled; pass --expand)");
       explainSink("");
     } else if (expansionStatus.kind === "no-key") {
       explainSink(

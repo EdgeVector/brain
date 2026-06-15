@@ -76,7 +76,7 @@ Commands:
   status         show or update a record's status
   link           link a task to a parent design
   search         semantic search over indexed records
-  ask            hybrid retrieval (BM25 + vector + RRF + LLM expansion)
+  ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
@@ -211,22 +211,26 @@ and skips stale hits (records deleted since indexing). Prints
   --json        emit a JSON array of \`{slug, score, type, title}\` on stdout
                 (parseable by \`jq\`). Empty result is \`[]\`. Weak-match
                 advisory and empty-result hint route to stderr.`,
-  ask: `fbrain ask <query> [-n N | --limit N] [--no-llm] [--explain] [--type T]... [--json]
+  ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--type T]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
-fused via Reciprocal Rank Fusion. By default an LLM generates 3 alternative
-phrasings of the query; BM25 + vector run against original + 3 expansions
-and RRF fuses across all 8 lists. The 4-query × 2-ranker design lets
-paraphrase recall ride alongside rare-token / acronym recall.
+fused via Reciprocal Rank Fusion. By DEFAULT it runs BM25 + vector on the
+original query and fuses the two lists — no LLM call, no API key, fastest.
+This is the eval-winning path: the 2026-05-25 labeled eval showed LLM query
+expansion REDUCED relevance (P@5 0.59 vs 0.73, MRR 0.46 vs 0.60), so it is
+opt-in. With --expand an LLM first generates 3 alternative phrasings; BM25 +
+vector then run against original + 3 expansions and RRF fuses all 8 lists.
 
   -n, --limit N max results (default 5; \`-n\` and \`--limit\` are aliases,
                 last wins)
-  --no-llm      skip LLM expansion (BM25 + vector + RRF on the original
-                query only — useful offline or to save tokens).
-                Incompatible with --explain (there is nothing to explain
-                without expansions); the combination exits 2.
+  --expand      opt in to LLM query expansion (alias --llm). Generates 3
+  --llm         alternative phrasings via Anthropic and fuses BM25 + vector
+                across original + 3 expansions. Costs 1 LLM call + an API key.
+  --no-llm      accepted for back-compat; a no-op now (expansion is already
+                off by default). Conflicts with --expand/--llm.
   --explain     print the LLM-generated expansions before results.
-                Requires expansion — incompatible with --no-llm.
+                Requires --expand (alias --llm) — there is nothing to explain
+                without expansion; \`--explain\` without it exits 2.
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`). Narrows both the BM25
                 corpus and the vector schemas filter.
@@ -237,14 +241,14 @@ paraphrase recall ride alongside rare-token / acronym recall.
                 no-key / expansion-failure notices, and the \`--explain\`
                 expansions block all route to stderr.
 
-Cost: 1 LLM call per invocation. Run with the global --verbose to see
-token + USD estimates and per-ranker debug. Missing ANTHROPIC_API_KEY
-falls back to --no-llm automatically with a one-line notice; with
---explain set, the explain section also prints a no-key notice instead
-of silently dropping.
+Cost: 0 LLM calls by default; 1 LLM call per invocation under --expand. Run
+with the global --verbose to see token + USD estimates and per-ranker debug.
+Under --expand, a missing ANTHROPIC_API_KEY falls back to the no-expansion
+path automatically with a one-line notice; with --explain set, the explain
+section also prints a no-key notice instead of silently dropping.
 
-The LLM key is read from \$ANTHROPIC_API_KEY (preferred) or an
-optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
+The LLM key (only needed for --expand) is read from \$ANTHROPIC_API_KEY
+(preferred) or an optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
   doctor: `fbrain doctor [--freshness] [--write] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
@@ -463,6 +467,14 @@ const SEARCH_OPTIONS = {
 } as const;
 const ASK_OPTIONS = {
   limit: { type: "string", short: "n" },
+  // Opt-in LLM query expansion. OFF by default — the labeled eval showed
+  // expansion hurts relevance (gate doc §8), so the default path is the
+  // eval-winning, key-free BM25 + vector + RRF on the original query.
+  expand: { type: "boolean", default: false },
+  // Alias for --expand.
+  llm: { type: "boolean", default: false },
+  // Back-compat no-op: expansion is already off by default, so --no-llm
+  // changes nothing now. Accepted so existing scripts/agents don't break.
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
   type: { type: "string", multiple: true },
@@ -1243,9 +1255,24 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.ask);
     return 1;
   }
-  if (values.explain && values["no-llm"]) {
+  // --expand and its alias --llm both turn LLM query expansion back on.
+  const expand = values.expand || values.llm;
+  // --no-llm is now a no-op (expansion is off by default); it only conflicts
+  // when paired with an explicit --expand/--llm — that's a contradiction we
+  // reject so the caller's intent is unambiguous.
+  if (expand && values["no-llm"]) {
     console.error(
-      "error: --explain requires LLM expansion; remove --no-llm or drop --explain.",
+      "error: --no-llm contradicts --expand/--llm; pick one (expansion is off by default).",
+    );
+    return 2;
+  }
+  // --explain prints the LLM-generated expansions, so it requires expansion.
+  // With expansion now off by default, --explain without --expand has nothing
+  // to explain — exit 2 with a clear next step (keeps the old --explain
+  // --no-llm rejection, now generalized to "explain needs expansion").
+  if (values.explain && !expand) {
+    console.error(
+      "error: --explain requires LLM expansion; add --expand (alias --llm).",
     );
     return 2;
   }
@@ -1256,7 +1283,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   const aOpts: Parameters<typeof askCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number") aOpts.limit = limit;
-  if (values["no-llm"]) aOpts.noLlm = true;
+  if (expand) aOpts.expand = true;
   if (values.explain) aOpts.explain = true;
   if (askTypes) aOpts.types = askTypes;
   if (values.json) aOpts.json = true;

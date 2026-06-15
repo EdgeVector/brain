@@ -203,6 +203,7 @@ describe("askCmd expansion failure observability (--explain)", () => {
       const result = await askCmd({
         cfg,
         query: "anything",
+        expand: true,
         explain: true,
         print: (line) => printed.push(line),
         printErr: (line) => stderr.push(line),
@@ -236,16 +237,16 @@ describe("askCmd expansion failure observability (--explain)", () => {
     },
   );
 
-  test("--no-llm path reports kind='disabled', not 'failed'", async () => {
-    // Negative control: --no-llm must NOT look like a failure. Keeps the
-    // discriminator honest if someone later collapses the branches.
+  test("default (no --expand) path reports kind='disabled', not 'failed'", async () => {
+    // Negative control: the default no-expansion path must NOT look like a
+    // failure. Keeps the discriminator honest if someone later collapses the
+    // branches. (Post-flip: expansion is off unless --expand is passed.)
     const cfg = buildTestCfg();
     installFetchStub({ queries: {}, vectorHits: [] });
 
     const result = await askCmd({
       cfg,
       query: "anything",
-      noLlm: true,
       explain: true,
       print: () => {},
     });
@@ -254,12 +255,10 @@ describe("askCmd expansion failure observability (--explain)", () => {
     expect(result.expansion).toBeNull();
   });
 
-  test("--no-llm + --explain prints a 'disabled' notice so --explain isn't a no-op", async () => {
-    // Pre-fix bug: running `ask --no-llm --explain` printed exactly the
-    // same lines as `ask --no-llm` (because the only --explain emit paths
-    // were the failure-reason print and the expansions list, both of which
-    // are quiet when --no-llm is on). An operator debugging with --explain
-    // had no signal that expansions were intentionally off.
+  test("disabled + --explain prints a notice so --explain isn't a no-op", async () => {
+    // --explain must say something on the disabled path, otherwise it prints
+    // exactly the same lines as a plain run. The notice now points at
+    // --expand (expansion is off by default after the eval-driven flip).
     const cfg = buildTestCfg();
     installFetchStub({ queries: {}, vectorHits: [] });
 
@@ -267,18 +266,19 @@ describe("askCmd expansion failure observability (--explain)", () => {
     await askCmd({
       cfg,
       query: "anything",
-      noLlm: true,
       explain: true,
       print: (line) => printed.push(line),
     });
 
-    expect(printed.some((l) => l.includes("LLM disabled via --no-llm"))).toBe(true);
+    expect(printed.some((l) => l.includes("LLM expansion not enabled; pass --expand"))).toBe(
+      true,
+    );
   });
 
-  test("--no-llm WITHOUT --explain stays quiet about the disabled status", async () => {
+  test("default WITHOUT --explain stays quiet about the disabled status", async () => {
     // Bookend the previous test: confirm we only emit the explanation
     // line when --explain is set, so users who don't ask for the debug
-    // surface don't get a new line of chatter on every offline run.
+    // surface don't get a new line of chatter on every default run.
     const cfg = buildTestCfg();
     installFetchStub({ queries: {}, vectorHits: [] });
 
@@ -286,14 +286,31 @@ describe("askCmd expansion failure observability (--explain)", () => {
     await askCmd({
       cfg,
       query: "anything",
-      noLlm: true,
       print: (line) => printed.push(line),
     });
 
-    expect(printed.some((l) => l.includes("LLM disabled via --no-llm"))).toBe(false);
+    expect(printed.some((l) => l.includes("LLM expansion not enabled"))).toBe(false);
   });
 
-  test("--explain with no ANTHROPIC_API_KEY prints a no-key notice", async () => {
+  test("--no-llm is a back-compat no-op — default already disables expansion", async () => {
+    // Existing scripts/agents that pass --no-llm must keep working. It now
+    // changes nothing (expansion is off by default) and must NOT surface as
+    // a failure.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const result = await askCmd({
+      cfg,
+      query: "anything",
+      noLlm: true,
+      print: () => {},
+    });
+
+    expect(result.expansionStatus.kind).toBe("disabled");
+    expect(result.expansion).toBeNull();
+  });
+
+  test("--explain with --expand and no ANTHROPIC_API_KEY prints a no-key notice", async () => {
     // Third branch of the fix: when the key is absent we already print a
     // top-of-run `note:` line, but --explain should ALSO drop its own
     // honest stub so the explain section is non-empty and self-consistent
@@ -309,6 +326,7 @@ describe("askCmd expansion failure observability (--explain)", () => {
     const result = await askCmd({
       cfg,
       query: "anything",
+      expand: true,
       explain: true,
       print: (line) => printed.push(line),
       printErr: (line) => stderr.push(line),
@@ -704,6 +722,7 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
     const result = await askCmd({
       cfg,
       query: "octopus",
+      expand: true,
       print: (line) => stdout.push(line),
       printErr: (line) => stderr.push(line),
     });
@@ -873,7 +892,9 @@ describe("askCmd --json", () => {
     // --json + --explain still works — explanations just land on stderr
     // so stdout stays parseable. Without this routing, `fbrain ask q
     // --json --explain | jq ...` would dead-end on a leading
-    // "(no expansions — LLM disabled via --no-llm)" line.
+    // "(no expansions — ...)" line. (Post-flip: the disabled notice now
+    // points at --expand; askCmd accepts explain+disabled, the CLI guard
+    // is what rejects `--explain` without `--expand`.)
     const cfg = buildTestCfg();
     installFetchStub({ queries: {}, vectorHits: [] });
 
@@ -882,7 +903,6 @@ describe("askCmd --json", () => {
     await askCmd({
       cfg,
       query: "anything",
-      noLlm: true,
       explain: true,
       json: true,
       print: (line) => stdout.push(line),
@@ -893,7 +913,7 @@ describe("askCmd --json", () => {
     expect(stdout).toEqual(["[]"]);
     // Stderr: the --explain `(no expansions ...)` notice.
     expect(
-      stderr.some((l) => l.includes("LLM disabled via --no-llm")),
+      stderr.some((l) => l.includes("LLM expansion not enabled; pass --expand")),
     ).toBe(true);
   });
 });
@@ -937,6 +957,7 @@ describe("askCmd query deduplication", () => {
     const result = await askCmd({
       cfg,
       query: "foo",
+      expand: true,
       print: () => {},
       fetchImpl: llmFetch,
     });

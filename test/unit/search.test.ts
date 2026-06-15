@@ -263,7 +263,7 @@ describe("searchCmd", () => {
     const lines: string[] = [];
     await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
     expect(lines[0]).toBe("no matches");
-    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+    expect(lines[1]).toContain("fbrain ask <query>");
     expect(lines).toHaveLength(2);
   });
 
@@ -286,14 +286,14 @@ describe("searchCmd", () => {
     const lines: string[] = [];
     await searchCmd({ cfg, query: "x", print: (l) => lines.push(l) });
     expect(lines[0]).toBe("no matches");
-    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+    expect(lines[1]).toContain("fbrain ask <query>");
     expect(lines).toHaveLength(2);
   });
 
-  test("empty result prints BM25-fallback hint pointing at `fbrain ask --no-llm`", async () => {
+  test("empty result prints BM25-fallback hint pointing at `fbrain ask`", async () => {
     // Vector index has freshness lag (G3a/G3b per phase-7-search-latency-spike.md).
     // Users who hit "no matches" interactively shouldn't be left thinking the record
-    // isn't there — BM25 (via `fbrain ask --no-llm`) often catches it.
+    // isn't there — BM25 (via the default `fbrain ask`) often catches it.
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
         return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
@@ -305,8 +305,8 @@ describe("searchCmd", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("no matches");
     expect(lines[1]).toMatch(/^hint:\s/);
-    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
-    expect(lines[1]).toContain("BM25 fallback");
+    expect(lines[1]).toContain("fbrain ask <query>");
+    expect(lines[1]).toContain("BM25 + vector hybrid");
   });
 
   test("tolerates missing metadata.score → prints — in the score column", async () => {
@@ -987,7 +987,7 @@ describe("searchCmd", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("no matches");
     expect(lines[1]).toMatch(/^hint:\s/);
-    expect(lines[1]).toContain("fbrain ask <query> --no-llm");
+    expect(lines[1]).toContain("fbrain ask <query>");
   });
 
   test("omits ?schemas when the config carries no schema hashes", async () => {
