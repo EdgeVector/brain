@@ -12,11 +12,13 @@ import { z } from "zod";
 import pkg from "../../package.json" with { type: "json" };
 import {
   buildPutInput,
+  CONFIG_MISSING_HINT,
   createFbrainMcpServer,
   DROPPED_INPUT_HINT,
   FBRAIN_MCP_VERSION,
   resolvePutBody,
 } from "../../src/mcp/server.ts";
+import { ConfigMissingError } from "../../src/config.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -1180,6 +1182,102 @@ describe("createFbrainMcpServer", () => {
       "fbrain_put",
       "fbrain_search",
     ]);
+  });
+});
+
+describe("server starts without a config (lazy config resolution)", () => {
+  // The new-developer path: `claude mcp add fbrain fbrain-mcp` is run BEFORE
+  // `fbrain init`, so there is no ~/.fbrain/config.json yet. The server must
+  // still construct and list its tools (so the MCP handshake succeeds and the
+  // client connects); the missing config only surfaces when a tool is CALLED,
+  // as a clean `isError` "run `fbrain init`" hint — not a startup crash.
+  //
+  // The `getCfg` thunk stands in for `readConfig()` here: throwing a
+  // ConfigMissingError models a missing config file without touching disk, and
+  // never calling it (until a tool runs) proves config resolution is lazy.
+
+  function missingConfigLoader(): () => never {
+    return () => {
+      throw new ConfigMissingError("/nope/.fbrain/config.json");
+    };
+  }
+
+  test("constructs and lists all 7 tools with no config (handshake survives)", () => {
+    let loaderCalls = 0;
+    const getCfg = () => {
+      loaderCalls += 1;
+      throw new ConfigMissingError("/nope/.fbrain/config.json");
+    };
+    const tools = toolsOf(createFbrainMcpServer({ getCfg }));
+    // tools/list never resolves config — the loader must not have run yet.
+    expect(loaderCalls).toBe(0);
+    expect(Object.keys(tools).sort()).toEqual([
+      "fbrain_ask",
+      "fbrain_delete",
+      "fbrain_get",
+      "fbrain_link",
+      "fbrain_list",
+      "fbrain_put",
+      "fbrain_search",
+    ]);
+  });
+
+  test("a tool call with no config returns an isError result naming `fbrain init` (not a crash)", async () => {
+    // No fetch mock installed: if the handler reached the node at all this
+    // would throw a network error instead of the clean hint. The config guard
+    // must short-circuit BEFORE any HTTP traffic.
+    const tools = toolsOf(createFbrainMcpServer({ getCfg: missingConfigLoader() }));
+    for (const name of [
+      "fbrain_search",
+      "fbrain_ask",
+      "fbrain_get",
+      "fbrain_list",
+      "fbrain_put",
+      "fbrain_delete",
+      "fbrain_link",
+    ]) {
+      const res = await tools[name]!(
+        // Minimal valid args per tool so zod's inputSchema passes and the
+        // handler runs (where the config guard fires). The args themselves
+        // don't matter — config resolution happens first.
+        name === "fbrain_link"
+          ? { from_type: "task", from_slug: "t", to_type: "design", to_slug: "d" }
+          : name === "fbrain_get" || name === "fbrain_delete"
+            ? { slug: "x" }
+            : name === "fbrain_put"
+              ? { slug: "x", type: "concept", body: "b" }
+              : name === "fbrain_list"
+                ? {}
+                : { query: "q" },
+      );
+      expect(res.isError).toBe(true);
+      const text = res.content[0]!.text ?? "";
+      expect(text).toBe(CONFIG_MISSING_HINT);
+      expect(text).toContain("fbrain init");
+    }
+  });
+
+  test("the loader runs per call (config resolved lazily, once a tool is invoked)", async () => {
+    let loaderCalls = 0;
+    const getCfg = () => {
+      loaderCalls += 1;
+      throw new ConfigMissingError("/nope/.fbrain/config.json");
+    };
+    const tools = toolsOf(createFbrainMcpServer({ getCfg }));
+    expect(loaderCalls).toBe(0);
+    await tools.fbrain_list!({});
+    expect(loaderCalls).toBe(1);
+  });
+});
+
+describe("CONFIG_MISSING_HINT wording", () => {
+  // Pin the actionable shape the new-dev path depends on: it must name the
+  // exact recovery command and where it writes, mirroring the fkanban
+  // `mcp-start-without-config` per-tool hint UX.
+  test("names `fbrain init` and the config path", () => {
+    expect(CONFIG_MISSING_HINT).toContain("fbrain init");
+    expect(CONFIG_MISSING_HINT).toContain("~/.fbrain/config.json");
+    expect(CONFIG_MISSING_HINT).toContain("not initialized");
   });
 });
 
