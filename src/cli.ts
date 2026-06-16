@@ -83,7 +83,7 @@ Commands:
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record to refresh embeddings
   migrate        evolve a schema by adding a field (see docs/g15-schema-evolution-playbook.md)
-  mcp            start an MCP server over stdio (6 tools: search/get/list/put/delete/link)
+  mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
   help <cmd>     per-command usage
 
 Global flags:
