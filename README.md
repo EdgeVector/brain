@@ -375,7 +375,7 @@ claude mcp add fbrain fbrain-mcp
 fbrain-mcp
 ```
 
-`bun link` (Quick start step 1) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting the clone.
+`bun link` (Quick start step 1) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting the clone. `fbrain doctor` verifies this for you — its `mcp-entrypoint` check PASSes with the resolved path when `fbrain-mcp` is on `PATH`, and WARNs (without failing the verdict) with a re-link hint when it isn't, so a silently-broken agent integration is visible instead of surfacing only at agent-call time.
 
 > **From a source checkout without `bun link`?** Use the path-based form from the repo root: `claude mcp add fbrain bun "$(realpath src/mcp/main.ts)"`. This bakes an absolute path to the clone into the MCP config — move or delete the clone and the registration breaks.
 

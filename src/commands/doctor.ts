@@ -17,6 +17,15 @@
 //      probe asks both questions a write needs to answer "yes" to and
 //      surfaces a structured FAIL ("write-blocked") with an actionable
 //      hint that distinguishes a missing grant from a cold registry.
+//   9. mcp-entrypoint — the `fbrain-mcp` bin (the headline agent
+//      integration `claude mcp add fbrain fbrain-mcp`) resolves on PATH.
+//      Cheap + offline (Bun.which only; never spawns the server). WARN —
+//      never FAIL — when missing, so a CLI-only or source-checkout user's
+//      green verdict isn't flipped, but a silently-broken agent path is
+//      surfaced with a re-link hint.
+//
+// With `--json`: emit the structured check results as a single JSON object
+// on stdout (same verdict + exit code) for CI / script consumption.
 //
 // Always-WARN disclosure probes (G0 gate item #9 —
 // see docs/g0-replacement-readiness-gate.md §6). These don't detect a
@@ -115,6 +124,15 @@ export type DoctorOptions = {
   // Override for tests: the write-node-client factory used by the round-trip
   // probe. Defaults to newWriteNodeClient.
   writeNodeFactory?: (opts: WriteNodeClientOptions) => WriteNodeClient;
+  // Override for tests: resolve a bin name to its absolute path on PATH (or
+  // null when unresolved). Defaults to Bun.which. Lets the mcp-entrypoint
+  // probe be exercised in both the resolved + unresolved states without
+  // mutating the test process's real PATH.
+  whichBin?: (name: string) => string | null;
+  // --json: emit the structured check results as a single JSON object on
+  // stdout instead of the human PASS/WARN/FAIL lines, so the agent-facing
+  // surfaces (CI, scripts) can read doctor's verdict programmatically.
+  json?: boolean;
 };
 
 // `tag` overrides the printed tag when set; `ok` always drives the exit code.
@@ -152,7 +170,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     // them back to a command that can't succeed.
     const probe = await runSchemaPublishGateProbe(opts, verbose);
     if (probe) checks.push(probe);
-    return finalize(checks, print);
+    return finalize(checks, print, opts.json);
   }
   const cfgIssues = validateConfigShape(cfg);
   if (cfgIssues.length > 0) {
@@ -187,7 +205,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   if (opts.usage) {
     if (cfgIssues.length > 0) {
       print("usage report skipped — config is invalid (see [FAIL] above).");
-      return finalize(checks, print);
+      return finalize(checks, print, opts.json);
     }
     const usageOpts: UsageOptions = { ...(opts.usageOptions ?? {}) };
     if (!usageOpts.print) usageOpts.print = print;
@@ -379,6 +397,19 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(writeReady);
   }
 
+  // MCP-entrypoint probe — the headline agent-integration path. The README
+  // front-loads `claude mcp add fbrain fbrain-mcp`, which only works if the
+  // `fbrain-mcp` bin (declared in package.json `bin` alongside `fbrain`) is
+  // on PATH. On a real machine a stale hand-installed `fbrain` shim that
+  // predates the `fbrain-mcp` bin leaves `fbrain` resolvable but `fbrain-mcp`
+  // missing — and pre-this-check doctor was all-PASS, so a broken agent
+  // integration failed silently. Cheap + offline (PATH resolution only; we
+  // do NOT spawn the MCP server). WARN, never FAIL: MCP is optional for
+  // CLI-only users and source-checkout users register the path-based form,
+  // so absence must not flip doctor's exit code.
+  const mcpCheck = runMcpEntrypointProbe(opts, verbose);
+  checks.push(mcpCheck);
+
   // Disclosure probes — always WARN, no detection. They surface the
   // multi-machine + team-sharing limits called out in
   // docs/g0-replacement-readiness-gate.md §6 so the gate stays honest
@@ -439,7 +470,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
-  return finalize(checks, print);
+  return finalize(checks, print, opts.json);
 }
 
 async function checkSchemaDrift(
@@ -705,8 +736,33 @@ export function validateConfigShape(cfg: Config): string[] {
   return issues;
 }
 
-function finalize(checks: CheckResult[], print: (line: string) => void): number {
+function finalize(
+  checks: CheckResult[],
+  print: (line: string) => void,
+  json = false,
+): number {
   const failures = checks.filter((c) => !c.ok);
+  // --json: emit one machine-readable object so agent-facing surfaces (CI,
+  // scripts) can read the verdict + per-check tags programmatically. Each
+  // entry mirrors the human line's components — name, tag (PASS/WARN/FAIL),
+  // ok (drives the exit code; WARN is ok:true), detail, and fix.
+  if (json) {
+    const entries = checks.map((c) => ({
+      name: c.name,
+      tag: tagOf(c),
+      ok: c.ok,
+      ...(c.detail !== undefined ? { detail: c.detail } : {}),
+      ...(c.fix !== undefined ? { fix: c.fix } : {}),
+    }));
+    print(
+      JSON.stringify({
+        ok: failures.length === 0,
+        failures: failures.length,
+        checks: entries,
+      }),
+    );
+    return failures.length === 0 ? 0 : 1;
+  }
   for (const check of checks) {
     const tag = tagOf(check);
     const detail = check.detail ? `  — ${check.detail}` : "";
@@ -1139,6 +1195,47 @@ export async function runWriteReadyProbe(
     name: "write-ready",
     ok: true,
     detail: "capability cached + JCS-valid for this node; consent dry-run returned 202",
+  };
+}
+
+// MCP-entrypoint probe — resolve the `fbrain-mcp` bin on PATH so a new dev
+// can see whether `claude mcp add fbrain fbrain-mcp` (the headline agent
+// integration the README front-loads) will actually work. package.json `bin`
+// declares both `fbrain` and `fbrain-mcp`, but a stale hand-installed `fbrain`
+// shim can leave `fbrain` resolvable while `fbrain-mcp` is missing — and that
+// breakage is otherwise invisible (the agent just can't reach the brain).
+//
+// Cheap + offline: PATH resolution via Bun.which only — we never spawn the
+// MCP server. WARN (never FAIL) when unresolved so the verdict stays green
+// for CLI-only users and source-checkout users (who register the path-based
+// form), with an actionable re-link hint. PASS message carries the resolved
+// path.
+export function runMcpEntrypointProbe(
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): CheckResult {
+  const which = opts.whichBin ?? ((name: string) => Bun.which(name));
+  const resolved = which("fbrain-mcp");
+  if (resolved) {
+    verbose?.(`mcp-entrypoint: resolved fbrain-mcp -> ${resolved}`);
+    return {
+      name: "mcp-entrypoint",
+      ok: true,
+      detail: `fbrain-mcp -> ${resolved}`,
+    };
+  }
+  verbose?.(`mcp-entrypoint: fbrain-mcp not on PATH — emitting WARN`);
+  return {
+    name: "mcp-entrypoint",
+    ok: true,
+    tag: "WARN",
+    detail:
+      "MCP entrypoint 'fbrain-mcp' is not on PATH — agent integration " +
+      "(`claude mcp add fbrain fbrain-mcp`) won't work",
+    fix:
+      "MCP entrypoint 'fbrain-mcp' not on PATH — agent integration won't work. " +
+      "Re-run 'bun link' in the fbrain repo, then 'claude mcp add fbrain fbrain-mcp'. " +
+      'From a source checkout: claude mcp add fbrain bun "$(realpath src/mcp/main.ts)".',
   };
 }
 
