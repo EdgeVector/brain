@@ -246,10 +246,23 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 3/6: load schemas into the node. This pulls the published catalog —
-  // including every fbrain/* schema — into the node's DB with no cert needed.
-  print(`[4/${STEPS}] loading schemas into the node`);
-  const loadResult = await nodeClient.loadSchemas();
+  // Step 3/6: load schemas into the node — scoped to JUST fbrain's 8 (fold
+  // #877), so a fresh node stays clean instead of pulling the entire global
+  // published catalog (~948 schemas). For each schema we pass its canonical
+  // identity hash when registration resolved it above; for cert-gated re-POSTs
+  // (the fresh-consumer path, where every fbrain/* schema is already published
+  // and we hold no DevCert) we don't yet have the hash, so we pass the
+  // `descriptive_name` — the node matches that too, and the (descriptive_name,
+  // owner_app_id) resolution below then pins the exact fbrain/* canonical hash.
+  // Forward-compatible: a pre-#877 node ignores the scope body and full-loads,
+  // and the resolution step still finds fbrain's schemas in the larger set.
+  const loadScope = UNIQUE_SCHEMAS.map((entry) => {
+    const firstType = entry.types[0];
+    const hash = firstType ? schemaHashes[firstType] : undefined;
+    return hash ?? entry.schema.schema.descriptive_name;
+  });
+  print(`[4/${STEPS}] loading schemas into the node (scoped to fbrain's ${loadScope.length})`);
+  const loadResult = await nodeClient.loadSchemas(loadScope);
   if (loadResult.failed_schemas.length > 0) {
     throw new Error(
       `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,

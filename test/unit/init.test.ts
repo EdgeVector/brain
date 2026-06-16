@@ -269,7 +269,7 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
   // carries the published fbrain/* schemas: every `POST /v1/schemas` is
   // rejected with 401 cert_required, but the node's GET /api/schemas exposes
   // each schema's authoritative identity_hash. init must resolve, not die.
-  function installCertGatedMock(): void {
+  function installCertGatedMock(loadBodies: unknown[] = []): void {
     const loaded = UNIQUE_SCHEMAS.map((e, i) => ({
       descriptive_name: e.schema.schema.descriptive_name,
       owner_app_id: e.schema.schema.owner_app_id,
@@ -285,6 +285,7 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
         return jsonResponse(401, { reason: "cert_required" });
       }
       if (url.endsWith("/api/schemas/load")) {
+        loadBodies.push(init?.body ? JSON.parse(String(init.body)) : null);
         return jsonResponse(200, {
           available_schemas_loaded: loaded.length,
           schemas_loaded_to_db: loaded.length,
@@ -302,7 +303,8 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
     tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-resolve-"));
     const configPath = join(tmpDir, "config.json");
-    installCertGatedMock();
+    const loadBodies: unknown[] = [];
+    installCertGatedMock(loadBodies);
 
     const lines: string[] = [];
     const result = await runInit({
@@ -311,6 +313,15 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
       // skip the interactive consent step in this unit test
       consent: { isTty: () => false },
     });
+
+    // The load was SCOPED (fold #877): with no DevCert, registration is
+    // cert-gated so init has no hashes yet — it must scope the load by the 8
+    // fbrain descriptive_names, NOT pull the whole global catalog (no body).
+    expect(loadBodies).toHaveLength(1);
+    const scoped = (loadBodies[0] as { schemas?: string[] } | null)?.schemas ?? [];
+    expect([...scoped].sort()).toEqual(
+      UNIQUE_SCHEMAS.map((e) => e.schema.schema.descriptive_name).sort(),
+    );
 
     // Every record type resolved to a node-provided hash — none left blank.
     for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
