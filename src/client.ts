@@ -287,6 +287,44 @@ export class FbrainError extends Error {
   }
 }
 
+// Every node/schema HTTP request gets a deadline that bounds BOTH the fetch
+// AND the response-body read, so a node that returns headers fast then stalls
+// while streaming the body (the cold-schema-init failure mode) can never hang
+// the CLI unbounded. Overridable via FBRAIN_HTTP_TIMEOUT_MS for a genuinely
+// slow node.
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+function defaultTimeoutMs(): number {
+  const raw = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "TimeoutError" || err.name === "AbortError") return true;
+  const cause = (err as { cause?: unknown }).cause;
+  return cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
+}
+
+// A stalled request/body-read fails fast with the idempotent-retry hint: every
+// fbrain write is an upsert keyed by slug, so re-running the command is safe.
+function timeoutError(
+  path: string,
+  method: string,
+  service: "node" | "schema",
+  timeoutMs: number,
+  cause: unknown,
+): FbrainError {
+  const which = service === "node" ? "node" : "schema service";
+  return new FbrainError({
+    code: "service_timeout",
+    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) ${DOCTOR_TIP}.`,
+    hint: "The node may be under heavy load (e.g. cold-initializing its schema index). Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with FBRAIN_HTTP_TIMEOUT_MS if the node is just slow.",
+    cause,
+  });
+}
+
 // Appended by every node + schema-service error message so non-doctor callers
 // (list/put/etc.) point users at `fbrain doctor`. `doctor` itself must strip
 // this back off — see stripDoctorTip below.
@@ -379,8 +417,8 @@ export function newSchemaServiceClient(
     baseUrl: url,
     async registerSchema(req) {
       const path = "/v1/schemas";
-      const res = await callSchemaServiceRaw(url, path, "POST", req, verbose);
-      const body = await readJson(res);
+      const { res, readBody } = await callSchemaServiceRaw(url, path, "POST", req, verbose);
+      const body = await readBody();
       if (res.status !== 200 && res.status !== 201) {
         throw mapSchemaServiceError(res, body, path);
       }
@@ -404,8 +442,8 @@ export function newSchemaServiceClient(
       return { canonicalHash, status: res.status, replacedSchema };
     },
     async listSchemas() {
-      const res = await callSchemaServiceRaw(url, "/v1/schemas", "GET", undefined, verbose);
-      const body = await readJson(res);
+      const { res, readBody } = await callSchemaServiceRaw(url, "/v1/schemas", "GET", undefined, verbose);
+      const body = await readBody();
       if (res.status !== 200) {
         throw mapSchemaServiceError(res, body, "/v1/schemas");
       }
@@ -413,12 +451,12 @@ export function newSchemaServiceClient(
     },
     async getSchemaByHash(hash) {
       const path = `/v1/schema/${encodeURIComponent(hash)}`;
-      const res = await callSchemaServiceRaw(url, path, "GET", undefined, verbose);
+      const { res, readBody } = await callSchemaServiceRaw(url, path, "GET", undefined, verbose);
       if (res.status === 404) {
-        await res.text();
+        await readBody();
         return null;
       }
-      const body = await readJson(res);
+      const body = await readBody();
       if (res.status !== 200) {
         throw mapSchemaServiceError(res, body, path);
       }
@@ -458,8 +496,8 @@ export function newSchemaServiceClient(
       };
     },
     async rawCall(method, path, body) {
-      const res = await callSchemaServiceRaw(url, path, method, body, verbose);
-      const text = await res.text();
+      const { res, readBody } = await callSchemaServiceRaw(url, path, method, body, verbose);
+      const text = await readBody({ asText: true });
       const json = parseJsonSafe(text);
       return { status: res.status, headers: res.headers, body: text, json };
     },
@@ -574,8 +612,8 @@ export function newNodeClient(opts: {
   ): Promise<{ status: number; body: unknown }> => {
     const send = async (): Promise<{ status: number; body: unknown }> => {
       const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
-      const res = await callNodeRaw(url, path, method, body, userHash, verbose, headers);
-      const parsed = await readJson(res);
+      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, headers);
+      const parsed = await readBody();
       return { status: res.status, body: parsed };
     };
     const first = await send();
@@ -934,8 +972,8 @@ export function newNodeClient(opts: {
       return hits;
     },
     async rawCall(method, path, body) {
-      const res = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader());
-      const text = await res.text();
+      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader());
+      const text = await readBody({ asText: true });
       const json = parseJsonSafe(text);
       return { status: res.status, headers: res.headers, body: text, json };
     },
@@ -1009,7 +1047,7 @@ async function callNodeRaw(
   userHash: string,
   verbose: Verbose,
   extraHeaders?: Record<string, string>,
-): Promise<Response> {
+): Promise<BoundedResponse> {
   return verboseFetch({
     baseUrl,
     path,
@@ -1027,9 +1065,26 @@ async function callSchemaServiceRaw(
   method: string,
   body: unknown,
   verbose: Verbose,
-): Promise<Response> {
+): Promise<BoundedResponse> {
   return verboseFetch({ baseUrl, path, method, body, verbose, service: "schema", headers: {} });
 }
+
+// The result of a bounded request: the response headers, plus a `readBody`
+// closure that drains the body UNDER THE SAME DEADLINE as the fetch. The node
+// returns headers as soon as it accepts the request, then can stall for the
+// whole cold-schema-init window while streaming the body; a plain
+// `await res.text()` after the fetch is NOT covered by the fetch's own abort,
+// so that stall used to hang the CLI unbounded. One AbortController governs
+// both halves, and the timer is cleared the instant the body is fully read.
+type ReadBody = {
+  (opts: { asText: true }): Promise<string>;
+  (opts?: { asText?: false }): Promise<unknown>;
+};
+
+type BoundedResponse = {
+  res: Response;
+  readBody: ReadBody;
+};
 
 // Shared inner fetch for both service clients. Differs only by the verbose
 // log tag (NODE vs SCHEMA), the service-specific headers passed in (the node
@@ -1043,7 +1098,8 @@ async function verboseFetch(opts: {
   verbose: Verbose;
   service: "node" | "schema";
   headers: Record<string, string>;
-}): Promise<Response> {
+  timeoutMs?: number;
+}): Promise<BoundedResponse> {
   const url = `${opts.baseUrl}${opts.path}`;
   const tag = opts.service === "node" ? "NODE" : "SCHEMA";
   const headers = { ...opts.headers };
@@ -1054,16 +1110,58 @@ async function verboseFetch(opts: {
       : typeof opts.body === "string"
         ? opts.body
         : JSON.stringify(opts.body);
+  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
   opts.verbose(
     `→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
   );
+
+  // One controller for the whole request lifecycle (headers + body). The timer
+  // keeps running after the fetch resolves, so if the body read stalls past the
+  // deadline the abort fires mid-`text()` and we map it to the same timeout
+  // error. `done` guards the timer so a slow *consumer* can never trip it once
+  // the I/O is already complete.
+  const controller = new AbortController();
+  let done = false;
+  const timer = setTimeout(() => {
+    if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
+  }, timeoutMs);
+
+  let res: Response;
   try {
-    const res = await fetch(url, { method: opts.method, headers, body: bodyStr });
+    res = await fetch(url, {
+      method: opts.method,
+      headers,
+      body: bodyStr,
+      signal: controller.signal,
+    });
     opts.verbose(`← ${tag} ${opts.method} ${url} status=${res.status}`);
-    return res;
   } catch (err) {
+    done = true;
+    clearTimeout(timer);
+    if (isTimeoutError(err)) {
+      throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
+    }
     throw connectionError(opts.baseUrl, opts.service, err);
   }
+
+  const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
+    try {
+      const text = await res.text();
+      done = true;
+      clearTimeout(timer);
+      if (readOpts?.asText) return text;
+      return parseBody(text);
+    } catch (err) {
+      done = true;
+      clearTimeout(timer);
+      if (isTimeoutError(err)) {
+        throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
+      }
+      throw connectionError(opts.baseUrl, opts.service, err);
+    }
+  }) as ReadBody;
+
+  return { res, readBody };
 }
 
 function parseJsonSafe(text: string): unknown {
@@ -1075,8 +1173,10 @@ function parseJsonSafe(text: string): unknown {
   }
 }
 
-async function readJson(res: Response): Promise<unknown> {
-  const text = await res.text();
+// Parse an already-read response body: JSON when it parses, the raw text
+// otherwise, null when empty. (The body read itself is deadline-bounded in
+// `verboseFetch`; this is the pure parse step.)
+function parseBody(text: string): unknown {
   if (text.length === 0) return null;
   try {
     return JSON.parse(text);
@@ -1212,7 +1312,7 @@ function connectionError(baseUrl: string, service: "node" | "schema", cause: unk
  * one so that (a) every HTTP request fbrain makes — SDK paths included — goes
  * through the same global `fetch` (which the unit suite stubs to capture
  * outgoing requests), and (b) a non-JSON body degrades to `body: null`
- * instead of a hard transport error, matching fbrain's tolerant `readJson`.
+ * instead of a hard transport error, matching fbrain's tolerant `parseBody`.
  */
 function fetchTransport(
   baseUrl: string,
@@ -1239,15 +1339,52 @@ function fetchTransport(
       const bodyStr =
         options.body === undefined ? undefined : JSON.stringify(options.body);
       if (bodyStr !== undefined) headers["Content-Type"] = "application/json";
+
+      // The mutation (write) path runs through this transport, so it carries
+      // the same joint fetch + body-read deadline as the raw node path: one
+      // AbortController bounds both halves, the timer survives the fetch so a
+      // body-read stall (cold-schema-init) is aborted too, and a deadline hit
+      // surfaces as `service_timeout` with the idempotent-retry hint rather
+      // than a silent unbounded hang. A genuine connect failure stays a
+      // TransportError (→ service_unreachable) as before.
+      const timeoutMs = defaultTimeoutMs();
+      const controller = new AbortController();
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
+      }, timeoutMs);
+
       let res: Response;
       try {
-        res = await fetch(`${baseUrl}${path}`, { method, headers, body: bodyStr });
+        res = await fetch(`${baseUrl}${path}`, {
+          method,
+          headers,
+          body: bodyStr,
+          signal: controller.signal,
+        });
       } catch (err) {
+        done = true;
+        clearTimeout(timer);
+        if (isTimeoutError(err)) throw timeoutError(path, method, "node", timeoutMs, err);
         throw new TransportError(
           `request to ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      const text = await res.text();
+
+      let text: string;
+      try {
+        text = await res.text();
+      } catch (err) {
+        done = true;
+        clearTimeout(timer);
+        if (isTimeoutError(err)) throw timeoutError(path, method, "node", timeoutMs, err);
+        throw new TransportError(
+          `reading response from ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      done = true;
+      clearTimeout(timer);
+
       let parsed: unknown = null;
       if (text.length > 0) {
         try {
