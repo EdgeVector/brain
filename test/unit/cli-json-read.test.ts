@@ -412,7 +412,7 @@ describe("searchCmd --json", () => {
                 slug: "alpha",
                 schemaName: TEST_HASHES.design,
                 schema_display_name: "Design",
-                score: 0.42,
+                score: 0.6,
               }),
             ],
             user_hash: cfg.userHash,
@@ -444,12 +444,14 @@ describe("searchCmd --json", () => {
     expect(out.length).toBe(1);
     const parsed = JSON.parse(out[0]!);
     expect(parsed).toEqual([
-      { slug: "alpha", score: 0.42, type: "design", title: "Alpha design" },
+      { slug: "alpha", score: 0.6, type: "design", title: "Alpha design" },
     ]);
-    // 0.42 is above the 0.35 weak-match threshold — no advisory.
+    // 0.6 clears the STRONG_SCORE ceiling — a real hit, so no weak-match
+    // advisory. (The point of this test is JSON-stdout purity: any advisory
+    // that did fire would land on stderr, never in the parseable document.)
     expect(err).toEqual([]);
     // Sanity: no human table padding in the JSON document.
-    expect(out[0]).not.toContain("0.420");
+    expect(out[0]).not.toContain("0.600");
     expect(out[0]).not.toContain("Alpha design  ");
   });
 
