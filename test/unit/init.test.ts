@@ -489,6 +489,12 @@ describe("printNextSteps", () => {
     expect(out).toContain("fbrain search");
     expect(out).toContain("fbrain ask");
     expect(out).toContain("fbrain doctor");
+    // The headline agent-integration step: a brain meant to be used BY an
+    // agent must tell the new dev how to connect it. Pin the exact command
+    // plus the `bun link` PATH caveat so this can't silently regress.
+    expect(out).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(out).toContain("bun link");
+    expect(out).toContain("fbrain_* tools");
     expect(out).toContain("http://127.0.0.1:9001");
     expect(out).toContain("/home/dev/.fbrain/config.json");
   });

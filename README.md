@@ -56,7 +56,7 @@ bun install
 bun link                              # exposes a global `fbrain` binary
 
 # 2. bootstrap
-fbrain init                           # 5 steps; writes ~/.fbrain/config.json
+fbrain init                           # 6 steps; writes ~/.fbrain/config.json
                                       # (auto-heals a stale local-schema config
                                       #  to the new cloud-Lambda default)
 ```
