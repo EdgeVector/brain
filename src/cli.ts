@@ -708,6 +708,52 @@ function validateLimitFlag(argv: Argv): void {
   validatePositiveIntFlag(argv, "--limit", "invalid_limit");
 }
 
+// Pull the offending option name (without leading dashes) out of a caught
+// ERR_PARSE_ARGS_UNKNOWN_OPTION. Node's message reads `Unknown option
+// '--tags'. ...`; we prefer the quoted token but fall back to scanning the
+// args for the first `--<long>` flag that isn't a known option key, so a
+// future Node message-format change can't silently break the hint.
+function unknownOptionName(
+  err: Error,
+  args: readonly string[],
+  knownKeys: readonly string[],
+): string | undefined {
+  const m = /Unknown option '(--?[^']+)'/.exec(err.message);
+  if (m?.[1]) return m[1].replace(/^--?/, "").split("=")[0];
+  const known = new Set(knownKeys);
+  for (const tok of args) {
+    if (!tok.startsWith("--")) continue;
+    const name = tok.slice(2).split("=")[0]!;
+    if (name && !known.has(name)) return name;
+  }
+  return undefined;
+}
+
+// Mirrors the `Did you mean: <cmd>?` UX from suggestCommand — same Levenshtein
+// threshold (max(2, floor(len/3))). Given the unknown option name (no dashes)
+// and the command's own option keys, returns the closest known long flag, or
+// undefined when nothing is near enough. `--tags` → `--tag` falls right out of
+// this (edit distance 1) without a special case, but the repeatable example
+// the caller appends is what makes the hint actually actionable.
+function suggestOption(
+  unknown: string,
+  knownKeys: readonly string[],
+): string | undefined {
+  if (unknown.length === 0) return undefined;
+  let best: string | null = null;
+  let bestDist = Infinity;
+  for (const k of knownKeys) {
+    const d = levenshtein(unknown, k);
+    if (d < bestDist) {
+      bestDist = d;
+      best = k;
+    }
+  }
+  if (best === null) return undefined;
+  const threshold = Math.max(2, Math.floor(unknown.length / 3));
+  return bestDist <= threshold ? best : undefined;
+}
+
 // Single funnel for every non-init command's parseArgs. Wraps the call so a
 // muscle-memory `fbrain <cmd> --node-url <URL>` / `--schema-service-url <URL>`
 // (the user re-using the flag they learned at `init`) becomes an actionable
@@ -737,6 +783,35 @@ function parseCommandArgs<T extends ParseArgsConfig>(config: T) {
             "--node-url / --schema-service-url are only accepted by `fbrain init`. The node and schema-service are pinned in ~/.fbrain/config.json at init time.",
           hint: "To point fbrain at a different node, re-run `fbrain init --node-url <URL> [--schema-service-url <URL>]` (or edit ~/.fbrain/config.json directly).",
         });
+      }
+      // A near-miss spelling of one of THIS command's own flags (the classic:
+      // `<type> new --tags foo,bar` — `--tags` plural is the natural guess
+      // since npm/cargo/git accept comma lists somewhere) dead-ends on
+      // parseArgs's bare "Unknown option" with no nudge toward the right
+      // flag. Mirror runPut's friendly recovery: suggest the closest known
+      // option via the same Levenshtein suggester used elsewhere. The
+      // legitimate `-- "--tags"` positional escape hatch never reaches here —
+      // parseArgs treats post-`--` tokens as positionals, so it doesn't throw.
+      const knownKeys = Object.keys(config.options ?? {});
+      const unknown = unknownOptionName(err, args, knownKeys);
+      if (unknown !== undefined) {
+        const suggestion = suggestOption(unknown, knownKeys);
+        if (suggestion !== undefined) {
+          // `tag` is `multiple: true` (repeatable), so the actionable form is
+          // one flag per value — the single highest-value hint for the
+          // `--tags foo,bar` papercut this guards against.
+          const opt = (config.options as Record<string, { multiple?: boolean }>)[
+            suggestion
+          ];
+          const example = opt?.multiple
+            ? `Repeat the flag per value: \`--${suggestion} foo --${suggestion} bar\`.`
+            : `Did you mean \`--${suggestion}\`?`;
+          throw new FbrainError({
+            code: "unknown_option",
+            message: `Unknown option \`--${unknown}\`. Did you mean \`--${suggestion}\`?`,
+            hint: example,
+          });
+        }
       }
     }
     throw err;
