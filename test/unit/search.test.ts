@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { dedupeHits, searchCmd } from "../../src/commands/search.ts";
+import { dedupeHits, isWeakMatch, searchCmd } from "../../src/commands/search.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -124,6 +124,48 @@ describe("dedupeHits", () => {
     expect(out).toHaveLength(2);
     const hashes = out.map((h) => h.schema_name).sort();
     expect(hashes).toEqual([FOREIGN_HASH, DESIGN_HASH].sort());
+  });
+});
+
+describe("isWeakMatch (distribution-shape weak-match classifier)", () => {
+  // Mirrors the constants in src/commands/search.ts. Weak ⇔ top < STRONG and
+  // the bulk piles on the floor (median − min < FLATNESS_GAP).
+  const STRONG = 0.5;
+  const GAP = 0.025;
+  const s = (...scores: (number | null)[]) => scores.map((score) => ({ score }));
+
+  test("a flat floor band whose top is well above the old 0.35 cut is weak", () => {
+    // The real-brain regression (live :9001 numbers): top 0.443 but the bulk
+    // is pinned to the score floor — median − min ≈ 0, far under FLATNESS_GAP.
+    expect(isWeakMatch(0.443, s(0.443, 0.334, 0.334, 0.334, 0.334), STRONG, GAP)).toBe(true);
+  });
+
+  test("a top score at/above STRONG_SCORE is never weak, even on a flat floor", () => {
+    expect(isWeakMatch(0.619, s(0.619, 0.347, 0.347, 0.346), STRONG, GAP)).toBe(false);
+    expect(isWeakMatch(0.5, s(0.5, 0.5, 0.5), STRONG, GAP)).toBe(false);
+  });
+
+  test("a sub-STRONG hit list that grades up off the floor is NOT weak", () => {
+    // Live "at-rest encryption master key": top 0.478, median 0.320, min 0.255
+    // → median − min = 0.065 ≥ 0.025.
+    expect(isWeakMatch(0.478, s(0.478, 0.42, 0.32, 0.28, 0.255), STRONG, GAP)).toBe(false);
+  });
+
+  test("a lone sub-STRONG hit has no distribution → median == min → weak", () => {
+    expect(isWeakMatch(0.24, s(0.24), STRONG, GAP)).toBe(true);
+    expect(isWeakMatch(0.48, s(0.48), STRONG, GAP)).toBe(true);
+  });
+
+  test("null scores are excluded from the distribution, not treated as 0", () => {
+    // Without filtering, nulls would crater the min and falsely lift median−min
+    // above the gap. With filtering, a flat measurable band stays weak.
+    expect(isWeakMatch(0.4, s(0.4, 0.39, 0.39, null, null), STRONG, GAP)).toBe(true);
+  });
+
+  test("an even-length score set uses the mean of the two middle values", () => {
+    // sorted [0.1, 0.2, 0.42, 0.45] → median (0.2+0.42)/2 = 0.31, min 0.1 →
+    // median − min = 0.21 ≥ 0.025 → graded, not weak.
+    expect(isWeakMatch(0.45, s(0.45, 0.42, 0.2, 0.1), STRONG, GAP)).toBe(false);
   });
 });
 
@@ -763,10 +805,10 @@ describe("searchCmd", () => {
   test("annotates with a weak-match note when the top score is below the confidence line", async () => {
     // Without a confidence signal a gibberish query that matches NOTHING
     // still returns the user's brain ranked by tiny cosine scores —
-    // indistinguishable from a real hit list. Clean-room dogfood (3 records,
-    // 2026-06-06) showed pure noise tops out ~0.24 while real matches sit
-    // ~0.45+, so when the TOP score is below 0.35 we prepend a note that
-    // tells the user the rows are weak. We never drop rows (Option A), so a
+    // indistinguishable from a real hit list. A lone hit at 0.24 is below the
+    // STRONG_SCORE ceiling (0.5) and has no pack to separate from (median ==
+    // top, gap 0 < SEPARATION_GAP), so it is flagged weak: we prepend a note
+    // telling the user the rows are weak. We never drop rows (Option A), so a
     // real-but-distant match in a large brain is still surfaced; the note
     // just disambiguates "showing the closest we found" from "this nailed it".
     const recordRow = {
@@ -831,9 +873,9 @@ describe("searchCmd", () => {
   test("does NOT annotate when the top score is above the confidence line (no false positive on a real match)", async () => {
     // Companion: a genuinely good top match must NOT trigger the weak-match
     // note. Pin a real-match-band score (0.579 from the same dogfood — a
-    // concept hit on "OAuth security tokens") and assert the note is absent
-    // even if lower-ranked rows fall under the threshold. Threshold is
-    // evaluated against the TOP score only.
+    // concept hit on "OAuth security tokens"), which clears the STRONG_SCORE
+    // ceiling (0.5) on its own, and assert the note is absent even though the
+    // lower-ranked rows trail far behind.
     const rows = ["my-first-note", "auth-redesign", "ship-it"].map((slug) => ({
       fields: {
         slug,
@@ -883,11 +925,120 @@ describe("searchCmd", () => {
     expect(stdout[0]).toContain("my-first-note");
   });
 
+  test("fires the weak-match note on a realistic flat noise band whose top score is well above 0.35", async () => {
+    // The brain-size regression this card fixes: on a real brain (hundreds of
+    // records) the nearest neighbour to even pure gibberish lands at a cosine
+    // ABOVE the old absolute 0.35 cut, so the advisory silently never fired and
+    // a no-match query was indistinguishable from a real hit (dogfooded
+    // 2026-06-16 on :9001: gibberish topped out 0.443). The separation signal
+    // catches it: a flat band (top 0.443, the pack clustered just below at
+    // 0.44/0.435/0.43) is NOT a spike — top − median ≈ 0.01 < SEPARATION_GAP —
+    // so the note fires even though every score is comfortably above 0.35.
+    const scores = [0.443, 0.44, 0.438, 0.435, 0.431];
+    const slugs = scores.map((_, i) => `noise-${i}`);
+    const rows = slugs.map((slug) => ({
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    }));
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: scores.map((score, i) =>
+              hit({ slug: slugs[i]!, schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score } }),
+            ),
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "qwxz9931 blarghonk zztopflux",
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+    // All five rows printed (we never drop rows), advisory on stderr.
+    expect(stdout).toHaveLength(5);
+    for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain("no strong matches");
+    expect(stderr[0]).toContain("qwxz9931 blarghonk zztopflux");
+  });
+
+  test("does NOT fire when a sub-0.5 hit list grades up off the floor", async () => {
+    // The mirror case: a genuine match in a large brain can land below the
+    // STRONG_SCORE ceiling (0.5) yet still produce a graded distribution that
+    // climbs off the score floor — the live "at-rest encryption master key"
+    // shape (top 0.478, median ~0.32, min ~0.255 → median − min ≈ 0.065 ≥
+    // FLATNESS_GAP). Reads as a real hit, so the note is suppressed.
+    const scores = [0.478, 0.42, 0.32, 0.28, 0.255];
+    const slugs = scores.map((_, i) => `spike-${i}`);
+    const rows = slugs.map((slug) => ({
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    }));
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: scores.map((score, i) =>
+              hit({ slug: slugs[i]!, schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score } }),
+            ),
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "a real but distant memory",
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+    expect(stdout).toHaveLength(5);
+    expect(stderr).toHaveLength(0);
+    for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
+  });
+
   test("--exact suppresses the weak-match note even when cosine scores fall below the confidence line", async () => {
     // Regression: the weak-match note classifies a hit list "no strong matches"
-    // by the TOP cosine score (< WEAK_SCORE_THRESHOLD = 0.35). That heuristic
-    // is meaningful for semantic search — a gibberish query that hits nothing
-    // semantically still gets ranked by tiny cosines. It is meaningless for
+    // by separation (top cosine not meaningfully above the median). That
+    // heuristic is meaningful for semantic search — a gibberish query that hits
+    // nothing semantically still gets ranked by a flat band of tiny cosines. It
+    // is meaningless for
     // `--exact`: the daemon's exact filter (fold_db_node/handlers/query.rs
     // `filter_by_exact_substring`) is a strict case-insensitive substring keep
     // applied AFTER the semantic top-50 cut, so every surviving hit is by

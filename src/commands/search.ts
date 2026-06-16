@@ -59,6 +59,34 @@ export type ResolvedHit = {
   record: FbrainRecord;
 };
 
+// Weak-match classifier (separation-based; see the rationale block in
+// `searchCmd` below). A hit list is weak when its top score neither clears
+// `strongScore` on its own NOR rises out of a flat floor band: when the bulk
+// of the distribution piles on its minimum (`median − min < flatnessGap`),
+// the results are indistinguishable noise even if the top fragment edges a
+// little higher. Robust to brain size by construction — more noise records
+// just lengthen the floor pile; a real query grades upward off the floor.
+// `null` scores are dropped first (they're "unmeasurable", not part of the
+// distribution). Exported for tests.
+export function isWeakMatch(
+  topScore: number,
+  hits: readonly { score: number | null }[],
+  strongScore: number,
+  flatnessGap: number,
+): boolean {
+  if (topScore >= strongScore) return false;
+  const scores = hits
+    .map((h) => h.score)
+    .filter((s): s is number => s !== null)
+    .sort((a, b) => a - b);
+  if (scores.length === 0) return false;
+  const min = scores[0]!;
+  const mid = Math.floor(scores.length / 2);
+  const median =
+    scores.length % 2 === 0 ? (scores[mid - 1]! + scores[mid]!) / 2 : scores[mid]!;
+  return median - min < flatnessGap;
+}
+
 export async function searchCmd(opts: SearchOptions): Promise<void> {
   const { print, printErr } = resolvePrintSinks(opts);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
@@ -195,15 +223,46 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
 
   // Weak-match advisory. Without a confidence signal, a gibberish query that
   // matches NOTHING still returns the brain ranked by tiny cosine scores —
-  // indistinguishable from a real hit list. Clean-room dogfood on a 3-record
-  // brain (2026-06-06) showed clean separation: real top matches ~0.45–0.59,
-  // pure-noise tops out ~0.24. 0.35 sits in the middle of that gap — well
-  // above the noise band, comfortably below the real-match band. This is
-  // STRICTLY ADDITIVE: we never drop a row, so a real-but-distant match in a
-  // large brain is still shown — we just flag the hit list as weak so the
-  // user can tell "showing the closest we found" apart from "this nailed it".
+  // indistinguishable from a real hit list. This is STRICTLY ADDITIVE: we
+  // never drop a row, so a real-but-distant match in a large brain is still
+  // shown — we just flag the hit list as weak so the user can tell "showing
+  // the closest we found" apart from "this nailed it".
   // Server-side `--min-score` (and explicit `--min-score 0`) are unchanged.
   // Score-null is treated as "unmeasurable", not "weak", so we don't annotate.
+  //
+  // ── Why a DISTRIBUTION-SHAPE signal, not a fixed cosine cut ───────────────
+  // The original advisory (#185/#193) fired when `topScore < 0.35`, calibrated
+  // on a clean-room 3-record brain (2026-06-06) where pure noise topped out
+  // ~0.24 and real matches sat ~0.45–0.59. That absolute cut is brain-size
+  // fragile: the more vectors indexed, the closer the nearest neighbour to
+  // even gibberish, so on Tom's real :9001 brain (hundreds of records) pure
+  // gibberish tops out ~0.39–0.44 — above 0.35 — and the advisory SILENTLY
+  // NEVER FIRED. A no-match query was indistinguishable from a real hit
+  // (dogfooded 2026-06-16, v0.11.0). `fbrain ask` (hybrid) degrades
+  // gracefully on the same query; `search` (and the `fbrain_search` MCP tool,
+  // fbrain's primary agent consumer) did not.
+  //
+  // The robust signal is the SHAPE of the score distribution, not its
+  // magnitude. A no-match query produces a flat FLOOR BAND: the server returns
+  // the top-N nearest vectors, and for noise they're all roughly equidistant,
+  // so the bulk of scores pile right on the minimum. A real query grades
+  // upward off that floor. Measured on :9001 (2026-06-16), `median − min`:
+  //   gibberish "qwxz9931 blarghonk zztopflux"  top 0.443  median−min 0.000
+  //   gibberish "florbnax wuggle …"             top 0.394  median−min 0.000
+  //   gibberish "plorptang xrrn jibwoz"         top 0.392  median−min 0.014
+  //   real      "weak match advisory threshold" top 0.475  median−min 0.035
+  //   real      "at-rest encryption master key" top 0.478  median−min 0.065
+  //   real      "fkanban board columns"         top 0.619  median−min 0.101
+  // Noise sits at ≤0.014, real (even sub-0.5) at ≥0.035. We flag weak when
+  // `median − min < FLATNESS_GAP` — robust to brain size by construction: more
+  // noise records just lengthen the floor pile, they don't lift the median off
+  // it. One escape hatch keeps it from over-firing on a clear hit:
+  //   • A top score at/above `STRONG_SCORE` is always a real hit regardless of
+  //     shape (covers a dense real-match band where every returned vector is
+  //     genuinely relevant, so the floor itself is high).
+  // A lone hit below `STRONG_SCORE` has `median == min`, so `median − min == 0`
+  // and it is conservatively flagged weak — the signal-preserving choice (we
+  // still print the row; the note never drops it).
   //
   // `--exact` opts out: fold_db_node's `filter_by_exact_substring` keeps only
   // hits whose hydrated value contains the query as a case-insensitive
@@ -211,13 +270,20 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // match by construction. The cosine carried on the wire is the semantic
   // relatedness of the fragment to the query — a query word buried in a long
   // doc can sit at cosine 0.15 while still being a real, "this nailed it"
-  // hit — so the threshold is meaningless in this mode. Worse, the note
+  // hit — so any confidence cut is meaningless in this mode. Worse, the note
   // points at `fbrain ask <query>` for keyword search, which is hybrid
   // semantic + BM25 + RRF — exactly the surface the user opted out of.
-  const WEAK_SCORE_THRESHOLD = 0.35;
+  //
+  // Top score at/above this is a real hit regardless of distribution shape
+  // (real-match band ~0.45–0.8 on the live brain; a dense strong band lands here).
+  const STRONG_SCORE = 0.5;
+  // Below STRONG_SCORE, a result set whose median is within this of its
+  // minimum is a flat floor band → weak. Noise measured at median−min ≤0.014,
+  // genuine sub-0.5 hits at ≥0.035 (data above); 0.025 splits them with margin.
+  const FLATNESS_GAP = 0.025;
   const topScore = trimmed[0]?.score ?? null;
   const weakMatch =
-    !opts.exact && topScore !== null && topScore < WEAK_SCORE_THRESHOLD;
+    !opts.exact && topScore !== null && isWeakMatch(topScore, trimmed, STRONG_SCORE, FLATNESS_GAP);
   const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`;
 
   if (opts.json) {
