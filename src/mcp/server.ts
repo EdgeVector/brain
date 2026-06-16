@@ -1,6 +1,7 @@
-// MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_get`,
-// `fbrain_list`) and write (`fbrain_put`, `fbrain_delete`, `fbrain_link`)
-// tools to MCP clients (Claude Code, Codex, etc.) over stdio.
+// MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_ask`,
+// `fbrain_get`, `fbrain_list`) and write (`fbrain_put`, `fbrain_delete`,
+// `fbrain_link`) tools to MCP clients (Claude Code, Codex, etc.) over stdio.
+// 7 tools total.
 //
 // Each handler wraps the existing CLI command function and captures its
 // printed output as a single text content block. No shell-out — the
@@ -14,6 +15,7 @@ import { readFileSync } from "node:fs";
 import { getFbrainVersion } from "../version.ts";
 import type { Config } from "../config.ts";
 import { searchCmd } from "../commands/search.ts";
+import { askCmd } from "../commands/ask.ts";
 import { getRecord } from "../commands/get.ts";
 import { listCmd } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
@@ -80,7 +82,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Search fbrain",
       description:
-        "Semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`.",
+        "Pure-vector semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer `fbrain_ask`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to `fbrain_ask` when this returns weak or missing matches.",
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -122,6 +124,49 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           types: args.type,
         }),
       ),
+  );
+
+  server.registerTool(
+    "fbrain_ask",
+    {
+      title: "Ask fbrain (hybrid retrieval)",
+      description:
+        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
+      inputSchema: {
+        query: requiredText("Search query."),
+        type: typeEnum
+          .array()
+          .optional()
+          .describe(
+            "Restrict results to one or more record types. Omit to search all types.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max results (default 5)."),
+      },
+    },
+    (args) =>
+      runTool(async (print) => {
+        await askCmd({
+          cfg,
+          query: args.query,
+          print,
+          // MCP bundles every printed line into one text block — fold
+          // CLI-stderr advisories (e.g. the all-stopword note) back into
+          // the same sink so agents see them inline, matching the search
+          // handler. The CLI uses its own default (console.error) otherwise.
+          printErr: print,
+          limit: args.limit,
+          types: args.type,
+          // LLM query expansion stays OFF (the default): the eval winner is
+          // plain BM25 + vector + RRF, and keeping it off means the tool
+          // works for any agent with zero extra config (no API key). A
+          // follow-up can add an optional `expand` param if wanted.
+        });
+      }),
   );
 
   server.registerTool(

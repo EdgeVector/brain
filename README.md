@@ -165,7 +165,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain delete <slug> [--type T]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 | `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
 | `fbrain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.fbrain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
-| `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 6 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_get`, `fbrain_list`; write: `fbrain_put`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
+| `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 7 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`; write: `fbrain_put`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
 
 Run `fbrain help <command>` for per-command usage.
 
@@ -365,7 +365,7 @@ The script retries each `get` up to five times (250 ms backoff) to ride out the 
 
 ## MCP
 
-fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Six tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`.
+fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Seven tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`.
 
 ```bash
 # Register fbrain with Claude Code (one-time, after the Quick start `bun link`):
@@ -383,7 +383,8 @@ The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and 
 
 | Tool | Input | What it does |
 |---|---|---|
-| `fbrain_search` | `query` + `limit?` + `exact?` + `min_score?` | Semantic search; same dedupe + stale-skip as `fbrain search` |
+| `fbrain_search` | `query` + `type?` + `limit?` + `exact?` + `min_score?` | Pure-vector semantic search; same dedupe + stale-skip as `fbrain search`. Description points agents to `fbrain_ask` for hybrid recall |
+| `fbrain_ask` | `query` + `type?` + `limit?` | Hybrid retrieval (BM25 + vector fused via RRF) — the eval-winning recall primitive; mirrors `fbrain ask`. No API key needed (LLM query expansion off by default) |
 | `fbrain_get` | `slug` + `type?` | Print one record; errors on ambiguous slug across types |
 | `fbrain_list` | `type?` + `status?` + `tag?` + `limit?` | Newest-first list with filters |
 | `fbrain_put` | `slug` + `type?` + `title?` + `body?` + `status?` + `tags?` + `frontmatter?` | Upsert a record. Synthesizes frontmatter from structured args or passes through raw `frontmatter`. One of `type` or a `type:` field in `frontmatter` is required — there is NO silent default (matches CLI `put`); if `status` is set, fires a follow-up `fbrain status` mutation |

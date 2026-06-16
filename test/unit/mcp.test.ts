@@ -306,6 +306,87 @@ describe("fbrain_search tool", () => {
   });
 });
 
+describe("fbrain_ask tool", () => {
+  // The ask pipeline builds a BM25 corpus by walking record types via
+  // /api/query (listRecords) and runs the vector ranker over
+  // /api/native-index/search. Mock both so the hybrid path runs end-to-end
+  // with no real node — and, critically, with NO Anthropic API key (LLM
+  // expansion is off by default in the tool, so none is ever attempted).
+  test("returns hybrid (BM25+vector RRF) results in a single text block, no API key needed", async () => {
+    const priorKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      installMock((url) => {
+        // BM25 corpus: only the Design type carries a record whose body has
+        // the rare keyword the vector ranker would miss.
+        if (url.includes("/api/query")) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [
+                {
+                  fields: {
+                    slug: "rrf-keyword-match",
+                    title: "Reciprocal rank fusion notes",
+                    body: "blueberry zzqx acronym keyword body",
+                    status: "draft",
+                    tags: ["x"],
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-02T00:00:00Z",
+                  },
+                  key: { hash: "rrf-keyword-match", range: null },
+                },
+              ],
+            },
+          };
+        }
+        if (url.includes("/api/native-index/search")) {
+          return { status: 200, body: { ok: true, results: [] } };
+        }
+        return { status: 404, body: { error: "unknown" } };
+      });
+      const tools = toolsOf(createFbrainMcpServer({ cfg }));
+      const res = await tools.fbrain_ask!({ query: "blueberry zzqx" });
+      expect(res.isError).toBeFalsy();
+      expect(res.content).toHaveLength(1);
+      expect(res.content[0]!.type).toBe("text");
+      const text = res.content[0]!.text ?? "";
+      // BM25 surfaced the keyword record even with an empty vector list —
+      // proves the hybrid ranker ran and fused.
+      expect(text).toContain("rrf-keyword-match");
+      expect(text).toContain("Reciprocal rank fusion notes");
+    } finally {
+      if (priorKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = priorKey;
+    }
+  });
+
+  test("passes type filter through to the ask pipeline", async () => {
+    const queriedSchemas: string[] = [];
+    installMock((url, init) => {
+      if (url.includes("/api/query") && typeof init?.body === "string") {
+        try {
+          const body = JSON.parse(init.body) as Record<string, unknown>;
+          queriedSchemas.push(String(body.schema_name ?? ""));
+        } catch {
+          // ignore
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    await tools.fbrain_ask!({ query: "q", type: ["design"] });
+    // The corpus walk is restricted to the requested type's schema hash.
+    expect(queriedSchemas).toContain(TEST_HASHES.design);
+    expect(queriedSchemas).not.toContain(TEST_HASHES.task);
+  });
+});
+
 describe("fbrain_get tool", () => {
   test("returns a single record formatted for display", async () => {
     let queryCount = 0;
@@ -1088,9 +1169,10 @@ describe("empty/dropped tool input guard", () => {
 });
 
 describe("createFbrainMcpServer", () => {
-  test("registers the 6 read+write tools", () => {
+  test("registers the 7 read+write tools", () => {
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
     expect(Object.keys(tools).sort()).toEqual([
+      "fbrain_ask",
       "fbrain_delete",
       "fbrain_get",
       "fbrain_link",
