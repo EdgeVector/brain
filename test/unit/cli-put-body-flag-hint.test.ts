@@ -83,6 +83,26 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
     expect(stderr).not.toContain("Unknown option");
   });
 
+  test("flags-first: `put --type design my-note --body X` recovers the SLUG, not the --type value", async () => {
+    // The slug positional comes AFTER `--type design`. A naive "first
+    // non-flag token before --body" scan grabs `design` (the VALUE of
+    // `--type`) as the slug. The recovery must skip an option's value and
+    // recover the real slug `my-note`.
+    const { code, stderr } = await runCli([
+      "put",
+      "--type",
+      "design",
+      "my-note",
+      "--body",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain put my-note --type design");
+    // The --type VALUE must NOT be mistaken for the slug.
+    expect(stderr).not.toContain("fbrain put design --type design");
+    expect(stderr).not.toContain("Unknown option");
+  });
+
   test("`fbrain put --body X` (no slug) falls back to `<slug>` in the hint", async () => {
     // The slug-recovery scan only looks at args BEFORE the body flag. With
     // no positional, it falls back to the literal `<slug>` placeholder

@@ -995,14 +995,35 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   return 0;
 }
 
+// The value-taking options on `put`, derived from PUT_OPTIONS so the slug
+// recovery below stays correct if another value option is ever added.
+// (`type: "boolean"` options take no value; everything else does.)
+const PUT_VALUE_FLAGS = new Set(
+  Object.entries(PUT_OPTIONS)
+    .filter(([, spec]) => (spec as { type: string }).type !== "boolean")
+    .map(([name]) => `--${name}`),
+);
+
 // Best-effort recovery of `put`'s slug positional when parseArgs already
 // threw — we can't trust its output, so scan args BEFORE the offending flag
-// and pick the first non-flag token. If the user typed e.g.
-// `fbrain put --body X` with no slug, there's nothing before the flag and
-// we fall back to `<slug>` rather than mis-quoting the flag's VALUE.
+// and pick the first non-flag token. We must skip an option's VALUE: in
+// `fbrain put --type design my-note --title X`, `design` is the value of
+// `--type`, not the positional slug, so a naive "first non-flag token" scan
+// grabs `design`. Skip any token whose preceding token is a value-taking
+// option (e.g. `--type`). The inline `--type=design` form carries its value
+// in the same token, so it's already harmless. If the user typed e.g.
+// `fbrain put --body X` with no slug, there's nothing before the flag and we
+// fall back to `<slug>` rather than mis-quoting the flag's (or --type's) VALUE.
 function recoverPutSlug(args: Argv, flag: string): string {
   const idx = args.indexOf(flag);
-  return args.slice(0, idx).find((a) => !a.startsWith("-")) ?? "<slug>";
+  const before = args.slice(0, idx);
+  return (
+    before.find(
+      (a, i) =>
+        !a.startsWith("-") &&
+        !(i > 0 && PUT_VALUE_FLAGS.has(before[i - 1] as string)),
+    ) ?? "<slug>"
+  );
 }
 
 // Best-effort recovery of `put`'s `--type <T>` value when parseArgs already
