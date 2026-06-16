@@ -13,7 +13,7 @@ import { z } from "zod";
 import { readFileSync } from "node:fs";
 
 import { getFbrainVersion } from "../version.ts";
-import type { Config } from "../config.ts";
+import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.ts";
 import { searchCmd } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
 import { getRecord } from "../commands/get.ts";
@@ -31,9 +31,30 @@ export const FBRAIN_MCP_NAME = "fbrain";
 // clients (Claude Code, Codex) see the same build identifier the CLI does.
 export const FBRAIN_MCP_VERSION: string = getFbrainVersion();
 
-export type CreateServerOptions = {
-  cfg: Config;
-};
+// Config can be supplied two ways:
+//   - `cfg`    — an already-loaded Config (the common case; what the CLI
+//                `fbrain mcp` subcommand and the test suite pass).
+//   - `getCfg` — a thunk that loads the Config on demand (calls `readConfig()`
+//                inside). This is what the `fbrain-mcp` bin entrypoint passes
+//                so the server can START even when no config exists yet: the
+//                handshake + `tools/list` succeed, and config resolution is
+//                deferred to the moment a tool is actually CALLED. A
+//                `ConfigMissingError`/`ConfigInvalidError` thrown by the thunk
+//                surfaces as a clean per-tool `isError` "run `fbrain init`"
+//                hint (see `runTool`) instead of a server that dies on startup.
+// Exactly one of the two is required; `cfg` is normalized to a `getCfg` thunk
+// internally so every tool handler resolves config through the same lazy path.
+export type CreateServerOptions =
+  | { cfg: Config; getCfg?: undefined }
+  | { getCfg: () => Config; cfg?: undefined };
+
+// Surfaced (as an `isError` tool result) when a tool is called on a server
+// that started without a usable config — the new-developer case where
+// `fbrain mcp` was registered before `fbrain init` ran. Actionable + concise:
+// names the one command that fixes it and where it writes.
+export const CONFIG_MISSING_HINT =
+  "fbrain is not initialized on this machine — run `fbrain init` first " +
+  "(writes ~/.fbrain/config.json), then retry.";
 
 // Recovery hint surfaced when a required field arrives `undefined` — i.e. the
 // tool was called with no value for it. The bite-y case is an empty `{}`: an
@@ -55,7 +76,12 @@ export const DROPPED_INPUT_HINT =
   "split the write into smaller records.";
 
 export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
-  const { cfg } = opts;
+  // Normalize both option shapes to a single lazy loader. When an eager `cfg`
+  // is supplied it's wrapped in a thunk that just returns it, so the resolution
+  // path is identical whether config was loaded up-front (CLI subcommand,
+  // tests) or is deferred until first tool call (the `fbrain-mcp` bin, where
+  // the server must start even with no config on disk).
+  const getCfg: () => Config = opts.getCfg ?? (() => opts.cfg);
   const server = new McpServer({
     name: FBRAIN_MCP_NAME,
     version: FBRAIN_MCP_VERSION,
@@ -108,7 +134,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool((print) =>
+      runTool(getCfg, (cfg, print) =>
         searchCmd({
           cfg,
           query: args.query,
@@ -149,7 +175,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
+      runTool(getCfg, async (cfg, print) => {
         await askCmd({
           cfg,
           query: args.query,
@@ -189,7 +215,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool((print) =>
+      runTool(getCfg, (cfg, print) =>
         getRecord({
           cfg,
           slug: args.slug,
@@ -221,7 +247,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool((print) =>
+      runTool(getCfg, (cfg, print) =>
         listCmd({
           cfg,
           print,
@@ -312,7 +338,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
+      runTool(getCfg, async (cfg, print) => {
         const input = buildPutInput(resolvePutBody(args));
         const result = await putCmd({ cfg, slug: args.slug, input });
         print(`${result.action} ${result.type} ${result.slug}`);
@@ -348,7 +374,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool((print) =>
+      runTool(getCfg, (cfg, print) =>
         deleteRecord({
           cfg,
           slug: args.slug,
@@ -374,7 +400,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runTool(async (print) => {
+      runTool(getCfg, async (cfg, print) => {
         if (args.from_type !== "task" || args.to_type !== "design") {
           throw new FbrainError({
             code: "unsupported_link_pair",
@@ -508,15 +534,31 @@ type ToolResult = {
   isError?: boolean;
 };
 
-// Every tool handler follows the same shape: collect printed lines from
-// the underlying command, return them as one text block, and map any
-// thrown error into an `isError` envelope. `runTool` is that shape.
+// Every tool handler follows the same shape: resolve the config, run the
+// underlying command, collect its printed lines into one text block, and map
+// any thrown error into an `isError` envelope. `runTool` is that shape.
+//
+// Config is resolved HERE, inside the try, via the `getCfg` thunk — not at
+// server construction. That's what lets the server start with no config on
+// disk: `initialize`/`tools/list` never touch config, and a missing/invalid
+// config only surfaces when a tool is actually called, as a clean `isError`
+// "run `fbrain init` first" hint rather than a startup crash.
 async function runTool(
-  fn: (print: (line: string) => void) => Promise<void>,
+  getCfg: () => Config,
+  fn: (cfg: Config, print: (line: string) => void) => Promise<void>,
 ): Promise<ToolResult> {
   const lines: string[] = [];
+  let cfg: Config;
   try {
-    await fn((l) => lines.push(l));
+    cfg = getCfg();
+  } catch (err) {
+    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
+      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
+    }
+    throw err;
+  }
+  try {
+    await fn(cfg, (l) => lines.push(l));
   } catch (err) {
     return errorResult(err);
   }

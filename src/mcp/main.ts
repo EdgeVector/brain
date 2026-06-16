@@ -6,27 +6,26 @@
 // Running from a source checkout without `bun link`? Path-based fallback:
 //   claude mcp add fbrain bun /path/to/fbrain/src/mcp/main.ts
 //
-// Reads ~/.fbrain/config.json (same as the CLI). Exits non-zero if the
-// config is missing — surface the error to the MCP client logs.
+// Reads ~/.fbrain/config.json (same as the CLI), but LAZILY: the server
+// always starts and completes the MCP handshake (`initialize` + `tools/list`)
+// even when no config exists yet — the common new-developer case where
+// `claude mcp add fbrain fbrain-mcp` is run before `fbrain init`. Config is
+// loaded on demand the first time a tool is CALLED; a missing/invalid config
+// then surfaces as a clean per-tool "run `fbrain init` first" `isError` result
+// in the client, instead of a server that dies on startup with only a buried
+// stderr line in the MCP client logs.
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-import { readConfig, ConfigMissingError } from "../config.ts";
+import { readConfig } from "../config.ts";
 import { createFbrainMcpServer } from "./server.ts";
 
 export async function runMcp(): Promise<number> {
-  let cfg;
-  try {
-    cfg = readConfig();
-  } catch (err) {
-    if (err instanceof ConfigMissingError) {
-      console.error(`fbrain mcp: ${err.message}`);
-      return 1;
-    }
-    throw err;
-  }
-
-  const server = createFbrainMcpServer({ cfg });
+  // Pass a config *loader* rather than an eager config: `readConfig()` runs
+  // only when a tool handler asks for it, so the handshake succeeds with no
+  // config on disk and the "run `fbrain init`" guidance lands per tool call
+  // (where the client surfaces it to the user) rather than as a startup crash.
+  const server = createFbrainMcpServer({ getCfg: () => readConfig() });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // server.connect() returns once the transport is started; the process
