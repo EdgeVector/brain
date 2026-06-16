@@ -132,6 +132,44 @@ describe("fbrain put --title → frontmatter hint", () => {
     expect(stderr).not.toContain("<type>");
   });
 
+  test("flags-first: `put --type design my-note --title X` recovers the SLUG, not the --type value", async () => {
+    // The slug positional comes AFTER `--type design` here. A naive
+    // "first non-flag token before --title" scan grabs `design` (the VALUE
+    // of `--type`) as the slug, mis-directing the user to create a record
+    // literally slugged `design`. The recovery must skip an option's value
+    // and recover the real slug `my-note`.
+    const { code, stderr } = await runCli([
+      "put",
+      "--type",
+      "design",
+      "my-note",
+      "--title",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain design new my-note --title");
+    // The --type VALUE must NOT be mistaken for the slug.
+    expect(stderr).not.toContain("fbrain design new design");
+    expect(stderr).not.toContain("<type>");
+  });
+
+  test("flags-first, no slug: `put --type concept --title X` falls back to `<slug>`", async () => {
+    // Only `--type concept` precedes `--title`, and `concept` is the VALUE
+    // of `--type` — not a positional. With no real slug, the recovery must
+    // fall back to the literal `<slug>` placeholder, NOT grab `concept`.
+    const { code, stderr } = await runCli([
+      "put",
+      "--type",
+      "concept",
+      "--title",
+      "X",
+    ]);
+    expect(code).toBe(1);
+    expect(stderr).toContain("fbrain concept new <slug> --title");
+    expect(stderr).not.toContain("fbrain concept new concept");
+    expect(stderr).not.toContain("<type>");
+  });
+
   test("`fbrain put --title X` (no slug) falls back to `<slug>` and `concept` in the hint", async () => {
     // The slug-recovery scan only looks at args BEFORE `--title`. With no
     // positional, it falls back to the literal `<slug>` placeholder rather
