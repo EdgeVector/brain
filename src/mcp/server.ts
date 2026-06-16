@@ -14,10 +14,10 @@ import { readFileSync } from "node:fs";
 
 import { getFbrainVersion } from "../version.ts";
 import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.ts";
-import { searchCmd } from "../commands/search.ts";
+import { searchCmd, type SearchHitJson } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
-import { getRecord } from "../commands/get.ts";
-import { listCmd } from "../commands/list.ts";
+import { getRecord, type RecordJson } from "../commands/get.ts";
+import { listCmd, type RecordSummary } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
@@ -74,6 +74,76 @@ export const DROPPED_INPUT_HINT =
   "`body_path` (a short path survives where a large inline `body` is " +
   "dropped), or via the CLI `fbrain put <slug> --type <type> < body.md`, or " +
   "split the write into smaller records.";
+
+// ── Output schemas for the read tools ────────────────────────────────────
+// Each read tool declares an `outputSchema` describing the typed JSON it
+// returns in `structuredContent`, so an MCP client gets fields back instead
+// of regex-parsing the human text block. The shapes are the SAME ones the
+// CLI emits under `--json` — the command functions hand the exact value to
+// the MCP layer via their `onResult` sink (one source of truth, no second
+// divergent shape; see each command's `onResult` option).
+//
+// MCP requires `structuredContent` to be an OBJECT, so the array-returning
+// tools (search/ask/list) wrap their array under a single named key
+// (`matches` / `records`) rather than returning a bare array; `get` returns
+// the single record object directly.
+
+// One search/ask match: `{slug, score, type, title}` (mirrors
+// SearchHitJson). `type` is the canonical lowercase RecordType so a client
+// can match it against the input `type` filter verbatim; `score` is the
+// 6-decimal-rounded relevance (a cosine for search, a fused RRF score for
+// ask) and is `null` only when the node reported no score for a search hit.
+const matchSchema = z.object({
+  slug: z.string().describe("Record slug."),
+  score: z
+    .number()
+    .nullable()
+    .describe("Relevance score (cosine for search, fused RRF for ask). Null when unscored."),
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
+  title: z.string().describe("Record title."),
+});
+
+// One `fbrain_list` row — the compact summary the CLI `list --json` emits
+// (body intentionally omitted; use `fbrain_get` for the full record).
+const summarySchema = z.object({
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
+  slug: z.string().describe("Record slug."),
+  title: z.string().describe("Record title."),
+  status: z.string().describe("Status enum value for the type."),
+  tags: z.array(z.string()).describe("Tag list."),
+  design_slug: z
+    .string()
+    .optional()
+    .describe("Parent design slug — only present on types that carry a design link."),
+  created_at: z.string().describe("ISO-8601 creation timestamp."),
+  updated_at: z.string().describe("ISO-8601 last-update timestamp."),
+});
+
+// The full single record `fbrain_get` returns (mirrors RecordJson) — the
+// summary fields plus the markdown `body` and the optional design-link /
+// child-task relationship fields.
+const recordSchema = z.object({
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
+  slug: z.string().describe("Record slug."),
+  title: z.string().describe("Record title."),
+  status: z.string().describe("Status enum value for the type."),
+  tags: z.array(z.string()).describe("Tag list."),
+  design_slug: z
+    .string()
+    .optional()
+    .describe("Parent design slug — only present on types that carry a design link."),
+  design_missing: z
+    .boolean()
+    .optional()
+    .describe("True when this record's parent design was deleted since the link was written."),
+  children: z
+    .array(z.object({ slug: z.string(), status: z.string() }))
+    .optional()
+    .describe("Child task summaries — only present for type=design."),
+  created_at: z.string().describe("ISO-8601 creation timestamp."),
+  updated_at: z.string().describe("ISO-8601 last-update timestamp."),
+  body: z.string().describe("Markdown body."),
+});
 
 export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   // Normalize both option shapes to a single lazy loader. When an eager `cfg`
@@ -132,23 +202,36 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe("Server-side score floor (?min_score=F)."),
       },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      // `structuredContent` is `{ matches: [{slug,score,type,title}, …] }` —
+      // the SAME array the CLI `--json` emits, wrapped under `matches`
+      // because MCP requires structuredContent to be an object.
+      outputSchema: {
+        matches: z
+          .array(matchSchema)
+          .describe("Matches, highest score first (empty array on no matches)."),
+      },
     },
     (args) =>
-      runTool(getCfg, (cfg, print) =>
-        searchCmd({
-          cfg,
-          query: args.query,
-          print,
-          // MCP bundles every printed line into one text block — fold
-          // CLI-stderr advisories back into the same sink so agents still
-          // see the weak-match note inline. The CLI uses its own default
-          // (console.error) when no override is passed.
-          printErr: print,
-          limit: args.limit,
-          exact: args.exact,
-          minScore: args.min_score,
-          types: args.type,
-        }),
+      runReadTool<SearchHitJson[]>(
+        getCfg,
+        (cfg, print, onResult) =>
+          searchCmd({
+            cfg,
+            query: args.query,
+            print,
+            // MCP bundles every printed line into one text block — fold
+            // CLI-stderr advisories back into the same sink so agents still
+            // see the weak-match note inline. The CLI uses its own default
+            // (console.error) when no override is passed.
+            printErr: print,
+            limit: args.limit,
+            exact: args.exact,
+            minScore: args.min_score,
+            types: args.type,
+            onResult,
+          }),
+        (matches) => ({ matches }),
       ),
   );
 
@@ -173,26 +256,40 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe("Max results (default 5)."),
       },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      // `structuredContent` is `{ matches: [{slug,score,type,title}, …] }` —
+      // identical shape to `fbrain_search`; `score` here is the fused RRF
+      // score (always non-null for ask hits).
+      outputSchema: {
+        matches: z
+          .array(matchSchema)
+          .describe("Fused (BM25 + vector) matches, highest score first (empty on no matches)."),
+      },
     },
     (args) =>
-      runTool(getCfg, async (cfg, print) => {
-        await askCmd({
-          cfg,
-          query: args.query,
-          print,
-          // MCP bundles every printed line into one text block — fold
-          // CLI-stderr advisories (e.g. the all-stopword note) back into
-          // the same sink so agents see them inline, matching the search
-          // handler. The CLI uses its own default (console.error) otherwise.
-          printErr: print,
-          limit: args.limit,
-          types: args.type,
-          // LLM query expansion stays OFF (the default): the eval winner is
-          // plain BM25 + vector + RRF, and keeping it off means the tool
-          // works for any agent with zero extra config (no API key). A
-          // follow-up can add an optional `expand` param if wanted.
-        });
-      }),
+      runReadTool<SearchHitJson[]>(
+        getCfg,
+        async (cfg, print, onResult) => {
+          await askCmd({
+            cfg,
+            query: args.query,
+            print,
+            // MCP bundles every printed line into one text block — fold
+            // CLI-stderr advisories (e.g. the all-stopword note) back into
+            // the same sink so agents see them inline, matching the search
+            // handler. The CLI uses its own default (console.error) otherwise.
+            printErr: print,
+            limit: args.limit,
+            types: args.type,
+            onResult,
+            // LLM query expansion stays OFF (the default): the eval winner is
+            // plain BM25 + vector + RRF, and keeping it off means the tool
+            // works for any agent with zero extra config (no API key). A
+            // follow-up can add an optional `expand` param if wanted.
+          });
+        },
+        (matches) => ({ matches }),
+      ),
   );
 
   server.registerTool(
@@ -213,15 +310,24 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             "Restrict lookup to one record type. Omit to search all types.",
           ),
       },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      // `structuredContent` is the single record object (the SAME shape the
+      // CLI `get --json` emits). Unlike the array tools there's nothing to
+      // wrap — the record is already an object.
+      outputSchema: recordSchema.shape,
     },
     (args) =>
-      runTool(getCfg, (cfg, print) =>
-        getRecord({
-          cfg,
-          slug: args.slug,
-          print,
-          type: args.type,
-        }),
+      runReadTool<RecordJson>(
+        getCfg,
+        (cfg, print, onResult) =>
+          getRecord({
+            cfg,
+            slug: args.slug,
+            print,
+            type: args.type,
+            onResult,
+          }),
+        (record) => record as unknown as Record<string, unknown>,
       ),
   );
 
@@ -245,17 +351,30 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe("Max results."),
       },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      // `structuredContent` is `{ records: [summary, …] }` — the SAME array
+      // the CLI `list --json` emits (body omitted; use `fbrain_get` for the
+      // full record), wrapped under `records` because MCP requires an object.
+      outputSchema: {
+        records: z
+          .array(summarySchema)
+          .describe("Record summaries, newest-first (empty array on no records)."),
+      },
     },
     (args) =>
-      runTool(getCfg, (cfg, print) =>
-        listCmd({
-          cfg,
-          print,
-          type: args.type,
-          status: args.status,
-          tag: args.tag,
-          limit: args.limit,
-        }),
+      runReadTool<RecordSummary[]>(
+        getCfg,
+        (cfg, print, onResult) =>
+          listCmd({
+            cfg,
+            print,
+            type: args.type,
+            status: args.status,
+            tag: args.tag,
+            limit: args.limit,
+            onResult,
+          }),
+        (records) => ({ records }),
       ),
   );
 
@@ -531,6 +650,12 @@ function yamlScalar(value: string): string {
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
+  // Typed JSON mirroring the tool's declared `outputSchema`. Set only by
+  // the read tools (`runReadTool`); the human text block stays the
+  // readable fallback for clients that don't consume structuredContent.
+  // MCP requires this to be an object, so array results are wrapped under
+  // a named key by their handler.
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
 
@@ -563,6 +688,51 @@ async function runTool(
     return errorResult(err);
   }
   return textResult(lines.join("\n"));
+}
+
+// Read-tool variant of `runTool`: alongside the human text block, capture
+// the command's structured payload (handed back via its `onResult` sink —
+// the SAME value the CLI emits under `--json`, so MCP `structuredContent`
+// can't drift from the CLI JSON shape) and attach it as `structuredContent`,
+// wrapped by `wrap` into the object MCP requires (an array result is nested
+// under a named key). The command still runs in human mode so the text
+// fallback renders for clients that ignore structuredContent. If the
+// command throws (e.g. `fbrain_get` on an unknown slug) before `onResult`
+// fires, the error envelope is returned and no structuredContent is set.
+async function runReadTool<P>(
+  getCfg: () => Config,
+  fn: (
+    cfg: Config,
+    print: (line: string) => void,
+    onResult: (payload: P) => void,
+  ) => Promise<void> | void,
+  wrap: (payload: P) => Record<string, unknown>,
+): Promise<ToolResult> {
+  const lines: string[] = [];
+  let cfg: Config;
+  try {
+    cfg = getCfg();
+  } catch (err) {
+    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
+      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
+    }
+    throw err;
+  }
+  let structured: Record<string, unknown> | undefined;
+  try {
+    await fn(
+      cfg,
+      (l) => lines.push(l),
+      (payload) => {
+        structured = wrap(payload);
+      },
+    );
+  } catch (err) {
+    return errorResult(err);
+  }
+  const result = textResult(lines.join("\n"));
+  if (structured !== undefined) result.structuredContent = structured;
+  return result;
 }
 
 function textResult(text: string): ToolResult {

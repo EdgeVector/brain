@@ -29,6 +29,14 @@ export type GetOptions = {
   json?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
+  // Structured-result sink. When set, receives the SAME single
+  // `RecordJson` object that `--json` mode serializes to stdout — one
+  // source of truth for both the JSON CLI surface and the MCP
+  // `structuredContent`. Fires once on a successful resolve (a not-found
+  // slug throws before this, surfacing as a tool error) regardless of
+  // the `json` flag, so the MCP handler can run the command in human
+  // mode for `content` text AND capture the typed record.
+  onResult?: (payload: RecordJson) => void;
 };
 
 export async function getRecord(opts: GetOptions): Promise<void> {
@@ -76,8 +84,14 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     );
   }
 
+  // Built unconditionally (not just under --json) so the `onResult`
+  // structured sink and the `--json` stdout document are the SAME value
+  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
+  const json = recordToJson(found.record, found.type, designMissing, designChildren);
+  opts.onResult?.(json);
+
   if (opts.json) {
-    print(JSON.stringify(recordToJson(found.record, found.type, designMissing, designChildren)));
+    print(JSON.stringify(json));
     return;
   }
 
