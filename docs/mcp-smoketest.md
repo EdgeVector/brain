@@ -1,10 +1,11 @@
 # MCP server smoketest
 
 End-to-end check that fbrain's MCP server (`fbrain mcp`) exposes the
-six tools — read: `fbrain_search`, `fbrain_get`, `fbrain_list`; write:
-`fbrain_put`, `fbrain_delete`, `fbrain_link` — and that an MCP client
-(Claude Code or `@modelcontextprotocol/inspector`) can call them
-against a live `~/.fbrain/config.json`.
+seven tools — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`,
+`fbrain_list`; write: `fbrain_put`, `fbrain_delete`, `fbrain_link` —
+and that an MCP client (Claude Code or
+`@modelcontextprotocol/inspector`) can call them against a live
+`~/.fbrain/config.json`.
 
 > Prerequisite: `fbrain init` has been run and `fbrain doctor` is green.
 > The MCP server reads the same config file as the CLI.
@@ -39,8 +40,9 @@ In a new Claude Code session, ask:
 
 > List the tools exposed by the `fbrain` MCP server.
 
-Expected: Claude reports six tools — `fbrain_search`, `fbrain_get`,
-`fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`. If you
+Expected: Claude reports seven tools — `fbrain_search`, `fbrain_ask`,
+`fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`,
+`fbrain_link`. If you
 see "no tools" or "server not connected", check the Claude Code logs
 (`~/Library/Logs/Claude` on macOS) for stderr from the
 `bun src/mcp/main.ts` process. The most common failure is
@@ -62,6 +64,18 @@ direction", limit: 3}` and returns a text block with `slug · score ·
 type · title` lines. With the readiness-gate placeholder seeded in the
 brain (see `docs/g0-replacement-readiness-gate.md`), expect at least
 one hit referencing that page.
+
+### C.1b — `fbrain_ask` (hybrid recall)
+
+> Use the fbrain MCP server to ask "replacement direction".
+> Show me the top 3 hits.
+
+Expected: Claude calls `fbrain_ask` with `{query: "replacement
+direction", limit: 3}` and returns the same `slug · score · type ·
+title` shape as `fbrain_search`. `fbrain_ask` fuses BM25 + vector via
+RRF (the eval-winning recall primitive) and needs no API key — LLM
+query expansion is off by default. Prefer it over `fbrain_search` for
+rare tokens, acronyms, and exact-keyword matches.
 
 ### C.2 — `fbrain_get`
 
@@ -135,7 +149,7 @@ bunx @modelcontextprotocol/inspector bun src/mcp/main.ts
 ```
 
 The inspector opens a local web UI. Use the "List Tools" button — you
-should see six tools registered. Click each tool, fill in the args
+should see seven tools registered. Click each tool, fill in the args
 panel (e.g. `query: "replacement"` for search), hit "Call Tool".
 
 ## E. Common failure modes
