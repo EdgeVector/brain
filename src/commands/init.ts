@@ -261,17 +261,31 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     const hash = firstType ? schemaHashes[firstType] : undefined;
     return hash ?? entry.schema.schema.descriptive_name;
   });
-  print(`[4/${STEPS}] loading schemas into the node (scoped to fbrain's ${loadScope.length})`);
+  // The header + count text are decided AFTER the load returns so they tell
+  // the truth: a #877 node honors the scope and loads ~8, a pre-#877 node
+  // ignores it and full-loads the whole published catalog (~953). We defer the
+  // "scoped to 8" claim until we know the node actually honored the scope, so a
+  // pre-#877 node never sees the self-contradicting "scoped to 8 / loaded 953".
   const loadResult = await nodeClient.loadSchemas(loadScope);
   if (loadResult.failed_schemas.length > 0) {
     throw new Error(
       `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
     );
   }
-  print(
-    `        loaded ${loadResult.schemas_loaded_to_db}/${loadResult.available_schemas_loaded} schemas` +
-      ` (failed_schemas empty ✓)`,
-  );
+  // honored iff the node loaded no more than we asked for; a pre-#877 node
+  // loads the full catalog (~953) and the resolution step below still finds
+  // fbrain's schemas in it.
+  const loaded = loadResult.schemas_loaded_to_db;
+  if (loaded <= loadScope.length) {
+    print(`[4/${STEPS}] loading schemas into the node (scoped to fbrain's ${loadScope.length})`);
+    print(`        loaded ${loaded}/${loadScope.length} schemas (failed_schemas empty ✓)`);
+  } else {
+    print(`[4/${STEPS}] loading fbrain's ${loadScope.length} schemas into the node`);
+    print(
+      `        node predates scoped load (fold #877) — loaded the full published catalog (${loaded}); ` +
+        `fbrain's ${loadScope.length} schemas resolved from it ✓`,
+    );
+  }
 
   // Resolve every cert-gated schema from the node's authoritative hashes.
   // This is the fresh-consumer happy path: no DevCert, no re-POST, the real
