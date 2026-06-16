@@ -249,7 +249,7 @@ section also prints a no-key notice instead of silently dropping.
 
 The LLM key (only needed for --expand) is read from \$ANTHROPIC_API_KEY
 (preferred) or an optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
-  doctor: `fbrain doctor [--freshness] [--write] [--usage [--usage-window N] [--usage-path PATH]]
+  doctor: `fbrain doctor [--freshness] [--write] [--json] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
   - config valid (~/.fbrain/config.json + hex-64 hashes)
@@ -261,6 +261,14 @@ Live health checks:
     the node's app registry knows fbrain (a consent dry-run returns 202
     rather than 404). FAIL is reported as "write-blocked" with a
     next-step hint — distinguishes a missing grant from a cold registry.
+  - mcp-entrypoint: the \`fbrain-mcp\` bin (the agent-integration path
+    \`claude mcp add fbrain fbrain-mcp\`) resolves on PATH. WARN, never
+    FAIL, when it's missing — MCP is optional and source checkouts use
+    the path-based registration form.
+
+With --json, emit the structured check results as a single JSON object
+on stdout instead of the human PASS/WARN/FAIL lines (same verdict + exit
+code). Each entry carries name, tag (PASS/WARN/FAIL), ok, detail, fix.
 
 With --freshness, additionally runs the G3 retrieval-quality probes
 (see docs/phase-7-search-latency-spike.md):
@@ -488,6 +496,9 @@ const DOCTOR_OPTIONS = {
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
   write: { type: "boolean", default: false },
+  // Machine-readable mode: emit the structured check results as a single
+  // JSON object on stdout instead of the human PASS/WARN/FAIL lines.
+  json: { type: "boolean", default: false },
 } as const;
 const DELETE_OPTIONS = {
   type: { type: "string" },
@@ -1410,6 +1421,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   if (verbose) dOpts.verbose = verbose;
   if (values.freshness) dOpts.freshness = true;
   if (values.write) dOpts.write = true;
+  if (values.json) dOpts.json = true;
   if (values.usage) {
     dOpts.usage = true;
     const windowArg = values["usage-window"];

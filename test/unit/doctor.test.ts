@@ -11,6 +11,7 @@ import {
   classifySchemaDrift,
   diffSchemas,
   doctor,
+  runMcpEntrypointProbe,
   schemaServiceFixHint,
   validateConfigShape,
 } from "../../src/commands/doctor.ts";
@@ -1804,5 +1805,139 @@ describe("schemaServiceFixHint", () => {
     expect(hint).toContain(DEV_URL);
     expect(hint).toContain(PROD_URL);
     expect(hint).not.toContain("--local-schema");
+  });
+});
+
+// mcp-entrypoint probe — the headline agent-integration path. PASS when the
+// `fbrain-mcp` bin resolves on PATH (message carries the resolved path); WARN
+// (never FAIL — must not flip the verdict) with a re-link hint when it
+// doesn't. Resolution is injected via `whichBin` so the test never depends on
+// the host's real PATH.
+describe("runMcpEntrypointProbe", () => {
+  test("resolved → PASS, detail names the resolved path", () => {
+    const check = runMcpEntrypointProbe(
+      { whichBin: () => "/Users/x/.bun/bin/fbrain-mcp" },
+      undefined,
+    );
+    expect(check.name).toBe("mcp-entrypoint");
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBeUndefined(); // plain PASS
+    expect(check.detail).toContain("fbrain-mcp -> /Users/x/.bun/bin/fbrain-mcp");
+  });
+
+  test("unresolved → WARN (ok:true) with the re-link hint, never FAIL", () => {
+    const check = runMcpEntrypointProbe({ whichBin: () => null }, undefined);
+    expect(check.name).toBe("mcp-entrypoint");
+    expect(check.ok).toBe(true); // WARN must not flip the verdict
+    expect(check.tag).toBe("WARN");
+    expect(check.fix).toContain("bun link");
+    expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(check.fix).toContain('realpath src/mcp/main.ts');
+  });
+
+  test("probes the fbrain-mcp bin name", () => {
+    const asked: string[] = [];
+    runMcpEntrypointProbe(
+      {
+        whichBin: (n) => {
+          asked.push(n);
+          return null;
+        },
+      },
+      undefined,
+    );
+    expect(asked).toEqual(["fbrain-mcp"]);
+  });
+});
+
+describe("doctor mcp-entrypoint integration", () => {
+  test("resolvable fbrain-mcp → [PASS] mcp-entrypoint with path, exit 0", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+    });
+    expect(code).toBe(0);
+    const line = lines.find((l) => l.includes("mcp-entrypoint"));
+    expect(line).toBeDefined();
+    expect(line!.startsWith("[PASS]")).toBe(true);
+    expect(line!).toContain("/Users/x/.bun/bin/fbrain-mcp");
+  });
+
+  test("unresolvable fbrain-mcp → [WARN] mcp-entrypoint + hint, overall exit STILL 0", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => null,
+    });
+    // WARN must NOT flip doctor's overall exit code.
+    expect(code).toBe(0);
+    const warnLine = lines.find((l) => l.includes("mcp-entrypoint"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!.startsWith("[WARN]")).toBe(true);
+    // The actionable re-link hint follows on the next `fix:` line.
+    const fixLine = lines[lines.indexOf(warnLine!) + 1] ?? "";
+    expect(fixLine).toContain("bun link");
+    expect(fixLine).toContain("claude mcp add fbrain fbrain-mcp");
+  });
+
+  test("--json output includes the mcp-entrypoint check entry", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      json: true,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+    });
+    expect(code).toBe(0);
+    // --json emits exactly one JSON object — the human lines are suppressed.
+    expect(lines.length).toBe(1);
+    const parsed = JSON.parse(lines[0]!) as {
+      ok: boolean;
+      failures: number;
+      checks: Array<{ name: string; tag: string; ok: boolean; detail?: string }>;
+    };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.failures).toBe(0);
+    const mcp = parsed.checks.find((c) => c.name === "mcp-entrypoint");
+    expect(mcp).toBeDefined();
+    expect(mcp!.tag).toBe("PASS");
+    expect(mcp!.ok).toBe(true);
+    expect(mcp!.detail).toContain("fbrain-mcp -> /Users/x/.bun/bin/fbrain-mcp");
+  });
+
+  test("--json with unresolvable fbrain-mcp → WARN entry, overall ok:true (exit 0)", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      json: true,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => null,
+    });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(lines[0]!) as {
+      ok: boolean;
+      checks: Array<{ name: string; tag: string; ok: boolean; fix?: string }>;
+    };
+    expect(parsed.ok).toBe(true); // WARN doesn't flip the verdict
+    const mcp = parsed.checks.find((c) => c.name === "mcp-entrypoint");
+    expect(mcp).toBeDefined();
+    expect(mcp!.tag).toBe("WARN");
+    expect(mcp!.ok).toBe(true);
+    expect(mcp!.fix).toContain("bun link");
   });
 });
