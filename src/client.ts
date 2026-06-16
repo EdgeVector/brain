@@ -382,7 +382,13 @@ export type NodeClient = {
   // via `folddb consent grant`.
   requestConsent(appId: string, scope: string): Promise<{ status: number; body: unknown }>;
   consentStatus(requestId: string): Promise<{ status: number; body: unknown }>;
-  loadSchemas(): Promise<{
+  // Load published schemas into the node's DB. Pass a list of schema
+  // identifiers (canonical identity hash or `descriptive_name`) to scope the
+  // load to just those (fold #877) — a fresh node then pulls only the handful
+  // it needs instead of the entire global catalog. Omit (or pass an empty
+  // list) to load every available schema, as before. Forward-compatible: a
+  // pre-#877 node ignores the scope body and full-loads.
+  loadSchemas(schemas?: readonly string[]): Promise<{
     available_schemas_loaded: number;
     schemas_loaded_to_db: number;
     failed_schemas: string[];
@@ -818,8 +824,16 @@ export function newNodeClient(opts: {
         throw err;
       }
     },
-    async loadSchemas() {
-      const body = await callJsonOk("/api/schemas/load", "POST");
+    async loadSchemas(schemas) {
+      // Scope the load to just the named schemas when a non-empty list is
+      // given (fold #877): each entry is a canonical identity hash or a
+      // `descriptive_name` (matching is lenient on whitespace/case). An empty
+      // list — or none at all — sends no body, so the node loads the full
+      // published catalog, exactly as before. This is forward-compatible: a
+      // pre-#877 node ignores the body and full-loads either way.
+      const scope = (schemas ?? []).filter((s) => typeof s === "string" && s.length > 0);
+      const reqBody = scope.length > 0 ? { schemas: scope } : undefined;
+      const body = await callJsonOk("/api/schemas/load", "POST", reqBody);
       const b = body as Record<string, unknown>;
       const failed = Array.isArray(b.failed_schemas) ? (b.failed_schemas as string[]) : [];
       return {
