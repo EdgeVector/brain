@@ -52,6 +52,7 @@ import {
   type BM25Document,
 } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
+import type { SearchHitJson } from "./search.ts";
 import {
   reciprocalRankFusion,
   RRF_DEFAULT_K,
@@ -102,6 +103,15 @@ export type AskOptions = {
   // `fbrain ask q 2>/dev/null` yields only the parseable result rows.
   // Default: console.error.
   printErr?: (line: string) => void;
+  // Structured-result sink. When set, receives the SAME array of
+  // `{slug,score,type,title}` objects that `--json` mode serializes to
+  // stdout — one source of truth for both the JSON CLI surface and the
+  // MCP `structuredContent`. Fires once per call (with `[]` on no
+  // matches) regardless of the `json` flag, so the MCP handler can run
+  // the command in human mode for `content` text AND capture the typed
+  // payload without re-parsing the printed line. Same shape as
+  // `fbrain search --json` (every `ask` hit carries a non-null score).
+  onResult?: (payload: SearchHitJson[]) => void;
   // For tests: stub the expansion HTTP call.
   fetchImpl?: typeof fetch;
 };
@@ -380,21 +390,27 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       explainSink("");
     }
   }
+  // {slug, score, type, title} per hit — type is the canonical lowercase
+  // RecordType (not the capitalized human display name) so consumers can
+  // match against `--type` values verbatim. Same shape as
+  // `fbrain search --json`. Empty result is `[]` rather than the human
+  // "no matches" sentinel.
+  //
+  // Score rounded to 6 decimals to match search --json's discipline and
+  // strip RRF's float noise — output-only; sort/rank ran on full precision.
+  //
+  // Built unconditionally (not just under --json) so the `onResult`
+  // structured sink and the `--json` stdout document are the SAME value
+  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
+  const payload: SearchHitJson[] = resolved.map((h) => ({
+    slug: h.slug,
+    score: Math.round(h.fusedScore * 1e6) / 1e6,
+    type: h.type,
+    title: h.record.title,
+  }));
+  opts.onResult?.(payload);
+
   if (opts.json) {
-    // {slug, score, type, title} per hit — type is the canonical lowercase
-    // RecordType (not the capitalized human display name) so consumers
-    // can match against `--type` values verbatim. Same shape as
-    // `fbrain search --json` (search.ts:226-238). Empty result is `[]`
-    // rather than the human "no matches" sentinel.
-    //
-    // Score rounded to 6 decimals to match search --json's discipline and
-    // strip RRF's float noise — output-only; sort/rank ran on full precision.
-    const payload = resolved.map((h) => ({
-      slug: h.slug,
-      score: Math.round(h.fusedScore * 1e6) / 1e6,
-      type: h.type,
-      title: h.record.title,
-    }));
     print(JSON.stringify(payload));
   } else if (resolved.length === 0) {
     print("no matches");

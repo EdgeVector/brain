@@ -36,6 +36,14 @@ export type ListOptions = {
   verbose?: Verbose;
   print?: (line: string) => void;
   printErr?: (line: string) => void;
+  // Structured-result sink. When set, receives the SAME array of
+  // `RecordSummary` objects that `--json` mode serializes to stdout —
+  // one source of truth for both the JSON CLI surface and the MCP
+  // `structuredContent`. Fires once per call (with `[]` on no records)
+  // regardless of the `json` flag, so the MCP handler can run the
+  // command in human mode for `content` text AND capture the typed
+  // payload without re-parsing the printed line.
+  onResult?: (payload: RecordSummary[]) => void;
 };
 
 export async function listCmd(opts: ListOptions): Promise<void> {
@@ -103,6 +111,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // `no records` even when the implicit default cap would have taken
   // effect. (Iron: the cap is a UX guard against floods, not a signal.)
   if (filtered.length === 0) {
+    opts.onResult?.([]);
     if (opts.json) {
       print("[]");
     } else {
@@ -118,13 +127,18 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   const trimmed = filtered.slice(0, effectiveLimit);
   const truncated = filtered.length - trimmed.length;
 
+  // One JSON document — exact same field set the human table surfaces,
+  // plus created_at/updated_at and the optional design_slug parent link.
+  // Body intentionally omitted to keep list payloads compact; consumers
+  // can `fbrain get <slug> --json` for the full record.
+  //
+  // Built unconditionally (not just under --json) so the `onResult`
+  // structured sink and the `--json` stdout document are the SAME value
+  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
+  const payload = trimmed.map(({ type, record }) => recordSummary(type, record));
+  opts.onResult?.(payload);
+
   if (opts.json) {
-    // One JSON document on stdout — exact same field set the human
-    // table surfaces, plus created_at/updated_at and the optional
-    // design_slug parent link. Body intentionally omitted to keep
-    // list payloads compact; consumers can `fbrain get <slug> --json`
-    // for the full record.
-    const payload = trimmed.map(({ type, record }) => recordSummary(type, record));
     print(JSON.stringify(payload));
     // Truncation advisory still useful for `jq` users — they may
     // wonder why the array is shorter than expected — but it must
@@ -155,7 +169,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   }
 }
 
-type RecordSummary = {
+export type RecordSummary = {
   type: RecordType;
   slug: string;
   title: string;

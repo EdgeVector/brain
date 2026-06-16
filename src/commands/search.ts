@@ -47,6 +47,25 @@ export type SearchOptions = {
   // `fbrain search q 2>/dev/null` yields only the parseable result rows.
   // Default: console.error.
   printErr?: (line: string) => void;
+  // Structured-result sink. When set, receives the SAME array of
+  // `{slug,score,type,title}` objects that `--json` mode serializes to
+  // stdout — one source of truth for both the JSON CLI surface and the
+  // MCP `structuredContent`. Fires once per call (with `[]` on no
+  // matches) regardless of the `json` flag, so the MCP handler can run
+  // the command in human mode for `content` text AND capture the typed
+  // payload without re-parsing the printed line.
+  onResult?: (payload: SearchHitJson[]) => void;
+};
+
+// One match in the machine-readable search/ask result. `type` is the
+// canonical lowercase RecordType (matches `--type` values verbatim);
+// `score` is rounded to 6 decimals (see the rationale at the emit site)
+// and is `null` only for search hits the node reported no score for.
+export type SearchHitJson = {
+  slug: string;
+  score: number | null;
+  type: RecordType;
+  title: string;
 };
 
 export type ResolvedHit = {
@@ -205,6 +224,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const trimmed = opts.limit && opts.limit > 0 ? resolved.slice(0, opts.limit) : resolved;
 
   if (trimmed.length === 0) {
+    opts.onResult?.([]);
     if (opts.json) {
       // Stdout is just `[]` so jq pipelines see a parseable empty
       // array rather than the "no matches" sentinel.
@@ -286,23 +306,29 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     !opts.exact && topScore !== null && isWeakMatch(topScore, trimmed, STRONG_SCORE, FLATNESS_GAP);
   const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`;
 
+  // {slug, score, type, title} per hit — type is the canonical
+  // lowercase RecordType (not the capitalized human display name)
+  // so consumers can match against `--type` values verbatim.
+  //
+  // Score is rounded to 6 decimals. The native index ships cosines as
+  // f32 and the node promotes back to f64 on the wire, so a perfect
+  // match arrives as 1.0000001192092896 (= f32(1.0)). Left raw, a
+  // consumer filtering on the natural cosine contract `score <= 1.0`
+  // silently drops the single best hit. Rounding is OUTPUT-ONLY — the
+  // sort above ran on the full-precision value. Null stays null.
+  //
+  // Built unconditionally (not just under --json) so the `onResult`
+  // structured sink and the `--json` stdout document are the SAME value
+  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
+  const payload: SearchHitJson[] = trimmed.map((hit) => ({
+    slug: hit.slug,
+    score: hit.score == null ? null : Math.round(hit.score * 1e6) / 1e6,
+    type: hit.type,
+    title: hit.record.title,
+  }));
+  opts.onResult?.(payload);
+
   if (opts.json) {
-    // {slug, score, type, title} per hit — type is the canonical
-    // lowercase RecordType (not the capitalized human display name)
-    // so consumers can match against `--type` values verbatim.
-    //
-    // Score is rounded to 6 decimals before serializing. The native index
-    // ships cosines as f32 and the node promotes back to f64 on the wire,
-    // so a perfect match arrives as 1.0000001192092896 (= f32(1.0)). Left
-    // raw, a consumer filtering on the natural cosine contract `score <=
-    // 1.0` silently drops the single best hit. Rounding is OUTPUT-ONLY —
-    // the sort above ran on the full-precision value. Null stays null.
-    const payload = trimmed.map((hit) => ({
-      slug: hit.slug,
-      score: hit.score == null ? null : Math.round(hit.score * 1e6) / 1e6,
-      type: hit.type,
-      title: hit.record.title,
-    }));
     print(JSON.stringify(payload));
     if (weakMatch) printErr(weakMatchNote);
     return;

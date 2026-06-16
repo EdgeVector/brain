@@ -108,6 +108,7 @@ type ToolCallback = (
   args: Record<string, unknown>,
 ) => Promise<{
   content: Array<{ type: string; text?: string }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }>;
 
@@ -117,6 +118,22 @@ function toolsOf(server: ReturnType<typeof createFbrainMcpServer>): Record<strin
   const out: Record<string, ToolCallback> = {};
   for (const [name, t] of Object.entries(map)) out[name] = t.handler;
   return out;
+}
+
+// The registered-tool map also carries each tool's declared `outputSchema`
+// (a ZodRawShape). We validate a tool's `structuredContent` against it to
+// prove the typed result actually conforms to what the tool advertises —
+// the same contract an MCP client's SDK enforces on the wire.
+function outputSchemaOf(
+  server: ReturnType<typeof createFbrainMcpServer>,
+  name: string,
+): z.ZodTypeAny | undefined {
+  const map = (
+    server as unknown as {
+      _registeredTools: Record<string, { outputSchema?: z.ZodTypeAny }>;
+    }
+  )._registeredTools;
+  return map[name]?.outputSchema;
 }
 
 function recordRow(slug: string, title = `T-${slug}`) {
@@ -523,6 +540,195 @@ describe("fbrain_list tool", () => {
     // listCmd prints "no records" when the result is empty; the MCP
     // wrapper passes that through verbatim.
     expect(res.content[0]!.text).toBe("no records");
+  });
+});
+
+// The whole point of this card: the 4 read tools must return typed JSON in
+// `structuredContent` (mirroring the CLI `--json` shapes) AND declare an
+// `outputSchema`, so an MCP client gets fields back instead of regex-parsing
+// the human text block — while the text block is still returned as a
+// readable fallback. Each test below proves: (1) structuredContent is
+// NON-null, (2) it matches the declared outputSchema, and (3) the text
+// content still renders.
+describe("read tools — structuredContent + outputSchema", () => {
+  test("fbrain_search returns { matches } matching its outputSchema, text still renders", async () => {
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "alpha", range: null },
+                value: "fragment",
+                metadata: { score: 0.42, match_type: "semantic" },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha design")] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_search!({ query: "blueberry" });
+    expect(res.isError).toBeFalsy();
+    // Structured payload is present and non-null.
+    expect(res.structuredContent).toBeDefined();
+    const sc = res.structuredContent as { matches: Array<Record<string, unknown>> };
+    expect(Array.isArray(sc.matches)).toBe(true);
+    expect(sc.matches).toHaveLength(1);
+    expect(sc.matches[0]).toMatchObject({ slug: "alpha", type: "design", title: "Alpha design" });
+    expect(sc.matches[0]!.score).toBeCloseTo(0.42, 6);
+    // Validates against the tool's declared outputSchema.
+    const schema = outputSchemaOf(server, "fbrain_search")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    // Text content fallback still renders.
+    expect(res.content[0]!.type).toBe("text");
+    expect(res.content[0]!.text).toContain("Alpha design");
+  });
+
+  test("fbrain_search returns { matches: [] } (non-null) on no matches", async () => {
+    installMock(() => ({ status: 200, body: { ok: true, results: [] } }));
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_search!({ query: "nothing" });
+    expect(res.structuredContent).toEqual({ matches: [] });
+    const schema = outputSchemaOf(server, "fbrain_search")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("fbrain_ask returns { matches } matching its outputSchema", async () => {
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "alpha", range: null },
+                value: "fragment",
+                metadata: { score: 0.5, match_type: "semantic" },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha design")] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_ask!({ query: "alpha" });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    const sc = res.structuredContent as { matches: Array<Record<string, unknown>> };
+    expect(sc.matches.length).toBeGreaterThanOrEqual(1);
+    expect(sc.matches[0]).toMatchObject({ slug: "alpha", type: "design" });
+    expect(typeof sc.matches[0]!.score).toBe("number");
+    const schema = outputSchemaOf(server, "fbrain_ask")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toContain("alpha");
+  });
+
+  test("fbrain_get returns the single record object matching its outputSchema", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha design")] } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_get!({ slug: "alpha", type: "design" });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    const sc = res.structuredContent as Record<string, unknown>;
+    // get returns the record object directly (not wrapped) — body included.
+    expect(sc).toMatchObject({
+      type: "design",
+      slug: "alpha",
+      title: "Alpha design",
+      status: "draft",
+      body: "body text",
+    });
+    expect(Array.isArray(sc.tags)).toBe(true);
+    const schema = outputSchemaOf(server, "fbrain_get")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toContain("Alpha design");
+  });
+
+  test("fbrain_get error (unknown slug) returns no structuredContent", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_get!({ slug: "ghost", type: "design" });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  test("fbrain_list returns { records } matching its outputSchema, text still renders", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: { ok: true, results: [recordRow("a", "A"), recordRow("b", "B")] },
+        };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_list!({ type: "design", limit: 5 });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    const sc = res.structuredContent as { records: Array<Record<string, unknown>> };
+    expect(Array.isArray(sc.records)).toBe(true);
+    expect(sc.records).toHaveLength(2);
+    expect(sc.records[0]).toMatchObject({ type: "design", status: "draft" });
+    // Summary omits body (compact list shape).
+    expect(sc.records[0]!).not.toHaveProperty("body");
+    const schema = outputSchemaOf(server, "fbrain_list")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toContain("design");
+  });
+
+  test("fbrain_list returns { records: [] } (non-null) on empty result", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_list!({ type: "design" });
+    expect(res.structuredContent).toEqual({ records: [] });
+    const schema = outputSchemaOf(server, "fbrain_list")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("write tools (put/delete/link) declare NO outputSchema (this card is read-only)", () => {
+    const server = createFbrainMcpServer({ cfg });
+    expect(outputSchemaOf(server, "fbrain_put")).toBeUndefined();
+    expect(outputSchemaOf(server, "fbrain_delete")).toBeUndefined();
+    expect(outputSchemaOf(server, "fbrain_link")).toBeUndefined();
+    // All four read tools DO declare one.
+    expect(outputSchemaOf(server, "fbrain_search")).toBeDefined();
+    expect(outputSchemaOf(server, "fbrain_ask")).toBeDefined();
+    expect(outputSchemaOf(server, "fbrain_get")).toBeDefined();
+    expect(outputSchemaOf(server, "fbrain_list")).toBeDefined();
   });
 });
 
