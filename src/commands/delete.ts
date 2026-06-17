@@ -56,6 +56,22 @@ export type DeleteOptions = {
   force?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
+  // Structured-output sink, mirroring the read commands' `onResult`: fires
+  // once on the success path with the SAME resolved `type`/`slug` the printed
+  // `deleted <type> <slug>` line uses, so the MCP `structuredContent` can't
+  // drift from the human text. `soft` is always `true` — fold_db is
+  // append-only, so every delete is a tombstone, never a hard delete.
+  onResult?: (payload: DeleteResult) => void;
+};
+
+// The structured payload the MCP `fbrain_delete` tool returns in
+// `structuredContent` (mirrors the printed `deleted <type> <slug> (soft …)`
+// line). `soft` is invariant `true`.
+export type DeleteResult = {
+  action: "deleted";
+  type: RecordType;
+  slug: string;
+  soft: true;
 };
 
 // Live (non-tombstoned) tasks whose design_slug points at `designSlug`.
@@ -204,4 +220,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   print(
     `deleted ${type} ${slug} (soft — fold_db is append-only; see docs/phase-5-delete-spike.md)`,
   );
+  // Emit the structured payload from the SAME resolved `type`/`slug` the
+  // printed line uses (one source of truth — see the read commands).
+  opts.onResult?.({ action: "deleted", type, slug, soft: true });
 }

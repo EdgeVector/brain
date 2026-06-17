@@ -719,16 +719,197 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
 
-  test("write tools (put/delete/link) declare NO outputSchema (this card is read-only)", () => {
+  test("all 7 tools — read AND write — declare an outputSchema", () => {
     const server = createFbrainMcpServer({ cfg });
-    expect(outputSchemaOf(server, "fbrain_put")).toBeUndefined();
-    expect(outputSchemaOf(server, "fbrain_delete")).toBeUndefined();
-    expect(outputSchemaOf(server, "fbrain_link")).toBeUndefined();
-    // All four read tools DO declare one.
+    // Read tools (typed since #262).
     expect(outputSchemaOf(server, "fbrain_search")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_ask")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_get")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_list")).toBeDefined();
+    // Write tools (this card closes the gap #262 opened for the read tools).
+    expect(outputSchemaOf(server, "fbrain_put")).toBeDefined();
+    expect(outputSchemaOf(server, "fbrain_delete")).toBeDefined();
+    expect(outputSchemaOf(server, "fbrain_link")).toBeDefined();
+  });
+});
+
+// The write tools (put/delete/link) now mirror the read tools: each declares
+// an `outputSchema` and returns typed `structuredContent` on success, with the
+// one-line English confirmation preserved as the `content` text fallback
+// (dual-emit). Each test proves: (1) structuredContent is non-null and equals
+// the values in the printed line, (2) it validates against the declared
+// outputSchema, and (3) the human text is unchanged.
+describe("write tools — structuredContent + outputSchema", () => {
+  test("fbrain_put returns {action,type,slug} matching its outputSchema; text unchanged", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        // Empty page → put-side verify sees the row via installMock's splice.
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.includes("/api/mutation")) return { status: 200, body: { ok: true } };
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_put!({
+      slug: "mcp-write-probe",
+      type: "concept",
+      title: "Probe",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    expect(res.structuredContent).toEqual({
+      action: "created",
+      type: "concept",
+      slug: "mcp-write-probe",
+    });
+    const schema = outputSchemaOf(server, "fbrain_put")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    // Text fallback is the same one-line confirmation as before.
+    expect(res.content[0]!.text).toBe("created concept mcp-write-probe");
+  });
+
+  test("fbrain_put on an existing slug returns action:\"updated\"", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        // Existing row present → putCmd resolves action=updated.
+        return { status: 200, body: { ok: true, results: [recordRow("mcp-write-probe")] } };
+      }
+      if (url.includes("/api/mutation")) return { status: 200, body: { ok: true } };
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_put!({
+      slug: "mcp-write-probe",
+      type: "design",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ action: "updated", type: "design", slug: "mcp-write-probe" });
+    const schema = outputSchemaOf(server, "fbrain_put")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toBe("updated design mcp-write-probe");
+  });
+
+  test("fbrain_put error (no type) returns isError and NO structuredContent", async () => {
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_put!({ slug: "no-type-probe" });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  test("fbrain_delete returns {action:'deleted',type,slug,soft:true} matching its outputSchema; text unchanged", async () => {
+    // Mirror the `fbrain_delete tool` happy-path mock: first design query
+    // returns the live row, subsequent ones return the tombstoned row so the
+    // post-delete verify passes.
+    let queryCount = 0;
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== TEST_HASHES.design) {
+          return { status: 200, body: { ok: true, results: [] } };
+        }
+        queryCount += 1;
+        if (queryCount === 1) {
+          return { status: 200, body: { ok: true, results: [recordRow("doomed", "alive")] } };
+        }
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                fields: {
+                  slug: "doomed",
+                  title: "(deleted)",
+                  body: "",
+                  status: "archived",
+                  tags: [TOMBSTONE_TAG],
+                  created_at: "2026-05-01T00:00:00Z",
+                  updated_at: "2026-05-23T10:00:00Z",
+                },
+                key: { hash: "doomed", range: null },
+              },
+            ],
+          },
+        };
+      }
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_delete!({ slug: "doomed", type: "design" });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    expect(res.structuredContent).toEqual({
+      action: "deleted",
+      type: "design",
+      slug: "doomed",
+      soft: true,
+    });
+    const schema = outputSchemaOf(server, "fbrain_delete")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    // Text fallback unchanged — still the soft-delete confirmation line.
+    expect(res.content[0]!.text).toContain("deleted design doomed (soft");
+  });
+
+  test("fbrain_delete error (missing slug) returns isError and NO structuredContent", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_delete!({ slug: "ghost", type: "design" });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  test("fbrain_link returns {action:'linked',from_*,to_*} matching its outputSchema; text unchanged", async () => {
+    // Mirror the `fbrain_link tool` happy-path mock: task lookup returns t1,
+    // design lookup returns d1, keyed on the schema hash.
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === TEST_HASHES.task) {
+          return { status: 200, body: { ok: true, results: [recordRow("t1")] } };
+        }
+        if (body.schema_name === TEST_HASHES.design) {
+          return { status: 200, body: { ok: true, results: [recordRow("d1")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_link!({
+      from_type: "task",
+      from_slug: "t1",
+      to_type: "design",
+      to_slug: "d1",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    expect(res.structuredContent).toEqual({
+      action: "linked",
+      from_type: "task",
+      from_slug: "t1",
+      to_type: "design",
+      to_slug: "d1",
+    });
+    const schema = outputSchemaOf(server, "fbrain_link")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toBe("linked task t1 → design d1");
+  });
+
+  test("fbrain_link error (unsupported pair) returns isError and NO structuredContent", async () => {
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_link!({
+      from_type: "concept",
+      from_slug: "c1",
+      to_type: "design",
+      to_slug: "d1",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.structuredContent).toBeUndefined();
   });
 });
 

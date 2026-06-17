@@ -41,7 +41,7 @@ export const FBRAIN_MCP_VERSION: string = getFbrainVersion();
 //                deferred to the moment a tool is actually CALLED. A
 //                `ConfigMissingError`/`ConfigInvalidError` thrown by the thunk
 //                surfaces as a clean per-tool `isError` "run `fbrain init`"
-//                hint (see `runTool`) instead of a server that dies on startup.
+//                hint (see the tool runners) instead of a server that dies on startup.
 // Exactly one of the two is required; `cfg` is normalized to a `getCfg` thunk
 // internally so every tool handler resolves config through the same lazy path.
 export type CreateServerOptions =
@@ -143,6 +143,47 @@ const recordSchema = z.object({
   created_at: z.string().describe("ISO-8601 creation timestamp."),
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),
   body: z.string().describe("Markdown body."),
+});
+
+// ── Output schemas for the write tools ───────────────────────────────────
+// Symmetric with the read tools above: each write tool declares an
+// `outputSchema` describing the typed JSON it returns in `structuredContent`,
+// so an agent can confirm its mutation landed (created vs updated, the
+// resolved type/slug, soft-delete, the link pair) without regex-parsing the
+// one-line English confirmation. Each shape is derived from the SAME value the
+// command function / handler already computes for its printed line (the
+// command's `onResult` sink), so structuredContent can't drift from the text.
+
+// `fbrain_put` → `{action, type, slug}`, mirroring the CLI's
+// `created|updated <type> <slug>` line. `action` distinguishes a fresh insert
+// from an in-place update so an agent knows whether it created or overwrote.
+const putResultSchema = z.object({
+  action: z
+    .enum(["created", "updated"])
+    .describe("`created` for a new record, `updated` for an in-place re-put."),
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type written."),
+  slug: z.string().describe("Resolved record slug."),
+});
+
+// `fbrain_delete` → `{action, type, slug, soft}`. `soft` is always `true` —
+// fold_db is append-only, so every delete is a tombstone, never a hard delete.
+const deleteResultSchema = z.object({
+  action: z.literal("deleted").describe("Always `deleted`."),
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type deleted."),
+  slug: z.string().describe("Resolved record slug."),
+  soft: z
+    .literal(true)
+    .describe("Always true — the delete is a soft tombstone (fold_db is append-only)."),
+});
+
+// `fbrain_link` → `{action, from_type, from_slug, to_type, to_slug}`. v0
+// supports task → design only, so `from_type`/`to_type` are fixed.
+const linkResultSchema = z.object({
+  action: z.literal("linked").describe("Always `linked`."),
+  from_type: z.literal("task").describe("Source record type (always `task` in v0)."),
+  from_slug: z.string().describe("Source task slug."),
+  to_type: z.literal("design").describe("Target record type (always `design` in v0)."),
+  to_slug: z.string().describe("Target design slug."),
 });
 
 export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
@@ -455,12 +496,17 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "overrides synthesis from `type`/`title`/`tags`.",
           ),
       },
+      // `structuredContent` is `{action, type, slug}` — the SAME values that
+      // compose the `created|updated <type> <slug>` text line, so the typed
+      // output can't drift from the prose fallback.
+      outputSchema: putResultSchema.shape,
     },
     (args) =>
-      runTool(getCfg, async (cfg, print) => {
+      runWriteTool(getCfg, async (cfg, print, onResult) => {
         const input = buildPutInput(resolvePutBody(args));
         const result = await putCmd({ cfg, slug: args.slug, input });
         print(`${result.action} ${result.type} ${result.slug}`);
+        onResult({ action: result.action, type: result.type, slug: result.slug });
       }),
   );
 
@@ -491,15 +537,20 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "their design references dangling.",
           ),
       },
+      // `structuredContent` is `{action:"deleted", type, slug, soft:true}` —
+      // the SAME resolved type/slug `deleteRecord` prints, via its `onResult`
+      // sink, so the typed output can't drift from the text line.
+      outputSchema: deleteResultSchema.shape,
     },
     (args) =>
-      runTool(getCfg, (cfg, print) =>
+      runWriteTool(getCfg, (cfg, print, onResult) =>
         deleteRecord({
           cfg,
           slug: args.slug,
           print,
           type: args.type,
           force: args.force,
+          onResult,
         }),
       ),
   );
@@ -517,9 +568,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         to_type: typeEnum.describe("Target record type (must be `design`)."),
         to_slug: requiredText("Target slug (the design)."),
       },
+      // `structuredContent` is `{action:"linked", from_type, from_slug,
+      // to_type, to_slug}` — the SAME normalized slugs `linkCmd` prints, via
+      // its `onResult` sink. v0 is strictly task → design.
+      outputSchema: linkResultSchema.shape,
     },
     (args) =>
-      runTool(getCfg, async (cfg, print) => {
+      runWriteTool(getCfg, async (cfg, print, onResult) => {
         if (args.from_type !== "task" || args.to_type !== "design") {
           throw new FbrainError({
             code: "unsupported_link_pair",
@@ -532,6 +587,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           taskSlug: args.from_slug,
           designSlug: args.to_slug,
           print,
+          onResult,
         });
       }),
   );
@@ -661,36 +717,17 @@ type ToolResult = {
 
 // Every tool handler follows the same shape: resolve the config, run the
 // underlying command, collect its printed lines into one text block, and map
-// any thrown error into an `isError` envelope. `runTool` is that shape.
+// any thrown error into an `isError` envelope. The read/write runners below
+// both build on that shape — the only difference is whether (and how) they
+// also attach typed `structuredContent`.
 //
-// Config is resolved HERE, inside the try, via the `getCfg` thunk — not at
+// Config is resolved INSIDE each runner's try, via the `getCfg` thunk — not at
 // server construction. That's what lets the server start with no config on
 // disk: `initialize`/`tools/list` never touch config, and a missing/invalid
 // config only surfaces when a tool is actually called, as a clean `isError`
 // "run `fbrain init` first" hint rather than a startup crash.
-async function runTool(
-  getCfg: () => Config,
-  fn: (cfg: Config, print: (line: string) => void) => Promise<void>,
-): Promise<ToolResult> {
-  const lines: string[] = [];
-  let cfg: Config;
-  try {
-    cfg = getCfg();
-  } catch (err) {
-    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
-    }
-    throw err;
-  }
-  try {
-    await fn(cfg, (l) => lines.push(l));
-  } catch (err) {
-    return errorResult(err);
-  }
-  return textResult(lines.join("\n"));
-}
 
-// Read-tool variant of `runTool`: alongside the human text block, capture
+// Read-tool runner: alongside the human text block, capture
 // the command's structured payload (handed back via its `onResult` sink —
 // the SAME value the CLI emits under `--json`, so MCP `structuredContent`
 // can't drift from the CLI JSON shape) and attach it as `structuredContent`,
@@ -725,6 +762,49 @@ async function runReadTool<P>(
       (l) => lines.push(l),
       (payload) => {
         structured = wrap(payload);
+      },
+    );
+  } catch (err) {
+    return errorResult(err);
+  }
+  const result = textResult(lines.join("\n"));
+  if (structured !== undefined) result.structuredContent = structured;
+  return result;
+}
+
+// Write-tool runner: alongside the human text block, capture
+// the typed payload the handler emits via `onResult` and attach it as
+// `structuredContent`. Symmetric with `runReadTool`, but the write payloads
+// are already objects (`{action,…}`), so there's no array-wrapping step. The
+// payload is derived from the SAME value the handler prints, so the typed
+// output can't drift from the text fallback. On a thrown error the error
+// envelope is returned and no structuredContent is set — the on-error envelope
+// is unchanged (`isError` + text, no structuredContent), exactly as before.
+async function runWriteTool(
+  getCfg: () => Config,
+  fn: (
+    cfg: Config,
+    print: (line: string) => void,
+    onResult: (payload: Record<string, unknown>) => void,
+  ) => Promise<void> | void,
+): Promise<ToolResult> {
+  const lines: string[] = [];
+  let cfg: Config;
+  try {
+    cfg = getCfg();
+  } catch (err) {
+    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
+      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
+    }
+    throw err;
+  }
+  let structured: Record<string, unknown> | undefined;
+  try {
+    await fn(
+      cfg,
+      (l) => lines.push(l),
+      (payload) => {
+        structured = payload;
       },
     );
   } catch (err) {
