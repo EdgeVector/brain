@@ -147,6 +147,39 @@ export async function listRecords(
   return res.results.map((row) => rowToRecord(row, type));
 }
 
+// Cheap "does this brain hold ANY live record?" probe, used only on the
+// search/ask no-match path to distinguish a brand-new EMPTY brain (a new dev
+// who hasn't created anything yet) from a populated brain whose query simply
+// matched nothing. Walks fbrain's distinct schema hashes and asks each for a
+// small page (the node's `/api/query` defaults to 100 rows — enough that a
+// page made entirely of tombstones is vanishingly unlikely to hide the one
+// live record we care about), returning true on the FIRST live (non-tombstone)
+// row seen. The types in `RECORD_TYPES` collapse onto a handful of unique
+// schema hashes (the Phase 6 types share the unified MEMO hash), so this is at
+// most a few round trips and short-circuits the instant any record is found.
+//
+// Returns `false` only when every schema hash comes back with no live row —
+// i.e. the empty-brain case. Errors propagate (a probe that can't reach the
+// node should surface, not silently claim "empty").
+export async function hasAnyLiveRecord(
+  node: NodeClient,
+  cfg: { schemaHashes: Record<string, string> },
+): Promise<boolean> {
+  const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
+  for (const schemaHash of hashes) {
+    // We only need to know whether a live row EXISTS, so map each hash back to
+    // one representative type for field selection. The unified MEMO types all
+    // share fields, so any type on the hash hydrates the slug/tags we read.
+    const type = RECORD_TYPES.find((t) => cfg.schemaHashes[t] === schemaHash);
+    if (!type) continue;
+    const res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
+    for (const row of res.results) {
+      if (!isTombstoned(rowToRecord(row, type))) return true;
+    }
+  }
+  return false;
+}
+
 export async function findBySlug(
   node: NodeClient,
   type: RecordType,

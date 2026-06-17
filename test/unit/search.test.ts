@@ -314,8 +314,11 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
+    // The stale hit resolves to nothing AND the brain holds no live record
+    // (every /api/query page is empty) → the empty-brain hint, not the
+    // fresh-write-latency one.
     expect(lines[0]).toBe("no matches");
-    expect(lines[1]).toContain("fbrain ask <query>");
+    expect(lines[1]).toContain("no records yet");
     expect(lines).toHaveLength(2);
   });
 
@@ -337,18 +340,38 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "x", print: (l) => lines.push(l) });
+    // Unregistered-schema hit is dropped AND no live record exists → empty-brain hint.
     expect(lines[0]).toBe("no matches");
-    expect(lines[1]).toContain("fbrain ask <query>");
+    expect(lines[1]).toContain("no records yet");
     expect(lines).toHaveLength(2);
   });
 
-  test("empty result prints BM25-fallback hint pointing at `fbrain ask`", async () => {
+  test("empty result on a POPULATED brain prints the fresh-write-latency hint pointing at `fbrain ask`", async () => {
     // Vector index has freshness lag (G3a/G3b per phase-7-search-latency-spike.md).
-    // Users who hit "no matches" interactively shouldn't be left thinking the record
-    // isn't there — BM25 (via the default `fbrain ask`) often catches it.
+    // On a brain that DOES hold records, a "no matches" interactively shouldn't
+    // leave the user thinking the record isn't there — BM25 (via the default
+    // `fbrain ask`) often catches it. The empty-brain probe must therefore see
+    // a live row so this populated-but-no-match path keeps the latency hint.
+    const liveRow = {
+      fields: {
+        slug: "an-existing-record",
+        title: "Already here",
+        body: "unrelated body",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "an-existing-record", range: null },
+    };
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
         return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      if (url.includes("/api/query")) {
+        // The empty-brain probe queries /api/query — return a live record so
+        // the brain reads as NON-empty.
+        return { status: 200, body: { ok: true, results: [liveRow] } };
       }
       return { status: 200, body: { ok: true, results: [] } };
     });
@@ -359,6 +382,55 @@ describe("searchCmd", () => {
     expect(lines[1]).toMatch(/^hint:\s/);
     expect(lines[1]).toContain("fbrain ask <query>");
     expect(lines[1]).toContain("BM25 + vector hybrid");
+  });
+
+  test("empty result on a brand-new EMPTY brain points the new dev at creating their first record", async () => {
+    // The new-developer cut this card fixes: the init next-steps tell a fresh
+    // dev to run `fbrain search "<term>"` (step 3) before they've created
+    // anything. On a zero-record brain every /api/query page is empty, so the
+    // hint must be the calm "create your first record" — NOT the misleading
+    // fresh-write-latency / `fbrain reindex` advice (nothing is indexed and
+    // nothing to reindex).
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      // Empty brain: every schema page comes back with no rows.
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no matches");
+    expect(lines[1]).toMatch(/^hint:\s/);
+    expect(lines[1]).toContain("no records yet");
+    expect(lines[1]).toContain("fbrain <type> new <slug>");
+    // The misleading latency / reindex advice must be gone on an empty brain.
+    expect(lines[1]).not.toContain("reindex");
+    expect(lines[1]).not.toContain("fresh writes");
+  });
+
+  test("empty-state hint on an empty brain routes to stderr under --json so stdout stays `[]`", async () => {
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "anything",
+      json: true,
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+    // Stdout is a single parseable empty array — jq pipelines stay clean.
+    expect(stdout).toEqual(["[]"]);
+    // The empty-state hint lands on stderr.
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain("no records yet");
   });
 
   test("tolerates missing metadata.score → prints — in the score column", async () => {
@@ -1130,11 +1202,12 @@ describe("searchCmd", () => {
     }
   });
 
-  test("explicit --min-score still filters server-side and the empty-state path is unchanged", async () => {
+  test("explicit --min-score still filters server-side and the empty-state path is intact", async () => {
     // Sanity check that the weak-note path doesn't displace the existing
     // explicit `--min-score` contract: the value still rides the wire on
-    // `?min_score=...`, and when the server returns zero rows the existing
-    // "no matches" + reindex hint is what the user sees.
+    // `?min_score=...`, and when the server returns zero rows the user still
+    // sees "no matches" + a hint. The brain here is empty (every /api/query
+    // page is empty), so the hint is the empty-brain "no records yet" form.
     let capturedUrl = "";
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
@@ -1154,7 +1227,7 @@ describe("searchCmd", () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("no matches");
     expect(lines[1]).toMatch(/^hint:\s/);
-    expect(lines[1]).toContain("fbrain ask <query>");
+    expect(lines[1]).toContain("no records yet");
   });
 
   test("omits ?schemas when the config carries no schema hashes", async () => {

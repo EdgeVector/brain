@@ -464,13 +464,31 @@ describe("searchCmd --json", () => {
     expect(out[0]).not.toContain("Alpha design  ");
   });
 
-  test("empty result emits `[]` on stdout; hint moves to stderr", async () => {
+  test("empty result on a populated brain emits `[]` on stdout; latency hint moves to stderr", async () => {
+    // The brain HOLDS records (the empty-brain probe sees a live row), so a
+    // no-match query keeps the fresh-write-latency / `fbrain ask` hint — and
+    // that hint must stay on stderr so stdout is a clean `[]` for jq.
+    const liveRow = {
+      fields: {
+        slug: "an-existing-record",
+        title: "Already here",
+        body: "unrelated body",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "an-existing-record", range: null },
+    };
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
         return {
           status: 200,
           body: { ok: true, results: [], user_hash: cfg.userHash },
         };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [liveRow] } };
       }
       return { status: 200, body: { ok: true, results: [] } };
     });
