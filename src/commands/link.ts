@@ -20,6 +20,22 @@ export type LinkOptions = {
   designSlug: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  // Structured-output sink, mirroring the read commands' `onResult`: fires
+  // once on the success path with the SAME normalized slugs the printed
+  // `linked task <task> → design <design>` line uses. v0 is strictly
+  // task → design, so the type pair is fixed.
+  onResult?: (payload: LinkResult) => void;
+};
+
+// The structured payload the MCP `fbrain_link` tool returns in
+// `structuredContent` (mirrors the printed `linked task <task> → design
+// <design>` line). v0 only supports task → design.
+export type LinkResult = {
+  action: "linked";
+  from_type: "task";
+  from_slug: string;
+  to_type: "design";
+  to_slug: string;
 };
 
 export async function linkCmd(opts: LinkOptions): Promise<void> {
@@ -122,6 +138,15 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   });
 
   print(`linked task ${taskSlug} → design ${designSlug}`);
+  // Emit the structured payload from the SAME normalized slugs the printed
+  // line uses (one source of truth — see the read commands).
+  opts.onResult?.({
+    action: "linked",
+    from_type: "task",
+    from_slug: taskSlug,
+    to_type: "design",
+    to_slug: designSlug,
+  });
 }
 
 // Best-effort cross-type lookup: returns the first non-design type the slug
