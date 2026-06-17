@@ -1067,7 +1067,12 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     });
   }
   const cfg = readConfig();
-  const body = values.body ?? (await maybeReadStdin());
+  // No --body → fall back to stdin. `maybeReadStdin({ announce: true })` prints
+  // a one-line breadcrumb BEFORE the (potentially indefinite) blocking read so
+  // the new-dev path doesn't silently hang on an empty inherited pipe. The
+  // notice only fires when a read will actually happen (non-TTY and not
+  // FBRAIN_NO_STDIN=1) — those cases short-circuit inside maybeReadStdin.
+  const body = values.body ?? (await maybeReadStdin({ announce: true }));
   const opts: Parameters<typeof recordNew>[0] = {
     cfg,
     type,
@@ -1771,12 +1776,26 @@ function suggestRecordTypeHint(normalised: string): string | undefined {
   return bestDist <= threshold ? `did you mean \`--type ${best}\`?` : undefined;
 }
 
-async function maybeReadStdin(): Promise<string> {
+async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   // Only read stdin when piped — avoid blocking interactive invocation.
   // Bun's process.stdin.isTTY is the same as Node's. In test contexts the
   // stdin stream may already be closed; tolerate that with a try/catch.
   if ((process.stdin as unknown as { isTTY?: boolean }).isTTY) return "";
   if (process.env.FBRAIN_NO_STDIN === "1") return "";
+  // We're past the early returns, so a blocking read is about to happen. For
+  // callers where stdin is a FALLBACK (the `<type> new` path with no --body),
+  // the wait is invisible: an inherited-but-empty pipe never EOFs, so the
+  // process hangs with zero output and a fresh dev (or their agent) has no
+  // idea why. Emit one stderr breadcrumb BEFORE the read so the wait is
+  // self-explaining. Only the fallback callers opt in via `announce` —
+  // `put`/`raw` take stdin as their documented PRIMARY input and stay silent.
+  // (Same warn-before-the-trap shape as #275/#276/#278/#279/#280.)
+  if (opts?.announce) {
+    console.error(
+      "note: no --body given; reading the record body from stdin until EOF " +
+        "(press Ctrl-D to finish, or pass --body / set FBRAIN_NO_STDIN=1 to skip).",
+    );
+  }
   try {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin as unknown as AsyncIterable<Buffer | Uint8Array>) {
