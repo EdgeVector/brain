@@ -136,12 +136,12 @@ function outputSchemaOf(
   return map[name]?.outputSchema;
 }
 
-function recordRow(slug: string, title = `T-${slug}`) {
+function recordRow(slug: string, title = `T-${slug}`, body = "body text") {
   return {
     fields: {
       slug,
       title,
-      body: "body text",
+      body,
       status: "draft",
       tags: ["x"],
       created_at: "2026-01-01T00:00:00Z",
@@ -586,6 +586,12 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(sc.matches).toHaveLength(1);
     expect(sc.matches[0]).toMatchObject({ slug: "alpha", type: "design", title: "Alpha design" });
     expect(sc.matches[0]!.score).toBeCloseTo(0.42, 6);
+    // The matching body snippet rides structuredContent so an agent reads the
+    // answer inline without a follow-up fbrain_get. recordRow's body is
+    // "body text"; the query shares no literal token, so the snippet is the
+    // (short) body head — a non-empty string is the contract here.
+    expect(typeof sc.matches[0]!.snippet).toBe("string");
+    expect(sc.matches[0]!.snippet).toBe("body text");
     // Validates against the tool's declared outputSchema.
     const schema = outputSchemaOf(server, "fbrain_search")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
@@ -639,6 +645,60 @@ describe("read tools — structuredContent + outputSchema", () => {
     const schema = outputSchemaOf(server, "fbrain_ask")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
     expect(res.content[0]!.text).toContain("alpha");
+  });
+
+  test("fbrain_ask structuredContent.matches[].snippet carries the matched body term", async () => {
+    // The card's MCP contract: an agent can read the answer from
+    // structuredContent without a follow-up fbrain_get. Body holds a known
+    // fact; the query term ("TTL") must surface in the snippet.
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "caching-decision", range: null },
+                value: "fragment",
+                metadata: { score: 0.9, match_type: "semantic" },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              recordRow(
+                "caching-decision",
+                "Caching layer decision",
+                "# Caching layer decision\n\nDecision: we picked a 5-minute TTL for the cache.",
+              ),
+            ],
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_ask!({ query: "TTL" });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as { matches: Array<{ slug: string; snippet: string }> };
+    const hit = sc.matches.find((m) => m.slug === "caching-decision");
+    expect(hit).toBeDefined();
+    expect(hit!.snippet).toContain("5-minute TTL");
+    // Leading H1 (== title) is stripped, so the snippet isn't the title echo.
+    expect(hit!.snippet).not.toContain("Caching layer decision");
+    // outputSchema still validates with the new field present.
+    const schema = outputSchemaOf(server, "fbrain_ask")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
 
   test("fbrain_get returns the single record object matching its outputSchema", async () => {

@@ -52,6 +52,7 @@ import {
   type BM25Document,
 } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
+import { buildSnippet } from "../retrieval/snippet.ts";
 import type { SearchHitJson } from "./search.ts";
 import {
   reciprocalRankFusion,
@@ -407,6 +408,12 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     score: Math.round(h.fusedScore * 1e6) / 1e6,
     type: h.type,
     title: h.record.title,
+    // Deterministic body extract from the already-hydrated record — no extra
+    // fetch. Centered on the first matching query term (or the body head when
+    // a hit came purely from the vector ranker with no literal overlap) so the
+    // answer shows inline. Built unconditionally so `--json` and the MCP
+    // `structuredContent` carry the same snippet the human render shows.
+    snippet: buildSnippet(h.record.body, opts.query),
   }));
   opts.onResult?.(payload);
 
@@ -440,7 +447,13 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       }),
       { align: ["left", "right", "left", "left", "left", "left", "left"] },
     );
-    for (const line of lines) print(line);
+    // Row, then the matching body snippet as an indented second line.
+    // `payload` is index-aligned with `resolved`/`lines` (same map source).
+    for (let i = 0; i < lines.length; i++) {
+      print(lines[i]!);
+      const snippet = payload[i]?.snippet;
+      if (snippet) print(`    ${snippet}`);
+    }
   } else {
     // Default: clean `slug · score · type · title` — same shape as
     // `fbrain search` and MCP `fbrain_search`. Per-ranker debug is
@@ -454,7 +467,15 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       ]),
       { align: ["left", "right", "left", "left"] },
     );
-    for (const line of lines) print(line);
+    // Row, then the matching body snippet as an indented second line so the
+    // answer is visible without a follow-up `fbrain get`. The table row is
+    // unchanged — same `slug · score · type · title` shape parsers expect.
+    // `payload` is index-aligned with `resolved`/`lines` (same map source).
+    for (let i = 0; i < lines.length; i++) {
+      print(lines[i]!);
+      const snippet = payload[i]?.snippet;
+      if (snippet) print(`    ${snippet}`);
+    }
   }
 
   if (expansion && opts.verbose) {

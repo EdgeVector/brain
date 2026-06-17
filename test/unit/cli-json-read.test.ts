@@ -388,7 +388,7 @@ function hit(opts: {
 }
 
 describe("searchCmd --json", () => {
-  test("emits a JSON array of {slug, score, type, title} hits", async () => {
+  test("emits a JSON array of {slug, score, type, title, snippet} hits", async () => {
     const recordRow = {
       fields: {
         slug: "alpha",
@@ -444,7 +444,15 @@ describe("searchCmd --json", () => {
     expect(out.length).toBe(1);
     const parsed = JSON.parse(out[0]!);
     expect(parsed).toEqual([
-      { slug: "alpha", score: 0.6, type: "design", title: "Alpha design" },
+      {
+        slug: "alpha",
+        score: 0.6,
+        type: "design",
+        title: "Alpha design",
+        // Body "blueberry octopus" with query "blueberry" → the snippet is the
+        // (short) whole body, surfacing the answer inline in the JSON document.
+        snippet: "blueberry octopus",
+      },
     ]);
     // 0.6 clears the STRONG_SCORE ceiling — a real hit, so no weak-match
     // advisory. (The point of this test is JSON-stdout purity: any advisory

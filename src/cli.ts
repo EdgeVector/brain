@@ -199,7 +199,9 @@ Rejects a non-existent design slug.`,
 
 Semantic search across indexed records. Dedupes fragment hits per record
 and skips stale hits (records deleted since indexing). Prints
-\`slug · score · type · title\` per match.
+\`slug · score · type · title\` per match, with a short matching body snippet
+indented under each row — so the answer is visible without a follow-up
+\`fbrain get\`.
 
   -n, --limit   max results (\`-n\` and \`--limit\` are aliases; last wins)
   --exact       exact-match mode (passes ?exact=true to the index)
@@ -208,9 +210,11 @@ and skips stale hits (records deleted since indexing). Prints
                 (e.g. \`--type design --type task\`).
                 One of: design | task | concept | preference | reference |
                 agent | project | spike. Omit to search across all 8 types.
-  --json        emit a JSON array of \`{slug, score, type, title}\` on stdout
-                (parseable by \`jq\`). Empty result is \`[]\`. Weak-match
-                advisory and empty-result hint route to stderr.`,
+  --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
+                on stdout (parseable by \`jq\`); \`snippet\` is the same
+                matching body extract shown under each human row. Empty
+                result is \`[]\`. Weak-match advisory and empty-result hint
+                route to stderr.`,
   ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--type T]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
@@ -220,6 +224,10 @@ This is the eval-winning path: the 2026-05-25 labeled eval showed LLM query
 expansion REDUCED relevance (P@5 0.59 vs 0.73, MRR 0.46 vs 0.60), so it is
 opt-in. With --expand an LLM first generates 3 alternative phrasings; BM25 +
 vector then run against original + 3 expansions and RRF fuses all 8 lists.
+
+Prints \`slug · score · type · title\` per match, with a short matching body
+snippet indented under each row — so the answer is visible without a
+follow-up \`fbrain get\`.
 
   -n, --limit N max results (default 5; \`-n\` and \`--limit\` are aliases,
                 last wins)
@@ -236,10 +244,12 @@ vector then run against original + 3 expansions and RRF fuses all 8 lists.
                 corpus and the vector schemas filter.
                 One of: design | task | concept | preference | reference |
                 agent | project | spike. Omit to search across all 8 types.
-  --json        emit a JSON array of \`{slug, score, type, title}\` on stdout
-                (parseable by \`jq\`). Empty result is \`[]\`. Advisory notes,
-                no-key / expansion-failure notices, and the \`--explain\`
-                expansions block all route to stderr.
+  --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
+                on stdout (parseable by \`jq\`); \`snippet\` is the same
+                matching body extract shown under each human row. Empty
+                result is \`[]\`. Advisory notes, no-key / expansion-failure
+                notices, and the \`--explain\` expansions block all route to
+                stderr.
 
 Cost: 0 LLM calls by default; 1 LLM call per invocation under --expand. Run
 with the global --verbose to see token + USD estimates and per-ranker debug.

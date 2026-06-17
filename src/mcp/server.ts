@@ -88,11 +88,14 @@ export const DROPPED_INPUT_HINT =
 // (`matches` / `records`) rather than returning a bare array; `get` returns
 // the single record object directly.
 
-// One search/ask match: `{slug, score, type, title}` (mirrors
+// One search/ask match: `{slug, score, type, title, snippet}` (mirrors
 // SearchHitJson). `type` is the canonical lowercase RecordType so a client
 // can match it against the input `type` filter verbatim; `score` is the
 // 6-decimal-rounded relevance (a cosine for search, a fused RRF score for
 // ask) and is `null` only when the node reported no score for a search hit.
+// `snippet` is a short deterministic body extract (a window around the first
+// matching query term, or the body head for a pure-vector hit) so an agent
+// can read the answer inline without a follow-up `fbrain_get`.
 const matchSchema = z.object({
   slug: z.string().describe("Record slug."),
   score: z
@@ -101,6 +104,11 @@ const matchSchema = z.object({
     .describe("Relevance score (cosine for search, fused RRF for ask). Null when unscored."),
   type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
   title: z.string().describe("Record title."),
+  snippet: z
+    .string()
+    .describe(
+      "Short body extract (~120 chars) around the first matching query term — or the body head for a pure-vector hit — so the answer is visible inline without a follow-up fbrain_get. Empty only when the record body is empty.",
+    ),
 });
 
 // One `fbrain_list` row — the compact summary the CLI `list --json` emits
@@ -219,7 +227,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Search fbrain",
       description:
-        "Pure-vector semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer `fbrain_ask`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to `fbrain_ask` when this returns weak or missing matches.",
+        "Pure-vector semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer `fbrain_ask`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to `fbrain_ask` when this returns weak or missing matches.",
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -281,7 +289,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Ask fbrain (hybrid retrieval)",
       description:
-        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
+        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
