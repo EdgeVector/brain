@@ -5,7 +5,7 @@
     "": {
       "name": "fbrain",
       "dependencies": {
-        "@folddb/app-sdk": "file:./vendor/folddb-app-sdk-0.1.0-f49da10.tgz",
+        "@folddb/app-sdk": "file:./vendor/folddb-app-sdk-0.1.0-b9a824b.tgz",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "zod": "^4.4.3",
       },
@@ -16,7 +16,7 @@
     },
   },
   "packages": {
-    "@folddb/app-sdk": ["@folddb/app-sdk@./vendor/folddb-app-sdk-0.1.0-f49da10.tgz", {}, "sha512-D4Fd2Y3KozqoORUIDmb5Zm+1mx5SDaMnod0yYMsO8THdt7uQrWVHUArV2bIuC/oFIe9koI94ZJI1koLCy/6J9Q=="],
+    "@folddb/app-sdk": ["@folddb/app-sdk@./vendor/folddb-app-sdk-0.1.0-b9a824b.tgz", {}, "sha512-jMl6AxiPDuw3RjzFErBIVSisbyon8WUaIdTvhcu+O+LfqrljNWWXakKSxPZFvnPT9putN8dOr8RPvsvpQEWQlQ=="],
 
     "@hono/node-server": ["@hono/node-server@1.19.14", "", { "peerDependencies": { "hono": "^4" } }, "sha512-GwtvgtXxnWsucXvbQXkRgqksiH2Qed37H9xHZocE5sA3N8O8O8/8FA3uclQXxXVzc9XBZuEOMK7+r02FmSpHtw=="],
 
