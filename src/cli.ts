@@ -980,9 +980,40 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     const suggestion = sub ? suggestCommand({ compound: `${type} ${sub}` }) : null;
     if (suggestion) {
       console.error(`Unknown ${type} subcommand: ${sub}. Did you mean: ${suggestion}?`);
-    } else {
-      console.error(`Unknown ${type} subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP[type]}`);
+      return 1;
     }
+    // "I want to change this record's status" recovery. By analogy with most
+    // CLIs (`git branch <name> --move`, `kubectl set ...`), a dev who knows
+    // `fbrain <type> new <slug>` and `fbrain status <slug>` naturally reaches
+    // for `fbrain <type> <slug> --status <value>` to move a record. That guess
+    // dead-ends here: `<slug>` is an unknown subcommand and `--status` is
+    // silently swallowed. Rather than dump the misleading `<type> new` usage,
+    // point at the real verb — `fbrain status <slug> <new-status>` — and echo
+    // back what they typed so the swallowed `--status` is acknowledged. We do
+    // NOT auto-perform the update; the explicit verb is intentional. Mirrors
+    // the accepted `--tags → --tag` recovery-hint pattern in parseCommandArgs.
+    //
+    // Gate: a slug-shaped subcommand (the record they meant to act on) and/or
+    // an explicit `--status <value>` flag. Both conditions point unambiguously
+    // at the status-update intent; genuinely unrecognizable input (a bad flag,
+    // a typo'd verb that missed the Levenshtein threshold) still falls through
+    // to the bare help dump below.
+    const statusValue = peekNextValue(args, "--status");
+    const subIsSlugShaped =
+      sub !== undefined && !sub.startsWith("-") && /^[a-z0-9][a-z0-9-_]*$/.test(sub);
+    if (subIsSlugShaped || statusValue !== undefined) {
+      const slugPart = subIsSlugShaped ? sub : "<slug>";
+      const statusPart = statusValue ?? "<new-status>";
+      const echo =
+        subIsSlugShaped && statusValue !== undefined
+          ? ` (you asked to set "${slugPart}" → "${statusPart}")`
+          : "";
+      console.error(
+        `Did you mean to change status? Use: fbrain status ${slugPart} ${statusPart}${echo}`,
+      );
+      return 1;
+    }
+    console.error(`Unknown ${type} subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP[type]}`);
     return 1;
   }
   const rest = args.slice(1);
