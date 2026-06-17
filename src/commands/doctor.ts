@@ -1367,7 +1367,7 @@ export async function runMcpBootProbe(
   const expected = [...FBRAIN_MCP_TOOL_NAMES];
   const got = result.tools ?? [];
   const gotSet = new Set(got);
-  const expectedSet = new Set(expected);
+  const expectedSet = new Set<string>(expected);
   const missing = expected.filter((t) => !gotSet.has(t));
   const unexpected = got.filter((t) => !expectedSet.has(t));
 
