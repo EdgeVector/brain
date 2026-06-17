@@ -188,6 +188,12 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+// Each result now prints as a table ROW followed by an indented body-snippet
+// line (4-space prefix). Row-count / row-order assertions filter the snippet
+// lines out with this helper; the snippet behavior is exercised by the
+// dedicated "body snippet" describe block at the end of the file.
+const rowsOf = (lines: string[]): string[] => lines.filter((l) => !l.startsWith("    "));
+
 describe("searchCmd", () => {
   test("resolves a single hit and prints slug+score+type+title", async () => {
     const recordRow = {
@@ -222,11 +228,14 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "blueberry", print: (l) => lines.push(l) });
-    expect(lines.length).toBe(1);
-    expect(lines[0]).toContain("alpha");
-    expect(lines[0]).toContain("0.420");
-    expect(lines[0]).toContain("Design");
-    expect(lines[0]).toContain("Alpha design");
+    const rows = rowsOf(lines);
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toContain("alpha");
+    expect(rows[0]).toContain("0.420");
+    expect(rows[0]).toContain("Design");
+    expect(rows[0]).toContain("Alpha design");
+    // The matching body snippet prints as an indented second line.
+    expect(lines.some((l) => l.startsWith("    ") && l.includes("blueberry octopus"))).toBe(true);
   });
 
   test("retries findBySlug past a transient empty /api/query slice and surfaces the hit", async () => {
@@ -278,9 +287,10 @@ describe("searchCmd", () => {
     const lines: string[] = [];
     await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
     expect(queryCalls).toBeGreaterThanOrEqual(2);
-    expect(lines.length).toBe(1);
-    expect(lines[0]).toContain("flaky");
-    expect(lines[0]).toContain("Flaky design");
+    const rows = rowsOf(lines);
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toContain("flaky");
+    expect(rows[0]).toContain("Flaky design");
   }, 10_000);
 
   test("silently skips stale hits where findBySlug returns nothing", async () => {
@@ -450,12 +460,13 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "x", limit: 2, print: (l) => lines.push(l) });
-    expect(lines).toHaveLength(2);
+    const printedRows = rowsOf(lines);
+    expect(printedRows).toHaveLength(2);
     // Canonical order: lexicographically smallest "(type::slug)" IDs first.
     // alpha < beta < zebra under "design::<slug>".
-    expect(lines[0]).toContain("alpha");
-    expect(lines[1]).toContain("beta");
-    // And the dropped hit ("zebra") must not have leaked into either line.
+    expect(printedRows[0]).toContain("alpha");
+    expect(printedRows[1]).toContain("beta");
+    // And the dropped hit ("zebra") must not have leaked into any line.
     expect(lines.join("\n")).not.toContain("zebra");
   });
 
@@ -511,9 +522,10 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "x", print: (l) => lines.push(l) });
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain("alpha");
-    expect(lines[1]).toContain("zebra");
+    const printedRows = rowsOf(lines);
+    expect(printedRows).toHaveLength(2);
+    expect(printedRows[0]).toContain("alpha");
+    expect(printedRows[1]).toContain("zebra");
   });
 
   test("applies -n limit", async () => {
@@ -554,10 +566,11 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "x", limit: 2, print: (l) => lines.push(l) });
-    expect(lines).toHaveLength(2);
+    const printedRows = rowsOf(lines);
+    expect(printedRows).toHaveLength(2);
     // Highest-scoring first.
-    expect(lines[0]).toContain("a");
-    expect(lines[1]).toContain("b");
+    expect(printedRows[0]).toContain("a");
+    expect(printedRows[1]).toContain("b");
   });
 
   test("--exact passes ?exact=true on the wire", async () => {
@@ -796,10 +809,11 @@ describe("searchCmd", () => {
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "blueberry", print: (l) => lines.push(l) });
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("alpha");
+    const rows = rowsOf(lines);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContain("alpha");
     // The kept fragment's score must be the higher of the two (0.6, not 0.4).
-    expect(lines[0]).toContain("0.600");
+    expect(rows[0]).toContain("0.600");
   });
 
   test("annotates with a weak-match note when the top score is below the confidence line", async () => {
@@ -854,14 +868,14 @@ describe("searchCmd", () => {
       print: (l) => stdout.push(l),
       printErr: (l) => stderr.push(l),
     });
-    // Stdout must contain ONLY the parseable result row — the advisory
-    // `note:` line goes to stderr so `fbrain search q 2>/dev/null` (or
-    // `| head -1`, or any line-oriented parse) doesn't see it as the
-    // first "result".
-    expect(stdout).toHaveLength(1);
-    expect(stdout[0]).not.toMatch(/^note:\s/);
-    expect(stdout[0]).toContain("ship-it");
-    expect(stdout[0]).toContain("0.240");
+    // Stdout carries the parseable result row (+ its indented snippet line) —
+    // the advisory `note:` line goes to stderr so `fbrain search q 2>/dev/null`
+    // (or any line-oriented parse) never sees a note among the result rows.
+    const rows = rowsOf(stdout);
+    expect(rows).toHaveLength(1);
+    for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
+    expect(rows[0]).toContain("ship-it");
+    expect(rows[0]).toContain("0.240");
     // Note lands on stderr.
     expect(stderr).toHaveLength(1);
     expect(stderr[0]).toMatch(/^note:\s/);
@@ -916,13 +930,14 @@ describe("searchCmd", () => {
       print: (l) => stdout.push(l),
       printErr: (l) => stderr.push(l),
     });
-    // Three rows on stdout, NO note on either sink.
-    expect(stdout).toHaveLength(3);
+    // Three result rows on stdout, NO note on either sink.
+    const printedRows = rowsOf(stdout);
+    expect(printedRows).toHaveLength(3);
     for (const line of stdout) {
       expect(line).not.toMatch(/^note:\s/);
     }
     expect(stderr).toHaveLength(0);
-    expect(stdout[0]).toContain("my-first-note");
+    expect(printedRows[0]).toContain("my-first-note");
   });
 
   test("fires the weak-match note on a realistic flat noise band whose top score is well above 0.35", async () => {
@@ -974,8 +989,8 @@ describe("searchCmd", () => {
       print: (l) => stdout.push(l),
       printErr: (l) => stderr.push(l),
     });
-    // All five rows printed (we never drop rows), advisory on stderr.
-    expect(stdout).toHaveLength(5);
+    // All five result rows printed (we never drop rows), advisory on stderr.
+    expect(rowsOf(stdout)).toHaveLength(5);
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
     expect(stderr).toHaveLength(1);
     expect(stderr[0]).toContain("no strong matches");
@@ -1028,7 +1043,7 @@ describe("searchCmd", () => {
       print: (l) => stdout.push(l),
       printErr: (l) => stderr.push(l),
     });
-    expect(stdout).toHaveLength(5);
+    expect(rowsOf(stdout)).toHaveLength(5);
     expect(stderr).toHaveLength(0);
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
   });
@@ -1102,12 +1117,13 @@ describe("searchCmd", () => {
       printErr: (l) => stderr.push(l),
     });
     // The row is printed; the weak-match note is suppressed in --exact mode.
-    expect(stdout).toHaveLength(1);
-    expect(stdout[0]).toContain("long-design");
-    expect(stdout[0]).toContain("0.150");
+    const rows = rowsOf(stdout);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContain("long-design");
+    expect(rows[0]).toContain("0.150");
     // No advisory note on either sink.
     expect(stderr).toHaveLength(0);
-    for (const line of stdout) {
+    for (const line of rows) {
       expect(line).not.toMatch(/^note:\s/);
       expect(line).not.toContain("no strong matches");
       expect(line).not.toContain("fbrain ask");
@@ -1168,6 +1184,65 @@ describe("searchCmd", () => {
     });
     await searchCmd({ cfg: emptyCfg, query: "x", print: () => {} });
     expect(capturedUrl).not.toContain("schemas=");
+  });
+
+  test("prints a matching body snippet under each hit and carries it in --json/onResult", async () => {
+    // The headline UX this card delivers: the answer is visible inline under
+    // the result row (no follow-up `fbrain get`), and the SAME snippet rides
+    // the structured `onResult` payload (so `--json` and MCP carry it too).
+    const recordRow = {
+      fields: {
+        slug: "caching-decision",
+        title: "Caching layer decision",
+        body: "# Caching layer decision\n\nDecision: we picked a 5-minute TTL for the cache after the dogfood.",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: "caching-decision", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({ slug: "caching-decision", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.62 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow] } };
+      }
+      return { status: 404 };
+    });
+    const lines: string[] = [];
+    let payload: import("../../src/commands/search.ts").SearchHitJson[] | undefined;
+    await searchCmd({
+      cfg,
+      query: "TTL",
+      print: (l) => lines.push(l),
+      onResult: (p) => {
+        payload = p;
+      },
+    });
+    // Human render: row + an indented snippet line under it.
+    const rows = rowsOf(lines);
+    expect(rows).toHaveLength(1);
+    const snippetLine = lines.find((l) => l.startsWith("    "));
+    expect(snippetLine).toBeDefined();
+    // The matched term shows inline; the H1 (== the title) is stripped so the
+    // snippet isn't just the title echoed.
+    expect(snippetLine!).toContain("5-minute TTL");
+    expect(snippetLine!).not.toContain("Caching layer decision");
+    // Structured payload carries the SAME snippet.
+    expect(payload).toBeDefined();
+    expect(payload![0]!.snippet).toContain("5-minute TTL");
+    expect(payload![0]!.snippet).not.toContain("Caching layer decision");
   });
 });
 

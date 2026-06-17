@@ -729,10 +729,12 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
 
     expect(result.expansionStatus.kind).toBe("no-key");
 
-    // Stdout: exactly one result row, no `note:` line interleaved.
-    expect(stdout).toHaveLength(1);
-    expect(stdout[0]).not.toMatch(/^note:\s/);
-    expect(stdout[0]).toContain("d1");
+    // Stdout: exactly one result row (+ its indented snippet line), no
+    // `note:` line interleaved among them.
+    const rows = stdout.filter((l) => !l.startsWith("    "));
+    expect(rows).toHaveLength(1);
+    for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
+    expect(rows[0]).toContain("d1");
 
     // Stderr: the no-key advisory.
     expect(stderr).toHaveLength(1);
@@ -742,7 +744,7 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
 });
 
 describe("askCmd --json", () => {
-  test("emits a single JSON array of {slug, score, type, title} on stdout", async () => {
+  test("emits a single JSON array of {slug, score, type, title, snippet} on stdout", async () => {
     // Mirrors the `searchCmd --json` regression in cli-json-read.test.ts —
     // ask is the retrieval sibling of search with the same default column
     // shape, so its JSON payload must match search's verbatim. Pins:
@@ -778,11 +780,12 @@ describe("askCmd --json", () => {
     expect(parsed.length).toBeGreaterThan(0);
     for (const entry of parsed) {
       expect(Object.keys(entry).sort()).toEqual(
-        ["score", "slug", "title", "type"],
+        ["score", "slug", "snippet", "title", "type"],
       );
       expect(typeof entry.slug).toBe("string");
       expect(typeof entry.score).toBe("number");
       expect(typeof entry.title).toBe("string");
+      expect(typeof entry.snippet).toBe("string");
       // Canonical lowercase RecordType, never the capitalized display.
       expect(entry.type).toBe(entry.type.toLowerCase());
     }
@@ -790,6 +793,9 @@ describe("askCmd --json", () => {
     expect(d1).toBeDefined();
     expect(d1.type).toBe("design");
     expect(d1.title).toBe("T-d1");
+    // Snippet carries the matching body inline — query "octopus" against
+    // body "octopus blueberry".
+    expect(d1.snippet).toContain("octopus");
     // No human table padding on stdout (fusedScore.toFixed(4) → "0.0328")
     // — only the raw number lands in JSON.
     expect(stdout[0]).not.toMatch(/\bDesign\b/);
@@ -915,6 +921,50 @@ describe("askCmd --json", () => {
     expect(
       stderr.some((l) => l.includes("LLM expansion not enabled; pass --expand")),
     ).toBe(true);
+  });
+
+  test("carries a matching body snippet in --json and prints it under the human row", async () => {
+    // The card's headline path on the `ask` side: the answer is visible
+    // inline (no follow-up `fbrain get`), in both the human render and the
+    // `--json` document (which is the SAME value MCP `structuredContent`
+    // surfaces).
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: {
+        [TEST_HASHES.design]: [
+          designRow(
+            "caching-decision",
+            "# Caching layer decision\n\nDecision: we picked a 5-minute TTL for the cache.",
+          ),
+        ],
+      },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "caching-decision", score: 0.9 }),
+      ],
+    });
+
+    // Human render.
+    const human: string[] = [];
+    await askCmd({ cfg, query: "TTL", noLlm: true, print: (l) => human.push(l) });
+    const snippetLine = human.find((l) => l.startsWith("    "));
+    expect(snippetLine).toBeDefined();
+    expect(snippetLine!).toContain("5-minute TTL");
+    expect(snippetLine!).not.toContain("Caching layer decision");
+
+    // --json carries the same snippet.
+    const stdout: string[] = [];
+    await askCmd({
+      cfg,
+      query: "TTL",
+      noLlm: true,
+      json: true,
+      print: (l) => stdout.push(l),
+    });
+    const parsed = JSON.parse(stdout[0]!) as Array<{ slug: string; snippet: string }>;
+    const hit = parsed.find((e) => e.slug === "caching-decision");
+    expect(hit).toBeDefined();
+    expect(hit!.snippet).toContain("5-minute TTL");
+    expect(hit!.snippet).not.toContain("Caching layer decision");
   });
 });
 

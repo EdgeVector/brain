@@ -23,6 +23,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
+import { buildSnippet } from "../retrieval/snippet.ts";
 import { type RecordType } from "../schemas.ts";
 
 export { dedupeHits };
@@ -66,6 +67,12 @@ export type SearchHitJson = {
   score: number | null;
   type: RecordType;
   title: string;
+  // A short deterministic body extract — a ~120-char window around the first
+  // matching query term (or the body head for a pure-vector hit) — so the
+  // answer is visible inline under each result without a follow-up
+  // `fbrain get`. `""` only when the record body is empty. Built from the
+  // already-hydrated record (no extra fetch).
+  snippet: string;
 };
 
 export type ResolvedHit = {
@@ -325,6 +332,11 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     score: hit.score == null ? null : Math.round(hit.score * 1e6) / 1e6,
     type: hit.type,
     title: hit.record.title,
+    // Deterministic body extract from the already-hydrated record — no extra
+    // fetch. Centered on the first matching query term (or the body head for a
+    // pure-vector hit) so the answer shows inline. Built unconditionally so
+    // the `--json` document and the MCP `structuredContent` carry it too.
+    snippet: buildSnippet(hit.record.body, opts.query),
   }));
   opts.onResult?.(payload);
 
@@ -346,5 +358,15 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     ]),
     { align: ["left", "right", "left", "left"] },
   );
-  for (const line of lines) print(line);
+  // Print the table row, then the matching body snippet as an indented
+  // second line under it (only when the body produced one). The table row
+  // itself is UNCHANGED — existing first-line parsers (and `--json`
+  // consumers) see the same `slug · score · type · title` shape; the snippet
+  // is purely additive human context. `payload` is index-aligned with
+  // `trimmed`/`lines` (same map source), so `payload[i].snippet` matches row i.
+  for (let i = 0; i < lines.length; i++) {
+    print(lines[i]!);
+    const snippet = payload[i]?.snippet;
+    if (snippet) print(`    ${snippet}`);
+  }
 }
