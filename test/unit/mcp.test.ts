@@ -19,6 +19,7 @@ import {
   resolvePutBody,
 } from "../../src/mcp/server.ts";
 import { ConfigMissingError } from "../../src/config.ts";
+import { COMMAND_HELP } from "../../src/cli.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -1629,6 +1630,24 @@ describe("createFbrainMcpServer", () => {
       "fbrain_put",
       "fbrain_search",
     ]);
+  });
+
+  // Pins `fbrain help mcp` text to the actually-registered MCP tool set so the
+  // subcommand help can't drift behind the server again (it claimed "six
+  // tools" and omitted fbrain_ask long after the tool shipped — done card
+  // help-mcp-says-six-tools-omits-ask, dogfood run 30, 2026-06-16).
+  test("COMMAND_HELP.mcp names every registered tool and says seven, not six", () => {
+    const help = COMMAND_HELP.mcp;
+    const registered = Object.keys(toolsOf(createFbrainMcpServer({ cfg })));
+    // 7 is the contract — the help must not undercount the server.
+    expect(registered).toHaveLength(7);
+    for (const name of registered) {
+      expect(help).toContain(name);
+    }
+    // fbrain_ask was the specific omission; assert it explicitly.
+    expect(help).toContain("fbrain_ask");
+    expect(help).toContain("seven tools");
+    expect(help).not.toContain("six tools");
   });
 });
 

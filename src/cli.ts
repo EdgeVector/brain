@@ -403,11 +403,14 @@ Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
   mcp: `fbrain mcp
 
-Start a Model Context Protocol server over stdio. Exposes six tools so
+Start a Model Context Protocol server over stdio. Exposes seven tools so
 MCP clients (Claude Code, Codex, etc.) can read and write fbrain
 in-process:
-  read:  fbrain_search, fbrain_get, fbrain_list
+  read:  fbrain_search, fbrain_ask, fbrain_get, fbrain_list
   write: fbrain_put,    fbrain_delete, fbrain_link
+
+fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
+vector (RRF hybrid) for better recall than pure-vector fbrain_search.
 
 Register with Claude Code (after \`bun link\` from the Quick start):
   claude mcp add fbrain fbrain-mcp
