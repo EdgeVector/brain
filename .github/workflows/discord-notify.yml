@@ -1,0 +1,17 @@
+name: Discord Notifications
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, closed, reopened]
+  issues:
+    types: [opened, closed, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  call:
+    uses: EdgeVector/.github/.github/workflows/discord-notify.yml@main
+    secrets: inherit
