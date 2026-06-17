@@ -485,15 +485,21 @@ describe("doctor verdict logic", () => {
     expect(ntsLine!).not.toContain("lights up");
   });
 
-  test("missing config → exit 1", async () => {
+  test("missing config + register succeeds → calm PASS schema-publish-gate (fbrain/* already published, the normal prod path)", async () => {
+    // On prod, fbrain's 8 schemas are ALREADY published, so the probe's
+    // re-register is idempotent and SUCCEEDS — this is the common path for
+    // every fresh consumer, not an "unexpected" one. The gate must surface a
+    // calm "already published / gate isn't blocking" PASS, and must NOT imply
+    // doctor itself published anything to prod. The no-config `[FAIL] config`
+    // line stays the sole verdict driver (still exit 1, still tells them to
+    // run `fbrain init`).
     const dir = mkdtempSync(join(tmpdir(), "fbrain-doctor-empty-"));
     const lines: string[] = [];
     const code = await doctor({
       configPath: join(dir, "config.json"),
       print: (l) => lines.push(l),
       // Stub the publish-gate probe so this test stays a unit test (no
-      // network). The probe's own behavior is covered by the two tests
-      // below; here we just confirm the no-config FAIL still surfaces.
+      // network) — register succeeds, exercising the idempotent-success branch.
       schemaClientFactory: () => ({
         baseUrl: "mock",
         async registerSchema() {
@@ -510,9 +516,21 @@ describe("doctor verdict logic", () => {
         },
       }),
     });
+    // Still red overall, but solely because of the no-config FAIL.
     expect(code).toBe(1);
-    expect(lines.some((l) => l.includes("FAIL"))).toBe(true);
+    expect(lines.some((l) => l.includes("[FAIL] config"))).toBe(true);
     expect(lines.some((l) => l.includes("fbrain init"))).toBe(true);
+    // The publish-gate line is a calm PASS with accurate "already published"
+    // wording — never a FAIL, and never the old alarming "accepted a fbrain/*
+    // publish" framing that read as though doctor published to prod.
+    expect(lines.some((l) => l.includes("[FAIL] schema-publish-gate"))).toBe(false);
+    const gateLine = lines.find((l) => l.includes("schema-publish-gate"));
+    expect(gateLine).toBeDefined();
+    expect(gateLine!).toContain("[PASS]");
+    expect(gateLine!).toContain("already has fbrain/* published");
+    expect(gateLine!).toContain("publish gate isn't blocking");
+    // The old "unexpected publish" framing must be gone.
+    expect(gateLine!).not.toContain("accepted a fbrain/* publish");
   });
 
   test("missing config + schema service returns cert_required → PASS schema-publish-gate (expected consumer state, not a blocker)", async () => {
