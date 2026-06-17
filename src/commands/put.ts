@@ -22,7 +22,9 @@ import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
+  crossTypeSlugNote,
   ensureStatus,
+  findCrossTypeSlugCollisions,
   findExistingForWrite,
   nowIso,
   type ReadRetryOptions,
@@ -107,6 +109,14 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   if (existing) {
     await node.updateRecord({ schemaHash: hash, fields, keyHash: slug });
   } else {
+    // CREATE path only — an in-place update of the same type isn't a new
+    // cross-type collision. Best-effort cross-type slug-collision NOTE, kept
+    // consistent with `<type> new` (see recordNew). The probe is swallowed on
+    // error so it can never block or fail the create; the note goes to STDERR
+    // only, leaving the `created …` stdout line and `--json` contracts intact.
+    const collisions = await findCrossTypeSlugCollisions(node, opts.cfg, type, slug);
+    const note = crossTypeSlugNote(type, slug, collisions);
+    if (note) console.error(note);
     await node.createRecord({ schemaHash: hash, fields, keyHash: slug });
   }
   // Read-your-writes guard. fold_db's `/api/mutation` is not RYW-consistent:
