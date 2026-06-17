@@ -53,7 +53,11 @@ curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
 # 1. install fbrain + link (one-time)
 git clone https://github.com/EdgeVector/fbrain && cd fbrain
 bun install
-bun link                              # exposes a global `fbrain` binary
+bun link                              # exposes the `fbrain` CLI and the `fbrain-mcp`
+                                      # agent entrypoint on your PATH — `fbrain-mcp` is what
+                                      # `claude mcp add fbrain fbrain-mcp` (see the MCP
+                                      # section below) consumes, so your AI agent's on-ramp
+                                      # is wired up now too, not just the human CLI
 
 # 2. bootstrap
 fbrain init                           # 6 steps; writes ~/.fbrain/config.json
