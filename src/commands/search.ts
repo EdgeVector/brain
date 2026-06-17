@@ -17,6 +17,7 @@ import type { Config } from "../config.ts";
 import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
 import {
   findBySlugFast,
+  hasAnyLiveRecord,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
@@ -232,19 +233,28 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
 
   if (trimmed.length === 0) {
     opts.onResult?.([]);
+    // Context-aware no-match hint. On a brand-new EMPTY brain (a new dev
+    // following the init next-steps, which tell them to run `fbrain search`
+    // before they've created anything), the fresh-write-latency / `fbrain
+    // reindex` advice is actively misleading — there is nothing indexed and
+    // nothing to reindex. Probe whether the brain holds any live record (a
+    // cheap extra round-trip, paid only on the no-match path) and, when it's
+    // empty, point them at creating their first record — the calm
+    // "create your first record" recovery every other CLI hint already gives.
+    // A populated brain that simply matched nothing keeps the existing hint.
+    const empty = !(await hasAnyLiveRecord(node, opts.cfg));
+    const hint = empty
+      ? "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then search again"
+      : "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)";
     if (opts.json) {
       // Stdout is just `[]` so jq pipelines see a parseable empty
-      // array rather than the "no matches" sentinel.
+      // array rather than the "no matches" sentinel; the hint stays on stderr.
       print("[]");
-      printErr(
-        "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
-      );
+      printErr(hint);
       return;
     }
     print("no matches");
-    print(
-      "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)",
-    );
+    print(hint);
     return;
   }
 
