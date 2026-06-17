@@ -16,6 +16,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { listCmd } from "../../src/commands/list.ts";
 import { getRecord } from "../../src/commands/get.ts";
 import { searchCmd } from "../../src/commands/search.ts";
+import { statusCmd } from "../../src/commands/status.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
@@ -711,5 +712,60 @@ describe("searchCmd --json", () => {
     expect(err.length).toBe(1);
     expect(err[0]).toContain("no strong matches");
     expect(out[0]).not.toContain("note:");
+  });
+});
+
+describe("statusCmd --json (show mode)", () => {
+  function installShowMock(slug: string, fields: Fields, schema: string) {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === schema) {
+        return queryResp([asRow(slug, fields)]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+  }
+
+  test("emits a single `{slug, type, status}` object on stdout", async () => {
+    installShowMock(
+      "my-task",
+      taskFields("my-task", { status: "in_progress" }),
+      TEST_HASHES.task,
+    );
+    const out: string[] = [];
+    await statusCmd({
+      cfg,
+      slug: "my-task",
+      type: "task",
+      json: true,
+      print: (l) => out.push(l),
+    });
+    expect(out.length).toBe(1);
+    const parsed = JSON.parse(out[0]!);
+    expect(parsed).toEqual({
+      slug: "my-task",
+      type: "task",
+      status: "in_progress",
+    });
+    // No human bare-word leakage — the object, not just `in_progress`.
+    expect(out[0]).not.toBe("in_progress");
+  });
+
+  test("without --json still prints the bare status word", async () => {
+    installShowMock(
+      "my-task",
+      taskFields("my-task", { status: "open" }),
+      TEST_HASHES.task,
+    );
+    const out: string[] = [];
+    await statusCmd({
+      cfg,
+      slug: "my-task",
+      type: "task",
+      print: (l) => out.push(l),
+    });
+    expect(out).toEqual(["open"]);
   });
 });
