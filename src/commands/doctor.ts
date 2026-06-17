@@ -46,6 +46,16 @@
 // under a reserved `doctor-write-roundtrip-<nonce>` slug. OFF by default
 // so plain `fbrain doctor` never mutates.
 //
+// With `--mcp`: also BOOTS the resolved `fbrain-mcp` entrypoint and asserts
+// the agent-integration surface end-to-end (the opt-in companion to check #9
+// `mcp-entrypoint`, which is PATH-resolution only):
+//   - mcp-boot — spawns `fbrain-mcp`, drives a JSON-RPC initialize +
+//     tools/list handshake over stdio under a bounded deadline (kills the
+//     child on timeout), and PASSes only when the server returns a valid
+//     initialize result AND reports EXACTLY the 7 expected tool names. FAIL
+//     (not WARN) on any boot/handshake/tool-set failure, with a re-link fix.
+//     OFF by default so plain `fbrain doctor` never spawns the server.
+//
 // Exit code 0 on all-green, 1 if any check fails.
 
 import {
@@ -92,6 +102,7 @@ import {
   type WriteNodeClient,
   type WriteNodeClientOptions,
 } from "../write-context.ts";
+import { FBRAIN_MCP_TOOL_NAMES } from "../mcp/server.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -129,6 +140,16 @@ export type DoctorOptions = {
   // probe be exercised in both the resolved + unresolved states without
   // mutating the test process's real PATH.
   whichBin?: (name: string) => string | null;
+  // --mcp boot probe: actually SPAWN the resolved `fbrain-mcp` entrypoint,
+  // drive a JSON-RPC initialize + tools/list handshake over stdio, and assert
+  // the 7-tool agent surface. OFF by default so plain `fbrain doctor` never
+  // spawns the server (stays cheap + offline, like --write / --freshness).
+  mcp?: boolean;
+  // Override for tests: spawn the MCP boot probe against a fake transport
+  // instead of the real `fbrain-mcp` child process. Receives the resolved
+  // entrypoint + a deadline; returns the handshake outcome the PASS/FAIL
+  // logic classifies. Defaults to a real child-process stdio handshake.
+  mcpBootRunner?: (input: McpBootInput) => Promise<McpBootResult>;
   // --json: emit the structured check results as a single JSON object on
   // stdout instead of the human PASS/WARN/FAIL lines, so the agent-facing
   // surfaces (CI, scripts) can read doctor's verdict programmatically.
@@ -409,6 +430,31 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // so absence must not flip doctor's exit code.
   const mcpCheck = runMcpEntrypointProbe(opts, verbose);
   checks.push(mcpCheck);
+
+  // --mcp boot probe — actually BOOT the resolved `fbrain-mcp` entrypoint and
+  // assert the live agent-integration surface, not just that the bin is on
+  // PATH. `mcp-entrypoint` above is PATH-resolution only (cheap + offline), so
+  // a resolved-but-broken server (crashes on boot, hangs, wrong/zero tools,
+  // version skew) yields a GREEN mcp-entrypoint and the new dev only discovers
+  // the dead server when their agent silently can't reach the brain. This
+  // opt-in probe spawns the server, drives a JSON-RPC initialize + tools/list
+  // handshake over stdio under a bounded deadline, and FAILs (not WARNs) on a
+  // boot/handshake/tool-set mismatch — mirroring the --write / --freshness
+  // opt-in-deep-probe pattern so plain `fbrain doctor` stays spawn-free. Kept
+  // SKIPPED (not FAIL) when mcp-entrypoint itself didn't resolve, so the
+  // verdict stays coherent: there is nothing to boot yet.
+  if (opts.mcp) {
+    const resolved = (opts.whichBin ?? ((name: string) => Bun.which(name)))(
+      "fbrain-mcp",
+    );
+    if (resolved) {
+      const bootProbe = await runMcpBootProbe(resolved, opts, verbose);
+      checks.push(bootProbe);
+      verbose?.(`mcp-boot: ${tagOf(bootProbe)} — ${bootProbe.detail ?? ""}`);
+    } else {
+      checks.push(skippedByMcpUnresolved());
+    }
+  }
 
   // Disclosure probes — always WARN, no detection. They surface the
   // multi-machine + team-sharing limits called out in
@@ -1236,6 +1282,311 @@ export function runMcpEntrypointProbe(
       "MCP entrypoint 'fbrain-mcp' not on PATH — agent integration won't work. " +
       "Re-run 'bun link' in the fbrain repo, then 'claude mcp add fbrain fbrain-mcp'. " +
       'From a source checkout: claude mcp add fbrain bun "$(realpath src/mcp/main.ts)".',
+  };
+}
+
+// --mcp boot probe — the active proof the headline agent-integration surface
+// actually works. `mcp-entrypoint` (above) only confirms the bin resolves on
+// PATH; this BOOTS it. We spawn the resolved `fbrain-mcp` entrypoint, write a
+// JSON-RPC `initialize` then `tools/list` to its stdin over stdio, read the
+// responses, and assert the server returns a valid initialize result AND
+// reports EXACTLY the 7 expected tool names (the set, so a missing/renamed
+// tool fails). Bounded by a deadline + child kill (mirrors #270's
+// attestOwnerSession discipline): a wedged server surfaces a clean FAIL, never
+// a hung doctor. FAIL (not WARN) on any boot/handshake/tool-set failure, with
+// an actionable re-link `fix`. Skipped (not FAIL) by the caller when
+// `mcp-entrypoint` didn't resolve.
+
+// Inputs handed to the boot runner so a test can stub the transport without
+// re-resolving PATH or re-deriving the deadline.
+export type McpBootInput = {
+  // Absolute path the `mcp-entrypoint` probe resolved for `fbrain-mcp`.
+  entrypoint: string;
+  // Hard deadline for the whole spawn → handshake → tools/list round-trip.
+  deadlineMs: number;
+  verbose?: Verbose;
+};
+
+// Outcome of the boot handshake the PASS/FAIL classifier reads. `ok:false`
+// carries a human reason; `serverInfo` + `tools` are present on a successful
+// handshake (tools may still be the wrong set — the classifier checks that).
+export type McpBootResult = {
+  ok: boolean;
+  // Failure reason (boot crash, handshake error, timeout). Set when ok:false.
+  reason?: string;
+  // `name`/`version` from the `initialize` result's serverInfo, when reached.
+  serverInfo?: { name: string; version: string };
+  // Tool names reported by `tools/list`, when reached.
+  tools?: string[];
+};
+
+// Bounded deadline for the boot probe, env-overridable via the same
+// FBRAIN_HTTP_TIMEOUT_MS knob the node transports honor (kept consistent with
+// client.ts defaultTimeoutMs; replicated here because that helper is private).
+function mcpBootDeadlineMs(): number {
+  const raw = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 30_000;
+}
+
+export async function runMcpBootProbe(
+  entrypoint: string,
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): Promise<CheckResult> {
+  const input: McpBootInput = {
+    entrypoint,
+    deadlineMs: mcpBootDeadlineMs(),
+  };
+  if (verbose) input.verbose = verbose;
+
+  let result: McpBootResult;
+  try {
+    result = await (opts.mcpBootRunner ?? defaultMcpBootRunner)(input);
+  } catch (err) {
+    // The runner is expected to convert failures into a structured
+    // McpBootResult, but a genuinely unexpected throw still becomes a clean
+    // FAIL rather than an uncaught rejection that hangs/aborts doctor.
+    result = { ok: false, reason: stripDoctorTip(errMsg(err)) };
+  }
+
+  const relinkFix =
+    "boot fbrain-mcp by hand to see why: `printf '{}' | fbrain-mcp` should not crash. " +
+    "Re-run `bun link` in the fbrain repo, then re-add via `claude mcp add fbrain fbrain-mcp`. " +
+    'From a source checkout: claude mcp add fbrain bun "$(realpath src/mcp/main.ts)".';
+
+  if (!result.ok) {
+    return {
+      name: "mcp-boot",
+      ok: false,
+      detail: `fbrain-mcp boot/handshake failed: ${result.reason ?? "unknown error"}`,
+      fix: relinkFix,
+    };
+  }
+
+  const expected = [...FBRAIN_MCP_TOOL_NAMES];
+  const got = result.tools ?? [];
+  const gotSet = new Set(got);
+  const expectedSet = new Set(expected);
+  const missing = expected.filter((t) => !gotSet.has(t));
+  const unexpected = got.filter((t) => !expectedSet.has(t));
+
+  if (missing.length > 0 || unexpected.length > 0) {
+    const parts: string[] = [`reported ${got.length} tool(s)`];
+    if (missing.length > 0) parts.push(`missing: ${missing.join(", ")}`);
+    if (unexpected.length > 0) parts.push(`unexpected: ${unexpected.join(", ")}`);
+    return {
+      name: "mcp-boot",
+      ok: false,
+      detail: `fbrain-mcp tool surface mismatch — ${parts.join("; ")} (expected exactly ${expected.length})`,
+      fix: relinkFix,
+    };
+  }
+
+  const info = result.serverInfo;
+  const infoStr = info ? `serverInfo ${info.name} ${info.version}` : "serverInfo (none)";
+  return {
+    name: "mcp-boot",
+    ok: true,
+    detail: `fbrain-mcp booted + served the full agent surface — tools=${got.length}, ${infoStr}`,
+  };
+}
+
+// Default boot runner: spawn the resolved `fbrain-mcp` entrypoint, drive a
+// line-delimited JSON-RPC initialize + tools/list handshake over its stdio,
+// and tear the child down in a finally. Bounded by `input.deadlineMs` via a
+// timer that kills the child — a wedged/hung server surfaces a clean timeout
+// FAIL instead of hanging doctor.
+async function defaultMcpBootRunner(
+  input: McpBootInput,
+): Promise<McpBootResult> {
+  const { entrypoint, deadlineMs, verbose } = input;
+
+  const proc = Bun.spawn([entrypoint], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  // The deadline is enforced by RACING every blocking read against a timer
+  // promise — NOT by relying on proc.kill() to unblock a pending
+  // `reader.read()`. Killing the child does not reliably reject an in-flight
+  // read of a piped stream in Bun, so a wedged server that never writes a byte
+  // would otherwise hang the read (and thus doctor) forever despite the kill.
+  // The race resolves the moment the deadline fires; the finally then
+  // SIGKILLs the child so even a SIGTERM-deaf / sleeping server is reaped.
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      resolve("timeout");
+    }, deadlineMs);
+  });
+
+  try {
+    // JSON-RPC over stdio: one request object per line. `initialize` first
+    // (required by the protocol), then `tools/list`. We don't send the
+    // `notifications/initialized` notice — `tools/list` works without it for
+    // this read-only probe and keeps the exchange minimal.
+    const initReq = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "fbrain-doctor-mcp-probe", version: "1" },
+      },
+    };
+    const listReq = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
+
+    const writer = proc.stdin;
+    // Writing to a stalled/full pipe could itself block; race it too so a
+    // server that never drains its stdin can't wedge the probe before we even
+    // start reading.
+    writer.write(`${JSON.stringify(initReq)}\n`);
+    writer.write(`${JSON.stringify(listReq)}\n`);
+    await Promise.race([writer.flush(), deadline]);
+
+    // Read stdout until we've seen responses for both ids (or the stream ends
+    // / the deadline fires). Each blocking read is raced against `deadline`,
+    // so a server that goes silent surfaces a bounded timeout instead of an
+    // unbounded hang. The SDK emits one JSON object per line.
+    const responses = new Map<number, Record<string, unknown>>();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const reader = proc.stdout.getReader();
+    try {
+      while (responses.size < 2 && !timedOut) {
+        const next = await Promise.race([reader.read(), deadline]);
+        if (next === "timeout") break;
+        const { value, done } = next;
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (line.length === 0) continue;
+          let msg: Record<string, unknown>;
+          try {
+            msg = JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            // Non-JSON line on stdout (stray log); ignore and keep reading.
+            continue;
+          }
+          const id = msg.id;
+          if (typeof id === "number") responses.set(id, msg);
+        }
+      }
+    } finally {
+      // cancel() (not just releaseLock) so the underlying read is abandoned
+      // and the stream torn down even if a read is still pending behind the
+      // race we abandoned.
+      try {
+        await reader.cancel();
+      } catch {
+        // stream already errored/closed.
+      }
+    }
+
+    if (timedOut) {
+      return {
+        ok: false,
+        reason: `boot/handshake exceeded the ${deadlineMs}ms deadline (server hung or never spoke MCP)`,
+      };
+    }
+
+    const initRes = responses.get(1);
+    if (!initRes || initRes.error || !isRecord(initRes.result)) {
+      const errMessage = describeRpcError(initRes, "initialize");
+      verbose?.(`mcp-boot: initialize failed — ${errMessage}`);
+      return { ok: false, reason: errMessage };
+    }
+    const listRes = responses.get(2);
+    if (!listRes || listRes.error || !isRecord(listRes.result)) {
+      const errMessage = describeRpcError(listRes, "tools/list");
+      verbose?.(`mcp-boot: tools/list failed — ${errMessage}`);
+      return { ok: false, reason: errMessage };
+    }
+
+    const serverInfo = readServerInfo(initRes.result);
+    const tools = readToolNames(listRes.result);
+    const out: McpBootResult = { ok: true, tools };
+    if (serverInfo) out.serverInfo = serverInfo;
+    return out;
+  } catch (err) {
+    if (timedOut) {
+      return {
+        ok: false,
+        reason: `boot/handshake exceeded the ${deadlineMs}ms deadline`,
+      };
+    }
+    return { ok: false, reason: stripDoctorTip(errMsg(err)) };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    // SIGKILL (not the default SIGTERM): a wedged or SIGTERM-deaf server must
+    // die immediately so the probe never leaves an orphaned child behind.
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      // already exited.
+    }
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function describeRpcError(
+  msg: Record<string, unknown> | undefined,
+  method: string,
+): string {
+  if (!msg) return `${method}: no response before stream end`;
+  const err = msg.error;
+  if (isRecord(err)) {
+    const m = typeof err.message === "string" ? err.message : JSON.stringify(err);
+    return `${method} returned an error: ${m}`;
+  }
+  return `${method}: malformed response (no result)`;
+}
+
+function readServerInfo(
+  result: Record<string, unknown>,
+): { name: string; version: string } | undefined {
+  const info = result.serverInfo;
+  if (!isRecord(info)) return undefined;
+  const name = typeof info.name === "string" ? info.name : "?";
+  const version = typeof info.version === "string" ? info.version : "?";
+  return { name, version };
+}
+
+function readToolNames(result: Record<string, unknown>): string[] {
+  const tools = result.tools;
+  if (!Array.isArray(tools)) return [];
+  const names: string[] = [];
+  for (const t of tools) {
+    if (isRecord(t) && typeof t.name === "string") names.push(t.name);
+  }
+  return names;
+}
+
+// Skipped-by-prereq variant for the boot probe: distinct from the generic
+// skippedByPrereqs (config/schemas) because the boot probe's only prereq is
+// that `mcp-entrypoint` resolved the bin. Keeping it a coherent skip (ok:true,
+// WARN) rather than a FAIL means `--mcp` on a CLI-only / source-checkout user
+// who hasn't put `fbrain-mcp` on PATH doesn't flip the verdict — the
+// mcp-entrypoint WARN above already carries the re-link fix.
+function skippedByMcpUnresolved(): CheckResult {
+  return {
+    name: "mcp-boot",
+    ok: true,
+    tag: "WARN",
+    detail:
+      "skipped — `fbrain-mcp` did not resolve on PATH, so there is nothing to boot " +
+      "(see the mcp-entrypoint check above for the re-link fix)",
   };
 }
 

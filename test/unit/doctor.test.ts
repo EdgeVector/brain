@@ -3,7 +3,7 @@
 // without touching the network.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,10 +11,14 @@ import {
   classifySchemaDrift,
   diffSchemas,
   doctor,
+  runMcpBootProbe,
   runMcpEntrypointProbe,
   schemaServiceFixHint,
   validateConfigShape,
+  type McpBootInput,
+  type McpBootResult,
 } from "../../src/commands/doctor.ts";
+import { FBRAIN_MCP_TOOL_NAMES } from "../../src/mcp/server.ts";
 import {
   RECORDS,
   RECORD_TYPES,
@@ -1957,5 +1961,269 @@ describe("doctor mcp-entrypoint integration", () => {
     expect(mcp!.tag).toBe("WARN");
     expect(mcp!.ok).toBe(true);
     expect(mcp!.fix).toContain("bun link");
+  });
+});
+
+// --mcp boot probe — the opt-in deep probe that BOOTS fbrain-mcp and asserts
+// the 7-tool agent surface (vs. mcp-entrypoint, which is PATH-resolution
+// only). The child-process handshake is injected via `mcpBootRunner` so the
+// tests never spawn a real server: a runner that returns a valid handshake +
+// the full tool set → PASS; one that drops a tool → FAIL; one that simulates a
+// hung server (timeout) → FAIL. Mirrors the owner-session-attest deadline
+// test shape.
+const FULL_TOOLS = [...FBRAIN_MCP_TOOL_NAMES];
+
+function bootRunnerReturning(result: McpBootResult) {
+  return async (_input: McpBootInput): Promise<McpBootResult> => result;
+}
+
+describe("runMcpBootProbe", () => {
+  test("valid handshake + all 7 tools → PASS with count + serverInfo", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        mcpBootRunner: bootRunnerReturning({
+          ok: true,
+          tools: FULL_TOOLS,
+          serverInfo: { name: "fbrain", version: "0.8.0 (abc1234)" },
+        }),
+      },
+      undefined,
+    );
+    expect(check.name).toBe("mcp-boot");
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBeUndefined(); // plain PASS
+    expect(check.detail).toContain("tools=7");
+    expect(check.detail).toContain("fbrain 0.8.0 (abc1234)");
+  });
+
+  test("handshake reports only 6 tools → FAIL naming the missing tool", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        mcpBootRunner: bootRunnerReturning({
+          ok: true,
+          tools: FULL_TOOLS.filter((t) => t !== "fbrain_link"),
+          serverInfo: { name: "fbrain", version: "0.8.0" },
+        }),
+      },
+      undefined,
+    );
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("mismatch");
+    expect(check.detail).toContain("missing: fbrain_link");
+    expect(check.detail).toContain("expected exactly 7");
+    expect(check.fix).toContain("bun link");
+    expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
+  });
+
+  test("handshake reports an unexpected/renamed tool → FAIL", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        mcpBootRunner: bootRunnerReturning({
+          ok: true,
+          tools: [...FULL_TOOLS, "fbrain_renamed"],
+        }),
+      },
+      undefined,
+    );
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("unexpected: fbrain_renamed");
+  });
+
+  test("server hangs past the deadline → clean FAIL (probe never hangs)", async () => {
+    // Mirror owner-session-attest's deadline test: the runner reports the
+    // timeout outcome the real child-kill path would produce, and the probe
+    // resolves to a FAIL rather than hanging.
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        mcpBootRunner: bootRunnerReturning({
+          ok: false,
+          reason: "boot/handshake exceeded the 30000ms deadline (server hung)",
+        }),
+      },
+      undefined,
+    );
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("boot/handshake failed");
+    expect(check.detail).toContain("deadline");
+    expect(check.fix).toContain("bun link");
+  });
+
+  test("boot crash → FAIL carrying the crash reason", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        mcpBootRunner: bootRunnerReturning({
+          ok: false,
+          reason: "initialize returned an error: SyntaxError on startup",
+        }),
+      },
+      undefined,
+    );
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("SyntaxError on startup");
+  });
+
+  test("runner that THROWS becomes a clean FAIL, not an uncaught rejection", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        mcpBootRunner: async () => {
+          throw new Error("spawn ENOENT");
+        },
+      },
+      undefined,
+    );
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("spawn ENOENT");
+  });
+
+  // Real-spawn regression for the deadline: the DEFAULT runner (no injected
+  // mcpBootRunner) spawns an actual child that never speaks MCP and ignores
+  // SIGTERM. The probe must surface a bounded timeout FAIL and reap the child
+  // — proving the deadline is enforced by racing the read, not by relying on
+  // proc.kill() to unblock a pending read. A short FBRAIN_HTTP_TIMEOUT_MS
+  // keeps the test fast.
+  test("DEFAULT runner: a hung SIGTERM-deaf child → bounded timeout FAIL (no hang)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-mcp-hang-"));
+    const fake = join(dir, "fbrain-mcp");
+    // Bash: ignore TERM, block forever reading stdin. Only SIGKILL stops it.
+    writeFileSync(fake, "#!/bin/bash\ntrap '' TERM\nwhile true; do read -r _l || sleep 1; done\n");
+    chmodSync(fake, 0o755);
+
+    const prev = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+    process.env.FBRAIN_HTTP_TIMEOUT_MS = "1500";
+    const started = Date.now();
+    try {
+      const check = await runMcpBootProbe(fake, {}, undefined);
+      const elapsed = Date.now() - started;
+      expect(check.ok).toBe(false);
+      expect(check.detail).toContain("deadline");
+      // Must complete near the deadline, not hang — generous upper bound to
+      // absorb CI scheduling jitter while still proving it didn't wedge.
+      expect(elapsed).toBeLessThan(10_000);
+    } finally {
+      if (prev === undefined) delete process.env.FBRAIN_HTTP_TIMEOUT_MS;
+      else process.env.FBRAIN_HTTP_TIMEOUT_MS = prev;
+    }
+  });
+});
+
+describe("doctor --mcp integration", () => {
+  test("default doctor (no --mcp) never invokes the boot runner / spawns", async () => {
+    const configPath = writeCfg(makeCfg());
+    let invoked = false;
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      mcpBootRunner: async () => {
+        invoked = true;
+        return { ok: true, tools: FULL_TOOLS };
+      },
+    });
+    expect(code).toBe(0);
+    expect(invoked).toBe(false); // cheap path: no spawn without --mcp
+    expect(lines.find((l) => l.includes("mcp-boot"))).toBeUndefined();
+  });
+
+  test("--mcp with a healthy server → [PASS] mcp-boot tools=7, exit 0", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      mcp: true,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      mcpBootRunner: bootRunnerReturning({
+        ok: true,
+        tools: FULL_TOOLS,
+        serverInfo: { name: "fbrain", version: "0.8.0" },
+      }),
+    });
+    expect(code).toBe(0);
+    const line = lines.find((l) => l.includes("mcp-boot"));
+    expect(line).toBeDefined();
+    expect(line!.startsWith("[PASS]")).toBe(true);
+    expect(line!).toContain("tools=7");
+  });
+
+  test("--mcp with a broken tool surface → [FAIL] mcp-boot, exit 1", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      mcp: true,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      mcpBootRunner: bootRunnerReturning({
+        ok: true,
+        tools: FULL_TOOLS.slice(0, 6),
+      }),
+    });
+    expect(code).toBe(1); // FAIL flips the verdict (unlike mcp-entrypoint WARN)
+    const line = lines.find((l) => l.includes("mcp-boot"));
+    expect(line).toBeDefined();
+    expect(line!.startsWith("[FAIL]")).toBe(true);
+  });
+
+  test("--mcp but fbrain-mcp unresolved → [WARN] mcp-boot skipped, exit STILL 0", async () => {
+    const configPath = writeCfg(makeCfg());
+    let invoked = false;
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      mcp: true,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => null,
+      mcpBootRunner: async () => {
+        invoked = true;
+        return { ok: true, tools: FULL_TOOLS };
+      },
+    });
+    expect(code).toBe(0); // skip is a coherent WARN, not a FAIL
+    expect(invoked).toBe(false); // nothing to boot — runner never called
+    const line = lines.find((l) => l.includes("mcp-boot"));
+    expect(line).toBeDefined();
+    expect(line!.startsWith("[WARN]")).toBe(true);
+    expect(line!).toContain("nothing to boot");
+  });
+
+  test("--json includes the mcp-boot check entry (FAIL → ok:false)", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      mcp: true,
+      json: true,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      mcpBootRunner: bootRunnerReturning({ ok: true, tools: FULL_TOOLS.slice(0, 6) }),
+    });
+    expect(code).toBe(1);
+    const parsed = JSON.parse(lines[0]!) as {
+      ok: boolean;
+      checks: Array<{ name: string; tag: string; ok: boolean; detail?: string; fix?: string }>;
+    };
+    expect(parsed.ok).toBe(false);
+    const boot = parsed.checks.find((c) => c.name === "mcp-boot");
+    expect(boot).toBeDefined();
+    expect(boot!.tag).toBe("FAIL");
+    expect(boot!.ok).toBe(false);
+    expect(boot!.fix).toContain("claude mcp add fbrain fbrain-mcp");
   });
 });

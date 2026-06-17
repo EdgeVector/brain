@@ -25,6 +25,20 @@ import { FbrainError, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
+// The complete agent-integration surface this server exposes — 4 read tools
+// + 3 write tools = 7. Single-sourced here so the `doctor --mcp` boot probe
+// can assert the live `tools/list` reports EXACTLY this set (a renamed or
+// dropped tool fails the probe) without re-listing the names. Keep in sync
+// with the `registerTool` calls below.
+export const FBRAIN_MCP_TOOL_NAMES = [
+  "fbrain_search",
+  "fbrain_ask",
+  "fbrain_get",
+  "fbrain_list",
+  "fbrain_put",
+  "fbrain_delete",
+  "fbrain_link",
+] as const;
 // Single-sourced via getFbrainVersion() so `fbrain --version` (cli.ts) and
 // the MCP `serverInfo.version` reported here can't drift. Includes the git
 // short-SHA suffix when the running source lives in a git checkout, so MCP
