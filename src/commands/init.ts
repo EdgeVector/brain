@@ -400,7 +400,7 @@ export function printNextSteps(
   print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
   print(`  4. Re-check health anytime:    fbrain doctor`);
   print(`  5. Connect it to your AI agent: claude mcp add fbrain fbrain-mcp`);
-  print(`        (gives your agent the fbrain_* tools — needs \`bun link\` first; run \`fbrain doctor\` if it's not found)`);
+  print(`        (gives your agent the fbrain_* tools — needs \`bun link\` first; run \`fbrain doctor --mcp\` to confirm it boots and serves all 7 tools)`);
   print(`  Data lives on the node at ${ctx.nodeUrl} (config: ${ctx.configPath}).`);
 
   // When consent wasn't established (non-TTY scripted/CI run without
