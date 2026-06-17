@@ -263,7 +263,7 @@ section also prints a no-key notice instead of silently dropping.
 
 The LLM key (only needed for --expand) is read from \$ANTHROPIC_API_KEY
 (preferred) or an optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
-  doctor: `fbrain doctor [--freshness] [--write] [--json] [--usage [--usage-window N] [--usage-path PATH]]
+  doctor: `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
   - config valid (~/.fbrain/config.json + hex-64 hashes)
@@ -294,6 +294,16 @@ With --write, additionally runs an idempotent put → get → soft-delete
 round-trip under a reserved \`doctor-write-roundtrip-<nonce>\` slug to
 prove writes actually land. OFF by default so plain \`fbrain doctor\`
 never mutates.
+
+With --mcp, additionally BOOTS the \`fbrain-mcp\` entrypoint and asserts
+the agent-integration surface end-to-end (the opt-in companion to the
+PATH-only mcp-entrypoint check):
+  - mcp-boot: spawn \`fbrain-mcp\`, drive a JSON-RPC initialize +
+    tools/list handshake over stdio under a bounded deadline, and PASS
+    only when the server returns a valid handshake AND reports exactly
+    the 7 expected tools. FAIL (not WARN) on a boot/handshake/tool-set
+    mismatch. Skipped when \`fbrain-mcp\` isn't on PATH. OFF by default
+    so plain \`fbrain doctor\` never spawns the server.
 
 With --usage, skips the health checks and prints a team-adoption
 telemetry report: write count by userHash (8-char prefix only)
@@ -522,6 +532,10 @@ const DOCTOR_OPTIONS = {
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
   write: { type: "boolean", default: false },
+  // --mcp: boot the resolved `fbrain-mcp` entrypoint and assert the 7-tool
+  // agent surface end-to-end (the opt-in companion to the PATH-only
+  // mcp-entrypoint check). OFF by default so plain doctor never spawns it.
+  mcp: { type: "boolean", default: false },
   // Machine-readable mode: emit the structured check results as a single
   // JSON object on stdout instead of the human PASS/WARN/FAIL lines.
   json: { type: "boolean", default: false },
@@ -1469,6 +1483,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   if (verbose) dOpts.verbose = verbose;
   if (values.freshness) dOpts.freshness = true;
   if (values.write) dOpts.write = true;
+  if (values.mcp) dOpts.mcp = true;
   if (values.json) dOpts.json = true;
   if (values.usage) {
     dOpts.usage = true;
