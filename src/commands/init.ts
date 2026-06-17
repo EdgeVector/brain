@@ -19,7 +19,7 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, isDefaultNodeUrl, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, type Verbose } from "../client.ts";
 import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -419,7 +419,7 @@ type ProbeOpts = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-async function probeWithRetry(
+export async function probeWithRetry(
   probeClient: ReturnType<typeof newNodeClient>,
   opts: ProbeOpts,
   print: (line: string) => void,
@@ -431,11 +431,7 @@ async function probeWithRetry(
     const delays = opts.retryDelaysMs ?? envRetryDelays() ?? DEFAULT_RETRY_DELAYS_MS;
     if (delays.length === 0) throw err;
     const sleep = opts.sleep ?? defaultSleep;
-    print(
-      isDefaultNodeUrl(opts.nodeUrl)
-        ? `        node not reachable at ${opts.nodeUrl}. Start it: \`brew services start folddb\` (or \`brew services restart folddb\` after a \`brew upgrade\`).`
-        : `        node not reachable at ${opts.nodeUrl}. If this is a first run from source, fold_db is compiling Rust — give it a few minutes.`,
-    );
+    print(`        node not reachable at ${opts.nodeUrl}. ${nodeDownHint(opts.nodeUrl)}`);
     for (let i = 0; i < delays.length; i++) {
       const delay = delays[i] ?? 0;
       print(`        retrying in ${Math.round(delay / 1000)}s (attempt ${i + 1}/${delays.length})…`);
