@@ -20,9 +20,11 @@ import {
   DEFAULT_SCHEMA_SERVICE_URL,
   hasUsableExistingConfig,
   printNextSteps,
+  probeWithRetry,
   resolveUrls,
   runInit,
 } from "../../src/commands/init.ts";
+import { newNodeClient } from "../../src/client.ts";
 import type { EstablishConsentResult } from "../../src/commands/init-consent.ts";
 import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import { FbrainError } from "../../src/client.ts";
@@ -537,5 +539,81 @@ describe("printNextSteps", () => {
       reinitialized: false,
     });
     expect(lines.join("\n")).not.toContain("--grant-consent");
+  });
+});
+
+// The node-down line `probeWithRetry` prints must reuse the canonical,
+// install-aware `nodeDownHint` (client.ts) rather than init's old hand-rolled
+// `isDefaultNodeUrl` ternary. The bug that ternary shipped: a dev who
+// brew-installed folddb but runs a non-default-port node and forgot to start
+// it was told "first run from source… compiling Rust" — useless, since they
+// never built from source. With the canonical helper, the prebuilt binary on
+// PATH (signalled here via FBRAIN_FOLDDB_BIN) drives brew/daemon-start
+// guidance even on a custom port.
+describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => {
+  // A probe client whose only behaviour is to fail unreachable, so the hint
+  // is printed once and then the (zero-length) retry schedule rethrows.
+  function unreachableProbeClient(): ReturnType<typeof newNodeClient> {
+    return {
+      autoIdentity: async () => {
+        throw new FbrainError({ code: "service_unreachable", message: "fetch failed" });
+      },
+    } as unknown as ReturnType<typeof newNodeClient>;
+  }
+
+  test("non-default URL + prebuilt binary on PATH → brew/daemon-start guidance, NOT 'compiling Rust'", async () => {
+    const prior = process.env.FBRAIN_FOLDDB_BIN;
+    // FBRAIN_FOLDDB_BIN makes defaultIsFolddbBinaryInstalled() return true
+    // without depending on the host PATH — the "downloaded user" signal.
+    process.env.FBRAIN_FOLDDB_BIN = "/opt/homebrew/bin/folddb";
+    const lines: string[] = [];
+    try {
+      // One zero-delay retry (mocked sleep) so the hint is printed once and
+      // the final attempt rethrows — exercising the real print path without
+      // any wall-clock wait.
+      await probeWithRetry(
+        unreachableProbeClient(),
+        { nodeUrl: "http://127.0.0.1:9050", retryDelaysMs: [0], sleep: async () => {} },
+        (l) => lines.push(l),
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    } finally {
+      if (prior === undefined) delete process.env.FBRAIN_FOLDDB_BIN;
+      else process.env.FBRAIN_FOLDDB_BIN = prior;
+    }
+    const out = lines.join("\n");
+    expect(out).toContain("node not reachable at http://127.0.0.1:9050");
+    // Canonical helper sends a downloaded user (binary on PATH) to brew, even
+    // on a non-default port — the whole point of the fix.
+    expect(out).toContain("brew services start folddb");
+    // The misleading from-source framing must be gone for this case.
+    expect(out).not.toContain("compiling Rust");
+    expect(out).not.toContain("compiles Rust");
+  });
+
+  test("default :9001 URL → brew/daemon-start guidance, unchanged", async () => {
+    const prior = process.env.FBRAIN_FOLDDB_BIN;
+    // Even with no prebuilt binary, the default daemon is always brew-first.
+    delete process.env.FBRAIN_FOLDDB_BIN;
+    const lines: string[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        { nodeUrl: DEFAULT_NODE_URL, retryDelaysMs: [0], sleep: async () => {} },
+        (l) => lines.push(l),
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    } finally {
+      if (prior !== undefined) process.env.FBRAIN_FOLDDB_BIN = prior;
+    }
+    const out = lines.join("\n");
+    expect(out).toContain(`node not reachable at ${DEFAULT_NODE_URL}`);
+    expect(out).toContain("brew services start folddb");
+    expect(out).not.toContain("compiling Rust");
   });
 });
