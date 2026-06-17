@@ -17,7 +17,9 @@ import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { capitalize } from "../format.ts";
 import {
+  crossTypeSlugNote,
   findBySlugFast,
+  findCrossTypeSlugCollisions,
   findExistingForWrite,
   nowIso,
   schemaHashFor,
@@ -92,6 +94,20 @@ export async function recordNew(opts: RecordNewOptions): Promise<void> {
         hint: "Create the design first (`fbrain design new ...`), or omit --design.",
       });
     }
+  }
+
+  // Cross-type slug-collision NOTE (best-effort, non-fatal). Slugs are unique
+  // per-type but allowed to collide across types; every bare-slug read/update
+  // verb is keyed by slug, so a cross-type collision quietly arms an
+  // `ambiguous_slug` trap for later `get`/`status`/`delete`. Warn the dev at
+  // creation, naming `--type` concretely. The probe is swallowed on any error
+  // (see findCrossTypeSlugCollisions) so it can never block or fail the create.
+  // Gated on `!opts.force` to honor the documented "--force skips the lookups"
+  // contract (force is a deliberate re-create from scratch; it does no reads).
+  if (!opts.force) {
+    const collisions = await findCrossTypeSlugCollisions(node, opts.cfg, opts.type, opts.slug);
+    const note = crossTypeSlugNote(opts.type, opts.slug, collisions);
+    if (note) console.error(note);
   }
 
   // --force intentionally skips the lookup and stamps a fresh created_at.

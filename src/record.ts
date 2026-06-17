@@ -468,6 +468,65 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Best-effort cross-type slug collision probe for the CREATE verbs. Slugs are
+// unique PER TYPE (the same-type duplicate guard enforces that), but a slug is
+// allowed to collide ACROSS types — `task new wire-login` then `design new
+// wire-login` both succeed. The catch is that every read/update verb is keyed
+// by BARE slug, so after a cross-type collision a bare-slug `get`/`status`/
+// `delete` dead-ends with `ambiguous_slug`. This probe lets the create verbs
+// warn the developer at the moment they create the collision, instead of
+// leaving them to discover the trap later with no breadcrumb back to its cause.
+//
+// `selfType` is excluded (its own duplicate guard already ran). The remaining
+// types are probed in parallel via `findBySlugFast` (the fast-miss helper), so
+// this is ~one round-trip's worth of latency, not 7 serial ones. It is STRICTLY
+// best-effort: any probe failure/timeout is swallowed and the affected type is
+// simply treated as "no collision" — a flaky probe must NEVER block or fail the
+// create. Returns the OTHER types that already hold the slug (empty ⇒ no note).
+export async function findCrossTypeSlugCollisions(
+  node: NodeClient,
+  cfg: Config,
+  selfType: RecordType,
+  slug: string,
+): Promise<RecordType[]> {
+  const others = RECORD_TYPES.filter((t) => t !== selfType);
+  const hits = await Promise.all(
+    others.map(async (t): Promise<RecordType | null> => {
+      try {
+        const hash = schemaHashFor(t, cfg);
+        const existing = await findBySlugFast(node, t, hash, slug);
+        return existing ? t : null;
+      } catch {
+        // Best-effort: a probe error/timeout on one type just skips that type.
+        return null;
+      }
+    }),
+  );
+  return hits.filter((t): t is RecordType => t !== null);
+}
+
+// Render the cross-type collision note for the create verbs. Returns null when
+// there is no collision (so callers can skip the stderr write entirely). The
+// note goes to STDERR only — it must not perturb the `created …` stdout line or
+// any `--json` contract. It names the `--type` flag concretely so a new dev
+// knows exactly how to disambiguate the bare-slug reads that will now be
+// ambiguous.
+export function crossTypeSlugNote(
+  selfType: RecordType,
+  slug: string,
+  collisions: readonly RecordType[],
+): string | null {
+  if (collisions.length === 0) return null;
+  const also =
+    collisions.length === 1
+      ? `a ${collisions[0]}`
+      : `${collisions.slice(0, -1).join(", ")} and ${collisions[collisions.length - 1]} records`;
+  return (
+    `note: slug "${slug}" also exists as ${also} — bare-slug get/status/delete ` +
+    `will now need --type (e.g. \`fbrain get ${slug} --type ${selfType}\`).`
+  );
+}
+
 export type ResolvedRecord = {
   type: RecordType;
   record: FbrainRecord;
@@ -561,9 +620,18 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
 
   if (matches.length > 1) {
     const matchedTypes = matches.map((m) => m.type).join(", ");
+    // Name the exact recovery command, not just "Specify a `type`." — a new dev
+    // shouldn't have to hunt that the flag is `--type`. The example uses the
+    // first matched type so it's a runnable command, not a placeholder. The CLI
+    // `hint` names the `--type` FLAG; the MCP server consumes `agentHint`
+    // instead (its tools take a `type` ARGUMENT, not a CLI flag — see
+    // mcp/server.ts and its test), so the flag spelling never leaks to agents.
+    const exampleType = matches[0]!.type;
     throw new FbrainError({
       code: "ambiguous_slug",
       message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify a \`type\`.`,
+      hint: `Re-run with --type, e.g. \`fbrain get ${opts.slug} --type ${exampleType}\`.`,
+      agentHint: `Pass the \`type\` argument, e.g. type: "${exampleType}".`,
     });
   }
 

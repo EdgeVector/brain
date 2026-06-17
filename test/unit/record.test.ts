@@ -666,6 +666,10 @@ describe("resolveBySlug", () => {
     ).rejects.toMatchObject({
       code: "ambiguous_slug",
       message: 'Slug "dual" exists in multiple schemas (design, task). Specify a `type`.',
+      // The hint names the exact recovery command (the `--type` flag and a
+      // runnable example using one of the matched types) so a new dev doesn't
+      // have to hunt that the flag is `--type`.
+      hint: "Re-run with --type, e.g. `fbrain get dual --type design`.",
     });
   });
 

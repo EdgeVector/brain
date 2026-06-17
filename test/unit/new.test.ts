@@ -95,6 +95,132 @@ describe("recordNew dispatches against the correct schema for each type", () => 
   }
 });
 
+// The cross-type slug-collision NOTE: creating a record whose slug already
+// exists under a DIFFERENT type prints a non-fatal stderr note that names
+// `--type`, but never blocks the create and never fires for a unique slug or a
+// same-type duplicate. Drive recordNew directly, capturing console.error.
+describe("recordNew warns on cross-type slug collision", () => {
+  let captured: string[] = [];
+  const realErr = console.error;
+
+  afterEach(() => {
+    console.error = realErr;
+    captured = [];
+  });
+
+  function captureStderr(): void {
+    console.error = (...args: unknown[]) => {
+      captured.push(args.map(String).join(" "));
+    };
+  }
+
+  // Mock that reports the given slug as already present under `holderType`
+  // (and only that type), so the cross-type probe sees exactly one collision.
+  function installCollisionMock(holderHash: string, slug: string): {
+    mutations: Array<Record<string, unknown>>;
+  } {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}") as {
+          schema_name?: string;
+        };
+        if (body.schema_name === holderHash) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [
+                { key: { hash: "h", range: "r" }, fields: { slug, tags: [] } },
+              ],
+            },
+          };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    return { mutations };
+  }
+
+  test("creating a design whose slug exists as a task emits the --type note and still creates", async () => {
+    captureStderr();
+    // `wire-login` already exists as a task; now create the design.
+    const { mutations } = installCollisionMock(TEST_HASHES.task, "wire-login");
+    await recordNew({
+      cfg,
+      type: "design",
+      slug: "wire-login",
+      title: "dup slug across type",
+      body: "",
+      tags: [],
+    });
+    // The create still happened (non-blocking warning).
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.mutation_type).toBe("create");
+    expect(mutations[0]!.schema).toBe(TEST_HASHES.design);
+    // The note fired, names the colliding type AND the --type recovery flag.
+    const note = captured.find((l) => l.startsWith("note:"));
+    expect(note).toBeDefined();
+    expect(note).toContain('slug "wire-login"');
+    expect(note).toContain("task");
+    expect(note).toContain("--type design");
+  });
+
+  test("creating a unique slug emits NO note (no false positives)", async () => {
+    captureStderr();
+    // Every type's page is empty ⇒ no collision.
+    installMock((url) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      return { status: 404 };
+    });
+    await recordNew({
+      cfg,
+      type: "design",
+      slug: "totally-unique-slug",
+      title: "fresh",
+      body: "",
+      tags: [],
+    });
+    expect(captured.find((l) => l.startsWith("note:"))).toBeUndefined();
+  });
+
+  test("a same-type duplicate still errors slug_already_exists and emits no cross-type note", async () => {
+    captureStderr();
+    // The SAME type (design) already holds the slug ⇒ the same-type guard
+    // throws BEFORE the cross-type probe runs, so no note.
+    installCollisionMock(TEST_HASHES.design, "wire-login");
+    await expect(
+      recordNew({ cfg, type: "design", slug: "wire-login", title: "x", body: "", tags: [] }),
+    ).rejects.toMatchObject({ code: "slug_already_exists" });
+    expect(captured.find((l) => l.startsWith("note:"))).toBeUndefined();
+  });
+
+  test("a probe failure never blocks the create (best-effort)", async () => {
+    captureStderr();
+    // Every /api/query 500s. The same-type guard rides out empty/error via
+    // findExistingForWrite (returns null on a non-throwing miss); the
+    // cross-type probe swallows the error. The create must still succeed.
+    let mutationSeen = false;
+    installMock((url) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutationSeen = true;
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await recordNew({ cfg, type: "design", slug: "x", title: "x", body: "", tags: [] });
+    expect(mutationSeen).toBe(true);
+    expect(captured.find((l) => l.startsWith("note:"))).toBeUndefined();
+  });
+});
+
 describe("recordNew rejects --design on non-task types", () => {
   for (const type of PHASE_6_TYPES) {
     test(`type=${type} + designSlug throws design_flag_unsupported before any I/O`, async () => {
