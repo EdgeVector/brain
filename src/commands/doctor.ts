@@ -1350,14 +1350,20 @@ export async function runSchemaPublishGateProbe(
   if (!probe) return null;
   try {
     await client.registerSchema(probe.schema);
-    // Should not normally land here without a config — init would have
-    // written one after a successful register. Silent PASS keeps doctor
-    // honest: if the probe succeeded, the publish gate isn't blocking.
-    verbose?.(`schema-publish-gate: probe unexpectedly succeeded`);
+    // EXPECTED on prod: fbrain's 8 schemas are ALREADY published there (that's
+    // how `init` resolves their canonical hashes without a DevCert), so this
+    // re-register is idempotent and succeeds. Success means the publish gate
+    // isn't blocking onboarding — a calm PASS, not an alarm. Don't imply
+    // doctor "published" anything; the no-config `[FAIL] config`
+    // (→ "run `fbrain init`") line already drives doctor's red verdict.
+    verbose?.(`schema-publish-gate: fbrain/* already published (idempotent re-register) PASS`);
     return {
       name: "schema-publish-gate",
       ok: true,
-      detail: `schema service at ${url} accepted a fbrain/* publish — re-run \`fbrain init\` to finish onboarding`,
+      detail:
+        `schema service at ${url} already has fbrain/* published ` +
+        `(idempotent re-register succeeded) — the publish gate isn't blocking; ` +
+        `run \`fbrain init\` to finish onboarding`,
     };
   } catch (err) {
     if (err instanceof FbrainError && err.code === "schema_cert_required") {
