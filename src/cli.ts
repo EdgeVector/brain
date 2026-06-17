@@ -186,12 +186,16 @@ exists in multiple types (specify --type to disambiguate).
   --json        emit a JSON array of record summaries on stdout
                 ({type, slug, title, status, tags, design_slug?, created_at,
                 updated_at}); truncation hint routes to stderr.`,
-  status: `fbrain status <slug> [<new-status>] [--type T]
+  status: `fbrain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
 type's status enum, updates updated_at, and writes back.
 
-  --type    design | task | concept | preference | reference | agent | project | spike`,
+  --type    design | task | concept | preference | reference | agent | project | spike
+  --json    (show form only) emit the status as a single JSON object on
+            stdout — \`{slug, type, status}\`, parseable by \`jq\`. Ignored
+            with a new-status; the update form keeps its human transition
+            line. Errors still print to stderr.`,
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
@@ -476,7 +480,16 @@ const LIST_OPTIONS = {
   // stdout. Truncation hint moves to stderr so `jq` pipelines stay clean.
   json: { type: "boolean", default: false },
 } as const;
-const STATUS_OPTIONS = { type: { type: "string" } } as const;
+const STATUS_OPTIONS = {
+  type: { type: "string" },
+  // Machine-readable mode for show form (`fbrain status <slug> --json`):
+  // emit a single `{slug, type, status}` JSON object on stdout, matching the
+  // `get --json` field-naming convention. Closes the read-surface parity gap
+  // — `status` show mode was the only read command rejecting `--json`. No
+  // effect in update form (`status <slug> <new-status>`), which keeps its
+  // human transition line.
+  json: { type: "boolean", default: false },
+} as const;
 const SEARCH_OPTIONS = {
   limit: { type: "string", short: "n" },
   exact: { type: "boolean", default: false },
@@ -1281,6 +1294,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
   const sOpts: Parameters<typeof statusCmd>[0] = { cfg, slug, verbose };
   if (positionals[1]) sOpts.newStatus = positionals[1];
   if (type) sOpts.type = type;
+  if (values.json) sOpts.json = true;
   await withTypeAsPositionalHint(slug, () => statusCmd(sOpts));
   return 0;
 }

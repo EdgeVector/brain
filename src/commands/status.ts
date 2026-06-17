@@ -20,6 +20,11 @@ export type StatusOptions = {
   newStatus?: string;
   type?: RecordType;
   verbose?: Verbose;
+  // Machine-readable show mode: when set (and no `newStatus` is given),
+  // print a single `{slug, type, status}` JSON object instead of the bare
+  // status word — read-surface parity with `get --json`. Ignored in update
+  // mode, which keeps its human transition line.
+  json?: boolean;
   print?: (line: string) => void;
 };
 
@@ -39,6 +44,19 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   });
 
   if (opts.newStatus === undefined) {
+    // Show mode. `--json` emits a single object whose field names mirror
+    // `get --json` ({slug, type, status}); otherwise the historical bare
+    // status word, so existing human/script callers are unaffected.
+    if (opts.json) {
+      print(
+        JSON.stringify({
+          slug: only.record.slug,
+          type: only.type,
+          status: only.record.status,
+        }),
+      );
+      return;
+    }
     print(only.record.status);
     return;
   }
