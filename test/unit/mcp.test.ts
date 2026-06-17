@@ -565,9 +565,11 @@ describe("fbrain_list tool", () => {
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
     const res = await tools.fbrain_list!({ type: "design" });
     expect(res.isError).toBeFalsy();
-    // listCmd prints "no records" when the result is empty; the MCP
-    // wrapper passes that through verbatim.
-    expect(res.content[0]!.text).toBe("no records");
+    // listCmd prints "no records" plus a context-aware empty-node hint when
+    // the result is empty; the MCP wrapper passes both lines through verbatim.
+    // Here the brain holds no live record → the create-your-first hint.
+    expect(res.content[0]!.text).toContain("no records");
+    expect(res.content[0]!.text).toContain("no records yet");
   });
 });
 

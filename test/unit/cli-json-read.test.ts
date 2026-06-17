@@ -133,7 +133,10 @@ describe("listCmd --json", () => {
     });
     expect(out).toEqual(["[]"]);
     expect(JSON.parse(out[0]!)).toEqual([]);
-    expect(err).toEqual([]);
+    // Empty brain now also emits the create-your-first hint — on stderr, so
+    // stdout stays a clean parseable `[]` for jq pipelines.
+    expect(err).toHaveLength(1);
+    expect(err[0]).toContain("no records yet");
   });
 
   test("truncation hint routes to stderr, not stdout", async () => {
