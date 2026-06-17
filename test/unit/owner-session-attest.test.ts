@@ -16,6 +16,7 @@ import { join } from "node:path";
 
 import {
   FOLDDB_SESSION_HEADER,
+  FbrainError,
   attestOwnerSession,
   newNodeClient,
 } from "../../src/client.ts";
@@ -84,6 +85,97 @@ describe("attestOwnerSession", () => {
       expect(seen.some((u) => u.includes("/api/session/browser-pair"))).toBe(true);
     } finally {
       sock.cleanup();
+    }
+  });
+
+  test("mint stalls past the deadline → service_timeout (not a silent hang)", async () => {
+    const sock = fakeSocket();
+    const prevTimeout = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+    process.env.FBRAIN_HTTP_TIMEOUT_MS = "100";
+    try {
+      // The mint fetch never resolves on its own; only the AbortController's
+      // signal can settle it. Without the deadline this would hang forever.
+      globalThis.fetch = ((_input: unknown, init?: RequestInit): Promise<Response> => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal) {
+            signal.addEventListener("abort", () => {
+              reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+            });
+          }
+        });
+      }) as unknown as typeof globalThis.fetch;
+      let err: unknown;
+      try {
+        await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(FbrainError);
+      expect((err as FbrainError).code).toBe("service_timeout");
+      expect((err as FbrainError).hint).toContain("re-running the command is safe");
+    } finally {
+      if (prevTimeout === undefined) delete process.env.FBRAIN_HTTP_TIMEOUT_MS;
+      else process.env.FBRAIN_HTTP_TIMEOUT_MS = prevTimeout;
+      sock.cleanup();
+    }
+  });
+
+  test("exchange stalls past the deadline → service_timeout (not a silent hang)", async () => {
+    const sock = fakeSocket();
+    const prevTimeout = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+    process.env.FBRAIN_HTTP_TIMEOUT_MS = "100";
+    try {
+      // Mint succeeds; the TCP exchange never resolves until aborted.
+      globalThis.fetch = ((input: unknown, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === "string" ? input : String(input);
+        if (url.includes("/control/browser-pairing-code")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ pairing_code: "code-xyz" }), { status: 200 }),
+          );
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal) {
+            signal.addEventListener("abort", () => {
+              reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+            });
+          }
+        });
+      }) as unknown as typeof globalThis.fetch;
+      let err: unknown;
+      try {
+        await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(FbrainError);
+      expect((err as FbrainError).code).toBe("service_timeout");
+    } finally {
+      if (prevTimeout === undefined) delete process.env.FBRAIN_HTTP_TIMEOUT_MS;
+      else process.env.FBRAIN_HTTP_TIMEOUT_MS = prevTimeout;
+      sock.cleanup();
+    }
+  });
+
+  test("socketless node still returns null even with a stalling fetch (degrade cleanly)", async () => {
+    const prevTimeout = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+    process.env.FBRAIN_HTTP_TIMEOUT_MS = "100";
+    try {
+      let fetched = false;
+      globalThis.fetch = ((): Promise<Response> => {
+        fetched = true;
+        return new Promise<Response>(() => {});
+      }) as unknown as typeof globalThis.fetch;
+      const token = await attestOwnerSession(
+        "http://127.0.0.1:9311",
+        "/nonexistent/path/folddb.sock",
+      );
+      expect(token).toBeNull();
+      expect(fetched).toBe(false);
+    } finally {
+      if (prevTimeout === undefined) delete process.env.FBRAIN_HTTP_TIMEOUT_MS;
+      else process.env.FBRAIN_HTTP_TIMEOUT_MS = prevTimeout;
     }
   });
 

@@ -112,6 +112,50 @@ export async function attestOwnerSession(
     verbose(`owner-session attestation skipped: no control socket at ${socketPath}`);
     return null;
   }
+  // This handshake is the FIRST node I/O of every CLI invocation — it runs
+  // BEFORE the read/write transports arm their own deadlines — so it carries
+  // its own. Each fetch (and its small body read) is bounded by
+  // `defaultTimeoutMs()` via an AbortController, mirroring callNodeRaw
+  // (L1137): one controller spans the whole request lifecycle so a stall in
+  // either the headers or the body read trips the same deadline. The
+  // genuinely-soft outcomes (refused, missing fields, connection error) still
+  // fail soft with `return null` so fbrain proceeds unattested exactly as
+  // before; only a TIMEOUT surfaces the canonical `service_timeout` error, so a
+  // contended/wedged node yields the bounded heavy-load/idempotent-retry hint
+  // instead of a silent unbounded hang.
+  const timeoutMs = defaultTimeoutMs();
+  // Fetch + parse JSON under a single deadline. Returns null when the response
+  // is non-OK (caller's soft path); throws the canonical service_timeout error
+  // when the request or body read stalls past the deadline.
+  const fetchJsonWithDeadline = async (
+    path: string,
+    url: string,
+    init: RequestInit & { unix?: string },
+  ): Promise<Record<string, unknown> | null> => {
+    const controller = new AbortController();
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
+    }, timeoutMs);
+    try {
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      if (!res.ok) {
+        verbose(`owner-session ${path} refused (HTTP ${res.status})`);
+        return null;
+      }
+      return (await res.json()) as Record<string, unknown>;
+    } catch (err) {
+      if (isTimeoutError(err)) {
+        verbose(`owner-session ${path} timed out after ${timeoutMs}ms`);
+        throw timeoutError(path, "POST", "node", timeoutMs, err);
+      }
+      throw err;
+    } finally {
+      done = true;
+      clearTimeout(timer);
+    }
+  };
+
   // Mint over the UDS control socket (a verb that exists ONLY on the
   // owner-attested channel). Bun's fetch speaks HTTP over a Unix socket via the
   // `unix` option, keeping fbrain on its single global-fetch HTTP stack.
@@ -119,15 +163,12 @@ export async function attestOwnerSession(
   try {
     // trace-egress: loopback (UDS control socket on the local machine; pairing
     // mint, never leaves the host)
-    const res = await fetch("http://localhost/control/browser-pairing-code", {
-      method: "POST",
-      unix: socketPath,
-    } as RequestInit & { unix: string });
-    if (!res.ok) {
-      verbose(`owner-session mint refused (HTTP ${res.status})`);
-      return null;
-    }
-    const body = (await res.json()) as Record<string, unknown>;
+    const body = await fetchJsonWithDeadline(
+      "/control/browser-pairing-code",
+      "http://localhost/control/browser-pairing-code",
+      { method: "POST", unix: socketPath },
+    );
+    if (body === null) return null;
     const code = body.pairing_code;
     if (typeof code !== "string" || code.length === 0) {
       verbose("owner-session mint response missing pairing_code");
@@ -135,6 +176,8 @@ export async function attestOwnerSession(
     }
     pairingCode = code;
   } catch (err) {
+    // service_timeout surfaces; only genuinely-soft failures degrade to null.
+    if (err instanceof FbrainError && err.code === "service_timeout") throw err;
     verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
@@ -142,16 +185,16 @@ export async function attestOwnerSession(
   try {
     // trace-egress: loopback (local daemon TCP listener; pairing-code exchange,
     // never leaves the host)
-    const res = await fetch(`${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: pairingCode }),
-    });
-    if (!res.ok) {
-      verbose(`owner-session exchange refused (HTTP ${res.status})`);
-      return null;
-    }
-    const body = (await res.json()) as Record<string, unknown>;
+    const body = await fetchJsonWithDeadline(
+      "/api/session/browser-pair",
+      `${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: pairingCode }),
+      },
+    );
+    if (body === null) return null;
     const token = body.session_token;
     if (typeof token !== "string" || token.length === 0) {
       verbose("owner-session exchange response missing session_token");
@@ -160,6 +203,7 @@ export async function attestOwnerSession(
     verbose("owner-session attested");
     return token;
   } catch (err) {
+    if (err instanceof FbrainError && err.code === "service_timeout") throw err;
     verbose(`owner-session exchange failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
