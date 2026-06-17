@@ -146,10 +146,16 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // 5 attempts is the READ_RETRY_ATTEMPTS default — exhausting the
-    // budget on a genuinely-empty result is the documented behavior.
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(5);
-    expect(lines).toEqual(["no records"]);
+    // 5 attempts is the READ_RETRY_ATTEMPTS default for the filtered sweep,
+    // then the empty-result hint path probes hasAnyLiveRecord once per schema
+    // hash (spike included) → 5 + 1 = 6 spike /api/query calls.
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(6);
+    // Brain is genuinely empty → the create-your-first hint (a filter was set,
+    // but an empty brain wins: there's nothing to filter, so guide the new dev).
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no records");
+    expect(lines[1]).toContain("no records yet");
+    expect(lines[1]).toContain("fbrain <type> new <slug>");
   });
 
   test("with --tag filter (no --status): retries on empty-then-hit", async () => {
@@ -193,8 +199,13 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
-    expect(lines).toEqual(["no records"]);
+    // One sweep call (no retry without a filter), then the empty-result hint
+    // path probes hasAnyLiveRecord across every schema → +1 spike call.
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // Genuinely-empty brain → create-your-first hint.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no records");
+    expect(lines[1]).toContain("no records yet");
   });
 
   test("retry budget stops once a non-tombstoned row appears, even if user filter excludes it", async () => {
@@ -205,7 +216,11 @@ describe("listCmd — read-flake retry", () => {
     // terminate after the first hit (1 sweep), not keep retrying.
     const row = spikeRow("wrong-status", { status: "exploring" });
     const responses = new Map<string, Array<Fields[]>>([
-      [TEST_HASHES.spike, [[row]]],
+      // First slice = the sweep (terminates retry on the first hit); the
+      // second slice is consumed by the empty-result hint path's
+      // hasAnyLiveRecord probe, which must also see the live row so the brain
+      // reads as NON-empty → the filter hint (not "create your first").
+      [TEST_HASHES.spike, [[row], [row]]],
     ]);
     const { restore, callsBySchema } = stubFetch(responses);
     const lines: string[] = [];
@@ -219,8 +234,14 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
-    expect(lines).toEqual(["no records"]);
+    // 1 sweep (no retry — first call hit) + 1 hasAnyLiveRecord probe = 2.
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // A live record exists but the filter excluded it → the filter hint, NOT
+    // the create-your-first hint (the brain is not empty).
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no records");
+    expect(lines[1]).toContain("no records match that filter");
+    expect(lines[1]).not.toContain("no records yet");
   });
 
   test("unfiltered list caps at DEFAULT_LIST_LIMIT (20) with a 'K more' hint", async () => {
@@ -334,7 +355,11 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(lines).toEqual(["no records"]);
+    // The empty-wins branch still fires before the truncation-hint path; on a
+    // genuinely-empty brain it now also appends the create-your-first hint.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no records");
+    expect(lines[1]).toContain("no records yet");
   });
 
   test("columns align even when one slug is much longer than the rest", () => {
@@ -737,5 +762,76 @@ describe("listCmd — deterministic ordering on tied updated_at", () => {
     expect(lines.length).toBe(2);
     expect(lines[0]).toContain("zzz-newer");
     expect(lines[1]).toContain("aaa-older");
+  });
+});
+
+describe("listCmd — empty-node create-your-first hint (parity with search/ask)", () => {
+  test("brand-new EMPTY brain points the new dev at creating their first record", async () => {
+    // `fbrain list` is step 2 of init's Next-steps — the FIRST content command
+    // a fresh dev runs. On a zero-record brain every schema page is empty, so
+    // the hasAnyLiveRecord probe reports empty and the hint is the calm
+    // "create your first record" guidance search (#276) / ask (#279) give.
+    const responses = new Map<string, Array<Fields[]>>(); // every schema → []
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({ cfg, print: (l) => lines.push(l) });
+    } finally {
+      restore();
+    }
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no records");
+    expect(lines[1]).toMatch(/^hint:\s/);
+    expect(lines[1]).toContain("no records yet");
+    expect(lines[1]).toContain("fbrain <type> new <slug>");
+    expect(lines[1]).toContain("list again");
+  });
+
+  test("POPULATED brain + a filter that matches nothing gets the filter hint, NOT create-first", async () => {
+    // A live spike record exists, but `--tag nonexistent` matches none. The
+    // hasAnyLiveRecord probe sees the live row → the brain reads as non-empty,
+    // so the hint must be the filter-specific nudge, never "create your first"
+    // (that would be wrong — they DO have records).
+    const row = spikeRow("already-here", { tags: ["real-tag"] });
+    const responses = new Map<string, Array<Fields[]>>([
+      // First slice: the --tag sweep (retries on empty, but this hits on the
+      // first call → terminates). Second slice: the hasAnyLiveRecord probe,
+      // which must also see the live row.
+      [TEST_HASHES.spike, [[row], [row]]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({ cfg, type: "spike", tag: "nonexistent", print: (l) => lines.push(l) });
+    } finally {
+      restore();
+    }
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("no records");
+    expect(lines[1]).toMatch(/^hint:\s/);
+    expect(lines[1]).toContain("no records match that filter");
+    expect(lines[1]).not.toContain("no records yet");
+  });
+
+  test("--json on an empty brain keeps stdout `[]` and routes the hint to stderr", async () => {
+    const responses = new Map<string, Array<Fields[]>>(); // empty brain
+    const { restore } = stubFetch(responses);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        json: true,
+        print: (l) => stdout.push(l),
+        printErr: (l) => stderr.push(l),
+      });
+    } finally {
+      restore();
+    }
+    // Stdout is a single parseable empty array — jq pipelines stay clean.
+    expect(stdout).toEqual(["[]"]);
+    // The hint lands on stderr.
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain("no records yet");
   });
 });

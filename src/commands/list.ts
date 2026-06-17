@@ -5,6 +5,7 @@ import type { Config } from "../config.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
+  hasAnyLiveRecord,
   isTombstoned,
   listRecords,
   schemaHashFor,
@@ -112,10 +113,37 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // effect. (Iron: the cap is a UX guard against floods, not a signal.)
   if (filtered.length === 0) {
     opts.onResult?.([]);
+    // Context-aware no-result hint, completing the empty-node-hint trilogy
+    // (list/search/ask). `list` is step 2 of init's own Next-steps — the
+    // FIRST content command a brand-new dev runs — so a bare `no records`
+    // dead-ends them. Probe whether the brain holds ANY live record (a cheap
+    // extra round-trip, paid only on the no-result path, like search/ask) and:
+    //   - genuinely-empty brain → the same calm "create your first record"
+    //     guidance search (#276) / ask (#279) already give the new dev.
+    //   - records exist but a --type/--status/--tag filter matched none → a
+    //     filter-specific nudge instead; "create your first" would be wrong
+    //     (mirrors search.ts's "populated brain that matched nothing keeps a
+    //     different hint" split).
+    // `!filteredQuery && non-empty` is impossible (no filter on a non-empty
+    // brain can't yield zero), so it falls through to the empty-brain hint.
+    const filteredQuery =
+      opts.type !== undefined || opts.status !== undefined || opts.tag !== undefined;
+    const empty = !(await hasAnyLiveRecord(node, opts.cfg));
+    // Filter hint only when a filter is active AND the brain has records;
+    // every other shape (empty brain; or the impossible no-filter-yet-zero
+    // case) falls through to the new-dev create-your-first guidance.
+    const hint =
+      !empty && filteredQuery
+        ? "hint:  no records match that filter — try `fbrain list` with no --type/--status/--tag"
+        : "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then list again";
     if (opts.json) {
+      // Stdout stays the parseable empty array `[]` so jq pipelines see a
+      // clean empty array, never the hint text; the hint goes to stderr.
       print("[]");
+      printErr(hint);
     } else {
       print("no records");
+      print(hint);
     }
     return;
   }
