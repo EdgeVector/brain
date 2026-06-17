@@ -388,7 +388,34 @@ describe("fbrain_ask tool", () => {
       if (url.includes("/api/query") && typeof init?.body === "string") {
         try {
           const body = JSON.parse(init.body) as Record<string, unknown>;
-          queriedSchemas.push(String(body.schema_name ?? ""));
+          const schema = String(body.schema_name ?? "");
+          queriedSchemas.push(schema);
+          // Seed one live (non-matching) design row so the BM25 corpus is
+          // non-empty: that lets ask's no-match empty-brain fast-path
+          // short-circuit WITHOUT a `hasAnyLiveRecord` walk that would query
+          // every type (including task) and break the type-filter assertion.
+          if (schema === TEST_HASHES.design) {
+            return {
+              status: 200,
+              body: {
+                ok: true,
+                results: [
+                  {
+                    fields: {
+                      slug: "seed",
+                      title: "Seed",
+                      body: "octopus blueberry zucchini",
+                      status: "draft",
+                      tags: [],
+                      created_at: "2026-01-01T00:00:00Z",
+                      updated_at: "2026-01-01T00:00:00Z",
+                    },
+                    key: { hash: "seed", range: null },
+                  },
+                ],
+              },
+            };
+          }
         } catch {
           // ignore
         }
