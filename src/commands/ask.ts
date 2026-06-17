@@ -35,6 +35,7 @@ import {
 import type { Config } from "../config.ts";
 import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
 import {
+  hasAnyLiveRecord,
   isTombstoned,
   listRecords,
   resolveTypeFilter,
@@ -417,10 +418,38 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }));
   opts.onResult?.(payload);
 
-  if (opts.json) {
+  if (resolved.length === 0) {
+    // Context-aware no-match hint, mirroring `fbrain search` (#276). `ask` is a
+    // BM25 + vector hybrid, so on a POPULATED brain it almost never returns
+    // zero — this branch is reached almost exclusively on a brand-new EMPTY
+    // brain (a new dev following the init next-steps, which point them at both
+    // `search` AND `ask` before they've created anything). Probe whether the
+    // brain holds any live record (a cheap extra round-trip, paid only on the
+    // no-match path) and, when it's empty, point them at creating their first
+    // record — the same calm guidance `search` now gives. A populated brain
+    // that simply matched nothing gets a terse retry nudge.
+    //
+    // Fast-path: the BM25 corpus we already built walked the active types, so a
+    // non-empty corpus PROVES the brain holds a live record — skip the extra
+    // probe round-trip entirely. We only pay the `hasAnyLiveRecord` walk when
+    // the corpus came back empty (the new-dev empty-brain case, or a `--type`
+    // filter whose type has no records — the probe checks ALL types).
+    const empty = docs.length === 0 && !(await hasAnyLiveRecord(node, opts.cfg));
+    const hint = empty
+      ? "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then ask again"
+      : "hint:  nothing matched — try fewer or different terms";
+    if (opts.json) {
+      // Stdout stays the parseable empty array `[]` (== JSON.stringify(payload)
+      // when nothing resolved); the hint goes to stderr so jq pipelines see a
+      // clean empty array, never the hint text.
+      print(JSON.stringify(payload));
+      printErr(hint);
+    } else {
+      print("no matches");
+      print(hint);
+    }
+  } else if (opts.json) {
     print(JSON.stringify(payload));
-  } else if (resolved.length === 0) {
-    print("no matches");
   } else if (opts.verbose) {
     // Verbose: per-ranker debug columns (bm25=, vec=, +exp[...]).
     // Expansion column collapses when every row has no expansion hits;

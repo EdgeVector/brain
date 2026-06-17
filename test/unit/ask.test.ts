@@ -573,8 +573,27 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         const body = init?.body ? JSON.parse(init.body as string) : undefined;
         const schema = (body as { schema_name: string }).schema_name;
         queryCounts.set(schema, (queryCounts.get(schema) ?? 0) + 1);
+        // Seed one live (non-matching) design row so the BM25 corpus is
+        // non-empty: that lets askCmd's no-match empty-brain fast-path
+        // short-circuit (corpus proves the brain holds a record) WITHOUT a
+        // second `hasAnyLiveRecord` walk that would query concept/preference
+        // and break the strict per-type counts this test asserts.
+        const rows =
+          schema === TEST_HASHES.design
+            ? [
+                {
+                  fields: designRow("seed", "octopus blueberry zucchini"),
+                  key: { hash: "seed", range: null },
+                },
+              ]
+            : [];
         return new Response(
-          JSON.stringify({ ok: true, results: [], total_count: 0, returned_count: 0 }),
+          JSON.stringify({
+            ok: true,
+            results: rows,
+            total_count: rows.length,
+            returned_count: rows.length,
+          }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
@@ -616,7 +635,12 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     const cfg = buildTestCfg();
     const stub = installFetchStub({
       queries: {
-        // No records anywhere — every type query returns [].
+        // One live (non-matching) design row so the BM25 corpus is non-empty:
+        // the query "anything" shares no tokens with it, so nothing resolves,
+        // but askCmd's no-match fast-path can short-circuit on a non-empty
+        // corpus WITHOUT a second `hasAnyLiveRecord` walk (which would add
+        // queries and break the exact RECORD_TYPES.length count below).
+        [TEST_HASHES.design]: [designRow("seed", "octopus blueberry zucchini")],
       },
       vectorHits: [
         vectorHit({ schemaName: TEST_HASHES.design, slug: "ghost", score: 0.9 }),
@@ -1026,5 +1050,85 @@ describe("askCmd query deduplication", () => {
     // And no wasted HTTP: the duplicate expansion does NOT trigger a
     // second vector call. Pre-fix this was 2.
     expect(stub.searchCalls).toBe(1);
+  });
+});
+
+describe("askCmd no-match hint (mirrors search #276)", () => {
+  test("empty brain → calm create-first hint, not a bare `no matches`", async () => {
+    // The brand-new-dev cut: `fbrain init`'s next-steps point a fresh dev at
+    // BOTH `fbrain search` and `fbrain ask` before they've created anything.
+    // On a zero-record brain ask resolves nothing AND the empty-brain probe
+    // finds no live record, so the hint must be the same calm "create your
+    // first record" guidance `search` now gives — never a dead-end `no
+    // matches` with no recovery.
+    const cfg = buildTestCfg();
+    // Empty corpus, no vector hits → nothing resolves, and every /api/query
+    // page comes back empty so hasAnyLiveRecord() reads the brain as empty.
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const printed: string[] = [];
+    await askCmd({
+      cfg,
+      query: "anything",
+      print: (line) => printed.push(line),
+    });
+
+    expect(printed).toContain("no matches");
+    const hint = printed.find((l) => l.startsWith("hint:"));
+    expect(hint).toBeDefined();
+    expect(hint).toContain("no records yet");
+    expect(hint).toContain("fbrain <type> new <slug>");
+    expect(hint).toContain("then ask again");
+  });
+
+  test("populated brain, nothing matched → terse retry nudge, not the create-first hint", async () => {
+    // ask is a BM25 + vector hybrid, so a populated brain almost never returns
+    // zero — but when it does, the new-dev create-first guidance would be
+    // wrong (there ARE records). The probe must distinguish the two: a live
+    // record exists, so the hint is the terse "try fewer/different terms".
+    const cfg = buildTestCfg();
+    // One live design record (so hasAnyLiveRecord → true) whose body shares no
+    // tokens with the query, and no vector hits → nothing resolves.
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: [designRow("alpha", "alpha beta gamma")] },
+      vectorHits: [],
+    });
+
+    const printed: string[] = [];
+    await askCmd({
+      cfg,
+      query: "zzzqqqxxnomatch99",
+      print: (line) => printed.push(line),
+    });
+
+    expect(printed).toContain("no matches");
+    const hint = printed.find((l) => l.startsWith("hint:"));
+    expect(hint).toBeDefined();
+    expect(hint).toContain("nothing matched");
+    // Must NOT show the empty-brain create-first guidance on a populated brain.
+    expect(hint).not.toContain("no records yet");
+  });
+
+  test("empty-state hint routes to stderr under --json so stdout stays `[]`", async () => {
+    // The --json contract: stdout is a single parseable empty array (jq
+    // pipelines stay clean) and the hint lands on stderr only.
+    const cfg = buildTestCfg();
+    installFetchStub({ queries: {}, vectorHits: [] });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "anything",
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    // Stdout is exactly the empty array — no hint, no `no matches` sentinel.
+    expect(stdout).toEqual(["[]"]);
+    expect(JSON.parse(stdout[0]!)).toEqual([]);
+    // The hint lands on stderr.
+    expect(stderr.some((l) => l.startsWith("hint:") && l.includes("no records yet"))).toBe(true);
   });
 });
