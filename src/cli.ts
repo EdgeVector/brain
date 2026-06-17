@@ -622,6 +622,20 @@ export async function main(argv: Argv): Promise<number> {
       console.error(`hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`);
       return 1;
     }
+    // A top-level create-verb (`new`/`create`/`add`) is muscle memory from
+    // git/gh/cargo/npm/fkanban, but fbrain creates records *per type*
+    // (`<type> new <slug>`). Pure Levenshtein lands these on an unrelated read
+    // verb (`new`→`get`, `add`→`ask`) — a misleading suggestion is worse than
+    // none on the highest-traffic new-dev action. Point at the real create
+    // family instead, before the generic nearest-match fallback below.
+    if (CREATE_SYNONYMS.includes(cmd)) {
+      const types = RECORD_TYPES.join(" | ");
+      console.error(`error: \`fbrain ${cmd}\` isn't a command — records are created per type.`);
+      console.error(`hint:  Use \`fbrain <type> new <slug>\`, e.g. \`fbrain design new my-first-idea\`.`);
+      console.error(`       Types: ${types}`);
+      console.error(`       (or pipe markdown:  fbrain put <slug> --type <type>)`);
+      return 1;
+    }
     const suggestion = suggestCommand({
       single: cmd,
       compound: stripped[1] ? `${cmd} ${stripped[1]}` : undefined,
@@ -665,6 +679,13 @@ function isCommand(s: string): s is Command {
 // so adding a new record type wires up "Did you mean?" and `fbrain help
 // "<type> new"` automatically.
 const COMPOUND_COMMANDS: readonly string[] = RECORD_TYPES.map((t) => `${t} new`);
+
+// Top-level record-creation synonyms a new dev reaches for by analogy with
+// other CLIs (git/gh/cargo/npm/fkanban). None is a real fbrain command —
+// records are created via `<type> new <slug>` — so these get a targeted
+// create-family hint instead of a misleading nearest-match (see the unknown-
+// command handler above).
+const CREATE_SYNONYMS: readonly string[] = ["new", "create", "add"];
 
 // Suggest the closest valid command for an unknown input. `single` is matched
 // against every entry in COMMANDS; `compound` (e.g. `desogn new`) is matched
