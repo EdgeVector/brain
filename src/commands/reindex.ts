@@ -1,16 +1,21 @@
 // `fbrain reindex [--type T] [--dry-run] [--verbose]` — refresh embeddings
 // for every live fbrain record.
 //
-// Workaround for the H2a finding in docs/phase-7-search-latency-spike.md:
+// Related to the H2a finding in docs/phase-7-search-latency-spike.md:
 // `fbrain delete` is soft (tombstone tag) and does NOT purge the
 // corresponding entries from fold_db's `EmbeddingIndex`. Over time, the
-// native-index top-50 fills with phantom embeddings + entries from other
-// schemas, drowning out fresh records. Until the upstream purge lands
-// (G3e), this command iterates every live record and re-issues an update
-// mutation, which re-runs fold_db's `index_record` and refreshes the
-// embedding entry in place. The phantom entries for tombstoned records
-// stay in the index — this just guarantees the live ones are present
-// and current.
+// native-index top-50 fills with stale embeddings + entries from other
+// schemas, drowning out fresh records. This command iterates every live
+// record and re-issues an update mutation, which re-runs fold_db's
+// `index_record`. IMPORTANT: fold_db's index is append-only — re-issuing
+// the update does NOT replace the prior embedding in place; it APPENDS a
+// fresh embedding and the previous entry persists as stale. So reindex
+// only guarantees each live record's CURRENT embedding is present; it does
+// NOT de-duplicate the index and it does NOT reduce pollution (it actually
+// adds one stale entry per record re-put). The true purge of stale and
+// tombstoned embeddings is upstream fold_db work, deferred (G3e
+// tombstone-purge / G3d schema-scoped search) and not available at the
+// fbrain layer. See `fbrain doctor --freshness` pollution-probe.
 //
 // Iterates all 8 types by default; --type narrows. Tombstoned records
 // (those carrying TOMBSTONE_TAG) are skipped, NOT reindexed.
