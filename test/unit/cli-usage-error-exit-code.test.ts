@@ -43,6 +43,83 @@ async function runCli(
   return { code, stdout, stderr };
 }
 
+// Writes a hand-written config pointing at a bogus (connection-refused) node
+// into a fresh fake HOME and returns its path. The malformed-input cases on the
+// put/create path read config BEFORE the input validation that throws (the put
+// handler reads config, then frontmatter parsing throws inside putCmd; the
+// create handler reads config, then validateSlug throws inside recordNew) — and
+// both throw BEFORE any HTTP traffic, so the bogus node is never contacted
+// (Tom's :9001 brain is never touched). Without a config they'd fail earlier
+// with config_missing (operational, exit 1) and never reach the input error.
+function writeBogusConfig(fakeHome: string): string {
+  const cfgPath = join(fakeHome, "config.json");
+  writeFileSync(
+    cfgPath,
+    JSON.stringify({
+      configVersion: 1,
+      nodeUrl: "http://127.0.0.1:59999",
+      schemaServiceUrl: "http://127.0.0.1:59999",
+      userHash: "0".repeat(64),
+      schemaHashes: {},
+      designSchemaHash: "0".repeat(64),
+      taskSchemaHash: "0".repeat(64),
+    }),
+  );
+  return cfgPath;
+}
+
+// Variant that pipes a body on stdin — needed for the `put` malformed-input
+// cases, whose errors fire on the *parsed stdin* (frontmatter parsing). We must
+// NOT set FBRAIN_NO_STDIN (that would short-circuit the stdin read and never
+// reach the frontmatter parser).
+async function runCliWithStdin(
+  args: string[],
+  stdin: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const fakeHome = mkdtempSync(join(tmpdir(), "fbrain-usage-exit-stdin-"));
+  const cfgPath = writeBogusConfig(fakeHome);
+  const env = {
+    ...process.env,
+    HOME: fakeHome,
+    FBRAIN_CONFIG: cfgPath,
+  } as Record<string, string>;
+  delete env.FBRAIN_NO_STDIN;
+  const proc = Bun.spawn(["bun", CLI_PATH, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: new TextEncoder().encode(stdin),
+    env,
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const code = await proc.exited;
+  return { code, stdout, stderr };
+}
+
+// Variant that runs with a bogus config present but no stdin — for the
+// invalid-slug create case, which reaches validateSlug (and throws) before any
+// HTTP traffic once a config exists.
+async function runCliWithConfig(
+  args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const fakeHome = mkdtempSync(join(tmpdir(), "fbrain-usage-exit-cfg-"));
+  const cfgPath = writeBogusConfig(fakeHome);
+  const proc = Bun.spawn(["bun", CLI_PATH, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+    env: { ...process.env, FBRAIN_NO_STDIN: "1", HOME: fakeHome, FBRAIN_CONFIG: cfgPath },
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const code = await proc.exited;
+  return { code, stdout, stderr };
+}
+
 describe("fbrain usage/argument errors → exit 2", () => {
   // The four representative usage classes from the card's contract table.
   // None of these reaches a node — they short-circuit in main() / the arg
@@ -77,6 +154,44 @@ describe("fbrain usage/argument errors → exit 2", () => {
 
   test("bad flag combination (`ask … --explain` without --expand) → exit 2", async () => {
     const { code } = await runCli(["ask", "foo", "--explain"]);
+    expect(code).toBe(2);
+  });
+
+  // Malformed-input errors on the put/create path. These are "you handed me a
+  // bad record" (fix your input), the same class as missing_type /
+  // unsupported_type / empty_stdin which already exit 2 — not operational. The
+  // frontmatter cases parse stdin and throw before any node access; the
+  // invalid-slug case rejects the bad slug arg before any node access too.
+  test("put with unclosed frontmatter → exit 2", async () => {
+    const { code } = await runCliWithStdin(
+      ["put", "some-slug"],
+      "---\ntype: concept\ntitle: oops\nbody no close\n",
+    );
+    expect(code).toBe(2);
+  });
+
+  test("put with malformed frontmatter → exit 2", async () => {
+    const { code } = await runCliWithStdin(
+      ["put", "some-slug"],
+      "---\n  : : :\n---\nbody\n",
+    );
+    expect(code).toBe(2);
+  });
+
+  test("put with unfenced frontmatter → exit 2", async () => {
+    const { code } = await runCliWithStdin(
+      ["put", "some-slug"],
+      "type: concept\ntitle: x\nbody\n",
+    );
+    expect(code).toBe(2);
+  });
+
+  test("create with an invalid slug → exit 2", async () => {
+    // A create with bad slug chars: rejected by validateSlug (invalid_slug)
+    // before any HTTP traffic. Same class as missing_slug (already exit 2). A
+    // config must exist so the create reaches validateSlug rather than
+    // short-circuiting on config_missing (operational, exit 1).
+    const { code } = await runCliWithConfig(["concept", "new", "Bad Slug!"]);
     expect(code).toBe(2);
   });
 });
