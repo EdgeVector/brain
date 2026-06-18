@@ -194,6 +194,22 @@ describe("fbrain usage/argument errors → exit 2", () => {
     const { code } = await runCliWithConfig(["concept", "new", "Bad Slug!"]);
     expect(code).toBe(2);
   });
+
+  test("put with an invalid status: in frontmatter → exit 2", async () => {
+    // An invalid status enum value (invalid_status) is a caller-supplied
+    // malformed value, same class as invalid_slug — usage error, exit 2. On
+    // the put path `ensureStatus` runs after frontmatter parse + validateSlug
+    // but BEFORE any HTTP traffic (the bogus node is never contacted), so the
+    // bad status is caught and classified as a usage error. The status-update
+    // surface (`status <slug> <bad>`) resolves the record on a live node
+    // before ensureStatus, so its exit-2 path is exercised in the app-run
+    // verification rather than this no-node spawn test.
+    const { code } = await runCliWithStdin(
+      ["put", "some-slug"],
+      "---\ntype: concept\ntitle: x\nstatus: not-a-real-status\n---\nbody\n",
+    );
+    expect(code).toBe(2);
+  });
 });
 
 describe("fbrain operational failures stay exit 1", () => {

@@ -170,6 +170,33 @@ describe("record", () => {
     expect(() => ensureStatus("design", "in_progress")).toThrow(FbrainError);
     expect(() => ensureStatus("task", "draft")).toThrow(FbrainError);
   });
+
+  test("ensureStatus tags the throw with code invalid_status (→ usage error, exit 2)", () => {
+    // An invalid status enum value is a caller-supplied malformed value, the
+    // same class as invalid_slug. The CLI classifier (USAGE_ERROR_CODES in
+    // cli.ts) maps `invalid_status` to exit 2; this pins the code so both
+    // surfaces that call ensureStatus — `status <slug> <bad>` and `put` with a
+    // bad `status:` in frontmatter — stay exit 2 rather than slipping back to
+    // the operational exit 1.
+    try {
+      ensureStatus("task", "not-a-real-status");
+      throw new Error("expected ensureStatus to throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      expect((err as FbrainError).code).toBe("invalid_status");
+    }
+  });
+});
+
+describe("USAGE_ERROR_CODES classifies invalid_status", () => {
+  // The exit-code contract: a malformed status VALUE the caller supplied is a
+  // usage error (exit 2), not an operational failure (exit 1). Pin membership
+  // directly so a future edit to the set can't silently drop invalid_status
+  // back to exit 1 (the hole closed by card invalid-status-value-exit-2).
+  test("invalid_status is a usage error (exit 2)", async () => {
+    const { USAGE_ERROR_CODES } = await import("../../src/cli.ts");
+    expect(USAGE_ERROR_CODES.has("invalid_status")).toBe(true);
+  });
 });
 
 describe("computeBackoffMs", () => {
