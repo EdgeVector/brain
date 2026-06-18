@@ -143,12 +143,15 @@ Run \`fbrain help <command>\` for per-command usage.`;
 // (--title/--tag/--body/--force) flag set. Task is the one type with an extra
 // --design parent-link arg, so it keeps its own bespoke help block.
 function simpleNewHelp(type: RecordType): string {
-  return `fbrain ${type} new <slug> [--title T] [--tag T]... [--body STR] [--force]
+  return `fbrain ${type} new <slug> [--title T] [--tag T]... [--body STR] [--force] [--json]
 
   --title     one-line name (defaults to slug)
   --tag       repeatable; tag value to attach
   --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
-  --force     overwrite an existing slug`;
+  --force     overwrite an existing slug
+  --json      emit \`{ok, type, slug}\` on stdout; the human \`created …\` line
+              moves to stderr so \`--json\` stdout is always parseable. On
+              failure a \`{error, hint}\` JSON object is emitted to stdout too.`;
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
@@ -172,20 +175,23 @@ live capability is already on disk.
                          FBRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb
                          CLI on PATH (fast-fails with a clear message if not).`,
   design: simpleNewHelp("design"),
-  task: `fbrain task new <slug> [--title T] [--design D] [--tag T]... [--body STR] [--force]
+  task: `fbrain task new <slug> [--title T] [--design D] [--tag T]... [--body STR] [--force] [--json]
 
   --title     one-line name (defaults to slug)
   --design    parent design slug (rejected if it does not exist)
   --tag       repeatable; tag value to attach
   --body      markdown body; if omitted and stdin is non-TTY, body is read from stdin
-  --force     overwrite an existing slug`,
+  --force     overwrite an existing slug
+  --json      emit \`{ok, type, slug}\` on stdout; the human \`created …\` line
+              moves to stderr so \`--json\` stdout is always parseable. On
+              failure a \`{error, hint}\` JSON object is emitted to stdout too.`,
   concept: simpleNewHelp("concept"),
   preference: simpleNewHelp("preference"),
   reference: simpleNewHelp("reference"),
   agent: simpleNewHelp("agent"),
   project: simpleNewHelp("project"),
   spike: simpleNewHelp("spike"),
-  put: `fbrain put [<slug>] [--type T]
+  put: `fbrain put [<slug>] [--type T] [--json]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
 and upsert a record. Re-putting the same slug updates in place —
@@ -201,6 +207,10 @@ If both are set and disagree, the put errors with type_conflict.
 
   --type    design | task | concept | preference | reference | agent | project | spike
             (case-insensitive; overrides absent frontmatter, errors on conflict)
+  --json    emit \`{ok, slug, created}\` on stdout (\`created\` is true on insert,
+            false on update); the human \`created/updated …\` line moves to
+            stderr so \`--json\` stdout is always parseable. On failure a
+            \`{error, hint}\` JSON object is emitted to stdout too.
 
 Frontmatter (between leading \`---\` lines) keys honored:
   slug     string         (positional arg overrides; conflict if both differ)
@@ -247,9 +257,13 @@ type's status enum, updates updated_at, and writes back.
             with a new-status; the update form keeps its human transition
             line. On failure, a \`{error, hint}\` JSON object is emitted to
             stdout too (human \`error:\`/\`hint:\` lines still go to stderr).`,
-  link: `fbrain link <task-slug> <design-slug>
+  link: `fbrain link <task-slug> <design-slug> [--json]
 
-Rejects a non-existent design slug.`,
+Rejects a non-existent design slug.
+
+  --json    emit \`{ok, task, design}\` on stdout; the human \`linked …\` line
+            moves to stderr so \`--json\` stdout is always parseable. On failure
+            a \`{error, hint}\` JSON object is emitted to stdout too.`,
   search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
 
 Semantic search across indexed records. Dedupes fragment hits per record
@@ -393,7 +407,7 @@ for the full evidence and the conditions under which this command can
 become a real share.
 
 Prints a pointer and exits 1.`,
-  delete: `fbrain delete <slug> [--type T] [--force] [--yes]
+  delete: `fbrain delete <slug> [--type T] [--force] [--yes] [--json]
 
 Soft-deletes the record. fold_db's mutation pipeline is append-only — see
 docs/phase-5-delete-spike.md — so the workaround overwrites every user
@@ -413,6 +427,9 @@ anyway — the tasks' design references are then left dangling.
   --force     delete a design even if live tasks still link to it
   --yes, -y   harmless no-op; delete is non-interactive so no confirmation
               prompt is shown. Accepted so scripts can pass \`-y\` uniformly.
+  --json      emit \`{ok, slug, deleted}\` on stdout; the human \`deleted …\` line
+              moves to stderr so \`--json\` stdout is always parseable. On
+              failure a \`{error, hint}\` JSON object is emitted to stdout too.
 
 After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
@@ -520,6 +537,12 @@ const DESIGN_OPTIONS = {
   tag: { type: "string", multiple: true },
   body: { type: "string" },
   force: { type: "boolean", default: false },
+  // Machine-readable mode: emit a `{ok,type,slug}` success object on stdout
+  // and route the human `created …` line to stderr — same convention as the
+  // read verbs (get/list/status). Accepted so an agent/script that uniformly
+  // appends `--json` to every fbrain call doesn't dead-end on a write verb
+  // with parseArgs's bare "Unknown option".
+  json: { type: "boolean", default: false },
 } as const;
 const TASK_OPTIONS = {
   title: { type: "string" },
@@ -527,8 +550,16 @@ const TASK_OPTIONS = {
   tag: { type: "string", multiple: true },
   body: { type: "string" },
   force: { type: "boolean", default: false },
+  // See DESIGN_OPTIONS.json.
+  json: { type: "boolean", default: false },
 } as const;
-const PUT_OPTIONS = { type: { type: "string" } } as const;
+const PUT_OPTIONS = {
+  type: { type: "string" },
+  // Machine-readable mode: emit a `{ok,slug,created}` success object on
+  // stdout; the human `created/updated …` line moves to stderr. See
+  // DESIGN_OPTIONS.json.
+  json: { type: "boolean", default: false },
+} as const;
 const GET_OPTIONS = {
   type: { type: "string" },
   // Machine-readable mode: emit the resolved record as a single JSON
@@ -605,6 +636,17 @@ const DELETE_OPTIONS = {
   // destructive commands shouldn't dead-end on parseArgs's bare
   // "Unknown option '--yes'". Accept it silently so the invocation works.
   yes: { type: "boolean", short: "y", default: false },
+  // Machine-readable mode: emit a `{ok,slug,deleted}` success object on
+  // stdout; the human `deleted …` line moves to stderr. See
+  // DESIGN_OPTIONS.json.
+  json: { type: "boolean", default: false },
+} as const;
+// `link` takes no value flags, only `--json` for machine-readable success.
+const LINK_OPTIONS = {
+  // Machine-readable mode: emit a `{ok,task,design}` success object on
+  // stdout; the human `linked …` line moves to stderr. See
+  // DESIGN_OPTIONS.json.
+  json: { type: "boolean", default: false },
 } as const;
 const REINDEX_OPTIONS = {
   type: { type: "string" },
@@ -635,7 +677,7 @@ export const CLI_SPEC = {
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
   status: STATUS_OPTIONS,
-  link: EMPTY_OPTIONS,
+  link: LINK_OPTIONS,
   search: SEARCH_OPTIONS,
   ask: ASK_OPTIONS,
   doctor: DOCTOR_OPTIONS,
@@ -1199,7 +1241,15 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   const designSlug = (values as { design?: string }).design;
   if (designSlug) opts.designSlug = designSlug;
   await recordNew(opts);
-  console.log(`created ${type} ${slug}`);
+  // Under --json the structured success object is the stdout document; the
+  // human line moves to stderr so `--json` stdout stays parseable (mirrors
+  // the read verbs).
+  if (values.json) {
+    console.error(`created ${type} ${slug}`);
+    console.log(JSON.stringify({ ok: true, type, slug }));
+  } else {
+    console.log(`created ${type} ${slug}`);
+  }
   return 0;
 }
 
@@ -1361,7 +1411,21 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     }
     throw err;
   }
-  console.log(`${result.action} ${result.type} ${result.slug}`);
+  // Under --json the structured success object is the stdout document; the
+  // human line moves to stderr (mirrors the read verbs). `created` reuses
+  // put's existing created/updated signal.
+  if (values.json) {
+    console.error(`${result.action} ${result.type} ${result.slug}`);
+    console.log(
+      JSON.stringify({
+        ok: true,
+        slug: result.slug,
+        created: result.action === "created",
+      }),
+    );
+  } else {
+    console.log(`${result.action} ${result.type} ${result.slug}`);
+  }
   return 0;
 }
 
@@ -1482,11 +1546,11 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runLink(args: Argv, verbose: Verbose): Promise<number> {
-  const { positionals } = parseCommandArgs({
+  const { values, positionals } = parseCommandArgs({
     args,
     strict: true,
     allowPositionals: true,
-    options: EMPTY_OPTIONS,
+    options: LINK_OPTIONS,
   });
   const taskSlug = positionals[0];
   const designSlug = positionals[1];
@@ -1507,7 +1571,18 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     });
   }
   const cfg = readConfig();
-  await linkCmd({ cfg, taskSlug, designSlug, verbose });
+  const lOpts: Parameters<typeof linkCmd>[0] = { cfg, taskSlug, designSlug, verbose };
+  // Under --json the structured success object is the stdout document; route
+  // linkCmd's human `linked …` line to stderr and emit the payload from the
+  // `onResult` sink (the same value the MCP tool returns).
+  if (values.json) {
+    lOpts.print = (line: string) => console.error(line);
+    lOpts.onResult = (payload) =>
+      console.log(
+        JSON.stringify({ ok: true, task: payload.from_slug, design: payload.to_slug }),
+      );
+  }
+  await linkCmd(lOpts);
   return 0;
 }
 
@@ -1699,6 +1774,14 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
   if (type) dOpts.type = type;
   if (values.force) dOpts.force = true;
+  // Under --json the structured success object is the stdout document; route
+  // deleteRecord's human `deleted …` line to stderr and emit the payload from
+  // the `onResult` sink (the same value the MCP tool returns).
+  if (values.json) {
+    dOpts.print = (line: string) => console.error(line);
+    dOpts.onResult = (payload) =>
+      console.log(JSON.stringify({ ok: true, slug: payload.slug, deleted: true }));
+  }
   await withTypeAsPositionalHint(slug, () => deleteRecord(dOpts));
   return 0;
 }
