@@ -413,6 +413,60 @@ export async function verifyRecordVisible(
   );
 }
 
+// Vector-index visibility check for the WRITE confirmation path (MCP
+// `fbrain_put` only — see mcp/server.ts). `verifyRecordVisible` above proves
+// the row is queryable via /api/query (the record-list / BM25 surface that
+// `ask` and `list` read), but it says NOTHING about the NATIVE (vector) index
+// that `fbrain_search` and `ask`'s vector leg read: fold_db indexes the
+// embedding asynchronously AFTER the mutation returns, so a tight
+// put→search in one warm process (the MCP-agent loop) lands inside a
+// sub-second-to-~1s window where the row is record-list-visible but NOT yet
+// in the vector index, and `fbrain_search` returns every OTHER record except
+// the one just written. We close that window at the confirmation layer:
+// after the put's `verifyRecordVisible` passes, poll the native index until
+// the slug appears among the hits for a probe query (the record's own
+// title/slug text, scoped to its schema hash) on a SHORT bounded budget.
+//
+// Returns true as soon as the slug is in the index, false if the budget is
+// spent without seeing it (the caller reports `indexPending: true` — an
+// honest "your write landed but the vector index hasn't caught up yet"
+// signal — and never fails the write). Distinct, tighter budget than the
+// record-list retry: the vector index lags by a known sub-second window, so
+// a few quick attempts cover the common case without adding noticeable
+// latency to a put that has already confirmed record-list visibility. Errors
+// from the probe are swallowed (treated as "not yet visible" for that
+// attempt) — a flaky search must never fail or block a write that already
+// persisted.
+export const VECTOR_INDEX_VERIFY_ATTEMPTS = 5;
+export const VECTOR_INDEX_VERIFY_BACKOFF_MS = 350;
+
+export async function verifyVectorIndexed(
+  node: NodeClient,
+  schemaHash: string,
+  slug: string,
+  query: string,
+  options?: ReadRetryOptions,
+): Promise<boolean> {
+  const maxAttempts = options?.maxAttempts ?? VECTOR_INDEX_VERIFY_ATTEMPTS;
+  const ceilingMs = options?.backoffMs ?? VECTOR_INDEX_VERIFY_BACKOFF_MS;
+  const result = await withReadRetry(
+    async (): Promise<boolean> => {
+      try {
+        const hits = await node.search(query, { schemas: [schemaHash] });
+        return hits.some((h) => h.key_value?.hash === slug);
+      } catch {
+        // A flaky/unavailable native index must not fail a persisted write —
+        // treat the probe error as "not yet visible" so the loop either
+        // retries or times out into the honest `indexPending` signal.
+        return false;
+      }
+    },
+    (visible) => visible,
+    { ...options, maxAttempts, backoffMs: ceilingMs },
+  );
+  return result;
+}
+
 // Read-context alias for the same fast-miss helper. The dangling-reference /
 // liveness validators in `new`, `link`, `get`, and `search` previously wrapped
 // `findBySlug` in `withReadRetry(fn, r => r !== null)` to ride out the daemon's
