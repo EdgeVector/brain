@@ -93,6 +93,48 @@ export function resolvePrintSinks(opts: {
   };
 }
 
+// One-line, TTY-only column legend for the `search` / `ask` result tables.
+//
+// The leading number in both tables is an unlabeled relevance score whose
+// SCALE differs by verb — `search` renders a max-normalized cosine (top hit
+// is always `1.000`), `ask` renders a raw fused-RRF score (top hit ≈ 0.03).
+// To a first-time human the bare `0.0328` reads like noise; this legend names
+// the columns and flags that the two scores are NOT comparable. The MCP/agent
+// surface already documents the same distinction (src/mcp/server.ts), so this
+// closes the human-vs-agent gap on the CLI.
+//
+// Discipline (matches the weak-match advisory, which goes to stderr): the
+// legend is additive HUMAN context, never part of the parsed rows. It is
+// emitted ONLY when:
+//   - stdout is an interactive TTY (`isTty()` — piped/redirected output and
+//     agent consumers see byte-identical rows), and
+//   - the caller is NOT in `--json` mode, and
+//   - there is at least one result row (no legend above a no-match hint).
+// The caller is responsible for those gates; this helper just formats + emits.
+//
+// `dimmed` wraps the text in ANSI dim (2m) so it reads as a subordinate
+// caption under a real TTY. We never reach here off-TTY, so the escape codes
+// can't leak into a pipe.
+export function printColumnLegend(print: (line: string) => void, text: string): void {
+  print(dimmed(`  columns: ${text}`));
+}
+
+// ANSI dim wrapper. Only used for the column legend, which is gated on a real
+// TTY at the call site, so the escapes never reach a pipe or `--json` stream.
+function dimmed(s: string): string {
+  return `\x1b[2m${s}\x1b[0m`;
+}
+
+// Resolve whether stdout should be treated as an interactive TTY for human
+// affordances (the column legend). Mirrors the injectable-TTY pattern used by
+// `init-consent` so tests can force the flag without a real terminal; defaults
+// to `process.stdout.isTTY` (NOT stdin — the legend rides the stdout stream,
+// so the redirect that must suppress it is `> file` / `| cmd`, which clears
+// `stdout.isTTY`).
+export function resolveStdoutIsTty(opts: { isTty?: () => boolean }): boolean {
+  return (opts.isTty ?? (() => Boolean(process.stdout.isTTY)))();
+}
+
 // Resolve the `print` sink alone, for commands that only emit to stdout
 // (get, status, link, delete, reindex, usage, migrate, doctor, init,
 // init-consent). Same default as resolvePrintSinks().print so the two

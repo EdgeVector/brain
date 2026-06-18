@@ -1317,6 +1317,100 @@ describe("searchCmd", () => {
     expect(payload![0]!.snippet).toContain("5-minute TTL");
     expect(payload![0]!.snippet).not.toContain("Caching layer decision");
   });
+
+  // ── TTY column legend ──────────────────────────────────────────────────
+  // A dim, one-line legend names the columns and flags that `search`'s 0–1
+  // cosine is NOT comparable to `ask`'s fused RRF. It rides the STDOUT stream
+  // (same as the rows) but is HUMAN-ONLY: present only on an interactive TTY,
+  // absent under `--json` and when stdout is piped/redirected, so first-line
+  // parsers and agent consumers see byte-identical rows.
+  const installSingleHitMock = (): void => {
+    const recordRow = {
+      fields: {
+        slug: "alpha",
+        title: "Alpha design",
+        body: "blueberry octopus",
+        status: "draft",
+        tags: ["x"],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: "alpha", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({ slug: "alpha", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.42 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow], total_count: 1, returned_count: 1 } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+  };
+
+  test("prints a TTY column legend above the rows, on the stdout stream", async () => {
+    installSingleHitMock();
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "blueberry", print: (l) => lines.push(l), isTty: () => true });
+    // The legend is the first stdout line, labels the columns, and names the
+    // cosine scale — so a first-time human knows the leading 1.000 is a cosine.
+    expect(lines[0]).toContain("columns:");
+    expect(lines[0]).toContain("relevance");
+    expect(lines[0]).toContain("cosine");
+    // It is dim (ANSI 2m) and never reaches a pipe (off-TTY path drops it).
+    expect(lines[0]).toContain("\x1b[2m");
+    // The actual result row is unchanged and still present below it.
+    const rows = rowsOf(lines).filter((l) => !l.includes("columns:"));
+    expect(rows[0]).toContain("alpha");
+    expect(rows[0]).toContain("0.420");
+  });
+
+  test("suppresses the legend when stdout is NOT a TTY (piped/redirected)", async () => {
+    installSingleHitMock();
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "blueberry", print: (l) => lines.push(l), isTty: () => false });
+    // No legend; first stdout line is the result row, byte-identical to the
+    // pre-change output (so first-line parsers are unaffected).
+    expect(lines.some((l) => l.includes("columns:"))).toBe(false);
+    expect(lines.some((l) => l.includes("\x1b["))).toBe(false);
+    expect(lines[0]).toContain("alpha");
+    expect(lines[0]).toContain("0.420");
+  });
+
+  test("suppresses the legend under --json even on a TTY", async () => {
+    installSingleHitMock();
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "blueberry", json: true, print: (l) => lines.push(l), isTty: () => true });
+    // --json stdout is exactly one JSON array document — no legend line.
+    expect(lines).toHaveLength(1);
+    expect(lines.some((l) => l.includes("columns:"))).toBe(false);
+    expect(() => JSON.parse(lines[0]!)).not.toThrow();
+  });
+
+  test("no legend on an empty/no-match result, even on a TTY", async () => {
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [], total_count: 0, returned_count: 0 } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "nothingmatchesthis", print: (l) => lines.push(l), isTty: () => true });
+    // The no-match hint path runs; no legend above it.
+    expect(lines.some((l) => l.includes("columns:"))).toBe(false);
+  });
 });
 
 beforeEach(() => {});
