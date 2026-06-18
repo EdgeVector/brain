@@ -221,7 +221,9 @@ exists in multiple types (specify --type to disambiguate).
 
   --type    design | task | concept | preference | reference | agent | project | spike
   --json    emit the resolved record as a single JSON object on stdout
-            (parseable by \`jq\`). Errors still print to stderr.`,
+            (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
+            is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
+            print to stderr) so \`--json\` stdout is always parseable.`,
   list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N] [--json]
 
   --type        design | task | concept | preference | reference | agent | project | spike
@@ -231,7 +233,9 @@ exists in multiple types (specify --type to disambiguate).
   -n, --limit   max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
   --json        emit a JSON array of record summaries on stdout
                 ({type, slug, title, status, tags, design_slug?, created_at,
-                updated_at}); truncation hint routes to stderr.`,
+                updated_at}); truncation hint routes to stderr. On failure, a
+                \`{error, hint}\` JSON object is emitted to stdout too, so
+                \`--json\` stdout is always parseable.`,
   status: `fbrain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
@@ -241,7 +245,8 @@ type's status enum, updates updated_at, and writes back.
   --json    (show form only) emit the status as a single JSON object on
             stdout — \`{slug, type, status}\`, parseable by \`jq\`. Ignored
             with a new-status; the update form keeps its human transition
-            line. Errors still print to stderr.`,
+            line. On failure, a \`{error, hint}\` JSON object is emitted to
+            stdout too (human \`error:\`/\`hint:\` lines still go to stderr).`,
   link: `fbrain link <task-slug> <design-slug>
 
 Rejects a non-existent design slug.`,
@@ -264,7 +269,9 @@ indented under each row — so the answer is visible without a follow-up
                 on stdout (parseable by \`jq\`); \`snippet\` is the same
                 matching body extract shown under each human row. Empty
                 result is \`[]\`. Weak-match advisory and empty-result hint
-                route to stderr.`,
+                route to stderr. On failure, a \`{error, hint}\` JSON object
+                is emitted to stdout too, so \`--json\` stdout is always
+                parseable.`,
   ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--type T]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
@@ -299,7 +306,8 @@ follow-up \`fbrain get\`.
                 matching body extract shown under each human row. Empty
                 result is \`[]\`. Advisory notes, no-key / expansion-failure
                 notices, and the \`--explain\` expansions block all route to
-                stderr.
+                stderr. On failure, a \`{error, hint}\` JSON object is emitted
+                to stdout too, so \`--json\` stdout is always parseable.
 
 Cost: 0 LLM calls by default; 1 LLM call per invocation under --expand. Run
 with the global --verbose to see token + USD estimates and per-ranker debug.
@@ -328,7 +336,9 @@ Live health checks:
 
 With --json, emit the structured check results as a single JSON object
 on stdout instead of the human PASS/WARN/FAIL lines (same verdict + exit
-code). Each entry carries name, tag (PASS/WARN/FAIL), ok, detail, fix.
+code). Each entry carries name, tag (PASS/WARN/FAIL), ok, detail, fix. If
+the run itself errors out (e.g. missing config), a \`{error, hint}\` JSON
+object is emitted to stdout instead, so \`--json\` stdout stays parseable.
 
 With --freshness, additionally runs the G3 retrieval-quality probes
 (see docs/phase-7-search-latency-spike.md):
@@ -640,7 +650,21 @@ export const CLI_SPEC = {
 
 type Argv = string[];
 
+// Did the invocation ask for machine-readable output? `--json` is a
+// per-command flag (consumed by each command's own parseArgs, not the global
+// pass below), but the top-level catch block needs to know about it so a
+// FAILING `--json` command can emit a parseable JSON error object on stdout
+// instead of a bare `error:` line that chokes `... --json | jq`. Scan the raw
+// argv rather than the per-command opts, mirroring how the global flags are
+// detected here. A stray `--json` in a command that doesn't accept it would be
+// rejected by that command's own parseArgs (a usage error) before reaching the
+// error-body path, so a permissive scan is safe.
+function wantsJson(argv: Argv): boolean {
+  return argv.includes("--json");
+}
+
 export async function main(argv: Argv): Promise<number> {
+  const jsonMode = wantsJson(argv);
   const stripped = argv.slice();
   const verbose = consumeFlag(stripped, "--verbose");
   if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-V")) {
@@ -699,6 +723,18 @@ export async function main(argv: Argv): Promise<number> {
   try {
     return await dispatch(cmd, rest, { verbose });
   } catch (err) {
+    // In `--json` mode every command's SUCCESS path already prints a JSON
+    // payload to stdout; emit the FAILURE as a JSON object too so stdout stays
+    // parseable end-to-end (`... --json | jq` no longer chokes on a bare
+    // `error:` line). The human `error:`/`hint:` lines still go to stderr below,
+    // unchanged, so interactive use is byte-identical. Exit-code classification
+    // is unaffected. Commands reached `dispatch` and threw *before* writing
+    // their own success payload, so there's no double-print on the failure path.
+    if (jsonMode) {
+      const hint = err instanceof FbrainError ? (err.hint ?? null) : null;
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(JSON.stringify({ error: message, hint }));
+    }
     if (err instanceof FbrainError) {
       console.error(`error: ${err.message}`);
       if (err.hint) console.error(`hint:  ${err.hint}`);
