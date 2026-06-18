@@ -12,6 +12,7 @@ import {
   writeConfig,
   type Config,
 } from "../../src/config.ts";
+import { FbrainError } from "../../src/client.ts";
 import { buildTestCfg } from "../util.ts";
 
 function tmpPath(): { dir: string; path: string } {
@@ -40,6 +41,28 @@ describe("config", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("ConfigMissingError is an FbrainError carrying a structured code + hint", () => {
+    const err = new ConfigMissingError("/x/.fbrain/config.json");
+    expect(err).toBeInstanceOf(FbrainError);
+    expect(err.code).toBe("config_missing");
+    // The recovery lives in `hint`, not the message — so the two don't
+    // duplicate and `--json`/the human `hint:` line surface it.
+    expect(err.hint).toBeTruthy();
+    expect(err.hint).toContain("fbrain init");
+    expect(err.message).toContain("Config not found at /x/.fbrain/config.json.");
+    expect(err.message).not.toContain("fbrain init");
+  });
+
+  test("ConfigInvalidError is an FbrainError carrying a structured code + hint", () => {
+    const err = new ConfigInvalidError("/x/.fbrain/config.json", "not valid JSON");
+    expect(err).toBeInstanceOf(FbrainError);
+    expect(err.code).toBe("config_invalid");
+    expect(err.hint).toBeTruthy();
+    expect(err.hint).toContain("fbrain init");
+    expect(err.message).toContain("invalid: not valid JSON.");
+    expect(err.message).not.toContain("fbrain init");
   });
 
   test("tryReadConfig returns null when missing", () => {

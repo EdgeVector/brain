@@ -9,7 +9,7 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
-import { readConfig, ConfigMissingError } from "./config.ts";
+import { readConfig } from "./config.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
@@ -785,11 +785,12 @@ export async function main(argv: Argv): Promise<number> {
       // extra/unexpected positionals) is "you invoked it wrong" → exit 2.
       // Operational FbrainErrors (record not found, node unreachable,
       // write/consent failures, non-2xx from `raw`) stay 1.
+      // ConfigMissingError / ConfigInvalidError now extend FbrainError
+      // (codes `config_missing` / `config_invalid`, neither in
+      // USAGE_ERROR_CODES), so the branch above prints their `error:`/`hint:`
+      // lines and classifies them as operational exit 1 — no dedicated case
+      // needed.
       return USAGE_ERROR_CODES.has(err.code) ? USAGE_ERROR : 1;
-    }
-    if (err instanceof ConfigMissingError) {
-      console.error(`error: ${err.message}`);
-      return 1;
     }
     if (err instanceof Error) {
       console.error(`error: ${err.message}`);

@@ -66,9 +66,31 @@ describe("fbrain --json failure path emits a JSON error object on stdout", () =>
     const parsed = JSON.parse(stdout.trim());
     expect(typeof parsed.error).toBe("string");
     expect(parsed.error.length).toBeGreaterThan(0);
-    expect("hint" in parsed).toBe(true); // hint key always present (string | null)
-    // Human lines still go to stderr, unchanged.
+    // The first-touch config-missing error now carries a STRUCTURED hint (the
+    // recovery action), not a null — it joins the uniform {error,hint} contract
+    // that node-down/capability/write errors already honor.
+    expect(typeof parsed.hint).toBe("string");
+    expect(parsed.hint).toContain("fbrain init");
+    // …and the human path prints the matching `error:` + `hint:` lines.
     expect(stderr).toContain("error:");
+    expect(stderr).toContain("hint:");
+    expect(stderr).toContain("fbrain init");
+  });
+
+  test("config-invalid `list --json` → non-null hint, exit 1", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "fbrain-json-err-invalid-"));
+    const cfgPath = join(fakeHome, "config.json");
+    writeFileSync(cfgPath, "{ not valid json", "utf8");
+    const { code, stdout } = await runCli(["list", "--json"], {
+      HOME: fakeHome,
+      FBRAIN_CONFIG: cfgPath,
+    });
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdout.trim());
+    expect(typeof parsed.error).toBe("string");
+    expect(parsed.error).toContain("invalid");
+    expect(typeof parsed.hint).toBe("string");
+    expect(parsed.hint).toContain("fbrain init");
   });
 
   test("node-unreachable `get <slug> --json` → JSON object on stdout, exit 1", async () => {

@@ -1,6 +1,6 @@
 // Error-path integration tests for paths NOT covered in phase1.test.ts:
 //   - init against a dead node = clear unreachable error
-//   - missing config (no init has run) = "Run `fbrain init` first"
+//   - missing config (no init has run) = `error:` + a structured `hint:` line
 //   - empty list returns "no records"
 //   - 401 on missing X-User-Hash (we set a blank user_hash in the harness config and probe)
 //
@@ -91,7 +91,11 @@ describeIntegration("error paths", () => {
     rmSync(configPath, { force: true });
     const res = await runCli(["list"]);
     expect(res.code).toBe(1);
-    expect(res.stderr).toContain("Run `fbrain init` first");
+    // The recovery now lives in a structured `hint:` line (uniform {error,hint}
+    // contract), not buried in the error message text.
+    expect(res.stderr).toContain("error: Config not found");
+    expect(res.stderr).toContain("hint:");
+    expect(res.stderr).toContain("Run `fbrain init`");
   });
 
   test("invalid config JSON → ConfigInvalid", async () => {

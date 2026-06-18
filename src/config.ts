@@ -22,6 +22,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { FbrainError } from "./client.ts";
+
 export const CONFIG_VERSION = 4;
 
 // Legacy FbrainKindNote schema-key (pre-v4). Defined here, not in
@@ -57,16 +59,31 @@ export function defaultConfigPath(): string {
   return join(homedir(), ".fbrain", "config.json");
 }
 
-export class ConfigMissingError extends Error {
+// The two first-touch config errors a brand-new developer hits when running
+// any verb before `fbrain init`. They extend FbrainError so they carry a
+// stable `code` and a structured `hint` (the recovery action), exactly like
+// every operational error (node-down, capability, write-timeout). The
+// message states only the *condition*; the recovery lives in `hint` so the
+// two don't duplicate, and `--json` / the human `hint:` line both surface it.
+// Their codes are NOT in USAGE_ERROR_CODES, so they stay exit 1 (operational).
+export class ConfigMissingError extends FbrainError {
   constructor(path: string) {
-    super(`Config not found at ${path}. Run \`fbrain init\` first.`);
+    super({
+      code: "config_missing",
+      message: `Config not found at ${path}.`,
+      hint: "Run `fbrain init` to create it.",
+    });
     this.name = "ConfigMissingError";
   }
 }
 
-export class ConfigInvalidError extends Error {
+export class ConfigInvalidError extends FbrainError {
   constructor(path: string, reason: string) {
-    super(`Config at ${path} is invalid: ${reason}. Re-run \`fbrain init\`.`);
+    super({
+      code: "config_invalid",
+      message: `Config at ${path} is invalid: ${reason}.`,
+      hint: "Re-run `fbrain init` to regenerate it (or edit the file).",
+    });
     this.name = "ConfigInvalidError";
   }
 }
