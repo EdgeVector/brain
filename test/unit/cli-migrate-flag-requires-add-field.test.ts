@@ -50,7 +50,7 @@ describe("fbrain migrate --default / --dry-run require --add-field", () => {
       "--default",
       "foo",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--default");
     expect(stderr).toContain("--add-field");
     // The check runs before readConfig — never the config-missing path.
@@ -59,7 +59,7 @@ describe("fbrain migrate --default / --dry-run require --add-field", () => {
 
   test("`--status --dry-run` exits 1 naming --dry-run (was silent no-op)", async () => {
     const { code, stderr } = await runCli(["migrate", "--status", "--dry-run"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--dry-run");
     expect(stderr).toContain("--add-field");
     expect(stderr).not.toContain("Config not found");
@@ -73,7 +73,7 @@ describe("fbrain migrate --default / --dry-run require --add-field", () => {
       "--default",
       "foo",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--default");
     expect(stderr).toContain("--add-field");
     expect(stderr).not.toContain("Config not found");
@@ -86,7 +86,7 @@ describe("fbrain migrate --default / --dry-run require --add-field", () => {
       "m-1234",
       "--dry-run",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--dry-run");
     expect(stderr).toContain("--add-field");
     expect(stderr).not.toContain("Config not found");
@@ -100,7 +100,7 @@ describe("fbrain migrate --default / --dry-run require --add-field", () => {
       "foo",
       "--dry-run",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--default");
     expect(stderr).toContain("--dry-run");
     expect(stderr).toContain("--add-field");

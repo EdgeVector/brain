@@ -75,7 +75,7 @@ describe("ask: -n and --limit are aliases", () => {
 
   test("`fbrain ask foo -n 0` reaches --limit's positive-int validator (no 'Unknown option')", async () => {
     const { code, stderr } = await runCli(["ask", "foo", "-n", "0"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("must be a positive integer");
     expect(stderr).toContain("0");
@@ -103,7 +103,7 @@ describe("search: --limit and -n are aliases", () => {
 
   test("`fbrain search foo --limit 0` reaches the positive-int validator (no 'Unknown option')", async () => {
     const { code, stderr } = await runCli(["search", "foo", "--limit", "0"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("must be a positive integer");
     expect(stderr).toContain("0");

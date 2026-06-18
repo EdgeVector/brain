@@ -45,7 +45,7 @@ async function runCli(
 describe("fbrain search --min-score validation", () => {
   test('`--min-score ""` exits 1 with the validation message (was silently parsed as 0)', async () => {
     const { code, stderr } = await runCli(["search", "foo", "--min-score", ""]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--min-score must be a number");
     // The check runs before doctor/readConfig — never the config-missing path.
     expect(stderr).not.toContain("Config not found");
@@ -53,21 +53,21 @@ describe("fbrain search --min-score validation", () => {
 
   test('`--min-score "   "` exits 1 with the validation message (was silently parsed as 0)', async () => {
     const { code, stderr } = await runCli(["search", "foo", "--min-score", "   "]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--min-score must be a number");
     expect(stderr).not.toContain("Config not found");
   });
 
   test("`--min-score=` (empty after `=`) exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["search", "foo", "--min-score="]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--min-score must be a number");
     expect(stderr).not.toContain("Config not found");
   });
 
   test("`--min-score abc` still rejected (regression guard on the existing NaN path)", async () => {
     const { code, stderr } = await runCli(["search", "foo", "--min-score", "abc"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--min-score must be a number");
     expect(stderr).toContain("abc");
   });

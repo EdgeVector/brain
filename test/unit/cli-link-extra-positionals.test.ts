@@ -42,7 +42,7 @@ describe("fbrain link extra-positional guard", () => {
     // BEFORE readConfig — proven by the empty HOME, which would otherwise
     // produce a config-missing error and shadow the validation message.
     const { code, stderr } = await runCli(["link", "t1", "d1", "t2", "d2"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("link takes exactly two positionals");
     expect(stderr).toContain("4");
     // All surplus tokens surfaced so the user sees exactly what got rejected.
@@ -58,7 +58,7 @@ describe("fbrain link extra-positional guard", () => {
 
   test("`fbrain link t1 d1 extra` (three positionals) reports all extras", async () => {
     const { code, stderr } = await runCli(["link", "t1", "d1", "extra"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("link takes exactly two positionals");
     expect(stderr).toContain("3");
     expect(stderr).toContain("t1, d1, extra");

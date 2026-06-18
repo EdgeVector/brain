@@ -57,7 +57,7 @@ describe("fbrain <type> new --tags → repeatable --tag hint", () => {
         "foo,bar",
         "some-slug",
       ]);
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       // The bare parseArgs error must be REPLACED, not appended to.
       expect(stderr).not.toContain("Unknown option '--tags'");
       // Names the closest known flag and gives the repeatable example.
@@ -108,7 +108,7 @@ describe("fbrain <type> new --tags → repeatable --tag hint", () => {
       "--xyzzy",
       "s",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--xyzzy'");
     expect(stderr).not.toContain("Did you mean");
   });

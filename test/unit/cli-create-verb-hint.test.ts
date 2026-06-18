@@ -49,7 +49,7 @@ describe("fbrain new/create/add → create-family recovery hint", () => {
   for (const verb of ["new", "create", "add"]) {
     test(`\`fbrain ${verb} foo\` points at the \`<type> new\` family`, async () => {
       const { code, stderr, stdout } = await runCli([verb, "foo"]);
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       // Points at the real create family with a concrete example.
       expect(stderr).toContain("fbrain <type> new <slug>");
       expect(stderr).toContain("fbrain design new my-first-idea");
@@ -81,13 +81,13 @@ describe("fbrain new/create/add → create-family recovery hint", () => {
   // the existing Levenshtein path still fires for everything else.
   test("`fbrain lst` still suggests `list`", async () => {
     const { code, stderr } = await runCli(["lst"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Did you mean: list?");
   });
 
   test("`fbrain serach` still suggests `search`", async () => {
     const { code, stderr } = await runCli(["serach", "phase 6"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Did you mean: search?");
   });
 });

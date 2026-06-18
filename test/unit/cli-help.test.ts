@@ -146,9 +146,9 @@ describe("`fbrain help` accepts the two-word names from TOP_HELP", () => {
     expect(split.stdout).toBe(baseline.stdout);
   });
 
-  test("help bogus still errors (exit 1)", async () => {
+  test("help bogus still errors (exit 2)", async () => {
     const { code, stderr } = await runCli(["help", "bogus"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toMatch(/Unknown command: bogus/);
   });
 });

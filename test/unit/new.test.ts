@@ -287,7 +287,7 @@ describe("`fbrain <type> new <slug>` is recognised for every record type", () =>
 
   test("`fbrain concept new` (no slug) prints the type-specific help, not generic", async () => {
     const { code, stderr } = await runCli(["concept", "new"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     // Type-specific synopsis line lands in stderr, proving the dispatcher
     // routed to runRecordNew("concept", …) and used COMMAND_HELP.concept.
     expect(stderr).toContain("fbrain concept new");
@@ -295,7 +295,7 @@ describe("`fbrain <type> new <slug>` is recognised for every record type", () =>
 
   test("`fbrain spike nwe x` suggests `spike new` via the per-type subcommand error", async () => {
     const { code, stderr } = await runCli(["spike", "nwe", "x"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown spike subcommand: nwe");
     expect(stderr).toContain("spike new");
   });

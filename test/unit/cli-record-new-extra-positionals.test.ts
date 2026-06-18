@@ -40,7 +40,7 @@ async function runCli(
 describe("fbrain <type> new extra-positional guard", () => {
   test("`fbrain task new my-slug extra` exits 1 with a clear validation message", async () => {
     const { code, stderr } = await runCli(["task", "new", "my-slug", "extra"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("task new takes exactly one slug");
     expect(stderr).toContain("2");
     // Both positionals surfaced so the user sees what got dropped.
@@ -65,7 +65,7 @@ describe("fbrain <type> new extra-positional guard", () => {
       "a",
       "b",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("task new takes exactly one slug");
     expect(stderr).toContain("my-slug");
     expect(stderr).toContain("b");
@@ -83,7 +83,7 @@ describe("fbrain <type> new extra-positional guard", () => {
       "two",
       "words",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("task new takes exactly one slug");
     expect(stderr).toContain("my-slug");
     expect(stderr).toContain("words");
@@ -97,7 +97,7 @@ describe("fbrain <type> new extra-positional guard", () => {
       "slug2",
       "slug3",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("design new takes exactly one slug");
     expect(stderr).toContain("3");
     expect(stderr).toContain("slug1");
@@ -113,7 +113,7 @@ describe("fbrain <type> new extra-positional guard", () => {
       "my-slug",
       "extra",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("concept new takes exactly one slug");
     expect(stderr).toContain("my-slug");
     expect(stderr).toContain("extra");

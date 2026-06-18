@@ -52,7 +52,7 @@ async function runCli(
 describe("fbrain list <type> → --type hint (parseArgs path)", () => {
   test("`fbrain list task` keeps the parseArgs error and appends a --type hint", async () => {
     const { code, stderr } = await runCli(["list", "task"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     // Original parseArgs wording preserved verbatim — the user still sees
     // exactly what's wrong, plus the suggestion.
     expect(stderr).toContain("Unexpected argument 'task'");
@@ -81,7 +81,7 @@ describe("fbrain list <type> → --type hint (parseArgs path)", () => {
     // through to the bare parseArgs error so we don't mislead the user
     // into thinking `--type xyzzy` would have worked.
     const { code, stderr } = await runCli(["list", "xyzzy"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unexpected argument 'xyzzy'");
     expect(stderr).not.toContain("--type xyzzy");
   });

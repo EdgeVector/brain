@@ -53,7 +53,7 @@ async function runCli(
 describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudge", () => {
   test("`fbrain list --node-url http://x` exits 1 with an init-only nudge", async () => {
     const { code, stderr } = await runCli(["list", "--node-url", "http://x"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     // The bare parseArgs error must be replaced — not just appended to.
     expect(stderr).not.toContain("Unknown option");
     // Points at where the flag actually belongs.
@@ -75,7 +75,7 @@ describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudg
       "--schema-service-url",
       "http://x",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).not.toContain('-- "--');
     expect(stderr).toContain("fbrain init");
@@ -88,7 +88,7 @@ describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudg
       "--node-url",
       "http://x",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("fbrain init");
   });
@@ -122,7 +122,7 @@ describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudg
     // must not regress that nudge — assert at least the title-specific
     // wording the original test pins is still present.
     const { code, stderr } = await runCli(["put", "foo", "--title", "X"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("frontmatter");
     // No `--type` in args → falls back to the concrete `concept` example
@@ -138,7 +138,7 @@ describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudg
     // A truly unknown option like `--bogus` must fall through — otherwise
     // we'd be silently absorbing every typo and pointing users at init.
     const { code, stderr } = await runCli(["list", "--bogus"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--bogus'");
     expect(stderr).not.toContain("fbrain init");
   });

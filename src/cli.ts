@@ -27,6 +27,52 @@ import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
 
+// Exit code for usage/argument errors — "you invoked fbrain wrong" (unknown
+// command, typo'd command, missing required arg, unknown/misapplied flag,
+// missing flag value). Distinct from exit 1, which means an operational
+// failure — "the work couldn't be done" (record not found on a reachable
+// node, node unreachable, write/consent failure, non-2xx from `raw`). Help
+// and bare invocation stay 0. Mirrors the sibling fkanban CLI's contract so a
+// script or agent wrapping fbrain can tell "fix my invocation" apart from
+// "the node is down / record missing / retry".
+export const USAGE_ERROR = 2;
+
+// FbrainError `code`s that represent a usage/argument error (bad invocation),
+// not an operational failure. main()'s catch maps these to USAGE_ERROR (2);
+// every other FbrainError code is operational and stays exit 1. Keep in sync
+// with the `throw new FbrainError({ code: ... })` sites in this file that
+// reject malformed invocations (flag parsing, positional arity, flag
+// combinations, numeric/type validation) — see `parseCommandArgs`,
+// `validatePositiveIntFlag`, `parseRecordType`, and the per-command guards.
+const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
+  "unknown_option",
+  "node_url_is_init_only",
+  "extra_positional_args",
+  "unexpected_positional",
+  "invalid_type",
+  "invalid_min_score",
+  "invalid_limit",
+  "invalid_usage_window",
+  "doctor_mode_conflict",
+  "doctor_flag_requires_usage",
+  "migrate_mode_conflict",
+  "migrate_flag_requires_add_field",
+  // Bad invocation surfaced inside the command modules (put / new / raw):
+  // missing or contradictory slug/type, a misapplied --design, an
+  // unrecognised --type, empty stdin with nothing to write, and a malformed
+  // `raw` method/path. All are "you invoked it wrong," not operational.
+  "missing_slug",
+  "missing_type",
+  "slug_conflict",
+  "type_conflict",
+  "unsupported_type",
+  "unknown_record_type",
+  "design_flag_unsupported",
+  "empty_stdin",
+  "invalid_raw_method",
+  "invalid_raw_path",
+]);
+
 export const COMMANDS = [
   "init",
   "design",
@@ -620,7 +666,7 @@ export async function main(argv: Argv): Promise<number> {
     if (cmd.startsWith("-")) {
       console.error(`error: \`${cmd}\` looks like an option, but it's in the command position.`);
       console.error(`hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`);
-      return 1;
+      return USAGE_ERROR;
     }
     // A top-level create-verb (`new`/`create`/`add`) is muscle memory from
     // git/gh/cargo/npm/fkanban, but fbrain creates records *per type*
@@ -634,7 +680,7 @@ export async function main(argv: Argv): Promise<number> {
       console.error(`hint:  Use \`fbrain <type> new <slug>\`, e.g. \`fbrain design new my-first-idea\`.`);
       console.error(`       Types: ${types}`);
       console.error(`       (or pipe markdown:  fbrain put <slug> --type <type>)`);
-      return 1;
+      return USAGE_ERROR;
     }
     const suggestion = suggestCommand({
       single: cmd,
@@ -646,7 +692,7 @@ export async function main(argv: Argv): Promise<number> {
       console.error(`Unknown command: ${cmd}`);
       console.error(TOP_HELP);
     }
-    return 1;
+    return USAGE_ERROR;
   }
   const rest = stripped.slice(1);
 
@@ -656,7 +702,12 @@ export async function main(argv: Argv): Promise<number> {
     if (err instanceof FbrainError) {
       console.error(`error: ${err.message}`);
       if (err.hint) console.error(`hint:  ${err.hint}`);
-      return 1;
+      // A usage/argument FbrainError (unknown/misapplied flag, missing flag
+      // value, bad flag combination, malformed --type/--min-score/--limit,
+      // extra/unexpected positionals) is "you invoked it wrong" → exit 2.
+      // Operational FbrainErrors (record not found, node unreachable,
+      // write/consent failures, non-2xx from `raw`) stay 1.
+      return USAGE_ERROR_CODES.has(err.code) ? USAGE_ERROR : 1;
     }
     if (err instanceof ConfigMissingError) {
       console.error(`error: ${err.message}`);
@@ -664,7 +715,13 @@ export async function main(argv: Argv): Promise<number> {
     }
     if (err instanceof Error) {
       console.error(`error: ${err.message}`);
-      return 1;
+      // A raw parseArgs failure that no per-command handler turned into a
+      // friendlier FbrainError (an unknown flag with no near-miss suggestion,
+      // a missing flag value, a stray positional) is still a usage error —
+      // "you invoked it wrong" → exit 2. The message above is parseArgs's own
+      // (unchanged); only the exit code is classified here. Every other
+      // Error is an operational/internal failure → exit 1.
+      return isParseArgsUsageError(err) ? USAGE_ERROR : 1;
     }
     console.error(`error: ${String(err)}`);
     return 1;
@@ -836,6 +893,24 @@ function suggestOption(
 // hint points at the right path to change them. `init` itself does NOT go
 // through this helper — it accepts both flags via INIT_OPTIONS and we must
 // not regress that.
+// Node's `parseArgs` throws ERR_PARSE_ARGS_* for malformed invocations: an
+// unknown flag, a flag missing its value, or an unexpected positional. These
+// are usage errors ("you invoked it wrong"), so when one reaches main()'s
+// catch unwrapped (no per-command handler upgraded it to a friendlier
+// FbrainError) it should still classify as exit 2, not 1.
+const PARSE_ARGS_USAGE_CODES: ReadonlySet<string> = new Set([
+  "ERR_PARSE_ARGS_UNKNOWN_OPTION",
+  "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
+  "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL",
+]);
+
+function isParseArgsUsageError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    PARSE_ARGS_USAGE_CODES.has((err as NodeJS.ErrnoException).code ?? "")
+  );
+}
+
 function parseCommandArgs<T extends ParseArgsConfig>(config: T) {
   try {
     return parseArgs(config);
@@ -894,13 +969,13 @@ function printHelpFor(name: string): number {
   if (!isCommand(name)) {
     console.error(`Unknown command: ${name}`);
     console.log(TOP_HELP);
-    return 1;
+    return USAGE_ERROR;
   }
   const h = COMMAND_HELP[name];
   if (!h) {
     console.error(`Unknown command: ${name}`);
     console.log(TOP_HELP);
-    return 1;
+    return USAGE_ERROR;
   }
   console.log(h);
   return 0;
@@ -1001,7 +1076,7 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     const suggestion = sub ? suggestCommand({ compound: `${type} ${sub}` }) : null;
     if (suggestion) {
       console.error(`Unknown ${type} subcommand: ${sub}. Did you mean: ${suggestion}?`);
-      return 1;
+      return USAGE_ERROR;
     }
     // "I want to change this record's status" recovery. By analogy with most
     // CLIs (`git branch <name> --move`, `kubectl set ...`), a dev who knows
@@ -1032,10 +1107,10 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
       console.error(
         `Did you mean to change status? Use: fbrain status ${slugPart} ${statusPart}${echo}`,
       );
-      return 1;
+      return USAGE_ERROR;
     }
     console.error(`Unknown ${type} subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP[type]}`);
-    return 1;
+    return USAGE_ERROR;
   }
   const rest = args.slice(1);
   // TASK_OPTIONS is DESIGN_OPTIONS + --design; for non-task types parseArgs
@@ -1049,7 +1124,7 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP[type]);
-    return 1;
+    return USAGE_ERROR;
   }
   // `fbrain <type> new <slug>` accepts exactly one positional. Without this
   // guard, `fbrain task new my-slug --tag a b` silently dropped `b` (parseArgs
@@ -1292,7 +1367,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.get);
-    return 1;
+    return USAGE_ERROR;
   }
   const type = parseRecordType(values.type);
   const cfg = readConfig();
@@ -1358,7 +1433,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.status);
-    return 1;
+    return USAGE_ERROR;
   }
   const cfg = readConfig();
   const type = parseRecordType(values.type);
@@ -1381,7 +1456,7 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
   const designSlug = positionals[1];
   if (!taskSlug || !designSlug) {
     console.error(COMMAND_HELP.link);
-    return 1;
+    return USAGE_ERROR;
   }
   // `fbrain link <task-slug> <design-slug>` accepts exactly two positionals.
   // Without this check, `fbrain link t1 d1 t2 d2` silently linked only
@@ -1411,7 +1486,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   const query = positionals.join(" ").trim();
   if (query.length === 0) {
     console.error(COMMAND_HELP.search);
-    return 1;
+    return USAGE_ERROR;
   }
   // Validate --type / --min-score before readConfig so a malformed invocation
   // surfaces the parse error even on an un-init'd machine.
@@ -1458,7 +1533,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   const query = positionals.join(" ").trim();
   if (query.length === 0) {
     console.error(COMMAND_HELP.ask);
-    return 1;
+    return USAGE_ERROR;
   }
   // --expand and its alias --llm both turn LLM query expansion back on.
   const expand = values.expand || values.llm;
@@ -1469,7 +1544,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
     console.error(
       "error: --no-llm contradicts --expand/--llm; pick one (expansion is off by default).",
     );
-    return 2;
+    return USAGE_ERROR;
   }
   // --explain prints the LLM-generated expansions, so it requires expansion.
   // With expansion now off by default, --explain without --expand has nothing
@@ -1479,7 +1554,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
     console.error(
       "error: --explain requires LLM expansion; add --expand (alias --llm).",
     );
-    return 2;
+    return USAGE_ERROR;
   }
   // Validate --type before readConfig so an unknown type surfaces even on
   // an un-init'd machine.
@@ -1568,7 +1643,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.delete);
-    return 1;
+    return USAGE_ERROR;
   }
   // `fbrain delete <slug>` accepts exactly one positional. Without this
   // check, extra positionals were silently dropped: `fbrain delete slug1
@@ -1683,7 +1758,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
     const fieldSpec = positionals[2];
     if (!type || !fieldName || !fieldSpec) {
       console.error(COMMAND_HELP.migrate);
-      return 1;
+      return USAGE_ERROR;
     }
     const mode: MigrateMode = {
       kind: "add-field",
@@ -1696,7 +1771,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
     mOpts.mode = mode;
   } else {
     console.error(COMMAND_HELP.migrate);
-    return 1;
+    return USAGE_ERROR;
   }
 
   await migrateCmd(mOpts);
@@ -1714,7 +1789,7 @@ async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
   const path = positionals[1];
   if (!method || !path) {
     console.error(COMMAND_HELP.raw);
-    return 1;
+    return USAGE_ERROR;
   }
   const cfg = readConfig();
   const rOpts: Parameters<typeof rawCmd>[0] = {

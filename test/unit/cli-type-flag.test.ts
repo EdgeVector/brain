@@ -40,7 +40,7 @@ async function runCli(
 describe("fbrain search / ask --type validation", () => {
   test("`fbrain search q --type whatever` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["search", "q", "--type", "whatever"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--type must be one of");
     expect(stderr).toContain("whatever");
     // The check runs before config — never the config-missing path.
@@ -49,7 +49,7 @@ describe("fbrain search / ask --type validation", () => {
 
   test("`fbrain ask q --type bogus` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["ask", "q", "--type", "bogus"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--type must be one of");
     expect(stderr).toContain("bogus");
     expect(stderr).not.toContain("config");
