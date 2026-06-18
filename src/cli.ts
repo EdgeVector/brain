@@ -44,7 +44,7 @@ export const USAGE_ERROR = 2;
 // reject malformed invocations (flag parsing, positional arity, flag
 // combinations, numeric/type validation) — see `parseCommandArgs`,
 // `validatePositiveIntFlag`, `parseRecordType`, and the per-command guards.
-const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
+export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "unknown_option",
   "node_url_is_init_only",
   "extra_positional_args",
@@ -75,6 +75,10 @@ const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "frontmatter_malformed",
   "frontmatter_unfenced",
   "invalid_slug",
+  // An invalid status enum value (e.g. `status <slug> bogus`, or a bad
+  // `status:` in put frontmatter) is a caller-supplied malformed value, same
+  // class as invalid_slug — usage error, exit 2.
+  "invalid_status",
   "invalid_raw_method",
   "invalid_raw_path",
 ]);
