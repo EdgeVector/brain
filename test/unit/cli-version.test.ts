@@ -60,3 +60,25 @@ describe("fbrain --version / -V", () => {
     expect(stderr).toBe("");
   });
 });
+
+describe("fbrain version / -v (muscle-memory aliases)", () => {
+  // `fbrain version` (git/docker/go-style bare subcommand) aliases to
+  // `--version`: same stdout, exit 0 — not the unknown-command help wall.
+  test("bare `version` prints the version string and exits 0", async () => {
+    const { code, stdout, stderr } = await runCli(["version"]);
+    expect(code).toBe(0);
+    expect(stdout.trim()).toMatch(VERSION_PATTERN);
+    expect(stderr).toBe("");
+  });
+
+  // `-v` (node/npm/bun muscle memory) is NOT silently aliased — it stays a
+  // usage error (exit 2) but the hint points at the real spelling `-V` /
+  // `--version` instead of the misleading generic flag-placement hint.
+  test("`-v` exits 2 with a hint naming `-V` / `--version`", async () => {
+    const { code, stdout, stderr } = await runCli(["-v"]);
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("-V");
+    expect(stderr).toContain("--version");
+  });
+});
