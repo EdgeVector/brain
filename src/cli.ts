@@ -732,6 +732,14 @@ export async function main(argv: Argv): Promise<number> {
     console.log(`fbrain ${getFbrainVersion()}`);
     return 0;
   }
+  // Bare `fbrain version` is muscle memory from `git/docker/go version`. It
+  // isn't a registered command (records are created per type, not via a global
+  // `version` verb), so without this it would fall through to the unknown-command
+  // path and dump the entire help wall. Alias it to the `--version`/`-V` output.
+  if (stripped[0] === "version" && stripped.length === 1) {
+    console.log(`fbrain ${getFbrainVersion()}`);
+    return 0;
+  }
   if (consumeFlag(stripped, "--help") || consumeFlag(stripped, "-h")) {
     if (stripped[0]) return printHelpFor(stripped[0]);
     console.log(TOP_HELP);
@@ -749,6 +757,15 @@ export async function main(argv: Argv): Promise<number> {
     // already consumed above. Tell the user about flag placement instead of
     // mislabeling the option as a "command".
     if (cmd.startsWith("-")) {
+      // `-v` is muscle memory for "show the version" (node/npm/bun -v), but in
+      // fbrain the version flag is `-V`/`--version`. Don't silently alias it
+      // (other tools split `-v` verbose vs `-V` version) — point at the real
+      // spelling instead of the generic flag-placement hint, which would
+      // falsely imply `fbrain init -v <value>` is valid.
+      if (cmd === "-v") {
+        console.error("error: `-v` isn't a flag; did you mean `-V` / `--version`?");
+        return USAGE_ERROR;
+      }
       console.error(`error: \`${cmd}\` looks like an option, but it's in the command position.`);
       console.error(`hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`);
       return USAGE_ERROR;
