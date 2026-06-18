@@ -475,8 +475,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     tag: "WARN",
     detail:
       "no team-sync transport — `fbrain share` is a placeholder until " +
-      "cloud sync is signed in and validated end-to-end " +
-      "(see docs/phase-3-sharing-memo.md)",
+      "cloud sync is signed in and validated end-to-end",
   });
 
   // --write probe — real put → get → soft-delete round-trip under a
@@ -990,7 +989,7 @@ export async function runFreshnessProbe(
     name: "freshness-probe",
     ok: false,
     detail,
-    fix: "fresh writes are not surfacing at score ≥ 0.5. `fbrain reindex` re-puts every live record so its embedding is present and current (it does NOT de-duplicate the index or reduce pollution); if reindex doesn't help, see docs/phase-7-search-latency-spike.md",
+    fix: "fresh writes are not surfacing at score ≥ 0.5. `fbrain reindex` re-puts every live record so its embedding is present and current (it does NOT de-duplicate the index or reduce pollution).",
   };
 }
 
@@ -1083,8 +1082,7 @@ export async function runPollutionProbe(
   const pollutionHint =
     "stale/superseded embeddings — fold_db's append-only index does not purge them on soft-delete or re-put. " +
     "No fbrain command can lower this: `fbrain reindex` refreshes live embeddings but does NOT reduce pollution " +
-    "(each re-put appends a new embedding and the prior one persists as stale). The index purge is tracked upstream " +
-    "(G3d schema-scoped search, G3e tombstone-purge — docs/phase-7-search-latency-spike.md). " +
+    "(each re-put appends a new embedding and the prior one persists as stale). The index purge is tracked upstream. " +
     "User-facing search/ask is unaffected: they skip stale hits at query time; this is raw-index bloat, not wrong results.";
   if (combinedPct > failThreshold) {
     return {

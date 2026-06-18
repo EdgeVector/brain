@@ -16,18 +16,13 @@ describe("shareCmd placeholder", () => {
     expect(shareCmd({ print: () => {} })).toBe(1);
   });
 
-  test("prints a pointer to docs/phase-3-sharing-memo.md", () => {
+  test("does not point users at internal phase/spike/memo docs", () => {
     const lines: string[] = [];
     shareCmd({ print: (line) => lines.push(line) });
     const joined = lines.join("\n");
-    expect(joined).toContain("docs/phase-3-sharing-memo.md");
-  });
-
-  test("points at docs/cloud-signin-spike-plan.md for the path forward", () => {
-    const lines: string[] = [];
-    shareCmd({ print: (line) => lines.push(line) });
-    const joined = lines.join("\n");
-    expect(joined).toContain("docs/cloud-signin-spike-plan.md");
+    expect(joined).not.toContain("docs/phase-");
+    expect(joined).not.toContain("-spike");
+    expect(joined).not.toContain("-memo");
   });
 
   test("frames the gap as sign-in, not missing infrastructure", () => {

@@ -17,9 +17,6 @@
 // Until then, calling `fbrain share` prints the same pointer and exits
 // non-zero so callers don't believe a no-op succeeded.
 
-const MEMO_PATH = "docs/phase-3-sharing-memo.md";
-const SIGNIN_PLAN_PATH = "docs/cloud-signin-spike-plan.md";
-
 export type ShareOptions = {
   print?: (line: string) => void;
 };
@@ -27,7 +24,7 @@ export type ShareOptions = {
 export function shareCmd(opts: ShareOptions = {}): number {
   const print = opts.print ?? ((line: string) => console.error(line));
   print(
-    "fbrain share is a Phase 3 v0+ placeholder — see " + MEMO_PATH + ".",
+    "fbrain share is a placeholder — team sync is not wired up yet.",
   );
   print(
     "Short version: the cross-node transport is deployed (fold_db's sync",
@@ -49,9 +46,6 @@ export function shareCmd(opts: ShareOptions = {}): number {
   );
   print(
     "authenticates against exemem and an end-to-end positive test passes.",
-  );
-  print(
-    "See " + SIGNIN_PLAN_PATH + " for what it would take to flip this on.",
   );
   return 1;
 }

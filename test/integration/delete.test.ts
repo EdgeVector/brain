@@ -107,7 +107,8 @@ describeIntegration("Phase 5 — delete (design)", () => {
     const del = await runCli(["delete", slug, "--type", "design"]);
     expect(del.code).toBe(0);
     expect(del.stdout).toContain(`deleted design ${slug}`);
-    expect(del.stdout).toContain("docs/phase-5-delete-spike.md");
+    expect(del.stdout).toContain("fold_db is append-only");
+    expect(del.stdout).not.toContain("docs/phase-5-delete-spike.md");
 
     const afterGet = await runCli(["get", slug, "--type", "design"]);
     expect(afterGet.code).toBe(1);

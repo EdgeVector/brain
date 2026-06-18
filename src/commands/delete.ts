@@ -219,7 +219,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   }
 
   print(
-    `deleted ${type} ${slug} (soft — fold_db is append-only; see docs/phase-5-delete-spike.md)`,
+    `deleted ${type} ${slug} (soft — fold_db is append-only)`,
   );
   // Emit the structured payload from the SAME resolved `type`/`slug` the
   // printed line uses (one source of truth — see the read commands).

@@ -371,7 +371,8 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       expect(d.key_value.hash).toBe("doomed");
       // success line.
       expect(lines.join("\n")).toContain("deleted design doomed");
-      expect(lines.join("\n")).toContain("docs/phase-5-delete-spike.md");
+      expect(lines.join("\n")).toContain("fold_db is append-only");
+      expect(lines.join("\n")).not.toContain("docs/phase-5-delete-spike.md");
     } finally {
       globalThis.fetch = originalFetch;
     }
