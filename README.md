@@ -141,7 +141,8 @@ the body becomes the indexed body
 NOTE
 
 fbrain list
-fbrain search "body that gets embedded"
+fbrain ask "body that gets embedded"     # hybrid (BM25 + vector) — catches the write you just made, immediately
+fbrain search "body that gets embedded"  # pure-vector; a brand-new write may take ~1s to land — use `ask` for immediate retrieval
 fbrain doctor                         # confirms everything is wired
 ```
 
@@ -161,7 +162,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <task-slug> <design-slug>` | Links a task to its parent design (v0: Task → Design only) |
-| `fbrain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more of the 8 record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases |
+| `fbrain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more of the 8 record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
 | `fbrain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
 | `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` entrypoint and asserts the full 7-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
