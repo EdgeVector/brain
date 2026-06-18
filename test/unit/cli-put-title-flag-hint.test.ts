@@ -46,7 +46,7 @@ async function runCli(
 describe("fbrain put --title → frontmatter hint", () => {
   test("`fbrain put foo --title X` exits 1 with a frontmatter + concrete-type hint", async () => {
     const { code, stderr } = await runCli(["put", "foo", "--title", "X"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     // The bare parseArgs error must be replaced — not just appended to.
     // A user who sees "Unknown option '--title'" assumes --title is wrong
     // when it's actually right (just on the wrong subcommand).
@@ -76,7 +76,7 @@ describe("fbrain put --title → frontmatter hint", () => {
       "--title",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain concept new my-slug --title");
     expect(stderr).not.toContain("<type>");
     expect(stderr).not.toContain("Unknown option");
@@ -93,7 +93,7 @@ describe("fbrain put --title → frontmatter hint", () => {
       "--title",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain design new my-slug --title");
     expect(stderr).not.toContain("<type>");
   });
@@ -109,7 +109,7 @@ describe("fbrain put --title → frontmatter hint", () => {
       "--title",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain design new my-slug --title");
     expect(stderr).not.toContain("<type>");
   });
@@ -126,7 +126,7 @@ describe("fbrain put --title → frontmatter hint", () => {
       "--title",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain concept new my-slug --title");
     expect(stderr).not.toContain("fbrain bogus new");
     expect(stderr).not.toContain("<type>");
@@ -146,7 +146,7 @@ describe("fbrain put --title → frontmatter hint", () => {
       "--title",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain design new my-note --title");
     // The --type VALUE must NOT be mistaken for the slug.
     expect(stderr).not.toContain("fbrain design new design");
@@ -164,7 +164,7 @@ describe("fbrain put --title → frontmatter hint", () => {
       "--title",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain concept new <slug> --title");
     expect(stderr).not.toContain("fbrain concept new concept");
     expect(stderr).not.toContain("<type>");
@@ -176,7 +176,7 @@ describe("fbrain put --title → frontmatter hint", () => {
     // than mis-treating the `--title` VALUE ("X") as a slug. The type, with
     // no `--type` in args, falls back to the concrete `concept` example.
     const { code, stderr } = await runCli(["put", "--title", "X"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain concept new <slug> --title");
     // Critically, the title VALUE ("X") must not appear as a slug suggestion.
     expect(stderr).not.toContain("fbrain concept new X");
@@ -190,7 +190,7 @@ describe("fbrain put --title → frontmatter hint", () => {
     // `--bogus` should fall through to the bare parseArgs error — otherwise
     // we'd be silently absorbing every typo.
     const { code, stderr } = await runCli(["put", "foo", "--bogus"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--bogus'");
     // And critically, no misleading title hint.
     expect(stderr).not.toContain("frontmatter");

@@ -85,7 +85,7 @@ describe("levenshtein", () => {
 describe("CLI hint behaviour", () => {
   test("`fbrain serch` prints a one-line hint and NO TOP_HELP", async () => {
     const { code, stdout, stderr } = await runCli(["serch", "phase 6"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown command: serch. Did you mean: search?");
     expect(stderr).not.toContain("Usage:");
     expect(stderr).not.toContain("Commands:");
@@ -94,27 +94,27 @@ describe("CLI hint behaviour", () => {
 
   test("`fbrain doctir` suggests doctor without dumping help", async () => {
     const { code, stderr } = await runCli(["doctir"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Did you mean: doctor?");
     expect(stderr).not.toContain("Commands:");
   });
 
   test("`fbrain desogn new x` suggests `design new` (compound form)", async () => {
     const { code, stderr } = await runCli(["desogn", "new", "x"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Did you mean: design new?");
     expect(stderr).not.toContain("Commands:");
   });
 
   test("`fbrain task nwe x` suggests `task new` via subcommand dispatch", async () => {
     const { code, stderr } = await runCli(["task", "nwe", "x"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown task subcommand: nwe. Did you mean: task new?");
   });
 
   test("`fbrain xyzzy` still dumps TOP_HELP — cold-start discovery preserved", async () => {
     const { code, stderr } = await runCli(["xyzzy"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown command: xyzzy");
     expect(stderr).not.toContain("Did you mean:");
     expect(stderr).toContain("Commands:");

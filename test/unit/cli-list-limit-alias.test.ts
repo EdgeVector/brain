@@ -76,7 +76,7 @@ describe("list: -n and --limit are aliases", () => {
 
   test("`fbrain list --limit 0` reaches the positive-int validator (no 'Unknown option')", async () => {
     const { code, stderr } = await runCli(["list", "--limit", "0"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("must be a positive integer");
     expect(stderr).toContain("0");
@@ -86,7 +86,7 @@ describe("list: -n and --limit are aliases", () => {
 
   test("`fbrain list --limit -1` errors clearly (not parseArgs's ambiguous message)", async () => {
     const { code, stderr } = await runCli(["list", "--limit", "-1"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).not.toContain("Unknown option");
     expect(stderr).toContain("must be a positive integer");
     expect(stderr).not.toContain("ambiguous");

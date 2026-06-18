@@ -47,7 +47,7 @@ describe("fbrain doctor --usage / --freshness conflict", () => {
       "--usage",
       "--freshness",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage");
     expect(stderr).toContain("--freshness");
     expect(stderr).toContain("mutually exclusive");
@@ -64,7 +64,7 @@ describe("fbrain doctor --usage / --freshness conflict", () => {
       "--freshness",
       "--usage",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage");
     expect(stderr).toContain("--freshness");
     expect(stderr).toContain("mutually exclusive");

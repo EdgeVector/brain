@@ -50,7 +50,7 @@ describe("fbrain migrate mode-flag conflicts", () => {
       "--resume",
       "m-1234",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--status");
     expect(stderr).toContain("--resume");
     expect(stderr).toContain("mutually exclusive");
@@ -67,7 +67,7 @@ describe("fbrain migrate mode-flag conflicts", () => {
       "urgency",
       "String",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--status");
     expect(stderr).toContain("--add-field");
     expect(stderr).toContain("mutually exclusive");
@@ -84,7 +84,7 @@ describe("fbrain migrate mode-flag conflicts", () => {
       "urgency",
       "String",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--resume");
     expect(stderr).toContain("--add-field");
     expect(stderr).toContain("mutually exclusive");
@@ -102,7 +102,7 @@ describe("fbrain migrate mode-flag conflicts", () => {
       "urgency",
       "String",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--status");
     expect(stderr).toContain("--resume");
     expect(stderr).toContain("--add-field");

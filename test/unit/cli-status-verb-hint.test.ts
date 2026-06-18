@@ -56,7 +56,7 @@ describe("fbrain <type> <slug> --status → status verb recovery hint", () => {
         "--status",
         "in_progress",
       ]);
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       // Points at the real verb with the slug + status echoed back.
       expect(stderr).toContain("fbrain status some-task-slug in_progress");
       // The misleading `<type> new` usage dump must NOT leak through.
@@ -75,7 +75,7 @@ describe("fbrain <type> <slug> --status → status verb recovery hint", () => {
     // status verb is the highest-value pointer. We surface `<new-status>` as
     // the placeholder since none was given.
     const { code, stderr } = await runCli(["task", "some-task-slug"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain status some-task-slug <new-status>");
     expect(stderr).not.toContain("fbrain task new <slug>");
   });
@@ -85,7 +85,7 @@ describe("fbrain <type> <slug> --status → status verb recovery hint", () => {
     // fall through to the bare `task new` usage dump — the hint is targeted at
     // the status-update intent, not a blanket replacement of all bad input.
     const { code, stderr } = await runCli(["task", "--frobnicate"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain task new <slug>");
     expect(stderr).not.toContain("Did you mean to change status");
   });
@@ -95,7 +95,7 @@ describe("fbrain <type> <slug> --status → status verb recovery hint", () => {
     // its existing compound-command suggestion, NOT be absorbed by the status
     // hint (the status hint only fires when no command suggestion matched).
     const { code, stderr } = await runCli(["task", "nwe"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Did you mean:");
     expect(stderr).not.toContain("Did you mean to change status");
   });

@@ -39,7 +39,7 @@ async function runCli(
 describe("fbrain doctor --usage-window validation", () => {
   test("`--usage-window 0` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["doctor", "--usage", "--usage-window", "0"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window must be a positive integer");
     expect(stderr).toContain("0");
     // The check runs before doctor() ever touches config.
@@ -48,7 +48,7 @@ describe("fbrain doctor --usage-window validation", () => {
 
   test("`--usage-window -1` exits 1 with a clean message (was parseArgs's ambiguous-option error)", async () => {
     const { code, stderr } = await runCli(["doctor", "--usage", "--usage-window", "-1"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window must be a positive integer");
     expect(stderr).toContain("-1");
     // No leakage of the parseArgs cryptic error.
@@ -57,14 +57,14 @@ describe("fbrain doctor --usage-window validation", () => {
 
   test("`--usage-window abc` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["doctor", "--usage", "--usage-window", "abc"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window must be a positive integer");
     expect(stderr).toContain("abc");
   });
 
   test("`--usage-window 3.5` rejects decimals (was silently parsed as 3)", async () => {
     const { code, stderr } = await runCli(["doctor", "--usage", "--usage-window", "3.5"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window must be a positive integer");
     expect(stderr).toContain("3.5");
     expect(stderr).not.toContain("~/.fbrain/config.json");
@@ -72,7 +72,7 @@ describe("fbrain doctor --usage-window validation", () => {
 
   test("`--usage-window 5abc` rejects trailing junk (was silently parsed as 5)", async () => {
     const { code, stderr } = await runCli(["doctor", "--usage", "--usage-window", "5abc"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window must be a positive integer");
     expect(stderr).toContain("5abc");
     expect(stderr).not.toContain("~/.fbrain/config.json");

@@ -37,7 +37,7 @@ async function runCli(
 describe("fbrain ask --limit validation", () => {
   test("`fbrain ask foo --limit 0` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["ask", "foo", "--limit", "0"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain("0");
     // The check runs before config — never the config-missing path.
@@ -46,21 +46,21 @@ describe("fbrain ask --limit validation", () => {
 
   test("`fbrain ask foo --limit -1` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["ask", "foo", "--limit", "-1"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain("-1");
   });
 
   test("`fbrain ask foo --limit abc` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["ask", "foo", "--limit", "abc"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain("abc");
   });
 
   test("`fbrain ask foo --limit 3.5` rejects decimals (was silently parsed as 3)", async () => {
     const { code, stderr } = await runCli(["ask", "foo", "--limit", "3.5"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain("3.5");
     expect(stderr).not.toContain("config");
@@ -68,7 +68,7 @@ describe("fbrain ask --limit validation", () => {
 
   test("`fbrain ask foo --limit 5abc` rejects trailing junk (was silently parsed as 5)", async () => {
     const { code, stderr } = await runCli(["ask", "foo", "--limit", "5abc"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--limit must be a positive integer");
     expect(stderr).toContain("5abc");
     expect(stderr).not.toContain("config");

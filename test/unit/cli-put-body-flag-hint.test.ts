@@ -51,7 +51,7 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
         flag,
         "X",
       ]);
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       // The bare parseArgs error must be replaced — not just appended to.
       expect(stderr).not.toContain("Unknown option");
       // Explains why the flag isn't accepted on `put`.
@@ -77,7 +77,7 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
       "--body",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain put foo --type design");
     expect(stderr).not.toContain("--type concept");
     expect(stderr).not.toContain("Unknown option");
@@ -96,7 +96,7 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
       "--body",
       "X",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain put my-note --type design");
     // The --type VALUE must NOT be mistaken for the slug.
     expect(stderr).not.toContain("fbrain put design --type design");
@@ -108,7 +108,7 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
     // no positional, it falls back to the literal `<slug>` placeholder
     // rather than mis-treating the flag VALUE ("X") as a slug.
     const { code, stderr } = await runCli(["put", "--body", "X"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("fbrain put <slug> --type concept");
     // Critically, the flag VALUE ("X") must not appear as the slug.
     expect(stderr).not.toContain("fbrain put X");
@@ -119,7 +119,7 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
     // Regression guard: extending the catch block must not break the
     // `--title` handler covered by cli-put-title-flag-hint.test.ts.
     const { code, stderr } = await runCli(["put", "foo", "--title", "X"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     // No `--type` in args → the title hint falls back to the concrete
     // `concept` example (copy-pasteable, not the literal `<type>`).
     expect(stderr).toContain("fbrain concept new foo --title");
@@ -133,7 +133,7 @@ describe("fbrain put --body/--content/--text → stdin hint", () => {
     // Same fall-through invariant as the --title test: an unrelated typo
     // like `--bogus` should NOT trigger the body hint.
     const { code, stderr } = await runCli(["put", "foo", "--bogus"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown option '--bogus'");
     expect(stderr).not.toContain("stdin");
   });

@@ -123,7 +123,7 @@ describe("shared --type flag: case-insensitive normalization", () => {
     // call readConfig() before parseRecordType, which would shadow this
     // assertion with a config-missing error in our HOME-as-empty-dir setup.
     const { code, stderr } = await runCli(["search", "q", "--type", "Whatever"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--type must be one of");
     // Echo the user's original spelling in the error for findability.
     expect(stderr).toContain("Whatever");
@@ -133,7 +133,7 @@ describe("shared --type flag: case-insensitive normalization", () => {
     // Polish: matches the `Did you mean: concept new?` UX from suggestCommand.
     // `desgin` → `design` is well within the Levenshtein threshold.
     const { code, stderr } = await runCli(["search", "q", "--type", "desgin"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--type must be one of");
     expect(stderr).toContain("did you mean");
     expect(stderr).toContain("design");

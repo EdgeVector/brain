@@ -88,7 +88,7 @@ describe("fbrain put extra-positional guard", () => {
       "--type",
       "concept",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("put takes one slug");
     expect(stderr).toContain("2");
     // Both surplus tokens are surfaced so the user sees exactly what got
@@ -110,7 +110,7 @@ describe("fbrain put extra-positional guard", () => {
     // generic "slug is the only positional" form rather than the
     // type-aware nudge.
     const { code, stderr } = await runCli(["put", "a", "b", "c"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("put takes one slug");
     expect(stderr).toContain("3");
     expect(stderr).toContain("a, b, c");
@@ -129,7 +129,7 @@ describe("fbrain put extra-positional guard", () => {
       "--type",
       "design",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("put takes one slug");
     expect(stderr).toContain("my-slug");
     expect(stderr).toContain("extra");
@@ -162,7 +162,7 @@ describe("fbrain put type-as-positional hint", () => {
       configPath,
       stdin: "the body\n",
     });
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     // The targeted hint must replace the generic types list.
     expect(stderr).toContain('"design" is a record type');
     expect(stderr).toContain("fbrain put <slug> --type design");
@@ -181,7 +181,7 @@ describe("fbrain put type-as-positional hint", () => {
       configPath,
       stdin: "the body\n",
     });
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("requires a `type:`");
     // Untouched: the original generic hint, with no type-aware nudge.
     expect(stderr).not.toContain("is a record type");

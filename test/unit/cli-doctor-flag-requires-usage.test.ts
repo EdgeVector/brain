@@ -44,7 +44,7 @@ async function runCli(
 describe("fbrain doctor --usage-window / --usage-path require --usage", () => {
   test("`--usage-window 14` exits 1 naming --usage-window (was silent no-op)", async () => {
     const { code, stdout, stderr } = await runCli(["doctor", "--usage-window", "14"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window");
     expect(stderr).toContain("--usage");
     // The check runs before doctor() ever touches config or the network.
@@ -60,7 +60,7 @@ describe("fbrain doctor --usage-window / --usage-path require --usage", () => {
       "--usage-path",
       "/tmp/u.jsonl",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-path");
     expect(stderr).toContain("--usage");
     expect(stdout).not.toContain("~/.fbrain/config.json");
@@ -74,7 +74,7 @@ describe("fbrain doctor --usage-window / --usage-path require --usage", () => {
       "--usage-path",
       "/tmp/u.jsonl",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("--usage-window");
     expect(stderr).toContain("--usage-path");
     expect(stderr).toContain("--usage");

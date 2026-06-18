@@ -45,7 +45,7 @@ async function runCli(
 describe("fbrain search -n validation", () => {
   test("`fbrain search foo -n 0` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["search", "foo", "-n", "0"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("-n must be a positive integer");
     expect(stderr).toContain("0");
     // The check runs before config — never the config-missing path.
@@ -54,7 +54,7 @@ describe("fbrain search -n validation", () => {
 
   test("`fbrain search foo -n -1` exits 1 with the validation message (not parseArgs's cryptic one)", async () => {
     const { code, stderr } = await runCli(["search", "foo", "-n", "-1"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("-n must be a positive integer");
     expect(stderr).toContain("-1");
     // No leaky parseArgs "Option -n argument is ambiguous" message.
@@ -63,7 +63,7 @@ describe("fbrain search -n validation", () => {
 
   test("`fbrain search foo -n abc` exits 1 with the validation message", async () => {
     const { code, stderr } = await runCli(["search", "foo", "-n", "abc"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("-n must be a positive integer");
     expect(stderr).toContain("abc");
   });

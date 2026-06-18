@@ -38,7 +38,7 @@ async function runCli(
 describe("fbrain delete extra-positional guard", () => {
   test("`fbrain delete slug1 slug2` exits 1 with a clear validation message", async () => {
     const { code, stderr } = await runCli(["delete", "slug1", "slug2"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("delete takes exactly one slug");
     expect(stderr).toContain("2");
     // Both slugs surfaced so the user sees what got dropped.
@@ -52,7 +52,7 @@ describe("fbrain delete extra-positional guard", () => {
 
   test("`fbrain delete slug1 slug2 slug3` exits 1 and reports all extras", async () => {
     const { code, stderr } = await runCli(["delete", "slug1", "slug2", "slug3"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("delete takes exactly one slug");
     expect(stderr).toContain("3");
     expect(stderr).toContain("slug1");
@@ -70,7 +70,7 @@ describe("fbrain delete extra-positional guard", () => {
       "slug1",
       "slug2",
     ]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("delete takes exactly one slug");
     expect(stderr).toContain("slug1");
     expect(stderr).toContain("slug2");

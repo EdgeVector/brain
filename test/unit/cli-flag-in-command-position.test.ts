@@ -40,7 +40,7 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
 describe("flag in command position", () => {
   test("`fbrain --node-url http://x doctor` emits option-aware error, not 'Unknown command'", async () => {
     const { code, stdout, stderr } = await runCli(["--node-url", "http://x", "doctor"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("`--node-url` looks like an option, but it's in the command position.");
     expect(stderr).toContain("Flags go after the subcommand");
     expect(stderr).not.toContain("Unknown command");
@@ -50,7 +50,7 @@ describe("flag in command position", () => {
 
   test("`fbrain -x doctor` (short-flag form) also triggers the option-aware error", async () => {
     const { code, stderr } = await runCli(["-x", "doctor"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("`-x` looks like an option, but it's in the command position.");
     expect(stderr).not.toContain("Unknown command");
     expect(stderr).not.toContain("Commands:");
@@ -58,7 +58,7 @@ describe("flag in command position", () => {
 
   test("`fbrain serach x` still suggests `search` (typo path preserved)", async () => {
     const { code, stderr } = await runCli(["serach", "x"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("Unknown command: serach. Did you mean: search?");
     expect(stderr).not.toContain("looks like an option");
   });
