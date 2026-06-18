@@ -13,8 +13,8 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 | 0 | fold_db feasibility spike | ✅ GO (with canonical-hash caveat) — see [spike notes](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/spikes/fbrain-phase-0-spike-notes.md) |
 | 1 | Bootstrap + core CRUD (init, design new, task new, get, list, status, link) | ✅ Landed |
 | 2 | Search + doctor + raw passthrough + polish | ✅ Landed |
-| 3 | Sharing spike | ✅ Memo — see [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) |
-| 5 | `fbrain delete` (soft, with verified semantics) | ✅ Landed — see [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) |
+| 3 | Sharing spike | ✅ Memo |
+| 5 | `fbrain delete` (soft, with verified semantics) | ✅ Landed |
 | 6 | Multi-type schemas (Concept / Preference / Reference / Agent / Project / Spike) + table-driven put dispatch | ✅ Landed |
 
 ## Plans
@@ -235,8 +235,8 @@ NOTE
 [PASS] schema-drift[Agent]  — Agent @ 42e7b6815ac0…
 [PASS] schema-drift[Project]  — Project @ 7c5a90def142…
 [PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
-[WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require fold_db sync transport (not yet built; tracked as G16)
-[WARN] no-team-sync  — fbrain share is a placeholder until fold_db cloud sync transport lights up (see docs/phase-3-sharing-memo.md)
+[WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require fbrain to drive fold_db's sync transport (deployed but not yet wired up from fbrain; tracked as G16)
+[WARN] no-team-sync  — no team-sync transport — `fbrain share` is a placeholder until cloud sync is signed in and validated end-to-end
 
 OK
 ```
@@ -260,8 +260,8 @@ The two `[WARN]` lines at the bottom are **always emitted** — they're disclosu
 [PASS] schema-drift[Agent]  — Agent @ 42e7b6815ac0…
 [PASS] schema-drift[Project]  — Project @ 7c5a90def142…
 [PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
-[WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require fold_db sync transport (not yet built; tracked as G16)
-[WARN] no-team-sync  — fbrain share is a placeholder until fold_db cloud sync transport lights up (see docs/phase-3-sharing-memo.md)
+[WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require fbrain to drive fold_db's sync transport (deployed but not yet wired up from fbrain; tracked as G16)
+[WARN] no-team-sync  — no team-sync transport — `fbrain share` is a placeholder until cloud sync is signed in and validated end-to-end
 
 FAIL: 1 issue
 ```
