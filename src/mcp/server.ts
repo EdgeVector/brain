@@ -311,6 +311,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             minScore: args.min_score,
             types: args.type,
             onResult,
+            // Agent channel: render the empty/no-match recovery hint in
+            // MCP-tool terms (`fbrain_put`/`fbrain_ask`), never CLI verbs or
+            // the no-MCP-tool `fbrain reindex` / repo doc-path dead-end.
+            agent: true,
           }),
         (matches) => ({ matches }),
       ),
@@ -363,6 +367,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             limit: args.limit,
             types: args.type,
             onResult,
+            // Agent channel: render the empty-brain recovery hint in MCP-tool
+            // terms (`fbrain_put`), never the `fbrain <type> new` CLI verb.
+            agent: true,
             // LLM query expansion stays OFF (the default): the eval winner is
             // plain BM25 + vector + RRF, and keeping it off means the tool
             // works for any agent with zero extra config (no API key). A
@@ -454,6 +461,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             tag: args.tag,
             limit: args.limit,
             onResult,
+            // Agent channel: render the empty/filter-no-match recovery hint in
+            // MCP-tool terms (`fbrain_put`/`fbrain_list`), never CLI verbs.
+            agent: true,
           }),
         (records) => ({ records }),
       ),
