@@ -174,7 +174,18 @@ describe("establishConsentInline — non-interactive skip", () => {
     expect(transport.requestConsentCalls).toBe(0);
     expect(transport.consentStatusCalls).toBe(0);
     expect(lines.some((l) => l.includes("non-interactive"))).toBe(true);
-    expect(lines.some((l) => l.includes("folddb consent grant fbrain"))).toBe(true);
+    // The skip message must lead with the headless one-shot recovery
+    // (`fbrain init --grant-consent`) — a bare `folddb consent grant fbrain`
+    // dead-ends on a fresh node ("no pending consent request"), so if it's
+    // mentioned at all it must come AFTER the working command as a caveat.
+    const skipLine = lines.find((l) => l.includes("fbrain init --grant-consent"));
+    expect(skipLine).toBeDefined();
+    const initIdx = skipLine!.indexOf("fbrain init --grant-consent");
+    const bareGrantIdx = skipLine!.indexOf("folddb consent grant fbrain");
+    expect(initIdx).toBeGreaterThanOrEqual(0);
+    if (bareGrantIdx >= 0) {
+      expect(initIdx).toBeLessThan(bareGrantIdx);
+    }
   });
 });
 

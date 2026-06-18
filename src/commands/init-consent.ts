@@ -159,7 +159,7 @@ export async function establishConsentInline(
     const isTty = (opts.isTty ?? defaultIsTty)();
     if (!isTty) {
       print(
-        `        non-interactive shell — skipping consent prompt. Run \`folddb consent grant ${appId}\` before your first write, or re-run \`fbrain init --grant-consent\`.`,
+        `        non-interactive shell — skipping consent prompt. Re-run \`fbrain init --grant-consent\` before your first write — it creates the consent request, grants it, and stores the capability headlessly. (A bare \`folddb consent grant ${appId}\` needs a pending request first, so it dead-ends on a fresh node.)`,
       );
       return { state: "skipped", reason: "non_tty" };
     }
