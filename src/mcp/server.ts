@@ -657,13 +657,27 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Link fbrain records",
       description:
-        "Link a task to a parent design. v0 supports task → design only; " +
-        "any other type pair errors with `unsupported_link_pair`.",
+        "Link a task to a parent design — pass just `{from_slug, to_slug}` " +
+        "(mirrors the CLI `fbrain link <task-slug> <design-slug>`). v0 supports " +
+        "task → design only, so the types are inferred; `from_type`/`to_type` " +
+        "are optional and default to `task`/`design`. Pass them only for a " +
+        "non-default pair (none exist in v0), which errors with " +
+        "`unsupported_link_pair`.",
       inputSchema: {
-        from_type: typeEnum.describe("Source record type (must be `task`)."),
-        from_slug: requiredText("Source slug (the task)."),
-        to_type: typeEnum.describe("Target record type (must be `design`)."),
-        to_slug: requiredText("Target slug (the design)."),
+        from_slug: requiredText("Slug of the task to link."),
+        to_slug: requiredText("Slug of the parent design to link it under."),
+        from_type: z
+          .literal("task")
+          .default("task")
+          .describe(
+            "Source record type. Optional — defaults to `task` (the only v0 source). Pass only for a non-default pair (none in v0).",
+          ),
+        to_type: z
+          .literal("design")
+          .default("design")
+          .describe(
+            "Target record type. Optional — defaults to `design` (the only v0 target). Pass only for a non-default pair (none in v0).",
+          ),
       },
       // `structuredContent` is `{action:"linked", from_type, from_slug,
       // to_type, to_slug}` — the SAME normalized slugs `linkCmd` prints, via
