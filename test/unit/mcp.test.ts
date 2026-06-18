@@ -166,6 +166,23 @@ function outputSchemaOf(
   return map[name]?.outputSchema;
 }
 
+// The registered-tool map also carries each tool's declared `inputSchema`
+// (the Zod object the SDK parses incoming args through before invoking the
+// handler). Parsing through it in a test reproduces the wire path — in
+// particular it applies `.default()`s, so a slug-only call materializes the
+// `from_type`/`to_type` defaults exactly as a real MCP client would.
+function inputSchemaOf(
+  server: ReturnType<typeof createFbrainMcpServer>,
+  name: string,
+): z.ZodTypeAny | undefined {
+  const map = (
+    server as unknown as {
+      _registeredTools: Record<string, { inputSchema?: z.ZodTypeAny }>;
+    }
+  )._registeredTools;
+  return map[name]?.inputSchema;
+}
+
 function recordRow(slug: string, title = `T-${slug}`, body = "body text") {
   return {
     fields: {
@@ -1181,7 +1198,58 @@ describe("write tools — structuredContent + outputSchema", () => {
     expect(res.content[0]!.text).toBe("linked task t1 → design d1");
   });
 
-  test("fbrain_link error (unsupported pair) returns isError and NO structuredContent", async () => {
+  test("fbrain_link links task → design from a SLUG-ONLY call (CLI parity)", async () => {
+    // The natural agent call mirrors the CLI `fbrain link <task> <design>`:
+    // just two slugs, no types. We parse the args through the tool's declared
+    // inputSchema (the wire path) so the `from_type`/`to_type` `.default()`s
+    // materialize exactly as a real MCP client would see them, then invoke the
+    // handler with the parsed (defaulted) args.
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === TEST_HASHES.task) {
+          return { status: 200, body: { ok: true, results: [recordRow("t1")] } };
+        }
+        if (body.schema_name === TEST_HASHES.design) {
+          return { status: 200, body: { ok: true, results: [recordRow("d1")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    // Slug-only input — the exact shape an agent guesses from the description.
+    const parsed = inputSchemaOf(server, "fbrain_link")!.parse({
+      from_slug: "t1",
+      to_slug: "d1",
+    });
+    // The defaults must have filled the types in.
+    expect(parsed).toEqual({
+      from_slug: "t1",
+      to_slug: "d1",
+      from_type: "task",
+      to_type: "design",
+    });
+    const res = await toolsOf(server).fbrain_link!(parsed as Record<string, unknown>);
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toEqual({
+      action: "linked",
+      from_type: "task",
+      from_slug: "t1",
+      to_type: "design",
+      to_slug: "d1",
+    });
+    const schema = outputSchemaOf(server, "fbrain_link")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toBe("linked task t1 → design d1");
+  });
+
+  test("fbrain_link error (unsupported pair) returns the agent-voiced unsupported_link_pair, NO structuredContent", async () => {
+    // The handler's `unsupported_link_pair` guard stays as defense-in-depth for
+    // any explicit non-default pair. We call the handler directly (bypassing
+    // the inputSchema's literal defaults) to exercise that guard and prove it
+    // surfaces an agent-voiced FbrainError, not a raw schema dump.
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_link!({
       from_type: "concept",
@@ -1191,6 +1259,9 @@ describe("write tools — structuredContent + outputSchema", () => {
     });
     expect(res.isError).toBe(true);
     expect(res.structuredContent).toBeUndefined();
+    const text = res.content[0]!.text;
+    expect(text).toContain("not supported");
+    expect(text).toContain("v0 supports task → design only");
   });
 });
 
