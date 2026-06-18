@@ -1178,7 +1178,11 @@ describe("doctor --freshness probes", () => {
     expect(lines.some((l) => l.includes("pollution 50%"))).toBe(true);
   });
 
-  test("pollution FAIL: >50% polluted → exit 1", async () => {
+  test("pollution above fail-threshold → WARN, exit 0, honest hint (no reindex remedy)", async () => {
+    // Regression for doctor-pollution-fix-misleads-reindex: a pollution ratio
+    // above the old 50% fail-threshold must NOT fail the verdict (exit stays 0)
+    // and must NOT recommend `fbrain reindex` (which increases pollution). It
+    // surfaces as a WARN with an honest hint pointing at the upstream purge.
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const conceptHash = TEST_HASHES.concept;
@@ -1205,9 +1209,17 @@ describe("doctor --freshness probes", () => {
           },
         }),
     });
-    expect(code).toBe(1);
-    expect(lines.some((l) => l.startsWith("[FAIL] pollution-probe"))).toBe(true);
+    // Pollution alone must not fail the verdict.
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.startsWith("[WARN] pollution-probe"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("[FAIL] pollution-probe"))).toBe(false);
     expect(lines.some((l) => l.includes("pollution 80%"))).toBe(true);
+    // The remediation must no longer point at `reindex` anywhere in the output.
+    expect(lines.some((l) => l.includes("run `fbrain reindex`"))).toBe(false);
+    // The hint is honest about the append-only cause and the upstream purge.
+    const hintLine = lines.find((l) => l.includes("does NOT reduce pollution"));
+    expect(hintLine).toBeDefined();
+    expect(lines.some((l) => l.includes("G3e"))).toBe(true);
   });
 
   test("pollution PASS: empty index → 0 hits, no tag escalation", async () => {
@@ -1252,7 +1264,11 @@ describe("doctor --freshness probes", () => {
           },
         }),
     });
-    expect(code).toBe(1); // 100% polluted → FAIL
+    // 100% polluted, but pollution never fails the verdict (it surfaces as a
+    // WARN — see doctor-pollution-fix-misleads-reindex). The point of this test
+    // is that a tombstoned record is classified as stale, not live.
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.startsWith("[WARN] pollution-probe"))).toBe(true);
     expect(lines.some((l) => l.includes("stale 1"))).toBe(true);
   });
 

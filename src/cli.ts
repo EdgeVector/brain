@@ -133,7 +133,7 @@ Commands:
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — see docs/phase-3-sharing-memo.md
   delete         soft-delete a record (fold_db is append-only)
-  reindex        re-put every live record to refresh embeddings
+  reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        evolve a schema by adding a field (see docs/g15-schema-evolution-playbook.md)
   mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
   help <cmd>     per-command usage
@@ -449,12 +449,17 @@ After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
   reindex: `fbrain reindex [--type T] [--dry-run] [--repair-titles]
 
-Refreshes the embedding entry for every live (non-tombstoned) fbrain
-record by re-issuing an update mutation. Workaround for the H2a
-finding in docs/phase-7-search-latency-spike.md — fold_db's
-EmbeddingIndex is not currently purged on tombstone, so this
-guarantees the live records stay current in the native-index top-50.
-Does NOT purge phantom embeddings (that's G3e, upstream fold_db).
+Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
+present by re-issuing an update mutation. Related to the H2a finding in
+docs/phase-7-search-latency-spike.md — fold_db's EmbeddingIndex is not
+purged on tombstone or re-put.
+
+NOTE: fold_db's index is append-only. Re-issuing the update does NOT
+replace the prior embedding in place — it APPENDS a fresh one and the
+previous entry persists as stale. So reindex does NOT de-duplicate the
+index and does NOT reduce pollution (it adds one stale entry per record).
+It is not a fix for high \`doctor --freshness\` pollution; that purge is
+upstream fold_db work (G3d/G3e), not available at the fbrain layer.
 
   --type            narrow to one of: design | task | concept | preference |
                     reference | agent | project | spike (default: all 8)

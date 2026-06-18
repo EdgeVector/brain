@@ -990,7 +990,7 @@ export async function runFreshnessProbe(
     name: "freshness-probe",
     ok: false,
     detail,
-    fix: "run `fbrain reindex` to refresh embeddings; fresh writes are not surfacing at score ≥ 0.5 (see docs/phase-7-search-latency-spike.md)",
+    fix: "fresh writes are not surfacing at score ≥ 0.5. `fbrain reindex` re-puts every live record so its embedding is present and current (it does NOT de-duplicate the index or reduce pollution); if reindex doesn't help, see docs/phase-7-search-latency-spike.md",
   };
 }
 
@@ -1074,13 +1074,25 @@ export async function runPollutionProbe(
     `query "${query}" → ${total} hits: ` +
     `live ${live}, stale ${stale} (${pct(stalePct)}), orphan ${orphan} (${pct(orphanPct)}) ` +
     `— pollution ${pct(combinedPct)}`;
+  // Pollution = stale/superseded embeddings that fold_db's append-only index
+  // does NOT purge on soft-delete or re-put. No fbrain-layer action can lower
+  // it today (the purge is upstream G3d/G3e work), and `reindex` makes it
+  // WORSE — each re-put appends a fresh embedding while the prior one persists
+  // as stale. So a high ratio must surface as a WARN (visible, counted) and
+  // must NOT fail the verdict or recommend `reindex`. See the honest hint.
+  const pollutionHint =
+    "stale/superseded embeddings — fold_db's append-only index does not purge them on soft-delete or re-put. " +
+    "No fbrain command can lower this: `fbrain reindex` refreshes live embeddings but does NOT reduce pollution " +
+    "(each re-put appends a new embedding and the prior one persists as stale). The index purge is tracked upstream " +
+    "(G3d schema-scoped search, G3e tombstone-purge — docs/phase-7-search-latency-spike.md). " +
+    "User-facing search/ask is unaffected: they skip stale hits at query time; this is raw-index bloat, not wrong results.";
   if (combinedPct > failThreshold) {
     return {
       name: "pollution-probe",
-      ok: false,
-      tag: "FAIL",
-      detail,
-      fix: "run `fbrain reindex` to refresh embeddings; upstream fixes tracked in docs/phase-7-search-latency-spike.md (G3d schema-scoped search, G3e tombstone-purge)",
+      ok: true,
+      tag: "WARN",
+      detail: `${detail} (above ${pct(failThreshold)} fail-threshold, but not a verdict failure — see fix)`,
+      fix: pollutionHint,
     };
   }
   if (combinedPct > warnThreshold) {
@@ -1089,7 +1101,7 @@ export async function runPollutionProbe(
       ok: true,
       tag: "WARN",
       detail,
-      fix: "pollution is climbing; consider the G3c reindex workaround and track upstream G3d/G3e",
+      fix: pollutionHint,
     };
   }
   return { name: "pollution-probe", ok: true, detail };
