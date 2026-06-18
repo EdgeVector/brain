@@ -115,6 +115,12 @@ export type AskOptions = {
   // Gates the human-only column legend — overridable so tests can drive both
   // the TTY (legend present) and piped (legend absent) paths deterministically.
   isTty?: () => boolean;
+  // Agent-channel signal. Set by the MCP `fbrain_ask` wrapper (NOT the human
+  // CLI). When true, the empty-brain recovery hint is rendered in MCP-tool
+  // terms (`fbrain_put`) instead of the `fbrain <type> new` CLI verb the agent
+  // has no tool for. Mirrors `FbrainError.agentHint` for the ERROR path.
+  // Default (undefined) keeps the human CLI output byte-identical.
+  agent?: boolean;
   // Structured-result sink. When set, receives the SAME array of
   // `{slug,score,type,title}` objects that `--json` mode serializes to
   // stdout — one source of truth for both the JSON CLI surface and the
@@ -445,8 +451,14 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     // the corpus came back empty (the new-dev empty-brain case, or a `--type`
     // filter whose type has no records — the probe checks ALL types).
     const empty = docs.length === 0 && !(await hasAnyLiveRecord(node, opts.cfg));
+    // On the MCP agent channel the empty-brain hint must name the agent's
+    // create TOOL (`fbrain_put`), not the `fbrain <type> new` CLI verb it can't
+    // call. The populated-brain "nothing matched" nudge is already
+    // channel-neutral (no CLI verb / reindex / doc path), so it's shared.
     const hint = empty
-      ? "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then ask again"
+      ? opts.agent
+        ? "hint:  no records yet — create your first with the `fbrain_put` tool, then try again"
+        : "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then ask again"
       : "hint:  nothing matched — try fewer or different terms";
     if (opts.json) {
       // Stdout stays the parseable empty array `[]` (== JSON.stringify(payload)

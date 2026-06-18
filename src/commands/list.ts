@@ -37,6 +37,13 @@ export type ListOptions = {
   verbose?: Verbose;
   print?: (line: string) => void;
   printErr?: (line: string) => void;
+  // Agent-channel signal. Set by the MCP `fbrain_list` wrapper (NOT the human
+  // CLI). When true, the empty/filter-no-match recovery hint is rendered in
+  // MCP-tool terms (`fbrain_put` / `fbrain_list`) instead of the CLI verbs the
+  // agent has no tools for (`fbrain <type> new`, `fbrain list`). Mirrors
+  // `FbrainError.agentHint` for the ERROR path. Default (undefined) keeps the
+  // human CLI output byte-identical.
+  agent?: boolean;
   // Structured-result sink. When set, receives the SAME array of
   // `RecordSummary` objects that `--json` mode serializes to stdout —
   // one source of truth for both the JSON CLI surface and the MCP
@@ -132,8 +139,16 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     // Filter hint only when a filter is active AND the brain has records;
     // every other shape (empty brain; or the impossible no-filter-yet-zero
     // case) falls through to the new-dev create-your-first guidance.
-    const hint =
-      !empty && filteredQuery
+    // On the MCP agent channel the hint must name TOOLS the agent can call:
+    // its create tool is `fbrain_put` (not `fbrain <type> new`) and re-listing
+    // unfiltered is the `fbrain_list` tool (not the `fbrain list` CLI verb).
+    // Render the agent-voiced variant only when `opts.agent` is set; the human
+    // CLI path is unchanged.
+    const hint = opts.agent
+      ? !empty && filteredQuery
+        ? "hint:  no records match that filter — call `fbrain_list` with no type/status/tag filter"
+        : "hint:  no records yet — create your first with the `fbrain_put` tool, then try again"
+      : !empty && filteredQuery
         ? "hint:  no records match that filter — try `fbrain list` with no --type/--status/--tag"
         : "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then list again";
     if (opts.json) {

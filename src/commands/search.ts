@@ -59,6 +59,13 @@ export type SearchOptions = {
   // Gates the human-only column legend — overridable so tests can drive both
   // the TTY (legend present) and piped (legend absent) paths deterministically.
   isTty?: () => boolean;
+  // Agent-channel signal. Set by the MCP `fbrain_search` wrapper (NOT the
+  // human CLI). When true, the empty/no-match recovery hint is rendered in
+  // MCP-tool terms (`fbrain_put` / `fbrain_ask`) instead of CLI verbs the
+  // agent has no tools for (`fbrain <type> new`, `fbrain ask`, `fbrain
+  // reindex`, a repo doc path). Mirrors `FbrainError.agentHint` for the
+  // ERROR path. Default (undefined) keeps the human CLI output byte-identical.
+  agent?: boolean;
   // Structured-result sink. When set, receives the SAME array of
   // `{slug,score,type,title}` objects that `--json` mode serializes to
   // stdout — one source of truth for both the JSON CLI surface and the
@@ -253,9 +260,18 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     // "create your first record" recovery every other CLI hint already gives.
     // A populated brain that simply matched nothing keeps the existing hint.
     const empty = !(await hasAnyLiveRecord(node, opts.cfg));
-    const hint = empty
-      ? "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then search again"
-      : "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)";
+    // On the MCP agent channel the hint must name TOOLS the agent can call.
+    // The CLI hint points at `fbrain <type> new`, `fbrain ask <query>`, and
+    // `fbrain reindex` (plus a repo-local doc path) — none of which exist as
+    // MCP tools — so an agent reading them dead-ends. Render the agent-voiced
+    // variant only when `opts.agent` is set; the human CLI path is unchanged.
+    const hint = opts.agent
+      ? empty
+        ? "hint:  no records yet — create your first with the `fbrain_put` tool, then try again"
+        : "hint:  fresh writes can take a moment to land in the vector index — use the `fbrain_ask` tool (BM25 + vector hybrid) for immediate retrieval"
+      : empty
+        ? "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then search again"
+        : "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)";
     if (opts.json) {
       // Stdout is just `[]` so jq pipelines see a parseable empty
       // array rather than the "no matches" sentinel; the hint stays on stderr.

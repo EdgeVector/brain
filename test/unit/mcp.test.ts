@@ -602,6 +602,131 @@ describe("fbrain_list tool", () => {
   });
 });
 
+// The empty/no-match recovery hint an MCP agent receives must name TOOLS the
+// agent can actually call (`fbrain_put`, `fbrain_ask`) — never CLI verbs
+// (`fbrain <type> new`, `fbrain ask`, `fbrain list`), the `fbrain reindex`
+// dead-end (there is NO MCP reindex tool), or a repo-local `docs/...` path.
+// This closes the agent-channel half of the empty-node-hint trilogy
+// (#276/#279/#283), mirroring how `agentHint` already fixed the ERROR path.
+describe("read tools — agent-channel empty/no-match hints", () => {
+  // CLI-flavored fragments that must NEVER leak to an agent over MCP.
+  const assertNoCliLeak = (text: string) => {
+    expect(text).not.toContain("fbrain reindex");
+    expect(text).not.toContain("docs/");
+    // The bare CLI verbs (with a trailing space so we don't false-positive on
+    // the MCP tool names `fbrain_ask` / `fbrain_list` / `fbrain_put`).
+    expect(text).not.toContain("fbrain ask ");
+    expect(text).not.toContain("fbrain list ");
+    expect(text).not.toContain("fbrain <type> new");
+  };
+
+  test("fbrain_search on a POPULATED brain that matched nothing names `fbrain_ask`", async () => {
+    // native-index/search returns no hits, but the brain holds a live record
+    // (hasAnyLiveRecord → /api/query has a row) → the populated no-match path.
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alive", "Alive")] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_search!({ query: "nothing-here", min_score: 0.99 });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("no matches");
+    expect(text).toContain("fbrain_ask");
+    assertNoCliLeak(text);
+  });
+
+  test("fbrain_search on an EMPTY brain names `fbrain_put`", async () => {
+    // No native-index hits AND no live record anywhere → empty-brain path.
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_search!({ query: "anything" });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("no matches");
+    expect(text).toContain("fbrain_put");
+    assertNoCliLeak(text);
+  });
+
+  test("fbrain_ask on an EMPTY brain names `fbrain_put`", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_ask!({ query: "anything" });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("no matches");
+    expect(text).toContain("fbrain_put");
+    assertNoCliLeak(text);
+  });
+
+  test("fbrain_list on an EMPTY brain names `fbrain_put`", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_list!({ type: "design" });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("no records");
+    expect(text).toContain("fbrain_put");
+    assertNoCliLeak(text);
+  });
+
+  test("fbrain_list filter-no-match on a POPULATED brain names `fbrain_list`", async () => {
+    // The requested `design` type returns no rows, but another type (concept)
+    // holds a live record so hasAnyLiveRecord → true → the filter-no-match
+    // path. We answer the filtered query empty and the probe walk non-empty.
+    installMock((url, init) => {
+      if (url.includes("/api/query") && typeof init?.body === "string") {
+        try {
+          const body = JSON.parse(init.body) as Record<string, unknown>;
+          const schema = String(body.schema_name ?? "");
+          // Any non-design schema hash → seed one live row (populated brain).
+          if (schema && schema !== TEST_HASHES.design) {
+            return { status: 200, body: { ok: true, results: [recordRow("c", "C")] } };
+          }
+        } catch {
+          // ignore
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_list!({ type: "design", status: "draft" });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("no records");
+    expect(text).toContain("fbrain_list");
+    expect(text).toContain("no type/status/tag filter");
+    assertNoCliLeak(text);
+  });
+});
+
 // The whole point of this card: the 4 read tools must return typed JSON in
 // `structuredContent` (mirroring the CLI `--json` shapes) AND declare an
 // `outputSchema`, so an MCP client gets fields back instead of regex-parsing
