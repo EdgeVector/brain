@@ -673,6 +673,48 @@ describe("resolveBySlug", () => {
     });
   });
 
+  test("ambiguous-slug hint echoes the invoking verb, defaulting to get", async () => {
+    // The recovery command must be runnable as-is for the verb the user
+    // actually ran. `status`/`delete` callers pass their own verb so the hint
+    // doesn't dead-end on `fbrain get` (which reads instead of updating /
+    // silently fails to delete); an omitted verb stays `get` so the throw is
+    // well-formed for any future caller.
+    const mk = () =>
+      mockNode({
+        designhash: [row("dup1")],
+        taskhash: [row("dup1", { status: "open", design_slug: "" })],
+      });
+
+    await expect(
+      resolveBySlug({ node: mk(), cfg, slug: "dup1", recoveryVerb: "status" }),
+    ).rejects.toMatchObject({
+      code: "ambiguous_slug",
+      hint: "Re-run with --type, e.g. `fbrain status dup1 --type design`.",
+    });
+
+    await expect(
+      resolveBySlug({ node: mk(), cfg, slug: "dup1", recoveryVerb: "delete" }),
+    ).rejects.toMatchObject({
+      code: "ambiguous_slug",
+      hint: "Re-run with --type, e.g. `fbrain delete dup1 --type design`.",
+    });
+
+    await expect(
+      resolveBySlug({ node: mk(), cfg, slug: "dup1", recoveryVerb: "get" }),
+    ).rejects.toMatchObject({
+      code: "ambiguous_slug",
+      hint: "Re-run with --type, e.g. `fbrain get dup1 --type design`.",
+    });
+
+    // Omitting the verb keeps the historical `get` example.
+    await expect(
+      resolveBySlug({ node: mk(), cfg, slug: "dup1" }),
+    ).rejects.toMatchObject({
+      code: "ambiguous_slug",
+      hint: "Re-run with --type, e.g. `fbrain get dup1 --type design`.",
+    });
+  });
+
   test(
     "untyped lookup detects ambiguity even when one type's first read flakes",
     async () => {

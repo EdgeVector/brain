@@ -50,6 +50,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     slug,
     type: opts.type,
     notFoundMessage: NOT_FOUND_TYPED,
+    recoveryVerb: "get",
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on
