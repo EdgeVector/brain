@@ -656,6 +656,60 @@ describe("resolveBySlug", () => {
     });
   });
 
+  test("untyped not-found carries a non-null hint pointing at `fbrain list`", async () => {
+    const node = mockNode({});
+    await expect(
+      resolveBySlug({ node, cfg, slug: "ghost" }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      message: 'No record with slug "ghost".',
+      // The whole point of this card: a slug miss is no longer a dead end.
+      hint: "Run `fbrain list` to see existing slugs (slugs are case-sensitive).",
+      agentHint:
+        "Call fbrain_list to see existing slugs (slugs are case-sensitive).",
+    });
+  });
+
+  test("typed not-found hint tells you to drop --type, naming the invoking verb", async () => {
+    const node = mockNode({});
+    // The slug may exist under a different type that `--type` hid — the hint
+    // widens the search. The recovery command echoes the verb the caller ran
+    // (status/delete), not a hardcoded `get`.
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "ghost",
+        type: "task",
+        recoveryVerb: "status",
+      }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      hint: "No task with that slug. Drop --type to search every type (`fbrain status ghost`), or `fbrain list` to see existing slugs.",
+      agentHint:
+        "Omit the `type` argument to search all record types, or call fbrain_list to see existing slugs.",
+    });
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "ghost",
+        type: "design",
+        recoveryVerb: "delete",
+      }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      hint: "No design with that slug. Drop --type to search every type (`fbrain delete ghost`), or `fbrain list` to see existing slugs.",
+    });
+    // Verb defaults to `get` when the caller omits recoveryVerb.
+    await expect(
+      resolveBySlug({ node, cfg, slug: "ghost", type: "design" }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      hint: "No design with that slug. Drop --type to search every type (`fbrain get ghost`), or `fbrain list` to see existing slugs.",
+    });
+  });
+
   test("ambiguous slug across two types throws ambiguous_slug naming both", async () => {
     const node = mockNode({
       designhash: [row("dual")],
