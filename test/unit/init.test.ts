@@ -112,6 +112,72 @@ describe("resolveUrls", () => {
   });
 });
 
+describe("resolveUrls — port-breadcrumb node-URL default", () => {
+  let tmp: string;
+  let priorHome: string | undefined;
+
+  function withBreadcrumb(content: string | null): void {
+    tmp = mkdtempSync(join(tmpdir(), "fbrain-breadcrumb-"));
+    if (content !== null) writeFileSync(join(tmp, "port"), content);
+    priorHome = process.env.FOLDDB_HOME;
+    process.env.FOLDDB_HOME = tmp;
+  }
+
+  afterEach(() => {
+    if (priorHome === undefined) delete process.env.FOLDDB_HOME;
+    else process.env.FOLDDB_HOME = priorHome;
+    priorHome = undefined;
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("fresh init with a breadcrumb → targets the breadcrumb port, not :9001", () => {
+    withBreadcrumb("9299");
+    const r = resolveUrls({}, null);
+    expect(r.nodeUrl).toBe("http://127.0.0.1:9299");
+    expect(r.nodeUrlFromBreadcrumb).toBe(true);
+    expect(r.healed).toEqual([]);
+  });
+
+  test("fresh init, breadcrumb absent → falls back to DEFAULT_NODE_URL", () => {
+    withBreadcrumb(null);
+    const r = resolveUrls({}, null);
+    expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
+    expect(r.nodeUrlFromBreadcrumb).toBe(false);
+  });
+
+  test("breadcrumb of 9001 → resolved URL is still http://127.0.0.1:9001", () => {
+    withBreadcrumb("9001");
+    const r = resolveUrls({}, null);
+    expect(r.nodeUrl).toBe("http://127.0.0.1:9001");
+    expect(r.nodeUrlFromBreadcrumb).toBe(true);
+  });
+
+  test("--node-url overrides the breadcrumb", () => {
+    withBreadcrumb("9299");
+    const r = resolveUrls({ nodeUrl: "http://127.0.0.1:9001" }, null);
+    expect(r.nodeUrl).toBe("http://127.0.0.1:9001");
+    expect(r.nodeUrlFromBreadcrumb).toBe(false);
+  });
+
+  test("existing config URL is reused over the breadcrumb (breadcrumb only seeds a FRESH init)", () => {
+    withBreadcrumb("9299");
+    const existing = buildTestCfg({
+      nodeUrl: "http://192.168.1.5:9001",
+      schemaServiceUrl: "https://my-custom-lambda.example.com",
+    });
+    const r = resolveUrls({}, existing);
+    expect(r.nodeUrl).toBe("http://192.168.1.5:9001");
+    expect(r.nodeUrlFromBreadcrumb).toBe(false);
+  });
+
+  test("junk breadcrumb → falls back to DEFAULT_NODE_URL", () => {
+    withBreadcrumb("not-a-port");
+    const r = resolveUrls({}, null);
+    expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
+    expect(r.nodeUrlFromBreadcrumb).toBe(false);
+  });
+});
+
 describe("hasUsableExistingConfig", () => {
   test("null → not usable", () => {
     expect(hasUsableExistingConfig(null)).toBe(false);

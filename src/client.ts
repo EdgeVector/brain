@@ -17,7 +17,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -90,6 +90,41 @@ export function defaultFolddbSocketPath(override?: string): string {
   if (override && override.length > 0) return override;
   const home = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
   return join(home, "data", SOCKET_FILE_NAME);
+}
+
+// Filename of fold's port breadcrumb — the running node writes its TCP listen
+// port here (`fold_db_node` drops `${FOLDDB_HOME ?? ~/.folddb}/port`). Reading
+// it lets `fbrain init` target whatever node is actually up on this machine
+// instead of assuming the homebrew :9001 default.
+const PORT_BREADCRUMB_FILE_NAME = "port";
+
+// Derive the running node's TCP URL from fold's `${FOLDDB_HOME ?? ~/.folddb}/port`
+// breadcrumb. Returns `http://127.0.0.1:<port>` when the file holds a valid
+// integer port, or `null` when it is missing / empty / non-numeric (caller then
+// falls back to the hardcoded default).
+//
+// CRITICAL: the home-resolution precedence MUST match `defaultFolddbSocketPath`
+// (FOLDDB_HOME, then homedir) so the node URL and the owner-attestation UDS
+// socket always derive from the SAME root — otherwise the two can silently
+// resolve to different nodes and the owner-session attestation fails with a
+// misleading `transport_not_attested` (the dogfood bug this fixes).
+export function defaultNodeUrlFromBreadcrumb(): string | null {
+  const home = process.env.FOLDDB_HOME ?? join(homedir(), ".folddb");
+  const breadcrumbPath = join(home, PORT_BREADCRUMB_FILE_NAME);
+  if (!existsSync(breadcrumbPath)) return null;
+  let raw: string;
+  try {
+    raw = readFileSync(breadcrumbPath, "utf8");
+  } catch {
+    return null;
+  }
+  const trimmed = raw.trim();
+  // Reject empty / non-numeric / out-of-range; only a clean positive integer
+  // port (1..65535) yields a URL.
+  if (!/^\d+$/.test(trimmed)) return null;
+  const port = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return `http://127.0.0.1:${port}`;
 }
 
 // Mint a one-time pairing code over the node's UDS control socket, then
