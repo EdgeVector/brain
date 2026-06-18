@@ -59,8 +59,10 @@ const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "migrate_flag_requires_add_field",
   // Bad invocation surfaced inside the command modules (put / new / raw):
   // missing or contradictory slug/type, a misapplied --design, an
-  // unrecognised --type, empty stdin with nothing to write, and a malformed
-  // `raw` method/path. All are "you invoked it wrong," not operational.
+  // unrecognised --type, empty stdin with nothing to write, malformed
+  // frontmatter (unclosed/malformed/unfenced) or an invalid slug on the
+  // put/create path, and a malformed `raw` method/path. All are "you invoked
+  // it wrong," not operational.
   "missing_slug",
   "missing_type",
   "slug_conflict",
@@ -69,6 +71,10 @@ const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "unknown_record_type",
   "design_flag_unsupported",
   "empty_stdin",
+  "frontmatter_unclosed",
+  "frontmatter_malformed",
+  "frontmatter_unfenced",
+  "invalid_slug",
   "invalid_raw_method",
   "invalid_raw_path",
 ]);
