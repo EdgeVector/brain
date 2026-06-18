@@ -21,7 +21,8 @@ import { listCmd, type RecordSummary } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
-import { FbrainError, stripDoctorTip } from "../client.ts";
+import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
+import { schemaHashFor, verifyVectorIndexed } from "../record.ts";
 import { RECORD_TYPES } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
@@ -185,6 +186,23 @@ const putResultSchema = z.object({
     .describe("`created` for a new record, `updated` for an in-place re-put."),
   type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type written."),
   slug: z.string().describe("Resolved record slug."),
+  // Read-after-write honesty for the agent loop. The write is ALWAYS
+  // persisted and record-list-visible before `fbrain_put` returns (the
+  // put's own verify-read guarantees that). `indexPending` reports the
+  // separate, lagging VECTOR index: `true` means the just-written record
+  // was NOT yet in the native (semantic) index when the short confirmation
+  // budget expired, so an immediate `fbrain_search`/`fbrain_ask` in this
+  // same session may not surface it yet (re-query in a moment). `false`
+  // means it IS already vector-searchable. Defaults to `false` — the common
+  // warm-node case where indexing caught up inside the budget.
+  indexPending: z
+    .boolean()
+    .describe(
+      "`true` only when the record landed but the semantic (vector) index " +
+        "had not caught up within the post-write confirmation budget, so an " +
+        "immediate fbrain_search/fbrain_ask may miss it — re-query shortly. " +
+        "`false` (the default) means it is already vector-searchable.",
+    ),
 });
 
 // `fbrain_delete` → `{action, type, slug, soft}`. `soft` is always `true` —
@@ -454,7 +472,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "body, stage it to a file and pass `body_path` instead of inlining " +
         "`body` — a long inline `body` can be silently dropped in transit in " +
         "long sessions, whereas a short path always survives. Returns " +
-        "one line: `created|updated <type> <slug>`.",
+        "one line: `created|updated <type> <slug>`. Before returning, the " +
+        "write is confirmed read-after-write consistent: the record is " +
+        "record-list-visible AND a short bounded poll waits for it to land in " +
+        "the semantic (vector) index, so an immediate follow-up " +
+        "`fbrain_search`/`fbrain_ask` in the same session returns it. If the " +
+        "vector index has not caught up within that budget the write still " +
+        "succeeds but `indexPending: true` is set (and noted in the text) so " +
+        "you know to re-query shortly.",
       inputSchema: {
         slug: requiredText("Record slug (lowercase, [a-z0-9-_])."),
         type: typeEnum
@@ -518,17 +543,57 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "overrides synthesis from `type`/`title`/`tags`.",
           ),
       },
-      // `structuredContent` is `{action, type, slug}` — the SAME values that
-      // compose the `created|updated <type> <slug>` text line, so the typed
-      // output can't drift from the prose fallback.
+      // `structuredContent` is `{action, type, slug, indexPending}` — the
+      // first three are the SAME values that compose the
+      // `created|updated <type> <slug>` text line (so the typed output can't
+      // drift from the prose fallback); `indexPending` is the read-after-write
+      // honesty signal added by the post-write vector-index confirmation below.
       outputSchema: putResultSchema.shape,
     },
     (args) =>
       runWriteTool(getCfg, async (cfg, print, onResult) => {
         const input = buildPutInput(resolvePutBody(args));
         const result = await putCmd({ cfg, slug: args.slug, input });
-        print(`${result.action} ${result.type} ${result.slug}`);
-        onResult({ action: result.action, type: result.type, slug: result.slug });
+        // Read-after-write confirmation for the agent loop. `putCmd` already
+        // guarantees the row is record-list-visible (its own verify-read), but
+        // the canonical agent loop is put → `fbrain_search`/`fbrain_ask`, which
+        // read the SEMANTIC (vector) index — and fold_db indexes the embedding
+        // asynchronously AFTER the mutation returns. In one warm MCP process
+        // the follow-up search fires inside that sub-second window and the
+        // just-written record is silently absent. So before returning, poll the
+        // native index (scoped to this record's schema, probing with its own
+        // title/slug text) on a SHORT bounded budget; report success as soon as
+        // it's visible. On timeout we STILL return success but set
+        // `indexPending: true` so the agent knows an immediate re-search may
+        // miss it — we never block indefinitely and never fail a persisted
+        // write. This is the fbrain-side confirmation fix; the deeper
+        // server-side synchronous-indexing change is a separate fold/native-
+        // index item (docs/phase-7-search-latency-spike.md, G3d/G3e).
+        let indexPending = false;
+        try {
+          const node = newReadClientFromCfg(cfg);
+          const schemaHash = schemaHashFor(result.type, cfg);
+          const probe = result.title.trim() || result.slug;
+          const visible = await verifyVectorIndexed(node, schemaHash, result.slug, probe);
+          indexPending = !visible;
+        } catch {
+          // A confirmation-probe failure (config/transport) must never fail a
+          // write that already persisted — report the index as pending so the
+          // agent re-queries rather than trusting a missed read.
+          indexPending = true;
+        }
+        print(
+          `${result.action} ${result.type} ${result.slug}` +
+            (indexPending
+              ? " (indexPending: semantic index catching up — an immediate search may miss it; re-query shortly)"
+              : ""),
+        );
+        onResult({
+          action: result.action,
+          type: result.type,
+          slug: result.slug,
+          indexPending,
+        });
       }),
   );
 

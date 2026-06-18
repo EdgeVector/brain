@@ -65,6 +65,35 @@ function installMock(handler: (url: string, init?: RequestInit) => MockResponse)
         // Non-JSON body — splice path doesn't apply.
       }
     }
+    // Mirror the /api/query splice for the native (vector) index probe the
+    // MCP `fbrain_put` handler now fires post-write (`verifyVectorIndexed`):
+    // a warm fold_db indexes the embedding moments after the mutation, so a
+    // search scoped to the written schema surfaces the just-written slug. When
+    // a handler doesn't explicitly script the search endpoint, auto-answer it
+    // from tracked writes so the put's index-confirmation passes (indexPending
+    // false) without each put test re-stubbing /api/native-index/search — and
+    // without paying the real verify backoff on an unhandled 404.
+    if (
+      url.includes("/api/native-index/search") &&
+      next.status !== 200 &&
+      writes.length > 0
+    ) {
+      const u = new URL(url, "http://node");
+      const schemas = (u.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+      const results = writes
+        .filter((w) => schemas.length === 0 || schemas.includes(w.schema))
+        .map((w) => ({
+          schema_name: w.schema,
+          field: "body",
+          key_value: { hash: w.key, range: null },
+          value: String(w.fields.body ?? ""),
+          metadata: { score: 1 },
+        }));
+      return new Response(JSON.stringify({ results }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     if (
       url.endsWith("/api/query") &&
       next.status === 200 &&
@@ -830,8 +859,27 @@ describe("read tools — structuredContent + outputSchema", () => {
 // the values in the printed line, (2) it validates against the declared
 // outputSchema, and (3) the human text is unchanged.
 describe("write tools — structuredContent + outputSchema", () => {
-  test("fbrain_put returns {action,type,slug} matching its outputSchema; text unchanged", async () => {
+  test("fbrain_put returns {action,type,slug,indexPending:false} matching its outputSchema; text unchanged", async () => {
     installMock((url) => {
+      // Native index already holds the slug → the post-write vector-index
+      // confirmation passes on the first poll, so indexPending is false and
+      // the text fallback stays the bare one-line confirmation.
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                field: "body",
+                key_value: { hash: "mcp-write-probe", range: null },
+                value: "Probe",
+                metadata: { score: 1 },
+              },
+            ],
+          },
+        };
+      }
       if (url.includes("/api/query")) {
         // Empty page → put-side verify sees the row via installMock's splice.
         return { status: 200, body: { ok: true, results: [] } };
@@ -851,15 +899,33 @@ describe("write tools — structuredContent + outputSchema", () => {
       action: "created",
       type: "concept",
       slug: "mcp-write-probe",
+      indexPending: false,
     });
     const schema = outputSchemaOf(server, "fbrain_put")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
-    // Text fallback is the same one-line confirmation as before.
+    // Text fallback is the same one-line confirmation as before (no
+    // indexPending suffix when the index has caught up).
     expect(res.content[0]!.text).toBe("created concept mcp-write-probe");
   });
 
   test("fbrain_put on an existing slug returns action:\"updated\"", async () => {
     installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                field: "body",
+                key_value: { hash: "mcp-write-probe", range: null },
+                value: "body text",
+                metadata: { score: 1 },
+              },
+            ],
+          },
+        };
+      }
       if (url.includes("/api/query")) {
         // Existing row present → putCmd resolves action=updated.
         return { status: 200, body: { ok: true, results: [recordRow("mcp-write-probe")] } };
@@ -873,7 +939,7 @@ describe("write tools — structuredContent + outputSchema", () => {
       type: "design",
     });
     expect(res.isError).toBeFalsy();
-    expect(res.structuredContent).toMatchObject({ action: "updated", type: "design", slug: "mcp-write-probe" });
+    expect(res.structuredContent).toMatchObject({ action: "updated", type: "design", slug: "mcp-write-probe", indexPending: false });
     const schema = outputSchemaOf(server, "fbrain_put")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
     expect(res.content[0]!.text).toBe("updated design mcp-write-probe");
@@ -1387,6 +1453,93 @@ describe("fbrain_put tool", () => {
     const getRes = await tools.fbrain_get!({ slug: "ryw-mcp", type: "concept" });
     expect(getRes.isError).toBeFalsy();
     expect(getRes.content[0]!.text ?? "").toContain("ryw-mcp");
+  });
+
+  // The card's core repro: in ONE long-lived MCP process, `fbrain_put` then an
+  // immediate `fbrain_search`/`fbrain_ask` for the just-written record. Before
+  // this fix, the put returned "created" before the vector index caught up, so
+  // the back-to-back search returned every OTHER record except the one just
+  // written. The post-write vector-index confirmation closes that window: the
+  // put reports `indexPending: false` only once the slug is in the native
+  // index, so the very next search surfaces it.
+  test("put then immediate search AND ask return the just-written record (read-after-write via one MCP process)", async () => {
+    // Auto-stateful mock: tracks the put's mutation and answers BOTH the
+    // /api/query (record-list) AND /api/native-index/search (vector) surfaces
+    // from it — mirroring a warm fold_db that has finished indexing. So the
+    // put's confirmation passes (indexPending false) and the following
+    // search/ask see the row.
+    installMock((url, init) => {
+      void init;
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      // Native-index search is auto-spliced from tracked writes by installMock.
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const putRes = await tools.fbrain_put!({
+      slug: "raw-quokka-marker",
+      type: "concept",
+      title: "Raw quokka marker",
+      body: "A unique raw quokka marker phrase for read-after-write.",
+    });
+    expect(putRes.isError).toBeFalsy();
+    // Confirmed in the index → no pending signal, bare confirmation text.
+    expect(putRes.structuredContent).toMatchObject({
+      action: "created",
+      slug: "raw-quokka-marker",
+      indexPending: false,
+    });
+    expect(putRes.content[0]!.text).toBe("created concept raw-quokka-marker");
+
+    // The immediately-following search in the SAME process surfaces the row.
+    const searchRes = await tools.fbrain_search!({ query: "raw quokka marker" });
+    expect(searchRes.isError).toBeFalsy();
+    expect(searchRes.content[0]!.text ?? "").toContain("raw-quokka-marker");
+    const searchHit = (searchRes.structuredContent?.matches as Array<{ slug: string }>)[0];
+    expect(searchHit?.slug).toBe("raw-quokka-marker");
+
+    // ...and so does ask (BM25 record-list + vector hybrid).
+    const askRes = await tools.fbrain_ask!({ query: "raw quokka marker" });
+    expect(askRes.isError).toBeFalsy();
+    expect(askRes.content[0]!.text ?? "").toContain("raw-quokka-marker");
+  });
+
+  // The honest-timeout branch: the row persists and is record-list-visible,
+  // but the vector index never catches up within the confirmation budget. The
+  // write still succeeds — it must NEVER fail or block indefinitely — and the
+  // result carries `indexPending: true` (plus a text note) so the agent knows
+  // an immediate semantic search may miss it and to re-query shortly.
+  test("genuine vector-index timeout still succeeds and reports indexPending:true", async () => {
+    installMock((url, init) => {
+      void init;
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      // Explicit 200 with NO hits → the auto-splice is bypassed (status 200),
+      // so the vector-index confirmation polls its whole budget and times out.
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_put!({
+      slug: "slow-index-marker",
+      type: "concept",
+      title: "Slow index marker",
+      body: "Indexing lags here.",
+    });
+    // Write succeeds despite the index never confirming.
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      action: "created",
+      type: "concept",
+      slug: "slow-index-marker",
+      indexPending: true,
+    });
+    const schema = outputSchemaOf(createFbrainMcpServer({ cfg }), "fbrain_put")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    // Text fallback carries an honest catching-up note.
+    expect(res.content[0]!.text).toContain("indexPending");
   });
 });
 

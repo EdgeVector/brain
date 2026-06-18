@@ -63,6 +63,11 @@ export type PutResult = {
   type: RecordType;
   slug: string;
   action: "created" | "updated";
+  // The resolved record title (frontmatter `title:`, else the body's first
+  // H1, else the slug). Exposed so the MCP put handler can use it as the
+  // probe query when confirming the record landed in the semantic (vector)
+  // index — see `verifyVectorIndexed` and mcp/server.ts. The CLI ignores it.
+  title: string;
 };
 
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
@@ -141,7 +146,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
     });
   }
-  return { type, slug, action };
+  return { type, slug, action, title };
 }
 
 function buildFields(
