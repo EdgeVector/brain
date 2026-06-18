@@ -318,7 +318,8 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
         `No consent capability cached for "${appId}" and this is a non-interactive shell, ` +
         `so fbrain can't prompt for a grant.`,
       hint:
-        `Run \`folddb consent grant ${appId}\` (or \`fbrain init --grant-consent\`) once, then retry. ` +
+        `Run \`fbrain init --grant-consent\` once, then retry — it creates the consent request, grants it, and stores the capability in one headless step. ` +
+        `(A bare \`folddb consent grant ${appId}\` only works once a pending request exists, i.e. an interactive write is already polling — it fails with "no pending consent request" on a fresh node.) ` +
         `Set FBRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
     });
   }

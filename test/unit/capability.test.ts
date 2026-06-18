@@ -250,24 +250,42 @@ describe("first-run consent acquisition", () => {
     };
 
     const start = Date.now();
-    await expect(
-      acquireCapability({
-        appId: "fbrain",
-        nodeUrl: NODE_URL,
-        store: inMemoryCapabilityStore(),
-        transport,
-        print: () => {},
-        // 5-min default would mask a regression — keep maxWaitMs short so a
-        // future bug that re-enters the poll surfaces as a fast timeout, not
-        // a hung test.
-        pollIntervalMs: 1,
-        sleep: noSleep,
-        maxWaitMs: 50,
-        isTty: () => false,
-      }),
-    ).rejects.toMatchObject({
-      code: "consent_required_non_interactive",
-    });
+    const err = await acquireCapability({
+      appId: "fbrain",
+      nodeUrl: NODE_URL,
+      store: inMemoryCapabilityStore(),
+      transport,
+      print: () => {},
+      // 5-min default would mask a regression — keep maxWaitMs short so a
+      // future bug that re-enters the poll surfaces as a fast timeout, not
+      // a hung test.
+      pollIntervalMs: 1,
+      sleep: noSleep,
+      maxWaitMs: 50,
+      isTty: () => false,
+    }).then(
+      () => {
+        throw new Error("expected acquireCapability to reject");
+      },
+      (e) => e as { code?: string; hint?: string },
+    );
+    expect(err.code).toBe("consent_required_non_interactive");
+    // The recovery hint must lead with the command that actually works
+    // headlessly on a fresh node (`fbrain init --grant-consent` creates the
+    // request, grants it, and stores the capability in one shot). A bare
+    // `folddb consent grant fbrain` dead-ends with "no pending consent
+    // request" because the non-interactive write path aborts before creating
+    // one — so it must NOT be the first/primary remedy.
+    const hint = err.hint ?? "";
+    expect(hint).toContain("fbrain init --grant-consent");
+    const initIdx = hint.indexOf("fbrain init --grant-consent");
+    const bareGrantIdx = hint.indexOf("folddb consent grant fbrain");
+    // `fbrain init --grant-consent` is named, and named before any bare
+    // `folddb consent grant fbrain` (which may still appear, as a caveat).
+    expect(initIdx).toBeGreaterThanOrEqual(0);
+    if (bareGrantIdx >= 0) {
+      expect(initIdx).toBeLessThan(bareGrantIdx);
+    }
     // The throw lands before the poll loop, and (since we fast-fail before
     // request-consent too) before any /api/apps/* traffic.
     expect(statusCalls).toBe(0);
