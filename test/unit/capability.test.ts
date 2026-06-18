@@ -267,9 +267,25 @@ describe("first-run consent acquisition", () => {
       () => {
         throw new Error("expected acquireCapability to reject");
       },
-      (e) => e as { code?: string; hint?: string },
+      (e) => e as { code?: string; message?: string; hint?: string; agentHint?: string },
     );
     expect(err.code).toBe("consent_required_non_interactive");
+    // The MCP/agent channel consumes `agentHint` (the CLI `hint` carries
+    // shell-/dogfood-only remediation an agent can't run). It must exist, be
+    // non-empty, name the OWNER action, and NOT leak the CLI-flavored "shell"
+    // wording or the FBRAIN_APP_IDENTITY_ENFORCE dogfood escape hatch — mirrors
+    // the record.ts agentHint assertions. (This is the one consent/write error
+    // an agent actually hits on a fresh-owner node, since the MCP write path
+    // fast-fails here before any consent traffic.)
+    const agentHint = err.agentHint ?? "";
+    expect(agentHint.length).toBeGreaterThan(0);
+    expect(agentHint).not.toContain("shell");
+    expect(agentHint).not.toContain("FBRAIN_APP_IDENTITY_ENFORCE");
+    expect(agentHint).toContain("owner");
+    expect(agentHint).toContain("fbrain init --grant-consent");
+    // The base `message` is rendered verbatim over MCP, so it too must be
+    // channel-neutral — no "non-interactive shell".
+    expect(err.message ?? "").not.toContain("shell");
     // The recovery hint must lead with the command that actually works
     // headlessly on a fresh node (`fbrain init --grant-consent` creates the
     // request, grants it, and stores the capability in one shot). A bare

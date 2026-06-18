@@ -314,16 +314,43 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   if (opts.onConsentRequested === undefined && !isTty()) {
     throw new FbrainError({
       code: "consent_required_non_interactive",
+      // Channel-neutral message — true on both surfaces. The old wording said
+      // "this is a non-interactive shell", which is meaningless to an MCP agent
+      // (it isn't a shell, and is *always* non-interactive). State the real
+      // fact instead: no write capability is cached and fbrain can't grant one
+      // on its own.
       message:
-        `No consent capability cached for "${appId}" and this is a non-interactive shell, ` +
-        `so fbrain can't prompt for a grant.`,
+        `No write capability is cached for "${appId}" on this node, ` +
+        `and fbrain can't request a grant non-interactively.`,
+      // CLI `hint` (human at a terminal) — UNCHANGED. Names the headless
+      // one-shot and the local/dogfood enforcement escape hatch, both correct
+      // for the human path and only shown when no `agentHint` is set.
       hint:
         `Run \`fbrain init --grant-consent\` once, then retry — it creates the consent request, grants it, and stores the capability in one headless step. ` +
         `(A bare \`folddb consent grant ${appId}\` only works once a pending request exists, i.e. an interactive write is already polling — it fails with "no pending consent request" on a fresh node.) ` +
         `Set FBRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
+      // Agent-voiced remediation (MCP) — names the OWNER action in agent terms,
+      // with no "shell" and no FBRAIN_APP_IDENTITY_ENFORCE dogfood note the
+      // agent can't act on. This is the first hard wall an agent hits on a
+      // fresh owner's node (init headlessly skips the consent prompt).
+      agentHint:
+        `The node owner must grant fbrain consent before writes land. ` +
+        `Ask them to run \`fbrain init --grant-consent\` (or \`folddb consent grant ${appId} --yes\`) in their terminal, then retry.`,
     });
   }
 
+  // Sibling-error audit (for the agent/MCP write surface): everything below
+  // this point is only reached when `onConsentRequested` is set (the inline
+  // `init --grant-consent` flow) or `isTty()` is true (a human at a terminal).
+  // The MCP write path supplies neither — `CapabilitySession.acquire` calls
+  // `acquireCapability` with no `onConsentRequested` and the default (non-TTY)
+  // `isTty`, so it ALWAYS fast-fails at the `consent_required_non_interactive`
+  // throw above and never reaches `app_not_registered`, the consent poll-loop
+  // denials/expiries, or the capability-integrity errors. Those are CLI-/inline-
+  // only, so their CLI `hint`s are the right voice and an `agentHint` would be
+  // unreachable on the agent channel. The single error an MCP agent can hit on
+  // a consent-pending write is the one above — which is why it's the one that
+  // carries `agentHint`.
   const req = await opts.transport.requestConsent(appId, scope);
   if (req.status === 404) {
     throw new FbrainError({
