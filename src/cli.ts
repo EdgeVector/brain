@@ -1260,17 +1260,31 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   // without widening the parseArgs return type.
   const designSlug = (values as { design?: string }).design;
   if (designSlug) opts.designSlug = designSlug;
-  await recordNew(opts);
+  const { indexPending } = await recordNew(opts);
   // Under --json the structured success object is the stdout document; the
   // human line moves to stderr so `--json` stdout stays parseable (mirrors
-  // the read verbs).
+  // the read verbs). The `indexPending` flag mirrors the MCP put's
+  // `structuredContent` so a scripted CLI write has the same read-after-write
+  // search-parity signal the agent path gets.
   if (values.json) {
-    console.error(`created ${type} ${slug}`);
-    console.log(JSON.stringify({ ok: true, type, slug }));
+    console.error(`created ${type} ${slug}${indexPendingNote(indexPending)}`);
+    console.log(JSON.stringify({ ok: true, type, slug, indexPending }));
   } else {
-    console.log(`created ${type} ${slug}`);
+    console.log(`created ${type} ${slug}${indexPendingNote(indexPending)}`);
   }
   return 0;
+}
+
+// Honest one-line suffix appended to a CLI write's success output when the
+// record persisted but the bounded vector-index confirmation timed out. Keeps
+// the success line truthful — the write landed — while warning that an
+// IMMEDIATE `fbrain search` may miss it (the native index is still catching
+// up). Empty when the record is confirmed in the index (or the confirmation
+// was skipped on a remote node), so the common case prints the bare line.
+function indexPendingNote(indexPending: boolean): string {
+  return indexPending
+    ? " (semantic index still catching up — an immediate `fbrain search` may miss it; retry in a moment)"
+    : "";
 }
 
 // The value-taking options on `put`, derived from PUT_OPTIONS so the slug
@@ -1435,16 +1449,21 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   // human line moves to stderr (mirrors the read verbs). `created` reuses
   // put's existing created/updated signal.
   if (values.json) {
-    console.error(`${result.action} ${result.type} ${result.slug}`);
+    console.error(
+      `${result.action} ${result.type} ${result.slug}${indexPendingNote(result.indexPending)}`,
+    );
     console.log(
       JSON.stringify({
         ok: true,
         slug: result.slug,
         created: result.action === "created",
+        indexPending: result.indexPending,
       }),
     );
   } else {
-    console.log(`${result.action} ${result.type} ${result.slug}`);
+    console.log(
+      `${result.action} ${result.type} ${result.slug}${indexPendingNote(result.indexPending)}`,
+    );
   }
   return 0;
 }

@@ -17,11 +17,13 @@ import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { capitalize } from "../format.ts";
 import {
+  confirmVectorIndexed,
   crossTypeSlugNote,
   findBySlugFast,
   findCrossTypeSlugCollisions,
   findExistingForWrite,
   nowIso,
+  type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
 } from "../record.ts";
@@ -40,9 +42,22 @@ export type RecordNewOptions = {
   designSlug?: string;
   force?: boolean;
   verbose?: Verbose;
+  // Tunables for the post-write VECTOR-index confirmation (read-after-write
+  // `fbrain search` parity — see `confirmVectorIndexed`). Production callers
+  // leave this unset and inherit the short bounded budget; tests pin attempts +
+  // inject a no-op sleep so a timed-out probe is observable without backoff.
+  vectorVerifyOptions?: ReadRetryOptions;
 };
 
-export async function recordNew(opts: RecordNewOptions): Promise<void> {
+export type RecordNewResult = {
+  // True when the record persisted but the bounded vector-index confirmation
+  // timed out — an immediate `fbrain search` may miss it. Mirrors
+  // `PutResult.indexPending`; the CLI prints an honest "index still catching
+  // up" note and surfaces it under `--json`.
+  indexPending: boolean;
+};
+
+export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult> {
   validateSlug(opts.slug);
   const entry = RECORDS[opts.type];
 
@@ -127,4 +142,22 @@ export async function recordNew(opts: RecordNewOptions): Promise<void> {
     fields.design_slug = opts.designSlug ?? "";
   }
   await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
+
+  // Read-after-write SEARCH parity (#295, CLI half). The native (vector) index
+  // `fbrain search` reads is populated asynchronously after the mutation
+  // returns, so a human's first `fbrain search` right after `fbrain <type> new`
+  // would otherwise get a jarring "no matches" for the record they just made.
+  // Confirm the slug is in the vector index on a short bounded budget; on
+  // timeout report `indexPending: true` so the CLI prints an honest "index
+  // still catching up" note. Gated to local nodes and never throws — see
+  // `confirmVectorIndexed`. (No record-list verify-read here: unlike `put`,
+  // `<type> new` doesn't promise read-your-writes on /api/query; the vector
+  // confirmation is the user-visible search-parity concern.)
+  return confirmVectorIndexed(
+    opts.cfg,
+    opts.type,
+    opts.slug,
+    opts.title,
+    opts.vectorVerifyOptions,
+  );
 }

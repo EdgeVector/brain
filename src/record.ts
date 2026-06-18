@@ -1,7 +1,7 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
 import type { NodeClient, QueryRow } from "./client.ts";
-import { FbrainError } from "./client.ts";
+import { FbrainError, isLoopbackNodeUrl, newReadClientFromCfg } from "./client.ts";
 import type { Config } from "./config.ts";
 import {
   RECORDS,
@@ -465,6 +465,50 @@ export async function verifyVectorIndexed(
     { ...options, maxAttempts, backoffMs: ceilingMs },
   );
   return result;
+}
+
+// CLI write-path read-after-write confirmation, shared by `putCmd` and
+// `recordNew`. After the write's record-list verify-read passes, confirm the
+// record also landed in the NATIVE (vector) index that `fbrain search` reads —
+// closing the same put→search window the MCP path closes (mcp/server.ts), so a
+// human's first `fbrain search` after their first create returns the record.
+//
+// Returns `indexPending`: false once the slug is in the vector index, true if
+// the bounded budget is spent without seeing it (the caller appends an honest
+// "index still catching up" note). NEVER throws — a flaky/unreachable native
+// index, or a non-loopback / remote node, must not fail or block a write that
+// already persisted. Specifically:
+//   - Non-loopback node → returns false (not pending). The lag only matters for
+//     a tight LOCAL create→search; over a remote node the extra round-trips
+//     aren't worth it, so we report "indexed" rather than nagging the user.
+//   - Any probe/transport error → swallowed exactly like the MCP path; treated
+//     as "not yet visible" (indexPending: true) so the honest note appears
+//     rather than a thrown error on a write that already succeeded.
+//
+// `options` threads the same tunables the record-list verify uses, so tests can
+// pin the attempt count and inject a no-op sleep (see put.test.ts).
+export async function confirmVectorIndexed(
+  cfg: Config,
+  type: RecordType,
+  slug: string,
+  title: string,
+  options?: ReadRetryOptions,
+): Promise<{ indexPending: boolean }> {
+  // Gate to local-node writes — the vector-index lag is only a paper cut for a
+  // tight local create→search; keep remote writes cheap (no extra round-trips).
+  if (!isLoopbackNodeUrl(cfg.nodeUrl)) return { indexPending: false };
+  try {
+    const node = newReadClientFromCfg(cfg);
+    const schemaHash = schemaHashFor(type, cfg);
+    const probe = title.trim() || slug;
+    const visible = await verifyVectorIndexed(node, schemaHash, slug, probe, options);
+    return { indexPending: !visible };
+  } catch {
+    // A confirmation-probe failure (config/transport) must never fail a write
+    // that already persisted — report the index as pending so the user knows
+    // an immediate `fbrain search` may miss it and to retry shortly.
+    return { indexPending: true };
+  }
 }
 
 // Read-context alias for the same fast-miss helper. The dangling-reference /

@@ -21,8 +21,7 @@ import { listCmd, type RecordSummary } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
-import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
-import { schemaHashFor, verifyVectorIndexed } from "../record.ts";
+import { FbrainError, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES } from "../schemas.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
@@ -563,35 +562,21 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     (args) =>
       runWriteTool(getCfg, async (cfg, print, onResult) => {
         const input = buildPutInput(resolvePutBody(args));
-        const result = await putCmd({ cfg, slug: args.slug, input });
         // Read-after-write confirmation for the agent loop. `putCmd` already
-        // guarantees the row is record-list-visible (its own verify-read), but
-        // the canonical agent loop is put → `fbrain_search`/`fbrain_ask`, which
-        // read the SEMANTIC (vector) index — and fold_db indexes the embedding
-        // asynchronously AFTER the mutation returns. In one warm MCP process
-        // the follow-up search fires inside that sub-second window and the
-        // just-written record is silently absent. So before returning, poll the
-        // native index (scoped to this record's schema, probing with its own
-        // title/slug text) on a SHORT bounded budget; report success as soon as
-        // it's visible. On timeout we STILL return success but set
-        // `indexPending: true` so the agent knows an immediate re-search may
-        // miss it — we never block indefinitely and never fail a persisted
-        // write. This is the fbrain-side confirmation fix; the deeper
+        // guarantees the row is record-list-visible (its own verify-read), AND
+        // — as of the CLI search-parity change (#295 CLI half) — confirms the
+        // record landed in the SEMANTIC (vector) index that
+        // `fbrain_search`/`fbrain_ask` read, surfacing `result.indexPending`.
+        // fold_db indexes the embedding asynchronously AFTER the mutation
+        // returns, so in one warm process a follow-up search can fire inside
+        // that sub-second window and miss the just-written record; `putCmd`'s
+        // bounded confirmation closes that window (or, on timeout, reports
+        // `indexPending: true`). It NEVER fails or blocks a persisted write.
+        // We just thread its result through to the agent — the deeper
         // server-side synchronous-indexing change is a separate fold/native-
         // index item (docs/phase-7-search-latency-spike.md, G3d/G3e).
-        let indexPending = false;
-        try {
-          const node = newReadClientFromCfg(cfg);
-          const schemaHash = schemaHashFor(result.type, cfg);
-          const probe = result.title.trim() || result.slug;
-          const visible = await verifyVectorIndexed(node, schemaHash, result.slug, probe);
-          indexPending = !visible;
-        } catch {
-          // A confirmation-probe failure (config/transport) must never fail a
-          // write that already persisted — report the index as pending so the
-          // agent re-queries rather than trusting a missed read.
-          indexPending = true;
-        }
+        const result = await putCmd({ cfg, slug: args.slug, input });
+        const indexPending = result.indexPending;
         print(
           `${result.action} ${result.type} ${result.slug}` +
             (indexPending
