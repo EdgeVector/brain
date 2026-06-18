@@ -621,7 +621,29 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
       opts.type !== undefined
         ? (opts.notFoundMessage?.typed?.(opts.type, opts.slug) ?? fallback)
         : (opts.notFoundMessage?.untyped?.(opts.slug) ?? fallback);
-    throw new FbrainError({ code: "not_found", message });
+    // Mirror the ambiguous-slug throw below: carry a runnable, type-aware
+    // recovery hint (+ channel-neutral agentHint) so a slug miss isn't a
+    // dead end. Additive only — the `code` and `message` above are unchanged
+    // (record.test.ts asserts them); just `hint`/`agentHint` light up.
+    const verb = opts.recoveryVerb ?? "get";
+    if (opts.type !== undefined) {
+      // Typed lookup: the slug may exist under a DIFFERENT type that `--type`
+      // hid. Point the dev at dropping the flag to widen the search.
+      throw new FbrainError({
+        code: "not_found",
+        message,
+        hint: `No ${opts.type} with that slug. Drop --type to search every type (\`fbrain ${verb} ${opts.slug}\`), or \`fbrain list\` to see existing slugs.`,
+        agentHint: `Omit the \`type\` argument to search all record types, or call fbrain_list to see existing slugs.`,
+      });
+    }
+    // Untyped lookup: every type was scanned, so the slug truly doesn't exist
+    // anywhere — the recovery is to discover the real slugs.
+    throw new FbrainError({
+      code: "not_found",
+      message,
+      hint: `Run \`fbrain list\` to see existing slugs (slugs are case-sensitive).`,
+      agentHint: `Call fbrain_list to see existing slugs (slugs are case-sensitive).`,
+    });
   }
 
   if (matches.length > 1) {
