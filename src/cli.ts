@@ -272,6 +272,10 @@ and skips stale hits (records deleted since indexing). Prints
 indented under each row — so the answer is visible without a follow-up
 \`fbrain get\`.
 
+\`score\` is a max-normalized cosine in 0–1 (the top hit is always \`1.000\`).
+This scale is NOT comparable to \`ask\`'s fused-RRF score — do not compare a
+\`search\` number against an \`ask\` number for the same record.
+
   -n, --limit   max results (\`-n\` and \`--limit\` are aliases; last wins)
   --exact       exact-match mode (passes ?exact=true to the index)
   --min-score   server-side score floor (passes ?min_score=F)
@@ -299,6 +303,10 @@ vector then run against original + 3 expansions and RRF fuses all 8 lists.
 Prints \`slug · score · type · title\` per match, with a short matching body
 snippet indented under each row — so the answer is visible without a
 follow-up \`fbrain get\`.
+
+\`score\` is a raw fused-RRF value (the top hit is a small number like
+\`0.03\`). This scale is NOT comparable to \`search\`'s 0–1 cosine — do not
+compare an \`ask\` number against a \`search\` number for the same record.
 
   -n, --limit N max results (default 5; \`-n\` and \`--limit\` are aliases,
                 last wins)
