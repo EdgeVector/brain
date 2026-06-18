@@ -41,6 +41,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     cfg: opts.cfg,
     slug,
     type: opts.type,
+    recoveryVerb: "status",
   });
 
   if (opts.newStatus === undefined) {

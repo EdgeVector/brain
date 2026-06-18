@@ -150,6 +150,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     type: opts.type,
     raw: true,
     notFoundMessage: NOT_FOUND_TYPED,
+    recoveryVerb: "delete",
   });
   const { type, record } = resolved;
 

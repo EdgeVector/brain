@@ -559,6 +559,12 @@ export interface ResolveBySlugOpts {
     typed?: (t: RecordType, slug: string) => string;
     untyped?: (slug: string) => string;
   };
+  // The CLI verb the caller is implementing. The ambiguous-slug `hint` echoes
+  // it so the suggested recovery command is runnable as-is for the command the
+  // user actually ran (`fbrain status …`/`fbrain delete …`, not always `get`).
+  // Three callers share this sweep; each passes its own verb. Defaults to
+  // "get" so the throw stays well-formed for any future caller that omits it.
+  recoveryVerb?: "get" | "status" | "delete";
   // Forwarded to the per-type lookup loop so tests can mock sleep / shrink
   // the budget without paying the real backoff schedule. Production callers
   // leave it unset and inherit the smoketest-tuned defaults.
@@ -630,7 +636,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
     throw new FbrainError({
       code: "ambiguous_slug",
       message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify a \`type\`.`,
-      hint: `Re-run with --type, e.g. \`fbrain get ${opts.slug} --type ${exampleType}\`.`,
+      hint: `Re-run with --type, e.g. \`fbrain ${opts.recoveryVerb ?? "get"} ${opts.slug} --type ${exampleType}\`.`,
       agentHint: `Pass the \`type\` argument, e.g. type: "${exampleType}".`,
     });
   }
