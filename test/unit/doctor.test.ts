@@ -1219,7 +1219,7 @@ describe("doctor --freshness probes", () => {
     // The hint is honest about the append-only cause and the upstream purge.
     const hintLine = lines.find((l) => l.includes("does NOT reduce pollution"));
     expect(hintLine).toBeDefined();
-    expect(lines.some((l) => l.includes("G3e"))).toBe(true);
+    expect(lines.some((l) => l.includes("tracked upstream"))).toBe(true);
   });
 
   test("pollution PASS: empty index → 0 hits, no tag escalation", async () => {

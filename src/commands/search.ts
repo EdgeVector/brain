@@ -271,7 +271,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
         : "hint:  fresh writes can take a moment to land in the vector index — use the `fbrain_ask` tool (BM25 + vector hybrid) for immediate retrieval"
       : empty
         ? "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then search again"
-        : "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex` (see docs/phase-7-search-latency-spike.md)";
+        : "hint:  fresh writes may take a moment to land in the vector index — try `fbrain ask <query>` (BM25 + vector hybrid) or `fbrain reindex`";
     if (opts.json) {
       // Stdout is just `[]` so jq pipelines see a parseable empty
       // array rather than the "no matches" sentinel; the hint stays on stderr.

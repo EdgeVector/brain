@@ -135,7 +135,7 @@ Commands:
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
-  share          (placeholder) — see docs/phase-3-sharing-memo.md
+  share          (placeholder) — team sync is not wired up yet
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        evolve a schema by adding a field (see docs/g15-schema-evolution-playbook.md)
@@ -372,8 +372,7 @@ code). Each entry carries name, tag (PASS/WARN/FAIL), ok, detail, fix. If
 the run itself errors out (e.g. missing config), a \`{error, hint}\` JSON
 object is emitted to stdout instead, so \`--json\` stdout stays parseable.
 
-With --freshness, additionally runs the G3 retrieval-quality probes
-(see docs/phase-7-search-latency-spike.md):
+With --freshness, additionally runs the G3 retrieval-quality probes:
   - freshness-probe: 5 trials of put → search assert score ≥ 0.5
   - pollution-probe: one broad query, classify hits as live / stale /
     orphan-schema. PASS at <25% polluted, WARN at 25-50%, FAIL above.
@@ -416,20 +415,18 @@ Examples:
   fbrain raw GET /v1/schemas`,
   share: `fbrain share
 
-Placeholder. Phase 3 spike concluded that cross-node data flow requires
-fold_db's S3 + Auth-Lambda transport, which is unreachable from a
-localhost-only spike. The sharing METADATA primitives (ShareRule,
-ShareInvite, ShareSubscription) work end-to-end on loopback but no
-records actually move between nodes. See docs/phase-3-sharing-memo.md
-for the full evidence and the conditions under which this command can
-become a real share.
+Placeholder. Cross-node data flow requires fold_db's S3 + Auth-Lambda
+transport, and this daemon has not been signed in to it. The sharing
+METADATA primitives (ShareRule, ShareInvite, ShareSubscription) work
+end-to-end on loopback, but no records actually move between nodes until
+the daemon authenticates against the cloud and an end-to-end test passes.
 
-Prints a pointer and exits 1.`,
+Prints a notice and exits 1.`,
   delete: `fbrain delete <slug> [--type T] [--force] [--yes] [--json]
 
-Soft-deletes the record. fold_db's mutation pipeline is append-only — see
-docs/phase-5-delete-spike.md — so the workaround overwrites every user
-field with sentinels and stamps a tombstone tag. All fbrain read paths
+Soft-deletes the record. fold_db's mutation pipeline is append-only, so
+the workaround overwrites every user field with sentinels and stamps a
+tombstone tag. All fbrain read paths
 (get, list, status, link, search) then filter the record out.
 
 Without --type, queries every registered schema; errors with "specify
@@ -454,8 +451,7 @@ After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
   reindex: `fbrain reindex [--type T] [--dry-run] [--repair-titles]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
-present by re-issuing an update mutation. Related to the H2a finding in
-docs/phase-7-search-latency-spike.md — fold_db's EmbeddingIndex is not
+present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
 purged on tombstone or re-put.
 
 NOTE: fold_db's index is append-only. Re-issuing the update does NOT
