@@ -13,6 +13,11 @@ const cfg = buildTestCfg({ userHash: "uh" });
 const DESIGN_HASH = TEST_HASHES.design;
 const TASK_HASH = TEST_HASHES.task;
 
+// No-op sleep so the post-write vector-index confirmation (which probes a
+// native-index URL these mocks 404) doesn't pay real backoff. These tests
+// assert the create mutation / parent-link, not search-parity.
+const VEC = { vectorVerifyOptions: { sleep: () => Promise.resolve() } } as const;
+
 const realFetch = globalThis.fetch;
 
 type MockHandler = (url: string, init?: RequestInit) => { status: number; body?: unknown };
@@ -62,6 +67,7 @@ describe("taskNew", () => {
       title: "Fresh task",
       body: "body",
       tags: ["a"],
+      ...VEC,
     });
     expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("create");
@@ -161,6 +167,7 @@ describe("taskNew", () => {
       body: "",
       tags: [],
       designSlug: "parent-design",
+      ...VEC,
     });
     expect(designQueryCalls).toBeGreaterThanOrEqual(2);
     expect(mutations).toHaveLength(1);

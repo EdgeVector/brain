@@ -1293,6 +1293,27 @@ export function isDefaultNodeUrl(url: string): boolean {
   }
 }
 
+// True when a node URL points at the local machine (loopback host). The
+// write-path vector-index confirmation (`verifyVectorIndexed`) only matters
+// for a tight local create→search on the same warm node — over a remote node
+// the round-trips aren't worth the latency, and the native index lag isn't the
+// problem the user is hitting. Gate the CLI confirmation on this so a remote
+// `--node-url` write stays cheap. (The MCP path doesn't gate because its agent
+// loop is always against the local owned node.)
+export function isLoopbackNodeUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      u.hostname === "127.0.0.1" ||
+      u.hostname === "localhost" ||
+      u.hostname === "::1" ||
+      u.hostname === "[::1]"
+    );
+  } catch {
+    return false;
+  }
+}
+
 // True when the prebuilt `folddb` binary is on PATH (Homebrew install or
 // `FBRAIN_FOLDDB_BIN` override). Mirrors the probe in init-consent.ts so
 // callers don't need to reach across modules. Injectable in `nodeDownHint`

@@ -22,6 +22,7 @@ import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
+  confirmVectorIndexed,
   crossTypeSlugNote,
   ensureStatus,
   findCrossTypeSlugCollisions,
@@ -57,6 +58,13 @@ export type PutOptions = {
   // unset and inherit the full `withReadRetry` budget (5×250 ms). Tests pin
   // attempt count + replace real sleep so they don't pay backoff.
   verifyOptions?: ReadRetryOptions;
+  // Tunables for the post-write VECTOR-index confirmation (the read-after-write
+  // `fbrain search` parity check — see `confirmVectorIndexed`). Production
+  // callers leave this unset and inherit the short bounded budget
+  // (VECTOR_INDEX_VERIFY_ATTEMPTS × VECTOR_INDEX_VERIFY_BACKOFF_MS). Tests pin
+  // attempt count + inject a no-op sleep so a timed-out probe is observable
+  // without paying real backoff.
+  vectorVerifyOptions?: ReadRetryOptions;
 };
 
 export type PutResult = {
@@ -64,10 +72,16 @@ export type PutResult = {
   slug: string;
   action: "created" | "updated";
   // The resolved record title (frontmatter `title:`, else the body's first
-  // H1, else the slug). Exposed so the MCP put handler can use it as the
-  // probe query when confirming the record landed in the semantic (vector)
-  // index — see `verifyVectorIndexed` and mcp/server.ts. The CLI ignores it.
+  // H1, else the slug). Used as the probe query when confirming the record
+  // landed in the semantic (vector) index — see `verifyVectorIndexed`.
   title: string;
+  // True when the write persisted (and is record-list-visible) but the bounded
+  // vector-index confirmation timed out — an immediate `fbrain search` may miss
+  // it. Mirrors the MCP `structuredContent.indexPending` so the CLI surface has
+  // read-after-write `search` parity with the agent path. False when the record
+  // is confirmed in the vector index, or when the confirmation was skipped (a
+  // non-loopback / remote node — the lag only matters for a tight local write).
+  indexPending: boolean;
 };
 
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
@@ -146,7 +160,24 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
     });
   }
-  return { type, slug, action, title };
+  // Read-after-write SEARCH parity (#295, CLI half). `verifyRecordVisible`
+  // above proves the row is queryable via /api/query (the record-list / BM25
+  // surface `get`/`list`/`ask` read), but says nothing about the native
+  // (vector) index `fbrain search` reads — fold_db indexes the embedding
+  // asynchronously after the mutation returns. Without this, a human's first
+  // `fbrain search` right after their first create gets a jarring "no matches"
+  // for the record they just made. Confirm the slug is in the vector index on
+  // a short bounded budget; on timeout report `indexPending: true` so the CLI
+  // prints an honest "index still catching up" note. Gated to local nodes and
+  // never throws — see `confirmVectorIndexed`.
+  const { indexPending } = await confirmVectorIndexed(
+    opts.cfg,
+    type,
+    slug,
+    title,
+    opts.vectorVerifyOptions,
+  );
+  return { type, slug, action, title, indexPending };
 }
 
 function buildFields(

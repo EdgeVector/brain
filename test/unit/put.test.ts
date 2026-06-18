@@ -16,7 +16,14 @@ import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
-const cfg = buildTestCfg({ userHash: "uh" });
+// Default cfg points at a NON-loopback node so `putCmd`'s post-write
+// vector-index confirmation (`confirmVectorIndexed`, gated to local nodes)
+// short-circuits to `indexPending: false` without probing the native index.
+// That keeps every existing put test focused on its own concern (frontmatter,
+// create/update, the record-list verify-read) and free of the search-parity
+// round-trip + backoff. The dedicated search-parity tests below use a loopback
+// cfg + an injected no-op sleep to exercise the confirmation explicitly.
+const cfg = buildTestCfg({ userHash: "uh", nodeUrl: "http://10.0.0.1:9001" });
 
 describe("splitFrontmatter", () => {
   test("no frontmatter at all returns null + the body verbatim", () => {
@@ -1674,4 +1681,154 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(queryCalls).toBeGreaterThanOrEqual(1);
     expect(mutations[0]!.mutation_type).toBe("create");
   }, 30_000);
+});
+
+// CLI search-parity (#295, CLI half): after the record-list verify-read passes,
+// `putCmd` confirms the record is in the NATIVE (vector) index that
+// `fbrain search` reads — the same #295 mechanism the MCP path uses — so a
+// human's first `fbrain search` right after their first create returns the
+// record (or, on a genuine index lag past budget, the result carries an honest
+// `indexPending: true`). The vector confirm is gated to LOCAL nodes, so these
+// tests use a loopback cfg (the module-level `cfg` is deliberately non-loopback
+// to keep the other put tests free of the confirm round-trip).
+describe("putCmd vector-index confirmation — read-after-write search parity (#295 CLI)", () => {
+  const localCfg = buildTestCfg({ userHash: "uh", nodeUrl: "http://127.0.0.1:9001" });
+  const noopSleep = (): Promise<void> => Promise.resolve();
+  const realFetchVec = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetchVec;
+  });
+
+  // A fetch stub that always reports the row as record-list-visible (so the
+  // RYW verify passes) and lets the caller decide what the native-index probe
+  // returns. `searchHits` is the slug list returned by /api/native-index/search.
+  function installVectorMock(opts: {
+    slug: string;
+    type: RecordType;
+    searchHits: () => string[];
+    onSearch?: () => void;
+  }): void {
+    const row = {
+      fields: {
+        slug: opts.slug,
+        title: "T",
+        body: "b",
+        status: RECORDS[opts.type].defaultStatus,
+        tags: [],
+        created_at: "2026-06-05T00:00:00.000Z",
+        updated_at: "2026-06-05T00:00:00.000Z",
+      },
+      key: { hash: opts.slug, range: null },
+    };
+    globalThis.fetch = (async (input: unknown): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.endsWith("/api/mutation")) {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/api/native-index/search")) {
+        opts.onSearch?.();
+        const results = opts.searchHits().map((slug) => ({
+          schema_name: "s",
+          field: "body",
+          key_value: { hash: slug, range: null },
+          value: "b",
+          metadata: { score: 1 },
+        }));
+        return new Response(JSON.stringify({ results }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/query")) {
+        // Pre-create existence check + RYW verify both see the row. (The
+        // existence check on the design schema returning the row would route
+        // to an UPDATE; we key the create-path tests off a concept slug whose
+        // page is empty until the verify-read — but for simplicity here the row
+        // is always present, so action is "updated". The confirm runs on both
+        // create and update, which is exactly what we're pinning.)
+        return new Response(JSON.stringify({ ok: true, results: [row] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  test("calls verifyVectorIndexed and reports indexPending:false once the slug is in the vector index", async () => {
+    let searchCalls = 0;
+    installVectorMock({
+      slug: "ric-visible",
+      type: "concept",
+      onSearch: () => {
+        searchCalls++;
+      },
+      searchHits: () => ["ric-visible"], // in the index from the first probe
+    });
+    const r = await putCmd({
+      cfg: localCfg,
+      slug: "ric-visible",
+      input: "---\ntype: concept\ntitle: T\n---\nb",
+      verifyOptions: { sleep: noopSleep },
+      vectorVerifyOptions: { sleep: noopSleep },
+    });
+    // The write path probed the native (vector) index at least once...
+    expect(searchCalls).toBeGreaterThanOrEqual(1);
+    // ...and saw the slug, so it's NOT pending.
+    expect(r.indexPending).toBe(false);
+  });
+
+  test("a timed-out probe (slug never appears) yields indexPending:true without failing the write", async () => {
+    let searchCalls = 0;
+    installVectorMock({
+      slug: "ric-lagging",
+      type: "concept",
+      onSearch: () => {
+        searchCalls++;
+      },
+      searchHits: () => [], // native index never surfaces the slug
+    });
+    const r = await putCmd({
+      cfg: localCfg,
+      slug: "ric-lagging",
+      input: "---\ntype: concept\ntitle: T\n---\nb",
+      verifyOptions: { sleep: noopSleep },
+      // Pin attempts so the budget is spent quickly; no-op sleep so no backoff.
+      vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 3 },
+    });
+    // The write SUCCEEDED (no throw) despite the index never confirming...
+    expect(r.action).toBeDefined();
+    // ...spent its whole bounded budget probing...
+    expect(searchCalls).toBe(3);
+    // ...and honestly reports the index as still catching up.
+    expect(r.indexPending).toBe(true);
+  });
+
+  test("indexPending is false (confirm skipped) on a NON-loopback node — the lag gate only fires locally", async () => {
+    let searchCalls = 0;
+    const remoteCfg = buildTestCfg({ userHash: "uh", nodeUrl: "http://10.0.0.1:9001" });
+    installVectorMock({
+      slug: "ric-remote",
+      type: "concept",
+      onSearch: () => {
+        searchCalls++;
+      },
+      searchHits: () => [], // would be pending IF we probed
+    });
+    const r = await putCmd({
+      cfg: remoteCfg,
+      slug: "ric-remote",
+      input: "---\ntype: concept\ntitle: T\n---\nb",
+      verifyOptions: { sleep: noopSleep },
+      vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 3 },
+    });
+    // The gate skipped the native-index probe entirely (remote node)...
+    expect(searchCalls).toBe(0);
+    // ...so the result reports not-pending rather than nagging the user.
+    expect(r.indexPending).toBe(false);
+  });
 });

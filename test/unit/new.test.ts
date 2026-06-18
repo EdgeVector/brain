@@ -27,6 +27,12 @@ const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
 const cfg = buildTestCfg({ userHash: "uh" });
 
+// No-op sleep so the post-write vector-index confirmation (which probes a
+// native-index URL these mocks 404) doesn't pay real backoff. These tests
+// assert create-dispatch / collision-note behavior, not search-parity (pinned
+// in its own describe block below).
+const VEC = { vectorVerifyOptions: { sleep: () => Promise.resolve() } } as const;
+
 const realFetch = globalThis.fetch;
 
 type MockHandler = (url: string, init?: RequestInit) => { status: number; body?: unknown };
@@ -79,6 +85,7 @@ describe("recordNew dispatches against the correct schema for each type", () => 
         title: `${type} title`,
         body: `${type} body`,
         tags: ["t1"],
+        ...VEC,
       });
       expect(mutations).toHaveLength(1);
       expect(mutations[0]!.mutation_type).toBe("create");
@@ -158,6 +165,7 @@ describe("recordNew warns on cross-type slug collision", () => {
       title: "dup slug across type",
       body: "",
       tags: [],
+      ...VEC,
     });
     // The create still happened (non-blocking warning).
     expect(mutations).toHaveLength(1);
@@ -186,6 +194,7 @@ describe("recordNew warns on cross-type slug collision", () => {
       title: "fresh",
       body: "",
       tags: [],
+      ...VEC,
     });
     expect(captured.find((l) => l.startsWith("note:"))).toBeUndefined();
   });
@@ -215,7 +224,7 @@ describe("recordNew warns on cross-type slug collision", () => {
       }
       return { status: 404 };
     });
-    await recordNew({ cfg, type: "design", slug: "x", title: "x", body: "", tags: [] });
+    await recordNew({ cfg, type: "design", slug: "x", title: "x", body: "", tags: [], ...VEC });
     expect(mutationSeen).toBe(true);
     expect(captured.find((l) => l.startsWith("note:"))).toBeUndefined();
   });

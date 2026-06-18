@@ -12,6 +12,11 @@ import { TEST_HASHES, buildTestCfg } from "../util.ts";
 const cfg = buildTestCfg({ userHash: "uh" });
 const DESIGN_HASH = TEST_HASHES.design;
 
+// No-op sleep so the post-write vector-index confirmation (which probes a
+// native-index URL these mocks 404) doesn't pay real backoff. These tests
+// assert the create mutation, not search-parity (pinned in new.test.ts).
+const VEC = { vectorVerifyOptions: { sleep: () => Promise.resolve() } } as const;
+
 const realFetch = globalThis.fetch;
 
 type MockHandler = (url: string, init?: RequestInit) => { status: number; body?: unknown };
@@ -50,6 +55,7 @@ describe("designNew", () => {
       title: "Fresh",
       body: "the body",
       tags: ["a", "b"],
+      ...VEC,
     });
     expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("create");
@@ -167,6 +173,7 @@ describe("designNew", () => {
       body: "",
       tags: [],
       force: true,
+      ...VEC,
     });
     expect(queryCalls).toBe(0);
     expect(mutations).toHaveLength(1);
