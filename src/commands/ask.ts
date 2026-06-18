@@ -33,7 +33,13 @@ import {
   type Verbose,
 } from "../client.ts";
 import type { Config } from "../config.ts";
-import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
+import {
+  capitalize,
+  formatTable,
+  printColumnLegend,
+  resolvePrintSinks,
+  resolveStdoutIsTty,
+} from "../format.ts";
 import {
   hasAnyLiveRecord,
   isTombstoned,
@@ -105,6 +111,10 @@ export type AskOptions = {
   // `fbrain ask q 2>/dev/null` yields only the parseable result rows.
   // Default: console.error.
   printErr?: (line: string) => void;
+  // Treat stdout as an interactive TTY (default: process.stdout.isTTY).
+  // Gates the human-only column legend — overridable so tests can drive both
+  // the TTY (legend present) and piped (legend absent) paths deterministically.
+  isTty?: () => boolean;
   // Structured-result sink. When set, receives the SAME array of
   // `{slug,score,type,title}` objects that `--json` mode serializes to
   // stdout — one source of truth for both the JSON CLI surface and the
@@ -451,6 +461,15 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   } else if (opts.json) {
     print(JSON.stringify(payload));
   } else if (opts.verbose) {
+    // Human-only column legend (TTY, non-JSON; `resolved` is non-empty here).
+    // `ask` ranks a fused-RRF score (top hit ≈ 0.03), a DIFFERENT scale from
+    // `search`'s 0–1 cosine — the note flags they are not comparable.
+    if (resolveStdoutIsTty(opts)) {
+      printColumnLegend(
+        print,
+        "slug · relevance(fused RRF, not comparable to search) · type · title",
+      );
+    }
     // Verbose: per-ranker debug columns (bm25=, vec=, +exp[...]).
     // Expansion column collapses when every row has no expansion hits;
     // formatTable computes a 0-width column for an all-empty column,
@@ -484,6 +503,15 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       if (snippet) print(`    ${snippet}`);
     }
   } else {
+    // Human-only column legend (TTY, non-JSON; `resolved` is non-empty here).
+    // `ask` ranks a fused-RRF score (top hit ≈ 0.03), a DIFFERENT scale from
+    // `search`'s 0–1 cosine — the note flags they are not comparable.
+    if (resolveStdoutIsTty(opts)) {
+      printColumnLegend(
+        print,
+        "slug · relevance(fused RRF, not comparable to search) · type · title",
+      );
+    }
     // Default: clean `slug · score · type · title` — same shape as
     // `fbrain search` and MCP `fbrain_search`. Per-ranker debug is
     // operator-only and lives behind --verbose.

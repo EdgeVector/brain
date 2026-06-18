@@ -14,7 +14,13 @@ import {
   recordTypeForHash,
 } from "../client.ts";
 import type { Config } from "../config.ts";
-import { capitalize, formatTable, resolvePrintSinks } from "../format.ts";
+import {
+  capitalize,
+  formatTable,
+  printColumnLegend,
+  resolvePrintSinks,
+  resolveStdoutIsTty,
+} from "../format.ts";
 import {
   findBySlugFast,
   hasAnyLiveRecord,
@@ -49,6 +55,10 @@ export type SearchOptions = {
   // `fbrain search q 2>/dev/null` yields only the parseable result rows.
   // Default: console.error.
   printErr?: (line: string) => void;
+  // Treat stdout as an interactive TTY (default: process.stdout.isTTY).
+  // Gates the human-only column legend — overridable so tests can drive both
+  // the TTY (legend present) and piped (legend absent) paths deterministically.
+  isTty?: () => boolean;
   // Structured-result sink. When set, receives the SAME array of
   // `{slug,score,type,title}` objects that `--json` mode serializes to
   // stdout — one source of truth for both the JSON CLI surface and the
@@ -358,6 +368,14 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
 
   // Advisory → stderr so `fbrain search q 2>/dev/null` stays parseable.
   if (weakMatch) printErr(weakMatchNote);
+
+  // Human-only column legend (TTY, non-JSON). `trimmed` is non-empty here (the
+  // empty-result path returned above), so this never sits above a no-match
+  // hint. `search` scores a max-normalized cosine in 0–1 (top hit is `1.000`);
+  // the note flags that this scale is NOT comparable to `ask`'s fused RRF.
+  if (resolveStdoutIsTty(opts)) {
+    printColumnLegend(print, "slug · relevance(0–1, cosine) · type · title");
+  }
 
   const lines = formatTable(
     trimmed.map((hit) => [

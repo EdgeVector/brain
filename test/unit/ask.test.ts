@@ -723,6 +723,64 @@ describe("askCmd output column gating (default vs --verbose)", () => {
   });
 });
 
+describe("askCmd TTY column legend", () => {
+  // Mirror of search's legend, but the note flags that `ask`'s fused-RRF score
+  // is NOT comparable to `search`'s 0–1 cosine — the human-vs-agent doc gap the
+  // card closes. Human-only: present on a TTY, absent under --json / when piped,
+  // so first-line parsers and agents see byte-identical rows.
+  const stubSingleHit = (): void => {
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")] },
+      vectorHits: [vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 })],
+    });
+  };
+
+  test("prints a dim TTY legend flagging RRF is not comparable to search", async () => {
+    const cfg = buildTestCfg();
+    stubSingleHit();
+    const lines: string[] = [];
+    await askCmd({ cfg, query: "octopus", noLlm: true, print: (l) => lines.push(l), isTty: () => true });
+    expect(lines[0]).toContain("columns:");
+    expect(lines[0]).toContain("relevance");
+    expect(lines[0]).toContain("RRF");
+    expect(lines[0]).toContain("not comparable to search");
+    expect(lines[0]).toContain("\x1b[2m");
+    // Result row unchanged and present below.
+    const row = lines.find((l) => l.includes("d1"));
+    expect(row).toBeDefined();
+    expect(row).toContain("Design");
+  });
+
+  test("--verbose path also carries the legend on a TTY", async () => {
+    const cfg = buildTestCfg();
+    stubSingleHit();
+    const lines: string[] = [];
+    await askCmd({ cfg, query: "octopus", noLlm: true, verbose: () => {}, print: (l) => lines.push(l), isTty: () => true });
+    expect(lines[0]).toContain("columns:");
+    expect(lines[0]).toContain("not comparable to search");
+  });
+
+  test("suppresses the legend when stdout is NOT a TTY (piped/redirected)", async () => {
+    const cfg = buildTestCfg();
+    stubSingleHit();
+    const lines: string[] = [];
+    await askCmd({ cfg, query: "octopus", noLlm: true, print: (l) => lines.push(l), isTty: () => false });
+    expect(lines.some((l) => l.includes("columns:"))).toBe(false);
+    expect(lines.some((l) => l.includes("\x1b["))).toBe(false);
+    expect(lines.find((l) => l.includes("d1"))).toBeDefined();
+  });
+
+  test("suppresses the legend under --json even on a TTY", async () => {
+    const cfg = buildTestCfg();
+    stubSingleHit();
+    const lines: string[] = [];
+    await askCmd({ cfg, query: "octopus", noLlm: true, json: true, print: (l) => lines.push(l), isTty: () => true });
+    expect(lines).toHaveLength(1);
+    expect(lines.some((l) => l.includes("columns:"))).toBe(false);
+    expect(() => JSON.parse(lines[0]!)).not.toThrow();
+  });
+});
+
 describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
   test("no-key path: stdout has ONLY parseable result rows; the `note:` advisory rides stderr", async () => {
     // Regression for the bug the brief calls out: a script doing
