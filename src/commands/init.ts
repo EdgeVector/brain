@@ -19,7 +19,7 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultNodeUrlFromBreadcrumb, type Verbose } from "../client.ts";
 import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -149,6 +149,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const nodeUrl = resolved.nodeUrl;
   const schemaServiceUrl = resolved.schemaServiceUrl;
+  if (resolved.nodeUrlFromBreadcrumb) {
+    const breadcrumbHome = process.env.FOLDDB_HOME ?? "~/.folddb";
+    print(`[1/${STEPS}] targeting node at ${nodeUrl} (from ${breadcrumbHome}/port)`);
+  }
 
   // Step 0/6: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
@@ -453,6 +457,10 @@ type ResolvedUrls = {
   // Empty when no heal happened (fresh init, or existing URLs are already
   // current / are user overrides).
   healed: string[];
+  // True when `nodeUrl` was derived from fold's `${FOLDDB_HOME ?? ~/.folddb}/port`
+  // breadcrumb (no explicit --node-url, no existing config URL to reuse). Lets
+  // the caller surface which node it auto-targeted.
+  nodeUrlFromBreadcrumb: boolean;
 };
 
 export function resolveUrls(
@@ -461,11 +469,23 @@ export function resolveUrls(
 ): ResolvedUrls {
   const healed: string[] = [];
 
+  // When no explicit --node-url is given and there's no existing config URL to
+  // reuse, target whatever node is actually running on this machine by reading
+  // fold's `${FOLDDB_HOME ?? ~/.folddb}/port` breadcrumb (same home-resolution
+  // root as the owner-attestation UDS socket — they MUST agree). Fall back to
+  // the hardcoded `:9001` homebrew default only when the breadcrumb is absent.
   let nodeUrl: string;
+  let nodeUrlFromBreadcrumb = false;
   if (opts.nodeUrl) {
     nodeUrl = opts.nodeUrl;
   } else if (!existing) {
-    nodeUrl = DEFAULT_NODE_URL;
+    const fromBreadcrumb = defaultNodeUrlFromBreadcrumb();
+    if (fromBreadcrumb) {
+      nodeUrl = fromBreadcrumb;
+      nodeUrlFromBreadcrumb = true;
+    } else {
+      nodeUrl = DEFAULT_NODE_URL;
+    }
   } else if (STALE_NODE_URLS.has(existing.nodeUrl)) {
     nodeUrl = DEFAULT_NODE_URL;
     healed.push(`nodeUrl ${existing.nodeUrl} → ${DEFAULT_NODE_URL}`);
@@ -485,7 +505,7 @@ export function resolveUrls(
     schemaServiceUrl = existing.schemaServiceUrl;
   }
 
-  return { nodeUrl, schemaServiceUrl, healed };
+  return { nodeUrl, schemaServiceUrl, healed, nodeUrlFromBreadcrumb };
 }
 
 function isUnreachable(err: unknown): boolean {
