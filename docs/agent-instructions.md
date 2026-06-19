@@ -29,7 +29,10 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
 2. **Checkpoint as you go.** When a decision, learning, or durable fact is
    settled, write it with `fbrain_put` *then* — don't wait to be asked, and don't
    batch it all to the end of the session where it gets lost. A one-line note now
-   beats a perfect note never.
+   beats a perfect note never. For a large body (a design, a long decision log),
+   stage it to a file and pass `body_path` instead of inlining `body` — a long
+   inline `body` can be silently dropped in transit in long sessions, whereas a
+   short path always survives.
 
 3. **Pick the right type.** Every record has a type; choose the one whose purpose
    matches what you're recording (`fbrain_put` requires a type — there is no
