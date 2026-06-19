@@ -2067,10 +2067,13 @@ function bootRunnerReturning(result: McpBootResult) {
 }
 
 describe("runMcpBootProbe", () => {
-  test("valid handshake + all 7 tools → PASS with count + serverInfo", async () => {
+  test("valid handshake + all 7 tools, version MATCHES CLI → PASS with count + serverInfo", async () => {
     const check = await runMcpBootProbe(
       "/Users/x/.bun/bin/fbrain-mcp",
       {
+        // Pin the CLI version to the agent's so the build-skew check passes
+        // and we exercise the plain-PASS path deterministically.
+        cliVersion: "0.8.0 (abc1234)",
         mcpBootRunner: bootRunnerReturning({
           ok: true,
           tools: FULL_TOOLS,
@@ -2084,6 +2087,48 @@ describe("runMcpBootProbe", () => {
     expect(check.tag).toBeUndefined(); // plain PASS
     expect(check.detail).toContain("tools=7");
     expect(check.detail).toContain("fbrain 0.8.0 (abc1234)");
+  });
+
+  test("valid handshake but agent build DIFFERS from CLI → WARN naming both versions + re-link fix", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        // CLI is one build; the booted (stale `bun link`ed) agent is another.
+        cliVersion: "0.8.0 (1aef3ea)",
+        mcpBootRunner: bootRunnerReturning({
+          ok: true,
+          tools: FULL_TOOLS,
+          serverInfo: { name: "fbrain", version: "0.8.0 (eac2d81)" },
+        }),
+      },
+      undefined,
+    );
+    expect(check.name).toBe("mcp-boot");
+    // WARN is ok:true + tag WARN — surfaces visibly but doesn't trip the verdict.
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBe("WARN");
+    expect(check.detail).toContain("DIFFERENT fbrain build");
+    expect(check.detail).toContain("CLI 0.8.0 (1aef3ea)");
+    expect(check.detail).toContain("agent 0.8.0 (eac2d81)");
+    expect(check.fix).toContain("bun link");
+    expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
+  });
+
+  test("serverInfo absent → stays PASS (no version to compare)", async () => {
+    const check = await runMcpBootProbe(
+      "/Users/x/.bun/bin/fbrain-mcp",
+      {
+        cliVersion: "0.8.0 (1aef3ea)",
+        mcpBootRunner: bootRunnerReturning({
+          ok: true,
+          tools: FULL_TOOLS,
+        }),
+      },
+      undefined,
+    );
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBeUndefined(); // plain PASS
+    expect(check.detail).toContain("serverInfo (none)");
   });
 
   test("handshake reports only 6 tools → FAIL naming the missing tool", async () => {
@@ -2232,6 +2277,8 @@ describe("doctor --mcp integration", () => {
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
       whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      // Agent build matches the CLI → plain PASS (not the version-skew WARN).
+      cliVersion: "0.8.0",
       mcpBootRunner: bootRunnerReturning({
         ok: true,
         tools: FULL_TOOLS,
