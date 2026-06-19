@@ -398,7 +398,7 @@ export function printNextSteps(
 
   print(``);
   print(`You're ready. Next steps:`);
-  print(`  1. Create your first record:  fbrain design new my-first-idea --title "My first idea"`);
+  print(`  1. Create your first record:  fbrain design new my-first-idea --title "My first idea" --body "what this idea is"`);
   print(`        (also: concept/preference/reference/agent/project/spike new, or pipe markdown to \`fbrain put <slug>\`)`);
   print(`  2. See what you've got:        fbrain list`);
   print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
