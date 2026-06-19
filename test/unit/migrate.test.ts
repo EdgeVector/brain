@@ -27,6 +27,7 @@ import {
   type MigrationManifest,
 } from "../../src/migration.ts";
 import { type Config } from "../../src/config.ts";
+import { FbrainError } from "../../src/client.ts";
 import { TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -109,6 +110,10 @@ function stubFetch(opts: {
   // returned by GET /v1/schema/<hash> will have its fields list set
   // to this. Use to model the fold_db overlap-merge bug.
   postRegisteredFields?: string[];
+  // Model the app_identity v3.1 publish gate: the schema-service POST
+  // /v1/schemas returns `401 {"reason":"cert_required"}` (a fresh
+  // consumer without a maintainer DevCert).
+  certRequiredOnPublish?: boolean;
 }): {
   restore: () => void;
   mutations: Array<{ schema: string; mutation_type: string; fields_and_values: Record<string, unknown>; key_value: { hash: string } }>;
@@ -141,6 +146,12 @@ function stubFetch(opts: {
 
     if (url.endsWith("/v1/schemas") && init?.method === "POST") {
       schemaRegistrations++;
+      if (opts.certRequiredOnPublish) {
+        return new Response(
+          JSON.stringify({ reason: "cert_required" }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        );
+      }
       const postedSchema = (body as { schema?: { fields?: string[] } } | undefined)?.schema;
       lastPostedFields = postedSchema?.fields ?? [];
       return new Response(
@@ -354,6 +365,47 @@ describe("migrateCmd post-registration sanity check", () => {
         }),
       ).rejects.toThrow(/Schema service collapsed.*marker/s);
       // We bailed before any record writes hit the node.
+      expect(stub.mutations.length).toBe(0);
+    } finally {
+      stub.restore();
+    }
+  });
+});
+
+describe("migrateCmd maintainer-only publish gate", () => {
+  // The consumer-path failure: a fresh consumer (no maintainer DevCert)
+  // running the documented `fbrain migrate` example hits the schema
+  // service's `401 cert_required` publish gate at step [1/7]. migrate
+  // must re-frame it as a maintainer-only operation rather than falling
+  // through to the INIT-flavored shared CERT_REQUIRED_HINT ("a fresh
+  // consumer is expected to skip publishing entirely; init resolves the
+  // already-published canonical hashes for you") — that framing cannot
+  // apply to migrate, whose whole purpose is to publish a NEW hash.
+  test("cert_required on publish emits the migrate-specific maintainer-only message, not the init hint", async () => {
+    const cfg = buildTestCfg();
+    writeStartingConfig(cfg);
+    const stub = stubFetch({ queries: {}, certRequiredOnPublish: true });
+    try {
+      let caught: unknown;
+      await migrateCmd({
+        cfg,
+        mode: { kind: "add-field", type: "concept", fieldName: "urgency", fieldSpec: "String", defaultRaw: "normal" },
+        print: () => {},
+        migrationsDir: tmpMigrations,
+        configPath,
+      }).catch((e) => {
+        caught = e;
+      });
+      expect(caught).toBeInstanceOf(FbrainError);
+      const err = caught as FbrainError;
+      expect(err.code).toBe("migrate_cert_required");
+      expect(err.message).toMatch(/maintainer-only operation/i);
+      expect(err.message).toMatch(/Concept_v2/);
+      expect(err.hint ?? "").toMatch(/you don't run `fbrain migrate`/);
+      // Must NOT reuse the init-flavored "skip publishing entirely" framing.
+      expect(err.message).not.toMatch(/skip publishing/);
+      expect(err.hint ?? "").not.toMatch(/skip publishing/);
+      // We bailed at [1/7] before any record writes hit the node.
       expect(stub.mutations.length).toBe(0);
     } finally {
       stub.restore();

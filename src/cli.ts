@@ -138,7 +138,7 @@ Commands:
   share          (placeholder) — team sync is not wired up yet
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
-  migrate        evolve a schema by adding a field (see docs/g15-schema-evolution-playbook.md)
+  migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
   help <cmd>     per-command usage
 
@@ -479,6 +479,14 @@ under --repair-titles).`,
   migrate: `fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
 fbrain migrate --status
 fbrain migrate --resume <manifest-id>
+
+MAINTAINER-ONLY. Evolving a schema publishes a NEW schema hash, which
+requires a maintainer DevCert for the schema service. Consumers don't
+run this: the canonical fbrain/* schemas are published centrally and
+\`fbrain init\` resolves them for you. The example below fails for a
+fresh consumer (401 cert_required) by design — run it only as a
+maintainer (DevCert), or against a local/dev schema service you control
+(\`fbrain init --schema-service-url <URL>\`).
 
 Evolve a fbrain schema by adding a field. fold_db is append-only and
 identity-hashes schemas by (descriptive_name, sorted fields), so

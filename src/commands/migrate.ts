@@ -194,7 +194,7 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   // 5. Register + load.
   print(`[1/7] registering ${newDescriptiveName} with schema service`);
   const schemaClient = newSchemaServiceClient(cfg.schemaServiceUrl, verbose);
-  const reg = await schemaClient.registerSchema(newSchema);
+  const reg = await registerNewSchema(schemaClient, newSchema, newDescriptiveName, cfg);
   const toHash = reg.canonicalHash;
   print(`        ${newDescriptiveName} → ${toHash}`);
 
@@ -580,6 +580,49 @@ async function assertFieldRegistered(
         "version marker is added automatically; if you're still hitting this, " +
         "the schema service has a prior <Schema>_vN registration with overlapping fields).",
     });
+  }
+}
+
+// Register the new (field-added) schema, re-framing the schema-service
+// publish gate (`401 cert_required`) for the migrate context.
+//
+// `client.ts` raises a `schema_cert_required` FbrainError carrying the
+// shared `CERT_REQUIRED_HINT` for every schema-publish 401. That hint is
+// written for the INIT flow — "a fresh consumer is expected to skip
+// publishing entirely; init resolves the already-published canonical
+// hashes for you." That framing is actively wrong for `migrate`: migrate's
+// entire job is to publish a NEW schema hash (<Type>_v<N>), so there is no
+// "skip publishing" path and no "init resolves it" out. A consumer who runs
+// the documented `fbrain migrate` example would otherwise dead-end on
+// guidance that cannot apply to the command they ran. Re-frame it as the
+// maintainer-only operation it is. (We do NOT touch the init/catalog-load
+// use of CERT_REQUIRED_HINT — that flow's framing is correct there.)
+async function registerNewSchema(
+  schemaClient: ReturnType<typeof newSchemaServiceClient>,
+  newSchema: Parameters<ReturnType<typeof newSchemaServiceClient>["registerSchema"]>[0],
+  newDescriptiveName: string,
+  cfg: Config,
+): Promise<Awaited<ReturnType<ReturnType<typeof newSchemaServiceClient>["registerSchema"]>>> {
+  try {
+    return await schemaClient.registerSchema(newSchema);
+  } catch (err) {
+    if (err instanceof FbrainError && err.code === "schema_cert_required") {
+      throw new FbrainError({
+        code: "migrate_cert_required",
+        message:
+          `Schema evolution is a maintainer-only operation. Adding a field publishes a new ` +
+          `schema hash (${newDescriptiveName}), which requires a maintainer DevCert that the ` +
+          `schema service (${cfg.schemaServiceUrl}) rejected (401 cert_required).`,
+        hint:
+          "As a consumer you don't run `fbrain migrate` — fbrain's canonical fbrain/* schemas " +
+          "are published centrally, and `fbrain init` resolves them for you. If you ARE an " +
+          "fbrain maintainer, you need a DevCert for this schema service (see app_identity v3.1 " +
+          "/ the developer-enroll flow). To target a local/dev schema service you control, re-run " +
+          "`fbrain init --schema-service-url <URL>` to pin it, then migrate against that.",
+        cause: err,
+      });
+    }
+    throw err;
   }
 }
 
