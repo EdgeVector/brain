@@ -379,11 +379,22 @@ The script retries each `get` up to five times (250 ms backoff) to ride out the 
 fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Seven tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`.
 
 ```bash
-# Register fbrain with Claude Code (one-time, after the Quick start `bun link`):
-claude mcp add fbrain fbrain-mcp
+# One-shot agent wiring (one-time, after the Quick start `bun link`):
+fbrain mcp install        # verifies the entrypoint, registers fbrain with
+                          # Claude Code, AND appends the agent-instructions
+                          # block to ./CLAUDE.md — re-running it is a safe no-op
 
 # Or run the server standalone (useful for testing with @modelcontextprotocol/inspector):
 fbrain-mcp
+```
+
+`fbrain mcp install` (alias `fbrain mcp setup`) collapses the three manual steps into one command — it's the recommended path. Pass `--yes` to skip the confirmation prompt (e.g. in scripts), or `--claude-md <path>` to target a different instructions file. If `claude` isn't on your `PATH` it prints the exact `claude mcp add` command for you to run; if `fbrain-mcp` isn't on `PATH` yet it tells you to `bun link` first. Verify with `fbrain doctor --mcp`.
+
+Prefer to wire it by hand (or already have part of it set up)? The two manual steps `install` runs for you are:
+
+```bash
+claude mcp add fbrain fbrain-mcp       # register the MCP server with Claude Code
+fbrain mcp instructions >> CLAUDE.md   # tell your agent to USE it (see below)
 ```
 
 `bun link` (Quick start step 1) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting the clone. `fbrain doctor` verifies this for you — its `mcp-entrypoint` check PASSes with the resolved path when `fbrain-mcp` is on `PATH`, and WARNs (without failing the verdict) with a re-link hint when it isn't, so a silently-broken agent integration is visible instead of surfacing only at agent-call time.

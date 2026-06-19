@@ -403,9 +403,9 @@ export function printNextSteps(
   print(`  2. See what you've got:        fbrain list`);
   print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
   print(`  4. Re-check health anytime:    fbrain doctor`);
-  print(`  5. Connect it to your AI agent: claude mcp add fbrain fbrain-mcp`);
-  print(`        (gives your agent the fbrain_* tools — needs \`bun link\` first; run \`fbrain doctor --mcp\` to confirm it boots and serves all 7 tools)`);
-  print(`        → run \`fbrain mcp instructions >> CLAUDE.md\` (or \`| pbcopy\`) to wire your agent so it actually uses the brain (recall first, checkpoint as you go)`);
+  print(`  5. Connect it to your AI agent: fbrain mcp install`);
+  print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; needs \`bun link\` first)`);
+  print(`        → then \`fbrain doctor --mcp\` to confirm the agent surface boots and serves all 7 tools. (Doing it by hand instead? \`claude mcp add fbrain fbrain-mcp\` then \`fbrain mcp instructions >> CLAUDE.md\`.)`);
   print(`  Data lives on the node at ${ctx.nodeUrl} (config: ${ctx.configPath}).`);
 
   // When consent wasn't established (non-TTY scripted/CI run without
