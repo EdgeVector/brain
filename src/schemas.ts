@@ -470,6 +470,46 @@ export function purposeFor(type: RecordType): string {
   return RECORD_PURPOSES[type];
 }
 
+// The single copy-paste CLAUDE.md block that teaches an agent *when* and *why*
+// to reach for the fbrain MCP tools — the agent usage-loop plus the record-type
+// table. SINGLE SOURCE: `fbrain mcp instructions` prints exactly this, and the
+// fenced block in `docs/agent-instructions.md` is asserted equal to it by a
+// drift test, so the on-ramp command and the doc can never diverge. The table's
+// "Use it for" column renders from RECORD_PURPOSES (above), so it also can't
+// drift from the README / bare-`fbrain` help. Output is plain markdown — no
+// ANSI, pipe-safe, paste-ready (the caller appends a trailing newline).
+export function buildAgentInstructionsBlock(): string {
+  const tableRows = RECORD_TYPES.map(
+    (t) => `   | \`${t}\` | ${RECORD_PURPOSES[t]} |`,
+  ).join("\n");
+  return `## fbrain (persistent memory)
+
+You have an \`fbrain\` MCP brain — a searchable store of prior decisions, learnings,
+and context that survives across sessions. Use it as a loop, not a filing cabinet:
+
+1. **Recall first.** Before answering a non-trivial question or starting a task,
+   call \`fbrain_ask\` (hybrid BM25 + vector recall — the strongest retrieval) to
+   pull relevant prior context. Don't answer from memory alone when the brain may
+   already hold the answer. Use \`fbrain_search\` for a pure-semantic lookup,
+   \`fbrain_get\`/\`fbrain_list\` when you know the slug or want to browse a type.
+
+2. **Checkpoint as you go.** When a decision, learning, or durable fact is
+   settled, write it with \`fbrain_put\` *then* — don't wait to be asked, and don't
+   batch it all to the end of the session where it gets lost. A one-line note now
+   beats a perfect note never.
+
+3. **Pick the right type.** Every record has a type; choose the one whose purpose
+   matches what you're recording (\`fbrain_put\` requires a type — there is no
+   silent default):
+
+   | Type | Use it for |
+   |---|---|
+${tableRows}
+
+   Link a \`task\` to its parent \`design\` with \`fbrain_link\`. Slugs are per-type, so
+   pass \`type\` to \`fbrain_get\`/\`fbrain_delete\` whenever a slug could be ambiguous.`;
+}
+
 export function isRecordType(s: string): s is RecordType {
   return (RECORD_TYPES as readonly string[]).includes(s);
 }

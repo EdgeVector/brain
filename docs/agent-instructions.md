@@ -50,7 +50,13 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    pass `type` to `fbrain_get`/`fbrain_delete` whenever a slug could be ambiguous.
 ```
 
-The **Use it for** strings above are the canonical one-liners from the single
-`RECORD_PURPOSES` map in [`src/schemas.ts`](../src/schemas.ts) — the same source
-the README's *Record types* table and the bare `fbrain` help print, kept in sync
-by a test so this doc can't drift.
+The fenced block above is rendered from `buildAgentInstructionsBlock()` in
+[`src/schemas.ts`](../src/schemas.ts) — the *same* builder that `fbrain mcp
+instructions` prints — and a test asserts the two are byte-for-byte identical, so
+the doc and the command can't drift. The **Use it for** strings come from the
+single `RECORD_PURPOSES` map in that file (the same source the README's *Record
+types* table and the bare `fbrain` help print).
+
+> Prefer the one-step on-ramp: `fbrain mcp instructions >> CLAUDE.md` (or
+> `| pbcopy`) appends just this block, no surrounding prose — no need to open
+> this file and hand-select the fenced lines.

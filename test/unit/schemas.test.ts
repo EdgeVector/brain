@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   AGENT_STATUSES,
+  buildAgentInstructionsBlock,
   CONCEPT_STATUSES,
   DESIGN_STATUSES,
   PREFERENCE_STATUSES,
@@ -225,5 +226,33 @@ describe("RECORD_PURPOSES (new-dev 'use it for' one-liners)", () => {
     for (const type of RECORD_TYPES) {
       expect(doc).toContain(RECORD_PURPOSES[type]);
     }
+  });
+});
+
+describe("buildAgentInstructionsBlock (the `fbrain mcp instructions` block)", () => {
+  test("renders the usage-loop + a row per record type, table sourced from RECORD_PURPOSES", () => {
+    const block = buildAgentInstructionsBlock();
+    expect(block.startsWith("## fbrain (persistent memory)")).toBe(true);
+    expect(block).toContain("1. **Recall first.**");
+    expect(block).toContain("2. **Checkpoint as you go.**");
+    expect(block).toContain("3. **Pick the right type.**");
+    expect(block).toContain("| Type | Use it for |");
+    for (const type of RECORD_TYPES) {
+      // one table row per type: `| \`type\` | <purpose> |`
+      expect(block).toContain(`| \`${type}\` | ${RECORD_PURPOSES[type]} |`);
+    }
+    // pure markdown — no ANSI escapes, paste-safe
+    expect(block).not.toMatch(/\[/);
+  });
+
+  test("IS the fenced markdown block in docs/agent-instructions.md (command<->doc can't drift)", async () => {
+    const doc = await Bun.file(
+      new URL("../../docs/agent-instructions.md", import.meta.url),
+    ).text();
+    const m = doc.match(/```markdown\n([\s\S]*?)\n```/);
+    expect(m).not.toBeNull();
+    // byte-for-byte identical: `fbrain mcp instructions` prints exactly what the
+    // doc shows, both rendered from this one builder.
+    expect(m![1]).toBe(buildAgentInstructionsBlock());
   });
 });

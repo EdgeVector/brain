@@ -26,6 +26,7 @@ import { deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import {
+  buildAgentInstructionsBlock,
   isRecordType,
   RECORD_PURPOSES,
   RECORD_TYPES,
@@ -147,6 +148,7 @@ ${RECORD_NEW_HELP_LINES}
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
+  mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
   help <cmd>     per-command usage
 
 Global flags:
@@ -522,9 +524,20 @@ re-puts and re-hashes all six together.
 
 Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
-  mcp: `fbrain mcp
+  mcp: `fbrain mcp [instructions]
 
-Start a Model Context Protocol server over stdio. Exposes seven tools so
+fbrain mcp instructions
+  Print the copy-paste CLAUDE.md block (the agent usage-loop + the
+  record-type table) to stdout — nothing else, so the output is paste-ready.
+  Wire the brain into your agent in one step:
+    fbrain mcp instructions >> CLAUDE.md      # append to your agent's instructions
+    fbrain mcp instructions | pbcopy          # or copy it to the clipboard
+  The block tells the agent to recall before answering (fbrain_ask),
+  checkpoint settled decisions as it goes (fbrain_put), and pick the right
+  record type. (Same content as docs/agent-instructions.md, kept in sync.)
+
+fbrain mcp
+  Start a Model Context Protocol server over stdio. Exposes seven tools so
 MCP clients (Claude Code, Codex, etc.) can read and write fbrain
 in-process:
   read:  fbrain_search, fbrain_ask, fbrain_get, fbrain_list
@@ -1858,7 +1871,33 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runMcpCmd(args: Argv): Promise<number> {
-  parseCommandArgs({ args, strict: true, allowPositionals: false, options: EMPTY_OPTIONS });
+  const { positionals } = parseCommandArgs({
+    args,
+    strict: true,
+    allowPositionals: true,
+    options: EMPTY_OPTIONS,
+  });
+  // `fbrain mcp instructions` — print ONLY the copy-paste CLAUDE.md block to
+  // stdout (the agent usage-loop + the record-type table) so a new dev can wire
+  // the brain into their agent in one step: `fbrain mcp instructions >> CLAUDE.md`
+  // (or `| pbcopy`). No surrounding prose, no ANSI, exit 0 — paste-ready. The
+  // block is single-sourced from buildAgentInstructionsBlock() (schemas.ts), the
+  // same source docs/agent-instructions.md is asserted against, so they can't
+  // drift. No node/config needed: pure presentation, prints offline.
+  const sub = positionals[0];
+  if (sub === "instructions") {
+    if (positionals.length > 1) {
+      console.error(COMMAND_HELP.mcp);
+      return USAGE_ERROR;
+    }
+    process.stdout.write(`${buildAgentInstructionsBlock()}\n`);
+    return 0;
+  }
+  if (sub !== undefined) {
+    console.error(`Unknown mcp subcommand: ${sub}\n${COMMAND_HELP.mcp}`);
+    return USAGE_ERROR;
+  }
+  // Bare `fbrain mcp` — start the server.
   // Lazy-import so the SDK only loads when the user runs `fbrain mcp`.
   // Keeps CLI startup fast for non-MCP commands.
   const { runMcp } = await import("./mcp/main.ts");

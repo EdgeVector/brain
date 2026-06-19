@@ -394,7 +394,14 @@ fbrain-mcp
 
 The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and re-uses the CLI's existing command functions in-process. See [`docs/mcp-smoketest.md`](docs/mcp-smoketest.md) for end-to-end verification (ask Claude to search, put, delete, link).
 
-**Registered, but is your agent actually *using* it?** The seven tools sit idle unless your agent knows when to reach for them. [`docs/agent-instructions.md`](docs/agent-instructions.md) is a copy-paste block to drop into your agent's `CLAUDE.md` / system prompt — it instructs the agent to recall before answering (`fbrain_ask`), checkpoint settled decisions as it goes (`fbrain_put`), and pick the right record type. One paste closes the "installed but unused" gap.
+**Registered, but is your agent actually *using* it?** The seven tools sit idle unless your agent knows when to reach for them. Wire the brain into your agent in one step — `fbrain mcp instructions` prints the copy-paste `CLAUDE.md` block (the agent usage-loop + the record-type table) to stdout, nothing else, so you can append it straight in:
+
+```bash
+fbrain mcp instructions >> CLAUDE.md   # append to your agent's instructions
+fbrain mcp instructions | pbcopy       # or copy it to the clipboard
+```
+
+The block instructs the agent to recall before answering (`fbrain_ask`), checkpoint settled decisions as it goes (`fbrain_put`), and pick the right record type. One command closes the "installed but unused" gap. (The same block is rendered in [`docs/agent-instructions.md`](docs/agent-instructions.md) with extra context; a drift test keeps the two in sync.)
 
 | Tool | Input | What it does |
 |---|---|---|
