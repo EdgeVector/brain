@@ -118,12 +118,20 @@ describe("fbrain put --tag/--tags → frontmatter hint", () => {
     expect(body.stderr).not.toContain("Unknown option");
   });
 
-  test("unrelated unknown options on put still surface parseArgs's message", async () => {
-    // Same fall-through invariant as the --title/--body tests: an unrelated
-    // typo like `--bogus` should NOT trigger the tag hint.
+  test("unrelated unknown options on put get the clean no-suggestion error, not the tag hint or the raw parseArgs string", async () => {
+    // Same fall-through invariant as the --title/--body tests: an unrelated typo
+    // like `--bogus` must NOT trigger the tag hint — and must NOT leak Node's
+    // raw parseArgs string. It falls through to the generic no-suggestion branch.
     const { code, stderr } = await runCli(["put", "foo", "--bogus"]);
     expect(code).toBe(2);
-    expect(stderr).toContain("Unknown option '--bogus'");
+    // Clean backtick-quoted message — NOT Node's single-quoted bare string.
+    expect(stderr).toContain("Unknown option `--bogus`.");
+    expect(stderr).not.toContain("Unknown option '--bogus'");
+    expect(stderr).not.toContain("place it at the end");
+    // No misleading tag hint.
     expect(stderr).not.toContain("Tags come from frontmatter");
+    // The generic valid-options hint instead.
+    expect(stderr).toContain("Valid options:");
+    expect(stderr).toContain("fbrain help put");
   });
 });

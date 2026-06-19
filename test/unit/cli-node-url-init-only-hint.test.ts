@@ -133,13 +133,21 @@ describe("fbrain <non-init> --node-url / --schema-service-url → init-only nudg
     expect(stderr).not.toContain("--node-url");
   });
 
-  test("unrelated unknown options still surface parseArgs's bare message (no over-absorption)", async () => {
-    // The nudge is keyed strictly on `--node-url` / `--schema-service-url`.
-    // A truly unknown option like `--bogus` must fall through — otherwise
-    // we'd be silently absorbing every typo and pointing users at init.
+  test("unrelated unknown options get the clean no-suggestion error (not the init nudge, not the raw parseArgs string)", async () => {
+    // The init nudge is keyed strictly on `--node-url` / `--schema-service-url`.
+    // A truly unknown option like `--bogus` must NOT be absorbed into the init
+    // nudge — but it must also NOT leak Node's raw parseArgs string. It now
+    // falls through to the generic no-suggestion branch: a clean error naming
+    // the bad flag + a valid-options hint pointing at `fbrain help <cmd>`.
     const { code, stderr } = await runCli(["list", "--bogus"]);
     expect(code).toBe(2);
-    expect(stderr).toContain("Unknown option '--bogus'");
+    // Clean backtick-quoted message — NOT Node's single-quoted bare string.
+    expect(stderr).toContain("Unknown option `--bogus`.");
+    expect(stderr).not.toContain("Unknown option '--bogus'");
+    // Not the init nudge.
     expect(stderr).not.toContain("fbrain init");
+    // The generic valid-options hint, pointing at the command's help.
+    expect(stderr).toContain("Valid options:");
+    expect(stderr).toContain("fbrain help list");
   });
 });

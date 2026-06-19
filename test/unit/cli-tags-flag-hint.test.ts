@@ -98,10 +98,12 @@ describe("fbrain <type> new --tags → repeatable --tag hint", () => {
     expect(stderr).toMatch(/config not found/i);
   });
 
-  test("a far-off unknown option still surfaces parseArgs's bare message (no over-absorption)", async () => {
-    // The hint is Levenshtein-gated. `--xyzzy` is nowhere near any known
-    // flag, so it must fall through to the raw parseArgs error rather than be
-    // silently absorbed into a misleading suggestion.
+  test("a far-off unknown option gets a clean error + valid-options hint, never the raw parseArgs string", async () => {
+    // The suggestion is Levenshtein-gated. `--xyzzy` is nowhere near any known
+    // flag, so it must NOT be absorbed into a misleading "Did you mean". But it
+    // must ALSO not leak Node's raw parseArgs string — instead it gets the same
+    // clean error/hint contract every other unknown-input surface follows:
+    // name the bad flag, list the command's valid flags, point at help.
     const { code, stderr } = await runCli([
       "concept",
       "new",
@@ -109,7 +111,14 @@ describe("fbrain <type> new --tags → repeatable --tag hint", () => {
       "s",
     ]);
     expect(code).toBe(2);
-    expect(stderr).toContain("Unknown option '--xyzzy'");
+    // Clean backtick-quoted message — NOT Node's single-quoted bare string.
+    expect(stderr).toContain("Unknown option `--xyzzy`.");
+    expect(stderr).not.toContain("Unknown option '--xyzzy'");
+    // The misleading `--`-positional-escape advice must be gone.
+    expect(stderr).not.toContain("place it at the end");
+    // No false suggestion, but a genuine valid-options hint pointing at help.
     expect(stderr).not.toContain("Did you mean");
+    expect(stderr).toContain("Valid options:");
+    expect(stderr).toContain("fbrain help concept new");
   });
 });
