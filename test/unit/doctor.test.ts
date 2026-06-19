@@ -739,6 +739,79 @@ describe("doctor verdict logic", () => {
     expect(out).toContain("brew services start folddb");
   });
 
+  test("node down → node-dependent checks SKIP (not vanish, not misleading PASS); single FAIL verdict", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const unreachable = new FbrainError({
+      code: "service_unreachable",
+      message: "node not reachable at http://127.0.0.1:9399.",
+    });
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      // Schema service is up — drift would mislead as [PASS] without the gate.
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ identityThrows: unreachable }),
+    });
+    const out = lines.join("\n");
+
+    // The four node-dependent checks must appear as explicit SKIP lines with a
+    // "node unreachable" reason — not silently dropped.
+    expect(out).toContain("[SKIP] node-provisioned  — node unreachable");
+    expect(out).toContain("[SKIP] schemas-loaded  — node unreachable");
+    expect(out).toContain("[SKIP] embedding-runtime  — node unreachable");
+    expect(out).toContain("[SKIP] write-ready  — node unreachable");
+
+    // schema-drift collapses to a single SKIP, NOT eight misleading [PASS].
+    expect(out).toContain("[SKIP] schema-drift  — node unreachable");
+    expect(out).not.toContain("[PASS] schema-drift");
+
+    // SKIP is neutral — the verdict is still a single node-reachable FAIL.
+    expect(out).toContain("[FAIL] node-reachable");
+    expect(out).toContain("FAIL: 1 issue");
+    expect(code).toBe(1);
+  });
+
+  test("node down --json → node-dependent checks carry tag SKIP, ok:true (neutral)", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const unreachable = new FbrainError({
+      code: "service_unreachable",
+      message: "node not reachable at http://127.0.0.1:9399.",
+    });
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ identityThrows: unreachable }),
+      json: true,
+    });
+    expect(code).toBe(1);
+    const parsed = JSON.parse(lines.join("\n")) as {
+      ok: boolean;
+      failures: number;
+      checks: { name: string; tag: string; ok: boolean }[];
+    };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.failures).toBe(1);
+    for (const name of [
+      "node-provisioned",
+      "schemas-loaded",
+      "embedding-runtime",
+      "write-ready",
+      "schema-drift",
+    ]) {
+      const entry = parsed.checks.find((c) => c.name === name);
+      expect(entry).toBeDefined();
+      expect(entry!.tag).toBe("SKIP");
+      expect(entry!.ok).toBe(true);
+    }
+    // The only failing check is node-reachable.
+    expect(parsed.checks.filter((c) => !c.ok).map((c) => c.name)).toEqual([
+      "node-reachable",
+    ]);
+  });
+
   // Regression: the `--usage` short-circuit (doctor.ts:149) used to propagate
   // err.message verbatim — including connectionError()'s DOCTOR_TIP suffix —
   // so `fbrain doctor --usage` with no node running printed "run `fbrain

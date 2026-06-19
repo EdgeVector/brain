@@ -158,11 +158,15 @@ export type DoctorOptions = {
 
 // `tag` overrides the printed tag when set; `ok` always drives the exit code.
 // WARN entries set `ok: true` + `tag: "WARN"` so they surface visually but
-// don't trip the doctor verdict.
+// don't trip the doctor verdict. SKIP entries are the same neutral shape
+// (`ok: true` + `tag: "SKIP"`): a check whose dependency was unreachable so it
+// never ran — rendered like WARN, never a pass or a fail. Emitting an explicit
+// SKIP keeps the check list a stable shape regardless of node state, instead
+// of node-dependent checks silently vanishing when the node is down.
 type CheckResult = {
   name: string;
   ok: boolean;
-  tag?: "PASS" | "WARN" | "FAIL";
+  tag?: "PASS" | "WARN" | "FAIL" | "SKIP";
   detail?: string;
   fix?: string;
 };
@@ -257,8 +261,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 
   // 3 + 4. node reachable + provisioned
   let provisioned = false;
+  let nodeReachable = false;
   try {
     const identity = await nodeClient.autoIdentity();
+    nodeReachable = true;
     checks.push({ name: "node-reachable", ok: true });
     verbose?.(`node-reachable: ok`);
     if (identity.provisioned) {
@@ -292,6 +298,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       fix: isNodeReachableButErroring(err) ? nodeHttpErrorHint(err) : nodeDownHint(cfg.nodeUrl),
     });
     verbose?.(`node-reachable: FAIL`);
+    // The node never answered, so node-provisioned can't be determined. Emit
+    // an explicit SKIP (neutral, like WARN) rather than letting it silently
+    // vanish — the schemas-loaded / schema-drift / embedding-runtime /
+    // write-ready checks below SKIP for the same reason at their own gates,
+    // so the check list keeps the same shape whether the node is up or down.
+    checks.push(skippedByNodeUnreachable("node-provisioned"));
   }
 
   // 5. schemas loaded — verified via the READ path (GET /api/schemas), NOT by
@@ -347,6 +359,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       });
       verbose?.(`schemas-loaded: FAIL`);
     }
+  } else if (!nodeReachable) {
+    // Node is down — reading the node DB to confirm fbrain's schemas are
+    // loaded is impossible. SKIP rather than drop the check.
+    checks.push(skippedByNodeUnreachable("schemas-loaded", "can't read the node DB"));
   }
 
   // 6. schema drift — check each unique schema once. Iterates 8 entries:
@@ -362,7 +378,16 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   //     schema's extra field is expected — softened here by
   //     softenDriftIfMigrated().
   const allManifests = safeListManifests();
-  if (cfgIssues.length === 0) {
+  if (cfgIssues.length === 0 && !nodeReachable) {
+    // checkSchemaDrift only reads the cloud schema-SERVICE, so it would still
+    // PASS with the node dead — but the `schema-drift[…]` label promises a
+    // comparison against the user's node, and eight green lines next to a red
+    // `node-reachable` read as "my schemas are fine on my node," which was
+    // never checked. Collapse to a single honest SKIP when the node is down.
+    checks.push(
+      skippedByNodeUnreachable("schema-drift", "can't compare against the node DB"),
+    );
+  } else if (cfgIssues.length === 0) {
     for (const entry of UNIQUE_SCHEMAS) {
       const hash = cfg.schemaHashes[entry.key];
       const label = entry.schema.schema.descriptive_name;
@@ -399,6 +424,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   if (provisioned && schemasLoadedOk) {
     const embed = await runEmbeddingProbe(nodeClient, verbose);
     checks.push(embed);
+  } else if (!nodeReachable) {
+    // The probe issues a search against the node to force its ONNX load —
+    // impossible with the node down. SKIP rather than drop it.
+    checks.push(skippedByNodeUnreachable("embedding-runtime"));
   }
 
   // Write-readiness probe — capability + consent-path check. The pre-PR
@@ -416,6 +445,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     const store = opts.capabilityStore ?? defaultCapabilityStore();
     const writeReady = await runWriteReadyProbe(nodeClient, cfg.nodeUrl, store, verbose);
     checks.push(writeReady);
+  } else if (!nodeReachable) {
+    // The probe POSTs request-consent to the node — impossible with the node
+    // down. SKIP rather than drop it.
+    checks.push(skippedByNodeUnreachable("write-ready"));
   }
 
   // MCP-entrypoint probe — the headline agent-integration path. The README
@@ -1775,8 +1808,22 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function tagOf(check: CheckResult): "PASS" | "WARN" | "FAIL" {
+function tagOf(check: CheckResult): "PASS" | "WARN" | "FAIL" | "SKIP" {
   return check.tag ?? (check.ok ? "PASS" : "FAIL");
+}
+
+// A node-dependent check that couldn't run because `node-reachable` FAILed.
+// Neutral (ok: true, tag "SKIP" — rendered like WARN, never a pass or a
+// fail) so the verdict stays a single node-reachable FAIL, but the check
+// still appears in the list with an honest "node unreachable" reason instead
+// of silently vanishing the way it did pre-this-change.
+function skippedByNodeUnreachable(name: string, why?: string): CheckResult {
+  return {
+    name,
+    ok: true,
+    tag: "SKIP",
+    detail: `node unreachable${why ? `; ${why}` : ""}`,
+  };
 }
 
 function skippedByPrereqs(name: string): CheckResult {
