@@ -422,7 +422,7 @@ The block instructs the agent to recall before answering (`fbrain_ask`), checkpo
 | `fbrain_list` | `type?` + `status?` + `tag?` + `limit?` | Newest-first list with filters |
 | `fbrain_put` | `slug` + `type?` + `title?` + `body?` + `status?` + `tags?` + `frontmatter?` | Upsert a record. Synthesizes frontmatter from structured args or passes through raw `frontmatter`. One of `type` or a `type:` field in `frontmatter` is required — there is NO silent default (matches CLI `put`); if `status` is set, fires a follow-up `fbrain status` mutation |
 | `fbrain_delete` | `slug` + `type?` | Soft-delete a record (tombstone tag). Without `type`, errors on ambiguous slug |
-| `fbrain_link` | `from_type` + `from_slug` + `to_type` + `to_slug` | Link a task to a parent design. v0: `task → design` only — any other pair errors with `unsupported_link_pair` |
+| `fbrain_link` | `from_slug` + `to_slug` + `from_type?` + `to_type?` | Link a task to a parent design — pass just `{from_slug, to_slug}`; `from_type`/`to_type` are optional and default `task`/`design`. v0: `task → design` only — any other pair errors with `unsupported_link_pair` |
 
 Single-user trust at stdio — no MCP auth layer. The server inherits the CLI's `~/.fbrain/config.json` credentials (your `userHash`), so every write is attributed to you. If you put fbrain behind a remote MCP transport one day, you'll want a real auth story first.
 

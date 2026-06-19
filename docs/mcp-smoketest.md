@@ -129,9 +129,10 @@ the CLI's `fbrain delete` behavior.
 > Use fbrain to link task `mcp-smoketest-task` to design
 > `mcp-smoketest-design`.
 
-Expected: Claude calls `fbrain_link` with `{from_type: "task",
-from_slug: "mcp-smoketest-task", to_type: "design", to_slug:
-"mcp-smoketest-design"}` and surfaces
+Expected: Claude calls `fbrain_link` with just `{from_slug:
+"mcp-smoketest-task", to_slug: "mcp-smoketest-design"}` (the canonical
+form — `from_type`/`to_type` are optional and default `task`/`design`)
+and surfaces
 `linked task mcp-smoketest-task → design mcp-smoketest-design`.
 Verify with `fbrain get mcp-smoketest-task` — the `design_slug:` line
 should show `mcp-smoketest-design`.
