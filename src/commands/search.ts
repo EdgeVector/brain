@@ -347,7 +347,15 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const topScore = trimmed[0]?.score ?? null;
   const weakMatch =
     !opts.exact && topScore !== null && isWeakMatch(topScore, trimmed, STRONG_SCORE, FLATNESS_GAP);
-  const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`;
+  // On the MCP agent channel the advisory must name a TOOL the agent can call,
+  // not a CLI command string. An MCP agent has no shell — telling it to run
+  // `fbrain ask <query>` is a dead-end. Render the agent-voiced variant only
+  // when `opts.agent` is set (mirroring the empty/no-match hint above); the
+  // human CLI path is byte-identical to before. "(BM25 + vector hybrid)" also
+  // labels `ask` accurately (it's hybrid/RRF, not keyword-only).
+  const weakMatchNote = opts.agent
+    ? `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or use the \`fbrain_ask\` tool (BM25 + vector hybrid).`
+    : `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`;
 
   // {slug, score, type, title} per hit — type is the canonical
   // lowercase RecordType (not the capitalized human display name)
