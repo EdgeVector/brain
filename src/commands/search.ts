@@ -358,8 +358,8 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // relatedness of the fragment to the query — a query word buried in a long
   // doc can sit at cosine 0.15 while still being a real, "this nailed it"
   // hit — so any confidence cut is meaningless in this mode. Worse, the note
-  // points at `fbrain ask <query>` for keyword search, which is hybrid
-  // semantic + BM25 + RRF — exactly the surface the user opted out of.
+  // points at `fbrain ask <query>`, which is the hybrid semantic + BM25 + RRF
+  // retrieval — exactly the surface the user opted out of.
   //
   // Top score at/above this is a real hit regardless of distribution shape
   // (real-match band ~0.45–0.8 on the live brain; a dense strong band lands here).
@@ -390,7 +390,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // labels `ask` accurately (it's hybrid/RRF, not keyword-only).
   const weakMatchNote = opts.agent
     ? `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or use the \`fbrain_ask\` tool (BM25 + vector hybrid).`
-    : `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` for keyword search.`;
+    : `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`fbrain ask <query>\` (BM25 + vector hybrid — fbrain's strongest retrieval).`;
 
   // {slug, score, type, title} per hit — type is the canonical
   // lowercase RecordType (not the capitalized human display name)
