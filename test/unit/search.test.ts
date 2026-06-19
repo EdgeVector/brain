@@ -956,6 +956,66 @@ describe("searchCmd", () => {
     expect(stderr[0]).toContain("fbrain ask");
   });
 
+  test("weak-match note names the `fbrain_ask` tool (not the CLI string) on the agent channel", async () => {
+    // The MCP `fbrain_search` handler sets `agent: true` and routes printErr
+    // into the agent content sink, so this advisory reaches an agent that has
+    // no shell. Telling it to run `fbrain ask <query>` is a dead-end — the
+    // agent-voiced variant must name the `fbrain_ask` TOOL instead, mirroring
+    // the empty/no-match hint. The human (default) path is byte-identical and
+    // still carries the CLI verb (covered by the test above).
+    const recordRow = {
+      fields: {
+        slug: "ship-it",
+        title: "Ship the thing",
+        body: "...",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: "ship-it", range: null },
+    };
+    installSequencedMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "ship-it",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.24 },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow] } };
+      }
+      return { status: 404 };
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "qwxz pqrlmn vbnghj",
+      agent: true,
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toMatch(/^note:\s/);
+    expect(stderr[0]).toContain("no strong matches");
+    // The agent path names the TOOL, never the CLI command string.
+    expect(stderr[0]).toContain("`fbrain_ask` tool");
+    expect(stderr[0]).toContain("(BM25 + vector hybrid)");
+    expect(stderr[0]).not.toContain("fbrain ask <query>");
+  });
+
   test("does NOT annotate when the top score is above the confidence line (no false positive on a real match)", async () => {
     // Companion: a genuinely good top match must NOT trigger the weak-match
     // note. Pin a real-match-band score (0.579 from the same dogfood — a
