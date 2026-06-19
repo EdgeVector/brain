@@ -103,6 +103,7 @@ import {
   type WriteNodeClientOptions,
 } from "../write-context.ts";
 import { FBRAIN_MCP_TOOL_NAMES } from "../mcp/server.ts";
+import { getFbrainVersion } from "../version.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -150,6 +151,12 @@ export type DoctorOptions = {
   // entrypoint + a deadline; returns the handshake outcome the PASS/FAIL
   // logic classifies. Defaults to a real child-process stdio handshake.
   mcpBootRunner?: (input: McpBootInput) => Promise<McpBootResult>;
+  // Override for tests: the running CLI's version string the mcp-boot probe
+  // compares against the booted agent surface's `serverInfo.version` to detect
+  // a build skew (a stale `bun link`ed fbrain-mcp from a different checkout).
+  // Defaults to `getFbrainVersion()` — the same single-sourced string the MCP
+  // server reports — so a real run compares like-for-like.
+  cliVersion?: string;
   // --json: emit the structured check results as a single JSON object on
   // stdout instead of the human PASS/WARN/FAIL lines, so the agent-facing
   // surfaces (CI, scripts) can read doctor's verdict programmatically.
@@ -1428,6 +1435,30 @@ export async function runMcpBootProbe(
 
   const info = result.serverInfo;
   const infoStr = info ? `serverInfo ${info.name} ${info.version}` : "serverInfo (none)";
+
+  // Version-skew WARN: the agent surface is the same fbrain *codebase* but a
+  // DIFFERENT *build* than the CLI we're running. `serverInfo.version` and the
+  // CLI's `getFbrainVersion()` are single-sourced (mcp/server.ts +
+  // version.ts), so they can't drift WITHIN one checkout — but `fbrain-mcp` on
+  // PATH can resolve to a stale `bun link`ed checkout / second worktree at a
+  // different commit. When the version strings differ, the AI agent may be
+  // serving stale `fbrain_*` tool behavior while the human CLI is current — a
+  // real, hard-to-diagnose state. WARN (ok:true, doesn't trip the verdict),
+  // never the tool-surface FAIL above.
+  const cliVersion = opts.cliVersion ?? getFbrainVersion();
+  if (info && info.version !== cliVersion) {
+    return {
+      name: "mcp-boot",
+      ok: true,
+      tag: "WARN",
+      detail:
+        `fbrain-mcp booted + served the full agent surface (tools=${got.length}), ` +
+        `but it's a DIFFERENT fbrain build than this CLI (CLI ${cliVersion}, agent ${info.version}) — ` +
+        "your AI agent may be serving stale fbrain_* tools.",
+      fix: relinkFix,
+    };
+  }
+
   return {
     name: "mcp-boot",
     ok: true,
