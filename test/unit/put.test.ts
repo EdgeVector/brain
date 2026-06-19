@@ -1808,6 +1808,69 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
     expect(r.indexPending).toBe(true);
   });
 
+  test("a FLICKERING index (slug hits once then drops) yields indexPending:true — a single transient hit is not enough", async () => {
+    // The fold_db native index's post-mutation visibility flickers: the slug
+    // surfaces on one probe and is MISSING on the next. The OLD first-hit
+    // criterion would report `indexPending: false` off that single transient
+    // hit — a false positive, the exact bug this card fixes. With the
+    // consecutive-hit bar (here 2), one isolated hit followed by a miss must
+    // NOT clear `indexPending`.
+    let searchCalls = 0;
+    // Hit pattern across probes: miss, HIT, miss, HIT, miss, HIT — never two
+    // in a row, so the streak never reaches 2 within the budget.
+    const pattern = [false, true, false, true, false, true];
+    installVectorMock({
+      slug: "ric-flicker",
+      type: "concept",
+      onSearch: () => {
+        searchCalls++;
+      },
+      searchHits: () => (pattern[searchCalls - 1] ? ["ric-flicker"] : []),
+    });
+    const r = await putCmd({
+      cfg: localCfg,
+      slug: "ric-flicker",
+      input: "---\ntype: concept\ntitle: T\n---\nb",
+      verifyOptions: { sleep: noopSleep },
+      // 6 attempts, no real backoff; default consecutiveHits (2).
+      vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 6 },
+    });
+    // The write SUCCEEDED despite the flicker...
+    expect(r.action).toBeDefined();
+    // ...spent its full budget chasing a stable streak it never got...
+    expect(searchCalls).toBe(6);
+    // ...and honestly reports the index as still catching up (NOT a false
+    // positive off the transient single hits).
+    expect(r.indexPending).toBe(true);
+  });
+
+  test("a flicker that then STABILIZES (two hits in a row) yields indexPending:false", async () => {
+    // Once the index settles — the slug appears on two CONSECUTIVE probes — the
+    // record is genuinely stably queryable, so `indexPending` clears honestly.
+    let searchCalls = 0;
+    // miss, HIT, miss, HIT, HIT → streak reaches 2 on probe 5.
+    const pattern = [false, true, false, true, true];
+    installVectorMock({
+      slug: "ric-settles",
+      type: "concept",
+      onSearch: () => {
+        searchCalls++;
+      },
+      searchHits: () => (pattern[searchCalls - 1] ? ["ric-settles"] : []),
+    });
+    const r = await putCmd({
+      cfg: localCfg,
+      slug: "ric-settles",
+      input: "---\ntype: concept\ntitle: T\n---\nb",
+      verifyOptions: { sleep: noopSleep },
+      vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 6 },
+    });
+    // Confirmed stable on the consecutive pair (probe 5), so it stops there...
+    expect(searchCalls).toBe(5);
+    // ...and reports the index as caught up.
+    expect(r.indexPending).toBe(false);
+  });
+
   test("indexPending is false (confirm skipped) on a NON-loopback node — the lag gate only fires locally", async () => {
     let searchCalls = 0;
     const remoteCfg = buildTestCfg({ userHash: "uh", nodeUrl: "http://10.0.0.1:9001" });

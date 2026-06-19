@@ -13,10 +13,17 @@ import {
   rowToRecord,
   schemaHashFor,
   TOMBSTONE_TAG,
+  VECTOR_INDEX_VERIFY_CONSECUTIVE,
+  verifyVectorIndexed,
   withReadRetry,
   type FbrainRecord,
 } from "../../src/record.ts";
-import { FbrainError, type NodeClient, type QueryResponse } from "../../src/client.ts";
+import {
+  FbrainError,
+  type NativeIndexHit,
+  type NodeClient,
+  type QueryResponse,
+} from "../../src/client.ts";
 import { RECORD_TYPES, type RecordType } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -1128,5 +1135,124 @@ describe("resolveBySlug", () => {
       ).rejects.toMatchObject({ code: "not_found" });
       expect(calls()["designhash"]).toBe(1);
     });
+  });
+});
+
+// The read-after-write honesty fix: the fold_db native index's post-mutation
+// visibility FLICKERS, so a single positive probe is a false positive. These
+// pin the consecutive-hit contract directly on `verifyVectorIndexed` — a fake
+// node whose `search` returns a scripted per-call hit pattern.
+describe("verifyVectorIndexed — consecutive-hit (anti-flicker) contract", () => {
+  const noSleep = async (): Promise<void> => {};
+
+  // A NodeClient whose only meaningful method is `search`, scripted by a
+  // per-call boolean: true → the probe returns the slug; false → it doesn't.
+  // Out-of-range calls return the LAST entry (steady-state after the pattern).
+  function flickerNode(
+    slug: string,
+    pattern: boolean[],
+  ): { node: NodeClient; calls: () => number } {
+    let n = 0;
+    const node = {
+      async search(): Promise<NativeIndexHit[]> {
+        const hit = pattern[Math.min(n, pattern.length - 1)] ?? false;
+        n++;
+        if (!hit) return [];
+        return [
+          {
+            schema_name: "s",
+            field: "body",
+            key_value: { hash: slug, range: null },
+            value: "b",
+            metadata: { score: 1 },
+          },
+        ];
+      },
+    } as unknown as NodeClient;
+    return { node, calls: () => n };
+  }
+
+  test("default requires 2 consecutive hits", () => {
+    expect(VECTOR_INDEX_VERIFY_CONSECUTIVE).toBe(2);
+  });
+
+  test("a single transient hit then a miss is NOT visible (the false-positive case)", async () => {
+    // miss, HIT, miss, HIT, miss, HIT — never two in a row.
+    const { node, calls } = flickerNode("s1", [false, true, false, true, false, true]);
+    const visible = await verifyVectorIndexed(node, "sh", "s1", "q", {
+      sleep: noSleep,
+      maxAttempts: 6,
+    });
+    expect(visible).toBe(false);
+    expect(calls()).toBe(6); // spent the whole budget chasing a streak
+  });
+
+  test("two consecutive hits → visible, and stops as soon as the streak is met", async () => {
+    // miss, HIT, miss, HIT, HIT — streak reaches 2 on the 5th probe.
+    const { node, calls } = flickerNode("s2", [false, true, false, true, true]);
+    const visible = await verifyVectorIndexed(node, "sh", "s2", "q", {
+      sleep: noSleep,
+      maxAttempts: 6,
+    });
+    expect(visible).toBe(true);
+    expect(calls()).toBe(5); // returned the moment the streak closed, didn't burn the 6th
+  });
+
+  test("a steadily-visible index confirms in exactly `consecutiveHits` probes", async () => {
+    const { node, calls } = flickerNode("s3", [true, true, true, true]);
+    const visible = await verifyVectorIndexed(node, "sh", "s3", "q", {
+      sleep: noSleep,
+      maxAttempts: 6,
+    });
+    expect(visible).toBe(true);
+    expect(calls()).toBe(2); // first probe + one confirming probe (the common warm case)
+  });
+
+  test("consecutiveHits is tunable: 3-in-a-row required", async () => {
+    // HIT, HIT, miss, HIT, HIT, HIT — first pair is broken by the miss; the
+    // streak of 3 only closes on the final probe.
+    const { node } = flickerNode("s4", [true, true, false, true, true, true]);
+    const visible = await verifyVectorIndexed(node, "sh", "s4", "q", {
+      sleep: noSleep,
+      maxAttempts: 6,
+      consecutiveHits: 3,
+    });
+    expect(visible).toBe(true);
+  });
+
+  test("a probe that throws counts as a miss and resets the streak (never fails the write)", async () => {
+    let n = 0;
+    // HIT, throw, HIT, HIT — the throw between the first two hits resets the
+    // streak; visibility is only confirmed on the trailing consecutive pair.
+    const node = {
+      async search(): Promise<NativeIndexHit[]> {
+        const i = n++;
+        if (i === 1) throw new Error("native index transiently unavailable");
+        return [
+          {
+            schema_name: "s",
+            field: "body",
+            key_value: { hash: "s5", range: null },
+            value: "b",
+            metadata: { score: 1 },
+          },
+        ];
+      },
+    } as unknown as NodeClient;
+    const visible = await verifyVectorIndexed(node, "sh", "s5", "q", {
+      sleep: noSleep,
+      maxAttempts: 6,
+    });
+    expect(visible).toBe(true); // recovered into a fresh streak; never threw
+  });
+
+  test("an index that never surfaces the slug → not visible, no throw", async () => {
+    const { node, calls } = flickerNode("s6", [false]);
+    const visible = await verifyVectorIndexed(node, "sh", "s6", "q", {
+      sleep: noSleep,
+      maxAttempts: 4,
+    });
+    expect(visible).toBe(false);
+    expect(calls()).toBe(4);
   });
 });
