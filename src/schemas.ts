@@ -456,7 +456,7 @@ export function resolveOwnedSchemaHash(
 // schema definition, hash, or wire `purpose_statement`.
 const HANDWRITTEN_PURPOSES: Partial<Record<RecordType, string>> = {
   design: "An architecture or plan you intend to build",
-  task: "A unit of work; links to a parent design via --design",
+  task: "A unit of work; links to a parent design",
 };
 
 export const RECORD_PURPOSES: Record<RecordType, string> = Object.fromEntries(

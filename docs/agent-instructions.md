@@ -38,7 +38,7 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    | Type | Use it for |
    |---|---|
    | `design` | An architecture or plan you intend to build |
-   | `task` | A unit of work; links to a parent design via --design |
+   | `task` | A unit of work; links to a parent design |
    | `concept` | Reusable framework, pattern, or protocol recorded for cross-session reuse |
    | `preference` | User-stated directive applied across future decisions |
    | `reference` | Pointer to an external resource useful for future lookup |
