@@ -443,6 +443,33 @@ export function resolveOwnedSchemaHash(
   return null;
 }
 
+// Human-facing "what is this type for" one-liners, surfaced in the README
+// and the top-level CLI help so a brand-new dev can tell which of the 8
+// record types to reach for. SINGLE SHARED SOURCE — both surfaces read this
+// map, so they cannot drift.
+//
+// For the six Phase 6 types the string IS the canonical `purpose_statement`
+// the dual-signal gate keys on (derived below, not re-typed). `design` and
+// `task` carry the bare descriptive_name as their wire `purpose_statement`
+// ("Design"/"Task"), which is not a usable sentence, so they get a short
+// hand-written one-liner here. This is presentation only — it never changes a
+// schema definition, hash, or wire `purpose_statement`.
+const HANDWRITTEN_PURPOSES: Partial<Record<RecordType, string>> = {
+  design: "An architecture or plan you intend to build",
+  task: "A unit of work; links to a parent design via --design",
+};
+
+export const RECORD_PURPOSES: Record<RecordType, string> = Object.fromEntries(
+  RECORD_TYPES.map((t) => [
+    t,
+    HANDWRITTEN_PURPOSES[t] ?? RECORDS[t].schema.schema.purpose_statement ?? t,
+  ]),
+) as Record<RecordType, string>;
+
+export function purposeFor(type: RecordType): string {
+  return RECORD_PURPOSES[type];
+}
+
 export function isRecordType(s: string): s is RecordType {
   return (RECORD_TYPES as readonly string[]).includes(s);
 }

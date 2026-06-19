@@ -25,7 +25,12 @@ import { putCmd } from "./commands/put.ts";
 import { deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
-import { isRecordType, RECORD_TYPES, type RecordType } from "./schemas.ts";
+import {
+  isRecordType,
+  RECORD_PURPOSES,
+  RECORD_TYPES,
+  type RecordType,
+} from "./schemas.ts";
 
 // Exit code for usage/argument errors — "you invoked fbrain wrong" (unknown
 // command, typo'd command, missing required arg, unknown/misapplied flag,
@@ -111,6 +116,15 @@ export const COMMANDS = [
 ] as const;
 export type Command = (typeof COMMANDS)[number];
 
+// The `<type> new` command lines carry each record type's "use it for"
+// one-liner so a new dev sees, in the bare `fbrain` help, which of the 8
+// types to reach for. Purposes come from the SINGLE SHARED RECORD_PURPOSES
+// map (schemas.ts) — the same source the README uses, so the two can't drift.
+const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.map((t) => {
+  const label = `${t} new`.padEnd(14);
+  return `  ${label} ${RECORD_PURPOSES[t]}`;
+}).join("\n");
+
 export const TOP_HELP = `fbrain — CLI brain over fold_db
 
 Usage:
@@ -118,14 +132,7 @@ Usage:
 
 Commands:
   init           bootstrap a node + register schemas + write config
-  design new     create a new Design
-  task new       create a new Task (--design <slug> links to a parent design)
-  concept new    create a new Concept
-  preference new create a new Preference
-  reference new  create a new Reference
-  agent new      create a new Agent
-  project new    create a new Project
-  spike new      create a new Spike
+${RECORD_NEW_HELP_LINES}
   put            upsert any record type from stdin (frontmatter-aware; type: picks schema)
   get            print a record by slug
   list           list records, newest-first
