@@ -244,6 +244,15 @@ export type ReadRetryOptions = {
   // `EMPTY_PAGE_RETRY_ATTEMPTS`. Tests override this together with `sleep`
   // to pin the count without paying real backoff.
   emptyPageAttempts?: number;
+  // Number of CONSECUTIVE positive probes the vector-index confirmation
+  // (`verifyVectorIndexed`) requires before reporting the slug stably visible.
+  // Defaults to `VECTOR_INDEX_VERIFY_CONSECUTIVE`. The fold_db native index's
+  // visibility FLICKERS — a single positive hit does not mean the row is
+  // queryable on the very next call — so one transient hit is not enough to
+  // honestly report `indexPending: false`. Tests pin this together with
+  // `maxAttempts`/`sleep` to assert the consecutive-hit contract without
+  // paying real backoff.
+  consecutiveHits?: number;
 };
 
 // Pure schedule: how long to wait *before* attempt N (1-based). Constant
@@ -427,18 +436,34 @@ export async function verifyRecordVisible(
 // the slug appears among the hits for a probe query (the record's own
 // title/slug text, scoped to its schema hash) on a SHORT bounded budget.
 //
-// Returns true as soon as the slug is in the index, false if the budget is
-// spent without seeing it (the caller reports `indexPending: true` — an
-// honest "your write landed but the vector index hasn't caught up yet"
-// signal — and never fails the write). Distinct, tighter budget than the
-// record-list retry: the vector index lags by a known sub-second window, so
-// a few quick attempts cover the common case without adding noticeable
-// latency to a put that has already confirmed record-list visibility. Errors
-// from the probe are swallowed (treated as "not yet visible" for that
-// attempt) — a flaky search must never fail or block a write that already
-// persisted.
-export const VECTOR_INDEX_VERIFY_ATTEMPTS = 5;
+// Returns true once the slug is STABLY in the index — see the consecutive-hit
+// rule below — false if the budget is spent without confirming stability (the
+// caller reports `indexPending: true` — an honest "your write landed but the
+// vector index hasn't caught up yet" signal — and never fails the write).
+// Distinct, tighter budget than the record-list retry: the vector index lags by
+// a known sub-second window, so a few quick attempts cover the common case
+// without adding noticeable latency to a put that has already confirmed
+// record-list visibility. Errors from the probe are swallowed (treated as "not
+// yet visible" for that attempt) — a flaky search must never fail or block a
+// write that already persisted.
+//
+// CONSECUTIVE-HIT RULE (this is the read-after-write honesty fix): fold_db's
+// native-index visibility FLICKERS during the post-mutation indexing window —
+// the slug can surface on one probe and then be MISSING on the very next call.
+// So a single positive probe is NOT proof the record is stably queryable; the
+// old "return on the first hit" criterion made `indexPending: false` a false
+// positive (the agent's `put` → immediate `search` loop dropped just-written
+// records 6/6 in dogfood run 76, 2026-06-19). We now require the slug to appear
+// on `consecutiveHits` probes IN A ROW (default 2) before declaring it visible;
+// any miss resets the streak. Only a stable streak — the same signal a real
+// user's next `search` will hit — clears `indexPending`. The budget is sized so
+// the common warm case (index caught up) still confirms sub-second: the first
+// probe + one confirming probe, no backoff burned until propagation actually
+// lags.
+export const VECTOR_INDEX_VERIFY_ATTEMPTS = 6;
 export const VECTOR_INDEX_VERIFY_BACKOFF_MS = 350;
+// Consecutive positive probes required to call the slug stably visible.
+export const VECTOR_INDEX_VERIFY_CONSECUTIVE = 2;
 
 export async function verifyVectorIndexed(
   node: NodeClient,
@@ -449,22 +474,30 @@ export async function verifyVectorIndexed(
 ): Promise<boolean> {
   const maxAttempts = options?.maxAttempts ?? VECTOR_INDEX_VERIFY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? VECTOR_INDEX_VERIFY_BACKOFF_MS;
-  const result = await withReadRetry(
-    async (): Promise<boolean> => {
-      try {
-        const hits = await node.search(query, { schemas: [schemaHash] });
-        return hits.some((h) => h.key_value?.hash === slug);
-      } catch {
-        // A flaky/unavailable native index must not fail a persisted write —
-        // treat the probe error as "not yet visible" so the loop either
-        // retries or times out into the honest `indexPending` signal.
-        return false;
-      }
-    },
-    (visible) => visible,
-    { ...options, maxAttempts, backoffMs: ceilingMs },
-  );
-  return result;
+  const needConsecutive = Math.max(1, options?.consecutiveHits ?? VECTOR_INDEX_VERIFY_CONSECUTIVE);
+  const sleep = options?.sleep ?? defaultSleep;
+
+  // Dedicated loop (not `withReadRetry`, whose isHit stops at the FIRST hit):
+  // we need a running streak of consecutive hits, with any miss resetting it.
+  let streak = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
+    let hit = false;
+    try {
+      const hits = await node.search(query, { schemas: [schemaHash] });
+      hit = hits.some((h) => h.key_value?.hash === slug);
+    } catch {
+      // A flaky/unavailable native index must not fail a persisted write —
+      // treat the probe error as a miss (resets the streak) so the loop either
+      // recovers into a fresh streak or times out into the honest
+      // `indexPending` signal.
+      hit = false;
+    }
+    streak = hit ? streak + 1 : 0;
+    if (streak >= needConsecutive) return true;
+  }
+  return false;
 }
 
 // CLI write-path read-after-write confirmation, shared by `putCmd` and
