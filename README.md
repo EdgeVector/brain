@@ -394,6 +394,8 @@ fbrain-mcp
 
 The server speaks MCP over stdio, reads `~/.fbrain/config.json` at startup, and re-uses the CLI's existing command functions in-process. See [`docs/mcp-smoketest.md`](docs/mcp-smoketest.md) for end-to-end verification (ask Claude to search, put, delete, link).
 
+**Registered, but is your agent actually *using* it?** The seven tools sit idle unless your agent knows when to reach for them. [`docs/agent-instructions.md`](docs/agent-instructions.md) is a copy-paste block to drop into your agent's `CLAUDE.md` / system prompt — it instructs the agent to recall before answering (`fbrain_ask`), checkpoint settled decisions as it goes (`fbrain_put`), and pick the right record type. One paste closes the "installed but unused" gap.
+
 | Tool | Input | What it does |
 |---|---|---|
 | `fbrain_search` | `query` + `type?` + `limit?` + `exact?` + `min_score?` | Pure-vector semantic search; same dedupe + stale-skip as `fbrain search`. Description points agents to `fbrain_ask` for hybrid recall |
