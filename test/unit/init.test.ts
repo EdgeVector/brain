@@ -558,8 +558,12 @@ describe("printNextSteps", () => {
     expect(out).toContain("fbrain ask");
     expect(out).toContain("fbrain doctor");
     // The headline agent-integration step: a brain meant to be used BY an
-    // agent must tell the new dev how to connect it. Pin the exact command
-    // plus the `bun link` PATH caveat so this can't silently regress.
+    // agent must tell the new dev how to connect it. The next-steps now LEAD
+    // with the one-shot `fbrain mcp install` (registers + appends instructions
+    // in one command), with the manual `claude mcp add` form kept as the
+    // by-hand fallback. Pin both plus the `bun link` PATH caveat so this can't
+    // silently regress.
+    expect(out).toContain("fbrain mcp install");
     expect(out).toContain("claude mcp add fbrain fbrain-mcp");
     expect(out).toContain("bun link");
     expect(out).toContain("fbrain_* tools");

@@ -148,6 +148,7 @@ ${RECORD_NEW_HELP_LINES}
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
+  mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
   help <cmd>     per-command usage
 
@@ -524,12 +525,24 @@ re-puts and re-hashes all six together.
 
 Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
-  mcp: `fbrain mcp [instructions]
+  mcp: `fbrain mcp [install|instructions]
+
+fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
+  One-shot agent wiring: do the whole "connect fbrain to my agent" ritual in
+  a single command. It (1) verifies the \`fbrain-mcp\` entrypoint is on PATH,
+  (2) registers the MCP server with Claude Code (\`claude mcp add fbrain
+  fbrain-mcp\`; prints the command if \`claude\` isn't on PATH), and (3) appends
+  the agent-instructions block to ./CLAUDE.md. Re-running it is a safe no-op
+  (idempotent — won't double-register or duplicate the block).
+  --yes        skip the [Y/n] confirmation before the side effects
+  --claude-md  append the instructions block to PATH instead of ./CLAUDE.md
+  If \`fbrain-mcp\` isn't on PATH yet, it exits non-zero and tells you to run
+  \`bun link\` first. Verify the result with \`fbrain doctor --mcp\`.
 
 fbrain mcp instructions
   Print the copy-paste CLAUDE.md block (the agent usage-loop + the
   record-type table) to stdout — nothing else, so the output is paste-ready.
-  Wire the brain into your agent in one step:
+  Wire the brain into your agent in one step (or just run \`fbrain mcp install\`):
     fbrain mcp instructions >> CLAUDE.md      # append to your agent's instructions
     fbrain mcp instructions | pbcopy          # or copy it to the clipboard
   The block tells the agent to recall before answering (fbrain_ask),
@@ -709,6 +722,18 @@ const MIGRATE_OPTIONS = {
 } as const;
 const EMPTY_OPTIONS = {} as const;
 
+// `fbrain mcp install` (alias `setup`) flags. The other mcp subcommands
+// (`instructions`, bare `mcp`) take no flags; `runMcpCmd` selects this set only
+// when the subcommand is install/setup.
+const MCP_OPTIONS = {
+  // Skip the [Y/n] confirmation before the side effects (the `claude mcp add`
+  // shell-out + the CLAUDE.md append) — the flag IS the explicit approval,
+  // mirroring `init --grant-consent`/`--yes`.
+  yes: { type: "boolean", default: false },
+  // Target CLAUDE.md for the appended agent-instructions block (default ./CLAUDE.md).
+  "claude-md": { type: "string" },
+} as const;
+
 export const CLI_SPEC = {
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
@@ -733,7 +758,7 @@ export const CLI_SPEC = {
   delete: DELETE_OPTIONS,
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
-  mcp: EMPTY_OPTIONS,
+  mcp: MCP_OPTIONS,
   help: EMPTY_OPTIONS,
 } as const satisfies Record<Command, Record<string, unknown>>;
 
@@ -1885,6 +1910,35 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runMcpCmd(args: Argv): Promise<number> {
+  // The `mcp` command multiplexes subcommands with DIFFERENT flag sets:
+  // `install`/`setup` accept `--yes` + `--claude-md`, while `instructions` and
+  // bare `mcp` accept none. Peek the subcommand from the first positional
+  // (flags can't precede it) before parsing so each gets the right option set.
+  const sub = args.find((a) => !a.startsWith("-"));
+
+  // `fbrain mcp install` (alias `setup`) — the one-shot agent-wiring command:
+  // verify the `fbrain-mcp` entrypoint, register the MCP server with Claude
+  // Code, and append the instructions block to ./CLAUDE.md. Gated by [Y/n]
+  // unless `--yes` (mirrors `init --grant-consent`). See commands/mcp-install.ts.
+  if (sub === "install" || sub === "setup") {
+    const { values, positionals } = parseCommandArgs({
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: MCP_OPTIONS,
+    });
+    // The only positional is the subcommand itself; anything more is a typo.
+    if (positionals.length > 1) {
+      console.error(COMMAND_HELP.mcp);
+      return USAGE_ERROR;
+    }
+    const { runMcpInstall } = await import("./commands/mcp-install.ts");
+    const installOpts: Parameters<typeof runMcpInstall>[0] = { yes: values.yes };
+    if (values["claude-md"] !== undefined) installOpts.claudeMd = values["claude-md"];
+    const result = await runMcpInstall(installOpts);
+    return result.code;
+  }
+
   const { positionals } = parseCommandArgs({
     args,
     strict: true,
@@ -1898,8 +1952,7 @@ async function runMcpCmd(args: Argv): Promise<number> {
   // block is single-sourced from buildAgentInstructionsBlock() (schemas.ts), the
   // same source docs/agent-instructions.md is asserted against, so they can't
   // drift. No node/config needed: pure presentation, prints offline.
-  const sub = positionals[0];
-  if (sub === "instructions") {
+  if (positionals[0] === "instructions") {
     if (positionals.length > 1) {
       console.error(COMMAND_HELP.mcp);
       return USAGE_ERROR;
@@ -1907,8 +1960,8 @@ async function runMcpCmd(args: Argv): Promise<number> {
     process.stdout.write(`${buildAgentInstructionsBlock()}\n`);
     return 0;
   }
-  if (sub !== undefined) {
-    console.error(`Unknown mcp subcommand: ${sub}\n${COMMAND_HELP.mcp}`);
+  if (positionals[0] !== undefined) {
+    console.error(`Unknown mcp subcommand: ${positionals[0]}\n${COMMAND_HELP.mcp}`);
     return USAGE_ERROR;
   }
   // Bare `fbrain mcp` — start the server.
