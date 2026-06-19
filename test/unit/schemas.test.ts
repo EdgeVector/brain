@@ -217,4 +217,13 @@ describe("RECORD_PURPOSES (new-dev 'use it for' one-liners)", () => {
       expect(readme).toContain(RECORD_PURPOSES[type]);
     }
   });
+
+  test("docs/agent-instructions.md surfaces every purpose string (agent doc<->CLI can't drift)", async () => {
+    const doc = await Bun.file(
+      new URL("../../docs/agent-instructions.md", import.meta.url),
+    ).text();
+    for (const type of RECORD_TYPES) {
+      expect(doc).toContain(RECORD_PURPOSES[type]);
+    }
+  });
 });
