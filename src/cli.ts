@@ -1079,7 +1079,10 @@ function isParseArgsUsageError(err: unknown): boolean {
   );
 }
 
-function parseCommandArgs<T extends ParseArgsConfig>(config: T) {
+function parseCommandArgs<T extends ParseArgsConfig>(
+  config: T,
+  commandName?: string,
+) {
   try {
     return parseArgs(config);
   } catch (err) {
@@ -1127,6 +1130,29 @@ function parseCommandArgs<T extends ParseArgsConfig>(config: T) {
             hint: example,
           });
         }
+        // No flag is within the Levenshtein threshold (e.g. `--wombat` vs
+        // search's limit/json/type/...). Before this branch the code fell
+        // through to `throw err`, leaking Node's bare parseArgs string — and on
+        // commands that take positionals that string includes the actively-
+        // misleading `-- "--wombat"` positional-escape advice (irrelevant to a
+        // typo'd flag, and internal jargon that steers a new dev toward a wrong
+        // fix). Replace it with the same clean error/hint contract every other
+        // unknown-input surface follows: name the bad flag and list this
+        // command's valid flags + point at help. Exit code stays 2 (unknown_option
+        // is in USAGE_ERROR_CODES).
+        const validOptions = knownKeys
+          .slice()
+          .sort()
+          .map((k) => `--${k}`)
+          .join(", ");
+        const helpTarget = commandName ? ` ${commandName}` : "";
+        const optionsPart =
+          validOptions.length > 0 ? `Valid options: ${validOptions}. ` : "";
+        throw new FbrainError({
+          code: "unknown_option",
+          message: `Unknown option \`--${unknown}\`.`,
+          hint: `${optionsPart}Run \`fbrain help${helpTarget}\` for usage.`,
+        });
       }
     }
     throw err;
@@ -1283,12 +1309,15 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   const rest = args.slice(1);
   // TASK_OPTIONS is DESIGN_OPTIONS + --design; for non-task types parseArgs
   // will reject --design via its strict-unknown-option check.
-  const { values, positionals } = parseCommandArgs({
-    args: rest,
-    strict: true,
-    allowPositionals: true,
-    options: type === "task" ? TASK_OPTIONS : DESIGN_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args: rest,
+      strict: true,
+      allowPositionals: true,
+      options: type === "task" ? TASK_OPTIONS : DESIGN_OPTIONS,
+    },
+    `${type} new`,
+  );
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP[type]);
@@ -1411,16 +1440,28 @@ function recoverPutType(args: Argv): RecordType {
 async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   let parsed;
   try {
-    parsed = parseCommandArgs({
-      args,
-      strict: true,
-      allowPositionals: true,
-      options: PUT_OPTIONS,
-    });
+    parsed = parseCommandArgs(
+      {
+        args,
+        strict: true,
+        allowPositionals: true,
+        options: PUT_OPTIONS,
+      },
+      "put",
+    );
   } catch (err) {
+    // An unknown option reaches here either as Node's raw
+    // ERR_PARSE_ARGS_UNKNOWN_OPTION or — now that parseCommandArgs upgrades the
+    // no-suggestion case to a clean FbrainError — as `unknown_option`. Either
+    // way, `put`'s own `--title`/`--body`/`--tag` papercut hints are more
+    // specific than the generic valid-options list, so give them first crack;
+    // anything they don't recognise falls through to `throw err` (the clean
+    // generic FbrainError, or the raw parseArgs error for non-unknown-option
+    // parse failures).
     if (
       err instanceof Error &&
-      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
+      ((err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ||
+        (err instanceof FbrainError && err.code === "unknown_option"))
     ) {
       // `put` is intentionally frontmatter-driven — title comes from the
       // `title:` key or the first `# H1`. But every `<type> new` subcommand
@@ -1581,12 +1622,15 @@ export async function withTypeAsPositionalHint<T>(
 }
 
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: GET_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: GET_OPTIONS,
+    },
+    "get",
+  );
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.get);
@@ -1605,12 +1649,15 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
   let parsed;
   try {
-    parsed = parseCommandArgs({
-      args,
-      strict: true,
-      allowPositionals: false,
-      options: LIST_OPTIONS,
-    });
+    parsed = parseCommandArgs(
+      {
+        args,
+        strict: true,
+        allowPositionals: false,
+        options: LIST_OPTIONS,
+      },
+      "list",
+    );
   } catch (err) {
     // A fresh user's instinct is `fbrain list task`, not `fbrain list --type
     // task`. parseArgs rejects the positional with ERR_PARSE_ARGS_UNEXPECTED_
@@ -1647,12 +1694,15 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: STATUS_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: STATUS_OPTIONS,
+    },
+    "status",
+  );
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.status);
@@ -1669,12 +1719,15 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runLink(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: LINK_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: LINK_OPTIONS,
+    },
+    "link",
+  );
   const taskSlug = positionals[0];
   const designSlug = positionals[1];
   if (!taskSlug || !designSlug) {
@@ -1711,12 +1764,15 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: SEARCH_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: SEARCH_OPTIONS,
+    },
+    "search",
+  );
   const query = positionals.join(" ").trim();
   if (query.length === 0) {
     console.error(COMMAND_HELP.search);
@@ -1758,12 +1814,15 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: ASK_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: ASK_OPTIONS,
+    },
+    "ask",
+  );
   const query = positionals.join(" ").trim();
   if (query.length === 0) {
     console.error(COMMAND_HELP.ask);
@@ -1807,12 +1866,15 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   validatePositiveIntFlag(args, "--usage-window", "invalid_usage_window");
-  const { values } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: false,
-    options: DOCTOR_OPTIONS,
-  });
+  const { values } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: false,
+      options: DOCTOR_OPTIONS,
+    },
+    "doctor",
+  );
 
   // `--usage` and `--freshness` pick mutually exclusive top-level paths:
   // doctor()'s `if (opts.usage)` short-circuit returns before the freshness
@@ -1863,17 +1925,23 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runShare(args: Argv): Promise<number> {
-  parseCommandArgs({ args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS });
+  parseCommandArgs(
+    { args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS },
+    "share",
+  );
   return shareCmd();
 }
 
 async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: DELETE_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: DELETE_OPTIONS,
+    },
+    "delete",
+  );
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.delete);
@@ -1921,12 +1989,15 @@ async function runMcpCmd(args: Argv): Promise<number> {
   // Code, and append the instructions block to ./CLAUDE.md. Gated by [Y/n]
   // unless `--yes` (mirrors `init --grant-consent`). See commands/mcp-install.ts.
   if (sub === "install" || sub === "setup") {
-    const { values, positionals } = parseCommandArgs({
-      args,
-      strict: true,
-      allowPositionals: true,
-      options: MCP_OPTIONS,
-    });
+    const { values, positionals } = parseCommandArgs(
+      {
+        args,
+        strict: true,
+        allowPositionals: true,
+        options: MCP_OPTIONS,
+      },
+      "mcp",
+    );
     // The only positional is the subcommand itself; anything more is a typo.
     if (positionals.length > 1) {
       console.error(COMMAND_HELP.mcp);
@@ -1939,12 +2010,15 @@ async function runMcpCmd(args: Argv): Promise<number> {
     return result.code;
   }
 
-  const { positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: EMPTY_OPTIONS,
-  });
+  const { positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: EMPTY_OPTIONS,
+    },
+    "mcp",
+  );
   // `fbrain mcp instructions` — print ONLY the copy-paste CLAUDE.md block to
   // stdout (the agent usage-loop + the record-type table) so a new dev can wire
   // the brain into their agent in one step: `fbrain mcp instructions >> CLAUDE.md`
@@ -1979,12 +2053,15 @@ async function runMcpCmd(args: Argv): Promise<number> {
 }
 
 async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
-  const { values } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: false,
-    options: REINDEX_OPTIONS,
-  });
+  const { values } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: false,
+      options: REINDEX_OPTIONS,
+    },
+    "reindex",
+  );
   const type = parseRecordType(values.type);
   const cfg = readConfig();
   const rOpts: Parameters<typeof reindexCmd>[0] = { cfg, verbose };
@@ -1996,12 +2073,15 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: MIGRATE_OPTIONS,
-  });
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: MIGRATE_OPTIONS,
+    },
+    "migrate",
+  );
 
   // --status / --resume / --add-field pick three mutually exclusive modes,
   // but the dispatch below is if/else if/else — when more than one is set
@@ -2075,12 +2155,15 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
-  const { positionals } = parseCommandArgs({
-    args,
-    strict: true,
-    allowPositionals: true,
-    options: EMPTY_OPTIONS,
-  });
+  const { positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: EMPTY_OPTIONS,
+    },
+    "raw",
+  );
   const method = positionals[0];
   const path = positionals[1];
   if (!method || !path) {

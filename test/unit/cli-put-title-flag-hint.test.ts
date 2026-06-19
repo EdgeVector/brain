@@ -185,15 +185,22 @@ describe("fbrain put --title → frontmatter hint", () => {
     expect(stderr).not.toContain("Unknown option");
   });
 
-  test("unrelated unknown options on put still surface parseArgs's message", async () => {
+  test("unrelated unknown options on put get the clean no-suggestion error, not the title hint or the raw parseArgs string", async () => {
     // The targeted hint is only for `--title`. A truly unknown option like
-    // `--bogus` should fall through to the bare parseArgs error — otherwise
-    // we'd be silently absorbing every typo.
+    // `--bogus` must NOT trigger the title hint — and must NOT leak Node's raw
+    // parseArgs string either. It falls through to the generic no-suggestion
+    // branch: a clean error + valid-options hint pointing at `fbrain help put`.
     const { code, stderr } = await runCli(["put", "foo", "--bogus"]);
     expect(code).toBe(2);
-    expect(stderr).toContain("Unknown option '--bogus'");
-    // And critically, no misleading title hint.
+    // Clean backtick-quoted message — NOT Node's single-quoted bare string.
+    expect(stderr).toContain("Unknown option `--bogus`.");
+    expect(stderr).not.toContain("Unknown option '--bogus'");
+    expect(stderr).not.toContain("place it at the end");
+    // No misleading title hint.
     expect(stderr).not.toContain("frontmatter");
     expect(stderr).not.toContain("<type> new");
+    // The generic valid-options hint instead.
+    expect(stderr).toContain("Valid options:");
+    expect(stderr).toContain("fbrain help put");
   });
 });
