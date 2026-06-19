@@ -1433,6 +1433,20 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
           hint: `Pipe the body in:  echo "..." | fbrain put ${slug} --type ${type}   (or:  fbrain put ${slug} --type ${type} < note.md)`,
         });
       }
+      // Same papercut for `--tag` / `--tags`: `<type> new` accepts a
+      // repeatable `--tag` flag, so a fresh user carries it over to `put`
+      // (`fbrain put my-note --type concept --tags perf`) and dead-ends on
+      // parseArgs's bare "Unknown option". `put` is frontmatter-driven —
+      // tags come from a `tags:` line in the YAML frontmatter, not a flag.
+      const tagFlag = ["--tag", "--tags"].find((f) => args.includes(f));
+      if (tagFlag) {
+        const slug = recoverPutSlug(args, tagFlag);
+        throw new FbrainError({
+          code: "unknown_option",
+          message: `\`put\` does not accept ${tagFlag}. Tags come from frontmatter (a \`tags:\` line between leading \`---\` lines).`,
+          hint: `Add a \`tags:\` line to the frontmatter:  printf '---\\ntype: concept\\ntags: [perf, infra]\\n---\\n# Title\\nbody\\n' | fbrain put ${slug}`,
+        });
+      }
     }
     throw err;
   }
