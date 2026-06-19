@@ -176,16 +176,22 @@ Run `fbrain help <command>` for per-command usage.
 
 ## Record types
 
-| Type | Status enum | Schema (in fold_db) |
-|---|---|---|
-| `design` | `draft \| reviewed \| approved \| implemented \| archived` | dedicated `Design` schema |
-| `task` | `open \| in_progress \| blocked \| done \| cancelled` | dedicated `Task` schema (carries `design_slug` for `link`) |
-| `concept` | `active \| archived` | dedicated `Concept` schema |
-| `preference` | `active \| superseded` | dedicated `Preference` schema |
-| `reference` | `active \| broken \| archived` | dedicated `Reference` schema |
-| `agent` | `active \| archived` | dedicated `Agent` schema |
-| `project` | `planning \| in_progress \| done \| archived` | dedicated `Project` schema |
-| `spike` | `active \| concluded` | dedicated `Spike` schema |
+Not sure which type to reach for? The **Use it for** column is the one-line
+answer for each — the same strings the bare `fbrain` help prints, sourced from
+the single `RECORD_PURPOSES` map in `src/schemas.ts` (which itself derives the
+six Phase 6 rows from each schema's canonical `purpose_statement`), so the CLI
+and this table can't drift.
+
+| Type | Use it for | Status enum | Schema (in fold_db) |
+|---|---|---|---|
+| `design` | An architecture or plan you intend to build | `draft \| reviewed \| approved \| implemented \| archived` | dedicated `Design` schema |
+| `task` | A unit of work; links to a parent design via --design | `open \| in_progress \| blocked \| done \| cancelled` | dedicated `Task` schema (carries `design_slug` for `link`) |
+| `concept` | Reusable framework, pattern, or protocol recorded for cross-session reuse | `active \| archived` | dedicated `Concept` schema |
+| `preference` | User-stated directive applied across future decisions | `active \| superseded` | dedicated `Preference` schema |
+| `reference` | Pointer to an external resource useful for future lookup | `active \| broken \| archived` | dedicated `Reference` schema |
+| `agent` | Persistent assistant identity with role and behavior conventions | `active \| archived` | dedicated `Agent` schema |
+| `project` | Active in-flight feature work tracked over its lifecycle | `planning \| in_progress \| done \| archived` | dedicated `Project` schema |
+| `spike` | Time-boxed investigation or exploration with a defined conclusion | `active \| concluded` | dedicated `Spike` schema |
 
 Each of the six Phase 6 types gets its own dedicated schema with a distinct `descriptive_name` + `purpose_statement`. We originally landed a single combined schema (`FbrainKindNote`) plus a `kind` discriminator as a workaround for fold_db's structural canonicalization (the node merged schemas with overlapping field positions during `/api/schemas/load`, making the second schema's data inaccessible). As of Phase E (PR #63, dual-signal canonicalization cutover) the schema service consults the purpose-statement embedding alongside the structural signal, so distinct purpose statements veto the merge and all six can share the same 7-field shape without colliding onto one canonical hash. The combined-schema workaround was retired; the consolidation migration moved every pre-Phase-E row into its per-kind canonical, and the legacy `FbrainKindNote` schema is no longer registered or read.
 

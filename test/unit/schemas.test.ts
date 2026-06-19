@@ -7,6 +7,7 @@ import {
   PREFERENCE_STATUSES,
   PROJECT_STATUSES,
   RECORDS,
+  RECORD_PURPOSES,
   RECORD_TYPES,
   REFERENCE_STATUSES,
   SPIKE_STATUSES,
@@ -20,6 +21,7 @@ import {
   isValidStatus,
   preferenceSchema,
   projectSchema,
+  purposeFor,
   referenceSchema,
   schemaFor,
   spikeSchema,
@@ -175,6 +177,44 @@ describe("schemas", () => {
   test("Task is the only type that has design_slug", () => {
     for (const type of RECORD_TYPES) {
       expect(RECORDS[type].hasDesignSlug).toBe(type === "task");
+    }
+  });
+});
+
+describe("RECORD_PURPOSES (new-dev 'use it for' one-liners)", () => {
+  test("every record type has a non-trivial purpose one-liner", () => {
+    for (const type of RECORD_TYPES) {
+      const p = purposeFor(type);
+      expect(typeof p).toBe("string");
+      expect(p.length).toBeGreaterThan(10);
+      // never the bare descriptive_name (which is what design/task carry as
+      // their wire purpose_statement) — that's not a usable sentence.
+      expect(p).not.toBe(RECORDS[type].schema.schema.descriptive_name);
+    }
+  });
+
+  test("the six Phase 6 purposes ARE the canonical purpose_statement (no drift)", () => {
+    for (const type of ["concept", "preference", "reference", "agent", "project", "spike"] as const) {
+      const canonical = RECORDS[type].schema.schema.purpose_statement;
+      expect(canonical).toBeDefined();
+      expect(RECORD_PURPOSES[type]).toBe(canonical!);
+    }
+  });
+
+  test("design/task carry hand-written one-liners distinct from their bare wire purpose_statement", () => {
+    for (const type of ["design", "task"] as const) {
+      const wire = RECORDS[type].schema.schema.purpose_statement;
+      // wire value stays the bare name (presentation change must not touch it)
+      expect(wire).toBe(RECORDS[type].schema.schema.descriptive_name);
+      // but the surfaced one-liner is a real sentence, not the bare name
+      expect(RECORD_PURPOSES[type]).not.toBe(wire);
+    }
+  });
+
+  test("README 'Record types' table surfaces every purpose string (README<->CLI can't drift)", async () => {
+    const readme = await Bun.file(new URL("../../README.md", import.meta.url)).text();
+    for (const type of RECORD_TYPES) {
+      expect(readme).toContain(RECORD_PURPOSES[type]);
     }
   });
 });
