@@ -129,43 +129,63 @@ describe("dedupeHits", () => {
 
 describe("isWeakMatch (distribution-shape weak-match classifier)", () => {
   // Mirrors the constants in src/commands/search.ts. Weak ⇔ top < STRONG and
-  // the bulk piles on the floor (median − min < FLATNESS_GAP).
+  // either top < NOISE_CEILING (absolute floor) OR the bulk piles on the floor
+  // (median − min < FLATNESS_GAP).
   const STRONG = 0.5;
   const GAP = 0.025;
+  const NOISE = 0.3;
   const s = (...scores: (number | null)[]) => scores.map((score) => ({ score }));
 
   test("a flat floor band whose top is well above the old 0.35 cut is weak", () => {
     // The real-brain regression (live :9001 numbers): top 0.443 but the bulk
     // is pinned to the score floor — median − min ≈ 0, far under FLATNESS_GAP.
-    expect(isWeakMatch(0.443, s(0.443, 0.334, 0.334, 0.334, 0.334), STRONG, GAP)).toBe(true);
+    expect(isWeakMatch(0.443, s(0.443, 0.334, 0.334, 0.334, 0.334), STRONG, GAP, NOISE)).toBe(true);
   });
 
   test("a top score at/above STRONG_SCORE is never weak, even on a flat floor", () => {
-    expect(isWeakMatch(0.619, s(0.619, 0.347, 0.347, 0.346), STRONG, GAP)).toBe(false);
-    expect(isWeakMatch(0.5, s(0.5, 0.5, 0.5), STRONG, GAP)).toBe(false);
+    expect(isWeakMatch(0.619, s(0.619, 0.347, 0.347, 0.346), STRONG, GAP, NOISE)).toBe(false);
+    expect(isWeakMatch(0.5, s(0.5, 0.5, 0.5), STRONG, GAP, NOISE)).toBe(false);
   });
 
   test("a sub-STRONG hit list that grades up off the floor is NOT weak", () => {
     // Live "at-rest encryption master key": top 0.478, median 0.320, min 0.255
     // → median − min = 0.065 ≥ 0.025.
-    expect(isWeakMatch(0.478, s(0.478, 0.42, 0.32, 0.28, 0.255), STRONG, GAP)).toBe(false);
+    expect(isWeakMatch(0.478, s(0.478, 0.42, 0.32, 0.28, 0.255), STRONG, GAP, NOISE)).toBe(false);
   });
 
   test("a lone sub-STRONG hit has no distribution → median == min → weak", () => {
-    expect(isWeakMatch(0.24, s(0.24), STRONG, GAP)).toBe(true);
-    expect(isWeakMatch(0.48, s(0.48), STRONG, GAP)).toBe(true);
+    expect(isWeakMatch(0.24, s(0.24), STRONG, GAP, NOISE)).toBe(true);
+    expect(isWeakMatch(0.48, s(0.48), STRONG, GAP, NOISE)).toBe(true);
   });
 
   test("null scores are excluded from the distribution, not treated as 0", () => {
     // Without filtering, nulls would crater the min and falsely lift median−min
     // above the gap. With filtering, a flat measurable band stays weak.
-    expect(isWeakMatch(0.4, s(0.4, 0.39, 0.39, null, null), STRONG, GAP)).toBe(true);
+    expect(isWeakMatch(0.4, s(0.4, 0.39, 0.39, null, null), STRONG, GAP, NOISE)).toBe(true);
   });
 
   test("an even-length score set uses the mean of the two middle values", () => {
     // sorted [0.1, 0.2, 0.42, 0.45] → median (0.2+0.42)/2 = 0.31, min 0.1 →
-    // median − min = 0.21 ≥ 0.025 → graded, not weak.
-    expect(isWeakMatch(0.45, s(0.45, 0.42, 0.2, 0.1), STRONG, GAP)).toBe(false);
+    // median − min = 0.21 ≥ 0.025 → graded by shape, not weak. Top 0.45 is also
+    // above NOISE_CEILING, so the absolute floor does not fire either.
+    expect(isWeakMatch(0.45, s(0.45, 0.42, 0.2, 0.1), STRONG, GAP, NOISE)).toBe(false);
+  });
+
+  // --- NOISE_CEILING (absolute low-top-score floor) — sparse new-dev brain ---
+
+  test("sparse-brain noise: scattered low scores with top < NOISE_CEILING are weak even though the gap test fails", () => {
+    // The regression this card fixes (dogfooded 2026-06-19, fresh 3-record
+    // brain, query "zzqqxx nonexistent topic 99"): top 0.236, scores scattered
+    // so median(0.223) − min(0.184) = 0.039 > FLATNESS_GAP → the shape test
+    // alone would NOT flag it. The absolute floor (top < 0.30) catches it.
+    expect(isWeakMatch(0.236, s(0.236, 0.223, 0.184), STRONG, GAP, NOISE)).toBe(true);
+  });
+
+  test("a genuine low-N real hit just above NOISE_CEILING is NOT over-fired", () => {
+    // A real sub-STRONG hit lands ~0.45–0.49 (and even a borderline ~0.46 hit
+    // is well above the 0.30 ceiling); with a graded distribution the shape
+    // test also passes. NOISE_CEILING must not push these into weak.
+    expect(isWeakMatch(0.46, s(0.46, 0.4, 0.34, 0.31), STRONG, GAP, NOISE)).toBe(false);
   });
 });
 

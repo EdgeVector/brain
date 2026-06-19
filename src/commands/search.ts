@@ -110,6 +110,18 @@ export type ResolvedHit = {
 // the results are indistinguishable noise even if the top fragment edges a
 // little higher. Robust to brain size by construction — more noise records
 // just lengthen the floor pile; a real query grades upward off the floor.
+//
+// One extra guard handles the SPARSE NEW-DEV brain. The flat-floor shape test
+// was calibrated on Tom's populated live brain, where dozens of noise records
+// pile on a flat floor so `median ≈ min`. A brand-new dev's brain has too few
+// records to form that pile — a handful of scattered low noise scores keeps
+// `median − min` above `flatnessGap`, so the shape test alone misses the noise
+// and the headline search feature looks broken for the exact "minimal effort"
+// persona fbrain targets. `noiseCeiling` adds an ABSOLUTE low-top-score floor:
+// an obviously-low top score is weak regardless of distribution shape. Genuine
+// sub-`strongScore` hits land ~0.45–0.49 and noise tops ~0.39–0.44, so a top
+// below ~0.30 is unambiguous noise.
+//
 // `null` scores are dropped first (they're "unmeasurable", not part of the
 // distribution). Exported for tests.
 export function isWeakMatch(
@@ -117,8 +129,12 @@ export function isWeakMatch(
   hits: readonly { score: number | null }[],
   strongScore: number,
   flatnessGap: number,
+  noiseCeiling: number,
 ): boolean {
   if (topScore >= strongScore) return false;
+  // Absolute floor: a top below the noise ceiling is weak no matter the shape
+  // (covers the sparse new-dev brain whose few records can't form a flat pile).
+  if (topScore < noiseCeiling) return true;
   const scores = hits
     .map((h) => h.score)
     .filter((s): s is number => s !== null)
@@ -319,10 +335,18 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // Noise sits at ≤0.014, real (even sub-0.5) at ≥0.035. We flag weak when
   // `median − min < FLATNESS_GAP` — robust to brain size by construction: more
   // noise records just lengthen the floor pile, they don't lift the median off
-  // it. One escape hatch keeps it from over-firing on a clear hit:
+  // it. Two extra guards bracket the shape test:
   //   • A top score at/above `STRONG_SCORE` is always a real hit regardless of
   //     shape (covers a dense real-match band where every returned vector is
   //     genuinely relevant, so the floor itself is high).
+  //   • A top score BELOW `NOISE_CEILING` is always weak regardless of shape.
+  //     The shape test assumes a populated brain with enough records to form a
+  //     flat floor pile; a brand-new dev's SPARSE brain has too few records, so
+  //     a few scattered low noise scores keep median−min above FLATNESS_GAP and
+  //     defeat the shape test (dogfooded 2026-06-19 on a fresh 3-record brain:
+  //     top 0.236, median−min 0.039 → would NOT have been flagged). Since real
+  //     sub-STRONG hits top ~0.45–0.49 and noise tops ~0.39–0.44, an absolute
+  //     ceiling at 0.30 catches sparse-brain noise without touching real hits.
   // A lone hit below `STRONG_SCORE` has `median == min`, so `median − min == 0`
   // and it is conservatively flagged weak — the signal-preserving choice (we
   // still print the row; the note never drops it).
@@ -344,9 +368,20 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // minimum is a flat floor band → weak. Noise measured at median−min ≤0.014,
   // genuine sub-0.5 hits at ≥0.035 (data above); 0.025 splits them with margin.
   const FLATNESS_GAP = 0.025;
+  // Absolute low-top-score floor for the SPARSE NEW-DEV brain, where too few
+  // records exist to form the flat floor pile FLATNESS_GAP keys off. A handful
+  // of scattered low noise scores keeps median−min above the gap, so the shape
+  // test alone misses obvious noise (dogfooded 2026-06-19 on a fresh 3-record
+  // brain: top 0.236, median−min 0.039 → NOT flagged). Any top below this is
+  // unambiguous noise regardless of shape: genuine sub-STRONG_SCORE hits land
+  // ~0.45–0.49 and noise tops ~0.39–0.44, so 0.30 clears the noise band with a
+  // wide margin and sits well below the lowest real sub-STRONG hit.
+  const NOISE_CEILING = 0.3;
   const topScore = trimmed[0]?.score ?? null;
   const weakMatch =
-    !opts.exact && topScore !== null && isWeakMatch(topScore, trimmed, STRONG_SCORE, FLATNESS_GAP);
+    !opts.exact &&
+    topScore !== null &&
+    isWeakMatch(topScore, trimmed, STRONG_SCORE, FLATNESS_GAP, NOISE_CEILING);
   // On the MCP agent channel the advisory must name a TOOL the agent can call,
   // not a CLI command string. An MCP agent has no shell — telling it to run
   // `fbrain ask <query>` is a dead-end. Render the agent-voiced variant only
