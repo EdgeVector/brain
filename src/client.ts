@@ -448,6 +448,16 @@ export type LoadedSchema = {
   identity_hash?: string;
 };
 
+// Parsed `GET /api/health` response. `version` is the running fold_db_node's
+// release string (e.g. "0.14.1"); it is OPTIONAL because an older node may not
+// report one — callers that surface it (e.g. `fbrain doctor`) must tolerate its
+// absence and fall back gracefully.
+export type HealthResult = {
+  ok: boolean;
+  uptime_s?: number;
+  version?: string;
+};
+
 export type NodeClient = {
   baseUrl: string;
   userHash: string;
@@ -455,6 +465,12 @@ export type NodeClient = {
     | { provisioned: true; userHash: string }
     | { provisioned: false; reason: string }
   >;
+  // GET /api/health — the node's liveness + version probe. Returns the parsed
+  // `{ ok, uptime_s, version }`; `version` is tolerated-missing (older nodes
+  // omit it). Informational only — `fbrain doctor` surfaces the reported
+  // version on its node-reachable line; a failure here must NOT be treated as
+  // the node being down (the auto-identity probe owns that verdict).
+  health(): Promise<HealthResult>;
   bootstrap(name: string): Promise<{ userHash: string }>;
   // App-identity consent handshake (app_identity v3.1). request-consent +
   // consent-status are the two app-driven steps; the owner grants out-of-band
@@ -801,6 +817,19 @@ export function newNodeClient(opts: {
         };
       }
       throw mapNodeError(status, body, "/api/system/auto-identity");
+    },
+    async health() {
+      // GET /api/health → `{ ok, uptime_s, version }`. The node reports its
+      // release string here (`fbrain doctor` surfaces it on node-reachable).
+      // `version` (and `uptime_s`) are read defensively: an older node may omit
+      // either, so each is only carried through when it's the expected type.
+      const { status, body } = await callJson("/api/health", "GET");
+      if (status !== 200) throw mapNodeError(status, body, "/api/health");
+      const b = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+      const result: HealthResult = { ok: b.ok === true };
+      if (typeof b.uptime_s === "number") result.uptime_s = b.uptime_s;
+      if (typeof b.version === "string" && b.version.length > 0) result.version = b.version;
+      return result;
     },
     async bootstrap(name) {
       const { status, body } = await callJson("/api/setup/bootstrap", "POST", { name });

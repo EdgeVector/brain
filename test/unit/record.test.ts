@@ -587,6 +587,9 @@ describe("resolveBySlug", () => {
       async autoIdentity() {
         return { provisioned: true, userHash: "uh" };
       },
+      async health() {
+        return { ok: true, uptime_s: 1 };
+      },
       async bootstrap() {
         return { userHash: "uh" };
       },
@@ -823,6 +826,9 @@ describe("resolveBySlug", () => {
         async autoIdentity() {
           return { provisioned: true, userHash: "uh" };
         },
+        async health() {
+          return { ok: true, uptime_s: 1 };
+        },
         async bootstrap() {
           return { userHash: "uh" };
         },
@@ -960,6 +966,9 @@ describe("resolveBySlug", () => {
         userHash: "uh",
         async autoIdentity() {
           return { provisioned: true, userHash: "uh" };
+        },
+        async health() {
+          return { ok: true, uptime_s: 1 };
         },
         async bootstrap() {
           return { userHash: "uh" };

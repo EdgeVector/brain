@@ -83,6 +83,7 @@ function mockNodeWithRows(rows: FakeRow[]): NodeClient {
     baseUrl: "mock",
     userHash: "uh",
     async autoIdentity() { return { provisioned: true, userHash: "uh" }; },
+    async health() { return { ok: true, uptime_s: 1 }; },
     async bootstrap() { return { userHash: "uh" }; },
     async requestConsent() { return { status: 202, body: { request_id: "r" } }; },
     async consentStatus() { return { status: 200, body: { status: "granted" } }; },

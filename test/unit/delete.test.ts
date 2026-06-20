@@ -59,6 +59,9 @@ function mockNode(state: MockState): NodeClient {
     async autoIdentity() {
       return { provisioned: true, userHash: "uh" };
     },
+    async health() {
+      return { ok: true, uptime_s: 1 };
+    },
     async bootstrap() {
       return { userHash: "uh" };
     },

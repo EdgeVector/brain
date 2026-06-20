@@ -164,6 +164,13 @@ function mockNodeClient(opts: {
   // When set, every `search()` call rejects with this error. Used to
   // exercise the embedding-runtime probe's failure path.
   searchThrows?: Error;
+  // Version the mock `health()` reports — drives the node-reachable version
+  // line. `undefined` (the default) simulates an older node that omits version;
+  // an explicit string surfaces `folddb <version> @ <url>`.
+  healthVersion?: string;
+  // When set, `health()` rejects with this error — exercises doctor's
+  // best-effort path (node-reachable must stay PASS, version omitted).
+  healthThrows?: Error;
 }): NodeClient {
   const store = opts.store ?? {};
   const mutations = opts.mutations ?? [];
@@ -175,6 +182,12 @@ function mockNodeClient(opts: {
       if (opts.identityThrows) throw opts.identityThrows;
       if (opts.provisioned === false) return { provisioned: false, reason: "node_not_provisioned" };
       return { provisioned: true, userHash: "uh-real" };
+    },
+    async health() {
+      if (opts.healthThrows) throw opts.healthThrows;
+      const result: { ok: boolean; uptime_s?: number; version?: string } = { ok: true, uptime_s: 42 };
+      if (opts.healthVersion !== undefined) result.version = opts.healthVersion;
+      return result;
     },
     async bootstrap() {
       return { userHash: "uh-real" };
@@ -738,6 +751,60 @@ describe("doctor verdict logic", () => {
     const out = lines.join("\n");
     expect(out).toContain("[FAIL] node-reachable");
     expect(out).toContain("brew services start folddb");
+  });
+
+  // The node-reachable line surfaces the connected node's folddb version
+  // (from GET /api/health) so a dev spots a stale node without curl.
+  test("node up + health reports version → node-reachable shows `folddb <ver> @ <url>`", async () => {
+    const configPath = writeCfg(makeCfg({ nodeUrl: "http://127.0.0.1:9077" }));
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({ healthVersion: "0.14.1" }),
+    });
+    expect(code).toBe(0);
+    const line = lines.find((l) => l.includes("[PASS] node-reachable"));
+    expect(line).toBeDefined();
+    expect(line).toContain("folddb 0.14.1 @ http://127.0.0.1:9077");
+  });
+
+  // Older node that doesn't report a version: node-reachable stays PASS and
+  // the detail falls back to the node URL alone (no "folddb undefined").
+  test("node up, no version reported → node-reachable falls back to the url alone", async () => {
+    const configPath = writeCfg(makeCfg({ nodeUrl: "http://127.0.0.1:9077" }));
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}), // healthVersion undefined
+    });
+    expect(code).toBe(0);
+    const line = lines.find((l) => l.includes("[PASS] node-reachable"));
+    expect(line).toBeDefined();
+    expect(line).toContain("http://127.0.0.1:9077");
+    expect(line).not.toContain("folddb");
+  });
+
+  // A health-probe failure is best-effort: node-reachable must stay PASS
+  // (auto-identity already proved the node is up) with the version omitted.
+  test("node up but health() throws → node-reachable stays PASS, version omitted", async () => {
+    const configPath = writeCfg(makeCfg({ nodeUrl: "http://127.0.0.1:9077" }));
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({ healthThrows: new Error("health endpoint 404") }),
+    });
+    expect(code).toBe(0);
+    const line = lines.find((l) => l.includes("[PASS] node-reachable"));
+    expect(line).toBeDefined();
+    expect(line).toContain("http://127.0.0.1:9077");
+    expect(line).not.toContain("folddb");
   });
 
   test("node down → node-dependent checks SKIP (not vanish, not misleading PASS); single FAIL verdict", async () => {
