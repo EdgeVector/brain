@@ -178,10 +178,21 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const nodeUrl = resolved.nodeUrl;
   const schemaServiceUrl = resolved.schemaServiceUrl;
-  if (resolved.nodeUrlFromBreadcrumb) {
+  // Always echo which node we're targeting and where the URL came from — a dev
+  // re-running `init` to confirm "which node am I actually pointed at?" needs
+  // the answer on every run, not only on the first (breadcrumb) run.
+  let nodeUrlSource: string;
+  if (opts.nodeUrl) {
+    nodeUrlSource = "from --node-url";
+  } else if (resolved.nodeUrlFromBreadcrumb) {
     const breadcrumbHome = process.env.FOLDDB_HOME ?? "~/.folddb";
-    print(`[1/${STEPS}] targeting node at ${nodeUrl} (from ${breadcrumbHome}/port)`);
+    nodeUrlSource = `from ${breadcrumbHome}/port`;
+  } else if (existing) {
+    nodeUrlSource = `from ${configPath}`;
+  } else {
+    nodeUrlSource = "default";
   }
+  print(`[1/${STEPS}] targeting node at ${nodeUrl} (${nodeUrlSource})`);
 
   // Step 0/6: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
@@ -421,7 +432,9 @@ export function printNextSteps(
   // Already-configured re-run: keep it terse — the full walkthrough is noise.
   if (ctx.reinitialized) {
     print(``);
-    print(`Already initialized — try \`fbrain list\` to see your records, or \`fbrain doctor\` to re-check health.`);
+    print(
+      `Already initialized on ${ctx.nodeUrl} (config: ${ctx.configPath}) — try \`fbrain list\` to see your records, or \`fbrain doctor\` to re-check health.`,
+    );
     return;
   }
 
