@@ -105,8 +105,10 @@ export const DROPPED_INPUT_HINT =
 // One search/ask match: `{slug, score, type, title, snippet}` (mirrors
 // SearchHitJson). `type` is the canonical lowercase RecordType so a client
 // can match it against the input `type` filter verbatim; `score` is the
-// 6-decimal-rounded relevance (a cosine for search, a fused RRF score for
-// ask) and is `null` only when the node reported no score for a search hit.
+// 6-decimal-rounded relevance — a 0–1 cosine for search, but a SMALL fused
+// RRF score for ask (a top ask hit is ~0.02–0.03, not 0–1, and not
+// comparable to search's cosine; rank order is the signal, never magnitude)
+// — and is `null` only when the node reported no score for a search hit.
 // `snippet` is a short deterministic body extract (a window around the first
 // matching query term, or the body head for a pure-vector hit) so an agent
 // can read the answer inline without a follow-up `fbrain_get`.
@@ -115,7 +117,9 @@ const matchSchema = z.object({
   score: z
     .number()
     .nullable()
-    .describe("Relevance score (cosine for search, fused RRF for ask). Null when unscored."),
+    .describe(
+      "Relevance score. For search: a 0–1 cosine (higher = closer). For ask: a fused-RRF score that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance, and NOT comparable to search's cosine. Rank order (highest first) is the signal; do NOT apply an absolute magnitude threshold (e.g. 'ignore < 0.5') — that would silently discard every ask result. Null when unscored.",
+    ),
   type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
   title: z.string().describe("Record title."),
   snippet: z
@@ -324,7 +328,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Ask fbrain (hybrid retrieval)",
       description:
-        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
+        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 8. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. The `score` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to `fbrain_search`'s cosine; read rank order, never magnitude, and never apply an absolute threshold (a ~0.016 top hit is the best match, not junk). Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -343,11 +347,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
       // `structuredContent` is `{ matches: [{slug,score,type,title}, …] }` —
       // identical shape to `fbrain_search`; `score` here is the fused RRF
-      // score (always non-null for ask hits).
+      // score (always non-null for ask hits) — small by construction (a top
+      // hit is ~0.02–0.03), so rank, never magnitude, is the signal.
       outputSchema: {
         matches: z
           .array(matchSchema)
-          .describe("Fused (BM25 + vector) matches, highest score first (empty on no matches)."),
+          .describe(
+            "Fused (BM25 + vector) matches, highest score first (empty on no matches). Scores are small by construction (a top hit is ~0.02–0.03) and are NOT comparable to fbrain_search's 0–1 cosine — read rank order, not magnitude.",
+          ),
       },
     },
     (args) =>
