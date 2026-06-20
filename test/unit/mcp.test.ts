@@ -16,6 +16,8 @@ import {
   createFbrainMcpServer,
   DROPPED_INPUT_HINT,
   FBRAIN_MCP_VERSION,
+  MCP_AUTO_GRANT_ENV,
+  mcpAutoGrantConsentEnabled,
   resolvePutBody,
 } from "../../src/mcp/server.ts";
 import { ConfigMissingError } from "../../src/config.ts";
@@ -25,6 +27,40 @@ import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultCapabilityStore } from "../../src/keychain.ts";
+import { type CapabilityToken } from "../../src/capability.ts";
+import { canonicalize, type JsonValue } from "../../src/jcs.ts";
+import { sha256Hex } from "../../src/hash.ts";
+
+// Mint a CapabilityToken blob whose envelope.payload_hash is the correct
+// sha256(JCS(token-minus-envelope)) — what fold_db_node's mint_capability
+// produces — so `verifyCapabilityBlob` accepts it on load. The Ed25519 `sig`
+// is a placeholder (fbrain never verifies it; the node does). Same factory
+// shape as test/unit/capability.test.ts.
+async function mintFbrainCapabilityBlob(nodePubkey = "bm9kZS1wdWJrZXk="): Promise<string> {
+  const token: CapabilityToken = {
+    envelope: {
+      version: 1,
+      purpose: "capability_grant",
+      alg: "Ed25519",
+      key_id: "a".repeat(64),
+      issued_at: "2026-05-29T12:00:00Z",
+      env: "dev",
+      payload_hash: "",
+      sig: "cGxhY2Vob2xkZXItc2lnbmF0dXJl",
+    },
+    capability_id: "cap-mcp-warm",
+    app_id: "fbrain",
+    scope: { Wildcard: "fbrain/*" },
+    granted_ops: ["Read", "Write"],
+    granted_at: "2026-05-29T12:00:00Z",
+    node_pubkey: nodePubkey,
+  };
+  const payload = { ...(token as unknown as Record<string, JsonValue>) };
+  delete payload.envelope;
+  token.envelope.payload_hash = await sha256Hex(canonicalize(payload as JsonValue));
+  return Buffer.from(JSON.stringify(token), "utf8").toString("base64");
+}
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -2144,5 +2180,229 @@ describe("FBRAIN_MCP_VERSION", () => {
   test("is not the historical 0.0.1 placeholder", () => {
     // Cheap guard against a future hand-edit that re-pins the literal.
     expect(FBRAIN_MCP_VERSION).not.toBe("0.0.1");
+  });
+});
+
+// ── Cold file-store capability self-warm (opt-in) ─────────────────────────
+// The MCP server runs with FBRAIN_FORCE_FILE_KEYCHAIN=1 and reads its write
+// capability from the file store. A cold file store makes every write
+// fast-fail with `consent_required_non_interactive`. These tests drive that
+// REAL error (enforcement ON + an empty temp file store) and prove the opt-in
+// self-warm: with FBRAIN_MCP_AUTO_GRANT_CONSENT set, runWriteTool runs the
+// grant (injected stub) and retries the write once; without it, the write
+// fast-fails cleanly and the grant is never attempted.
+describe("FBRAIN_MCP_AUTO_GRANT_CONSENT opt-in gate", () => {
+  test("off / unset / non-affirmative → disabled; affirmative values → enabled", () => {
+    const prior = process.env[MCP_AUTO_GRANT_ENV];
+    try {
+      delete process.env[MCP_AUTO_GRANT_ENV];
+      expect(mcpAutoGrantConsentEnabled()).toBe(false);
+      for (const v of ["", "0", "false", "no", "off", "nope"]) {
+        process.env[MCP_AUTO_GRANT_ENV] = v;
+        expect(mcpAutoGrantConsentEnabled()).toBe(false);
+      }
+      for (const v of ["1", "true", "TRUE", "yes", "on", " On "]) {
+        process.env[MCP_AUTO_GRANT_ENV] = v;
+        expect(mcpAutoGrantConsentEnabled()).toBe(true);
+      }
+    } finally {
+      if (prior === undefined) delete process.env[MCP_AUTO_GRANT_ENV];
+      else process.env[MCP_AUTO_GRANT_ENV] = prior;
+    }
+  });
+});
+
+describe("MCP cold-capability self-warm", () => {
+  // Force the real (enforced) write path to throw `consent_required_non_interactive`:
+  //   - enforcement ON (so newWriteClientFromCfg acquires a capability),
+  //   - file-store backend pointed at an EMPTY temp dir (so the cache is cold),
+  //   - non-TTY (the unit-test default) so acquireCapability can't poll.
+  // Each test restores every env it touched.
+  function withColdCapabilityEnv(autoGrantEnv: string | undefined): {
+    restore: () => void;
+    capDir: string;
+  } {
+    const capDir = mkdtempSync(join(tmpdir(), "fbrain-cap-cold-"));
+    const prior = {
+      enforce: process.env.FBRAIN_APP_IDENTITY_ENFORCE,
+      forceFile: process.env.FBRAIN_FORCE_FILE_KEYCHAIN,
+      capDirEnv: process.env.FBRAIN_CAPABILITY_DIR,
+      autoGrant: process.env[MCP_AUTO_GRANT_ENV],
+    };
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    process.env.FBRAIN_FORCE_FILE_KEYCHAIN = "1";
+    process.env.FBRAIN_CAPABILITY_DIR = capDir;
+    if (autoGrantEnv === undefined) delete process.env[MCP_AUTO_GRANT_ENV];
+    else process.env[MCP_AUTO_GRANT_ENV] = autoGrantEnv;
+    return {
+      capDir,
+      restore: () => {
+        const set = (k: string, v: string | undefined) => {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        };
+        set("FBRAIN_APP_IDENTITY_ENFORCE", prior.enforce);
+        set("FBRAIN_FORCE_FILE_KEYCHAIN", prior.forceFile);
+        set("FBRAIN_CAPABILITY_DIR", prior.capDirEnv);
+        set(MCP_AUTO_GRANT_ENV, prior.autoGrant);
+        rmSync(capDir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  // A node mock whose /api/apps/request-consent never grants — but the cold
+  // write fast-fails BEFORE any consent HTTP, so this just keeps the path
+  // honest if the throw ever moved. The mutation succeeds so a retry-after-grant
+  // lands.
+  function installColdNodeMock(): void {
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) return { status: 200, body: { results: [] } };
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      return { status: 404 };
+    });
+  }
+
+  test("baseline: cold capability + enforcement ON makes fbrain_put fast-fail with the consent error", async () => {
+    const env = withColdCapabilityEnv(undefined);
+    try {
+      installColdNodeMock();
+      const tools = toolsOf(createFbrainMcpServer({ cfg }));
+      const res = await tools.fbrain_put!({ slug: "cold-baseline", type: "concept", body: "b" });
+      expect(res.isError).toBe(true);
+      // The agent-voiced remediation from the consent_required_non_interactive
+      // FbrainError — proves we hit exactly that error.
+      expect(res.content[0]!.text).toContain("grant fbrain consent");
+    } finally {
+      env.restore();
+    }
+  });
+
+  test("opt-in set + grant lands → write auto-warms and retries once (write succeeds)", async () => {
+    const env = withColdCapabilityEnv("1");
+    try {
+      installColdNodeMock();
+      let grantCalls = 0;
+      const server = createFbrainMcpServer({
+        cfg,
+        // Simulate the real inline grant: warm the SAME file store the server
+        // reads (defaultCapabilityStore() honors FBRAIN_FORCE_FILE_KEYCHAIN +
+        // FBRAIN_CAPABILITY_DIR, both set by withColdCapabilityEnv), so the
+        // retried write finds a valid cached capability and proceeds.
+        autoGrant: async (c) => {
+          grantCalls += 1;
+          const blob = await mintFbrainCapabilityBlob();
+          await defaultCapabilityStore().save({
+            appId: "fbrain",
+            nodeUrl: c.nodeUrl,
+            nodePubkey: "bm9kZS1wdWJrZXk=",
+            capabilityId: "cap-mcp-warm",
+            blob,
+          });
+          return true;
+        },
+      });
+      const res = await toolsOf(server).fbrain_put!({
+        slug: "cold-autowarm",
+        type: "concept",
+        body: "b",
+      });
+      // The grant ran exactly once, then the write was retried and landed.
+      expect(grantCalls).toBe(1);
+      expect(res.isError).toBeFalsy();
+      // The retried write created the record (the indexPending suffix, if any,
+      // is orthogonal to this card's self-warm path).
+      expect(res.content[0]!.text).toContain("created concept cold-autowarm");
+      expect(res.structuredContent).toMatchObject({
+        action: "created",
+        type: "concept",
+        slug: "cold-autowarm",
+      });
+    } finally {
+      env.restore();
+    }
+  });
+
+  test("opt-in NOT set → write fast-fails cleanly and the grant is never attempted", async () => {
+    const env = withColdCapabilityEnv(undefined);
+    try {
+      installColdNodeMock();
+      let grantCalls = 0;
+      const server = createFbrainMcpServer({
+        cfg,
+        autoGrant: async () => {
+          grantCalls += 1;
+          return true;
+        },
+      });
+      const res = await toolsOf(server).fbrain_put!({
+        slug: "cold-no-optin",
+        type: "concept",
+        body: "b",
+      });
+      expect(grantCalls).toBe(0); // human gate preserved — no auto-grant
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text).toContain("grant fbrain consent");
+    } finally {
+      env.restore();
+    }
+  });
+
+  test("opt-in set but grant does NOT land → original consent error surfaces unchanged", async () => {
+    const env = withColdCapabilityEnv("1");
+    try {
+      installColdNodeMock();
+      let grantCalls = 0;
+      const server = createFbrainMcpServer({
+        cfg,
+        autoGrant: async () => {
+          grantCalls += 1;
+          return false; // grant failed (no owner-local folddb / missing key / denial)
+        },
+      });
+      const res = await toolsOf(server).fbrain_put!({
+        slug: "cold-grant-fails",
+        type: "concept",
+        body: "b",
+      });
+      expect(grantCalls).toBe(1); // tried once
+      expect(res.isError).toBe(true);
+      // The original error — not a masked / misleading one.
+      expect(res.content[0]!.text).toContain("grant fbrain consent");
+    } finally {
+      env.restore();
+    }
+  });
+
+  test("a NON-consent write error never triggers auto-grant (only the cold-capability error does)", async () => {
+    const env = withColdCapabilityEnv("1");
+    try {
+      // Enforcement OFF for this one so the write skips consent and reaches the
+      // node, where the mutation 500s — a non-consent error. Auto-grant must
+      // not fire for it.
+      process.env.FBRAIN_APP_IDENTITY_ENFORCE = "false";
+      installMock((url) => {
+        if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+        if (url.endsWith("/api/mutation")) return { status: 500, body: { error: "boom" } };
+        return { status: 404 };
+      });
+      let grantCalls = 0;
+      const server = createFbrainMcpServer({
+        cfg,
+        autoGrant: async () => {
+          grantCalls += 1;
+          return true;
+        },
+      });
+      const res = await toolsOf(server).fbrain_put!({
+        slug: "non-consent-err",
+        type: "concept",
+        body: "b",
+      });
+      expect(res.isError).toBe(true);
+      expect(grantCalls).toBe(0); // auto-grant scoped to the cold-capability error only
+    } finally {
+      env.restore();
+    }
   });
 });
