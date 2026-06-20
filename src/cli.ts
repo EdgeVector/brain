@@ -294,8 +294,8 @@ indented under each row — so the answer is visible without a follow-up
 \`fbrain get\`.
 
 \`score\` is a max-normalized cosine in 0–1 (the top hit is always \`1.000\`).
-This scale is NOT comparable to \`ask\`'s fused-RRF score — do not compare a
-\`search\` number against an \`ask\` number for the same record.
+\`ask\` instead prints a best-first ranked list (no score column), so the two
+human outputs no longer invite a misleading score comparison.
 
   -n, --limit   max results (\`-n\` and \`--limit\` are aliases; last wins)
   --exact       exact-match mode (passes ?exact=true to the index)
@@ -321,13 +321,13 @@ expansion REDUCED relevance (P@5 0.59 vs 0.73, MRR 0.46 vs 0.60), so it is
 opt-in. With --expand an LLM first generates 3 alternative phrasings; BM25 +
 vector then run against original + 3 expansions and RRF fuses all 8 lists.
 
-Prints \`slug · score · type · title\` per match, with a short matching body
-snippet indented under each row — so the answer is visible without a
-follow-up \`fbrain get\`.
-
-\`score\` is a raw fused-RRF value (the top hit is a small number like
-\`0.03\`). This scale is NOT comparable to \`search\`'s 0–1 cosine — do not
-compare an \`ask\` number against a \`search\` number for the same record.
+Results are printed best-first as a ranked list — \`rank · slug · type ·
+title\` per match (a leading \`1.\`, \`2.\`, … rank position), with a short
+matching body snippet indented under each row, so the answer is visible
+without a follow-up \`fbrain get\`. The human output shows ranking only, not
+a confidence magnitude. \`--json\` exposes the raw fused-RRF \`score\` for
+machine consumers that need the underlying ranking signal (\`--verbose\`
+shows it as a debug column too).
 
   -n, --limit N max results (default 5; \`-n\` and \`--limit\` are aliases,
                 last wins)
