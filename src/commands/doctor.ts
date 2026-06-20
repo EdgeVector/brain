@@ -41,9 +41,14 @@
 //   - no-team-sync       — `fbrain share` is a placeholder.
 //
 // With `--freshness`: also runs two G3 probes (see docs/phase-7-search-latency-spike.md):
-//   - freshness-probe — 5 trials of put → search asserting score ≥ 0.5
-//     against a `doctor-freshness-probe-<nonce>` slug namespace, cleaning
-//     up afterwards. FAILs if any trial misses its own record at score ≥ 0.5.
+//   - freshness-probe — 5 trials of put → search against a
+//     `doctor-freshness-probe-<nonce>` slug namespace, cleaning up
+//     afterwards. Each trial passes when the fresh record surfaces at
+//     score ≥ 0.5. The verdict is variance-tolerant: PASS when the average
+//     score is healthy (≥ 0.5) AND a majority of trials surfaced; FAILs only
+//     when writes don't surface at all or retrieval quality is systematically
+//     low (so normal per-trial score noise no longer produces a flaky FAIL on
+//     a healthy fresh brain).
 //   - pollution-probe — one broad query (default "fbrain"); classifies each
 //     hit as live / stale-fragment / orphan-schema. PASS if <25% polluted,
 //     WARN at 25-50%, FAIL above 50%.
@@ -929,9 +934,14 @@ export async function runEmbeddingProbe(
 
 // G3a — freshness probe. Five trials of put → search; each trial passes
 // when the freshly-written record surfaces in the top-K of a search for a
-// unique marker word at score ≥ freshnessMinScore (default 0.5). Probes are
-// soft-deleted in a finally block so a thrown error mid-trial still
-// cleans up. See docs/phase-7-search-latency-spike.md G3a.
+// unique marker word at score ≥ freshnessMinScore (default 0.5). The overall
+// verdict is variance-tolerant: it PASSes on a healthy average score
+// (≥ minScore) AND a majority of trials surfacing, so normal per-trial
+// embedding-score noise on a healthy fresh brain does not flip it to a flaky
+// FAIL — while writes that don't surface at all, or a systematically low
+// average, still FAIL loudly. Probes are soft-deleted in a
+// finally block so a thrown error mid-trial still cleans up. See
+// docs/phase-7-search-latency-spike.md G3a.
 export async function runFreshnessProbe(
   node: NodeClient,
   cfg: Config,
@@ -1046,14 +1056,48 @@ export async function runFreshnessProbe(
     ` (min score ≥ ${minScore}; ` +
     (avgScore === null ? "no scores observed" : `avg observed score ${avgScore.toFixed(3)}`) +
     ")";
-  if (passed === trials) {
+
+  // Variance-tolerant verdict. The all-trials-must-clear-0.5 gate was
+  // non-deterministic on a perfectly healthy fresh brain: per-trial embedding
+  // scores hover around ~0.6 and one (occasionally two) trials dipping below
+  // the floor by normal noise flipped the whole verdict to a red FAIL/exit-1,
+  // scaring off new devs who run the very health check `fbrain init`
+  // recommends. (Empirically, on a healthy fresh brain ~3% of runs land at 3/5
+  // and ~25% at 4/5 even though the average is consistently ~0.6 — the
+  // all-or-nothing gate fired on all of those.) The genuine signal is "fresh
+  // writes surface healthily", which is captured by a healthy *average* score
+  // together with a majority of trials surfacing — NOT by every single trial
+  // clearing the floor. (Same class as the pollution-probe low-N floor fixed in
+  // doctor-pollution-probe-low-n-floor.)
+  //
+  // PASS when BOTH hold:
+  //   - the average score is healthy (avgScore ≥ minScore) — the average is the
+  //     stable signal; per-trial noise cancels out across trials; AND
+  //   - a majority of trials surfaced at the floor (passed ≥ ceil(trials/2)) —
+  //     so a high average carried by one or two outlier trials while most miss
+  //     does NOT pass (that's a genuinely weak index, not noise).
+  // This passes 5/5, 4/5, and the occasional 3/5 when the average is healthy,
+  // while still failing a weak minority (≤ 2/5) or a systematically low average.
+  const majorityThreshold = Math.ceil(trials / 2);
+  const majoritySurfaced = passed >= majorityThreshold;
+  const healthyAverage = avgScore !== null && avgScore >= minScore;
+  if (majoritySurfaced && healthyAverage) {
     return { name: "freshness-probe", ok: true, detail };
   }
+
+  // Genuine failure. Distinguish the two real causes so the fix line points
+  // somewhere useful instead of blanket-recommending `fbrain reindex` (which
+  // re-puts embeddings and does nothing for score variance or a node whose
+  // writes aren't surfacing at all).
+  const notSurfacing = avgScore === null || passed === 0;
+  const fix = notSurfacing
+    ? "fresh writes are not surfacing in search at all — this points at the node, not the index. Check the node log and confirm the embedding runtime is up (the native-index search must be returning our just-written record); restart the node with embeddings enabled if needed."
+    : `fresh writes are surfacing but retrieval quality is systematically low (avg score < ${minScore} and/or only a weak minority of trials cleared the floor). Check the node's embedding model/runtime; if the live index has drifted, \`fbrain reindex\` re-puts every live record so its embedding is current (it does NOT de-duplicate the index or reduce pollution).`;
   return {
     name: "freshness-probe",
     ok: false,
     detail,
-    fix: "fresh writes are not surfacing at score ≥ 0.5. `fbrain reindex` re-puts every live record so its embedding is present and current (it does NOT de-duplicate the index or reduce pollution).",
+    fix,
   };
 }
 
