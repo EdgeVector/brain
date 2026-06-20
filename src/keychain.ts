@@ -123,6 +123,42 @@ function legacyKeychainEnabled(): boolean {
   return platform() === "darwin";
 }
 
+// Whether the current security session has a usable default keychain.
+//
+// This mirrors the SDK's own pre-flight (`MacKeychainStore.ensureKeychainAvailable`,
+// see node_modules/@folddb/app-sdk/dist/capabilityStore.js): the SDK probes with
+// `security default-keychain`, which on a keychain-less session (SSH / CI /
+// headless / under an AI agent) returns a NON-zero status WITHOUT popping the
+// blocking "Keychain Not Found" SecurityAgent modal — unlike the
+// add-/find-generic-password calls. We reuse that exact, GUI-less signal here so
+// the CLI can decide UP FRONT whether to hand the SDK its keychain-first store
+// (keychain genuinely available) or a file-only store (the fallback was going to
+// happen anyway). Building file-only in the latter case means the SDK never
+// probes the keychain a second time and so never emits its one-time
+// "macOS keychain unavailable…" warning — which, in a fresh CLI process per
+// command, would otherwise print on EVERY write.
+//
+// The probe is bounded by the same SIGKILL timeout as the legacy reads
+// (`securitySpawn` → SECURITY_TIMEOUT_MS), so a wedged `security` can never hang
+// the CLI; a timeout is conservatively treated as "unavailable" → file store.
+//
+// We DELIBERATELY do not blanket-force the file store: when this returns true
+// the keychain-first store is used exactly as before (no security downgrade on a
+// normal GUI-login Mac).
+//
+// Exported for tests (assert store selection without a real keychain); production
+// callers reach it only through {@link defaultCapabilityStore}.
+export function keychainAvailable(): boolean {
+  // An explicit override always wins: callers asking for the file store get it.
+  if (process.env.FBRAIN_FORCE_FILE_KEYCHAIN === "1") return false;
+  // Off macOS the SDK is the file store anyway (no keychain to probe). Skip the
+  // probe — except when a test runner is injected, so the available/unavailable
+  // branch is exercisable on any OS without a real keychain.
+  if (!securitySpawnInjected && platform() !== "darwin") return false;
+  const res = securitySpawn(["default-keychain"], false);
+  return !res.timedOut && res.status === 0;
+}
+
 function parseStored(raw: string): StoredCapability | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -264,16 +300,30 @@ export function sdkBackedCapabilityStore(
 /**
  * Build the default capability store: the SDK's keychain-with-file-fallback
  * store under fbrain's keychain service + `~/.fbrain/` file directory,
- * adapted to fbrain's interface with legacy migration. macOS keychain when
- * available; every keychain call is timeout-bounded by the SDK so a locked /
- * unavailable keychain degrades to the 0600 file backend instead of hanging.
- * `FBRAIN_FORCE_FILE_KEYCHAIN=1` skips the keychain outright (tests / CI).
+ * adapted to fbrain's interface with legacy migration.
+ *
+ * Store selection:
+ *   - `FBRAIN_FORCE_FILE_KEYCHAIN=1`  → file store outright (explicit override).
+ *   - keychain genuinely AVAILABLE     → the keychain-first store, used exactly
+ *     as before (macOS Keychain; every call timeout-bounded by the SDK; no
+ *     security downgrade on a normal GUI-login Mac).
+ *   - keychain genuinely UNAVAILABLE   → the file store directly.
+ *
+ * The third case is the fix for the keychain-less session (SSH / CI / headless /
+ * under an AI agent): the SDK's keychain-first store would itself fall back to
+ * the file store there, but only AFTER probing the keychain and printing its
+ * one-time `[folddb-app-sdk] macOS keychain unavailable…` warning. Because each
+ * CLI invocation is a fresh process, that "one-time" note prints on EVERY write
+ * command. By detecting the unavailable session up front (with the SDK's own
+ * GUI-less, timeout-bounded `security default-keychain` signal — see
+ * {@link keychainAvailable}) and constructing the file store directly, we reach
+ * the exact same destination the SDK would have — the 0600 file store — but
+ * QUIETLY, and only when the fallback was going to happen anyway.
  */
 export function defaultCapabilityStore(): CapabilityStore {
-  const sdkStore: SdkCapabilityStore =
-    process.env.FBRAIN_FORCE_FILE_KEYCHAIN === "1"
-      ? new FileCapabilityStore(fbrainDir())
-      : new KeychainWithFileFallbackStore(fbrainDir(), KEYCHAIN_SERVICE);
+  const sdkStore: SdkCapabilityStore = keychainAvailable()
+    ? new KeychainWithFileFallbackStore(fbrainDir(), KEYCHAIN_SERVICE)
+    : new FileCapabilityStore(fbrainDir());
   return sdkBackedCapabilityStore(sdkStore);
 }
 
