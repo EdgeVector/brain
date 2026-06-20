@@ -585,6 +585,11 @@ describe("printNextSteps", () => {
     const out = lines.join("\n");
     expect(out).toContain("Already initialized");
     expect(out).toContain("fbrain list");
+    // A dev re-running `init` to confirm "which node am I pointed at?" must get
+    // the answer even on the terse already-initialized path — echo both the
+    // resolved node URL and the config path.
+    expect(out).toContain(DEFAULT_NODE_URL);
+    expect(out).toContain("/home/dev/.fbrain/config.json");
     // The full first-record walkthrough is suppressed on a re-run.
     expect(out).not.toContain("Next steps");
     expect(out).not.toContain("fbrain design new");
