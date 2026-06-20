@@ -690,11 +690,14 @@ describe("askCmd output column gating (default vs --verbose)", () => {
     expect(joined).not.toContain("bm25=");
     expect(joined).not.toContain("vec=");
     expect(joined).not.toContain("+exp[");
-    // Sanity: the row still carries the four expected columns.
+    // Sanity: the row still carries the rank + remaining columns.
     const row = lines.find((l) => l.includes("d1"));
     expect(row).toBeDefined();
     expect(row).toContain("Design");
     expect(row).toContain("T-d1");
+    // Leads with the 1-based rank (`1.`), NOT a tiny RRF confidence decimal.
+    expect(row).toMatch(/^\s*1\.\s/);
+    expect(row).not.toMatch(/0\.0\d{3}/);
   });
 
   test("--verbose output retains the bm25=/vec= debug columns", async () => {
@@ -724,10 +727,11 @@ describe("askCmd output column gating (default vs --verbose)", () => {
 });
 
 describe("askCmd TTY column legend", () => {
-  // Mirror of search's legend, but the note flags that `ask`'s fused-RRF score
-  // is NOT comparable to `search`'s 0–1 cosine — the human-vs-agent doc gap the
-  // card closes. Human-only: present on a TTY, absent under --json / when piped,
-  // so first-line parsers and agents see byte-identical rows.
+  // The default human legend now describes a best-first RANKED list (no score
+  // column) — the tiny raw-RRF decimal that read like "3% confidence" is gone.
+  // Human-only: present on a TTY, absent under --json / when piped, so
+  // first-line parsers and agents see byte-identical rows. The raw fused-RRF
+  // score stays a labeled debug column under --verbose.
   const stubSingleHit = (): void => {
     installFetchStub({
       queries: { [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")] },
@@ -735,28 +739,33 @@ describe("askCmd TTY column legend", () => {
     });
   };
 
-  test("prints a dim TTY legend flagging RRF is not comparable to search", async () => {
+  test("prints a dim TTY legend describing a best-first ranked list", async () => {
     const cfg = buildTestCfg();
     stubSingleHit();
     const lines: string[] = [];
     await askCmd({ cfg, query: "octopus", noLlm: true, print: (l) => lines.push(l), isTty: () => true });
     expect(lines[0]).toContain("columns:");
-    expect(lines[0]).toContain("relevance");
-    expect(lines[0]).toContain("RRF");
-    expect(lines[0]).toContain("not comparable to search");
+    expect(lines[0]).toContain("rank");
+    expect(lines[0]).toContain("best match first");
+    // No misleading score/relevance language in the default legend.
+    expect(lines[0]).not.toContain("RRF");
+    expect(lines[0]).not.toContain("relevance");
     expect(lines[0]).toContain("\x1b[2m");
-    // Result row unchanged and present below.
+    // Result row present below, leading with the 1-based rank.
     const row = lines.find((l) => l.includes("d1"));
     expect(row).toBeDefined();
     expect(row).toContain("Design");
+    expect(row).toMatch(/^\s*1\.\s/);
   });
 
-  test("--verbose path also carries the legend on a TTY", async () => {
+  test("--verbose path carries a legend that still documents the raw RRF debug column", async () => {
     const cfg = buildTestCfg();
     stubSingleHit();
     const lines: string[] = [];
     await askCmd({ cfg, query: "octopus", noLlm: true, verbose: () => {}, print: (l) => lines.push(l), isTty: () => true });
     expect(lines[0]).toContain("columns:");
+    expect(lines[0]).toContain("rank");
+    expect(lines[0]).toContain("rrf");
     expect(lines[0]).toContain("not comparable to search");
   });
 

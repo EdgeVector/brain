@@ -95,13 +95,12 @@ export function resolvePrintSinks(opts: {
 
 // One-line, TTY-only column legend for the `search` / `ask` result tables.
 //
-// The leading number in both tables is an unlabeled relevance score whose
-// SCALE differs by verb — `search` renders a max-normalized cosine (top hit
-// is always `1.000`), `ask` renders a raw fused-RRF score (top hit ≈ 0.03).
-// To a first-time human the bare `0.0328` reads like noise; this legend names
-// the columns and flags that the two scores are NOT comparable. The MCP/agent
-// surface already documents the same distinction (src/mcp/server.ts), so this
-// closes the human-vs-agent gap on the CLI.
+// `search` renders a max-normalized cosine score (top hit is always `1.000`),
+// so its legend names the score column. `ask` no longer shows a score in its
+// default human output — it prints a best-first RANKED list (leading `1.`,
+// `2.`, …), because the raw fused-RRF value (top hit ≈ 0.03) read like "3%
+// confidence" on a perfect match and undermined trust in retrieval. The
+// caller supplies the legend text; this helper just formats + emits it.
 //
 // Discipline (matches the weak-match advisory, which goes to stderr): the
 // legend is additive HUMAN context, never part of the parsed rows. It is

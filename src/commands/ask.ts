@@ -474,20 +474,22 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     print(JSON.stringify(payload));
   } else if (opts.verbose) {
     // Human-only column legend (TTY, non-JSON; `resolved` is non-empty here).
-    // `ask` ranks a fused-RRF score (top hit ≈ 0.03), a DIFFERENT scale from
-    // `search`'s 0–1 cosine — the note flags they are not comparable.
+    // Verbose keeps the raw fused-RRF score as a labeled debug column for
+    // operators; the leading column is still the 1-based rank so the primary
+    // read stays "best-first" rather than the tiny RRF magnitude.
     if (resolveStdoutIsTty(opts)) {
       printColumnLegend(
         print,
-        "slug · relevance(fused RRF, not comparable to search) · type · title",
+        "rank · slug · rrf(raw fused, not comparable to search) · type · bm25 · vec · title",
       );
     }
-    // Verbose: per-ranker debug columns (bm25=, vec=, +exp[...]).
-    // Expansion column collapses when every row has no expansion hits;
-    // formatTable computes a 0-width column for an all-empty column,
-    // and adjacent gaps merge into the same 2-space separator.
+    // Verbose: per-ranker debug columns (bm25=, vec=, +exp[...]) plus the raw
+    // fused-RRF score for diagnostics. The leading rank column matches the
+    // default human render. Expansion column collapses when every row has no
+    // expansion hits; formatTable computes a 0-width column for an all-empty
+    // column, and adjacent gaps merge into the same 2-space separator.
     const lines = formatTable(
-      resolved.map((h) => {
+      resolved.map((h, i) => {
         const score = h.fusedScore.toFixed(4);
         const bm = h.bm25Rank === null ? "—" : String(h.bm25Rank);
         const vr = h.vectorRank === null ? "—" : String(h.vectorRank);
@@ -496,6 +498,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
             ? ""
             : `+exp[${formatExpansionHits(h.expansionHits)}]`;
         return [
+          `${i + 1}.`,
           h.slug,
           score,
           capitalize(h.type),
@@ -505,7 +508,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
           h.record.title,
         ];
       }),
-      { align: ["left", "right", "left", "left", "left", "left", "left"] },
+      { align: ["right", "left", "right", "left", "left", "left", "left", "left"] },
     );
     // Row, then the matching body snippet as an indented second line.
     // `payload` is index-aligned with `resolved`/`lines` (same map source).
@@ -516,25 +519,27 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     }
   } else {
     // Human-only column legend (TTY, non-JSON; `resolved` is non-empty here).
-    // `ask` ranks a fused-RRF score (top hit ≈ 0.03), a DIFFERENT scale from
-    // `search`'s 0–1 cosine — the note flags they are not comparable.
+    // Rows are printed best-first; the leading column is the 1-based rank,
+    // NOT a score (the raw fused-RRF value is exposed via --json/--verbose).
     if (resolveStdoutIsTty(opts)) {
-      printColumnLegend(
-        print,
-        "slug · relevance(fused RRF, not comparable to search) · type · title",
-      );
+      printColumnLegend(print, "rank · slug · type · title (best match first)");
     }
-    // Default: clean `slug · score · type · title` — same shape as
-    // `fbrain search` and MCP `fbrain_search`. Per-ranker debug is
+    // Default: clean `rank · slug · type · title` — best-first ranked list.
+    // The leading column is the hit's 1-based rank position (rows are already
+    // emitted in RRF rank order, so rank is monotonic by construction). We
+    // intentionally do NOT show the raw fused-RRF score here: a tiny value
+    // like `0.0328` on a perfect top match reads as "3% confidence" and
+    // undermines trust in retrieval. Machine consumers get the raw `score`
+    // via --json; operators get it via --verbose. Per-ranker debug is
     // operator-only and lives behind --verbose.
     const lines = formatTable(
-      resolved.map((h) => [
+      resolved.map((h, i) => [
+        `${i + 1}.`,
         h.slug,
-        h.fusedScore.toFixed(4),
         capitalize(h.type),
         h.record.title,
       ]),
-      { align: ["left", "right", "left", "left"] },
+      { align: ["right", "left", "left", "left"] },
     );
     // Row, then the matching body snippet as an indented second line so the
     // answer is visible without a follow-up `fbrain get`. The table row is
