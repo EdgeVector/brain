@@ -13,6 +13,7 @@ import {
   doctor,
   runMcpBootProbe,
   runMcpEntrypointProbe,
+  runRuntimeProbe,
   schemaServiceFixHint,
   validateConfigShape,
   type McpBootInput,
@@ -1958,6 +1959,104 @@ describe("runMcpEntrypointProbe", () => {
       undefined,
     );
     expect(asked).toEqual(["fbrain-mcp"]);
+  });
+});
+
+// runtime probe — compares the running Bun against fbrain's documented minimum
+// (README Prerequisites / package.json engines.bun). PASS when new enough;
+// FAIL (not WARN — too old a runtime is a real blocker) with a `brew upgrade
+// bun` hint when older. The running version is injected via `bunVersion` so
+// both branches are deterministic regardless of the host's installed Bun.
+describe("runRuntimeProbe", () => {
+  test("supported Bun → PASS, detail names found + minimum", () => {
+    const check = runRuntimeProbe({ bunVersion: "1.3.10" }, undefined);
+    expect(check.name).toBe("runtime");
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBeUndefined(); // plain PASS
+    expect(check.detail).toContain("1.3.10");
+    expect(check.fix).toBeUndefined();
+  });
+
+  test("newer Bun → PASS", () => {
+    const check = runRuntimeProbe({ bunVersion: "1.4.0" }, undefined);
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBeUndefined();
+  });
+
+  test("a Bun prerelease of the minimum still PASSes (build noise ignored)", () => {
+    const check = runRuntimeProbe({ bunVersion: "1.3.10-canary.1+abc" }, undefined);
+    expect(check.ok).toBe(true);
+  });
+
+  test("older Bun → FAIL with an actionable upgrade hint", () => {
+    const check = runRuntimeProbe({ bunVersion: "1.2.0" }, undefined);
+    expect(check.name).toBe("runtime");
+    expect(check.ok).toBe(false); // FAIL flips the verdict — real blocker
+    expect(check.detail).toContain("1.2.0");
+    expect(check.detail).toContain("1.3.10"); // names the required minimum
+    expect(check.fix).toContain("1.2.0"); // the found version
+    expect(check.fix).toContain("1.3.10"); // the required minimum
+    expect(check.fix).toContain("brew upgrade bun");
+  });
+});
+
+describe("doctor runtime integration", () => {
+  test("supported Bun → [PASS] runtime, exit 0", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      bunVersion: "1.3.10",
+    });
+    expect(code).toBe(0);
+    const line = lines.find((l) => /\] runtime\b/.test(l));
+    expect(line).toBeDefined();
+    expect(line!.startsWith("[PASS]")).toBe(true);
+    expect(line!).toContain("1.3.10");
+  });
+
+  test("older Bun → [FAIL] runtime + upgrade hint, overall exit 1", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      bunVersion: "1.0.0",
+    });
+    // A too-old runtime FAILs the verdict.
+    expect(code).toBe(1);
+    const failLine = lines.find((l) => /\] runtime\b/.test(l));
+    expect(failLine).toBeDefined();
+    expect(failLine!.startsWith("[FAIL]")).toBe(true);
+    const fixLine = lines[lines.indexOf(failLine!) + 1] ?? "";
+    expect(fixLine).toContain("brew upgrade bun");
+    expect(fixLine).toContain("1.0.0"); // names the found version
+  });
+
+  test("--json output includes the runtime check entry", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      json: true,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => mockNodeClient({}),
+      bunVersion: "1.3.10",
+    });
+    expect(code).toBe(0);
+    const parsed = JSON.parse(lines.join("\n")) as {
+      checks: { name: string; tag: string; ok: boolean }[];
+    };
+    const runtime = parsed.checks.find((c) => c.name === "runtime");
+    expect(runtime).toBeDefined();
+    expect(runtime!.tag).toBe("PASS");
+    expect(runtime!.ok).toBe(true);
   });
 });
 
