@@ -87,10 +87,39 @@ const STALE_SCHEMA_URLS: ReadonlySet<string> = new Set([
   "http://localhost:9102",
 ]);
 
-// Default cold-build retry schedule: 5s, 10s, 20s, 30s, 60s, 60s ≈ 3m max.
-// First run of `fold/run.sh` compiles Rust and can take several minutes
-// before the node starts listening.
-const DEFAULT_RETRY_DELAYS_MS = [5000, 10000, 20000, 30000, 60000, 60000];
+// Default cold-build retry schedule. Two competing cases share one budget:
+//   - The COMMON new-dev miss: the node just isn't running yet (forgot
+//     `brew services start folddb`). init prints the fix immediately; the dev
+//     reads it, starts the daemon, and wants init to notice *promptly*.
+//   - The contributor-from-source case: first `fold/run.sh` compiles Rust and
+//     can take a few minutes before the node starts listening, so the TOTAL
+//     wait must stay generous.
+// The old schedule (5s, 10s, 20s, 30s, 60s, 60s ≈ 3m) covered the build case
+// but escalated the *gap* to 60s — a dev who started the daemon mid-wait could
+// sit idle for up to a minute before the next probe. A health probe is just a
+// cheap loopback GET, so there's no reason to back off that far: poll on a
+// short ramp then a flat ~5s cadence. Same ~3m total budget, but the gap is
+// capped at MAX_RETRY_GAP_MS so a just-started node is caught within ~5s.
+const RETRY_RAMP_MS = [2000, 3000];
+export const MAX_RETRY_GAP_MS = 5000;
+export const RETRY_TOTAL_BUDGET_MS = 185_000; // matches the old schedule's total
+// On the flat cadence, only emit a "still retrying…" heartbeat every Nth
+// attempt so the frequent polls don't spam the terminal (≈ every 30s at 5s).
+const RETRY_LOG_EVERY = 6;
+export const DEFAULT_RETRY_DELAYS_MS = buildRetrySchedule();
+
+// A short ramp (so the very first re-probe is quick) followed by a flat
+// MAX_RETRY_GAP_MS cadence, filling out RETRY_TOTAL_BUDGET_MS. No single gap
+// ever exceeds MAX_RETRY_GAP_MS.
+function buildRetrySchedule(): number[] {
+  const schedule = [...RETRY_RAMP_MS];
+  let total = schedule.reduce((a, b) => a + b, 0);
+  while (total < RETRY_TOTAL_BUDGET_MS) {
+    schedule.push(MAX_RETRY_GAP_MS);
+    total += MAX_RETRY_GAP_MS;
+  }
+  return schedule;
+}
 
 function envRetryDelays(): number[] | null {
   const raw = process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
@@ -439,12 +468,19 @@ export async function probeWithRetry(
     print(`        node not reachable at ${opts.nodeUrl}. ${nodeDownHint(opts.nodeUrl)}`);
     for (let i = 0; i < delays.length; i++) {
       const delay = delays[i] ?? 0;
-      print(`        retrying in ${Math.round(delay / 1000)}s (attempt ${i + 1}/${delays.length})…`);
+      // The fast cadence means many attempts; don't print a line for every one
+      // or the terminal floods. Always show the first few (so the dev sees the
+      // quick re-probe ramp), the last, and then a terse heartbeat every
+      // RETRY_LOG_EVERY attempts.
+      const isLast = i === delays.length - 1;
+      if (i < RETRY_RAMP_MS.length + 1 || isLast || (i + 1) % RETRY_LOG_EVERY === 0) {
+        print(`        retrying in ${Math.round(delay / 1000)}s (attempt ${i + 1}/${delays.length})…`);
+      }
       await sleep(delay);
       try {
         return await probeClient.autoIdentity();
       } catch (e2) {
-        if (i === delays.length - 1 || !isUnreachable(e2)) throw e2;
+        if (isLast || !isUnreachable(e2)) throw e2;
       }
     }
     throw err;

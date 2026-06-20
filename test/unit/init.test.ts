@@ -17,7 +17,10 @@ import { join } from "node:path";
 
 import {
   DEFAULT_NODE_URL,
+  DEFAULT_RETRY_DELAYS_MS,
   DEFAULT_SCHEMA_SERVICE_URL,
+  MAX_RETRY_GAP_MS,
+  RETRY_TOTAL_BUDGET_MS,
   hasUsableExistingConfig,
   printNextSteps,
   probeWithRetry,
@@ -685,5 +688,63 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).toContain(`node not reachable at ${DEFAULT_NODE_URL}`);
     expect(out).toContain("brew services start folddb");
     expect(out).not.toContain("compiling Rust");
+  });
+});
+
+// The default retry schedule must stay RESPONSIVE: a dev who starts the node
+// mid-wait should be caught within ~one cap, not sit through a 60s gap. So no
+// single inter-probe gap may exceed MAX_RETRY_GAP_MS, while the TOTAL wait
+// budget stays generous enough for the slow contributor-from-source (Rust
+// cold build) case.
+describe("DEFAULT_RETRY_DELAYS_MS — responsive cap, comparable total budget", () => {
+  test("no single gap exceeds the cap", () => {
+    for (const gap of DEFAULT_RETRY_DELAYS_MS) {
+      expect(gap).toBeLessThanOrEqual(MAX_RETRY_GAP_MS);
+    }
+  });
+
+  test("total budget is preserved (~3 min, covers the slow-build case)", () => {
+    const total = DEFAULT_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+    // Same generous budget as the old 5/10/20/30/60/60 schedule (185s); the
+    // ramp + flat-cap fill makes it land at or just above the target.
+    expect(total).toBeGreaterThanOrEqual(RETRY_TOTAL_BUDGET_MS);
+    // Don't let the schedule balloon far past the old budget either.
+    expect(total).toBeLessThan(RETRY_TOTAL_BUDGET_MS + MAX_RETRY_GAP_MS);
+  });
+
+  test("polls frequently — many short attempts, not a few long ones", () => {
+    // The whole point: the fast cadence yields a lot of attempts so a
+    // just-started node is re-probed within ~5s. (The old schedule had 6.)
+    expect(DEFAULT_RETRY_DELAYS_MS.length).toBeGreaterThan(6);
+  });
+
+  test("a node that comes up mid-wait is caught within one capped gap", async () => {
+    // Drive probeWithRetry with the real default schedule but a mocked sleep
+    // (no wall clock). The probe fails for the first few attempts, then the
+    // "node" comes up — assert the gap we waited through to catch it is <= cap.
+    let attempts = 0;
+    const slept: number[] = [];
+    const probeClient = {
+      autoIdentity: async () => {
+        attempts += 1;
+        if (attempts <= 3) {
+          throw new FbrainError({ code: "service_unreachable", message: "fetch failed" });
+        }
+        return { provisioned: true, userHash: "deadbeefcafef00d" } as Awaited<
+          ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>
+        >;
+      },
+    } as unknown as ReturnType<typeof newNodeClient>;
+
+    const result = await probeWithRetry(
+      probeClient,
+      { nodeUrl: "http://127.0.0.1:9050", sleep: async (ms) => { slept.push(ms); } },
+      () => {},
+    );
+
+    expect((result as { provisioned: boolean }).provisioned).toBe(true);
+    // Every gap we actually waited through (using the DEFAULT schedule, since
+    // retryDelaysMs was not injected) is within the cap.
+    for (const ms of slept) expect(ms).toBeLessThanOrEqual(MAX_RETRY_GAP_MS);
   });
 });
