@@ -2111,7 +2111,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   return 0;
 }
 
-async function runMcpCmd(args: Argv): Promise<number> {
+export async function runMcpCmd(args: Argv): Promise<number> {
   // The `mcp` command multiplexes subcommands with DIFFERENT flag sets:
   // `install`/`setup` accept `--yes` + `--claude-md`, while `instructions` and
   // bare `mcp` accept none. Peek the subcommand from the first positional
@@ -2172,7 +2172,30 @@ async function runMcpCmd(args: Argv): Promise<number> {
     console.error(`Unknown mcp subcommand: ${positionals[0]}\n${COMMAND_HELP.mcp}`);
     return USAGE_ERROR;
   }
-  // Bare `fbrain mcp` — start the server.
+  // Bare `fbrain mcp` — start the stdio MCP server.
+  //
+  // This is the machine-facing entrypoint: it speaks JSON-RPC over stdin and is
+  // meant to be `exec`'d by an AI client, never typed by hand. A human who runs
+  // it at an interactive terminal (a natural thing to try after seeing
+  // `fbrain mcp install` / `fbrain mcp instructions` in the help) used to get a
+  // silently frozen prompt — the server started and then blocked forever on the
+  // `await new Promise(() => {})` below with zero output, because an interactive
+  // stdin never EOFs and no client ever speaks. Guard the interactive case:
+  // when stdin is a TTY, print one line of guidance to stderr pointing at the
+  // two commands they actually want and exit with the usage code — do NOT start
+  // the server. Piped/redirected stdin (the real MCP-client case) is unchanged:
+  // the server still starts exactly as before. Same `process.stdin.isTTY` idiom
+  // as the put/--body stdin fallback in maybeReadStdin().
+  if ((process.stdin as unknown as { isTTY?: boolean }).isTTY) {
+    console.error(
+      "`fbrain mcp` is the stdio MCP server for AI clients (Claude Code, Codex, …); it speaks JSON-RPC over stdin and is not meant to be run by hand.\n" +
+        "You probably want one of:\n" +
+        "  fbrain mcp install        # wire fbrain into your agent in one step\n" +
+        "  fbrain mcp instructions   # print the CLAUDE.md usage block\n" +
+        "To run the server manually for debugging, pipe a request: printf '{}' | fbrain mcp",
+    );
+    return USAGE_ERROR;
+  }
   // Lazy-import so the SDK only loads when the user runs `fbrain mcp`.
   // Keeps CLI startup fast for non-MCP commands.
   const { runMcp } = await import("./mcp/main.ts");
