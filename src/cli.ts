@@ -383,7 +383,12 @@ the run itself errors out (e.g. missing config), a \`{error, hint}\` JSON
 object is emitted to stdout instead, so \`--json\` stdout stays parseable.
 
 With --freshness, additionally runs the G3 retrieval-quality probes:
-  - freshness-probe: 5 trials of put → search assert score ≥ 0.5
+  - freshness-probe: 5 trials of put → search; each trial asserts the fresh
+    record surfaces at score ≥ 0.5. Variance-tolerant verdict: PASSes when the
+    average score is healthy (≥ 0.5) AND a majority of trials surfaced, so
+    normal per-trial score noise doesn't produce a flaky FAIL on a healthy
+    fresh brain; FAILs when writes don't surface at all or the average is
+    systematically low.
   - pollution-probe: one broad query, classify hits as live / stale /
     orphan-schema. WARN above 25% polluted; never fails the verdict. A
     small-sample floor (default 10 hits) suppresses the % framing on a

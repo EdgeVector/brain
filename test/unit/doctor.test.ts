@@ -1162,7 +1162,11 @@ describe("doctor --freshness probes", () => {
     expect(cleanupUpdates.length).toBe(5);
   });
 
-  test("freshness FAIL: search returns nothing for one trial → exit 1, but cleanup still runs", async () => {
+  test("freshness PASS: 4/5 trials pass with a healthy average (variance-tolerant) → exit 0, cleanup still runs", async () => {
+    // Variance tolerance (card doctor-freshness-probe-variance-tolerance): a
+    // single trial missing the floor while the average stays healthy is normal
+    // embedding-score noise on a fresh brain, NOT a failure. 4/5 passing with a
+    // healthy avg must PASS so a new dev isn't scared off by a flaky red FAIL.
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const mutations: RecordedMutation[] = [];
@@ -1178,22 +1182,120 @@ describe("doctor --freshness probes", () => {
         mockNodeClient({
           mutations,
           onFreshnessSearch: (slug) => {
-            // Drop the 3rd trial: simulates the fresh record not appearing.
+            // 4 trials surface healthily (~0.62); the 3rd dips below the floor
+            // by noise. avg over the 5 scored trials ≈ 0.556 (≥ 0.5), 4/5 pass.
             const idx = trial++;
-            if (idx === 2) return null;
-            return selfHit(slug, conceptHash, 0.91);
+            if (idx === 2) return selfHit(slug, conceptHash, 0.42);
+            return selfHit(slug, conceptHash, 0.62);
+          },
+          onPollutionSearch: () => [],
+        }),
+    });
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.startsWith("[PASS] freshness-probe"))).toBe(true);
+    expect(lines.some((l) => l.includes("4/5 trials passed"))).toBe(true);
+    // The detail line still surfaces the average so a borderline-but-passing
+    // brain reports its number.
+    expect(lines.some((l) => l.includes("avg observed score"))).toBe(true);
+    // Cleanup still ran for all 5 creates.
+    const cleanupUpdates = mutations.filter(
+      (m) => m.kind === "update" && Array.isArray(m.fields["tags"]) && (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
+    );
+    expect(cleanupUpdates.length).toBe(5);
+  });
+
+  test("freshness FAIL: writes don't surface at all (avg null) → exit 1, node-pointing fix (no reindex), cleanup still runs", async () => {
+    // A genuine failure: every trial misses its own record. avgScore === null,
+    // 0/5 pass. Must FAIL loudly, and the fix must point at the node/embedding
+    // runtime — NOT blanket-recommend `fbrain reindex`, which can't help when
+    // writes aren't surfacing at all.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const mutations: RecordedMutation[] = [];
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      nonceFn: () => "test2b",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          mutations,
+          onFreshnessSearch: () => null, // never surfaces
+          onPollutionSearch: () => [],
+        }),
+    });
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.startsWith("[FAIL] freshness-probe"))).toBe(true);
+    expect(lines.some((l) => l.includes("0/5 trials passed"))).toBe(true);
+    // Fix points at the node, not a reindex.
+    expect(lines.some((l) => l.includes("not surfacing in search at all"))).toBe(true);
+    expect(lines.some((l) => l.includes("`fbrain reindex`"))).toBe(false);
+    // Cleanup still ran for all 5 creates.
+    const cleanupUpdates = mutations.filter(
+      (m) => m.kind === "update" && Array.isArray(m.fields["tags"]) && (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
+    );
+    expect(cleanupUpdates.length).toBe(5);
+  });
+
+  test("freshness FAIL: low average even with a passing majority → exit 1", async () => {
+    // Systematically low retrieval quality: 3/5 trials technically clear the
+    // floor at exactly 0.5 but two are very low, pulling the average under the
+    // floor. A weak/low-quality index must still FAIL even though >half passed.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const conceptHash = TEST_HASHES.concept;
+    let trial = 0;
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      nonceFn: () => "test2c",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          // scores: 0.5, 0.5, 0.5, 0.1, 0.1 → 3/5 pass but avg 0.34 < 0.5.
+          onFreshnessSearch: (slug) => {
+            const idx = trial++;
+            return selfHit(slug, conceptHash, idx < 3 ? 0.5 : 0.1);
           },
           onPollutionSearch: () => [],
         }),
     });
     expect(code).toBe(1);
     expect(lines.some((l) => l.startsWith("[FAIL] freshness-probe"))).toBe(true);
-    expect(lines.some((l) => l.includes("4/5 trials passed"))).toBe(true);
-    // Cleanup still ran for all 5 creates.
-    const cleanupUpdates = mutations.filter(
-      (m) => m.kind === "update" && Array.isArray(m.fields["tags"]) && (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
-    );
-    expect(cleanupUpdates.length).toBe(5);
+    expect(lines.some((l) => l.includes("3/5 trials passed"))).toBe(true);
+    expect(lines.some((l) => l.includes("systematically low"))).toBe(true);
+  });
+
+  test("freshness FAIL: only a weak minority passes (2/5) even with a healthy avg → exit 1", async () => {
+    // Majority-surfaced gate: a high average carried by a couple of strong
+    // trials while most miss is NOT a healthy fresh brain. 2/5 is below the
+    // ceil(trials/2) majority, so it must FAIL even though the average across
+    // scored trials is ≥ floor.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const conceptHash = TEST_HASHES.concept;
+    let trial = 0;
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      nonceFn: () => "test2d",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          // scores: 0.95, 0.95, 0.45, 0.45, 0.45 → avg 0.65 (≥0.5) but only 2/5 pass.
+          onFreshnessSearch: (slug) => {
+            const idx = trial++;
+            return selfHit(slug, conceptHash, idx < 2 ? 0.95 : 0.45);
+          },
+          onPollutionSearch: () => [],
+        }),
+    });
+    expect(code).toBe(1);
+    expect(lines.some((l) => l.startsWith("[FAIL] freshness-probe"))).toBe(true);
+    expect(lines.some((l) => l.includes("2/5 trials passed"))).toBe(true);
   });
 
   test("freshness FAIL: score below threshold → exit 1", async () => {
