@@ -1644,6 +1644,33 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.get);
     return USAGE_ERROR;
   }
+  // `fbrain get <type> <slug>` (type-then-slug) is the muscle-memory mirror of
+  // `fbrain design new <slug>`, `fbrain list --type design`, and the MCP
+  // `fbrain_get(slug, type)`. With two positionals, `slug = positionals[0]`
+  // would take the TYPE as the slug and silently drop the real slug — and the
+  // single-arg `withTypeAsPositionalHint` would then nudge at `list --type`,
+  // the wrong intent (the user wants one specific record, not a type listing).
+  // Catch the shape BEFORE the network call: route them at the correct
+  // `get <slug> --type <type>` form. This is the same recovery-hint family as
+  // put's extra-positional guard above. Single-positional `fbrain get design`
+  // is untouched — it still gets the `list --type design` hint below.
+  if (positionals.length > 1 && isRecordType(slug)) {
+    throw new FbrainError({
+      code: "not_found",
+      message: `No record with slug "${slug}".`,
+      hint: `"${slug}" is a record type — did you mean \`fbrain get ${positionals[1]} --type ${slug}\`?`,
+    });
+  }
+  // Surplus positionals where the first ISN'T a type: `get` only consumes the
+  // slug, so don't let the rest vanish without a trace — warn that they're
+  // ignored (still proceeds to look up positionals[0]).
+  if (positionals.length > 1) {
+    console.error(
+      `note: \`get\` takes a single slug; ignoring extra positional${
+        positionals.length > 2 ? "s" : ""
+      } ${positionals.slice(1).map((p) => `"${p}"`).join(", ")}.`,
+    );
+  }
   const type = parseRecordType(values.type);
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };

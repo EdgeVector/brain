@@ -177,3 +177,50 @@ describe("withTypeAsPositionalHint (get/status/delete not-found path)", () => {
     expect(result).toEqual({ ok: true });
   });
 });
+
+describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
+  // The natural mistake `fbrain get design my-first-idea` (type-then-slug)
+  // used to take "design" as the slug, silently drop "my-first-idea", and
+  // emit the single-arg `list --type design` hint — the WRONG intent (the
+  // user wants one record, not a type listing). The two-positional shape is
+  // caught BEFORE the network call and routed at `get <slug> --type <type>`.
+  // HOME-as-empty-dir makes the test sharp: the shape check must fire before
+  // readConfig, so we never see a config-missing error.
+
+  test("two positionals with a record-type first nudge at `get <slug> --type <type>`", async () => {
+    const { code, stderr } = await runCli(["get", "design", "my-first-idea"]);
+    expect(code).toBe(1);
+    expect(stderr).toContain('"design" is a record type');
+    // Points at the corrected command, preserving the slug they typed.
+    expect(stderr).toContain("fbrain get my-first-idea --type design");
+    // NOT the misleading single-arg listing hint.
+    expect(stderr).not.toContain("fbrain list --type design");
+    // Fires before readConfig.
+    expect(stderr).not.toContain("config");
+  });
+
+  test("every record type triggers the corrected get hint", async () => {
+    for (const t of RECORD_TYPES) {
+      const { stderr } = await runCli(["get", t, "some-slug"]);
+      expect(stderr).toContain(`fbrain get some-slug --type ${t}`);
+      expect(stderr).not.toContain(`fbrain list --type ${t}`);
+    }
+  });
+
+  test("single-positional `fbrain get design` is UNCHANGED (still list --type hint)", async () => {
+    // The slug-lookup miss path: a live brain returns not_found and
+    // withTypeAsPositionalHint adds the `list --type` hint. With HOME empty
+    // there's no node, so we assert the corrected get-hint does NOT appear —
+    // i.e. the two-positional branch did not steal the single-arg case.
+    const { stderr } = await runCli(["get", "design"]);
+    expect(stderr).not.toContain("fbrain get  --type design");
+    expect(stderr).not.toContain("--type design`?");
+  });
+
+  test("two positionals where the first is NOT a type warns the extra is ignored", async () => {
+    // `fbrain get my-slug stray` — "my-slug" isn't a type, so we still look
+    // it up, but the surplus positional must not vanish silently.
+    const { stderr } = await runCli(["get", "my-slug", "stray"]);
+    expect(stderr).toContain('ignoring extra positional "stray"');
+  });
+});
