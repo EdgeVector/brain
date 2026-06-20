@@ -1708,6 +1708,34 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.status);
     return USAGE_ERROR;
   }
+  // Symmetric recovery for the `status set/update <slug> <value>` guess. The
+  // CLI is noun-verb everywhere a new dev looks (`design new`, `task new`,
+  // `mcp install`), so `status` *looks* like it should take a `set`/`update`
+  // verb — but the real form is `fbrain status <slug> [<new-status>]`. Without
+  // this guard, `set`/`update` is parsed as the slug positional and
+  // `resolveBySlug` dead-ends with the misleading `No record with slug "set"`
+  // hint that sends devs to `fbrain list` — the wrong remedy (the fix is to
+  // *drop* the verb). This is the twin of the `fbrain <type> <slug> --status`
+  // recovery in runRecordNew above; same intent, same message shape, so the two
+  // paths read identically. We do NOT auto-perform the update — the explicit
+  // verb is intentional, matching the runRecordNew precedent.
+  //
+  // Gate: pseudo-verb (`set`/`update`) AND a following positional (the slug
+  // they meant). The `>= 2` requirement keeps it tight — a record literally
+  // slugged `set`/`update` still resolves via the unambiguous bare
+  // `fbrain status set` (one positional) path.
+  if ((slug === "set" || slug === "update") && positionals.length >= 2) {
+    const slugPart = positionals[1];
+    const statusPart = positionals[2] ?? "<new-status>";
+    const echo =
+      positionals[2] !== undefined
+        ? ` (you asked to set "${slugPart}" → "${statusPart}")`
+        : "";
+    console.error(
+      `Did you mean to change status? Use: fbrain status ${slugPart} ${statusPart}${echo}`,
+    );
+    return USAGE_ERROR;
+  }
   const cfg = readConfig();
   const type = parseRecordType(values.type);
   const sOpts: Parameters<typeof statusCmd>[0] = { cfg, slug, verbose };
