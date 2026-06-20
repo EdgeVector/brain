@@ -17,6 +17,12 @@
 //      probe asks both questions a write needs to answer "yes" to and
 //      surfaces a structured FAIL ("write-blocked") with an actionable
 //      hint that distinguishes a missing grant from a cold registry.
+//  9b. runtime — the running `Bun.version` meets fbrain's documented minimum
+//      (README Prerequisites; single-sourced from package.json `engines.bun`).
+//      Cheap + offline (string compare; never touches the node). FAIL (not
+//      WARN) when too old, with a `brew upgrade bun` hint — a new dev whose
+//      `fbrain init`/`fbrain <cmd>` failed cryptically on an old Bun gets a
+//      clear diagnosis instead of an opaque low-level error.
 //   9. mcp-entrypoint — the `fbrain-mcp` bin (the headline agent
 //      integration `claude mcp add fbrain fbrain-mcp`) resolves on PATH.
 //      Cheap + offline (Bun.which only; never spawns the server). WARN —
@@ -104,6 +110,7 @@ import {
 } from "../write-context.ts";
 import { FBRAIN_MCP_TOOL_NAMES } from "../mcp/server.ts";
 import { getFbrainVersion } from "../version.ts";
+import { MIN_BUN_VERSION, bunVersionMeetsMinimum } from "../runtime.ts";
 
 export type DoctorOptions = {
   configPath?: string;
@@ -141,6 +148,12 @@ export type DoctorOptions = {
   // probe be exercised in both the resolved + unresolved states without
   // mutating the test process's real PATH.
   whichBin?: (name: string) => string | null;
+  // Override for tests: the running Bun version the `runtime` check compares
+  // against fbrain's documented minimum (MIN_BUN_VERSION). Defaults to the live
+  // `Bun.version`. An explicit seam (like `whichBin`) so doctor.test.ts can
+  // drive both the too-old FAIL branch and the supported PASS branch
+  // deterministically without depending on the host's installed Bun.
+  bunVersion?: string;
   // --mcp boot probe: actually SPAWN the resolved `fbrain-mcp` entrypoint,
   // drive a JSON-RPC initialize + tools/list handshake over stdio, and assert
   // the 7-tool agent surface. OFF by default so plain `fbrain doctor` never
@@ -457,6 +470,16 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     // down. SKIP rather than drop it.
     checks.push(skippedByNodeUnreachable("write-ready"));
   }
+
+  // Runtime probe — compare the running Bun against fbrain's documented
+  // minimum (README Prerequisites: "Bun ≥ <MIN_BUN_VERSION>"). The README tells
+  // every new dev to run `fbrain doctor`, but until this check nothing
+  // enforced the version, so a dev on an older Bun hit an opaque low-level
+  // failure with no pointer to the real cause. Cheap + offline (string compare
+  // only; never touches the node) — fits the same slot as mcp-entrypoint. FAIL
+  // (not WARN) when too old, with an actionable upgrade hint.
+  const runtimeCheck = runRuntimeProbe(opts, verbose);
+  checks.push(runtimeCheck);
 
   // MCP-entrypoint probe — the headline agent-integration path. The README
   // front-loads `claude mcp add fbrain fbrain-mcp`, which only works if the
@@ -1306,6 +1329,37 @@ export async function runWriteReadyProbe(
 // for CLI-only users and source-checkout users (who register the path-based
 // form), with an actionable re-link hint. PASS message carries the resolved
 // path.
+// Runtime probe — compare the running Bun against fbrain's documented minimum.
+// PASS when `Bun.version >= MIN_BUN_VERSION` (single-sourced from
+// package.json `engines.bun`); FAIL (not WARN — too old a runtime is a real
+// blocker, not an optional nicety) with an actionable upgrade hint when older.
+// The running version is injected via `bunVersion` (defaults to `Bun.version`)
+// so both branches are testable without depending on the host's installed Bun.
+// Cheap + offline: a pure version string compare, never touches the node.
+export function runRuntimeProbe(
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): CheckResult {
+  const found = opts.bunVersion ?? Bun.version;
+  if (bunVersionMeetsMinimum(found, MIN_BUN_VERSION)) {
+    verbose?.(`runtime: Bun ${found} (>= ${MIN_BUN_VERSION})`);
+    return {
+      name: "runtime",
+      ok: true,
+      detail: `Bun ${found} (>= ${MIN_BUN_VERSION})`,
+    };
+  }
+  verbose?.(`runtime: Bun ${found} is older than ${MIN_BUN_VERSION} — FAIL`);
+  return {
+    name: "runtime",
+    ok: false,
+    detail: `Bun ${found} is older than fbrain's minimum (${MIN_BUN_VERSION})`,
+    fix:
+      `your Bun (${found}) is older than fbrain's minimum (${MIN_BUN_VERSION}). ` +
+      "Upgrade: `brew upgrade bun` (or `bun upgrade`), then re-run.",
+  };
+}
+
 export function runMcpEntrypointProbe(
   opts: DoctorOptions,
   verbose: Verbose | undefined,
