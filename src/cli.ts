@@ -385,7 +385,10 @@ object is emitted to stdout instead, so \`--json\` stdout stays parseable.
 With --freshness, additionally runs the G3 retrieval-quality probes:
   - freshness-probe: 5 trials of put → search assert score ≥ 0.5
   - pollution-probe: one broad query, classify hits as live / stale /
-    orphan-schema. PASS at <25% polluted, WARN at 25-50%, FAIL above.
+    orphan-schema. WARN above 25% polluted; never fails the verdict. A
+    small-sample floor (default 10 hits) suppresses the % framing on a
+    new/sparse brain, where the ratio is just low-N noise — it reports the
+    raw counts with a "low sample — % not meaningful yet" note instead.
 
 With --write, additionally runs an idempotent put → get → soft-delete
 round-trip under a reserved \`doctor-write-roundtrip-<nonce>\` slug to

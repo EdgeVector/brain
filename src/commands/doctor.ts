@@ -126,6 +126,7 @@ export type DoctorOptions = {
   pollutionQuery?: string;             // default "fbrain"
   pollutionWarnThreshold?: number;     // default 0.25
   pollutionFailThreshold?: number;     // default 0.5
+  pollutionMinSample?: number;         // default 10 — below this the ratio is low-N noise; report raw counts only
   nonceFn?: () => string;              // override for deterministic tests
   // --usage report (G13 team-adoption telemetry — see commands/usage.ts).
   // When set, doctor skips its health-check sequence and just prints the
@@ -1058,9 +1059,16 @@ export async function runFreshnessProbe(
 
 // G3a (pollution component) — issue one broad query and classify every hit
 // into live / stale (record gone or tombstoned) / orphan (schema not an
-// fbrain type). PASS at <warnThreshold (default 25%), WARN to failThreshold
-// (default 50%), FAIL above. Mirrors the verbose `skip stale` / `skip
-// schema_name matches no registered fbrain type` lines in `fbrain search`.
+// fbrain type). The ratio verdict (WARN above warnThreshold, default 25%)
+// only applies once there are enough hits to be statistically meaningful:
+// below `pollutionMinSample` (default 10) the percentage is dominated by a
+// tiny denominator — a brand-new dev's own re-put/delete churn plus the
+// freshness probe's own writes reads as "catastrophic" when nothing is
+// wrong — so we report the raw counts with an explicit low-sample note and
+// skip the threshold framing entirely. Mirrors the verbose `skip stale` /
+// `skip schema_name matches no registered fbrain type` lines in `fbrain
+// search`, and the same low-N discipline applied to the search weak-match
+// advisory (card search-weak-match-sparse-brain-floor).
 export async function runPollutionProbe(
   node: NodeClient,
   cfg: Config,
@@ -1070,6 +1078,7 @@ export async function runPollutionProbe(
   const query = opts.pollutionQuery ?? "fbrain";
   const warnThreshold = opts.pollutionWarnThreshold ?? 0.25;
   const failThreshold = opts.pollutionFailThreshold ?? 0.5;
+  const minSample = opts.pollutionMinSample ?? 10;
 
   let hits: NativeIndexHit[];
   try {
@@ -1127,6 +1136,22 @@ export async function runPollutionProbe(
       live++;
       verbose?.(`pollution: live ${type}/${slug}`);
     }
+  }
+
+  // Small-sample floor: below `minSample` total hits the (stale+orphan)/total
+  // ratio is low-N noise — a couple of stale embeddings from the dev's own
+  // first re-put/delete (plus the freshness probe's own writes) reads as
+  // "catastrophic" when nothing is wrong. Report the raw counts with an
+  // explicit note and SKIP the warn/fail-threshold framing. Once there are
+  // enough hits the ratio verdict below applies exactly as before.
+  if (total < minSample) {
+    return {
+      name: "pollution-probe",
+      ok: true,
+      detail:
+        `query "${query}" → ${total} hits: live ${live}, stale ${stale}, orphan ${orphan} ` +
+        `— low sample (N=${total} < ${minSample}) — pollution % not meaningful on a small/new brain yet`,
+    };
   }
 
   const stalePct = stale / total;

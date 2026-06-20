@@ -1225,11 +1225,13 @@ describe("doctor --freshness probes", () => {
     const conceptHash = TEST_HASHES.concept;
     // 4 hits: 2 live, 1 stale (slug missing from store), 1 orphan. → 50% polluted.
     // Pollution at exactly 50% is NOT > failThreshold (0.5), so it lands as WARN
-    // because > 0.25.
+    // because > 0.25. pollutionMinSample:1 keeps this exercising the ratio path
+    // (4 hits is below the real default-10 small-sample floor).
     const code = await doctor({
       configPath,
       freshness: true,
       freshnessTrials: 1,
+      pollutionMinSample: 1,
       nonceFn: () => "test4",
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
@@ -1260,11 +1262,13 @@ describe("doctor --freshness probes", () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const conceptHash = TEST_HASHES.concept;
-    // 1 live + 3 stale + 1 orphan = 80% polluted.
+    // 1 live + 3 stale + 1 orphan = 80% polluted. pollutionMinSample:1 keeps
+    // this on the ratio path (5 hits is below the real default-10 floor).
     const code = await doctor({
       configPath,
       freshness: true,
       freshnessTrials: 1,
+      pollutionMinSample: 1,
       nonceFn: () => "test5",
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
@@ -1327,6 +1331,7 @@ describe("doctor --freshness probes", () => {
       freshness: true,
       freshnessTrials: 1,
       nonceFn: () => "test7",
+      pollutionMinSample: 1,
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () =>
@@ -1341,9 +1346,97 @@ describe("doctor --freshness probes", () => {
     // 100% polluted, but pollution never fails the verdict (it surfaces as a
     // WARN — see doctor-pollution-fix-misleads-reindex). The point of this test
     // is that a tombstoned record is classified as stale, not live.
+    // pollutionMinSample:1 keeps the single hit on the ratio path.
     expect(code).toBe(0);
     expect(lines.some((l) => l.startsWith("[WARN] pollution-probe"))).toBe(true);
     expect(lines.some((l) => l.includes("stale 1"))).toBe(true);
+  });
+
+  test("pollution small-sample floor: total < minSample → PASS, no WARN, low-sample note, no fail-threshold framing", async () => {
+    // Regression for doctor-pollution-probe-low-n-floor: a brand-new dev's
+    // sparse brain (a handful of hits, mostly stale from their own re-put/delete
+    // churn) must NOT trip the ratio verdict. Below the default-10 floor the
+    // probe PASSes and reports raw counts with an explicit low-sample note —
+    // never "above NN% fail-threshold".
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const conceptHash = TEST_HASHES.concept;
+    // 7 hits, 5 stale → 71% by ratio (the dogfooded false signal), but only 7
+    // hits is below the default-10 floor, so the % framing is suppressed.
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      freshnessTrials: 1,
+      nonceFn: () => "lowN",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          onFreshnessSearch: (slug) => selfHit(slug, conceptHash, 0.9),
+          onPollutionSearch: () => [
+            fbrainHit("alive-1", conceptHash, 0.7),
+            fbrainHit("alive-2", conceptHash, 0.6),
+            fbrainHit("gone-1", conceptHash, 0.55),
+            fbrainHit("gone-2", conceptHash, 0.5),
+            fbrainHit("gone-3", conceptHash, 0.45),
+            fbrainHit("gone-4", conceptHash, 0.4),
+            fbrainHit("gone-5", conceptHash, 0.35),
+          ],
+          store: {
+            [conceptHash]: [conceptRow("alive-1"), conceptRow("alive-2")],
+          },
+        }),
+    });
+    expect(code).toBe(0);
+    // PASS, never WARN, at low N.
+    expect(lines.some((l) => l.startsWith("[PASS] pollution-probe"))).toBe(true);
+    expect(lines.some((l) => l.startsWith("[WARN] pollution-probe"))).toBe(false);
+    // Explicit low-sample note, raw counts, and NO fail-threshold framing.
+    expect(lines.some((l) => l.includes("low sample (N=7"))).toBe(true);
+    expect(lines.some((l) => l.includes("not meaningful"))).toBe(true);
+    expect(lines.some((l) => l.includes("fail-threshold"))).toBe(false);
+    expect(lines.some((l) => l.includes("stale 5"))).toBe(true);
+  });
+
+  test("pollution at/above minSample still WARNs with the ratio framing", async () => {
+    // Companion to the floor test: once there are enough hits (>= minSample) the
+    // existing ratio verdict applies unchanged — a genuinely polluted node still
+    // surfaces a WARN.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const conceptHash = TEST_HASHES.concept;
+    // 10 hits (== default floor), 8 stale → 80% polluted → WARN.
+    const code = await doctor({
+      configPath,
+      freshness: true,
+      freshnessTrials: 1,
+      nonceFn: () => "atFloor",
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          onFreshnessSearch: (slug) => selfHit(slug, conceptHash, 0.9),
+          onPollutionSearch: () => [
+            fbrainHit("alive-1", conceptHash, 0.7),
+            fbrainHit("alive-2", conceptHash, 0.6),
+            fbrainHit("gone-1", conceptHash, 0.55),
+            fbrainHit("gone-2", conceptHash, 0.5),
+            fbrainHit("gone-3", conceptHash, 0.45),
+            fbrainHit("gone-4", conceptHash, 0.4),
+            fbrainHit("gone-5", conceptHash, 0.35),
+            fbrainHit("gone-6", conceptHash, 0.3),
+            fbrainHit("gone-7", conceptHash, 0.25),
+            fbrainHit("gone-8", conceptHash, 0.2),
+          ],
+          store: {
+            [conceptHash]: [conceptRow("alive-1"), conceptRow("alive-2")],
+          },
+        }),
+    });
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.startsWith("[WARN] pollution-probe"))).toBe(true);
+    expect(lines.some((l) => l.includes("pollution 80%"))).toBe(true);
+    expect(lines.some((l) => l.includes("low sample"))).toBe(false);
   });
 
   test("freshness probe writes only per-kind Concept fields (no legacy kind/v1_marker_a/v1_marker_b)", async () => {
