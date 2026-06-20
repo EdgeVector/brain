@@ -1,26 +1,6 @@
 # fbrain
 
-> ⚠️ **PROTOTYPE graduating into gbrain replacement**
->
-> This is the active prototype for the EdgeVector team-shared brain. The 2026-05-24 review reaffirmed: fbrain replaces gbrain for org deploys. Readiness-gate criteria are defined; **10 of 10 acceptance items are green or outstanding** — only the dogfood-shaped items remain (#5 mirror-flip 7-day, #8 rollback rehearsal). See [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the full ship-criteria contract, named outstanding items, and rollback. If the gate isn't green by **2026-08-23**, this repo gets an archive review per the same discipline applied to the four predecessor monorepo predecessors — see [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) Workstream B.
-
-A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Eight record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes** — with semantic search and a Phase 3 sharing probe.
-
-## Status
-
-| Phase | Description | Status |
-|---|---|---|
-| 0 | fold_db feasibility spike | ✅ GO (with canonical-hash caveat) — see [spike notes](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/spikes/fbrain-phase-0-spike-notes.md) |
-| 1 | Bootstrap + core CRUD (init, design new, task new, get, list, status, link) | ✅ Landed |
-| 2 | Search + doctor + raw passthrough + polish | ✅ Landed |
-| 3 | Sharing spike | ✅ Memo |
-| 5 | `fbrain delete` (soft, with verified semantics) | ✅ Landed |
-| 6 | Multi-type schemas (Concept / Preference / Reference / Agent / Project / Spike) + table-driven put dispatch | ✅ Landed |
-
-## Plans
-
-- [`FBRAIN_PROTOTYPE_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PROTOTYPE_PLAN.md) — this prototype (v0)
-- [`FBRAIN_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PLAN.md) — the 9–11 month production vision (separate from this prototype)
+A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Eight record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe.
 
 ## Prerequisites
 
@@ -516,6 +496,10 @@ The pair set lives at [`eval/retrieval/pairs.json`](eval/retrieval/pairs.json) �
 CI runs the harness as a **non-blocking** step (`continue-on-error: true`) — the build logs the numbers but doesn't fail on them. The runner self-skips when `~/.fbrain/config.json` is absent or the node is unreachable, so CI prints "skipping" today; once an ephemeral node is wired into CI the numbers will start flowing. TODO: once we have ≥7 days of runs, gate on a P@1 floor (see the G3b plan).
 
 A typical baseline reading against a polluted homebrew daemon (the H2 case the Phase 7 spike documents) hovers around P@1 ≈ 0.4 — most queries either rank the seeded record first or get drowned by phantom/orphan-schema fragments. That number is the artifact this harness exists to track.
+
+## Project status
+
+fbrain is a working prototype, not yet a 1.0. CRUD across all eight record types, multi-type schemas, semantic/hybrid retrieval (`search` + `ask`), soft delete, `doctor`, and the MCP agent surface are all shipped and exercised end to end. The remaining work is the G0 replacement-readiness gate (a dogfood-shaped checklist) — see [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the ship criteria and outstanding items. Until that gate ships, treat published binaries and APIs as unstable.
 
 ## Replacement direction
 
