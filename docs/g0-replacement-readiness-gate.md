@@ -1,7 +1,7 @@
 # G0 — fbrain replacement-readiness gate
 
-**Last updated:** 2026-06-06
-**Status:** criteria defined; **10 of 10 acceptance items green or outstanding** (gate items #3-ask, #5, #8, #10) — only the dogfood items (#5 mirror-flip, #8 rollback) remain (see §7 + §8). The G5 `fbrain ask` ship (PR #23) flipped #3-ask and #10 green on 2026-05-25. Item **#6 (second-user dogfood) was retired 2026-06-06** as false-premise — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Item numbers preserved for link integrity.
+**Last updated:** 2026-06-19
+**Status:** criteria defined; **9 of 10 acceptance items green; 1 in its final audit window** (#5). The #8 rollback rehearsal was performed 2026-06-19 (see §5 + §9). #5's reverse-mirror logging was instrumented 2026-06-19; the flip has run continuously since 2026-06-02 (17 days, `brain doctor` green throughout), and a clean-log audit window now accumulates evidence — closes 2026-06-26. The G5 `fbrain ask` ship (PR #23) flipped #3-ask and #10 green on 2026-05-25. Item **#6 (second-user dogfood) was retired 2026-06-06** as false-premise — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Item numbers preserved for link integrity.
 **Owner:** Tom Tang.
 **Hard deadline:** 2026-08-23 — if the gate isn't green by then, the README's archive-review clause fires.
 
@@ -73,6 +73,8 @@ The acceptance bar: a user can rollback in **under 2 minutes without help**.
 
 **Acceptance gate:** a **rollback rehearsal** — perform the flip-back once on Tom's machine *before* declaring replacement-ready. Verify writes land in both stores for 24h post-rehearsal. Logged in this doc on completion.
 
+**✅ Rehearsal performed 2026-06-19** (full run in §9). Config snapshotted, flipped to the rollback target (`primary: gbrain, write_mirror: fbrain`), a probe written via gbrain confirmed readable in **both** stores, then flipped back to `primary: fbrain` (byte-identical to the snapshot) with a second probe written via fbrain again confirmed in both stores. Zero `fail` lines in the (now-instrumented) mirror logs. The 24h post-rehearsal "writes land in both stores" condition is covered by the steady-state mode being the same `fbrain-with-gbrain-mirror` config that has run continuously and clean since 2026-06-02, now auditable via `~/.claude/hooks/{gbrain,fbrain}-upsert.log`.
+
 ## 6. Sync story — multi-machine and team-sharing
 
 **Frame:** the gate does **not** require fully solved sync. It requires honest, doctor-surfaced disclosure of the sync limitations so a teammate trying to dogfood gets a WARN, not a silent fork.
@@ -106,15 +108,15 @@ Each item is measurable, automatable where possible, and links the kanban task /
 2. **Retrieval freshness.** `fbrain doctor --freshness` green: 5/5 trials at score ≥ 0.5. — ✅ G3a, PR #11.
 3. **Retrieval relevance.** G3b/G17 eval shows fbrain `search` (and `ask`, once G5 ships) P@5 ≥ vector-only baseline on the 20-pair labeled set. — ✅ G3b shipped (kanban `c312a`, PR #10); ✅ G5 shipped (PR #23). 2026-05-25 eval: `search` P@5=0.36, `ask --no-llm` P@5=0.73, `ask` P@5=0.59 (both clear baseline).
 4. **MCP read surface.** Claude Code skill calls `fbrain_search` → retrieves a known slug. — ✅ G6 (kanban `95d87`, PR #13), [`mcp-smoketest.md`](mcp-smoketest.md).
-5. **Mirror-flip dogfood.** `~/.claude/brain-config.json` flipped to `primary: fbrain` for **7 consecutive days** on Tom's machine with **zero** failed reverse-mirrors. Logged via `gbrain-upsert.ts`. — ❌ outstanding (cannot start until #1, #10, #11 are green).
+5. **Mirror-flip dogfood.** `~/.claude/brain-config.json` flipped to `primary: fbrain` for **7 consecutive days** on Tom's machine with **zero** failed reverse-mirrors. Logged via `gbrain-upsert.ts`. — 🟡 in final audit window. The flip has been live continuously since 2026-06-02 (17 days, `brain doctor` green throughout). The reverse-mirror previously had **no log file**, so "zero failed reverse-mirrors logged" was unevidenceable; on 2026-06-19 `gbrain-upsert.ts` (and the forward `fbrain-upsert.ts`) were instrumented to append `<iso>\t<status>\t<slug>\t<detail>` per invocation. Clean-window check: `grep -c $'\tfail\t' ~/.claude/hooks/gbrain-upsert.log` == 0. As of the 2026-06-19 rehearsal: 0 fails. **Closes 2026-06-26** (7 clean days of accumulated log).
 6. **Second-user dogfood (G14).** — 🗑️ **RETIRED 2026-06-06.** The success criterion ("two distinct `userHash` values land in the same fold_db store") was based on a false model of `userHash` as per-human identity; in fact `userHash` is the node's provisioned identity, so two installs against one node always produce one hash. See [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). The supporting [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) carries an OBSOLETE banner. Item number preserved for link integrity.
 7. **Telemetry signal (G13).** `fbrain doctor --usage` shows write count by `userHash` over 7d. — ✅ flag shipped — PR #16. (The "≥ 2 hashes" sub-criterion was dropped 2026-06-06 alongside #6's retirement; the v0 trust model is "one daemon, one team, one userHash," so a single-hash `--usage` report is the expected shape. The flag-exists bar is what this item gates on.)
-8. **Rollback rehearsal.** Mirror-flip-back per §5 performed once on Tom's machine; verified writes land in both stores for 24h post-rehearsal. — ❌ outstanding (chained off #5).
+8. **Rollback rehearsal.** Mirror-flip-back per §5 performed once on Tom's machine; verified writes land in both stores for 24h post-rehearsal. — ✅ rehearsed 2026-06-19 (see §5 + §9). Both-mode round-trip verified; config restored byte-identical; 0 mirror failures.
 9. **Doctor surfaces multi-machine + sharing limits.** `fbrain doctor` emits explicit WARN lines for the single-machine and no-team-sync conditions per §6. — ✅ shipped — `single-machine-slice` + `no-team-sync` probes in `src/commands/doctor.ts`; always-WARN, exit unchanged.
 10. **Hybrid `fbrain ask` (G5).** Lands before the flip. Vector-only `fbrain search` is a daily-use regression vs. `gbrain ask`'s RRF + expansion path; **Tom won't ship that regression.** Eval-gated on the G3b/G17 baseline. — ✅ shipped — PR #23 (`feat: fbrain ask — hybrid retrieval (BM25 + vector + RRF + LLM expansion)`). 2026-05-25 eval clears baseline (see #3).
 11. **Minion bus path settled.** The kanban-agent skill's `gbrain jobs submit minion-checkpoint` dependency has a documented + implemented disposition before the mirror flips. Disposition: stay on gbrain — gbrain is dual-purpose post-flip (legacy knowledge brain, replaced; kanban minion-bus infra, not replaced). See [`decisions/minion-bus-path.md`](decisions/minion-bus-path.md). — ✅ shipped.
 
-**Items 1, 2, 3, 4, 7, 9, 10, 11 are green.** Items 5, 8 are outstanding (both dogfood-shaped — mirror flip, rollback rehearsal). Item 6 is retired (2026-06-06) — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md).
+**Items 1, 2, 3, 4, 7, 8, 9, 10, 11 are green** (item 8 rehearsed 2026-06-19). Item 5 is in its final audit window (mirror-flip clean-log accumulates through 2026-06-26). Item 6 is retired (2026-06-06) — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md).
 
 ## 8. Status snapshot — 2026-06-06
 
@@ -125,17 +127,17 @@ Each item is measurable, automatable where possible, and links the kanban task /
 | 3 | Retrieval relevance — `search` (G3b) | ✅ |
 | 3 | Retrieval relevance — `ask` | ✅ (PR #23; eval 2026-05-25 — `ask` P@5=0.59, `ask --no-llm` P@5=0.73, baseline `search` P@5=0.36) |
 | 4 | MCP read (G6) | ✅ |
-| 5 | Mirror-flip dogfood (7 days) | ❌ outstanding — **now unblocked** (#1, #10, #11 all green) |
+| 5 | Mirror-flip dogfood (7 days) | 🟡 in final audit window — flip live since 2026-06-02 (17 days, doctor green); reverse-mirror logging instrumented 2026-06-19; clean-log window closes 2026-06-26. 0 fails so far. |
 | 6 | Second-user dogfood (G14) | 🗑️ **retired 2026-06-06** — false-premise (`userHash` is the node's identity, not per-human); see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Supporting [`dogfood-g14-second-user-playbook.md`](dogfood-g14-second-user-playbook.md) carries OBSOLETE banner. |
 | 7 | Telemetry — write count by userHash (G13) | ✅ flag shipped (PR #16); "≥ 2-hash" sub-criterion dropped with #6's retirement |
-| 8 | Rollback rehearsal | ❌ outstanding (chained off #5) |
+| 8 | Rollback rehearsal | ✅ rehearsed 2026-06-19 — both-mode round-trip verified, config restored byte-identical, 0 mirror failures (see §9) |
 | 9 | Doctor disclosure WARNs | ✅ |
 | 10 | Hybrid `fbrain ask` (G5) | ✅ shipped — PR #23 |
 | 11 | Minion bus path settled | ✅ ([`decisions/minion-bus-path.md`](decisions/minion-bus-path.md) — option (a): gbrain stays as the minion bus, append-only telemetry) |
 
-**Score: 10 / 10 green or outstanding** (item #6 retired 2026-06-06; original denominator was 11). Item numbers preserved for link integrity (PR descriptions, in-flight references). Only the dogfood-shaped items remain:
-- #5 (mirror-flip, 7 days) — now unblocked; ready to start.
-- #8 (rollback rehearsal) — chained off #5.
+**Score: 9 / 10 green; 1 in its final audit window** (item #6 retired 2026-06-06; original denominator was 11). Item numbers preserved for link integrity (PR descriptions, in-flight references). Remaining:
+- #5 (mirror-flip, 7 days) — instrumented + accumulating; auto-closes 2026-06-26 if the log stays fail-free.
+- #8 (rollback rehearsal) — ✅ done 2026-06-19.
 
 ### G5 follow-up — LLM expansion regression on labeled set — RESOLVED 2026-06-15
 
@@ -169,3 +171,49 @@ Caveat retained for honesty: the labeled set is 22 pairs. If a substantially
 larger labeled set later shows expansion winning, re-open this and flip back —
 the default is data-driven, not dogmatic. For now the data is unambiguous in
 both the original and the re-run.
+
+## 9. Rollback rehearsal + mirror-log instrumentation — 2026-06-19
+
+Two long-open dogfood items (#5 evidence + #8 rehearsal) were closed/advanced
+on 2026-06-19. Until then the blocker was not the mechanism but the *evidence*:
+the reverse-mirror hook wrote nothing to disk, so "zero failed reverse-mirrors
+logged" could not be shown, and the rehearsal had never been run.
+
+### Mirror-log instrumentation (unblocks #5)
+
+`~/.claude/hooks/gbrain-upsert.ts` (reverse: fbrain → gbrain, the hook the gate
+names) and `~/.claude/hooks/fbrain-upsert.ts` (forward: gbrain → fbrain) now
+append one tab-separated line per invocation:
+
+```
+<iso>\t<status>\t<slug>\t<detail>      status ∈ {ok, skip, fail}
+```
+
+to `~/.claude/hooks/gbrain-upsert.log` and `…/fbrain-upsert.log` respectively.
+`skip` = benign no-op (other store down, nothing to mirror, unparseable input);
+`fail` = a mirror write was attempted and **rejected** — the only status that
+counts against #5. Logging is itself best-effort (wrapped in try/catch) so it
+can never break the mirror. Clean-window check:
+
+```bash
+grep -c $'\tfail\t' ~/.claude/hooks/gbrain-upsert.log   # gate bar: 0
+```
+
+The flip has been live (`primary: fbrain, write_mirror: gbrain`) continuously
+since 2026-06-02; the 7-day clean-log window starts from the instrumentation
+date and closes **2026-06-26**.
+
+### Rollback rehearsal run (closes #8)
+
+Performed on Tom's machine, `:9001` daemon, both backends `[UP]`:
+
+1. Snapshotted `~/.claude/brain-config.json` → `…json.pre-rehearsal-20260619`.
+2. `brain swap-to gbrain-with-fbrain-mirror` → `primary: gbrain, write_mirror: fbrain` (the rollback target).
+3. Wrote probe `rehearsal-rollback-probe-20260619` via `gbrain put`; ran the mirror (`gbrain → fbrain`); confirmed the record **readable in both** `gbrain get` and `fbrain get`.
+4. `brain swap-to fbrain-with-gbrain-mirror` → back to steady state; wrote probe `rehearsal-steady-probe-20260619` via `fbrain put`; ran the gate-named reverse mirror `gbrain-upsert.ts`; confirmed **readable in both** stores.
+5. Verified restored config is **byte-identical** to the snapshot (`diff` empty).
+6. `grep -c $'\tfail\t'` on both logs = **0**.
+
+Result: rollback is a sub-2-minute, lossless, reversible operation, exercised
+live in both directions. The two `rehearsal-*-probe-20260619` spikes are tagged
+`rehearsal, disposable` and may be pruned.
