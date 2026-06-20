@@ -23,6 +23,7 @@ import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { FbrainError, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES } from "../schemas.ts";
+import { establishConsentInline } from "../commands/init-consent.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
 // The complete agent-integration surface this server exposes — 4 read tools
@@ -58,9 +59,27 @@ export const FBRAIN_MCP_VERSION: string = getFbrainVersion();
 //                hint (see the tool runners) instead of a server that dies on startup.
 // Exactly one of the two is required; `cfg` is normalized to a `getCfg` thunk
 // internally so every tool handler resolves config through the same lazy path.
-export type CreateServerOptions =
+//
+// `autoGrant` is the ONLY non-config option: an injection seam for the cold-
+// capability self-warm path (see runWriteTool / attemptAutoGrant). Production
+// never sets it — the server uses the real `establishConsentInline` — but tests
+// drive the retry deterministically without standing up a node or enabling
+// enforcement (the unit suite runs with FBRAIN_APP_IDENTITY_ENFORCE=false, so
+// the real write path never reaches the consent throw). It is gated behind the
+// same opt-in env regardless, so wiring a stub can never auto-grant unless the
+// operator opted in.
+export type CreateServerOptions = (
   | { cfg: Config; getCfg?: undefined }
-  | { getCfg: () => Config; cfg?: undefined };
+  | { getCfg: () => Config; cfg?: undefined }
+) & {
+  /** Test-only override for the cold-capability self-warm grant. */
+  autoGrant?: AutoGrantFn;
+};
+
+// Performs a non-interactive consent grant against the configured node and
+// resolves true if it landed a capability, false otherwise. Wraps
+// `establishConsentInline(nonInteractiveGrant:true)` in production.
+export type AutoGrantFn = (cfg: Config) => Promise<boolean>;
 
 // Surfaced (as an `isError` tool result) when a tool is called on a server
 // that started without a usable config — the new-developer case where
@@ -229,6 +248,70 @@ const linkResultSchema = z.object({
   to_slug: z.string().describe("Target design slug."),
 });
 
+// ── Cold-capability self-warm (opt-in) ───────────────────────────────────
+// The MCP server is launched with FBRAIN_FORCE_FILE_KEYCHAIN=1, so it reads
+// its write capability from the file store (~/.fbrain/capabilities/), not the
+// OS keychain. `fbrain init --grant-consent` (the CLI default) warms only the
+// keychain, so the file store stays cold and every MCP write fast-fails with
+// `consent_required_non_interactive` ("No write capability is cached …"). The
+// validated manual fix is `FBRAIN_FORCE_FILE_KEYCHAIN=1 fbrain init
+// --grant-consent`, which warms the SAME file store the server reads.
+//
+// This self-warm path runs that grant automatically on the first cold-cache
+// write — BUT ONLY when the operator opted in via FBRAIN_MCP_AUTO_GRANT_CONSENT.
+// Security: auto-grant is no stronger than the owner running the grant by hand.
+// `establishConsentInline(nonInteractiveGrant:true)` reuses the exact same
+// machinery (`defaultRunFolddbGrant` shells out to `folddb consent grant
+// fbrain --yes`, then `acquireCapability` polls + stores), which still requires
+// an owner-local `folddb` on PATH and the node's master key to be available —
+// the grant fast-fails otherwise. We do NOT touch FBRAIN_APP_IDENTITY_ENFORCE.
+// The grant lands in the store `defaultCapabilityStore()` selects, which honors
+// FBRAIN_FORCE_FILE_KEYCHAIN — so it warms precisely the store the server reads.
+
+export const MCP_AUTO_GRANT_ENV = "FBRAIN_MCP_AUTO_GRANT_CONSENT";
+
+// Opt-in gate. Off unless the operator set the env to an affirmative value, so
+// the human consent gate is preserved by default — a cold-cache write
+// fast-fails cleanly (with the existing agentHint) exactly as before.
+export function mcpAutoGrantConsentEnabled(): boolean {
+  const raw = process.env[MCP_AUTO_GRANT_ENV];
+  if (raw === undefined) return false;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+// True only for the one error a cold file-store capability raises on the MCP
+// write path: `acquireCapability` fast-fails with this code when no capability
+// is cached and it can't request a grant non-interactively (capability.ts).
+function isColdCapabilityError(err: unknown): boolean {
+  return err instanceof FbrainError && err.code === "consent_required_non_interactive";
+}
+
+// Production auto-grant: drive the same non-interactive grant `fbrain init
+// --grant-consent` runs, against the configured node, writing into the store
+// `defaultCapabilityStore()` selects (honoring FBRAIN_FORCE_FILE_KEYCHAIN). On
+// any failure (folddb not on PATH, master key unavailable, denial, timeout) it
+// returns false so the original cold-capability error surfaces unchanged —
+// auto-grant never masks a genuine failure with a misleading message.
+async function defaultAutoGrant(cfg: Config): Promise<boolean> {
+  try {
+    const result = await establishConsentInline({
+      nodeUrl: cfg.nodeUrl,
+      userHash: cfg.userHash,
+      nonInteractiveGrant: true,
+      // Swallow the inline grant's human-oriented progress lines — the MCP
+      // channel surfaces only the tool result, and a failed grant falls
+      // through to the original error below.
+      print: () => {},
+    });
+    return result.state === "granted_inline" || result.state === "already_granted";
+  } catch {
+    // A genuine grant failure (denial/expiry/transport) — let the caller
+    // surface the original cold-capability error rather than this one.
+    return false;
+  }
+}
+
 export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   // Normalize both option shapes to a single lazy loader. When an eager `cfg`
   // is supplied it's wrapped in a thunk that just returns it, so the resolution
@@ -236,6 +319,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   // tests) or is deferred until first tool call (the `fbrain-mcp` bin, where
   // the server must start even with no config on disk).
   const getCfg: () => Config = opts.getCfg ?? (() => opts.cfg);
+  // The cold-capability self-warm grant. Default = the real inline grant;
+  // tests inject a stub. Either way it only runs when the operator opted in
+  // (mcpAutoGrantConsentEnabled) — see runWriteTool.
+  const autoGrant: AutoGrantFn = opts.autoGrant ?? defaultAutoGrant;
   const server = new McpServer({
     name: FBRAIN_MCP_NAME,
     version: FBRAIN_MCP_VERSION,
@@ -567,7 +654,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: putResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, async (cfg, print, onResult) => {
+      runWriteTool(getCfg, autoGrant, async (cfg, print, onResult) => {
         const input = buildPutInput(resolvePutBody(args));
         // Read-after-write confirmation for the agent loop. `putCmd` already
         // guarantees the row is record-list-visible (its own verify-read), AND
@@ -632,7 +719,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: deleteResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, (cfg, print, onResult) =>
+      runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
         deleteRecord({
           cfg,
           slug: args.slug,
@@ -677,7 +764,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: linkResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, async (cfg, print, onResult) => {
+      runWriteTool(getCfg, autoGrant, async (cfg, print, onResult) => {
         if (args.from_type !== "task" || args.to_type !== "design") {
           throw new FbrainError({
             code: "unsupported_link_pair",
@@ -885,13 +972,13 @@ async function runReadTool<P>(
 // is unchanged (`isError` + text, no structuredContent), exactly as before.
 async function runWriteTool(
   getCfg: () => Config,
+  autoGrant: AutoGrantFn,
   fn: (
     cfg: Config,
     print: (line: string) => void,
     onResult: (payload: Record<string, unknown>) => void,
   ) => Promise<void> | void,
 ): Promise<ToolResult> {
-  const lines: string[] = [];
   let cfg: Config;
   try {
     cfg = getCfg();
@@ -901,8 +988,13 @@ async function runWriteTool(
     }
     throw err;
   }
-  let structured: Record<string, unknown> | undefined;
-  try {
+
+  // One write attempt. Returns the ToolResult on success, or RE-THROWS on
+  // error so the caller can decide whether to self-warm + retry. Fresh sinks
+  // per attempt so a failed-then-retried write never double-prints.
+  const attempt = async (): Promise<ToolResult> => {
+    const lines: string[] = [];
+    let structured: Record<string, unknown> | undefined;
     await fn(
       cfg,
       (l) => lines.push(l),
@@ -910,12 +1002,36 @@ async function runWriteTool(
         structured = payload;
       },
     );
+    const result = textResult(lines.join("\n"));
+    if (structured !== undefined) result.structuredContent = structured;
+    return result;
+  };
+
+  try {
+    return await attempt();
   } catch (err) {
+    // Cold file-store capability self-warm. The server runs with
+    // FBRAIN_FORCE_FILE_KEYCHAIN=1, so `acquireCapability` fast-fails with
+    // `consent_required_non_interactive` when the file store has no cached
+    // capability (it can't request a grant non-interactively). When the
+    // operator opted in (FBRAIN_MCP_AUTO_GRANT_CONSENT), run the same grant
+    // `fbrain init --grant-consent` performs — into the SAME store this server
+    // reads (defaultCapabilityStore honors FBRAIN_FORCE_FILE_KEYCHAIN) — then
+    // retry the write ONCE. Without the opt-in, or if the grant doesn't land
+    // (no owner-local folddb / missing master key / denial), the original
+    // error surfaces unchanged: a clean fast-fail with the existing agentHint.
+    if (isColdCapabilityError(err) && mcpAutoGrantConsentEnabled()) {
+      const granted = await autoGrant(cfg);
+      if (granted) {
+        try {
+          return await attempt();
+        } catch (retryErr) {
+          return errorResult(retryErr);
+        }
+      }
+    }
     return errorResult(err);
   }
-  const result = textResult(lines.join("\n"));
-  if (structured !== undefined) result.structuredContent = structured;
-  return result;
 }
 
 function textResult(text: string): ToolResult {
