@@ -299,7 +299,7 @@ Phase 3 was a sharing spike: stand up two local fold_db nodes, walk every `/api/
 
 In short: the sharing **metadata** (ShareRule, ShareInvite, ShareSubscription) is fully wireable on loopback — two nodes with distinct identities can hand-deliver an invite and persist a subscription end-to-end. But the **data** never actually moves between nodes on a `--local --local-schema` spike, because fold_db's cross-node transport is the cloud sync engine (S3-backed, mediated by an Auth Lambda + discovery service), and the spike intentionally didn't sign in to it. Without authenticated transport, the "B cannot read an unshared record" negative test is moot — B can't read **any** of A's records, shared or not.
 
-**This is a sign-in gap, not a missing-infra gap.** Both halves of the transport are built and deployed: fold_db's sync engine ([`crates/core/src/sync/engine.rs`](https://github.com/EdgeVector/fold/blob/main/fold_db/crates/core/src/sync/engine.rs) — `local Sled → SyncEngine → Auth Lambda → S3`) and the exemem cloud stack ([`exemem-infra/lambdas/`](https://github.com/EdgeVector/exemem-infra/tree/main/lambdas) — auth, discovery, storage, etc., live in dev us-west-2 and prod us-east-1). The homebrew daemon at `:9001` reports `GET /api/sharing/exemem-status → {"connected": false}` because nobody has signed it in yet; the sync engine has somewhere to talk to as soon as a cloud session exists. See [`docs/cloud-signin-spike-plan.md`](docs/cloud-signin-spike-plan.md) for what it would take to light up the positive end-to-end test.
+**This is a sign-in gap, not a missing-infra gap.** Both halves of the transport are built and deployed: fold_db's sync engine (`fold_db/crates/core/src/sync/engine.rs` — `local Sled → SyncEngine → Auth Lambda → S3`) and the exemem cloud stack (`exemem-infra/lambdas/` — auth, discovery, storage, etc., live in dev us-west-2 and prod us-east-1). The homebrew daemon at `:9001` reports `GET /api/sharing/exemem-status → {"connected": false}` because nobody has signed it in yet; the sync engine has somewhere to talk to as soon as a cloud session exists. See [`docs/cloud-signin-spike-plan.md`](docs/cloud-signin-spike-plan.md) for what it would take to light up the positive end-to-end test.
 
 `fbrain share` is currently a placeholder: it prints a pointer to the memo and exits non-zero. A real implementation drives `POST /api/sharing/rules` + `POST /api/sharing/invite` + `POST /api/sharing/accept`, gated on `exemem-status.connected == true`.
 
@@ -307,7 +307,7 @@ Read [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) for the full
 
 ## Delete
 
-fold_db's mutation pipeline is documented as append-only — `MutationType::Delete` writes a sync-log marker but does not remove molecule entries on local storage. `POST /api/mutation` with `mutation_type=delete` therefore returns `{ok: true, success: true}` but the record is still present on every read path. **This is documented behavior, not a bug** (see fold_db's own [`apple_consolidation.rs:25-27`](https://github.com/EdgeVector/fold/blob/main/fold_db_node/src/fold_node/migrations/apple_consolidation.rs)).
+fold_db's mutation pipeline is documented as append-only — `MutationType::Delete` writes a sync-log marker but does not remove molecule entries on local storage. `POST /api/mutation` with `mutation_type=delete` therefore returns `{ok: true, success: true}` but the record is still present on every read path. **This is documented behavior, not a bug** (see fold_db's own `apple_consolidation.rs`).
 
 `fbrain delete` works around this at the fbrain layer:
 
@@ -425,7 +425,7 @@ The node binary is local — Sled storage, all reads/writes go through it. The
 schema service moved to two cloud Lambdas: prod is the default for daily use,
 dev is targeted by `fbrain init --schema-service-url <dev URL>` and the
 integration test harness. fbrain holds only the schemas, the CLI parsing, and
-the error-message layer. See [`FBRAIN_PROTOTYPE_PLAN.md`](https://github.com/EdgeVector/exemem-workspace/blob/main/docs/plans/FBRAIN_PROTOTYPE_PLAN.md) for the rationale.
+the error-message layer.
 
 Power users contributing to fold itself can still point at a worktree-local
 schema service with `--node-url` / `--schema-service-url` on `fbrain init`
