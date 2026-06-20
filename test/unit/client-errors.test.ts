@@ -45,6 +45,28 @@ describe("client error mapping", () => {
     expect(r.provisioned).toBe(false);
   });
 
+  test("node /api/health 200 → parses { ok, uptime_s, version }", async () => {
+    installMock([{ status: 200, body: { ok: true, uptime_s: 12, version: "0.14.1" } }]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
+    const h = await c.health();
+    expect(h).toEqual({ ok: true, uptime_s: 12, version: "0.14.1" });
+  });
+
+  test("node /api/health 200 without a version → version omitted (tolerate older nodes)", async () => {
+    installMock([{ status: 200, body: { ok: true, uptime_s: 7 } }]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
+    const h = await c.health();
+    expect(h.ok).toBe(true);
+    expect(h.uptime_s).toBe(7);
+    expect(h.version).toBeUndefined();
+  });
+
+  test("node /api/health non-200 → throws a FbrainError", async () => {
+    installMock([{ status: 500, body: { error: "boom" } }]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
+    await expect(c.health()).rejects.toBeInstanceOf(FbrainError);
+  });
+
   test("node 401 MISSING_USER_CONTEXT maps to missing_user_context", async () => {
     installMock([{ status: 401, body: { code: "MISSING_USER_CONTEXT", error: "MISSING_USER_CONTEXT" } }]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });

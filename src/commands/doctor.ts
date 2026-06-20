@@ -291,7 +291,22 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   try {
     const identity = await nodeClient.autoIdentity();
     nodeReachable = true;
-    checks.push({ name: "node-reachable", ok: true });
+    // Surface the connected node's folddb version on the node-reachable line —
+    // a developer can then spot a stale node (e.g. a 0.13.0 brew node bind-
+    // fighting the desktop app on :9001) without reaching for `curl`. This is
+    // best-effort and STRICTLY informational: a health-probe failure (older
+    // node with no /api/health, transient hiccup) must NOT flip node-reachable
+    // to FAIL — auto-identity already answered that the node is up — so we keep
+    // PASS and just omit the version, falling back to the node URL alone.
+    let nodeReachableDetail = cfg.nodeUrl;
+    try {
+      const health = await nodeClient.health();
+      if (health.version) nodeReachableDetail = `folddb ${health.version} @ ${cfg.nodeUrl}`;
+      verbose?.(`node health: version=${health.version ?? "—"}`);
+    } catch (err) {
+      verbose?.(`node health probe failed (non-fatal): ${errMsg(err)}`);
+    }
+    checks.push({ name: "node-reachable", ok: true, detail: nodeReachableDetail });
     verbose?.(`node-reachable: ok`);
     if (identity.provisioned) {
       provisioned = true;
