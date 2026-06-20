@@ -52,6 +52,7 @@ export const USAGE_ERROR = 2;
 // `validatePositiveIntFlag`, `parseRecordType`, and the per-command guards.
 export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "unknown_option",
+  "unknown_init_option",
   "node_url_is_init_only",
   "extra_positional_args",
   "unexpected_positional",
@@ -1059,6 +1060,31 @@ function suggestOption(
   return bestDist <= threshold ? best : undefined;
 }
 
+// Prefix-aware variant for `init`. The plain Levenshtein suggester above can't
+// recover `init`'s most important papercut: a new dev abbreviating `--node-url`
+// to `--node`. `node`→`node-url` is edit distance 4 (threshold 2 ⇒ rejected),
+// while `node`→`name` is distance 2 (⇒ wrongly suggested). So we first try a
+// prefix relationship — `--node` is a prefix of `--node-url`, `--schema-service`
+// a prefix of `--schema-service-url` — and only fall back to suggestOption when
+// no prefix match exists. When several known flags share the prefix we prefer
+// the shortest (closest abbreviation). The other direction (a known flag being
+// a prefix of a longer typo, e.g. `--node-urls`) is handled symmetrically.
+function suggestInitOption(
+  unknown: string,
+  knownKeys: readonly string[],
+): string | undefined {
+  if (unknown.length === 0) return undefined;
+  let best: string | undefined;
+  for (const k of knownKeys) {
+    if (k === unknown) continue;
+    if (k.startsWith(unknown) || unknown.startsWith(k)) {
+      if (best === undefined || k.length < best.length) best = k;
+    }
+  }
+  if (best !== undefined) return best;
+  return suggestOption(unknown, knownKeys);
+}
+
 // Single funnel for every non-init command's parseArgs. Wraps the call so a
 // muscle-memory `fbrain <cmd> --node-url <URL>` / `--schema-service-url <URL>`
 // (the user re-using the flag they learned at `init`) becomes an actionable
@@ -1247,13 +1273,58 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
 
 type Verbose = ((msg: string) => void) | undefined;
 
+// `init` deliberately does NOT route through parseCommandArgs (it's the one
+// command that legitimately accepts --node-url / --schema-service-url, which
+// that helper rejects). But it still owes a friendly unknown-option nudge: the
+// new-dev path's literal first command is often `fbrain init --node <url>`
+// (the obvious abbreviation of --node-url), and bare parseArgs dead-ends it
+// with `error: Unknown option '--node'` and no recovery. Catch
+// ERR_PARSE_ARGS_UNKNOWN_OPTION and upgrade it to a prefix-aware suggestion so
+// `--node`→`--node-url` and `--schema-service`→`--schema-service-url` resolve
+// (plain Levenshtein can't — see suggestInitOption). Exit code stays 2
+// (unknown_init_option is in USAGE_ERROR_CODES).
+function parseInitArgs(args: Argv) {
+  try {
+    return parseArgs({
+      args,
+      strict: true,
+      allowPositionals: false,
+      options: INIT_OPTIONS,
+    });
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
+    ) {
+      const knownKeys = Object.keys(INIT_OPTIONS);
+      const unknown = unknownOptionName(err, args, knownKeys);
+      if (unknown !== undefined) {
+        const suggestion = suggestInitOption(unknown, knownKeys);
+        if (suggestion !== undefined) {
+          throw new FbrainError({
+            code: "unknown_init_option",
+            message: `Unknown option \`--${unknown}\`. Did you mean \`--${suggestion}\`?`,
+            hint: `Run \`fbrain init --${suggestion} <value>\` (see \`fbrain help init\`).`,
+          });
+        }
+        const validOptions = knownKeys
+          .slice()
+          .sort()
+          .map((k) => `--${k}`)
+          .join(", ");
+        throw new FbrainError({
+          code: "unknown_init_option",
+          message: `Unknown option \`--${unknown}\`.`,
+          hint: `Valid options: ${validOptions}. Run \`fbrain help init\` for usage.`,
+        });
+      }
+    }
+    throw err;
+  }
+}
+
 async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
-  const { values } = parseArgs({
-    args,
-    strict: true,
-    allowPositionals: false,
-    options: INIT_OPTIONS,
-  });
+  const { values } = parseInitArgs(args);
   // Defaults are resolved inside runInit so it can auto-heal a stale config
   // (e.g. previously-baked `:9101 / :9102` URLs) without clobbering a user
   // override the next time `fbrain init` runs without flags.
