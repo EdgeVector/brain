@@ -108,7 +108,8 @@ The waiting command then unblocks and the write lands.
 ```bash
 # 3. drive it
 fbrain design new my-first-design --title "First design" --tag spike --body "the body that gets embedded"
-fbrain task new t1 --design my-first-design --title "first task"
+fbrain task new t1 --design my-first-design --title "first task" --body "what this task covers"
+# Note: omitting --body makes `<TYPE> new` read the body from stdin — supply --body, end stdin with Ctrl-D, or set FBRAIN_NO_STDIN=1 to skip it.
 
 # Or pipe a markdown note with frontmatter (idempotent upsert — re-put updates in place):
 cat <<'NOTE' | fbrain put my-second-design
@@ -183,8 +184,8 @@ Every type has an ergonomic `<type> new` verb:
 
 ```bash
 fbrain concept new idempotency --title "Idempotency" --body "mutations are keyed by canonical hash"
-fbrain preference new no-emojis --title "No emojis in code"
-fbrain spike new vectors-eval --title "Evaluating vector ranker quality"
+fbrain preference new no-emojis --title "No emojis in code" --body "keep code comment-free of emojis"
+fbrain spike new vectors-eval --title "Evaluating vector ranker quality" --body "measure ranker precision/recall"
 # …same shape for reference / agent / project / spike
 ```
 
