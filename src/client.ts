@@ -1326,16 +1326,18 @@ export function defaultIsFolddbBinaryInstalled(): boolean {
 }
 
 // "Your node isn't reachable — start it" guidance. A downloaded user — port
-// `:9001` OR the prebuilt `folddb` binary on PATH — gets the Homebrew action
-// first; the from-source `./run.sh` + "compiling Rust" framing is only right
-// when the user has no prebuilt binary (a genuine fold contributor running
-// from source against a custom port).
+// `:9001` OR the prebuilt `folddb` binary on PATH — gets a combined Homebrew
+// install+start line first (`brew install` no-ops if already installed, so the
+// same line covers both the never-installed and forgot-to-start dev); the
+// from-source `./run.sh` + "compiling Rust" framing is only right when the user
+// has no prebuilt binary (a genuine fold contributor running from source
+// against a custom port).
 export function nodeDownHint(
   url: string,
   isFolddbBinaryInstalled: () => boolean = defaultIsFolddbBinaryInstalled,
 ): string {
   if (isDefaultNodeUrl(url) || isFolddbBinaryInstalled()) {
-    return "Start it: `brew services start folddb` (or `brew services restart folddb` after a `brew upgrade`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
+    return "Install + start it: `brew install edgevector/folddb/folddb && brew services start folddb` (already installed? `brew services restart folddb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
   }
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
 }

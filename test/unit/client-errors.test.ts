@@ -257,6 +257,10 @@ describe("client error mapping", () => {
     // is detected — pin the binary probe to `false` so the assertion holds
     // even on hosts that don't have `folddb` on PATH.
     const hint = nodeDownHint("http://127.0.0.1:9001", () => false);
+    // The hint must lead with a combined, copy-pasteable install+start line so
+    // a brand-new dev who never ran `brew install` (the common case) doesn't
+    // dead-end on `Error: Formula 'folddb' is not installed.`.
+    expect(hint).toContain("brew install edgevector/folddb/folddb");
     expect(hint).toContain("brew services start folddb");
     // The from-source path is still mentioned, but only as the secondary
     // contributor note — it must not lead.
@@ -279,6 +283,7 @@ describe("client error mapping", () => {
   test("node-down hint leads with `brew services` for a non-9001 port when the prebuilt binary is on PATH", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9050")).toBe(false);
     const hint = nodeDownHint("http://127.0.0.1:9050", () => true);
+    expect(hint).toContain("brew install edgevector/folddb/folddb");
     expect(hint).toContain("brew services start folddb");
     expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
     expect(hint).not.toContain("compiles Rust");
