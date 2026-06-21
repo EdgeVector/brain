@@ -22,7 +22,7 @@ import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
-import { deleteRecord } from "./commands/delete.ts";
+import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import {
@@ -441,31 +441,46 @@ end-to-end on loopback, but no records actually move between nodes until
 the daemon authenticates against the cloud and an end-to-end test passes.
 
 Prints a notice and exits 1.`,
-  delete: `fbrain delete <slug> [--type T] [--force] [--yes] [--json]
+  delete: `fbrain delete <slug> [--type T] [--force] [--json]
+fbrain delete --tag T [--type T] [--status S] [--yes] [--force] [--json]
 
-Soft-deletes the record. fold_db's mutation pipeline is append-only, so
-the workaround overwrites every user field with sentinels and stamps a
-tombstone tag. All fbrain read paths
-(get, list, status, link, search) then filter the record out.
+Soft-deletes records. fold_db's mutation pipeline is append-only, so the
+workaround overwrites every user field with sentinels and stamps a
+tombstone tag. All fbrain read paths (get, list, status, link, search)
+then filter the record out.
 
+SINGLE-SLUG mode — \`fbrain delete <slug>\`:
 Without --type, queries every registered schema; errors with "specify
 --type" if the slug exists in more than one type. Errors with
 "No <type>: <slug>" if the slug is already deleted or never existed.
 
+FILTER (bulk) mode — \`fbrain delete --tag T [--type T] [--status S]\`:
+Soft-deletes EVERY live record matching the filter — the SAME
+--tag/--type/--status selectors \`fbrain list\` accepts. DRY-RUN BY
+DEFAULT: it prints the records that WOULD be deleted (type · slug ·
+title) plus a count and exits WITHOUT mutating. Re-run with --yes to
+actually delete. A bare \`fbrain delete\` (no slug AND no filter) is
+refused — it would otherwise select everything.
+
 Deleting a design that still has live tasks linked to it is blocked
 (symmetric with \`task new --design\` / \`link\` rejecting a dangling
-design). Re-link or delete those tasks first, or pass --force to delete
-anyway — the tasks' design references are then left dangling.
+design). In single-slug mode this is a hard error; in filter mode the
+linked design is skipped+warned (the batch continues). Pass --force to
+delete anyway — the tasks' design references are then left dangling.
 
   --type      design | task | concept | preference | reference | agent | project | spike
+  --tag T     filter mode: delete every live record carrying tag T
+  --status S  filter mode: additionally require status S
   --force     delete a design even if live tasks still link to it
-  --yes, -y   harmless no-op; delete is non-interactive so no confirmation
-              prompt is shown. Accepted so scripts can pass \`-y\` uniformly.
-  --json      emit \`{ok, slug, deleted}\` on stdout; the human \`deleted …\` line
-              moves to stderr so \`--json\` stdout is always parseable. On
-              failure a \`{error, hint}\` JSON object is emitted to stdout too.
+  --yes, -y   filter mode: confirm the batch delete (without it, dry-run
+              preview). Single-slug delete is non-interactive, so -y is a
+              harmless no-op there (accepted so scripts can pass it uniformly).
+  --json      single-slug: emit \`{ok, slug, deleted}\`. Filter mode: emit
+              \`{ok, deleted: [{type, slug}], dryRun}\`. Both on stdout; the
+              human lines move to stderr so \`--json\` stdout is always
+              parseable. On failure a \`{error, hint}\` JSON object is emitted too.
 
-After delete, the slug is reusable: \`fbrain design new <same-slug>\` (no
+After delete, a slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
   reindex: `fbrain reindex [--type T] [--dry-run] [--repair-titles]
 
@@ -698,12 +713,19 @@ const DOCTOR_OPTIONS = {
 } as const;
 const DELETE_OPTIONS = {
   type: { type: "string" },
+  // Filter-mode (bulk) selectors — the SAME `--status`/`--tag` `fbrain list`
+  // accepts. With no positional <slug>, a delete carrying any of
+  // --tag/--type/--status switches to filter mode: soft-delete every live
+  // record matching the filter, dry-run by default (`--yes` to apply).
+  status: { type: "string" },
+  tag: { type: "string" },
   force: { type: "boolean", default: false },
-  // `--yes` / `-y` is a documented no-op. delete is non-interactive (no
-  // confirmation prompt), but apt / npm / rm muscle memory reaches for
-  // `-y` to suppress one — and a script that uniformly passes `-y` to
-  // destructive commands shouldn't dead-end on parseArgs's bare
-  // "Unknown option '--yes'". Accept it silently so the invocation works.
+  // `--yes` / `-y`: in FILTER mode it is the confirmation that flips the
+  // dry-run preview into an actual batch delete. In SINGLE-SLUG mode it stays
+  // a harmless no-op — single delete is non-interactive (no confirmation
+  // prompt), but apt / npm / rm muscle memory reaches for `-y` to suppress
+  // one, and a script that uniformly passes `-y` shouldn't dead-end on
+  // parseArgs's "Unknown option '--yes'". Accepted in both modes.
   yes: { type: "boolean", short: "y", default: false },
   // Machine-readable mode: emit a `{ok,slug,deleted}` success object on
   // stdout; the human `deleted …` line moves to stderr. See
@@ -2077,9 +2099,47 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
     "delete",
   );
   const slug = positionals[0];
+  const type = parseRecordType(values.type);
+  // Filter mode is selected by ANY of the list-style selectors --tag/--status
+  // (--type alone keeps working with a single slug, as it always has). It is an
+  // ALTERNATIVE to a positional slug: a slug AND --tag/--status together is a
+  // contradiction we reject loudly rather than guess at.
+  const hasFilter = values.tag !== undefined || values.status !== undefined;
+
   if (!slug) {
-    console.error(COMMAND_HELP.delete);
-    return USAGE_ERROR;
+    // No positional slug. With a filter → filter (bulk) mode. With none →
+    // the empty/unbounded invocation: refuse to "select everything", and
+    // print the usage so the user sees both forms.
+    if (!hasFilter && type === undefined) {
+      console.error(COMMAND_HELP.delete);
+      return USAGE_ERROR;
+    }
+    const cfg = readConfig();
+    const fOpts: Parameters<typeof deleteByFilter>[0] = { cfg, verbose };
+    if (type) fOpts.type = type;
+    if (values.status !== undefined) fOpts.status = values.status;
+    if (values.tag !== undefined) fOpts.tag = values.tag;
+    if (values.force) fOpts.force = true;
+    if (values.yes) fOpts.yes = true;
+    // Under --json the structured batch object is the stdout document; the
+    // human preview/progress lines move to stderr so stdout stays parseable.
+    if (values.json) {
+      fOpts.print = (line: string) => console.error(line);
+      fOpts.onResult = (payload) => console.log(JSON.stringify(payload));
+    }
+    await deleteByFilter(fOpts);
+    return 0;
+  }
+
+  // A slug was given — single-slug mode, 100% unchanged. The filter selectors
+  // are filter-mode-only; mixing them with a slug is a usage error (we don't
+  // silently ignore them on a destructive command).
+  if (hasFilter) {
+    throw new FbrainError({
+      code: "slug_and_filter",
+      message: `delete takes EITHER a <slug> OR filter selectors (--tag/--status), not both (got slug "${slug}" with a filter).`,
+      hint: "Delete one record with `fbrain delete <slug>`, or bulk-delete with `fbrain delete --tag T [--type T] [--status S] --yes` (no slug).",
+    });
   }
   // `fbrain delete <slug>` accepts exactly one positional. Without this
   // check, extra positionals were silently dropped: `fbrain delete slug1
@@ -2091,10 +2151,9 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
     throw new FbrainError({
       code: "extra_positional_args",
       message: `delete takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain delete <slug>` once per record; bulk delete is not supported.",
+      hint: "Run `fbrain delete <slug>` once per record, or bulk-delete with `fbrain delete --tag T --yes`.",
     });
   }
-  const type = parseRecordType(values.type);
   const cfg = readConfig();
   const dOpts: Parameters<typeof deleteRecord>[0] = { cfg, slug, verbose };
   if (type) dOpts.type = type;
