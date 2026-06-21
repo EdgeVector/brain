@@ -19,7 +19,7 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsFolddbProcessRunning, defaultNodeUrlFromBreadcrumb, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsFolddbProcessRunning, defaultNodeUrlFromBreadcrumb, resolveNodeHome, type Verbose } from "../client.ts";
 import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -185,8 +185,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (opts.nodeUrl) {
     nodeUrlSource = "from --node-url";
   } else if (resolved.nodeUrlFromBreadcrumb) {
-    const breadcrumbHome = process.env.FOLDDB_HOME ?? "~/.folddb";
-    nodeUrlSource = `from ${breadcrumbHome}/port`;
+    nodeUrlSource = `from ${resolveNodeHome()}/port`;
   } else if (existing) {
     nodeUrlSource = `from ${configPath}`;
   } else {
