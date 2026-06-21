@@ -190,3 +190,57 @@ export function formatRecord(
   }
   return lines.join("\n");
 }
+
+// Re-render a record's human text from a `RecordJson` (the structured shape),
+// substituting `body` with a possibly-windowed slice and appending a visible
+// truncation note when the window doesn't cover the whole body. Used by the
+// MCP `fbrain_get` handler, which caps the body it returns so a large record
+// can't overflow the agent harness token budget. The header/metadata lines are
+// rendered identically to `formatRecord` (so the two surfaces stay in sync),
+// but driven off `RecordJson` because that is the only shape the MCP handler
+// holds after `getRecord`'s structured sink fires. The CLI `fbrain get` does
+// NOT use this — a terminal has no token cap — so its output is unaffected.
+export function formatRecordJsonWindow(
+  json: RecordJson,
+  window: { body: string; offset: number; total: number; truncated: boolean },
+): string {
+  const lines = [
+    `[${json.type}] ${json.slug}`,
+    `title:      ${json.title}`,
+    `status:     ${json.status}`,
+    `tags:       ${json.tags.length === 0 ? "(none)" : json.tags.join(", ")}`,
+  ];
+  if (json.design_slug !== undefined) {
+    const hasDesign = json.design_slug.length > 0;
+    const designValue = hasDesign
+      ? `${json.design_slug}${json.design_missing ? " (deleted)" : ""}`
+      : "(none)";
+    lines.push(`design:     ${designValue}`);
+  }
+  if (json.type === "design" && json.children !== undefined) {
+    if (json.children.length === 0) {
+      lines.push("tasks:      (none)");
+    } else {
+      const rendered = json.children
+        .map((t) => `${t.slug} (${t.status})`)
+        .join(", ");
+      lines.push(`tasks:      ${rendered}`);
+    }
+  }
+  lines.push(`created_at: ${json.created_at}`);
+  lines.push(`updated_at: ${json.updated_at}`);
+  if (window.total > 0) {
+    lines.push("---");
+    lines.push(window.body);
+    if (window.truncated || window.offset > 0) {
+      const shownEnd = window.offset + window.body.length;
+      lines.push(
+        `… [body truncated: showing chars ${window.offset}–${shownEnd} of ${window.total}` +
+          (window.truncated
+            ? `; re-call fbrain_get with body_offset=${shownEnd} for more]`
+            : ` (end of body)]`),
+      );
+    }
+  }
+  return lines.join("\n");
+}
