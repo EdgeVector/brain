@@ -12,9 +12,11 @@ import { z } from "zod";
 import pkg from "../../package.json" with { type: "json" };
 import {
   buildPutInput,
+  bodyWindow,
   CONFIG_MISSING_HINT,
   createFbrainMcpServer,
   DROPPED_INPUT_HINT,
+  FBRAIN_GET_BODY_LIMIT_DEFAULT,
   FBRAIN_MCP_VERSION,
   MCP_AUTO_GRANT_ENV,
   mcpAutoGrantConsentEnabled,
@@ -570,6 +572,150 @@ describe("fbrain_get tool", () => {
     expect(text).toContain("exists in multiple schemas");
     expect(text).not.toContain("--type");
     expect(text).toContain("Specify a `type`");
+  });
+
+  // ── Body pagination (large-record token-budget guard) ──────────────────
+  // A record whose body exceeds the harness token budget used to fail
+  // `fbrain_get` outright ("result (N characters) exceeds maximum allowed
+  // tokens") — zero usable content. The tool now returns a bounded body
+  // window + pagination metadata so an agent can always read big records.
+
+  // Build a record row with a body of exactly `len` distinct-ish chars so a
+  // window can be checked for the right slice. Returns the row + the full body.
+  function bigBodyRow(slug: string, len: number) {
+    // A repeating 0–9 pattern: position i in a window == the global offset's
+    // ones digit, so a windowed slice is verifiable without holding the body.
+    const body = Array.from({ length: len }, (_, i) => String(i % 10)).join("");
+    return { row: recordRow(slug, `T-${slug}`, body), body };
+  }
+
+  function installSingleGet(row: ReturnType<typeof recordRow>) {
+    let n = 0;
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        n += 1;
+        return n === 1
+          ? { status: 200, body: { ok: true, results: [row] } }
+          : { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+  }
+
+  test("a body over the cap is windowed with bodyTruncated + pagination metadata", async () => {
+    const total = FBRAIN_GET_BODY_LIMIT_DEFAULT + 12_345;
+    const { row, body } = bigBodyRow("huge", total);
+    installSingleGet(row);
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_get!({ slug: "huge", type: "design" });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    // Body in the result is the HEAD window, not the whole body.
+    expect((sc.body as string).length).toBe(FBRAIN_GET_BODY_LIMIT_DEFAULT);
+    expect(sc.body).toBe(body.slice(0, FBRAIN_GET_BODY_LIMIT_DEFAULT));
+    expect(sc.bodyTotalChars).toBe(total);
+    expect(sc.bodyOffset).toBe(0);
+    expect(sc.bodyTruncated).toBe(true);
+    expect(sc.bodyNextOffset).toBe(FBRAIN_GET_BODY_LIMIT_DEFAULT);
+    // The text rendering surfaces the truncation note with how to page.
+    expect(res.content[0]!.text).toContain("[body truncated");
+    expect(res.content[0]!.text).toContain(
+      `body_offset=${FBRAIN_GET_BODY_LIMIT_DEFAULT}`,
+    );
+    // structuredContent still validates against the declared outputSchema.
+    const schema = outputSchemaOf(server, "fbrain_get")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("body_offset pages through a large body to the end (bodyNextOffset null at the tail)", async () => {
+    const limit = 40; // small cap to walk a body in a few hops
+    const total = 100; // 3 windows: [0,40) [40,80) [80,100)
+    const { row, body } = bigBodyRow("walk", total);
+
+    // Window 1: head.
+    installSingleGet(row);
+    let server = createFbrainMcpServer({ cfg });
+    let res = await toolsOf(server).fbrain_get!({
+      slug: "walk",
+      type: "design",
+      body_limit: limit,
+    });
+    let sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.body).toBe(body.slice(0, 40));
+    expect(sc.bodyTruncated).toBe(true);
+    expect(sc.bodyNextOffset).toBe(40);
+
+    // Window 2: middle (offset from the previous bodyNextOffset).
+    installSingleGet(row);
+    server = createFbrainMcpServer({ cfg });
+    res = await toolsOf(server).fbrain_get!({
+      slug: "walk",
+      type: "design",
+      body_offset: 40,
+      body_limit: limit,
+    });
+    sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.body).toBe(body.slice(40, 80));
+    expect(sc.bodyOffset).toBe(40);
+    expect(sc.bodyTruncated).toBe(true);
+    expect(sc.bodyNextOffset).toBe(80);
+
+    // Window 3: tail — fewer than `limit` chars remain, so it ends the walk.
+    installSingleGet(row);
+    server = createFbrainMcpServer({ cfg });
+    res = await toolsOf(server).fbrain_get!({
+      slug: "walk",
+      type: "design",
+      body_offset: 80,
+      body_limit: limit,
+    });
+    sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.body).toBe(body.slice(80, 100));
+    expect(sc.bodyOffset).toBe(80);
+    // A non-zero offset is itself a window even when it reaches the end, so
+    // the fields are present — but truncated is false and next is null.
+    expect(sc.bodyTruncated).toBe(false);
+    expect(sc.bodyNextOffset).toBeNull();
+    expect(res.content[0]!.text).toContain("(end of body)");
+  });
+
+  test("a small body returns unchanged — no window fields, body intact", async () => {
+    // The common case must be byte-for-byte identical to the pre-pagination
+    // result: full body, and NONE of the bodyTotalChars/bodyOffset/
+    // bodyTruncated/bodyNextOffset fields present.
+    installSingleGet(recordRow("small", "Small", "a short body"));
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_get!({ slug: "small", type: "design" });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.body).toBe("a short body");
+    expect("bodyTotalChars" in sc).toBe(false);
+    expect("bodyOffset" in sc).toBe(false);
+    expect("bodyTruncated" in sc).toBe(false);
+    expect("bodyNextOffset" in sc).toBe(false);
+    expect(res.content[0]!.text).not.toContain("[body truncated");
+    // Text rendering matches the pre-pagination header/metadata/body shape.
+    expect(res.content[0]!.text).toContain("[design] small");
+    expect(res.content[0]!.text).toContain("a short body");
+  });
+});
+
+describe("bodyWindow helper", () => {
+  test("body within the limit at offset 0 is a single, non-windowed read", () => {
+    const w = bodyWindow(100, 0, 200);
+    expect(w).toEqual({ start: 0, end: 100, truncated: false, next: null, windowed: false });
+  });
+  test("body over the limit truncates and reports the next offset", () => {
+    const w = bodyWindow(250, 0, 100);
+    expect(w).toEqual({ start: 0, end: 100, truncated: true, next: 100, windowed: true });
+  });
+  test("a non-zero offset is a window even when it reaches the end", () => {
+    const w = bodyWindow(100, 60, 100);
+    expect(w).toEqual({ start: 60, end: 100, truncated: false, next: null, windowed: true });
+  });
+  test("an over-large offset clamps to an empty tail window (no negative slice)", () => {
+    const w = bodyWindow(100, 500, 40);
+    expect(w).toEqual({ start: 100, end: 100, truncated: false, next: null, windowed: true });
   });
 });
 

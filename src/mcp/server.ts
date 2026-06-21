@@ -16,7 +16,7 @@ import { getFbrainVersion } from "../version.ts";
 import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.ts";
 import { searchCmd, type SearchHitJson } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
-import { getRecord, type RecordJson } from "../commands/get.ts";
+import { getRecord, formatRecordJsonWindow, type RecordJson } from "../commands/get.ts";
 import { listCmd, type RecordSummary } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
@@ -108,6 +108,39 @@ export const DROPPED_INPUT_HINT =
   "dropped), or via the CLI `fbrain put <slug> --type <type> < body.md`, or " +
   "split the write into smaller records.";
 
+// Default char cap on the body a single `fbrain_get` returns. A record body
+// counts toward the agent harness's tool-result token budget twice over (the
+// human text block AND the `structuredContent` body), and a large note can be
+// huge — the live repro was a 186,356-char project tracker (~47K tokens) that
+// overflowed the budget outright, so `fbrain_get` returned a hard error and
+// ZERO usable content. 40,000 chars is ~10K tokens, comfortably under the
+// limit even counted twice, and big enough that almost every record fits in
+// one window. Bodies at or under this cap (with offset 0) are returned whole
+// and unchanged. Overridable per-call via the `body_limit` input.
+export const FBRAIN_GET_BODY_LIMIT_DEFAULT = 40_000;
+
+// Compute the body window for one `fbrain_get` call and the pagination
+// metadata that tells the agent whether more remains. `offset`/`limit` are the
+// (already-validated) request values; `total` is the full body length.
+// Returns `truncated: false` with `next: null` for the common single-window
+// case (the caller then OMITS the window fields entirely, preserving the
+// pre-pagination result shape byte-for-byte). A window is "applied" whenever
+// the body doesn't fit from `offset` in one `limit`-sized slice, OR a non-zero
+// `offset` was requested (paging into a record is itself a windowed read).
+export function bodyWindow(
+  total: number,
+  offset: number,
+  limit: number,
+): { start: number; end: number; truncated: boolean; next: number | null; windowed: boolean } {
+  // Clamp the start into [0, total] so an over-large offset returns an empty
+  // tail window (end-of-body) rather than a negative slice.
+  const start = Math.min(Math.max(offset, 0), total);
+  const end = Math.min(start + limit, total);
+  const truncated = end < total;
+  const windowed = truncated || start > 0;
+  return { start, end, truncated, next: truncated ? end : null, windowed };
+}
+
 // ── Output schemas for the read tools ────────────────────────────────────
 // Each read tool declares an `outputSchema` describing the typed JSON it
 // returns in `structuredContent`, so an MCP client gets fields back instead
@@ -187,7 +220,48 @@ const recordSchema = z.object({
     .describe("Child task summaries — only present for type=design."),
   created_at: z.string().describe("ISO-8601 creation timestamp."),
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),
-  body: z.string().describe("Markdown body."),
+  body: z
+    .string()
+    .describe(
+      "Markdown body. May be a WINDOW of the full body when it exceeds the char cap — see `bodyTruncated`/`bodyTotalChars`/`bodyNextOffset` (and the `[body truncated …]` note in the text rendering). Page to the rest by re-calling fbrain_get with `body_offset`.",
+    ),
+  // ── Body-pagination window fields ──────────────────────────────────────
+  // `fbrain_get` caps how much of a record's body it returns in one call so a
+  // large note (a 186K-char project tracker is ~47K tokens) can't overflow the
+  // agent harness's tool-result token budget. When the body fits in one window
+  // (≤ cap and offset 0) these fields are OMITTED entirely — the result is
+  // byte-for-byte the pre-pagination shape, no regression for the common case.
+  // They appear only when a window was applied (or a non-zero `body_offset`
+  // was requested), and the `body` above is then the sliced window, not the
+  // whole body.
+  bodyTotalChars: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "Total length of the FULL body in characters (the window in `body` may be shorter). Present only when the body was windowed.",
+    ),
+  bodyOffset: z
+    .number()
+    .int()
+    .optional()
+    .describe(
+      "Character offset into the full body where the returned `body` window starts. Present only when the body was windowed.",
+    ),
+  bodyTruncated: z
+    .boolean()
+    .optional()
+    .describe(
+      "True when `body` is a partial window of a larger body (more remains past this window). Present only when the body was windowed; absent (treat as false) for a single-window record.",
+    ),
+  bodyNextOffset: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe(
+      "The `body_offset` to pass on the next fbrain_get call to read the following window; `null` when this window reaches the end of the body. Present only when the body was windowed.",
+    ),
 });
 
 // ── Output schemas for the write tools ───────────────────────────────────
@@ -482,7 +556,15 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "(plus optional `type`) — there is no `query`/`key`/`id` argument; for " +
         "text or fuzzy lookup use `fbrain_search` instead. Without `type`, " +
         "queries every registered schema and errors if the slug exists in " +
-        "multiple types.",
+        "multiple types. Large bodies are PAGINATED: the body is capped at " +
+        `~${FBRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")} chars per ` +
+        "call so a big record (a long design/project note) can't overflow the " +
+        "tool-result token budget. When the body is windowed the result carries " +
+        "`bodyTruncated=true`, `bodyTotalChars`, `bodyOffset`, and `bodyNextOffset` " +
+        "(and a `[body truncated …]` note in the text); read the rest by re-calling " +
+        "fbrain_get with `body_offset` set to the previous `bodyNextOffset` (repeat " +
+        "until `bodyNextOffset` is null). `body_limit` overrides the per-call cap. " +
+        "A record that fits in one window returns unchanged (no window fields).",
       inputSchema: {
         slug: requiredText("Record slug."),
         type: typeEnum
@@ -490,26 +572,37 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "Restrict lookup to one record type. Omit to search all types.",
           ),
+        body_offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            "Character offset into the body to start the returned window at (default 0 = body head). Set to a prior response's `bodyNextOffset` to page to the next window of a large body.",
+          ),
+        body_limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe(
+            `Max body characters to return in this call (default ~${FBRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")}, ~10K tokens). Lower it to stay further under the token budget; the metadata + non-body fields are always returned.`,
+          ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       // `structuredContent` is the single record object (the SAME shape the
-      // CLI `get --json` emits). Unlike the array tools there's nothing to
-      // wrap — the record is already an object.
+      // CLI `get --json` emits, plus the optional body-window fields). Unlike
+      // the array tools there's nothing to wrap — the record is already an
+      // object.
       outputSchema: recordSchema.shape,
     },
     (args) =>
-      runReadTool<RecordJson>(
-        getCfg,
-        (cfg, print, onResult) =>
-          getRecord({
-            cfg,
-            slug: args.slug,
-            print,
-            type: args.type,
-            onResult,
-          }),
-        (record) => record as unknown as Record<string, unknown>,
-      ),
+      runGetTool(getCfg, {
+        slug: args.slug,
+        type: args.type,
+        bodyOffset: args.body_offset ?? 0,
+        bodyLimit: args.body_limit ?? FBRAIN_GET_BODY_LIMIT_DEFAULT,
+      }),
   );
 
   server.registerTool(
@@ -959,6 +1052,84 @@ async function runReadTool<P>(
   }
   const result = textResult(lines.join("\n"));
   if (structured !== undefined) result.structuredContent = structured;
+  return result;
+}
+
+// `fbrain_get` runner — a body-paginating variant of `runReadTool`. It can't
+// reuse `runReadTool` because the body must be WINDOWED before it reaches both
+// the text content AND the `structuredContent` body (both count toward the
+// agent harness token budget; the live overflow was a 186K-char record). So
+// instead of streaming `getRecord`'s printed text straight through, it captures
+// the structured `RecordJson` via `onResult`, slices the body to the requested
+// window, re-renders the human text from the windowed record, and attaches the
+// windowed structured object plus the pagination metadata. A body that fits in
+// one window (≤ cap, offset 0) yields the SAME shape as before — no window
+// fields, byte-identical text — so the common case is unchanged. `getRecord`
+// itself is untouched (the CLI `fbrain get` has no cap).
+async function runGetTool(
+  getCfg: () => Config,
+  args: { slug: string; type?: RecordJson["type"]; bodyOffset: number; bodyLimit: number },
+): Promise<ToolResult> {
+  let cfg: Config;
+  try {
+    cfg = getCfg();
+  } catch (err) {
+    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
+      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
+    }
+    throw err;
+  }
+  let record: RecordJson | undefined;
+  try {
+    await getRecord({
+      cfg,
+      slug: args.slug,
+      type: args.type,
+      // Drop `getRecord`'s human text — we re-render it from the windowed
+      // record below so the body shown matches the windowed structuredContent.
+      print: () => {},
+      onResult: (payload) => {
+        record = payload;
+      },
+    });
+  } catch (err) {
+    // Unknown/ambiguous slug throws before onResult: same error envelope as
+    // any read tool, no structuredContent — unchanged from the old path.
+    return errorResult(err);
+  }
+  // Defensive: a successful resolve always fires onResult, but if it somehow
+  // didn't, fall back to the error envelope rather than emitting a partial.
+  if (record === undefined) {
+    return errorResult(new Error("fbrain_get: no record resolved"));
+  }
+
+  const fullBody = record.body;
+  const total = fullBody.length;
+  const win = bodyWindow(total, args.bodyOffset, args.bodyLimit);
+  const windowedBody = fullBody.slice(win.start, win.end);
+
+  // Structured payload: start from the resolved record, swap in the windowed
+  // body, and attach the pagination metadata ONLY when a window was applied.
+  const structured: Record<string, unknown> = {
+    ...record,
+    body: windowedBody,
+  };
+  if (win.windowed) {
+    structured.bodyTotalChars = total;
+    structured.bodyOffset = win.start;
+    structured.bodyTruncated = win.truncated;
+    structured.bodyNextOffset = win.next;
+  }
+
+  const text = formatRecordJsonWindow(record, {
+    body: windowedBody,
+    offset: win.start,
+    total,
+    truncated: win.truncated,
+  });
+
+  const result = textResult(text);
+  result.structuredContent = structured;
   return result;
 }
 
