@@ -46,3 +46,53 @@ jobs:
         if: always()
         continue-on-error: true
         run: bun scripts/eval-retrieval.ts --format table+json
+
+  # Model C Phase 2 — compile + sign the standalone `fbrain-mcp` binary and
+  # prove it boots the MCP stdio surface. Runs on macOS because the binary's
+  # code-signature must match the `folddb.toml` [code_signature] block
+  # (bundle id com.edgevector.fbrain) and `codesign` is macOS-only — the
+  # signature is the platform-relevant artifact the node attests. Reports as a
+  # distinct status check; the merge queue waits on `ci-required` (above).
+  build-mcp-binary:
+    name: build-mcp-binary
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Ad-hoc sign by default; set CODESIGN_IDENTITY (+ org APPLE_* secrets)
+      # to switch to a real Developer ID without touching this workflow.
+      - name: Compile + sign fbrain-mcp
+        run: bun run build:mcp
+
+      - name: Verify signature matches manifest bundle id
+        run: |
+          codesign -dv dist/fbrain-mcp 2>&1 | tee /tmp/codesign.txt
+          grep -q 'Identifier=com.edgevector.fbrain' /tmp/codesign.txt
+          codesign --verify --verbose dist/fbrain-mcp
+
+      # Boot the COMPILED binary directly (not via `bun run`) and confirm the
+      # MCP handshake returns all 7 fbrain tools — exactly the new-dev path.
+      - name: Smoke-test the compiled MCP surface
+        run: |
+          printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+            | ./dist/fbrain-mcp 2>/tmp/mcp-stderr.log > /tmp/mcp-out.txt
+          cat /tmp/mcp-stderr.log
+          n=$(bun -e 'const ls=require("fs").readFileSync("/tmp/mcp-out.txt","utf8").trim().split("\n"); const r=JSON.parse(ls[1]); const names=r.result.tools.map(t=>t.name); console.log(names.join(",")); process.stderr.write(String(names.length));' 2>/tmp/mcp-count.txt)
+          echo "tools: $n"
+          test "$(cat /tmp/mcp-count.txt)" = "7"
+
+      - name: Upload fbrain-mcp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fbrain-mcp
+          path: dist/fbrain-mcp
+          if-no-files-found: error
