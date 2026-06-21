@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import {
   CapabilityDeniedError,
@@ -100,9 +100,13 @@ export function resolveNodeHome(): string {
   if (lastdbEnv && lastdbEnv.length > 0) return lastdbEnv;
   const folddbEnv = process.env.FOLDDB_HOME;
   if (folddbEnv && folddbEnv.length > 0) return folddbEnv;
-  const lastdbDefault = join(homedir(), ".lastdb");
+  // Both default node-home paths derive from the guarded home base so a broken
+  // HOME fails loud rather than resolving to a relative `undefined/.lastdb`.
+  // (An explicit LASTDB_HOME/FOLDDB_HOME override above already bypasses this.)
+  const home = fbrainHomeBase();
+  const lastdbDefault = join(home, ".lastdb");
   if (existsSync(lastdbDefault)) return lastdbDefault;
-  return join(homedir(), ".folddb");
+  return join(home, ".folddb");
 }
 
 // Build the `onboarding_already_complete` (HTTP 410) recovery hint's "start
@@ -405,6 +409,77 @@ export class FbrainError extends Error {
     this.capabilityReason = opts.capabilityReason;
     this.capabilityDetail = opts.capabilityDetail;
   }
+}
+
+// Raised when the OS cannot give us a usable home directory and we therefore
+// cannot derive ANY of fbrain's on-disk paths (config, keychain, migrations,
+// caches, usage log, node home). Extends FbrainError so it carries a stable
+// `code` + structured `hint` like every other operational error. Its code is
+// NOT in USAGE_ERROR_CODES, so it stays exit 1 (operational, not a usage
+// error).
+//
+// WHY THIS EXISTS: `os.homedir()` does NOT throw on a broken HOME. When a
+// spawn passes a JS-`undefined` HOME (`env: { ...process.env, HOME: fakeHome }`
+// with `fakeHome` undefined — several test harnesses + dogfood scripts do
+// exactly this), Bun/Node return the LITERAL string `"undefined"`. Every
+// `join(homedir(), ".fbrain", …)` (and `~/.lastdb` / `~/.folddb` node-home)
+// then becomes a RELATIVE path like `undefined/.fbrain/…`, and the first
+// `mkdirSync(dirname(path), …)` + `writeFileSync` silently scatters config +
+// keychain + caches under whatever cwd the process happened to be standing in
+// (observed: a stray `./undefined/.fbrain/config.json` committed-adjacent in
+// the repo root). An *empty/unset* HOME is FINE — `homedir()` falls back to
+// the passwd entry and returns an absolute path; only a garbage VALUE (the
+// literal `"undefined"`/`"null"`) or any non-absolute result triggers the
+// scatter. We fail loud here instead.
+//
+// Defined here (the lowest layer, alongside FbrainError) so both client.ts's
+// `resolveNodeHome` and config.ts's path resolvers can share ONE guard with no
+// import cycle; config.ts re-exports `fbrainHomeBase`/`HomeUnresolvedError` so
+// the rest of the codebase imports them from there.
+export class HomeUnresolvedError extends FbrainError {
+  constructor(resolved: string) {
+    super({
+      code: "home_unresolved",
+      message:
+        `Could not resolve a usable home directory: os.homedir() returned ` +
+        `${JSON.stringify(resolved)}, which is not an absolute path.`,
+      hint:
+        "Set a valid $HOME (an absolute path), or pin the config path " +
+        "explicitly with the FBRAIN_CONFIG env var. A common cause is a " +
+        'spawn passing an undefined HOME (`env: { HOME: undefined }`), which ' +
+        'makes os.homedir() return the literal string "undefined".',
+      agentHint:
+        "The HOME environment variable is unset or invalid (os.homedir() " +
+        `returned ${JSON.stringify(resolved)}). Set HOME to an absolute path, ` +
+        "or set FBRAIN_CONFIG to an absolute config path.",
+    });
+    this.name = "HomeUnresolvedError";
+  }
+}
+
+// The single guarded home resolver. Every fbrain on-disk path derives from
+// here (config / keychain / migrations / bm25 cache / expand cache / usage /
+// node home), so a broken HOME can never `mkdir`/write a relative
+// `undefined/…` path — it fails loud with HomeUnresolvedError instead. Returns
+// the same value as `homedir()` on the happy path (a valid absolute home), so
+// behavior is identical for every real developer; this is pure hardening.
+export function fbrainHomeBase(): string {
+  return validateHomeBase(homedir());
+}
+
+// The pure guard predicate behind `fbrainHomeBase`, split out so it is
+// directly unit-testable with literal inputs (in-process `os.homedir()` on
+// macOS reads the passwd entry, NOT $HOME, so a test cannot exercise the bad
+// shapes by overriding process.env.HOME — only a spawned child can). Rejects
+// the three failure shapes the dogfood found: a missing/empty result, the
+// literal garbage strings Bun/Node yield from an `undefined`/`null` HOME, and
+// any other non-absolute path (which would resolve relative to cwd). Exported
+// for tests; production code calls `fbrainHomeBase`.
+export function validateHomeBase(h: string): string {
+  if (!h || h === "undefined" || h === "null" || !isAbsolute(h)) {
+    throw new HomeUnresolvedError(h);
+  }
+  return h;
 }
 
 // Every node/schema HTTP request gets a deadline that bounds BOTH the fetch
