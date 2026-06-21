@@ -7,6 +7,7 @@ import {
   fieldsFor,
   findBySlugFast,
   findExistingForWrite,
+  hydrateSchemaBySlug,
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
   resolveBySlug,
@@ -567,6 +568,83 @@ describe("findBySlugFast (read-context fast-miss for dangling-ref validators)", 
     });
     expect(r).toBeNull();
     expect(calls()).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
+  });
+});
+
+// hydrateSchemaBySlug is the BATCH hydrate behind `fbrain search`'s
+// fragment→record resolution. It fetches a schema's whole page ONCE
+// (`queryAll`) into a `Map<slug, record>`, so N search hits on one schema
+// resolve from a single fetch instead of N. These tests pin: (1) ONE queryAll
+// per call regardless of how many slugs the caller will look up, (2) live rows
+// keyed by slug with tombstones dropped (a soft-deleted slug → undefined → the
+// search caller's stale skip), and (3) the same EMPTY-page flake tolerance the
+// per-hit fast-miss helper had, just hoisted to the schema level.
+describe("hydrateSchemaBySlug (batch search hydrate)", () => {
+  function seqNode(pages: Array<Array<{ slug: string; tags?: string[] }>>) {
+    let calls = 0;
+    const node = {
+      baseUrl: "mock",
+      userHash: "uh",
+      async queryAll(): Promise<QueryResponse> {
+        const page = pages[Math.min(calls, pages.length - 1)] ?? [];
+        calls++;
+        const results = page.map((r) => ({
+          fields: {
+            slug: r.slug,
+            title: `T-${r.slug}`,
+            body: "B",
+            status: "draft",
+            tags: r.tags ?? [],
+            created_at: "2026-06-05T00:00:00Z",
+            updated_at: "2026-06-05T00:00:00Z",
+          },
+          key: { hash: r.slug, range: null },
+        }));
+        return { ok: true, results, total_count: results.length, returned_count: results.length };
+      },
+    } as unknown as NodeClient;
+    return { node, calls: () => calls };
+  }
+  const noSleep = { sleep: async () => {} };
+
+  test("populated page → ONE queryAll, returns every live row keyed by slug", async () => {
+    const { node, calls } = seqNode([[{ slug: "a" }, { slug: "b" }, { slug: "c" }]]);
+    const map = await hydrateSchemaBySlug(node, "design", "h", noSleep);
+    // The whole point: a SINGLE fetch hydrates the entire schema for batch lookup.
+    expect(calls()).toBe(1);
+    expect(map.size).toBe(3);
+    expect(map.get("a")?.slug).toBe("a");
+    expect(map.get("b")?.title).toBe("T-b");
+    // A slug the caller will look up but the page lacks resolves to undefined
+    // (the search caller's "stale hit" skip) — still ONE fetch, no per-slug query.
+    expect(map.get("missing")).toBeUndefined();
+    expect(calls()).toBe(1);
+  });
+
+  test("tombstoned rows are dropped (soft-deleted slug → stale skip downstream)", async () => {
+    const { node } = seqNode([[{ slug: "live" }, { slug: "gone", tags: [TOMBSTONE_TAG] }]]);
+    const map = await hydrateSchemaBySlug(node, "concept", "h", noSleep);
+    expect(map.has("live")).toBe(true);
+    // gone is tombstoned → absent from the map, exactly like findBySlug null.
+    expect(map.has("gone")).toBe(false);
+    expect(map.size).toBe(1);
+  });
+
+  test("empty page → retries up to EMPTY_PAGE_RETRY_ATTEMPTS, then empty map", async () => {
+    // Same flake tolerance as the per-hit fast-miss helper, hoisted to the
+    // schema: an empty /api/query slice on a saturated daemon is ambiguous, so
+    // the schema-level fetch retries (capped) before declaring the schema empty.
+    const { node, calls } = seqNode([[]]);
+    const map = await hydrateSchemaBySlug(node, "design", "h", noSleep);
+    expect(map.size).toBe(0);
+    expect(calls()).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
+  });
+
+  test("empty → populated rides out a single flake (one extra fetch)", async () => {
+    const { node, calls } = seqNode([[], [{ slug: "x" }]]);
+    const map = await hydrateSchemaBySlug(node, "task", "h", noSleep);
+    expect(map.get("x")?.slug).toBe("x");
+    expect(calls()).toBe(2);
   });
 });
 

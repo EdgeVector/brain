@@ -313,6 +313,69 @@ describe("searchCmd", () => {
     expect(rows[0]).toContain("Flaky design");
   }, 10_000);
 
+  test("hydrates ONCE per distinct schema, not once per hit (N+1 fix)", async () => {
+    // The perf fix this card lands. Pre-fix, search hydrated each deduped hit
+    // with its own `findBySlugFast` — and that helper fetches the WHOLE schema
+    // page via /api/query and client-filters for one slug. So N hits on one
+    // schema issued N identical full-schema fetches (the ~25–29 s live-brain
+    // latency, dogfood run 115). The fix groups hits by schema hash and fetches
+    // each DISTINCT schema exactly once. Here: 5 Design hits + 3 Task hits = 8
+    // hits across 2 distinct schemas must issue exactly 2 /api/query POSTs, not
+    // 8. We count POSTs PER schema_name so the assertion pins both the total
+    // (K, not N) and the one-per-schema invariant.
+    const mkRow = (slug: string, title: string) => ({
+      fields: {
+        slug,
+        title,
+        body: `body for ${slug}`,
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    });
+    const designRows = ["d1", "d2", "d3", "d4", "d5"].map((s) => mkRow(s, `Design ${s}`));
+    const taskRows = ["t1", "t2", "t3"].map((s) => mkRow(s, `Task ${s}`));
+    const searchHits = [
+      ...designRows.map((r) =>
+        hit({ slug: r.fields.slug, schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.6 } }),
+      ),
+      ...taskRows.map((r) =>
+        hit({ slug: r.fields.slug, schemaName: TASK_HASH, schema_display_name: "Task", metadata: { score: 0.55 } }),
+      ),
+    ];
+    // POST count keyed by the schema_name the /api/query body targets.
+    const queryCallsBySchema = new Map<string, number>();
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: searchHits, user_hash: cfg.userHash } };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        const schema = body.schema_name ?? "";
+        queryCallsBySchema.set(schema, (queryCallsBySchema.get(schema) ?? 0) + 1);
+        const rows = schema === DESIGN_HASH ? designRows : schema === TASK_HASH ? taskRows : [];
+        return { status: 200, body: { ok: true, results: rows, total_count: rows.length, returned_count: rows.length } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
+    // Exactly ONE hydrate fetch per distinct schema — the whole point of the fix.
+    expect(queryCallsBySchema.get(DESIGN_HASH)).toBe(1);
+    expect(queryCallsBySchema.get(TASK_HASH)).toBe(1);
+    // K=2 distinct schemas, not N=8 hits.
+    const totalQueryCalls = [...queryCallsBySchema.values()].reduce((a, b) => a + b, 0);
+    expect(totalQueryCalls).toBe(2);
+    // …and all 8 hits still resolved + printed (no row lost to the batching).
+    const rows = rowsOf(lines);
+    expect(rows.length).toBe(8);
+    for (const r of [...designRows, ...taskRows]) {
+      expect(rows.some((row) => row.includes(r.fields.slug))).toBe(true);
+    }
+  });
+
   test("silently skips stale hits where findBySlug returns nothing", async () => {
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
