@@ -1234,12 +1234,15 @@ export function newNodeClient(opts: {
             code: "query_pagination_stalled",
             message:
               `Node /api/query returned page ${page + 1} at offset=${offset} ` +
-              `with only previously-seen record keys but reported has_more=true — ` +
-              `fold_db_node's offset pagination is unstable on schemas larger than ` +
-              `QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) and would loop or truncate ${DOCTOR_TIP}.`,
+              `with only previously-seen record keys but reported has_more=true ` +
+              `(total_count=${lastTotalCount ?? "?"}) — the node is counting ` +
+              `deleted/tombstoned record keys in total_count but omitting them from ` +
+              `the materialized page, so has_more never clears and pagination cannot ` +
+              `progress ${DOCTOR_TIP}.`,
             hint:
-              "Upgrade the fold_db_node to a version with stable /api/query ordering, " +
-              "or temporarily reduce the schema's row count below QUERY_PAGE_SIZE.",
+              "Upgrade the fold_db_node to a build with the tombstone-aware " +
+              "list-query count fix (fold #995). This affects only the record type " +
+              "you deleted from; other record types still work.",
           });
         }
         // Defensive: a node that returns has_more=true with an empty
@@ -1256,11 +1259,15 @@ export function newNodeClient(opts: {
           message:
             `Node /api/query finished with has_more=false but only ${allResults.length} ` +
             `unique records were collected across pages — the node's reported total_count ` +
-            `was ${lastTotalCount}. fold_db_node's offset pagination silently dropped rows ` +
-            `via overlapping pages ${DOCTOR_TIP}.`,
+            `was ${lastTotalCount}. This means total_count includes record keys the node ` +
+            `never returned in any page: either deleted/tombstoned keys counted in the ` +
+            `total, or rows silently dropped by unstable offset pagination on a schema ` +
+            `larger than QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) ${DOCTOR_TIP}.`,
           hint:
-            "Upgrade the fold_db_node to a version with stable /api/query ordering, " +
-            "or temporarily reduce the schema's row count below QUERY_PAGE_SIZE.",
+            "Upgrade the fold_db_node to a build with the tombstone-aware list-query " +
+            "count fix (fold #995) and stable /api/query ordering. If the gap matches " +
+            "records you recently deleted, only that record type is affected; other " +
+            "types still work.",
         });
       }
       return {

@@ -184,7 +184,13 @@ describe("newNodeClient.queryAll pagination guard", () => {
       expect(fe.code).toBe("query_pagination_stalled");
       expect(fe.message).toContain("has_more=true");
       expect(fe.message).toContain("previously-seen");
-      expect(fe.hint ?? "").toContain("stable /api/query ordering");
+      // The message names the real trigger — tombstoned/deleted keys counted in
+      // total_count but omitted from the page — not a >1000-row problem.
+      expect(fe.message).toContain("tombstoned");
+      // The hint points at the node-side count fix (fold #995) and is actionable
+      // for the common single-delete case (NOT "reduce the schema's row count").
+      expect(fe.hint ?? "").toContain("fold #995");
+      expect(fe.hint ?? "").not.toContain("reduce the schema");
     }
   });
 
