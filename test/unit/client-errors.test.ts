@@ -12,6 +12,7 @@ import {
   newSchemaServiceClient,
   nodeDownHint,
   nodeHttpErrorHint,
+  nodePortOf,
   schemaDownHint,
 } from "../../src/client.ts";
 
@@ -376,21 +377,21 @@ describe("client error mapping", () => {
     expect(hint).not.toContain("compiles Rust");
   });
 
-  // DX (init-node-process-alive-not-serving-hint): a node PROCESS that is alive
-  // but not answering on its port (wedged, hung mid-boot, or still starting) is
-  // the most misdiagnosed failure — it looks identical to "not started" to a
-  // naive reachability check, so the old hint told the dev to re-install /
-  // `brew services restart`, which just re-hangs a wedged node. When the process
-  // probe reports a live folddb/lastdb process, the hint must instead name that
-  // a process IS running but isn't responding, and tell the dev to STOP it
-  // before restarting — NOT the bare install/restart line.
-  test("node-down hint names 'running but not responding' + stop-before-restart when a folddb process is alive", () => {
+  // DX (init-node-bound-to-target-port-not-serving-hint): when SOMETHING is
+  // bound to the TARGET port but not answering (wedged, hung mid-boot, or still
+  // starting), that's the most misdiagnosed failure — it looks identical to
+  // "not started" to a naive reachability check, so the old hint told the dev
+  // to re-install / `brew services restart`, which just re-hangs a wedged node.
+  // When the target-port probe reports a listener, the hint must instead name
+  // that a node IS bound to that URL but isn't responding, and tell the dev to
+  // STOP it before restarting — NOT the bare install/restart line.
+  test("node-down hint names 'bound but not responding' + stop-before-restart when something is listening on the target port", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9711",
       () => true, // binary installed
-      () => true, // process IS running
+      () => true, // something IS listening on the target port
     );
-    expect(hint).toContain("process is running but isn't responding");
+    expect(hint).toContain("isn't responding");
     expect(hint).toContain("http://127.0.0.1:9711");
     expect(hint).toContain("brew services list");
     expect(hint).toContain("stop it before restarting");
@@ -401,23 +402,23 @@ describe("client error mapping", () => {
     expect(hint).not.toContain("brew services restart lastdb");
   });
 
-  // The running-but-not-serving branch wins regardless of the node URL or
-  // whether the prebuilt binary is detected — a live process is a stronger
-  // signal than either.
-  test("node-down hint prefers the 'running but not responding' branch over the install/start branch", () => {
-    // Default :9001 daemon, binary NOT on PATH, but a process IS alive.
+  // The wedged branch wins regardless of the node URL or whether the prebuilt
+  // binary is detected — a listener on the target port is a stronger signal
+  // than either.
+  test("node-down hint prefers the 'bound but not responding' branch over the install/start branch", () => {
+    // Default :9001 daemon, binary NOT on PATH, but something IS listening.
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
       () => false,
       () => true,
     );
-    expect(hint).toContain("process is running but isn't responding");
+    expect(hint).toContain("isn't responding");
     expect(hint).not.toContain("brew install edgevector/lastdb/lastdb");
   });
 
-  // The genuine not-running case (no live process) must be UNCHANGED — still
-  // the install/start line for a default/installed node.
-  test("node-down hint keeps the install/start line when no folddb process is alive", () => {
+  // The genuine not-started case (nothing listening on the target port) must be
+  // UNCHANGED — still the install/start line for a default/installed node.
+  test("node-down hint keeps the install/start line when nothing is listening on the target port", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
       () => true,
@@ -425,7 +426,54 @@ describe("client error mapping", () => {
     );
     expect(hint).toContain("brew install edgevector/lastdb/lastdb");
     expect(hint).toContain("brew services start lastdb");
-    expect(hint).not.toContain("process is running but isn't responding");
+    expect(hint).not.toContain("isn't responding");
+  });
+
+  // CARD (fbrain-init-down-hint-scope-to-target-port) case (a): a node is alive
+  // on a DIFFERENT port while the TARGET port is down. The target-port probe
+  // reports false (nothing on the target port) even though a host-wide `pgrep`
+  // would have matched the sibling node — so the dev must get the
+  // "not started / install+start" branch, NOT a false "wedged / stop lastdb".
+  test("node-down hint: sibling node on a different port + target down ⇒ install+start, NOT 'wedged/stop'", () => {
+    // Simulate the dogfooded bug: target :9876 is down (nothing listening),
+    // a sibling node is alive on :55564 — but the probe is scoped to :9876.
+    const isTargetPortListening = (url: string) =>
+      nodePortOf(url) === 55564; // only the sibling port has a listener
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9876",
+      () => true, // prebuilt binary on PATH (downloaded user)
+      isTargetPortListening,
+    );
+    // Must NOT misdiagnose the down :9876 as wedged or tell the dev to stop
+    // their (unrelated) running node.
+    expect(hint).not.toContain("isn't responding");
+    expect(hint).not.toContain("brew services stop lastdb");
+    // Must give the correct "start a node on this port" guidance.
+    expect(hint).toContain("brew services start lastdb");
+  });
+
+  // CARD case (b): something is bound to the TARGET port but not serving
+  // (genuinely wedged). The probe reports true for that exact port ⇒ the
+  // stop-before-restart guidance.
+  test("node-down hint: listener bound to the TARGET port but not serving ⇒ 'wedged / stop before restart'", () => {
+    const isTargetPortListening = (url: string) => nodePortOf(url) === 9876;
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9876",
+      () => true,
+      isTargetPortListening,
+    );
+    expect(hint).toContain("isn't responding");
+    expect(hint).toContain("stop it before restarting");
+    expect(hint).toContain("brew services stop lastdb");
+  });
+
+  // The port extractor underpins the scoping — pin its behaviour.
+  test("nodePortOf extracts the target port (and falls back to scheme default)", () => {
+    expect(nodePortOf("http://127.0.0.1:9876")).toBe(9876);
+    expect(nodePortOf("http://localhost:55564/")).toBe(55564);
+    expect(nodePortOf("http://example.com")).toBe(80);
+    expect(nodePortOf("https://example.com")).toBe(443);
+    expect(nodePortOf("not a url")).toBeNull();
   });
 
   test("connectionError node hint mentions `brew services` for the default daemon", async () => {

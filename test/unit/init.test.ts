@@ -655,9 +655,9 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
           nodeUrl: "http://127.0.0.1:9050",
           retryDelaysMs: [0],
           sleep: async () => {},
-          // Pin the process probe off so the hint is deterministic regardless
-          // of whether a folddb node happens to be running on the test host.
-          isFolddbProcessRunning: () => false,
+          // Pin the target-port probe off so the hint is deterministic
+          // regardless of whether anything is listening on the test host.
+          isTargetPortListening: () => false,
         },
         (l) => lines.push(l),
       );
@@ -691,7 +691,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
           nodeUrl: DEFAULT_NODE_URL,
           retryDelaysMs: [0],
           sleep: async () => {},
-          isFolddbProcessRunning: () => false,
+          isTargetPortListening: () => false,
         },
         (l) => lines.push(l),
       );
@@ -707,11 +707,12 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).not.toContain("compiling Rust");
   });
 
-  // init-node-process-alive-not-serving-hint: when a folddb/lastdb node PROCESS
-  // is alive but not answering (wedged / hung mid-boot), the retry-loop hint
-  // must name "running but isn't responding" + "stop it before restarting",
-  // NOT loop the dev back to re-install/restart (which re-hangs a wedged node).
-  test("node process alive but not serving → 'running but not responding' hint, NOT re-install/restart", async () => {
+  // init-node-bound-to-target-port-not-serving-hint: when SOMETHING is bound to
+  // the TARGET port but not answering (wedged / hung mid-boot), the retry-loop
+  // hint must name "bound ... but isn't responding" + "stop it before
+  // restarting", NOT loop the dev back to re-install/restart (which re-hangs a
+  // wedged node). The probe is scoped to the target port — see client-errors.
+  test("something bound to the target port but not serving → 'bound but not responding' hint, NOT re-install/restart", async () => {
     const lines: string[] = [];
     try {
       await probeWithRetry(
@@ -721,7 +722,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
           retryDelaysMs: [0],
           sleep: async () => {},
           isFolddbBinaryInstalled: () => true,
-          isFolddbProcessRunning: () => true,
+          isTargetPortListening: () => true,
         },
         (l) => lines.push(l),
       );
@@ -731,7 +732,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     }
     const out = lines.join("\n");
     expect(out).toContain("node not reachable at http://127.0.0.1:9711");
-    expect(out).toContain("process is running but isn't responding");
+    expect(out).toContain("isn't responding");
     expect(out).toContain("stop it before restarting");
     // Must NOT loop the dev back into the re-install/restart reflex.
     expect(out).not.toContain("brew install edgevector/lastdb/lastdb");
