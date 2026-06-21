@@ -1,0 +1,36 @@
+# fbrain app manifest — the platform's `folddb.toml` (parsed by FoldDB's
+# `app_identity_client::manifest::Manifest`; `folddb push` / `folddb app
+# status` read it, `folddb app install` verifies the binary against the
+# `[code_signature]` block below).
+#
+# Phase 1 of the Model C (attestation-scoped app) migration — see
+# docs/design-fbrain-app-model.md. This file is DECLARATIVE ONLY: it changes
+# no runtime behavior. fbrain still runs as the node owner today; the signed
+# binary (Phase 2), socket split (Phase 3), and install wiring (Phase 4)
+# land in later phases.
+
+# App namespace. Must match `^[a-z][a-z0-9-]{0,39}$`. fbrain's schemas are
+# namespaced under `fbrain/*` (owner_app_id folds into the identity hash).
+app_id = "fbrain"
+
+# Cross-app schemas / transform outputs this app declares it *consumes*.
+# fbrain owns all of its eight record types (Design, Task, Concept,
+# Preference, Reference, Agent, Project, Spike) under its own `fbrain/*`
+# namespace and consumes no other app's schemas, so this is empty. Declared
+# explicitly to mark the discovery/intent front door as reviewed for Phase 1.
+uses = []
+
+[metadata]
+display_name = "fbrain"
+description = "EdgeVector's CLI brain over fold_db — eight record types (designs, tasks, concepts, preferences, references, agents, projects, spikes) with semantic search, sharing, and migration. Tom's local prototype graduating into the gbrain replacement."
+homepage_url = "https://github.com/EdgeVector/fbrain"
+
+# Code-signing identity of fbrain's shipped binary. The signed `fbrain-mcp`
+# binary itself is Phase 2; this block declares the macOS bundle identifier
+# the node will derive fbrain's caller code-signature requirement from. The
+# reverse-DNS prefix `com.edgevector.fbrain` matches the existing keychain
+# service (src/keychain.ts). `team_id` (the Developer ID team) is omitted
+# until signing is wired in Phase 2 — absent is valid and never clears a
+# registered identity.
+[code_signature]
+bundle_identifier = "com.edgevector.fbrain"
