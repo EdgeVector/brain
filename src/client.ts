@@ -18,7 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { cpus, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -386,6 +386,57 @@ function isTimeoutError(err: unknown): boolean {
   return cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError");
 }
 
+// Default local-CPU-pressure probe — 1-minute load average and core count from
+// the OS. Injectable in `timeoutHint` so tests don't depend on the host's live
+// load. A reading of [0, 0] means "unmeasurable" (loadavg() returns 0s on some
+// platforms, e.g. Windows) → callers fall back to the load-agnostic hint.
+export function defaultLoadProbe(): { load1: number; cores: number } {
+  return { load1: loadavg()[0] ?? 0, cores: cpus().length };
+}
+
+// The over-subscription factor at which we blame local CPU starvation rather
+// than the node. A load average above `cores * factor` means meaningfully more
+// runnable work than the machine has cores — the classic "a `cargo build` is
+// hogging the box" state a new dev hits in their first hour. 1.5 leaves headroom
+// for the normal load a healthy machine carries without crying starvation.
+const STARVATION_LOAD_FACTOR = 1.5;
+
+// Hint for a request timeout. For the local node path this is load-aware: when
+// the host is CPU-saturated (load >> cores) the node is almost certainly
+// STARVED, not broken — so the old static "cold-initializing its schema index"
+// guess was actively misleading (it sent devs to restart a perfectly healthy,
+// hours-up node when the real fix was "await the other CPU hog"). The
+// schema-service path is a remote Lambda, where local load is irrelevant — it
+// keeps the load-agnostic hint. See the `nodeDownHint` / `isNodeReachableButErroring`
+// family for the precedent of context-aware hints.
+export function timeoutHint(
+  service: "node" | "schema",
+  loadProbe: () => { load1: number; cores: number } = defaultLoadProbe,
+): string {
+  const idempotentTail =
+    "Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with FBRAIN_HTTP_TIMEOUT_MS if it's just slow.";
+  if (service === "node") {
+    const { load1, cores } = loadProbe();
+    // load1 > 0 guards the "unmeasurable" platforms; cores > 0 is defensive.
+    if (cores > 0 && load1 > cores * STARVATION_LOAD_FACTOR) {
+      return (
+        `This machine is under heavy CPU load (load ${load1.toFixed(1)} on ${cores} cores) — ` +
+        "the node is likely starved, not broken. Re-run once the other work " +
+        "(e.g. a build/test run) finishes. " +
+        idempotentTail
+      );
+    }
+    return (
+      "The node may be slow (under load, or cold-initializing its schema index). " +
+      idempotentTail
+    );
+  }
+  return (
+    "The schema service may be under heavy load (e.g. a cold Lambda). " +
+    idempotentTail
+  );
+}
+
 // A stalled request/body-read fails fast with the idempotent-retry hint: every
 // fbrain write is an upsert keyed by slug, so re-running the command is safe.
 function timeoutError(
@@ -399,7 +450,7 @@ function timeoutError(
   return new FbrainError({
     code: "service_timeout",
     message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) ${DOCTOR_TIP}.`,
-    hint: "The node may be under heavy load (e.g. cold-initializing its schema index). Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with FBRAIN_HTTP_TIMEOUT_MS if the node is just slow.",
+    hint: timeoutHint(service),
     cause,
   });
 }
