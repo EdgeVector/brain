@@ -1,10 +1,27 @@
 {
   "name": "fbrain",
   "version": "0.8.0",
-  "description": "fbrain prototype — CLI brain over fold_db",
-  "private": true,
+  "description": "fbrain — a CLI brain over fold_db (designs, tasks, concepts, preferences, references, agents, projects, spikes) with semantic search and an MCP agent surface",
   "license": "MIT",
   "type": "module",
+  "homepage": "https://github.com/EdgeVector/fbrain#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EdgeVector/fbrain.git"
+  },
+  "bugs": {
+    "url": "https://github.com/EdgeVector/fbrain/issues"
+  },
+  "keywords": [
+    "fbrain",
+    "fold_db",
+    "folddb",
+    "brain",
+    "cli",
+    "mcp",
+    "semantic-search",
+    "rag"
+  ],
   "engines": {
     "bun": ">=1.3.10"
   },
@@ -12,6 +29,14 @@
     "fbrain": "src/cli.ts",
     "fbrain-mcp": "src/mcp/main.ts"
   },
+  "files": [
+    "src",
+    "vendor",
+    "tsconfig.json",
+    "bunfig.toml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "fbrain": "bun src/cli.ts",
     "test": "bun test",
