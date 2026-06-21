@@ -105,6 +105,18 @@ export function resolveNodeHome(): string {
   return join(homedir(), ".folddb");
 }
 
+// Build the `onboarding_already_complete` (HTTP 410) recovery hint's "start
+// fresh" command so it points at the dev's REAL node home rather than a
+// hardcoded `~/.folddb`. The rebrand moved the onboarding state to
+// `~/.lastdb/config/` on a v0.15.1+ node, so a hardcoded `rm -rf ~/.folddb/config/`
+// silently no-ops on a current node and the dev stays wedged. Routing through
+// `resolveNodeHome()` keeps the 0.14.x fallback (`~/.folddb`) intact while
+// printing `~/.lastdb/config/` on a current node. Exported so it is directly
+// unit-testable (the 410 path is hard to exercise end-to-end).
+export function onboardingResetConfigDir(): string {
+  return `${join(resolveNodeHome(), "config")}/`;
+}
+
 // Resolve the node's UDS control-socket path. Mirrors the CLI: the socket lives
 // at `<home>/data/folddb.sock`, where `<home>` is `resolveNodeHome()` (the
 // current default is `~/.lastdb`; legacy 0.14.x nodes use `~/.folddb`). An
@@ -940,7 +952,8 @@ export function newNodeClient(opts: {
           hint:
             "Recovery: (a) if ~/.fbrain/config.json from this node still exists, re-run `fbrain init` so it reuses the saved userHash; " +
             "(b) follow the node's own instruction above (typically `POST /api/auth/restore` with the recovery phrase); " +
-            "(c) to start fresh, stop the daemon and clear its onboarding state (homebrew default: `rm -rf ~/.folddb/config/`), then re-run `fbrain init`.",
+            "(c) to start fresh, stop the daemon and clear its onboarding state " +
+            `(homebrew default: \`rm -rf ${onboardingResetConfigDir()}\`), then re-run \`fbrain init\`.`,
         });
       }
       throw mapNodeError(status, body, "/api/setup/bootstrap");
@@ -1467,10 +1480,10 @@ export function nodeDownHint(
   isFolddbProcessRunning: () => boolean = defaultIsFolddbProcessRunning,
 ): string {
   if (isFolddbProcessRunning()) {
-    return `A fold node process is running but isn't responding on ${url} — it may still be starting up, or it may be wedged. Check \`brew services list\` and the node log; if it's wedged, **stop it before restarting** (a restart of a wedged node just re-hangs): \`brew services stop folddb\` then \`brew services start folddb\`. Contributors running from source: stop the existing \`folddb_server\`/\`lastdb_server\` process, then \`cd fold/fold_db_node && ./run.sh --local\`.`;
+    return `A fold node process is running but isn't responding on ${url} — it may still be starting up, or it may be wedged. Check \`brew services list\` and the node log; if it's wedged, **stop it before restarting** (a restart of a wedged node just re-hangs): \`brew services stop lastdb\` then \`brew services start lastdb\`. Contributors running from source: stop the existing \`lastdb_server\`/\`folddb_server\` process, then \`cd fold/fold_db_node && ./run.sh --local\`.`;
   }
   if (isDefaultNodeUrl(url) || isFolddbBinaryInstalled()) {
-    return "Install + start it: `brew install edgevector/folddb/folddb && brew services start folddb` (already installed? `brew services restart folddb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
+    return "Install + start it: `brew install edgevector/lastdb/lastdb && brew services start lastdb` (already installed? `brew services restart lastdb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
   }
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
 }
@@ -1907,9 +1920,9 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
         `(${ctx.messageBlob.trim()}) ${DOCTOR_TIP}.`,
       hint:
         "Restart the node so it re-fetches the ONNX file from the embedding cache " +
-        "(homebrew: `folddb daemon stop && folddb daemon start`). " +
+        "(homebrew: `lastdb daemon stop && lastdb daemon start`). " +
         "If the failure persists, run `fbrain doctor --freshness` and capture " +
-        "the node log (the latest file under ~/Library/Logs/Homebrew/folddb/).",
+        "the node log (the latest file under ~/Library/Logs/Homebrew/lastdb/).",
       agentHint:
         "This is a node-side issue, not something this tool can fix — ask the " +
         "operator to restart the fold_db node, then retry.",

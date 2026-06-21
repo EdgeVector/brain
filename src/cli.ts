@@ -190,7 +190,7 @@ live capability is already on disk.
   --name                 bootstrap display name (default: fbrain)
   --grant-consent, --yes complete the one-time consent grant non-interactively
                          (no TTY needed). Use this in scripted / CI / agent
-                         installs: init shells out to folddb consent grant
+                         installs: init shells out to lastdb consent grant
                          and polls until the capability is cached. No-op when
                          a live capability already exists, or under
                          FBRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb

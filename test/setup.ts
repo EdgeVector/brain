@@ -21,7 +21,7 @@ if (process.env.FBRAIN_APP_IDENTITY_ENFORCE === undefined) {
 // `attestOwnerSession` fires a real UDS `fetch` whenever a control socket
 // exists on disk at the resolved path (default `~/.folddb/data/folddb.sock`).
 // On any dev machine running the daemon — exactly what the README tells a new
-// contributor to do (`brew services start folddb`) — that socket EXISTS, so
+// contributor to do (`brew services start lastdb`) — that socket EXISTS, so
 // the attestation fetch lands on the global-`fetch` stub the unit tests
 // install, silently consuming the first canned response and shifting every
 // later assertion (HTTP 500 fall-through, dropped pagination rows, etc.). CI

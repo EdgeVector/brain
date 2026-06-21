@@ -673,7 +673,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).toContain("node not reachable at http://127.0.0.1:9050");
     // Canonical helper sends a downloaded user (binary on PATH) to brew, even
     // on a non-default port — the whole point of the fix.
-    expect(out).toContain("brew services start folddb");
+    expect(out).toContain("brew services start lastdb");
     // The misleading from-source framing must be gone for this case.
     expect(out).not.toContain("compiling Rust");
     expect(out).not.toContain("compiles Rust");
@@ -703,7 +703,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     }
     const out = lines.join("\n");
     expect(out).toContain(`node not reachable at ${DEFAULT_NODE_URL}`);
-    expect(out).toContain("brew services start folddb");
+    expect(out).toContain("brew services start lastdb");
     expect(out).not.toContain("compiling Rust");
   });
 
@@ -734,8 +734,8 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).toContain("process is running but isn't responding");
     expect(out).toContain("stop it before restarting");
     // Must NOT loop the dev back into the re-install/restart reflex.
-    expect(out).not.toContain("brew install edgevector/folddb/folddb");
-    expect(out).not.toContain("brew services restart folddb");
+    expect(out).not.toContain("brew install edgevector/lastdb/lastdb");
+    expect(out).not.toContain("brew services restart lastdb");
   });
 });
 

@@ -166,7 +166,7 @@ function mockNodeClient(opts: {
   searchThrows?: Error;
   // Version the mock `health()` reports — drives the node-reachable version
   // line. `undefined` (the default) simulates an older node that omits version;
-  // an explicit string surfaces `folddb <version> @ <url>`.
+  // an explicit string surfaces `lastdb <version> @ <url>`.
   healthVersion?: string;
   // When set, `health()` rejects with this error — exercises doctor's
   // best-effort path (node-reachable must stay PASS, version omitted).
@@ -727,7 +727,7 @@ describe("doctor verdict logic", () => {
     // The node's own message is surfaced as the detail.
     expect(out).toContain("returned HTTP 500");
     // The fix must NOT tell the user to start a node that is plainly up.
-    expect(out).not.toContain("brew services start folddb");
+    expect(out).not.toContain("brew services start lastdb");
     // Identity-failure heuristic points at the real remedy.
     expect(out).toContain("FOLDDB_MASTER_KEY");
   });
@@ -750,12 +750,12 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(1);
     const out = lines.join("\n");
     expect(out).toContain("[FAIL] node-reachable");
-    expect(out).toContain("brew services start folddb");
+    expect(out).toContain("brew services start lastdb");
   });
 
   // The node-reachable line surfaces the connected node's folddb version
   // (from GET /api/health) so a dev spots a stale node without curl.
-  test("node up + health reports version → node-reachable shows `folddb <ver> @ <url>`", async () => {
+  test("node up + health reports version → node-reachable shows `lastdb <ver> @ <url>`", async () => {
     const configPath = writeCfg(makeCfg({ nodeUrl: "http://127.0.0.1:9077" }));
     const lines: string[] = [];
     const code = await doctor({
@@ -767,11 +767,11 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(0);
     const line = lines.find((l) => l.includes("[PASS] node-reachable"));
     expect(line).toBeDefined();
-    expect(line).toContain("folddb 0.14.1 @ http://127.0.0.1:9077");
+    expect(line).toContain("lastdb 0.14.1 @ http://127.0.0.1:9077");
   });
 
   // Older node that doesn't report a version: node-reachable stays PASS and
-  // the detail falls back to the node URL alone (no "folddb undefined").
+  // the detail falls back to the node URL alone (no "lastdb undefined").
   test("node up, no version reported → node-reachable falls back to the url alone", async () => {
     const configPath = writeCfg(makeCfg({ nodeUrl: "http://127.0.0.1:9077" }));
     const lines: string[] = [];
@@ -1065,7 +1065,7 @@ describe("doctor verdict logic", () => {
               "Semantic search is unavailable — the fold_db node failed to load its embedding model.",
             hint:
               "Restart the node so it re-fetches the ONNX file from the embedding cache " +
-              "(homebrew: `folddb daemon stop && folddb daemon start`).",
+              "(homebrew: `lastdb daemon stop && lastdb daemon start`).",
           }),
         }),
     });
@@ -1077,7 +1077,7 @@ describe("doctor verdict logic", () => {
     expect(failLine).toBeDefined();
     expect(failLine!).toContain("Semantic search is unavailable");
     const fixLine = lines[lines.indexOf(failLine!) + 1] ?? "";
-    expect(fixLine).toContain("folddb daemon stop && folddb daemon start");
+    expect(fixLine).toContain("lastdb daemon stop && lastdb daemon start");
   });
 
   test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {

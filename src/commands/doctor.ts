@@ -301,7 +301,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     let nodeReachableDetail = cfg.nodeUrl;
     try {
       const health = await nodeClient.health();
-      if (health.version) nodeReachableDetail = `folddb ${health.version} @ ${cfg.nodeUrl}`;
+      if (health.version) nodeReachableDetail = `lastdb ${health.version} @ ${cfg.nodeUrl}`;
       verbose?.(`node health: version=${health.version ?? "—"}`);
     } catch (err) {
       verbose?.(`node health probe failed (non-fatal): ${errMsg(err)}`);
@@ -935,7 +935,7 @@ export async function runEmbeddingProbe(
         detail: stripDoctorTip(err.message),
         fix:
           err.hint ??
-          "restart the node so it re-fetches the ONNX file (homebrew: `folddb daemon stop && folddb daemon start`)",
+          "restart the node so it re-fetches the ONNX file (homebrew: `lastdb daemon stop && lastdb daemon start`)",
       };
     }
     return {
@@ -1391,7 +1391,7 @@ export async function runWriteReadyProbe(
       detail: capabilityDetail,
       fix:
         "run `fbrain init` to grant consent and store a capability (or any write command — they all run the consent handshake on first use). " +
-        "On the daemon side the grant is confirmed with `folddb consent grant fbrain`.",
+        "On the daemon side the grant is confirmed with `lastdb consent grant fbrain`.",
     };
   }
   return {

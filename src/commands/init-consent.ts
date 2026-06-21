@@ -99,7 +99,12 @@ export type EstablishConsentResult =
 
 export type SkipReason = "enforce_off" | "non_tty" | "declined";
 
-const FOLDDB_BIN = "folddb";
+// The node's CLI binary name. The FoldDB→LastDB rebrand renamed the binary to
+// `lastdb` (fold#951), keeping `folddb` as a back-compat shim. We display and
+// prefer `lastdb`; `defaultResolveFolddb` falls back to the legacy `folddb`
+// name on older installs so a node that only ships the shim still resolves.
+const FOLDDB_BIN = "lastdb";
+const LEGACY_FOLDDB_BIN = "folddb";
 
 /**
  * Run the inline consent handshake at the end of `fbrain init`. Returns a
@@ -146,7 +151,7 @@ export async function establishConsentInline(
     resolveFolddb() === null
   ) {
     print(
-      `        \`${FOLDDB_BIN}\` not found on PATH — cannot complete \`--grant-consent\` non-interactively. Install the folddb CLI (\`brew install edgevector/folddb/folddb\`) and re-run, or grant manually in a second terminal while your first write polls.`,
+      `        \`${FOLDDB_BIN}\` not found on PATH — cannot complete \`--grant-consent\` non-interactively. Install the lastdb CLI (\`brew install edgevector/lastdb/lastdb\`) and re-run, or grant manually in a second terminal while your first write polls.`,
     );
     return { state: "skipped", reason: "non_tty" };
   }
@@ -159,7 +164,7 @@ export async function establishConsentInline(
     const isTty = (opts.isTty ?? defaultIsTty)();
     if (!isTty) {
       print(
-        `        non-interactive shell — skipping consent prompt. Re-run \`fbrain init --grant-consent\` before your first write — it creates the consent request, grants it, and stores the capability headlessly. (A bare \`folddb consent grant ${appId}\` needs a pending request first, so it dead-ends on a fresh node.)`,
+        `        non-interactive shell — skipping consent prompt. Re-run \`fbrain init --grant-consent\` before your first write — it creates the consent request, grants it, and stores the capability headlessly. (A bare \`${FOLDDB_BIN} consent grant ${appId}\` needs a pending request first, so it dead-ends on a fresh node.)`,
       );
       return { state: "skipped", reason: "non_tty" };
     }
@@ -171,7 +176,7 @@ export async function establishConsentInline(
     );
     if (!isAffirmative(answer)) {
       print(
-        `        skipped — run \`folddb consent grant ${appId}\` later, or fbrain will prompt on first write.`,
+        `        skipped — run \`${FOLDDB_BIN} consent grant ${appId}\` later, or fbrain will prompt on first write.`,
       );
       return { state: "skipped", reason: "declined" };
     }
@@ -281,12 +286,17 @@ function defaultResolveFolddb(): string | null {
   if (override && override.length > 0) return override;
   // Use `command -v` instead of `which` — it's POSIX and behaves identically
   // on macOS + Linux. Run via /bin/sh so PATH expansion uses the user's env.
-  const probe = spawnSync("/bin/sh", ["-c", `command -v ${FOLDDB_BIN}`], {
-    encoding: "utf8",
-  });
-  if (probe.status !== 0) return null;
-  const path = (probe.stdout ?? "").trim();
-  return path.length > 0 ? path : null;
+  // Prefer the renamed `lastdb` binary; fall back to the legacy `folddb` name
+  // so older installs that only ship the back-compat shim still resolve.
+  for (const bin of [FOLDDB_BIN, LEGACY_FOLDDB_BIN]) {
+    const probe = spawnSync("/bin/sh", ["-c", `command -v ${bin}`], {
+      encoding: "utf8",
+    });
+    if (probe.status !== 0) continue;
+    const path = (probe.stdout ?? "").trim();
+    if (path.length > 0) return path;
+  }
+  return null;
 }
 
 function defaultRunFolddbGrant(

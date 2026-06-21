@@ -188,7 +188,7 @@ function fbrainSurfaceFor(
     case "capability_revoked":
       return (
         "fbrain's access to this node was revoked. Ask the node owner to re-grant: " +
-        "`folddb consent grant fbrain`."
+        "`lastdb consent grant fbrain`."
       );
     case "capability_out_of_scope":
       return (
@@ -327,7 +327,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       // for the human path and only shown when no `agentHint` is set.
       hint:
         `Run \`fbrain init --grant-consent\` once, then retry — it creates the consent request, grants it, and stores the capability in one headless step. ` +
-        `(A bare \`folddb consent grant ${appId}\` only works once a pending request exists, i.e. an interactive write is already polling — it fails with "no pending consent request" on a fresh node.) ` +
+        `(A bare \`lastdb consent grant ${appId}\` only works once a pending request exists, i.e. an interactive write is already polling — it fails with "no pending consent request" on a fresh node.) ` +
         `Set FBRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
       // Agent-voiced remediation (MCP) — names the OWNER action in agent terms,
       // with no "shell" and no FBRAIN_APP_IDENTITY_ENFORCE dogfood note the
@@ -335,7 +335,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       // fresh owner's node (init headlessly skips the consent prompt).
       agentHint:
         `The node owner must grant fbrain consent before writes land. ` +
-        `Ask them to run \`fbrain init --grant-consent\` (or \`folddb consent grant ${appId} --yes\`) in their terminal, then retry.`,
+        `Ask them to run \`fbrain init --grant-consent\` (or \`lastdb consent grant ${appId} --yes\`) in their terminal, then retry.`,
     });
   }
 
@@ -395,7 +395,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
     await opts.onConsentRequested({ appId, requestId, print });
     print(`Confirming the grant landed (polling every ${pollSeconds}s)…`);
   } else {
-    print(`First-run setup — run: \`folddb consent grant ${appId}\` in your terminal.`);
+    print(`First-run setup — run: \`lastdb consent grant ${appId}\` in your terminal.`);
     print(`Waiting for you to grant access to this node (polling every ${pollSeconds}s)…`);
   }
 
@@ -456,14 +456,14 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       throw new FbrainError({
         code: "consent_denied",
         message: `The node owner denied fbrain's request for access.`,
-        hint: `Retry with another \`folddb consent grant ${appId}\` once you're ready to allow it.`,
+        hint: `Retry with another \`lastdb consent grant ${appId}\` once you're ready to allow it.`,
       });
     }
     if (res.status === 408) {
       throw new FbrainError({
         code: "consent_expired",
         message: `The consent request expired before it was granted (5-minute window).`,
-        hint: `Re-run the fbrain command to start a fresh request, then \`folddb consent grant ${appId}\`.`,
+        hint: `Re-run the fbrain command to start a fresh request, then \`lastdb consent grant ${appId}\`.`,
       });
     }
     if (res.status === 404) {
@@ -478,7 +478,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       throw new FbrainError({
         code: "consent_timeout",
         message: `Timed out after ${Math.round(maxWaitMs / 1000)}s waiting for consent to be granted.`,
-        hint: `Run \`folddb consent grant ${appId}\` and retry the command.`,
+        hint: `Run \`lastdb consent grant ${appId}\` and retry the command.`,
       });
     }
     await sleep(pollIntervalMs);
