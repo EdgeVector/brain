@@ -3,6 +3,13 @@ dist/
 .DS_Store
 *.log
 
+# ...but the vendored @folddb/app-sdk IS distributed as its prebuilt dist/ — it
+# has no source build step in this repo, so its dist/ must be committed. Without
+# this negation the global `dist/` rule above silently drops the SDK's only
+# runtime code, leaving `@folddb/app-sdk: file:./vendor/folddb-app-sdk` an empty
+# shell when installed from a `github:` specifier.
+!/vendor/folddb-app-sdk/dist/
+
 # Bun
 bun.lockb
 
