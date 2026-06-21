@@ -7,7 +7,7 @@ A CLI named `fbrain` that uses fold_db as the storage engine for a personal brai
 You only need two things to **download and use** fbrain — Bun and a running
 `fold_db_node`. No Rust toolchain, no building from source.
 
-- **Bun** ≥ 1.3.10 — `bun --version`.
+- **Bun** ≥ 1.3.10 — `bun --version`. fbrain ships as a Bun-runtime CLI, so Bun is the only thing you install to *run* it (`bunx fbrain …` / `npm i -g fbrain` both put the `fbrain` bin on your PATH and run it under Bun — no clone, no compile).
 - **A running `fold_db_node`** — install the prebuilt daemon from the [`edgevector/folddb` Homebrew tap](https://github.com/EdgeVector/homebrew-folddb) (no Rust toolchain, no compile step):
   ```bash
   brew install edgevector/folddb/folddb   # taps + installs `folddb` and `folddb_server`
@@ -30,20 +30,27 @@ brew install edgevector/folddb/folddb
 brew services start folddb            # launchd: serves :9001, restarts on crash
 curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
 
-# 1. install fbrain + link (one-time)
-git clone https://github.com/EdgeVector/fbrain && cd fbrain
-bun install
-bun link                              # exposes the `fbrain` CLI and the `fbrain-mcp`
-                                      # agent entrypoint on your PATH — `fbrain-mcp` is what
-                                      # `claude mcp add fbrain fbrain-mcp` (see the MCP
-                                      # section below) consumes, so your AI agent's on-ramp
-                                      # is wired up now too, not just the human CLI
+# 1. install the fbrain CLI (one-time, single command — no clone, no compile)
+npm i -g fbrain                       # puts the `fbrain` (and `fbrain-mcp`) bin on
+                                      # your PATH, run under the Bun runtime
+# …or run it without installing at all:
+bunx fbrain init                      # one-shot: downloads + runs the CLI on demand
 
 # 2. bootstrap
 fbrain init                           # 6 steps; writes ~/.fbrain/config.json
                                       # (auto-heals a stale local-schema config
                                       #  to the new cloud-Lambda default)
 ```
+
+> **Contributing to fbrain itself?** To hack on the CLI source, clone the repo
+> and link it onto your PATH instead of installing the published package:
+> ```bash
+> git clone https://github.com/EdgeVector/fbrain && cd fbrain
+> bun install
+> bun link                              # exposes the local `fbrain` + `fbrain-mcp` bins
+> ```
+> Everything below works the same whether `fbrain` is the published install or a
+> `bun link`'d checkout.
 
 ### One-time consent grant (handled by `init`)
 
@@ -75,8 +82,7 @@ so the very next `fbrain put` lands without a second terminal:
 ```bash
 brew install edgevector/folddb/folddb
 brew services start folddb
-git clone https://github.com/EdgeVector/fbrain && cd fbrain
-bun install && bun link
+npm i -g fbrain                                 # single-command install, no clone
 
 fbrain init --grant-consent </dev/null         # ready-to-write in one shot
 echo "hello scripted brain" | fbrain put my-first-note --type concept
@@ -375,8 +381,19 @@ The script retries each `get` up to five times (250 ms backoff) to ride out the 
 
 fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Seven tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`, `fbrain_link`.
 
+> **Heads up — the agent surface (`fbrain-mcp`) graduates to a scoped app.** This
+> README's one-command install (`npm i -g fbrain` / `bunx fbrain`) covers the
+> **human** `fbrain` CLI, whose `init`/consent run as the node *owner* under any
+> app model. The steady-state *agent* surface (`fbrain-mcp`) is moving to a
+> sandboxed, scoped app (**model C**, tracked by the *fbrain sandboxed-app
+> design* in fbrain) — its distribution + connection path is governed by that
+> migration, not by this CLI install. Until that lands, the `fbrain-mcp` bin
+> ships alongside the CLI (so the wiring below works today), but treat its
+> distribution as provisional. Look it up with
+> `fbrain search "fbrain sandboxed scoped app model C"` for the current design.
+
 ```bash
-# One-shot agent wiring (one-time, after the Quick start `bun link`):
+# One-shot agent wiring (one-time, after installing fbrain in the Quick start):
 fbrain mcp install        # verifies the entrypoint, registers fbrain with
                           # Claude Code, AND appends the agent-instructions
                           # block to ./CLAUDE.md — re-running it is a safe no-op
@@ -385,7 +402,7 @@ fbrain mcp install        # verifies the entrypoint, registers fbrain with
 fbrain-mcp
 ```
 
-`fbrain mcp install` (alias `fbrain mcp setup`) collapses the three manual steps into one command — it's the recommended path. Pass `--yes` to skip the confirmation prompt (e.g. in scripts), or `--claude-md <path>` to target a different instructions file. If `claude` isn't on your `PATH` it prints the exact `claude mcp add` command for you to run; if `fbrain-mcp` isn't on `PATH` yet it tells you to `bun link` first. Verify with `fbrain doctor --mcp`.
+`fbrain mcp install` (alias `fbrain mcp setup`) collapses the three manual steps into one command — it's the recommended path. Pass `--yes` to skip the confirmation prompt (e.g. in scripts), or `--claude-md <path>` to target a different instructions file. If `claude` isn't on your `PATH` it prints the exact `claude mcp add` command for you to run; if `fbrain-mcp` isn't on `PATH` yet it tells you to (re)install fbrain (`npm i -g fbrain`, or `bun link` from a source checkout) first. Verify with `fbrain doctor --mcp`.
 
 Prefer to wire it by hand (or already have part of it set up)? The two manual steps `install` runs for you are:
 
@@ -394,7 +411,7 @@ claude mcp add fbrain fbrain-mcp       # register the MCP server with Claude Cod
 fbrain mcp instructions >> CLAUDE.md   # tell your agent to USE it (see below)
 ```
 
-`bun link` (Quick start step 1) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting the clone. `fbrain doctor` verifies this for you — its `mcp-entrypoint` check PASSes with the resolved path when `fbrain-mcp` is on `PATH`, and WARNs (without failing the verdict) with a re-link hint when it isn't, so a silently-broken agent integration is visible instead of surfacing only at agent-call time.
+Installing fbrain (Quick start step 1 — `npm i -g fbrain`, or `bun link` from a source checkout) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting any clone. `fbrain doctor` verifies this for you — its `mcp-entrypoint` check PASSes with the resolved path when `fbrain-mcp` is on `PATH`, and WARNs (without failing the verdict) with a re-link hint when it isn't, so a silently-broken agent integration is visible instead of surfacing only at agent-call time.
 
 **"My agent can't reach fbrain"? Run `fbrain doctor --mcp` first.** The default `mcp-entrypoint` check only *resolves* `fbrain-mcp` on `PATH` — it PASSes even if the server crashes on boot, hangs, or serves the wrong tool set. `fbrain doctor --mcp` actually *boots* the resolved entrypoint, completes the JSON-RPC handshake, and asserts the full agent surface, printing e.g. `[PASS] mcp-boot — fbrain-mcp booted + served the full agent surface — tools=7`. That is the end-to-end proof your agent integration works; it's the recommended first troubleshooting step (resolve vs. boot), ahead of the manual smoketest below.
 
@@ -531,4 +548,4 @@ Until the readiness gate ships, both gbrain and fbrain coexist; the `gbrain put`
 - Not E2E-encrypted (Phase 3 sharing probes the surface, doesn't build a product)
 - Not running new fold_db core code
 - No git-to-brain sync
-- No published binaries (`bun link` for local install)
+- No compiled standalone binaries — fbrain runs as a Bun-runtime CLI (`npm i -g fbrain` / `bunx fbrain`; `bun link` for a source checkout)
