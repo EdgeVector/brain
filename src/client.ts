@@ -495,6 +495,32 @@ function defaultTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
 }
 
+// Per-KB and ceiling for the payload-scaled WRITE deadline. The node
+// chunk-embeds the *entire* body on write (~512-char chunks, batched), so a
+// write's cost is O(payload): a ~218KB record is ~425 chunk embeddings and
+// routinely blows past the flat 30s deadline, hard-failing `service_timeout`
+// for no reason other than that the record is big. (Reads stay on
+// `defaultTimeoutMs()` — they embed a single query vector and a 219KB read
+// round-trips in ~0.26s, so a fast deadline still surfaces a wedged node
+// quickly.) These scale the deadline up with body size so a large write
+// succeeds out of the box; the ceiling keeps a runaway from hanging forever.
+const PER_KB_MS = 300;
+const MAX_WRITE_TIMEOUT_MS = 240_000;
+
+// Deadline for a write whose body is `bodyBytes` long. An explicit
+// FBRAIN_HTTP_TIMEOUT_MS still wins unchanged — that's authoritative user
+// intent and must not be silently rescaled. Otherwise grow the base 30s
+// deadline by `PER_KB_MS` per KB of body, clamped to [DEFAULT, MAX]. A
+// zero-byte body (a GET / bodyless request routed through a write transport)
+// resolves to exactly DEFAULT_TIMEOUT_MS, so reads are never slowed.
+export function writeTimeoutMs(bodyBytes: number): number {
+  const raw = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+  const override = raw === undefined ? NaN : parseInt(raw, 10);
+  if (Number.isFinite(override) && override > 0) return override;
+  const scaled = DEFAULT_TIMEOUT_MS + Math.ceil(Math.max(0, bodyBytes) / 1024) * PER_KB_MS;
+  return Math.min(Math.max(DEFAULT_TIMEOUT_MS, scaled), MAX_WRITE_TIMEOUT_MS);
+}
+
 function isTimeoutError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (err.name === "TimeoutError" || err.name === "AbortError") return true;
@@ -1400,7 +1426,11 @@ async function verboseFetch(opts: {
       : typeof opts.body === "string"
         ? opts.body
         : JSON.stringify(opts.body);
-  const timeoutMs = opts.timeoutMs ?? defaultTimeoutMs();
+  // Scale the deadline by body size for writes: a bodyless request (GET/read)
+  // has 0 bytes → exactly DEFAULT_TIMEOUT_MS (reads stay snappy), while a large
+  // write body grows the deadline so it isn't capped by the small-record flat
+  // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
+  const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
   opts.verbose(
     `→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
   );
@@ -1712,7 +1742,11 @@ function fetchTransport(
       // surfaces as `service_timeout` with the idempotent-retry hint rather
       // than a silent unbounded hang. A genuine connect failure stays a
       // TransportError (→ service_unreachable) as before.
-      const timeoutMs = defaultTimeoutMs();
+      // Payload-scaled deadline (see writeTimeoutMs): the mutation/write path
+      // routes through here, and its node-side cost is O(body) because the node
+      // chunk-embeds the whole body. A bodyless GET → 0 bytes → DEFAULT, so
+      // reads through this transport keep the fast deadline.
+      const timeoutMs = writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
       const controller = new AbortController();
       let done = false;
       const timer = setTimeout(() => {
