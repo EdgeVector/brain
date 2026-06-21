@@ -181,7 +181,7 @@ describe("establishConsentInline — non-interactive skip", () => {
     const skipLine = lines.find((l) => l.includes("fbrain init --grant-consent"));
     expect(skipLine).toBeDefined();
     const initIdx = skipLine!.indexOf("fbrain init --grant-consent");
-    const bareGrantIdx = skipLine!.indexOf("folddb consent grant fbrain");
+    const bareGrantIdx = skipLine!.indexOf("lastdb consent grant fbrain");
     expect(initIdx).toBeGreaterThanOrEqual(0);
     if (bareGrantIdx >= 0) {
       expect(initIdx).toBeLessThan(bareGrantIdx);
@@ -211,7 +211,7 @@ describe("establishConsentInline — user declines", () => {
     expect(result).toEqual({ state: "skipped", reason: "declined" });
     expect(transport.requestConsentCalls).toBe(0);
     expect(transport.consentStatusCalls).toBe(0);
-    expect(lines.some((l) => l.includes("folddb consent grant fbrain"))).toBe(true);
+    expect(lines.some((l) => l.includes("lastdb consent grant fbrain"))).toBe(true);
   });
 });
 
@@ -249,8 +249,8 @@ describe("establishConsentInline — folddb missing fallback", () => {
     expect(
       lines.some(
         (l) =>
-          l.includes("`folddb` not found on PATH") &&
-          l.includes("folddb consent grant fbrain"),
+          l.includes("`lastdb` not found on PATH") &&
+          l.includes("lastdb consent grant fbrain"),
       ),
     ).toBe(true);
   });
@@ -288,7 +288,7 @@ describe("establishConsentInline — folddb present happy path", () => {
     expect(transport.requestConsentCalls).toBe(1);
     expect((await store.load(NODE_URL))?.blob).toBe(blob);
     expect(
-      lines.some((l) => l.includes("running `folddb consent grant fbrain --yes`")),
+      lines.some((l) => l.includes("running `lastdb consent grant fbrain --yes`")),
     ).toBe(true);
   });
 
@@ -319,12 +319,12 @@ describe("establishConsentInline — folddb present happy path", () => {
     expect(
       lines.some(
         (l) =>
-          l.includes("`folddb consent grant` exited with status 1") &&
+          l.includes("`lastdb consent grant` exited with status 1") &&
           l.includes("permission denied"),
       ),
     ).toBe(true);
     expect(
-      lines.some((l) => l.includes("retry manually with `folddb consent grant fbrain`")),
+      lines.some((l) => l.includes("retry manually with `lastdb consent grant fbrain`")),
     ).toBe(true);
   });
 
@@ -374,7 +374,7 @@ describe("establishConsentInline — folddb present happy path", () => {
     // re-running `folddb consent grant` in the same shell would fail the
     // same way, so leaking that hint is actively misleading.
     expect(
-      lines.some((l) => l.includes("retry manually with `folddb consent grant fbrain`")),
+      lines.some((l) => l.includes("retry manually with `lastdb consent grant fbrain`")),
     ).toBe(false);
   });
 });

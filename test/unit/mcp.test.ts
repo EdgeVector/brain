@@ -376,7 +376,7 @@ describe("fbrain_search tool", () => {
 
   test("embedding-down error is channel-neutral — no CLI/brew remediation reaches the agent", async () => {
     // The node fails to load its embedding model; client.ts maps that to a
-    // rich FbrainError whose CLI `hint` names `folddb daemon`,
+    // rich FbrainError whose CLI `hint` names `lastdb daemon`,
     // `fbrain doctor --freshness`, and a homebrew log path, and whose message
     // carries the `fbrain doctor` tip. None of that is actionable for an MCP
     // agent — the boundary must strip the doctor tip and swap in the
@@ -401,7 +401,7 @@ describe("fbrain_search tool", () => {
     expect(text).toContain("Semantic search is unavailable");
     // … but no CLI-/brew-only remediation it can't perform.
     expect(text).not.toContain("fbrain doctor");
-    expect(text).not.toContain("folddb daemon");
+    expect(text).not.toContain("lastdb daemon");
     expect(text).not.toContain("brew");
     expect(text).not.toContain("Library/Logs");
     expect(text).not.toContain("--freshness");

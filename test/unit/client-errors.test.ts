@@ -180,7 +180,60 @@ describe("client error mapping", () => {
       expect(fe.hint ?? "").not.toContain("should probe");
       // Hint references the three actionable recovery paths.
       expect(fe.hint ?? "").toContain("~/.fbrain/config.json");
-      expect(fe.hint ?? "").toContain("~/.folddb/config");
+      // The "start fresh" recovery path is built from resolveNodeHome(), so it
+      // points at the dev's real node home rather than a hardcoded ~/.folddb.
+      // With LASTDB_HOME set below it resolves to that explicit home's config/.
+    }
+  });
+
+  test("bootstrap 410 recovery hint derives the reset path from resolveNodeHome (lastdb rebrand)", async () => {
+    // The FoldDB→LastDB rebrand moved the onboarding state from ~/.folddb/config
+    // to ~/.lastdb/config on a v0.15.1+ node; the recovery hint must point at the
+    // resolved home (LASTDB_HOME wins), not a dead hardcoded ~/.folddb path.
+    const priorLastdb = process.env.LASTDB_HOME;
+    const priorFolddb = process.env.FOLDDB_HOME;
+    process.env.LASTDB_HOME = "/tmp/lastdb-fixture-home";
+    delete process.env.FOLDDB_HOME;
+    try {
+      installMock([
+        {
+          status: 410,
+          body: { ok: false, error: "onboarding_already_complete", message: "already bootstrapped" },
+        },
+      ]);
+      const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+      try {
+        await c.bootstrap("x");
+        throw new Error("did not throw");
+      } catch (err) {
+        const fe = err as FbrainError;
+        // Points at the resolved home's config dir, NOT the dead ~/.folddb/config.
+        expect(fe.hint ?? "").toContain("/tmp/lastdb-fixture-home/config/");
+        expect(fe.hint ?? "").not.toContain("~/.folddb/config/");
+      }
+      // Back-compat: a legacy 0.14.x layout (only FOLDDB_HOME) still resolves to
+      // its ~/.folddb-style config dir.
+      delete process.env.LASTDB_HOME;
+      process.env.FOLDDB_HOME = "/tmp/folddb-legacy-home";
+      installMock([
+        {
+          status: 410,
+          body: { ok: false, error: "onboarding_already_complete", message: "already bootstrapped" },
+        },
+      ]);
+      const c2 = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+      try {
+        await c2.bootstrap("x");
+        throw new Error("did not throw");
+      } catch (err) {
+        const fe = err as FbrainError;
+        expect(fe.hint ?? "").toContain("/tmp/folddb-legacy-home/config/");
+      }
+    } finally {
+      if (priorLastdb === undefined) delete process.env.LASTDB_HOME;
+      else process.env.LASTDB_HOME = priorLastdb;
+      if (priorFolddb === undefined) delete process.env.FOLDDB_HOME;
+      else process.env.FOLDDB_HOME = priorFolddb;
     }
   });
 
@@ -213,12 +266,12 @@ describe("client error mapping", () => {
       expect(fe.message).toContain("Semantic search is unavailable");
       expect(fe.message).toContain("embedding model");
       expect(fe.message).toContain("fbrain doctor");
-      expect(fe.hint ?? "").toContain("folddb daemon stop && folddb daemon start");
+      expect(fe.hint ?? "").toContain("lastdb daemon stop && lastdb daemon start");
       expect(fe.hint ?? "").toContain("fbrain doctor --freshness");
-      expect(fe.hint ?? "").toContain("~/Library/Logs/Homebrew/folddb/");
+      expect(fe.hint ?? "").toContain("~/Library/Logs/Homebrew/lastdb/");
       // The channel-neutral variant (shown over `hint` on the MCP boundary)
       // must carry none of that CLI/brew remediation an agent can't run.
-      expect(fe.agentHint ?? "").not.toContain("folddb daemon");
+      expect(fe.agentHint ?? "").not.toContain("lastdb daemon");
       expect(fe.agentHint ?? "").not.toContain("fbrain doctor");
       expect(fe.agentHint ?? "").not.toContain("brew");
       expect(fe.agentHint ?? "").toContain("operator");
@@ -247,7 +300,7 @@ describe("client error mapping", () => {
       expect(err).toBeInstanceOf(FbrainError);
       const fe = err as FbrainError;
       expect(fe.code).toBe("embedding_model_unavailable");
-      expect(fe.hint ?? "").toContain("folddb daemon stop && folddb daemon start");
+      expect(fe.hint ?? "").toContain("lastdb daemon stop && lastdb daemon start");
     }
   });
 
@@ -271,7 +324,7 @@ describe("client error mapping", () => {
   });
 
   // DX: a downloaded user who simply forgot to start their daemon must be
-  // told to `brew services start folddb`, NOT to compile Rust from source.
+  // told to `brew services start lastdb`, NOT to compile Rust from source.
   test("node-down hint leads with `brew services` for the default :9001 daemon", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9001")).toBe(true);
     expect(isDefaultNodeUrl("http://localhost:9001")).toBe(true);
@@ -286,8 +339,8 @@ describe("client error mapping", () => {
     // The hint must lead with a combined, copy-pasteable install+start line so
     // a brand-new dev who never ran `brew install` (the common case) doesn't
     // dead-end on `Error: Formula 'folddb' is not installed.`.
-    expect(hint).toContain("brew install edgevector/folddb/folddb");
-    expect(hint).toContain("brew services start folddb");
+    expect(hint).toContain("brew install edgevector/lastdb/lastdb");
+    expect(hint).toContain("brew services start lastdb");
     // The from-source path is still mentioned, but only as the secondary
     // contributor note — it must not lead.
     expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
@@ -308,7 +361,7 @@ describe("client error mapping", () => {
 
   // DX regression: a downloaded user whose `folddb` is on a non-9001 port
   // (port conflict, two nodes, custom `--node-url` at init) must STILL be
-  // sent to `brew services start folddb` — not asked to clone the fold
+  // sent to `brew services start lastdb` — not asked to clone the fold
   // monorepo and compile Rust. The prebuilt binary on PATH is the signal.
   test("node-down hint leads with `brew services` for a non-9001 port when the prebuilt binary is on PATH", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9050")).toBe(false);
@@ -317,8 +370,8 @@ describe("client error mapping", () => {
       () => true,
       () => false,
     );
-    expect(hint).toContain("brew install edgevector/folddb/folddb");
-    expect(hint).toContain("brew services start folddb");
+    expect(hint).toContain("brew install edgevector/lastdb/lastdb");
+    expect(hint).toContain("brew services start lastdb");
     expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
     expect(hint).not.toContain("compiles Rust");
   });
@@ -341,11 +394,11 @@ describe("client error mapping", () => {
     expect(hint).toContain("http://127.0.0.1:9711");
     expect(hint).toContain("brew services list");
     expect(hint).toContain("stop it before restarting");
-    expect(hint).toContain("brew services stop folddb");
+    expect(hint).toContain("brew services stop lastdb");
     // It must NOT lead the dev back into the install/`brew services restart`
     // reflex that re-hangs a wedged node.
-    expect(hint).not.toContain("brew install edgevector/folddb/folddb");
-    expect(hint).not.toContain("brew services restart folddb");
+    expect(hint).not.toContain("brew install edgevector/lastdb/lastdb");
+    expect(hint).not.toContain("brew services restart lastdb");
   });
 
   // The running-but-not-serving branch wins regardless of the node URL or
@@ -359,7 +412,7 @@ describe("client error mapping", () => {
       () => true,
     );
     expect(hint).toContain("process is running but isn't responding");
-    expect(hint).not.toContain("brew install edgevector/folddb/folddb");
+    expect(hint).not.toContain("brew install edgevector/lastdb/lastdb");
   });
 
   // The genuine not-running case (no live process) must be UNCHANGED — still
@@ -370,8 +423,8 @@ describe("client error mapping", () => {
       () => true,
       () => false,
     );
-    expect(hint).toContain("brew install edgevector/folddb/folddb");
-    expect(hint).toContain("brew services start folddb");
+    expect(hint).toContain("brew install edgevector/lastdb/lastdb");
+    expect(hint).toContain("brew services start lastdb");
     expect(hint).not.toContain("process is running but isn't responding");
   });
 
@@ -384,7 +437,7 @@ describe("client error mapping", () => {
       await c.autoIdentity();
       throw new Error("did not throw");
     } catch (err) {
-      expect((err as FbrainError).hint ?? "").toContain("brew services start folddb");
+      expect((err as FbrainError).hint ?? "").toContain("brew services start lastdb");
     }
   });
 

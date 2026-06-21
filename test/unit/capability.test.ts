@@ -185,7 +185,7 @@ describe("first-run consent acquisition", () => {
     expect(stored.blob).toBe(blob);
     expect(stored.nodePubkey).toBe(NODE_PUBKEY);
     // The exact, single, actionable console instruction (design step 3).
-    expect(lines.some((l) => l.includes("folddb consent grant fbrain"))).toBe(true);
+    expect(lines.some((l) => l.includes("lastdb consent grant fbrain"))).toBe(true);
     // Manual-fallback framing: the human really does need to act in another
     // terminal, so the polling line tells them so.
     expect(lines.some((l) => l.includes("Waiting for you to grant access"))).toBe(true);
@@ -295,7 +295,7 @@ describe("first-run consent acquisition", () => {
     const hint = err.hint ?? "";
     expect(hint).toContain("fbrain init --grant-consent");
     const initIdx = hint.indexOf("fbrain init --grant-consent");
-    const bareGrantIdx = hint.indexOf("folddb consent grant fbrain");
+    const bareGrantIdx = hint.indexOf("lastdb consent grant fbrain");
     // `fbrain init --grant-consent` is named, and named before any bare
     // `folddb consent grant fbrain` (which may still appear, as a caveat).
     expect(initIdx).toBeGreaterThanOrEqual(0);

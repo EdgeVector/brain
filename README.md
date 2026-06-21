@@ -8,13 +8,13 @@ You only need two things to **download and use** fbrain — Bun and a running
 `fold_db_node`. No Rust toolchain, no building from source.
 
 - **Bun** ≥ 1.3.10 — `bun --version`. fbrain ships as a Bun-runtime CLI, so Bun is the only thing you install to *run* it — clone the public repo and `bun link` puts the `fbrain` bin on your PATH and runs it under Bun (no Rust, no compile). (A registry one-liner — `npm i -g fbrain` / `bunx fbrain` — is coming **once the package is published to npm**; see Quick start step 1.)
-- **A running `fold_db_node`** — install the prebuilt daemon from the [`edgevector/folddb` Homebrew tap](https://github.com/EdgeVector/homebrew-folddb) (no Rust toolchain, no compile step):
+- **A running `fold_db_node`** — install the prebuilt daemon from the [`edgevector/lastdb` Homebrew tap](https://github.com/EdgeVector/homebrew-lastdb) (no Rust toolchain, no compile step):
   ```bash
-  brew install edgevector/folddb/folddb   # taps + installs `folddb` and `folddb_server`
-  brew services start folddb              # launchd: runs `folddb_server --port 9001` with keep_alive
+  brew install edgevector/lastdb/lastdb   # taps + installs `lastdb` and `lastdb_server`
+  brew services start lastdb              # launchd: runs `lastdb_server --port 9001` with keep_alive
   curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
   ```
-  fbrain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade folddb`, run `brew services restart folddb` so the new binary takes over the port. (Prefer a foreground daemon for a quick try? `folddb daemon start` also works — `brew services` is just the keep-alive launchd path that survives crashes and reboots.)
+  fbrain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade lastdb`, run `brew services restart lastdb` so the new binary takes over the port. (Prefer a foreground daemon for a quick try? `lastdb daemon start` also works — `brew services` is just the keep-alive launchd path that survives crashes and reboots.)
 - **Network access to the schema service** — fbrain registers its 8 schemas with the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com`. There is **no local schema_service to run**. (Iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`.)
 
 > **Contributing to fold_db itself?** Instead of the Homebrew binary you can run a worktree-local node from source with `./run.sh` — that path *does* need a Rust toolchain and a multi-minute cold build the first time (cargo `target/` is shared once warmed). Point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`; `fbrain init` prints a "compiling Rust — give it a few minutes" hint and retries while the node comes up. Override either endpoint with `--node-url` / `--schema-service-url` on `fbrain init`.
@@ -25,9 +25,9 @@ From a clean machine to your first record in a few minutes (most of it is the
 one-time installs):
 
 ```bash
-# 0. install + start fold_db (one-time; prebuilt binary, no Rust)
-brew install edgevector/folddb/folddb
-brew services start folddb            # launchd: serves :9001, restarts on crash
+# 0. install + start lastdb (one-time; prebuilt binary, no Rust)
+brew install edgevector/lastdb/lastdb
+brew services start lastdb            # launchd: serves :9001, restarts on crash
 curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
 
 # 1. install the fbrain CLI (one-time) — clone the public repo + bun link.
@@ -67,9 +67,10 @@ terminal. After registering schemas, `init` prints:
 fbrain wants read/write access to its namespace on this node. Grant now? [Y/n]
 ```
 
-Press `y` and `init` shells out to `folddb consent grant fbrain --yes` for you
-(the `folddb` CLI ships in the same Homebrew formula, so it's already on your
-PATH), then waits until the capability is cached in your keychain. When `init`
+Press `y` and `init` shells out to `lastdb consent grant fbrain --yes` for you
+(the `lastdb` CLI ships in the same Homebrew formula, so it's already on your
+PATH; older installs that only have the `folddb` compat shim still work), then
+waits until the capability is cached in your keychain. When `init`
 returns you have a ready-to-write capability — your first `fbrain put` /
 `design new` lands immediately. Re-running `init` is idempotent: it skips the
 prompt when a live capability already exists. (Running a local/dev node with
@@ -79,12 +80,12 @@ hashes from the node, and writes land as NodeOwner with no capability headers.)
 
 **Scripted / CI / agent install (no TTY).** Pass `--grant-consent` and `init`
 runs the same handshake non-interactively — request-consent, shell out to
-`folddb consent grant fbrain --yes`, poll until the capability is cached —
+`lastdb consent grant fbrain --yes`, poll until the capability is cached —
 so the very next `fbrain put` lands without a second terminal:
 
 ```bash
-brew install edgevector/folddb/folddb
-brew services start folddb
+brew install edgevector/lastdb/lastdb
+brew services start lastdb
 git clone https://github.com/EdgeVector/fbrain && cd fbrain  # registry-free install
 bun install && bun link                         # puts `fbrain` on PATH (no npm publish)
 
@@ -106,7 +107,7 @@ declined `init`'s prompt, ran `init` non-interactively without
 next write stalls with:
 
 ```
-First-run setup — run: `folddb consent grant fbrain` in your terminal.
+First-run setup — run: `lastdb consent grant fbrain` in your terminal.
 Waiting for you to grant access to this node (polling every 2s)…
 ```
 
@@ -114,7 +115,7 @@ Re-run `fbrain init` and accept the grant, or approve it once in a second
 terminal:
 
 ```bash
-folddb consent grant fbrain           # review the request, then `y` (or pass --yes)
+lastdb consent grant fbrain           # review the request, then `y` (or pass --yes)
 ```
 
 The waiting command then unblocks and the write lands.
@@ -478,14 +479,14 @@ schema service with `--node-url` / `--schema-service-url` on `fbrain init`
 
 Top errors you'll hit and the fix:
 
-- **Your first write hangs at `First-run setup — run: \`folddb consent grant fbrain\` … Waiting for you to grant access…`**  
-  Rare now that `fbrain init` grants consent inline — you'll only see this if you declined init's consent prompt, ran `init` non-interactively, or your capability was revoked. Easiest fix: re-run `fbrain init` (idempotent) and accept the grant. Otherwise leave the write waiting and, **in a second terminal**, run `folddb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-handled-by-init). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
+- **Your first write hangs at `First-run setup — run: \`lastdb consent grant fbrain\` … Waiting for you to grant access…`**  
+  Rare now that `fbrain init` grants consent inline — you'll only see this if you declined init's consent prompt, ran `init` non-interactively, or your capability was revoked. Easiest fix: re-run `fbrain init` (idempotent) and accept the grant. Otherwise leave the write waiting and, **in a second terminal**, run `lastdb consent grant fbrain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-handled-by-init). To opt out on a local/dev node, set `FBRAIN_APP_IDENTITY_ENFORCE=off`.
 
 - **First write is slow (~5s) the first time on a headless / SSH / locked-keychain box, then fast after**  
   fbrain stores its capability in the macOS login keychain (best protection against co-resident exfiltration). When there's no GUI to answer a keychain-authorization prompt (SSH, CI, an automation agent, or a never-unlocked login keychain), the `security` call can't complete — every keychain call is bounded by a short timeout (via the `@folddb/app-sdk` capability store) and transparently falls back to a `0600` file under `~/.fbrain/capabilities/` instead of hanging (a pre-SDK `~/.fbrain/capabilities.json` entry is still read and migrated). You'll see a one-time ~5s pause on that first write; subsequent writes read the cached file and are fast. To skip the keychain entirely on such hosts, set `FBRAIN_FORCE_FILE_KEYCHAIN=1`.
 
 - **`error: node not reachable at http://127.0.0.1:9001 — run \`fbrain doctor\` for a full diagnosis.`**  
-  The homebrew `fold_db_node` daemon isn't running. Check with `brew services list` (look for `folddb` → `started`) and start it with `brew services start folddb` (or `folddb daemon start` if you prefer the foreground path). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
+  The homebrew `fold_db_node` daemon isn't running. Check with `brew services list` (look for `lastdb` → `started`) and start it with `brew services start lastdb` (or `lastdb daemon start` if you prefer the foreground path). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`.
 
 - **`error: Node not set up — run \`fbrain doctor\` for a full diagnosis.`**  
   The node is running but not provisioned. Run `fbrain init`.
@@ -497,10 +498,10 @@ Top errors you'll hit and the fix:
   You haven't initialised fbrain yet. Run `fbrain init`.
 
 - **`error: Node rejected POST /api/setup/bootstrap with 410 — already provisioned …`**  
-  The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where `~/.folddb/config/` carries over from a previous fold install. Recovery: (a) if you still have `~/.fbrain/config.json` from when this node was working, re-run `fbrain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.folddb/config/`, restart, then re-run `fbrain init`.
+  The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where the node's `config/` carries over from a previous install. Recovery: (a) if you still have `~/.fbrain/config.json` from when this node was working, re-run `fbrain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.lastdb/config/` (on a current v0.15.1+ node; legacy 0.14.x nodes use `~/.folddb/config/`), restart, then re-run `fbrain init`. (The error hint itself prints the resolved path for your node.)
 
 - **`error: Semantic search is unavailable — the fold_db node failed to load its embedding model …`** (or, on older fbrain versions, the opaque `Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx`).  
-  The fold_db_node loads its `model.onnx` lazily on the first `fbrain search` / `fbrain ask` call. After certain restarts (commonly `brew upgrade folddb`) that cache is partially populated and the node 400s instead of fetching. **Workaround:** `folddb daemon stop && folddb daemon start` — the embedding cache repopulates on next search. If the failure persists, run `fbrain doctor --freshness` and capture the node log (the latest file under `~/Library/Logs/Homebrew/folddb/`); the underlying cache-recovery bug is tracked upstream in `EdgeVector/fold` (fold/fold_db_node/). `fbrain doctor` (no flags) now runs a one-token search probe so this failure surfaces as a structured `[FAIL] embedding-runtime` line instead of an opaque error on first use.
+  The fold_db_node loads its `model.onnx` lazily on the first `fbrain search` / `fbrain ask` call. After certain restarts (commonly `brew upgrade lastdb`) that cache is partially populated and the node 400s instead of fetching. **Workaround:** `lastdb daemon stop && lastdb daemon start` — the embedding cache repopulates on next search. If the failure persists, run `fbrain doctor --freshness` and capture the node log (the latest file under `~/Library/Logs/Homebrew/lastdb/`); the underlying cache-recovery bug is tracked upstream in `EdgeVector/fold` (fold/fold_db_node/). `fbrain doctor` (no flags) now runs a one-token search probe so this failure surfaces as a structured `[FAIL] embedding-runtime` line instead of an opaque error on first use.
 
 - **`?? ~/` showing up in `git status` inside this repo.**  
   Don't get confused by it — that literal `~` directory is `fold_db` writing to a config path of `~/.folddb` without expanding the tilde, leaving a real `./~/` subtree in whatever cwd it ran from. The contents are safe to delete (`rm -rf ./~`). It's also gitignored (`/~/` in `.gitignore`) so it won't be staged.
