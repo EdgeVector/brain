@@ -60,7 +60,7 @@ import {
 } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
-import type { SearchHitJson } from "./search.ts";
+import { isWeakMatch, type SearchHitJson } from "./search.ts";
 import {
   reciprocalRankFusion,
   RRF_DEFAULT_K,
@@ -434,6 +434,63 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }));
   opts.onResult?.(payload);
 
+  // Weak-match advisory. `ask` is the RECOMMENDED retrieval primitive, yet
+  // until now it was the one that silently handed a no-match query five
+  // confident-looking rows with no signal they're junk — while the secondary
+  // `search` path warns (#253/#308/#321). Close that inconsistency: when the
+  // result set is a flat floor band of noise, flag it. STRICTLY ADDITIVE — we
+  // never drop a row; the note just lets the user tell "showing the closest we
+  // found" apart from "this nailed it".
+  //
+  // The signal is the per-hit `vectorScore` (the cosine the vector ranker
+  // returned), NOT the fused RRF score. RRF scores are rank-based (~0.016 even
+  // for great hits) and carry no absolute-relevance meaning, so they can't be
+  // thresholded. `vectorScore` is the SAME cosine scale `search` thresholds on,
+  // so we reuse search's distribution-shape classifier (`isWeakMatch`) and its
+  // STRONG_SCORE 0.5 / FLATNESS_GAP 0.025 — those are the same cosine scale.
+  //
+  // NOISE_CEILING differs from search's 0.3, and on purpose. `search`
+  // classifies over its full top-50 cosine list, so the flat-floor band is
+  // densely sampled and FLATNESS_GAP reliably catches noise — 0.3 only needs to
+  // backstop the sparse-brain edge. `ask` resolves only the top-`limit` (≈5)
+  // RRF-FUSED hits, a tiny sample where one moderately-higher cosine breaks
+  // flatness even on pure noise: a real no-match query measured top 0.419 with
+  // median−min 0.037 on the live :9001 brain (run 2026-06-21) and slipped past
+  // the flatness test. So `ask` leans harder on the absolute floor. Calibrated
+  // on the live brain: noise tops landed 0.41–0.44, genuine sub-STRONG real
+  // hits 0.45–0.49 (search.ts's own measured boundary), so 0.45 splits them —
+  // it flags both gibberish probes (tops 0.419 / 0.409) via the floor while a
+  // real query's strong top (≥0.66 here) clears STRONG_SCORE outright. A real
+  // query whose own top is sub-strong-and-flat (e.g. 0.459, median−min 0.020)
+  // still flags, exactly as `search` would — that IS a weak match, not a false
+  // positive.
+  //
+  // If every resolved hit has `vectorScore === null` (e.g. a pure-BM25 rescue
+  // where the vector ranker contributed nothing) the distribution is
+  // unmeasurable → do not annotate (same as search's null handling). The
+  // all-stopwords notice in Stage 2 (qi === 0, zero tokens) is a different,
+  // complementary case and stays as-is.
+  const STRONG_SCORE = 0.5;
+  const FLATNESS_GAP = 0.025;
+  const NOISE_CEILING = 0.45;
+  const topVectorScore = resolved.reduce<number | null>((max, h) => {
+    if (h.vectorScore === null) return max;
+    return max === null || h.vectorScore > max ? h.vectorScore : max;
+  }, null);
+  const weakMatch =
+    resolved.length > 0 &&
+    topVectorScore !== null &&
+    isWeakMatch(
+      topVectorScore,
+      resolved.map((h) => ({ score: h.vectorScore })),
+      STRONG_SCORE,
+      FLATNESS_GAP,
+      NOISE_CEILING,
+    );
+  // Same copy as search's `weakMatchNote`, minus the "Try `fbrain ask`" tail
+  // (the user is already in ask — pointing them back at it is a dead end).
+  const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms.`;
+
   if (resolved.length === 0) {
     // Context-aware no-match hint, mirroring `fbrain search` (#276). `ask` is a
     // BM25 + vector hybrid, so on a POPULATED brain it almost never returns
@@ -472,7 +529,11 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     }
   } else if (opts.json) {
     print(JSON.stringify(payload));
+    // Advisory → stderr only; stdout stays pure JSON (mirrors search.ts).
+    if (weakMatch) printErr(weakMatchNote);
   } else if (opts.verbose) {
+    // Advisory → stderr so `fbrain ask q 2>/dev/null` stays parseable.
+    if (weakMatch) printErr(weakMatchNote);
     // Human-only column legend (TTY, non-JSON; `resolved` is non-empty here).
     // Verbose keeps the raw fused-RRF score as a labeled debug column for
     // operators; the leading column is still the 1-based rank so the primary
@@ -518,6 +579,8 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       if (snippet) print(`    ${snippet}`);
     }
   } else {
+    // Advisory → stderr so `fbrain ask q 2>/dev/null` stays parseable.
+    if (weakMatch) printErr(weakMatchNote);
     // Human-only column legend (TTY, non-JSON; `resolved` is non-empty here).
     // Rows are printed best-first; the leading column is the 1-based rank,
     // NOT a score (the raw fused-RRF value is exposed via --json/--verbose).

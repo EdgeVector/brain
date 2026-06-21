@@ -1199,3 +1199,202 @@ describe("askCmd no-match hint (mirrors search #276)", () => {
     expect(stderr.some((l) => l.startsWith("hint:") && l.includes("no records yet"))).toBe(true);
   });
 });
+
+describe("askCmd weak-match advisory (#253 parity on the recommended path)", () => {
+  // `ask` thresholds the per-hit vectorScore (the cosine the vector ranker
+  // returned), NOT the fused RRF score — RRF scores are rank-based and carry no
+  // absolute-relevance meaning. Reuses search's distribution-shape classifier +
+  // constants (STRONG_SCORE 0.5 / FLATNESS_GAP 0.025 / NOISE_CEILING 0.3), and
+  // routes the `note:` to stderr in both text and --json modes. The note copy
+  // drops search's "Try `fbrain ask`" tail (already in ask).
+
+  // All rows share the token "octopus" so BM25 resolves the whole list; the
+  // weak/strong distinction comes purely from the vectorScores below.
+  const noiseRows = [
+    designRow("d1", "octopus alpha"),
+    designRow("d2", "octopus beta"),
+    designRow("d3", "octopus gamma"),
+    designRow("d4", "octopus delta"),
+  ];
+
+  // A flat floor band of vector cosines: top below STRONG_SCORE (0.5) and the
+  // bulk pinned to the floor (median − min < FLATNESS_GAP 0.025) — the no-match
+  // shape. Top 0.443 is also above NOISE_CEILING (0.3) so the flatness test,
+  // not the absolute floor, is what fires here.
+  const noiseVectorHits = [
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.443 }),
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d2", score: 0.334 }),
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d3", score: 0.334 }),
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d4", score: 0.334 }),
+  ];
+
+  // A strong distribution: top at/above STRONG_SCORE → never weak.
+  const strongVectorHits = [
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.62 }),
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d2", score: 0.34 }),
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d3", score: 0.34 }),
+    vectorHit({ schemaName: TEST_HASHES.design, slug: "d4", score: 0.33 }),
+  ];
+
+  test("a noise hit list fires the advisory on stderr (text mode); stdout has the rows", async () => {
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: noiseRows, [TEST_HASHES.task]: [] },
+      vectorHits: noiseVectorHits,
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    // Advisory on stderr, with the ask-flavored copy (no "Try `fbrain ask`").
+    expect(stderr.some((l) => l.includes("no strong matches"))).toBe(true);
+    expect(stderr.some((l) => l.includes("Try different terms."))).toBe(true);
+    expect(stderr.some((l) => l.includes("`fbrain ask"))).toBe(false);
+    // Result rows still land on stdout (strictly additive — never drops a row).
+    expect(stdout.some((l) => l.includes("d1"))).toBe(true);
+    expect(stdout.some((l) => l.startsWith("note:"))).toBe(false);
+  });
+
+  test("a strong hit list does NOT fire the advisory", async () => {
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: noiseRows, [TEST_HASHES.task]: [] },
+      vectorHits: strongVectorHits,
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(stderr.some((l) => l.includes("no strong matches"))).toBe(false);
+    expect(stdout.some((l) => l.includes("d1"))).toBe(true);
+  });
+
+  test("--json: advisory rides stderr, stdout stays pure JSON", async () => {
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: noiseRows, [TEST_HASHES.task]: [] },
+      vectorHits: noiseVectorHits,
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      json: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    // Stdout: exactly one parseable JSON document, no `note:` contamination.
+    expect(stdout).toHaveLength(1);
+    const parsed = JSON.parse(stdout[0]!);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(stdout.some((l) => l.startsWith("note:"))).toBe(false);
+    // Stderr carries the advisory.
+    expect(stderr.some((l) => l.includes("no strong matches"))).toBe(true);
+  });
+
+  test("small-sample noise whose floor breaks flatness is still caught by NOISE_CEILING", async () => {
+    // The live-brain calibration case (run 2026-06-21): a true no-match query
+    // resolved only ~5 RRF-fused hits whose vectorScores were
+    // [0.419, 0.330, null, 0.385, 0.321] — top 0.419, median−min ≈ 0.037, so
+    // the flatness test alone (median−min < 0.025) did NOT fire. ask's tiny
+    // sample doesn't form the dense flat floor search's top-50 does, so the
+    // absolute NOISE_CEILING (0.45 on ask, above search's 0.3) is what catches
+    // it: top 0.419 < 0.45 → weak. This pins that calibration.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: noiseRows, [TEST_HASHES.task]: [] },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.419 }),
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d2", score: 0.385 }),
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d3", score: 0.33 }),
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d4", score: 0.321 }),
+      ],
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(stderr.some((l) => l.includes("no strong matches"))).toBe(true);
+  });
+
+  test("a sub-STRONG top whose own band is flat is weak (parity with search)", async () => {
+    // A real-but-loosely-matching query can have a top cosine between
+    // NOISE_CEILING and STRONG_SCORE with a flat band (live: 0.459, median−min
+    // 0.020). That IS a weak match by search's own definition (top < 0.5 +
+    // flat), so ask flags it too — not a false positive. The flatness test, not
+    // the floor, is what fires here.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: noiseRows, [TEST_HASHES.task]: [] },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.459 }),
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d2", score: 0.452 }),
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d3", score: 0.449 }),
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d4", score: 0.448 }),
+      ],
+    });
+
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: () => {},
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(stderr.some((l) => l.includes("no strong matches"))).toBe(true);
+  });
+
+  test("all-null vectorScores (pure-BM25 rescue) are unmeasurable → no advisory", async () => {
+    // No vector hits at all: every resolved hit has vectorScore === null, so
+    // the distribution is unmeasurable. Matches search's null handling — we do
+    // not annotate. BM25 still resolves the rows via the shared "octopus" token.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: { [TEST_HASHES.design]: noiseRows, [TEST_HASHES.task]: [] },
+      vectorHits: [],
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const result = await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    // Sanity: BM25 rescued rows, but none carry a vectorScore.
+    expect(result.hits.length).toBeGreaterThan(0);
+    expect(result.hits.every((h) => h.vectorScore === null)).toBe(true);
+    // Unmeasurable → no advisory.
+    expect(stderr.some((l) => l.includes("no strong matches"))).toBe(false);
+  });
+});
