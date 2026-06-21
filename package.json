@@ -40,7 +40,8 @@
   "scripts": {
     "fbrain": "bun src/cli.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:mcp": "scripts/build-mcp-binary.sh"
   },
   "devDependencies": {
     "@types/bun": "latest",
