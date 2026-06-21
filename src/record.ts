@@ -561,6 +561,60 @@ export async function confirmVectorIndexed(
 // future tweak to the args).
 export const findBySlugFast = findExistingForWrite;
 
+// Batch hydrate for the SEARCH resolver. `fbrain search` resolves N deduped
+// hits to their full records; pre-fix it called `findBySlugFast` once per hit,
+// and `findBySlugFast` fetches the WHOLE schema page (`listRecords` →
+// `queryAll`) and client-filters for one slug. So a 50-hit search that all
+// lands on one schema (the common case — Design, Task, and the unified MEMO
+// share at most 3 distinct hashes) issued ~50 identical full-schema fetches,
+// each ~0.5–2 s, throwing away every row but one. Pure N+1 read amplification;
+// the dominant cost of `search` (~25–29 s on the live brain — dogfood run 115).
+//
+// This collapses the loop to ONE fetch per distinct schema: hydrate the whole
+// page once into a `Map<slug, FbrainRecord>` keyed by slug, and the caller
+// resolves every hit on that schema by map lookup. Live (non-tombstoned) rows
+// only — a tombstoned row is omitted from the map, so a hit whose record was
+// soft-deleted since indexing resolves to `undefined` and the caller skips it
+// as stale, exactly as `findBySlugFast` returning null did per hit.
+//
+// Empty-page flake tolerance is preserved, just hoisted from per-hit to
+// per-schema: the same EMPTY-page retry the fast-miss helper applies (an empty
+// `/api/query` slice on a saturated daemon is ambiguous — flake vs. genuinely
+// empty schema — so retry up to `EMPTY_PAGE_RETRY_ATTEMPTS`; a NON-empty page
+// is authoritative and stops immediately). A non-empty page missing a given
+// slug is an authoritative stale hit for that slug — identical observable
+// behavior to the old per-hit path, with the retry budget paid once for the
+// schema instead of once per hit on it.
+export async function hydrateSchemaBySlug(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  options?: ReadRetryOptions,
+): Promise<Map<string, FbrainRecord>> {
+  const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
+  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
+  const sleep = options?.sleep ?? defaultSleep;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
+    const list = await listRecords(node, type, schemaHash);
+    if (list.length > 0) {
+      const bySlug = new Map<string, FbrainRecord>();
+      for (const r of list) {
+        // Drop tombstones so a soft-deleted slug resolves to `undefined`
+        // (stale skip), mirroring `findBySlug`. Last live row wins on the
+        // vanishingly-rare duplicate-slug-per-schema case; the write path's
+        // per-type uniqueness guard makes that a non-issue in practice.
+        if (!isTombstoned(r)) bySlug.set(r.slug, r);
+      }
+      return bySlug;
+    }
+    // Empty page ⇒ ambiguous; retry up to EMPTY_PAGE_RETRY_ATTEMPTS to ride
+    // out a single saturated-daemon flake before declaring the schema empty.
+  }
+  return new Map();
+}
+
 // Reverse-direction lookup: live (non-tombstoned) tasks whose `design_slug`
 // matches the given parent. Mirrors `findBySlugWithFastMiss`'s cost discipline
 // — a populated task page is authoritative (return the filtered slice with no

@@ -22,8 +22,8 @@ import {
   resolveStdoutIsTty,
 } from "../format.ts";
 import {
-  findBySlugFast,
   hasAnyLiveRecord,
+  hydrateSchemaBySlug,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
@@ -187,7 +187,24 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const unique = dedupeHits(hits, opts.verbose);
   opts.verbose?.(`dedupe collapsed to ${unique.length} unique record(s)`);
 
-  const resolved: ResolvedHit[] = [];
+  // Resolve every deduped hit to its full record. Two passes so the whole
+  // hydration cost is ONE /api/query per DISTINCT schema, not one per hit.
+  //
+  // Pre-fix this loop called `findBySlugFast` per hit, and that helper fetches
+  // the WHOLE schema page (`queryAll`) and client-filters for one slug — so a
+  // 50-hit search that all landed on one schema issued ~50 identical
+  // full-schema fetches (each ~0.5–2 s) and threw away every row but one. That
+  // N+1 read amplification was the entire ~25–29 s `search` latency on the live
+  // brain (dogfood run 115). fbrain's hits collapse onto ≤3 distinct schema
+  // hashes (Design, Task, unified MEMO) regardless of hit count, so batching
+  // per-schema drops a 50-hit search from ~50 fetches to ~1–3. See PR #98
+  // (link), PRs #154/#156, and docs/phase-7-search-latency-spike.md.
+  //
+  // Pass 1 (no node round-trips): classify each hit — resolve its type, apply
+  // the `--type` filter, and record the distinct schema hashes to hydrate.
+  type Candidate = { hit: (typeof unique)[number]; slug: string; type: RecordType; schemaHash: string };
+  const candidates: Candidate[] = [];
+  const schemaHashByType = new Map<RecordType, string>();
   for (const hit of unique) {
     const slug = hit.key_value.hash;
     if (!slug) {
@@ -212,17 +229,33 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       continue;
     }
     const schemaHash = schemaHashFor(type, opts.cfg);
-    // /api/query returns a non-deterministic top-100 slice per schema, so a
-    // single findBySlug can miss a slug that genuinely exists (~1/5 of the
-    // time on a saturated daemon). The fast-miss helper rides out that
-    // empty-page flake (so a live record isn't silently dropped as "stale")
-    // but short-circuits on a populated-but-missing page — so a genuinely
-    // stale hit (record deleted since indexing) skips in ~one query instead
-    // of burning the full 5×250 ms retry budget serially per stale result.
-    // See PR #98 (link), PRs #154/#156, and docs/phase-7-search-latency-spike.md.
-    const record = await findBySlugFast(node, type, schemaHash, slug);
+    schemaHashByType.set(type, schemaHash);
+    candidates.push({ hit, slug, type, schemaHash });
+  }
+
+  // Hydrate each DISTINCT schema exactly once into a `Map<slug, record>`. The
+  // batch helper preserves the per-hit empty-page flake tolerance, just hoisted
+  // to the schema level: /api/query returns a non-deterministic top-100 slice,
+  // so an empty page on a saturated daemon is retried (capped) before the
+  // schema is declared empty, while a NON-empty page is authoritative — a slug
+  // present in the search hits but absent from a non-empty hydrated page is a
+  // genuine stale hit (record deleted since indexing). Same observable behavior
+  // as the old per-hit `findBySlugFast`, one fetch per schema instead of one
+  // per hit on it. Key the cache by schema HASH (not type) so the unified-MEMO
+  // types — concept/preference/reference/agent/project/spike all on one hash —
+  // share a single hydration.
+  const hydrated = new Map<string, Map<string, FbrainRecord>>();
+  for (const [type, schemaHash] of schemaHashByType) {
+    if (hydrated.has(schemaHash)) continue;
+    hydrated.set(schemaHash, await hydrateSchemaBySlug(node, type, schemaHash));
+  }
+
+  // Pass 2: resolve every candidate by map lookup (no further round-trips).
+  const resolved: ResolvedHit[] = [];
+  for (const { hit, slug, type, schemaHash } of candidates) {
+    const record = hydrated.get(schemaHash)?.get(slug);
     if (!record) {
-      // Stale hit — record deleted since the index was written.
+      // Stale hit — record deleted (or never present) in the current store.
       opts.verbose?.(`skip stale: ${type}/${slug} not found in current store`);
       continue;
     }
