@@ -18,9 +18,9 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { fbrainHomeBase } from "./config.ts";
 import type { AddSchemaRequest, FieldType, RecordType } from "./schemas.ts";
 
 export const MIGRATION_DIR_ENV = "FBRAIN_MIGRATIONS_DIR";
@@ -46,7 +46,7 @@ export type MigrationManifest = {
 export function defaultMigrationsDir(): string {
   const override = process.env[MIGRATION_DIR_ENV];
   if (override && override.length > 0) return override;
-  return join(homedir(), ".fbrain", "migrations");
+  return join(fbrainHomeBase(), ".fbrain", "migrations");
 }
 
 export function manifestPath(id: string, dir: string = defaultMigrationsDir()): string {

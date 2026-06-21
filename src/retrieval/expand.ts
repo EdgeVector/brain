@@ -12,8 +12,8 @@
 // "no expansion" mode automatically — see ask.ts.
 
 import { readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+
+import { defaultConfigPath } from "../config.ts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
@@ -49,7 +49,10 @@ export function resolveAnthropicKey(): string | null {
   // Optional config field — undocumented because env is the conventional
   // path. We read it so users on machines without a shell-env can still
   // wire ask up by editing ~/.fbrain/config.json.
-  const cfgPath = process.env.FBRAIN_CONFIG ?? join(homedir(), ".fbrain", "config.json");
+  // Same path resolution as everywhere else (FBRAIN_CONFIG override, else the
+  // guarded home base) so a broken HOME fails loud rather than reading a
+  // relative `undefined/.fbrain/config.json`.
+  const cfgPath = defaultConfigPath();
   if (!existsSync(cfgPath)) return null;
   try {
     const raw: unknown = JSON.parse(readFileSync(cfgPath, "utf8"));

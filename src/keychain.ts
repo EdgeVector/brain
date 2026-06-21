@@ -34,7 +34,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
@@ -46,6 +46,7 @@ import {
 } from "@folddb/app-sdk";
 
 import type { CapabilityStore, StoredCapability } from "./capability.ts";
+import { fbrainHomeBase } from "./config.ts";
 
 // Keychain service label — unchanged across the SDK port so existing entries
 // stay in fbrain's namespace.
@@ -55,7 +56,7 @@ const KEYCHAIN_SERVICE = "com.edgevector.fbrain.capability";
 export function fbrainDir(): string {
   const override = process.env.FBRAIN_CAPABILITY_DIR;
   if (override && override.length > 0) return override;
-  return join(homedir(), ".fbrain");
+  return join(fbrainHomeBase(), ".fbrain");
 }
 
 // ---------------------------------------------------------------------------

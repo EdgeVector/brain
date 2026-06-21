@@ -19,10 +19,15 @@
 // every legacy row into the per-kind canonicals).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { FbrainError } from "./client.ts";
+// The guarded home resolver + its error live in client.ts (the lowest layer,
+// alongside FbrainError) so client.ts's `resolveNodeHome` can share the SAME
+// guard with no import cycle. Re-exported here so the rest of the codebase
+// imports them from `./config.ts` (the conventional home for path resolution).
+export { fbrainHomeBase, validateHomeBase, HomeUnresolvedError } from "./client.ts";
+import { fbrainHomeBase } from "./client.ts";
 
 export const CONFIG_VERSION = 4;
 
@@ -58,7 +63,10 @@ export type Config = {
 export function defaultConfigPath(): string {
   const override = process.env.FBRAIN_CONFIG;
   if (override && override.length > 0) return override;
-  return join(homedir(), ".fbrain", "config.json");
+  // FBRAIN_CONFIG override (above) wins even with a broken HOME, so a pinned
+  // config path still works. Otherwise derive from the guarded home base, which
+  // fails loud rather than writing a relative `undefined/.fbrain/config.json`.
+  return join(fbrainHomeBase(), ".fbrain", "config.json");
 }
 
 // The two first-touch config errors a brand-new developer hits when running

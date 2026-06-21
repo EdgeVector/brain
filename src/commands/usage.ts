@@ -16,7 +16,6 @@
 // command is what makes that condition measurable.
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
@@ -25,7 +24,7 @@ import {
   type QueryRow,
   type Verbose,
 } from "../client.ts";
-import { type Config } from "../config.ts";
+import { fbrainHomeBase, type Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import { fieldsFor, stringField } from "../record.ts";
 import {
@@ -168,7 +167,7 @@ export type DailySummaryLine = {
 };
 
 export function defaultUsagePath(): string {
-  return join(homedir(), ".fbrain", "usage.jsonl");
+  return join(fbrainHomeBase(), ".fbrain", "usage.jsonl");
 }
 
 function persistDailySummary(args: {

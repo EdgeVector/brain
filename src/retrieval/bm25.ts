@@ -19,9 +19,9 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { fbrainHomeBase } from "../config.ts";
 import type { RecordType } from "../schemas.ts";
 
 const STOPWORDS = new Set<string>([
@@ -253,7 +253,7 @@ export function computeFingerprint(docs: BM25Document[]): string {
 export function defaultCacheDir(): string {
   const override = process.env.FBRAIN_CACHE_DIR;
   if (override && override.length > 0) return override;
-  return join(homedir(), ".fbrain", "cache");
+  return join(fbrainHomeBase(), ".fbrain", "cache");
 }
 
 export function bm25CachePath(userHash: string, dir: string = defaultCacheDir()): string {
