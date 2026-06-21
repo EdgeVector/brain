@@ -278,7 +278,11 @@ describe("client error mapping", () => {
     // :9001 is always brew-first, regardless of whether the prebuilt binary
     // is detected — pin the binary probe to `false` so the assertion holds
     // even on hosts that don't have `folddb` on PATH.
-    const hint = nodeDownHint("http://127.0.0.1:9001", () => false);
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9001",
+      () => false,
+      () => false,
+    );
     // The hint must lead with a combined, copy-pasteable install+start line so
     // a brand-new dev who never ran `brew install` (the common case) doesn't
     // dead-end on `Error: Formula 'folddb' is not installed.`.
@@ -292,7 +296,11 @@ describe("client error mapping", () => {
 
   test("node-down hint keeps the from-source/compile framing for a non-default node URL when no prebuilt binary is installed", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9101")).toBe(false);
-    const hint = nodeDownHint("http://127.0.0.1:9101", () => false);
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9101",
+      () => false,
+      () => false,
+    );
     expect(hint).toContain("run.sh");
     expect(hint).toContain("compiles Rust");
     expect(hint).not.toContain("brew services");
@@ -304,11 +312,67 @@ describe("client error mapping", () => {
   // monorepo and compile Rust. The prebuilt binary on PATH is the signal.
   test("node-down hint leads with `brew services` for a non-9001 port when the prebuilt binary is on PATH", () => {
     expect(isDefaultNodeUrl("http://127.0.0.1:9050")).toBe(false);
-    const hint = nodeDownHint("http://127.0.0.1:9050", () => true);
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9050",
+      () => true,
+      () => false,
+    );
     expect(hint).toContain("brew install edgevector/folddb/folddb");
     expect(hint).toContain("brew services start folddb");
     expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
     expect(hint).not.toContain("compiles Rust");
+  });
+
+  // DX (init-node-process-alive-not-serving-hint): a node PROCESS that is alive
+  // but not answering on its port (wedged, hung mid-boot, or still starting) is
+  // the most misdiagnosed failure — it looks identical to "not started" to a
+  // naive reachability check, so the old hint told the dev to re-install /
+  // `brew services restart`, which just re-hangs a wedged node. When the process
+  // probe reports a live folddb/lastdb process, the hint must instead name that
+  // a process IS running but isn't responding, and tell the dev to STOP it
+  // before restarting — NOT the bare install/restart line.
+  test("node-down hint names 'running but not responding' + stop-before-restart when a folddb process is alive", () => {
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9711",
+      () => true, // binary installed
+      () => true, // process IS running
+    );
+    expect(hint).toContain("process is running but isn't responding");
+    expect(hint).toContain("http://127.0.0.1:9711");
+    expect(hint).toContain("brew services list");
+    expect(hint).toContain("stop it before restarting");
+    expect(hint).toContain("brew services stop folddb");
+    // It must NOT lead the dev back into the install/`brew services restart`
+    // reflex that re-hangs a wedged node.
+    expect(hint).not.toContain("brew install edgevector/folddb/folddb");
+    expect(hint).not.toContain("brew services restart folddb");
+  });
+
+  // The running-but-not-serving branch wins regardless of the node URL or
+  // whether the prebuilt binary is detected — a live process is a stronger
+  // signal than either.
+  test("node-down hint prefers the 'running but not responding' branch over the install/start branch", () => {
+    // Default :9001 daemon, binary NOT on PATH, but a process IS alive.
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9001",
+      () => false,
+      () => true,
+    );
+    expect(hint).toContain("process is running but isn't responding");
+    expect(hint).not.toContain("brew install edgevector/folddb/folddb");
+  });
+
+  // The genuine not-running case (no live process) must be UNCHANGED — still
+  // the install/start line for a default/installed node.
+  test("node-down hint keeps the install/start line when no folddb process is alive", () => {
+    const hint = nodeDownHint(
+      "http://127.0.0.1:9001",
+      () => true,
+      () => false,
+    );
+    expect(hint).toContain("brew install edgevector/folddb/folddb");
+    expect(hint).toContain("brew services start folddb");
+    expect(hint).not.toContain("process is running but isn't responding");
   });
 
   test("connectionError node hint mentions `brew services` for the default daemon", async () => {

@@ -651,7 +651,14 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
       // any wall-clock wait.
       await probeWithRetry(
         unreachableProbeClient(),
-        { nodeUrl: "http://127.0.0.1:9050", retryDelaysMs: [0], sleep: async () => {} },
+        {
+          nodeUrl: "http://127.0.0.1:9050",
+          retryDelaysMs: [0],
+          sleep: async () => {},
+          // Pin the process probe off so the hint is deterministic regardless
+          // of whether a folddb node happens to be running on the test host.
+          isFolddbProcessRunning: () => false,
+        },
         (l) => lines.push(l),
       );
       throw new Error("did not throw");
@@ -680,7 +687,12 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     try {
       await probeWithRetry(
         unreachableProbeClient(),
-        { nodeUrl: DEFAULT_NODE_URL, retryDelaysMs: [0], sleep: async () => {} },
+        {
+          nodeUrl: DEFAULT_NODE_URL,
+          retryDelaysMs: [0],
+          sleep: async () => {},
+          isFolddbProcessRunning: () => false,
+        },
         (l) => lines.push(l),
       );
       throw new Error("did not throw");
@@ -693,6 +705,37 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).toContain(`node not reachable at ${DEFAULT_NODE_URL}`);
     expect(out).toContain("brew services start folddb");
     expect(out).not.toContain("compiling Rust");
+  });
+
+  // init-node-process-alive-not-serving-hint: when a folddb/lastdb node PROCESS
+  // is alive but not answering (wedged / hung mid-boot), the retry-loop hint
+  // must name "running but isn't responding" + "stop it before restarting",
+  // NOT loop the dev back to re-install/restart (which re-hangs a wedged node).
+  test("node process alive but not serving → 'running but not responding' hint, NOT re-install/restart", async () => {
+    const lines: string[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        {
+          nodeUrl: "http://127.0.0.1:9711",
+          retryDelaysMs: [0],
+          sleep: async () => {},
+          isFolddbBinaryInstalled: () => true,
+          isFolddbProcessRunning: () => true,
+        },
+        (l) => lines.push(l),
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    }
+    const out = lines.join("\n");
+    expect(out).toContain("node not reachable at http://127.0.0.1:9711");
+    expect(out).toContain("process is running but isn't responding");
+    expect(out).toContain("stop it before restarting");
+    // Must NOT loop the dev back into the re-install/restart reflex.
+    expect(out).not.toContain("brew install edgevector/folddb/folddb");
+    expect(out).not.toContain("brew services restart folddb");
   });
 });
 
