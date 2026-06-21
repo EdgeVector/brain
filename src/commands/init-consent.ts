@@ -90,7 +90,35 @@ export type EstablishConsentOptions = {
 export type GrantResult = {
   status: number | null;
   stderr?: string;
+  /**
+   * The grant shell-out was killed because it exceeded the bounded timeout
+   * (the folddb CLI hung — see defaultRunFolddbGrant). Callers map this to an
+   * actionable "node may be wedged, grant manually" message instead of
+   * treating it as a generic non-zero exit.
+   */
+  timedOut?: boolean;
 };
+
+// How long to wait for `folddb consent grant` before giving up. Generous for a
+// healthy grant (the daemon round-trip is sub-second), bounded so a wedged /
+// slow CLI can't freeze `fbrain init --grant-consent` forever (the 0.15.0 brew
+// binary hangs on ANY startup — see init-grant-consent-shellout-timeout). Env
+// override `FBRAIN_FOLDDB_GRANT_TIMEOUT_MS` for slow machines / debugging.
+const DEFAULT_FOLDDB_GRANT_TIMEOUT_MS = 45_000;
+
+/**
+ * Resolve the grant shell-out timeout in ms. Honours
+ * `FBRAIN_FOLDDB_GRANT_TIMEOUT_MS` when it parses to a positive integer;
+ * otherwise falls back to the default. Exported for tests.
+ */
+export function folddbGrantTimeoutMs(): number {
+  const raw = process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+  if (raw !== undefined && raw.length > 0) {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  return DEFAULT_FOLDDB_GRANT_TIMEOUT_MS;
+}
 
 export type EstablishConsentResult =
   | { state: "skipped"; reason: SkipReason }
@@ -210,6 +238,15 @@ export async function establishConsentInline(
       const result = runFolddbGrant(folddb, ctx.appId, opts.nodeUrl);
       if (result.status === 0) {
         folddbUsed = true;
+      } else if (result.timedOut) {
+        // The folddb CLI hung past the bounded timeout (a wedged / slow node
+        // binary — 0.15.0 brew does this on any startup). Don't let init
+        // freeze: print an actionable manual-grant next step and fall through
+        // to acquireCapability's normal poll/fast-fail path.
+        const secs = Math.round(folddbGrantTimeoutMs() / 1000);
+        ctx.print(
+          `        \`${FOLDDB_BIN} consent grant ${ctx.appId}\` did not respond within ${secs}s — your ${FOLDDB_BIN} CLI may be wedged (try \`${FOLDDB_BIN} --version\`, or run brain-doctor). Grant manually in a working shell with \`${FOLDDB_BIN} consent grant ${ctx.appId}\`, then re-run \`fbrain doctor\`.`,
+        );
       } else {
         const detail = result.stderr ? `: ${result.stderr.trim()}` : "";
         ctx.print(
@@ -299,7 +336,12 @@ function defaultResolveFolddb(): string | null {
   return null;
 }
 
-function defaultRunFolddbGrant(
+/**
+ * Default `runFolddbGrant`: shells out to `folddb consent grant <app> --yes`,
+ * pinning FOLDDB_PORT for loopback nodes and bounding the call with a timeout
+ * so a wedged CLI can't hang init. Exported for tests.
+ */
+export function defaultRunFolddbGrant(
   folddbPath: string,
   appId: string,
   nodeUrl: string,
@@ -322,16 +364,50 @@ function defaultRunFolddbGrant(
   }
   // Inherit stdio so the user sees folddb's own progress + any TUI it emits
   // (the grant is fast but the daemon may print a one-line confirmation).
+  //
+  // Bound the call with a timeout: without it, a wedged folddb CLI (the 0.15.0
+  // brew binary hangs on ANY startup) freezes `fbrain init --grant-consent`
+  // forever at step [6/6] with zero feedback. On timeout spawnSync sends
+  // SIGTERM and surfaces it via res.error (code "ETIMEDOUT") + res.signal
+  // ("SIGTERM") with res.status === null.
   const res = spawnSync(folddbPath, ["consent", "grant", appId, "--yes"], {
     stdio: ["ignore", "inherit", "pipe"],
     encoding: "utf8",
     env,
+    timeout: folddbGrantTimeoutMs(),
   });
+  if (isTimeoutResult(res)) {
+    const out: GrantResult = { status: null, timedOut: true };
+    if (typeof res.stderr === "string" && res.stderr.length > 0) {
+      out.stderr = res.stderr;
+    }
+    return out;
+  }
   const out: GrantResult = { status: res.status };
   if (typeof res.stderr === "string" && res.stderr.length > 0) {
     out.stderr = res.stderr;
   }
   return out;
+}
+
+/**
+ * Detect the spawnSync timeout shape. Node kills the child with SIGTERM when
+ * `timeout` elapses and reports it via `res.error` (an Error whose `code` is
+ * "ETIMEDOUT") with `res.signal === "SIGTERM"` and a null status. We accept
+ * either signal — the env var override allows callers to swap the kill signal
+ * in principle — so we key primarily on the ETIMEDOUT error code, with the
+ * SIGTERM-on-null-status shape as a defensive fallback.
+ */
+function isTimeoutResult(
+  res: ReturnType<typeof spawnSync>,
+): boolean {
+  const err = res.error as (Error & { code?: string }) | undefined;
+  if (err && err.code === "ETIMEDOUT") return true;
+  // Fallback: spawnSync killed the child via signal with no exit status. A
+  // bare SIGTERM with a null status is the timeout shape on platforms where
+  // the error code doesn't surface cleanly.
+  if (res.status === null && res.signal === "SIGTERM") return true;
+  return false;
 }
 
 /**

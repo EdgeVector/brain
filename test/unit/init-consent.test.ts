@@ -14,9 +14,14 @@
 // directly with a mock transport + in-memory store, no node required.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
+  defaultRunFolddbGrant,
   establishConsentInline,
+  folddbGrantTimeoutMs,
   loopbackPortFromUrl,
   looksLikeMasterKeyFailure,
   type GrantResult,
@@ -376,6 +381,169 @@ describe("establishConsentInline — folddb present happy path", () => {
     expect(
       lines.some((l) => l.includes("retry manually with `lastdb consent grant fbrain`")),
     ).toBe(false);
+  });
+});
+
+// The freeze we're guarding against: a wedged folddb CLI (0.15.0 brew hangs on
+// ANY startup) makes `fbrain init --grant-consent` hang forever at [6/6] with
+// no feedback. defaultRunFolddbGrant now bounds the shell-out with a timeout
+// and surfaces a distinct timedOut GrantResult; the handler degrades to an
+// actionable manual-grant message instead of hanging.
+describe("establishConsentInline — folddb grant times out (wedged CLI)", () => {
+  test("timedOut GrantResult → prints actionable manual-grant message, keeps polling (no hang)", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      ask: yesAsk,
+      isTty: ttyOn,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      // Simulate the wedged-binary outcome: spawnSync killed it on timeout.
+      runFolddbGrant: (): GrantResult => ({ status: null, timedOut: true }),
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    // Polling still completed (transport returns granted on the 2nd call) — so
+    // init reaches a stored capability via the manual fallback rather than
+    // freezing. The whole point: it RETURNS.
+    expect(result).toEqual({ state: "granted_inline", folddbUsed: false });
+    expect((await store.load(NODE_URL))?.blob).toBe(blob);
+    // The actionable timeout message must name the wedged-CLI diagnosis and a
+    // copy-pasteable manual grant + recovery step.
+    expect(
+      lines.some(
+        (l) =>
+          l.includes("did not respond within") &&
+          l.includes("may be wedged") &&
+          l.includes("lastdb consent grant fbrain") &&
+          l.includes("fbrain doctor"),
+      ),
+    ).toBe(true);
+    // The generic non-zero-exit "retry manually" / "exited with status" lines
+    // MUST NOT appear — this is a distinct branch from a real exec failure.
+    expect(
+      lines.some((l) => l.includes("exited with status")),
+    ).toBe(false);
+    expect(
+      lines.some((l) => l.includes("retry manually with `lastdb consent grant fbrain`")),
+    ).toBe(false);
+  });
+
+  test("--grant-consent (non-TTY) path also degrades on timeout instead of hanging", async () => {
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    const transport = scriptedTransport(blob);
+    const lines: string[] = [];
+
+    const result = await establishConsentInline({
+      nodeUrl: NODE_URL,
+      userHash: USER_HASH,
+      store,
+      transport,
+      print: (l) => lines.push(l),
+      isTty: ttyOff,
+      nonInteractiveGrant: true,
+      resolveFolddb: () => "/opt/homebrew/bin/folddb",
+      runFolddbGrant: (): GrantResult => ({ status: null, timedOut: true }),
+      sleep: noSleep,
+      pollIntervalMs: 1,
+    });
+
+    expect(result).toEqual({ state: "granted_inline", folddbUsed: false });
+    expect(lines.some((l) => l.includes("did not respond within"))).toBe(true);
+  });
+});
+
+// End-to-end of the actual shell-out guard: point defaultRunFolddbGrant at a
+// real stub that sleeps far longer than a tiny override timeout and assert it
+// returns a timedOut GrantResult in ~the timeout window rather than blocking
+// for the stub's full sleep. This is the regression that the brief calls out:
+// a hanging `folddb` binary must NOT freeze the grant.
+describe("defaultRunFolddbGrant — bounded by FBRAIN_FOLDDB_GRANT_TIMEOUT_MS", () => {
+  let dir: string;
+  let savedTimeout: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "fbrain-grant-timeout-"));
+    savedTimeout = process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+  });
+  afterEach(() => {
+    if (savedTimeout === undefined) {
+      delete process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+    } else {
+      process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS = savedTimeout;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a folddb stub that sleeps > timeout → timedOut result, returns within the timeout window", () => {
+    // Stub binary that hangs far longer than our override timeout. `exec` so
+    // the shell is REPLACED by sleep — spawnSync's timeout SIGTERM then reaches
+    // the sleep directly, leaving no orphan to keep the test process alive.
+    const stub = join(dir, "hanging-folddb");
+    writeFileSync(stub, "#!/bin/sh\nexec sleep 999\n", { mode: 0o755 });
+    chmodSync(stub, 0o755);
+
+    process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS = "300";
+    expect(folddbGrantTimeoutMs()).toBe(300);
+
+    const start = Date.now();
+    const result = defaultRunFolddbGrant(stub, "fbrain", NODE_URL);
+    const elapsed = Date.now() - start;
+
+    expect(result.timedOut).toBe(true);
+    expect(result.status).toBeNull();
+    // It must NOT have waited the stub's full 999s — generous ceiling well
+    // under the sleep so a hang is unambiguously caught.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+
+  test("a folddb stub that exits 0 quickly → normal success result, not timedOut", () => {
+    const stub = join(dir, "fast-folddb");
+    writeFileSync(stub, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    chmodSync(stub, 0o755);
+
+    process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS = "5000";
+    const result = defaultRunFolddbGrant(stub, "fbrain", NODE_URL);
+
+    expect(result.timedOut).toBeUndefined();
+    expect(result.status).toBe(0);
+  });
+});
+
+describe("folddbGrantTimeoutMs", () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+    else process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS = saved;
+  });
+
+  test("defaults to 45000ms when the env var is unset", () => {
+    delete process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+    expect(folddbGrantTimeoutMs()).toBe(45_000);
+  });
+
+  test("honours a positive-integer override", () => {
+    process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS = "12000";
+    expect(folddbGrantTimeoutMs()).toBe(12_000);
+  });
+
+  test("ignores non-positive / non-numeric overrides (falls back to default)", () => {
+    for (const bad of ["0", "-1", "abc", "", "12.5"]) {
+      process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS = bad;
+      expect(folddbGrantTimeoutMs()).toBe(45_000);
+    }
   });
 });
 
