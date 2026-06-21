@@ -148,7 +148,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` entrypoint and asserts the full 7-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
-| `fbrain delete <slug> [--type T]` | Soft-deletes a record. fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
+| `fbrain delete <slug> [--type T]`<br>`fbrain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
 | `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
 | `fbrain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.fbrain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
 | `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 7 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`; write: `fbrain_put`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
@@ -318,6 +318,22 @@ fold_db's mutation pipeline is documented as append-only — `MutationType::Dele
 4. Verifies by reading the record back and asserting the tombstone tag is present. If verification fails, errors with `delete_not_applied`.
 
 Every fbrain read path (`get`, `list`, `status`, `link`, `search`) filters tombstoned records via `findBySlug`, so the user-visible behavior matches a hard delete. The slug is also reusable: `fbrain design new <same-slug>` (no `--force`) recreates it cleanly.
+
+### Bulk delete (filter mode)
+
+To purge a batch of throwaway records in one command, `fbrain delete` also accepts the SAME `--tag`/`--type`/`--status` selectors `fbrain list` does, as an alternative to a positional `<slug>`:
+
+```bash
+fbrain delete --tag dogfood                 # DRY-RUN: preview what would be deleted
+fbrain delete --tag dogfood --yes           # actually soft-delete every match
+fbrain delete --tag probe --type concept --status archived --yes
+```
+
+- **Dry-run by default.** Without `--yes`, filter mode lists the records that *would* be deleted (`type · slug · title`) plus a count and exits without mutating — so you can confirm the set before committing. Re-run with `--yes` to actually delete.
+- **Same set as `list`.** Filter mode resolves matches via the identical path `fbrain list --tag/--type/--status` uses, so already-tombstoned records are excluded and a `list` preview matches what `delete` will remove.
+- **Bounded selector required.** A bare `fbrain delete` (no slug *and* no filter) is refused — it would otherwise select every record. A `<slug>` and a filter together is also rejected (pick one mode).
+- **Per-record referential integrity.** The design-with-live-tasks guard is honored per record: a linked design is skipped with a warning (the rest of the batch proceeds) unless you pass `--force`.
+- **`--json`** in filter mode emits `{ok, deleted: [{type, slug}], dryRun}` so scripts and agents can consume the result.
 
 `fbrain raw POST /api/query` is the escape hatch — it returns the raw fold_db state including tombstoned rows.
 
