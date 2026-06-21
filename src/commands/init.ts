@@ -19,7 +19,7 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultNodeUrlFromBreadcrumb, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsFolddbProcessRunning, defaultNodeUrlFromBreadcrumb, type Verbose } from "../client.ts";
 import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -464,6 +464,11 @@ type ProbeOpts = {
   nodeUrl: string;
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
+  // Injectable probes forwarded to `nodeDownHint` so the printed guidance is
+  // deterministic in tests (otherwise it would read the host's live PATH /
+  // process table). Default to the real probes in production.
+  isFolddbBinaryInstalled?: () => boolean;
+  isFolddbProcessRunning?: () => boolean;
 };
 
 export async function probeWithRetry(
@@ -478,7 +483,13 @@ export async function probeWithRetry(
     const delays = opts.retryDelaysMs ?? envRetryDelays() ?? DEFAULT_RETRY_DELAYS_MS;
     if (delays.length === 0) throw err;
     const sleep = opts.sleep ?? defaultSleep;
-    print(`        node not reachable at ${opts.nodeUrl}. ${nodeDownHint(opts.nodeUrl)}`);
+    print(
+      `        node not reachable at ${opts.nodeUrl}. ${nodeDownHint(
+        opts.nodeUrl,
+        opts.isFolddbBinaryInstalled ?? defaultIsFolddbBinaryInstalled,
+        opts.isFolddbProcessRunning ?? defaultIsFolddbProcessRunning,
+      )}`,
+    );
     for (let i = 0; i < delays.length; i++) {
       const delay = delays[i] ?? 0;
       // The fast cadence means many attempts; don't print a line for every one

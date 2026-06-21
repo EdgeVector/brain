@@ -1354,17 +1354,41 @@ export function defaultIsFolddbBinaryInstalled(): boolean {
   return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
 }
 
-// "Your node isn't reachable — start it" guidance. A downloaded user — port
-// `:9001` OR the prebuilt `folddb` binary on PATH — gets a combined Homebrew
-// install+start line first (`brew install` no-ops if already installed, so the
-// same line covers both the never-installed and forgot-to-start dev); the
-// from-source `./run.sh` + "compiling Rust" framing is only right when the user
-// has no prebuilt binary (a genuine fold contributor running from source
-// against a custom port).
+// True when a folddb/lastdb node PROCESS is alive on this host (regardless of
+// whether it is actually serving on its port). `folddb_server` re-execs
+// `lastdb_server`, so a wedged/mid-boot node shows up under either name — match
+// both. Mirrors the `defaultIsFolddbBinaryInstalled` spawnSync probe; injectable
+// in `nodeDownHint` so tests don't depend on the host's live process table.
+export function defaultIsFolddbProcessRunning(): boolean {
+  const probe = spawnSync("/bin/sh", ["-c", "pgrep -f 'folddb_server|lastdb_server'"], {
+    encoding: "utf8",
+  });
+  return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
+}
+
+// "Your node isn't reachable — start it" guidance. Three cases:
+//   1. A folddb/lastdb node PROCESS is alive but the socket isn't answering —
+//      the node is wedged, mid-boot, or hung (it did NOT just "not start"). A
+//      restart of a wedged node just re-hangs, so telling the dev to
+//      `brew services restart` is actively wrong: point them at the logs and
+//      tell them to STOP it before restarting. This branch wins first because a
+//      live-but-dead process is the most misdiagnosed failure (it looks
+//      identical to "not started" to a naive reachability check).
+//   2. No process, but a downloaded user — port `:9001` OR the prebuilt `folddb`
+//      binary on PATH — gets a combined Homebrew install+start line first
+//      (`brew install` no-ops if already installed, so the same line covers both
+//      the never-installed and forgot-to-start dev).
+//   3. No process and no prebuilt binary — a genuine fold contributor running
+//      from source against a custom port; give the `./run.sh` + "compiling Rust"
+//      framing.
 export function nodeDownHint(
   url: string,
   isFolddbBinaryInstalled: () => boolean = defaultIsFolddbBinaryInstalled,
+  isFolddbProcessRunning: () => boolean = defaultIsFolddbProcessRunning,
 ): string {
+  if (isFolddbProcessRunning()) {
+    return `A fold node process is running but isn't responding on ${url} — it may still be starting up, or it may be wedged. Check \`brew services list\` and the node log; if it's wedged, **stop it before restarting** (a restart of a wedged node just re-hangs): \`brew services stop folddb\` then \`brew services start folddb\`. Contributors running from source: stop the existing \`folddb_server\`/\`lastdb_server\` process, then \`cd fold/fold_db_node && ./run.sh --local\`.`;
+  }
   if (isDefaultNodeUrl(url) || isFolddbBinaryInstalled()) {
     return "Install + start it: `brew install edgevector/folddb/folddb && brew services start folddb` (already installed? `brew services restart folddb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
   }
