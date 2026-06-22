@@ -35,7 +35,7 @@ import { buildTestCfg } from "../util.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
-const NOTE = "reading the record body from stdin";
+const NOTE = "reading the record body from piped stdin";
 
 // A config whose nodeUrl points at a dead loopback port — readConfig() accepts
 // it, but any write fails immediately. The note prints before the write.
@@ -78,7 +78,10 @@ describe("`<type> new` without --body → stdin breadcrumb", () => {
     // The note must name the escape hatches so the wait is self-resolving.
     expect(stderr).toContain("--body");
     expect(stderr).toContain("FBRAIN_NO_STDIN=1");
-    expect(stderr).toContain("Ctrl-D");
+    // The note must NOT tell the user to press Ctrl-D: by the time it fires
+    // stdin is guaranteed non-TTY (a pipe or redirect), so there is no terminal
+    // EOF for Ctrl-D to send to this read — it is dead advice.
+    expect(stderr).not.toContain("Ctrl-D");
   });
 
   test("note fires exactly once (not per-chunk / not duplicated)", async () => {
