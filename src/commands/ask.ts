@@ -396,18 +396,15 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   // A resolve miss means the doc is stale (vector index ahead of the live
   // snapshot, or soft-deleted between the listing and the vector call);
   // silently skip — same contract on both paths.
-  const resolveRecord = (
-    id: string,
-    type: RecordType,
-    slug: string,
-  ): FbrainRecord | null => {
+  const resolveRecord = (id: string, slug: string): FbrainRecord | null => {
     const cached = liveById.get(id);
     if (cached) return cached;
     if (!bm25CacheHit) return null; // cold path had the full map; a miss is stale
     const text = index!.recordText(id);
     if (!text) return null; // not in the (warm) index → stale ranker hit
     // Minimal record: only title/body are consumed downstream. design_slug is
-    // omitted (optional); slug/type are authoritative from the parsed doc id.
+    // omitted (optional); the slug is authoritative from the parsed doc id (the
+    // type lives on the AskHit, derived from the same parsed doc id).
     return {
       slug,
       title: text.title,
@@ -424,7 +421,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     const f = fused[i]!;
     const parsed = parseDocId(f.id);
     if (!parsed) continue;
-    const rec = resolveRecord(f.id, parsed.type, parsed.slug);
+    const rec = resolveRecord(f.id, parsed.slug);
     if (!rec) {
       opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
       continue;
