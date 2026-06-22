@@ -95,6 +95,18 @@ echo "hello scripted brain" | fbrain put my-first-note --type concept
 > `npm i -g fbrain`; the `bun add -g github:` form works today against the public
 > repo with no registry.
 
+> **No node up yet? Non-interactive `init` fails fast.** When `init` runs
+> without a TTY (the CI / agent / scripted path above) and the node is
+> unreachable, it prints the actionable node-down hint on the first probe and
+> exits non-zero within a few seconds — it does **not** sit through the long
+> retry budget, since an unattended caller can't start the daemon mid-wait.
+> (Interactive runs keep the full ~3-minute budget for the from-source
+> contributor watching a Rust cold build.) To override the schedule explicitly
+> — e.g. extend the wait in CI while an ephemeral node boots, or disable
+> retries entirely — set `FBRAIN_INIT_RETRY_DELAYS_MS` to a comma-separated
+> list of inter-probe gaps in ms (`FBRAIN_INIT_RETRY_DELAYS_MS=` empty = zero
+> retries, fail on the first probe).
+
 The flag is idempotent (no-op when a live capability already exists) and a
 friendly no-op under `FBRAIN_APP_IDENTITY_ENFORCE=off` (no capability needed
 in that mode — writes land as NodeOwner).
