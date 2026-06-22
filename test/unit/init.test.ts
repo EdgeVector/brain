@@ -20,7 +20,9 @@ import {
   DEFAULT_RETRY_DELAYS_MS,
   DEFAULT_SCHEMA_SERVICE_URL,
   MAX_RETRY_GAP_MS,
+  NONINTERACTIVE_RETRY_DELAYS_MS,
   RETRY_TOTAL_BUDGET_MS,
+  RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE,
   hasUsableExistingConfig,
   printNextSteps,
   probeWithRetry,
@@ -771,6 +773,9 @@ describe("DEFAULT_RETRY_DELAYS_MS — responsive cap, comparable total budget", 
     // Drive probeWithRetry with the real default schedule but a mocked sleep
     // (no wall clock). The probe fails for the first few attempts, then the
     // "node" comes up — assert the gap we waited through to catch it is <= cap.
+    // Pin isTty=true so we exercise the long interactive default schedule
+    // (bun test has no TTY, so without this the fail-fast non-interactive
+    // schedule would give up before the node comes up at attempt 4).
     let attempts = 0;
     const slept: number[] = [];
     const probeClient = {
@@ -787,7 +792,7 @@ describe("DEFAULT_RETRY_DELAYS_MS — responsive cap, comparable total budget", 
 
     const result = await probeWithRetry(
       probeClient,
-      { nodeUrl: "http://127.0.0.1:9050", sleep: async (ms) => { slept.push(ms); } },
+      { nodeUrl: "http://127.0.0.1:9050", isTty: () => true, sleep: async (ms) => { slept.push(ms); } },
       () => {},
     );
 
@@ -795,5 +800,154 @@ describe("DEFAULT_RETRY_DELAYS_MS — responsive cap, comparable total budget", 
     // Every gap we actually waited through (using the DEFAULT schedule, since
     // retryDelaysMs was not injected) is within the cap.
     for (const ms of slept) expect(ms).toBeLessThanOrEqual(MAX_RETRY_GAP_MS);
+  });
+});
+
+// init-noninteractive-fail-fast-down-node: the retry budget against a DOWN
+// node must be interactivity-aware. A non-interactive run (CI / agent /
+// scripted `fbrain init --grant-consent </dev/null`) can't read the hint and
+// start the daemon mid-wait, so a ~3-min retry is dead time — fail fast after
+// the first hint. An interactive run (a contributor watching a Rust cold
+// build) keeps the long budget. The explicit env / injected override always
+// wins so the escape hatch and tests still control the schedule.
+describe("probeWithRetry — interactivity-aware down-node budget", () => {
+  function unreachableProbeClient(): ReturnType<typeof newNodeClient> {
+    return {
+      autoIdentity: async () => {
+        throw new FbrainError({ code: "service_unreachable", message: "fetch failed" });
+      },
+    } as unknown as ReturnType<typeof newNodeClient>;
+  }
+
+  test("the non-interactive schedule is SHORT (fail-fast) vs the long interactive one", () => {
+    const niTotal = NONINTERACTIVE_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(niTotal).toBeGreaterThanOrEqual(RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE);
+    expect(niTotal).toBeLessThan(RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE + MAX_RETRY_GAP_MS);
+    // Decisively shorter than the interactive compile-wait budget.
+    const interactiveTotal = DEFAULT_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(niTotal).toBeLessThan(interactiveTotal);
+    // No single gap exceeds the responsiveness cap.
+    for (const gap of NONINTERACTIVE_RETRY_DELAYS_MS) {
+      expect(gap).toBeLessThanOrEqual(MAX_RETRY_GAP_MS);
+    }
+  });
+
+  test("non-interactive (isTty=()=>false) uses the SHORT schedule", async () => {
+    const slept: number[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        {
+          nodeUrl: "http://127.0.0.1:9099",
+          isTty: () => false,
+          sleep: async (ms) => { slept.push(ms); },
+          isTargetPortListening: () => false,
+        },
+        () => {},
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    }
+    const total = slept.reduce((a, b) => a + b, 0);
+    expect(total).toBe(NONINTERACTIVE_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+    // It must be the fast-fail budget, not the ~3-min one.
+    expect(total).toBeLessThanOrEqual(RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE);
+  });
+
+  test("interactive (isTty=()=>true) uses the LONG schedule", async () => {
+    const slept: number[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        {
+          nodeUrl: "http://127.0.0.1:9099",
+          isTty: () => true,
+          sleep: async (ms) => { slept.push(ms); },
+          isTargetPortListening: () => false,
+        },
+        () => {},
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    }
+    const total = slept.reduce((a, b) => a + b, 0);
+    expect(total).toBe(DEFAULT_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0));
+    expect(total).toBeGreaterThanOrEqual(RETRY_TOTAL_BUDGET_MS);
+  });
+
+  test("explicit retryDelaysMs override wins over the TTY default", async () => {
+    const slept: number[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        {
+          nodeUrl: "http://127.0.0.1:9099",
+          // Non-interactive, but the caller-injected schedule must win.
+          isTty: () => false,
+          retryDelaysMs: [1000, 1000, 1000],
+          sleep: async (ms) => { slept.push(ms); },
+          isTargetPortListening: () => false,
+        },
+        () => {},
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    }
+    expect(slept).toEqual([1000, 1000, 1000]);
+  });
+
+  test("FBRAIN_INIT_RETRY_DELAYS_MS env override wins over the TTY default", async () => {
+    const prior = process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
+    process.env.FBRAIN_INIT_RETRY_DELAYS_MS = "1500,1500";
+    const slept: number[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        {
+          // Non-interactive default would be short; env override must win.
+          nodeUrl: "http://127.0.0.1:9099",
+          isTty: () => false,
+          sleep: async (ms) => { slept.push(ms); },
+          isTargetPortListening: () => false,
+        },
+        () => {},
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    } finally {
+      if (prior === undefined) delete process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
+      else process.env.FBRAIN_INIT_RETRY_DELAYS_MS = prior;
+    }
+    expect(slept).toEqual([1500, 1500]);
+  });
+
+  test("the node-down hint still prints on the first probe (fast-fail keeps it actionable)", async () => {
+    const lines: string[] = [];
+    try {
+      await probeWithRetry(
+        unreachableProbeClient(),
+        {
+          nodeUrl: "http://127.0.0.1:9099",
+          isTty: () => false,
+          sleep: async () => {},
+          // Pin both hint probes so the asserted text is deterministic
+          // regardless of the test host's PATH / socket table (CI has no
+          // lastdb binary installed; a dev box may).
+          isFolddbBinaryInstalled: () => true,
+          isTargetPortListening: () => false,
+        },
+        (l) => lines.push(l),
+      );
+      throw new Error("did not throw");
+    } catch (err) {
+      expect((err as FbrainError).code).toBe("service_unreachable");
+    }
+    const out = lines.join("\n");
+    expect(out).toContain("node not reachable at http://127.0.0.1:9099");
+    expect(out).toContain("brew services start lastdb");
   });
 });

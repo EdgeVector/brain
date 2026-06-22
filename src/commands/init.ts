@@ -103,18 +103,35 @@ const STALE_SCHEMA_URLS: ReadonlySet<string> = new Set([
 const RETRY_RAMP_MS = [2000, 3000];
 export const MAX_RETRY_GAP_MS = 5000;
 export const RETRY_TOTAL_BUDGET_MS = 185_000; // matches the old schedule's total
+// Non-interactive (no TTY) runs are the documented CI / agent / scripted
+// install path (`fbrain init --grant-consent </dev/null`). For an unattended
+// caller the node-down hint is already actionable on the FIRST probe, so a
+// ~3-minute retry against a down node is pure dead time — it can't read the
+// hint and start the daemon mid-wait. Fail fast after surfacing the hint:
+// just the short ramp (~5s total) so the script gets a quick, actionable
+// non-zero exit instead of a silent-looking hang. The long
+// RETRY_TOTAL_BUDGET_MS still applies to interactive runs, where a
+// from-source contributor watching a Rust cold build genuinely wants init to
+// keep polling until the node comes up.
+export const RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE = 5000;
 // On the flat cadence, only emit a "still retrying…" heartbeat every Nth
 // attempt so the frequent polls don't spam the terminal (≈ every 30s at 5s).
 const RETRY_LOG_EVERY = 6;
-export const DEFAULT_RETRY_DELAYS_MS = buildRetrySchedule();
+export const DEFAULT_RETRY_DELAYS_MS = buildRetrySchedule(RETRY_TOTAL_BUDGET_MS);
+export const NONINTERACTIVE_RETRY_DELAYS_MS = buildRetrySchedule(RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE);
 
 // A short ramp (so the very first re-probe is quick) followed by a flat
-// MAX_RETRY_GAP_MS cadence, filling out RETRY_TOTAL_BUDGET_MS. No single gap
+// MAX_RETRY_GAP_MS cadence, filling out the given total budget. No single gap
 // ever exceeds MAX_RETRY_GAP_MS.
-function buildRetrySchedule(): number[] {
-  const schedule = [...RETRY_RAMP_MS];
-  let total = schedule.reduce((a, b) => a + b, 0);
-  while (total < RETRY_TOTAL_BUDGET_MS) {
+function buildRetrySchedule(totalBudgetMs: number): number[] {
+  const schedule: number[] = [];
+  let total = 0;
+  for (const gap of RETRY_RAMP_MS) {
+    if (total >= totalBudgetMs) break;
+    schedule.push(gap);
+    total += gap;
+  }
+  while (total < totalBudgetMs) {
     schedule.push(MAX_RETRY_GAP_MS);
     total += MAX_RETRY_GAP_MS;
   }
@@ -468,6 +485,11 @@ type ProbeOpts = {
   // socket table). Default to the real probes in production.
   isFolddbBinaryInstalled?: () => boolean;
   isTargetPortListening?: (url: string) => boolean;
+  // Treat the current process as a TTY (default: process.stdin.isTTY). Gates
+  // the down-node retry budget: interactive runs keep the long compile-wait,
+  // non-interactive (CI/agent/scripted) runs fail fast. Injectable so the
+  // budget selection stays unit-testable — mirrors init-consent.ts's idiom.
+  isTty?: () => boolean;
 };
 
 export async function probeWithRetry(
@@ -479,7 +501,14 @@ export async function probeWithRetry(
     return await probeClient.autoIdentity();
   } catch (err) {
     if (!isUnreachable(err)) throw err;
-    const delays = opts.retryDelaysMs ?? envRetryDelays() ?? DEFAULT_RETRY_DELAYS_MS;
+    // Budget precedence (most explicit wins): a test/caller-injected
+    // `retryDelaysMs` → the `FBRAIN_INIT_RETRY_DELAYS_MS` env override → the
+    // interactivity-aware default. Non-interactive runs (no TTY — the CI /
+    // agent / scripted install path) fail fast on a down node after surfacing
+    // the actionable hint; interactive runs keep the long compile-wait budget.
+    const isTty = (opts.isTty ?? defaultIsTty)();
+    const interactivityDefault = isTty ? DEFAULT_RETRY_DELAYS_MS : NONINTERACTIVE_RETRY_DELAYS_MS;
+    const delays = opts.retryDelaysMs ?? envRetryDelays() ?? interactivityDefault;
     if (delays.length === 0) throw err;
     const sleep = opts.sleep ?? defaultSleep;
     print(
@@ -584,4 +613,8 @@ export function hasUsableExistingConfig(cfg: Config | null): cfg is Config {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function defaultIsTty(): boolean {
+  return Boolean(process.stdin.isTTY);
 }
