@@ -387,10 +387,16 @@ describe("establishConsentInline — folddb present happy path", () => {
 // The freeze we're guarding against: a wedged folddb CLI (0.15.0 brew hangs on
 // ANY startup) makes `fbrain init --grant-consent` hang forever at [6/6] with
 // no feedback. defaultRunFolddbGrant now bounds the shell-out with a timeout
-// and surfaces a distinct timedOut GrantResult; the handler degrades to an
-// actionable manual-grant message instead of hanging.
-describe("establishConsentInline — folddb grant times out (wedged CLI)", () => {
-  test("timedOut GrantResult → prints actionable manual-grant message, keeps polling (no hang)", async () => {
+// and surfaces a distinct timedOut GrantResult; the handler degrades to a
+// NEUTRAL "the CLI was slow; confirming whether the grant landed anyway" note
+// instead of hanging — and crucially does NOT pre-print a prescriptive "grant
+// manually / re-run fbrain doctor" recovery instruction, because the very next
+// poll is the authoritative verdict (it owns the success line on success and
+// the consent_timeout/denied/expired hints on genuine failure). Printing
+// manual-recovery here contradicts the `Access granted.` success that follows
+// on the (common) slow-but-landed happy path.
+describe("establishConsentInline — folddb grant times out (slow CLI)", () => {
+  test("timedOut GrantResult → prints a neutral 'confirming the grant landed' note (no stale manual-recovery), keeps polling (no hang)", async () => {
     const blob = await mintTokenBlob();
     const store = inMemoryCapabilityStore();
     const transport = scriptedTransport(blob);
@@ -416,17 +422,22 @@ describe("establishConsentInline — folddb grant times out (wedged CLI)", () =>
     // freezing. The whole point: it RETURNS.
     expect(result).toEqual({ state: "granted_inline", folddbUsed: false });
     expect((await store.load(NODE_URL))?.blob).toBe(blob);
-    // The actionable timeout message must name the wedged-CLI diagnosis and a
-    // copy-pasteable manual grant + recovery step.
+    // The timeout note must be NEUTRAL: it says the CLI is slow and that init
+    // will confirm whether the grant landed anyway — it does NOT prescribe a
+    // recovery path, because the poll is the authoritative verdict.
     expect(
       lines.some(
         (l) =>
-          l.includes("did not respond within") &&
-          l.includes("may be wedged") &&
-          l.includes("lastdb consent grant fbrain") &&
-          l.includes("fbrain doctor"),
+          l.includes("is taking longer than") &&
+          l.includes("confirming whether the grant landed"),
       ),
     ).toBe(true);
+    // The stale, contradictory manual-recovery instruction MUST NOT be printed
+    // before the poll's verdict — this was the bug: a "may be wedged / Grant
+    // manually / re-run fbrain doctor" line appearing ABOVE a successful
+    // `Access granted.` on the slow-but-landed happy path.
+    expect(lines.some((l) => l.includes("may be wedged"))).toBe(false);
+    expect(lines.some((l) => l.includes("re-run `fbrain doctor`"))).toBe(false);
     // The generic non-zero-exit "retry manually" / "exited with status" lines
     // MUST NOT appear — this is a distinct branch from a real exec failure.
     expect(
@@ -458,7 +469,8 @@ describe("establishConsentInline — folddb grant times out (wedged CLI)", () =>
     });
 
     expect(result).toEqual({ state: "granted_inline", folddbUsed: false });
-    expect(lines.some((l) => l.includes("did not respond within"))).toBe(true);
+    expect(lines.some((l) => l.includes("is taking longer than"))).toBe(true);
+    expect(lines.some((l) => l.includes("may be wedged"))).toBe(false);
   });
 });
 
