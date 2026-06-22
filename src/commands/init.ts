@@ -445,7 +445,7 @@ export function printNextSteps(
   print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
   print(`  4. Re-check health anytime:    fbrain doctor`);
   print(`  5. Connect it to your AI agent: fbrain mcp install`);
-  print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; needs \`bun link\` first)`);
+  print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; \`fbrain-mcp\` is already on your PATH from the global \`bun add -g\` install — from a contributor source checkout, run \`bun link\` first)`);
   print(`        → then \`fbrain doctor --mcp\` to confirm the agent surface boots and serves all 7 tools. (Doing it by hand instead? \`claude mcp add fbrain fbrain-mcp\` then \`fbrain mcp instructions >> CLAUDE.md\`.)`);
   print(`  Data lives on the node at ${ctx.nodeUrl} (config: ${ctx.configPath}).`);
 

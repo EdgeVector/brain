@@ -560,8 +560,9 @@ fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
   (idempotent — won't double-register or duplicate the block).
   --yes        skip the [Y/n] confirmation before the side effects
   --claude-md  append the instructions block to PATH instead of ./CLAUDE.md
-  If \`fbrain-mcp\` isn't on PATH yet, it exits non-zero and tells you to run
-  \`bun link\` first. Verify the result with \`fbrain doctor --mcp\`.
+  If \`fbrain-mcp\` isn't on PATH yet, it exits non-zero and tells you to
+  (re)install fbrain (\`bun add -g github:EdgeVector/fbrain\`, or \`bun link\`
+  from a contributor checkout) first. Verify the result with \`fbrain doctor --mcp\`.
 
 fbrain mcp instructions
   Print the copy-paste CLAUDE.md block (the agent usage-loop + the
@@ -583,11 +584,13 @@ in-process:
 fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
 vector (RRF hybrid) for better recall than pure-vector fbrain_search.
 
-Register with Claude Code (after \`bun link\` from the Quick start):
+Register with Claude Code (the global \`bun add -g github:EdgeVector/fbrain\`
+install already put \`fbrain-mcp\` on your PATH):
   claude mcp add fbrain fbrain-mcp
 
-The \`fbrain-mcp\` bin is global once linked, so the command works from
-any directory. Running from a source checkout without \`bun link\`? Use
+The \`fbrain-mcp\` bin is global, so the command works from any directory.
+Contributing to fbrain itself? \`bun link\` from your source checkout puts
+the same bin on PATH. From a source checkout you don't want to link, use
 the path-based form from the repo root:
   claude mcp add fbrain bun $(realpath src/mcp/main.ts)
 

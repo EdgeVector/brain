@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 // fbrain MCP server entrypoint — speaks the Model Context Protocol over
-// stdio. Register with Claude Code (after `bun link` from the README
-// Quick start, which puts `fbrain-mcp` on PATH):
+// stdio. Register with Claude Code (the global `bun add -g
+// github:EdgeVector/fbrain` install from the README Quick start already put
+// `fbrain-mcp` on PATH):
 //   claude mcp add fbrain fbrain-mcp
-// Running from a source checkout without `bun link`? Path-based fallback:
+// Contributing from a source checkout? `bun link` puts the same bin on PATH.
+// Don't want to link? Path-based fallback:
 //   claude mcp add fbrain bun /path/to/fbrain/src/mcp/main.ts
 //
 // Reads ~/.fbrain/config.json (same as the CLI), but LAZILY: the server

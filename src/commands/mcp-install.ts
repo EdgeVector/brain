@@ -91,12 +91,15 @@ export async function runMcpInstall(
 
   // Step 1: resolve the entrypoint. This is the one hard prerequisite — without
   // `fbrain-mcp` on PATH there is nothing to register, so we fast-fail with the
-  // exact fix instead of registering a server the agent can't reach. We do NOT
-  // run `bun link` for the user: it depends on their cwd being the fbrain repo.
+  // exact fix instead of registering a server the agent can't reach. The global
+  // `bun add -g` install puts `fbrain-mcp` on PATH alongside `fbrain`; if it's
+  // missing the primary remedy is to (re)install. We do NOT run `bun link` for
+  // the user: it only applies to a contributor checkout (cwd = the fbrain repo).
   const entrypoint = which(MCP_ENTRYPOINT);
   if (entrypoint === null) {
     print(`[mcp install] \`${MCP_ENTRYPOINT}\` is not on PATH — nothing to register.`);
-    print(`  Fix: run \`bun link\` in the fbrain repo first (it puts \`${MCP_ENTRYPOINT}\` on PATH alongside \`fbrain\`), then re-run \`fbrain mcp install\`.`);
+    print(`  Fix: (re)install fbrain — \`bun add -g github:EdgeVector/fbrain\` puts \`${MCP_ENTRYPOINT}\` on PATH alongside \`fbrain\` — then re-run \`fbrain mcp install\`.`);
+    print(`  Contributing from a source checkout? Run \`bun link\` in the fbrain repo instead, then re-run \`fbrain mcp install\`.`);
     print(`  From a source checkout you don't want to link, use the path-based form: \`claude mcp add ${MCP_SERVER_NAME} bun "$(realpath src/mcp/main.ts)"\`.`);
     return { code: 1 };
   }
