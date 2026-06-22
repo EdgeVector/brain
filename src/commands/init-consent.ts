@@ -239,13 +239,20 @@ export async function establishConsentInline(
       if (result.status === 0) {
         folddbUsed = true;
       } else if (result.timedOut) {
-        // The folddb CLI hung past the bounded timeout (a wedged / slow node
-        // binary — 0.15.0 brew does this on any startup). Don't let init
-        // freeze: print an actionable manual-grant next step and fall through
-        // to acquireCapability's normal poll/fast-fail path.
+        // The folddb CLI hung past the bounded timeout (a slow node binary —
+        // 0.15.x brew can do this on a first/cold startup). Don't let init
+        // freeze, and don't pre-judge the outcome: the very next step is
+        // acquireCapability's poll, which is the AUTHORITATIVE verdict. The
+        // grant frequently DID land despite the CLI being slow to return, in
+        // which case the poll prints `Access granted. Capability stored.` and a
+        // "grant manually / re-run fbrain doctor" instruction here would be
+        // stale and contradictory. So print a neutral "the CLI was slow,
+        // confirming whether the grant landed anyway" note and let the poll own
+        // the guidance — success on success; `consent_timeout`/`consent_denied`/
+        // `consent_expired` with their own actionable hints on genuine failure.
         const secs = Math.round(folddbGrantTimeoutMs() / 1000);
         ctx.print(
-          `        \`${FOLDDB_BIN} consent grant ${ctx.appId}\` did not respond within ${secs}s — your ${FOLDDB_BIN} CLI may be wedged (try \`${FOLDDB_BIN} --version\`, or run brain-doctor). Grant manually in a working shell with \`${FOLDDB_BIN} consent grant ${ctx.appId}\`, then re-run \`fbrain doctor\`.`,
+          `        \`${FOLDDB_BIN} consent grant ${ctx.appId}\` is taking longer than ${secs}s (the ${FOLDDB_BIN} CLI can be slow on a first / cold run) — confirming whether the grant landed anyway…`,
         );
       } else {
         const detail = result.stderr ? `: ${result.stderr.trim()}` : "";
