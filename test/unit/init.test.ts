@@ -934,6 +934,10 @@ describe("probeWithRetry — interactivity-aware down-node budget", () => {
           nodeUrl: "http://127.0.0.1:9099",
           isTty: () => false,
           sleep: async () => {},
+          // Pin both hint probes so the asserted text is deterministic
+          // regardless of the test host's PATH / socket table (CI has no
+          // lastdb binary installed; a dev box may).
+          isFolddbBinaryInstalled: () => true,
           isTargetPortListening: () => false,
         },
         (l) => lines.push(l),
