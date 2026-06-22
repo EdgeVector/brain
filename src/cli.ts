@@ -2472,8 +2472,9 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   // (Same warn-before-the-trap shape as #275/#276/#278/#279/#280.)
   if (opts?.announce) {
     console.error(
-      "note: no --body given; reading the record body from stdin until EOF " +
-        "(press Ctrl-D to finish, or pass --body / set FBRAIN_NO_STDIN=1 to skip).",
+      "note: no --body given; reading the record body from piped stdin. " +
+        "If nothing is piped (e.g. an inherited-but-empty pipe) this will hang " +
+        "— pass --body or set FBRAIN_NO_STDIN=1 to skip.",
     );
   }
   try {
