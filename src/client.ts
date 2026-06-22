@@ -81,20 +81,30 @@ const SOCKET_FILE_NAME = "folddb.sock";
 
 // Resolve the running node's data home (the dir holding `port` and `data/`).
 //
-// The FoldDB→LastDB rebrand (node v0.15.1+) renamed the default data home from
-// `~/.folddb` to `~/.lastdb`. fbrain must work against BOTH: a current 0.15.x
-// node (`~/.lastdb`) and a legacy 0.14.x node (`~/.folddb`). Precedence:
+// The FoldDB→LastDB rebrand is mid-flight: there is NO single fixed default
+// home, so fbrain must work against BOTH and pick the one that's actually live:
+//   - the shipped LastDB.app desktop node uses `~/.folddb` as its data home,
+//   - a v0.15.1+ CLI / brew `lastdb` node uses `~/.lastdb`.
+// A mixed-version machine can have BOTH dirs on disk (e.g. a dev who first ran a
+// 0.15.1 brew node — creating `~/.lastdb` — then switched to LastDB.app, which
+// uses `~/.folddb`). Precedence:
 //   1. `LASTDB_HOME` env (the new explicit override),
 //   2. `FOLDDB_HOME` env (the legacy explicit override — still honored),
-//   3. `~/.lastdb` if it exists (the current default),
-//   4. `~/.folddb` otherwise (legacy fallback — also the path when neither
+//   3. the candidate home whose live control socket (`data/folddb.sock`)
+//      actually exists — `~/.lastdb` first, then `~/.folddb` — so we attest
+//      against the node that's truly running rather than whichever home dir
+//      merely exists (the dir can be a stale leftover with no live socket),
+//   4. `~/.lastdb` if its dir exists (no socket on either — pre-launch default),
+//   5. `~/.folddb` otherwise (legacy fallback — also the path when neither
 //      dir exists yet, so error/hint strings keep pointing somewhere real).
 //
 // CRITICAL: every place that derives the node home (socket path + port
 // breadcrumb + init hint) MUST go through this one resolver so the owner-
 // attestation UDS socket and the node URL always derive from the SAME root —
 // a mismatch silently fails owner attestation with a misleading
-// `transport_not_attested` (the original dogfood bug).
+// `transport_not_attested` (the original dogfood bug). Probing for the live
+// socket here (not in `defaultFolddbSocketPath` alone) is what keeps that
+// invariant on a mixed machine.
 export function resolveNodeHome(): string {
   const lastdbEnv = process.env.LASTDB_HOME;
   if (lastdbEnv && lastdbEnv.length > 0) return lastdbEnv;
@@ -103,10 +113,36 @@ export function resolveNodeHome(): string {
   // Both default node-home paths derive from the guarded home base so a broken
   // HOME fails loud rather than resolving to a relative `undefined/.lastdb`.
   // (An explicit LASTDB_HOME/FOLDDB_HOME override above already bypasses this.)
-  const home = fbrainHomeBase();
-  const lastdbDefault = join(home, ".lastdb");
-  if (existsSync(lastdbDefault)) return lastdbDefault;
-  return join(home, ".folddb");
+  return resolveDefaultNodeHome(fbrainHomeBase(), existsSync);
+}
+
+// The pure default-home resolver behind `resolveNodeHome` (after the env
+// overrides are consumed), split out so the socket-preference + directory
+// fallback is directly unit-testable with an injected home base and `exists`
+// probe — in-process `os.homedir()` reads the passwd entry (not $HOME) and the
+// real machine's `~/.lastdb`/`~/.folddb` state can't be driven from a test, so
+// this seam lets a test assert the mixed-version cases deterministically.
+// Production code calls `resolveNodeHome`, which passes `fbrainHomeBase()` and
+// the real `existsSync`. Precedence (steps 3–5 of resolveNodeHome's doc):
+//   3. the default home whose live control socket (`data/folddb.sock`) exists —
+//      `~/.lastdb` first, then `~/.folddb`,
+//   4. `~/.lastdb` if its dir exists (no socket on either — pre-launch default),
+//   5. `~/.folddb` otherwise.
+export function resolveDefaultNodeHome(
+  homeBase: string,
+  exists: (p: string) => boolean,
+): string {
+  const lastdbDefault = join(homeBase, ".lastdb");
+  const folddbDefault = join(homeBase, ".folddb");
+  // Prefer the home whose control socket actually exists: that's the node truly
+  // running on this machine, regardless of which home *directories* are present.
+  if (exists(join(lastdbDefault, "data", SOCKET_FILE_NAME))) return lastdbDefault;
+  if (exists(join(folddbDefault, "data", SOCKET_FILE_NAME))) return folddbDefault;
+  // No live socket under either default: fall back to the directory-existence
+  // heuristic (`~/.lastdb` first) so error/hint strings still point somewhere
+  // real before any node has been launched.
+  if (exists(lastdbDefault)) return lastdbDefault;
+  return folddbDefault;
 }
 
 // Build the `onboarding_already_complete` (HTTP 410) recovery hint's "start
@@ -122,10 +158,12 @@ export function onboardingResetConfigDir(): string {
 }
 
 // Resolve the node's UDS control-socket path. Mirrors the CLI: the socket lives
-// at `<home>/data/folddb.sock`, where `<home>` is `resolveNodeHome()` (the
-// current default is `~/.lastdb`; legacy 0.14.x nodes use `~/.folddb`). An
-// explicit override (config field / FBRAIN_FOLDDB_SOCKET env) wins for
-// ephemeral / non-default nodes.
+// at `<home>/data/folddb.sock`, where `<home>` is `resolveNodeHome()` — which
+// now prefers whichever default home (`~/.lastdb` for a v0.15.1+ CLI node,
+// `~/.folddb` for the LastDB.app desktop node) has a live socket on disk, so on
+// a mixed-version machine this returns the socket that's actually there rather
+// than a dead path under a stale home dir. An explicit override (config field /
+// FBRAIN_FOLDDB_SOCKET env) wins for ephemeral / non-default nodes.
 export function defaultFolddbSocketPath(override?: string): string {
   // Precedence: the FBRAIN_FOLDDB_SOCKET env wins (the ad-hoc / test override),
   // then an explicit config-supplied path, then the default
@@ -1965,17 +2003,18 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
             ? "The socket exists but attestation failed — the node may have restarted (its in-memory " +
               "session dropped) or it isn't the node serving your --node-url. "
             : "fbrain attests by minting a pairing code over the node's UDS control socket, which lives at " +
-              "`<node-data-dir>/folddb.sock` — for the default brain that's `~/.lastdb/data/folddb.sock` " +
-              "(a legacy 0.14.x node still uses `~/.folddb/data/folddb.sock`). " +
-              "A from-source node (`./run.sh`) or one launched with a custom `LASTDB_HOME`/`FOLDDB_HOME` keeps its socket elsewhere. ") +
+              "`<node-data-home>/data/folddb.sock` — that's `~/.folddb/data/folddb.sock` for the LastDB.app " +
+              "desktop node and `~/.lastdb/data/folddb.sock` for a v0.15.1+ CLI/brew node. fbrain probes " +
+              "both and picks whichever socket exists; if your node uses a different home (a from-source " +
+              "`./run.sh` node, or one launched with a custom `LASTDB_HOME`/`FOLDDB_HOME`) the probe won't find it. ") +
           "Point fbrain at the right socket with `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
-          "(or `LASTDB_HOME=<node-home>`), then re-run. The socket is created by the OS user that " +
-          "owns the node, so run fbrain as that user on the same machine.",
+          "(or `LASTDB_HOME=<node-home>` / `FOLDDB_HOME=<node-home>`), then re-run. The socket is created " +
+          "by the OS user that owns the node, so run fbrain as that user on the same machine.",
         agentHint:
           `This node gates owner verbs behind an attested UDS control socket (fold#739). ${where}. ` +
-          "Set the FBRAIN_FOLDDB_SOCKET env to the node's `<data-dir>/folddb.sock` (default brain: " +
-          "`~/.lastdb/data/folddb.sock`; legacy 0.14.x: `~/.folddb/data/folddb.sock`) and retry. " +
-          "fbrain must run as the OS user that owns the node.",
+          "Set the FBRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` (LastDB.app " +
+          "desktop: `~/.folddb/data/folddb.sock`; v0.15.1+ CLI/brew: `~/.lastdb/data/folddb.sock`) and " +
+          "retry. fbrain must run as the OS user that owns the node.",
       };
     },
   },
