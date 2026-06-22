@@ -61,8 +61,17 @@ type Posting = {
   f: number; // term frequency in that doc
 };
 
+// The per-doc text Stage 4/5 of `ask` needs to RENDER a chosen hit — its
+// title (table column) and body (snippet). Persisted alongside the postings so
+// a warm `ask` can resolve its (≤ limit) hits straight from the cache, with NO
+// network body refetch. fold_db's `/api/query` has no per-key filter, so the
+// only alternative to caching this is re-scanning a whole schema page per hit
+// — which would defeat the cache. Caching it turns a warm resolve into a local
+// disk read.
+type DocText = { title: string; body: string };
+
 type SerializedIndex = {
-  version: 1;
+  version: 2;
   fingerprint: string;
   generatedAt: string;
   documents: Array<{ type: RecordType; slug: string }>;
@@ -70,6 +79,9 @@ type SerializedIndex = {
   avgDocLength: number;
   // term -> postings list (sorted by doc id for compact serialization)
   postings: Record<string, Posting[]>;
+  // Per-doc render text, index-aligned with `documents`. Lets a warm cache hit
+  // resolve hits without refetching bodies over the network.
+  docText: DocText[];
 };
 
 export class BM25Index {
@@ -77,6 +89,11 @@ export class BM25Index {
   private docLengths: number[];
   private avgDocLength: number;
   private postings: Map<string, Posting[]>;
+  private docText: DocText[];
+  // id ("type::slug") -> index into `documents`/`docText`. Built lazily on the
+  // first `recordText` lookup so a warm `ask` can resolve a chosen hit's render
+  // text in O(1) without a network fetch.
+  private idIndex: Map<string, number> | null = null;
   readonly fingerprint: string;
 
   private constructor(serialized: SerializedIndex) {
@@ -84,6 +101,7 @@ export class BM25Index {
     this.docLengths = serialized.docLengths;
     this.avgDocLength = serialized.avgDocLength;
     this.postings = new Map(Object.entries(serialized.postings));
+    this.docText = serialized.docText;
     this.fingerprint = serialized.fingerprint;
   }
 
@@ -113,15 +131,33 @@ export class BM25Index {
       postings[term] = list;
     }
     const fingerprint = computeFingerprint(docs);
+    const docText: DocText[] = docs.map((d) => ({ title: d.title, body: d.body }));
     return new BM25Index({
-      version: 1,
+      version: 2,
       fingerprint,
       generatedAt: new Date().toISOString(),
       documents,
       docLengths,
       avgDocLength,
       postings,
+      docText,
     });
+  }
+
+  // Render text (title + body) for a doc id ("type::slug"), or null if the id
+  // isn't in this index. Lets a warm cache hit resolve its chosen hits without
+  // a network body fetch — the cached index already carries every doc's text.
+  recordText(id: string): DocText | null {
+    if (!this.idIndex) {
+      this.idIndex = new Map();
+      for (let i = 0; i < this.documents.length; i++) {
+        const d = this.documents[i]!;
+        this.idIndex.set(`${d.type}::${d.slug}`, i);
+      }
+    }
+    const i = this.idIndex.get(id);
+    if (i === undefined) return null;
+    return this.docText[i] ?? null;
   }
 
   search(query: string, limit: number): BM25Hit[] {
@@ -175,25 +211,31 @@ export class BM25Index {
     const postings: Record<string, Posting[]> = {};
     for (const [k, v] of this.postings) postings[k] = v;
     return {
-      version: 1,
+      version: 2,
       fingerprint: this.fingerprint,
       generatedAt: new Date().toISOString(),
       documents: this.documents,
       docLengths: this.docLengths,
       avgDocLength: this.avgDocLength,
       postings,
+      docText: this.docText,
     };
   }
 
   static fromJSON(raw: unknown): BM25Index | null {
     if (!raw || typeof raw !== "object") return null;
     const obj = raw as Partial<SerializedIndex>;
-    if (obj.version !== 1) return null;
+    // v2 added `docText` (the cached render text that lets a warm `ask` resolve
+    // hits without a network body fetch). A v1 file lacks it, so reject it —
+    // loadCachedIndex returns null and `ask` rebuilds (one extra cold call),
+    // which is the same safe fall-through as any other corrupt/stale cache.
+    if (obj.version !== 2) return null;
     if (typeof obj.fingerprint !== "string") return null;
     if (!Array.isArray(obj.documents)) return null;
     if (!Array.isArray(obj.docLengths)) return null;
     if (typeof obj.avgDocLength !== "number") return null;
     if (!obj.postings || typeof obj.postings !== "object") return null;
+    if (!Array.isArray(obj.docText)) return null;
     // Cross-array structural checks: the cache file is written
     // non-atomically, so a truncated write or stale-schema file can pass
     // the field-type guards above and still produce an index whose
@@ -202,6 +244,16 @@ export class BM25Index {
     // (loadCachedIndex → null → rebuild) the file's contract promises.
     const N = obj.documents.length;
     if (obj.docLengths.length !== N) return null;
+    // docText is index-aligned with documents; a length mismatch means a
+    // truncated/stale write — reject so a warm resolve can't read past the
+    // array or render a hit with the wrong record's text.
+    if (obj.docText.length !== N) return null;
+    for (const t of obj.docText) {
+      if (!t || typeof t !== "object") return null;
+      const tt = (t as { title?: unknown }).title;
+      const bb = (t as { body?: unknown }).body;
+      if (typeof tt !== "string" || typeof bb !== "string") return null;
+    }
     for (const list of Object.values(obj.postings)) {
       if (!Array.isArray(list)) return null;
       for (const p of list) {
@@ -212,13 +264,14 @@ export class BM25Index {
       }
     }
     return new BM25Index({
-      version: 1,
+      version: 2,
       fingerprint: obj.fingerprint,
       generatedAt: typeof obj.generatedAt === "string" ? obj.generatedAt : "",
       documents: obj.documents as Array<{ type: RecordType; slug: string }>,
       docLengths: obj.docLengths as number[],
       avgDocLength: obj.avgDocLength,
       postings: obj.postings as Record<string, Posting[]>,
+      docText: obj.docText as DocText[],
     });
   }
 }
@@ -236,7 +289,19 @@ export function tokenize(text: string): string[] {
   return out;
 }
 
-export function computeFingerprint(docs: BM25Document[]): string {
+// The minimal per-record identity the fingerprint is computed over. A
+// BM25Document is a superset of this (it also carries title + body), so
+// `computeFingerprint` delegates here — the two MUST agree bit-for-bit, or a
+// cheap-listing fingerprint would never match the index a full-corpus build
+// stamped, defeating the cache. Keeping one hash function over this shape is
+// what lets `ask` decide cache-hit-vs-miss from a body-less listing.
+export type FingerprintKey = {
+  type: RecordType;
+  slug: string;
+  updatedAt: string;
+};
+
+export function computeFingerprint(docs: readonly FingerprintKey[]): string {
   // Stable hash of the (slug, updated_at) pairs sorted by slug. This is what
   // tells us "did the corpus change since the last build?". Including type
   // means a slug moving between types invalidates too.

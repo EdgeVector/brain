@@ -43,11 +43,13 @@ import {
 import {
   hasAnyLiveRecord,
   isTombstoned,
+  listRecordKeys,
   listRecords,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
+  type RecordKey,
 } from "../record.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
 import {
@@ -219,25 +221,48 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
 
   const queries = [opts.query, ...expansions];
 
-  // ── Stage 1: BM25 corpus build (cached) ──────────────────────────────
+  // ── Stage 1: BM25 corpus build (cached, cache-aware FETCH) ───────────
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
-  const { docs, liveById } = await loadBm25Documents(node, opts.cfg, activeTypes);
+  // Cheap listing FIRST. Pull only slug + updated_at (+ tags to drop
+  // tombstones) per active type — no `body`, the heavy field. The fingerprint
+  // over this body-less listing is bit-identical to the one a full corpus
+  // build stamps (both `computeFingerprint`, both tombstone-filtered), so it
+  // alone decides cache hit vs miss. This is the cut: pre-fix `ask` fetched
+  // every record's full body on EVERY call just to compute this fingerprint;
+  // now the full-body fetch happens only on a MISS.
+  const keys = await loadBm25Keys(node, opts.cfg, activeTypes);
+  const fingerprint = computeFingerprint(keys);
   let index = loadCachedIndex(opts.cfg.userHash);
-  // computeFingerprint is the same hash BM25Index.build assigns, so we use it
-  // standalone here to decide cache hit vs miss — building the full index
-  // just to read its fingerprint would discard a full postings build on every
-  // cache hit.
-  const fingerprint = computeFingerprint(docs);
   let bm25CacheHit = false;
+  // `liveById` is the Stage-4 resolve lookup. On a cache MISS the full corpus
+  // walk populates it for free; on a cache HIT we never fetch bodies, so it
+  // stays empty and Stage 4 resolves its (≤ limit) chosen hits from the cached
+  // index's persisted render text instead (no network).
+  let liveById = new Map<string, FbrainRecord>();
+  // Corpus size for the AskResult / no-match probe. On a hit it's the cheap
+  // listing's live-record count (no bodies fetched); on a miss it's the same
+  // number, counted from the docs we did fetch.
+  let corpusSize = keys.length;
+
   if (index && index.fingerprint === fingerprint) {
+    // WARM PATH: corpus unchanged since the last `ask`. Reuse the cached
+    // postings AND skip `loadBm25Documents` entirely — no body fetch at all.
     bm25CacheHit = true;
-    opts.verbose?.(`bm25: cache hit (fingerprint ${fingerprint.slice(0, 12)}…)`);
+    opts.verbose?.(
+      `bm25: cache hit (fingerprint ${fingerprint.slice(0, 12)}…) — skipping corpus body fetch`,
+    );
   } else {
-    index = BM25Index.build(docs);
+    // COLD/STALE PATH: corpus changed (or no cache). Fall back to the full
+    // body fetch + rebuild — unchanged behavior, correctness preserved. The
+    // body fetch ALSO hydrates `liveById` for Stage 4.
+    const built = await loadBm25Documents(node, opts.cfg, activeTypes);
+    liveById = built.liveById;
+    corpusSize = built.docs.length;
+    index = BM25Index.build(built.docs);
     saveCachedIndex(opts.cfg.userHash, index);
     opts.verbose?.(
-      `bm25: rebuilt index (${docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}…)`,
+      `bm25: rebuilt index (${built.docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}…)`,
     );
   }
 
@@ -353,17 +378,50 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const fused = reciprocalRankFusion(rankers, { k: RRF_DEFAULT_K });
 
   // ── Stage 4: resolve + filter ────────────────────────────────────────
-  // Every live record was already loaded during the corpus build (Stage 1)
-  // and indexed in `liveById`. Resolve is a Map lookup — no additional
-  // HTTP round-trips. A miss means the doc is stale (vector index ahead
-  // of the kind-filtered live snapshot, or soft-deleted between the
-  // corpus walk and the vector call); silently skip.
+  // Both resolve paths cost ZERO additional network round-trips — that's the
+  // invariant this card preserves:
+  //   - Cache MISS: the corpus body fetch (Stage 1) already loaded every live
+  //     record into `liveById`, so resolve is a pure Map lookup.
+  //   - Cache HIT: we deliberately never fetched bodies, but the cached index
+  //     carries each doc's render text (title + body). So a chosen hit resolves
+  //     to a MINIMAL record synthesized from `index.recordText(id)` — a local
+  //     read, no network. (fold_db `/api/query` has no per-key filter, so an
+  //     on-demand single-record fetch would re-scan a whole schema page and
+  //     defeat the cache — caching the text is the right tradeoff.)
+  // Only `title` + `body` are read off the resolved record downstream (the
+  // table title column + the snippet); the synthesized record fills the rest
+  // with empty/identity values, which is sound because no consumer of
+  // `askCmd().hits[].record` reads them (verified: cli.ts + mcp/server.ts).
+  //
+  // A resolve miss means the doc is stale (vector index ahead of the live
+  // snapshot, or soft-deleted between the listing and the vector call);
+  // silently skip — same contract on both paths.
+  const resolveRecord = (id: string, slug: string): FbrainRecord | null => {
+    const cached = liveById.get(id);
+    if (cached) return cached;
+    if (!bm25CacheHit) return null; // cold path had the full map; a miss is stale
+    const text = index!.recordText(id);
+    if (!text) return null; // not in the (warm) index → stale ranker hit
+    // Minimal record: only title/body are consumed downstream. design_slug is
+    // omitted (optional); the slug is authoritative from the parsed doc id (the
+    // type lives on the AskHit, derived from the same parsed doc id).
+    return {
+      slug,
+      title: text.title,
+      body: text.body,
+      status: "",
+      tags: [],
+      created_at: "",
+      updated_at: "",
+    };
+  };
+
   const resolved: AskHit[] = [];
   for (let i = 0; i < fused.length && resolved.length < limit; i++) {
     const f = fused[i]!;
     const parsed = parseDocId(f.id);
     if (!parsed) continue;
-    const rec = liveById.get(f.id);
+    const rec = resolveRecord(f.id, parsed.slug);
     if (!rec) {
       opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
       continue;
@@ -502,12 +560,12 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     // record — the same calm guidance `search` now gives. A populated brain
     // that simply matched nothing gets a terse retry nudge.
     //
-    // Fast-path: the BM25 corpus we already built walked the active types, so a
+    // Fast-path: the cheap listing we already ran walked the active types, so a
     // non-empty corpus PROVES the brain holds a live record — skip the extra
     // probe round-trip entirely. We only pay the `hasAnyLiveRecord` walk when
     // the corpus came back empty (the new-dev empty-brain case, or a `--type`
     // filter whose type has no records — the probe checks ALL types).
-    const empty = docs.length === 0 && !(await hasAnyLiveRecord(node, opts.cfg));
+    const empty = corpusSize === 0 && !(await hasAnyLiveRecord(node, opts.cfg));
     // On the MCP agent channel the empty-brain hint must name the agent's
     // create TOOL (`fbrain_put`), not the `fbrain <type> new` CLI verb it can't
     // call. The populated-brain "nothing matched" nudge is already
@@ -628,7 +686,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     expansion,
     expansionStatus,
     hits: resolved,
-    bm25CorpusSize: docs.length,
+    bm25CorpusSize: corpusSize,
     bm25CacheHit,
   };
 }
@@ -640,6 +698,26 @@ export function formatCost(usd: number | null, model: string): string {
   return usd === null
     ? `cost≈unknown (${model} not in price table)`
     : `cost≈$${usd.toFixed(6)}`;
+}
+
+// The cache-decision listing: walk the active types fetching ONLY the
+// body-less keys (slug + updated_at + tags-for-tombstone-drop). Mirrors
+// `loadBm25Documents`'s type walk and `--type` narrowing, but issues the cheap
+// `listRecordKeys` query instead of the full-body `listRecords`. The keys feed
+// `computeFingerprint`, whose hash is bit-identical to the one a full corpus
+// build stamps — so a hit here is a real hit there. This is the only fetch a
+// warm `ask` does for the BM25 half.
+async function loadBm25Keys(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+): Promise<RecordKey[]> {
+  const keys: RecordKey[] = [];
+  for (const t of types) {
+    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg));
+    for (const k of typeKeys) keys.push(k);
+  }
+  return keys;
 }
 
 async function loadBm25Documents(
