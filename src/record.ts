@@ -147,6 +147,54 @@ export async function listRecords(
   return res.results.map((row) => rowToRecord(row, type));
 }
 
+// The body-less identity of a live record — slug, when it last changed, and
+// its tags (needed only to drop tombstones). This is the SHAPE the BM25 cache
+// fingerprint is computed over (see `computeFingerprint`), so a record listed
+// this way produces the same fingerprint as one fetched in full.
+export type RecordKey = {
+  type: RecordType;
+  slug: string;
+  updatedAt: string;
+};
+
+// The minimal `/api/query` projection that still answers "did the corpus
+// change?". `ask` runs this BEFORE deciding whether to do a full body fetch:
+// on a warm cache hit the body fetch is skipped entirely, turning the corpus
+// load from O(all records, full bodies) into O(this cheap listing). We pull
+// slug + updated_at for the fingerprint, and tags only to drop tombstones (a
+// soft-deleted record must not contribute to the fingerprint, exactly as the
+// full corpus build excludes it). Critically NO `body` / `title` / `status` —
+// those are the heavy fields whose repeated fetch this card removes.
+//
+// `computeFingerprint` over the returned keys MUST equal the fingerprint a
+// full `loadBm25Documents` + `BM25Index.build` stamps for the same corpus, so
+// the two paths share `tombstone` semantics: both drop `TOMBSTONE_TAG` rows.
+export async function listRecordKeys(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+): Promise<RecordKey[]> {
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["slug", "tags", "updated_at"],
+  });
+  const keys: RecordKey[] = [];
+  for (const row of res.results) {
+    const f = (row.fields ?? {}) as Record<string, unknown>;
+    // Reuse the same tombstone test the full path uses: build the tag list
+    // through the shared array parser so a phantom empty tag / string-encoded
+    // list can't make the two paths disagree on what's live.
+    const tags = arrayStringField(f, "tags");
+    if (tags.includes(TOMBSTONE_TAG)) continue;
+    keys.push({
+      type,
+      slug: stringField(f, "slug"),
+      updatedAt: stringField(f, "updated_at"),
+    });
+  }
+  return keys;
+}
+
 // Cheap "does this brain hold ANY live record?" probe, used only on the
 // search/ask no-match path to distinguish a brand-new EMPTY brain (a new dev
 // who hasn't created anything yet) from a populated brain whose query simply

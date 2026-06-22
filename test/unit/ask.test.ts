@@ -107,6 +107,12 @@ function vectorHit(opts: {
 
 type Stub = {
   queryCountsBySchema: Map<string, number>;
+  // Subset of the above counting only BODY-BEARING queries (the `fields`
+  // projection includes "body"). The cache-aware corpus load issues a cheap
+  // body-LESS listing on every call and a full body fetch only on a cache
+  // miss, so this is the meter the perf cut moves: a warm `ask` over an
+  // unchanged corpus must add ZERO to it.
+  bodyQueryCountsBySchema: Map<string, number>;
   searchCalls: number;
 };
 
@@ -118,6 +124,7 @@ function installFetchStub(opts: {
 }): Stub {
   const stub: Stub = {
     queryCountsBySchema: new Map(),
+    bodyQueryCountsBySchema: new Map(),
     searchCalls: 0,
   };
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
@@ -129,6 +136,13 @@ function installFetchStub(opts: {
         schema,
         (stub.queryCountsBySchema.get(schema) ?? 0) + 1,
       );
+      const fields = (body as { fields?: unknown }).fields;
+      if (Array.isArray(fields) && fields.includes("body")) {
+        stub.bodyQueryCountsBySchema.set(
+          schema,
+          (stub.bodyQueryCountsBySchema.get(schema) ?? 0) + 1,
+        );
+      }
       const rows = opts.queries[schema] ?? [];
       return new Response(
         JSON.stringify({
@@ -414,24 +428,174 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       expect(result.hits.length).toBeGreaterThan(0);
       expect(result.hits.length).toBeLessThanOrEqual(5);
 
-      // CRITICAL ASSERTION: total /api/query calls equal RECORD_TYPES.length.
-      // The corpus build runs listRecords once per logical type. Stage 4
-      // must add ZERO calls — anything more is the old N+1.
-      //
-      // Pre-fix behavior was 8 (corpus) + N (per fused hit) = 8 + min(limit,
-      // fused.length). The regression assertion is the tight bound 8.
+      // CRITICAL ASSERTION: the BODY corpus fetch runs once per logical type,
+      // never per fused hit. Stage 4 must add ZERO body fetches — anything
+      // more is the old N+1. (Pre-fix the per-hit listRecords re-fetched the
+      // full body; the in-memory map collapsed that, and the cache-aware load
+      // keeps the cold-path body fetch at exactly one per type.)
+      const totalBodyQueries = Array.from(
+        stub.bodyQueryCountsBySchema.values(),
+      ).reduce((a, b) => a + b, 0);
+      expect(totalBodyQueries).toBe(RECORD_TYPES.length);
+
+      // The shared note hash is the worst-case multiplier. Before the N+1 fix
+      // it took the corpus body calls (one per Phase 6 type = 6) PLUS one per
+      // resolved Phase 6 hit. After: exactly 6 body fetches, no more.
+      expect(stub.bodyQueryCountsBySchema.get(sharedNoteHash)).toBe(6);
+      expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.design)).toBe(1);
+      expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.task)).toBe(1);
+
+      // The cheap body-less listing also runs once per type (the cache-decision
+      // pass). On this COLD call (empty cache) that's listing + body fetch per
+      // type — the warm-call test below proves the body half drops to zero.
       const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
       );
-      expect(totalQueries).toBe(RECORD_TYPES.length);
+      expect(totalQueries).toBe(2 * RECORD_TYPES.length);
+    },
+  );
 
-      // The shared note hash is the worst-case multiplier. Before the fix
-      // it took the corpus calls (one per Phase 6 type = 6) PLUS one per
-      // resolved Phase 6 hit. After the fix: exactly 6, no more.
-      expect(stub.queryCountsBySchema.get(sharedNoteHash)).toBe(6);
-      expect(stub.queryCountsBySchema.get(TEST_HASHES.design)).toBe(1);
-      expect(stub.queryCountsBySchema.get(TEST_HASHES.task)).toBe(1);
+  test(
+    "a WARM ask over an UNCHANGED corpus issues only the cheap listing — ZERO body fetches",
+    async () => {
+      // The headline of the cache-aware corpus load: pre-fix `ask` re-fetched
+      // every record's full body on EVERY call (one full-body limit:1000 scan
+      // per type) just to recompute the fingerprint. Now the fingerprint is
+      // computed from a body-less listing, so when nothing changed since the
+      // last `ask` the second call does the cheap listing ONLY — no body
+      // fetch, no rebuild — and still returns the right hits from the cached
+      // index. The shared FBRAIN_CACHE_DIR (beforeEach) lets the first call's
+      // saved index carry into the second.
+      const cfg = buildTestCfg();
+      const stub = installFetchStub({
+        queries: {
+          [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")],
+          [TEST_HASHES.task]: [],
+        },
+        vectorHits: [
+          vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 }),
+        ],
+      });
+
+      // COLD call: warms the cache (does the full body fetch + rebuild).
+      const cold = await askCmd({
+        cfg,
+        query: "octopus",
+        noLlm: true,
+        print: () => {},
+      });
+      expect(cold.bm25CacheHit).toBe(false);
+      const coldBody = Array.from(stub.bodyQueryCountsBySchema.values()).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      expect(coldBody).toBe(RECORD_TYPES.length);
+
+      // Reset the counters; the index file persists in FBRAIN_CACHE_DIR.
+      stub.queryCountsBySchema.clear();
+      stub.bodyQueryCountsBySchema.clear();
+
+      // WARM call: same corpus → cache hit → no body fetch at all.
+      const warm = await askCmd({
+        cfg,
+        query: "octopus",
+        noLlm: true,
+        print: () => {},
+      });
+      expect(warm.bm25CacheHit).toBe(true);
+
+      // ZERO body-bearing /api/query calls on the warm path — the whole point.
+      const warmBody = Array.from(stub.bodyQueryCountsBySchema.values()).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      expect(warmBody).toBe(0);
+
+      // The cheap listing still runs (it's how we detect "unchanged"), one per
+      // active type — but it carries no `body`, so it's the small query.
+      const warmTotal = Array.from(stub.queryCountsBySchema.values()).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      expect(warmTotal).toBe(RECORD_TYPES.length);
+
+      // Correctness preserved: the warm path still resolves the same hit, with
+      // its full record (title/body) hydrated on demand for the chosen hit.
+      expect(warm.hits.map((h) => h.slug)).toEqual(["d1"]);
+      expect(warm.hits[0]!.record.title).toBe("T-d1");
+      expect(warm.hits[0]!.record.body).toContain("octopus");
+    },
+  );
+
+  test(
+    "editing a record between asks busts the cache and rebuilds — the change is findable",
+    async () => {
+      // Correctness half of the cache: a changed corpus (new updated_at) must
+      // change the fingerprint so the warm path falls back to a full rebuild
+      // and the edited content is searchable. We flip the live row's body +
+      // updated_at between the two calls and assert the second call rebuilds
+      // (cache MISS) and finds the new token.
+      const cfg = buildTestCfg();
+      let designBody = "octopus blueberry";
+      let designUpdatedAt = "2026-01-01T00:00:00Z";
+      const queryCounts = new Map<string, number>();
+      const bodyQueryCounts = new Map<string, number>();
+      globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === "string" ? input : String(input);
+        const body = init?.body ? JSON.parse(init.body as string) : undefined;
+        if (url.includes("/api/query")) {
+          const schema = (body as { schema_name: string }).schema_name;
+          queryCounts.set(schema, (queryCounts.get(schema) ?? 0) + 1);
+          const fields = (body as { fields?: unknown }).fields;
+          if (Array.isArray(fields) && fields.includes("body")) {
+            bodyQueryCounts.set(schema, (bodyQueryCounts.get(schema) ?? 0) + 1);
+          }
+          const rows =
+            schema === TEST_HASHES.design
+              ? [designRow("d1", designBody, { updated_at: designUpdatedAt })]
+              : [];
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: rows.map((f) => ({ fields: f, key: { hash: f.slug as string, range: null } })),
+              total_count: rows.length,
+              returned_count: rows.length,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.includes("/api/native-index/search")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: [vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 })],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("{}", { status: 200 });
+      }) as unknown as typeof globalThis.fetch;
+
+      // COLD: builds the index over the original body.
+      const cold = await askCmd({ cfg, query: "octopus", noLlm: true, print: () => {} });
+      expect(cold.bm25CacheHit).toBe(false);
+      expect(cold.hits.map((h) => h.slug)).toEqual(["d1"]);
+
+      // Edit the record: new body token + bumped updated_at.
+      designBody = "octopus zucchini";
+      designUpdatedAt = "2026-02-02T00:00:00Z";
+      bodyQueryCounts.clear();
+      queryCounts.clear();
+
+      // The edited corpus must bust the cache (fingerprint changed) and rebuild.
+      const rebuilt = await askCmd({ cfg, query: "zucchini", noLlm: true, print: () => {} });
+      expect(rebuilt.bm25CacheHit).toBe(false);
+      // Rebuild means a full body fetch happened (so the new token is indexed).
+      expect((bodyQueryCounts.get(TEST_HASHES.design) ?? 0)).toBeGreaterThan(0);
+      // And the new content is findable by its new token.
+      expect(rebuilt.hits.map((h) => h.slug)).toEqual(["d1"]);
+      expect(rebuilt.hits[0]!.record.body).toContain("zucchini");
     },
   );
 
@@ -547,8 +711,10 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
     expect(sent).toEqual([TEST_HASHES.design]);
 
-    // BM25 corpus build only queried the design type — no concept walk.
-    expect(queryCounts.get(TEST_HASHES.design)).toBe(1);
+    // BM25 corpus load only touched the design type — no concept walk. On a
+    // cold call that's the cheap listing + the full body fetch (2), both scoped
+    // to design; concept is never queried in either pass.
+    expect(queryCounts.get(TEST_HASHES.design)).toBe(2);
     expect(queryCounts.get(TEST_HASHES.concept) ?? 0).toBe(0);
 
     // Results are design only — no agent-pr-events-* noise.
@@ -619,9 +785,10 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
     expect(new Set(sent)).toEqual(new Set([TEST_HASHES.design, TEST_HASHES.task]));
 
-    expect(queryCounts.get(TEST_HASHES.design)).toBe(1);
-    expect(queryCounts.get(TEST_HASHES.task)).toBe(1);
-    // No walks of the six Phase 6 types.
+    // Cold call: cheap listing + full body fetch (2) per requested type.
+    expect(queryCounts.get(TEST_HASHES.design)).toBe(2);
+    expect(queryCounts.get(TEST_HASHES.task)).toBe(2);
+    // No walks of the six Phase 6 types — narrowing skips them in both passes.
     expect(queryCounts.get(TEST_HASHES.concept) ?? 0).toBe(0);
     expect(queryCounts.get(TEST_HASHES.preference) ?? 0).toBe(0);
   });
@@ -655,13 +822,19 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     });
 
     expect(result.hits.length).toBe(0);
-    // Eight corpus queries (one per RECORD_TYPE), nothing extra for the
-    // ghost vector hit.
+    // The ghost vector hit triggers NO extra fetch: on the cold path it's a
+    // `liveById` Map miss (the in-memory corpus map), silently skipped. So the
+    // only /api/query traffic is the corpus load itself — one cheap listing +
+    // one full body fetch per RECORD_TYPE — and zero body fetches for ghost.
     const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
       (a, b) => a + b,
       0,
     );
-    expect(totalQueries).toBe(RECORD_TYPES.length);
+    expect(totalQueries).toBe(2 * RECORD_TYPES.length);
+    const totalBodyQueries = Array.from(
+      stub.bodyQueryCountsBySchema.values(),
+    ).reduce((a, b) => a + b, 0);
+    expect(totalBodyQueries).toBe(RECORD_TYPES.length);
   });
 });
 
