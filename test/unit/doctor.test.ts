@@ -1841,7 +1841,10 @@ describe("doctor write-readiness probe", () => {
     expect(fail).toBeDefined();
     expect(fail!).toContain("no capability stored");
     const fix = lines[lines.indexOf(fail!) + 1] ?? "";
-    expect(fix).toContain("fbrain init");
+    // Must name the non-interactive verb `fbrain init --grant-consent`, NOT bare
+    // `fbrain init` — bare init silently skips the consent prompt without a TTY,
+    // so following the hint on the scripted/agent install path loops forever.
+    expect(fix).toContain("fbrain init --grant-consent");
   });
 
   test("FAIL: stored capability fails JCS integrity check is treated as absent", async () => {

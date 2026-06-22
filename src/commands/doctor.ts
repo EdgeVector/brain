@@ -1390,7 +1390,8 @@ export async function runWriteReadyProbe(
       ok: false,
       detail: capabilityDetail,
       fix:
-        "run `fbrain init` to grant consent and store a capability (or any write command — they all run the consent handshake on first use). " +
+        "run `fbrain init --grant-consent` to grant consent and store a capability — it works whether or not you have an interactive terminal (bare `fbrain init` skips the consent prompt without a TTY, so it no-ops here and loops). " +
+        "It's idempotent, so it's safe interactively too (or run any write command — they all run the consent handshake on first use). " +
         "On the daemon side the grant is confirmed with `lastdb consent grant fbrain`.",
     };
   }
