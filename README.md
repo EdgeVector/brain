@@ -134,7 +134,7 @@ The waiting command then unblocks and the write lands.
 # 3. drive it
 fbrain design new my-first-design --title "First design" --tag spike --body "the body that gets embedded"
 fbrain task new t1 --design my-first-design --title "first task" --body "what this task covers"
-# Note: omitting --body makes `<TYPE> new` read the body from stdin — supply --body, end stdin with Ctrl-D, or set FBRAIN_NO_STDIN=1 to skip it.
+# Note: with no --body, `<TYPE> new` reads the body from stdin only when stdin is piped/redirected (non-TTY); in an interactive terminal it creates an empty body. Prefer --body, pipe a body in, or set FBRAIN_NO_STDIN=1 to skip the stdin read.
 
 # Or pipe a markdown note with frontmatter (idempotent upsert — re-put updates in place):
 cat <<'NOTE' | fbrain put my-second-design
