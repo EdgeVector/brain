@@ -152,3 +152,34 @@ describe("`fbrain help` accepts the two-word names from TOP_HELP", () => {
     expect(stderr).toMatch(/Unknown command: bogus/);
   });
 });
+
+// TOP_HELP advertises `mcp install` / `mcp instructions` as commands, so a dev
+// wiring fbrain into their agent who runs `fbrain help "mcp install"` (quoted)
+// — or any quoted multi-word subcommand — should land on the parent command's
+// help, the same as the unquoted two-token form already does, NOT dead-end on
+// "Unknown command" + a full TOP_HELP dump.
+describe("`fbrain help` resolves a quoted multi-word subcommand to its parent", () => {
+  for (const sub of ["mcp install", "mcp instructions", "mcp setup"]) {
+    test(`help "${sub}" matches help mcp (exit 0, same usage)`, async () => {
+      const [baseline, quoted] = await Promise.all([runCli(["help", "mcp"]), runCli(["help", sub])]);
+      expect(baseline.code).toBe(0);
+      expect(quoted.code).toBe(0);
+      expect(quoted.stdout).toBe(baseline.stdout);
+      expect(quoted.stderr).toBe("");
+    });
+  }
+
+  test("help mcp install (two unquoted tokens) still matches help mcp", async () => {
+    const [baseline, split] = await Promise.all([runCli(["help", "mcp"]), runCli(["help", "mcp", "install"])]);
+    expect(baseline.code).toBe(0);
+    expect(split.code).toBe(0);
+    expect(split.stdout).toBe(baseline.stdout);
+  });
+
+  test('help "design new" still resolves to design-new help (regression)', async () => {
+    const [baseline, quoted] = await Promise.all([runCli(["help", "design"]), runCli(["help", "design new"])]);
+    expect(baseline.code).toBe(0);
+    expect(quoted.code).toBe(0);
+    expect(quoted.stdout).toBe(baseline.stdout);
+  });
+});

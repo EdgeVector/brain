@@ -1291,7 +1291,14 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       if ((COMPOUND_COMMANDS as readonly string[]).includes(joined)) {
         return printHelpFor(joined.split(" ")[0]!);
       }
-      return printHelpFor(target);
+      // A quoted multi-word subcommand ("mcp install", "mcp instructions",
+      // "mcp setup") should resolve to its parent command's help — the same
+      // result the unquoted two-token form already gets by falling through to
+      // printHelpFor("mcp"). Drop to the first whitespace token of `target`;
+      // this is a no-op for every single-word command (so `help bogus` still
+      // errors on "bogus") and is reached only after the compound check above.
+      const first = target.split(/\s+/)[0]!;
+      return printHelpFor(first);
     }
   }
 }
