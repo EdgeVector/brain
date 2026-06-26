@@ -909,7 +909,7 @@ export function newNodeClient(opts: {
   // owner-session token attaches to the SDK's consent/mutation calls too, and
   // an invalidation-after-403 re-pair is reflected without rebuilding the
   // transport.
-  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash }, sessionHeader);
+  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash }, sessionHeader, socketPath);
 
   // SDK clients constructed here never use the SDK's capability store —
   // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
@@ -944,7 +944,7 @@ export function newNodeClient(opts: {
   ): Promise<{ status: number; body: unknown }> => {
     const send = async (): Promise<{ status: number; body: unknown }> => {
       const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
-      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, headers);
+      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, headers, socketPath);
       const parsed = await readBody();
       return { status: res.status, body: parsed };
     };
@@ -1333,7 +1333,7 @@ export function newNodeClient(opts: {
       return hits;
     },
     async rawCall(method, path, body) {
-      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader());
+      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader(), socketPath);
       const text = await readBody({ asText: true });
       const json = parseJsonSafe(text);
       return { status: res.status, headers: res.headers, body: text, json };
@@ -1408,6 +1408,7 @@ async function callNodeRaw(
   userHash: string,
   verbose: Verbose,
   extraHeaders?: Record<string, string>,
+  socketPath?: string,
 ): Promise<BoundedResponse> {
   return verboseFetch({
     baseUrl,
@@ -1417,6 +1418,7 @@ async function callNodeRaw(
     verbose,
     service: "node",
     headers: { "X-User-Hash": userHash, ...(extraHeaders ?? {}) },
+    socketPath,
   });
 }
 
@@ -1447,6 +1449,34 @@ type BoundedResponse = {
   readBody: ReadBody;
 };
 
+// The node's Unix-domain socket is data-plane only: it serves `/api/query` and
+// `/api/mutation`, while system/schema/health routes remain TCP-only.
+const SOCKET_DATA_PLANE_PATHS = ["/api/query", "/api/mutation"];
+
+function shouldUseNodeSocket(service: "node" | "schema", path: string, socketPath?: string): boolean {
+  return (
+    service === "node" &&
+    SOCKET_DATA_PLANE_PATHS.includes(path) &&
+    socketPath !== undefined &&
+    socketPath.length > 0 &&
+    existsSync(socketPath)
+  );
+}
+
+function isConnectError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = `${err.message} ${(err as { cause?: unknown }).cause instanceof Error ? ((err as { cause?: Error }).cause?.message ?? "") : ""}`.toLowerCase();
+  return (
+    msg.includes("unable to connect") ||
+    msg.includes("connection refused") ||
+    msg.includes("econnrefused") ||
+    msg.includes("enoent") ||
+    msg.includes("failed to connect") ||
+    msg.includes("socket") ||
+    msg.includes("connection closed")
+  );
+}
+
 // Shared inner fetch for both service clients. Differs only by the verbose
 // log tag (NODE vs SCHEMA), the service-specific headers passed in (the node
 // always sends X-User-Hash), and the connectionError service param. Same
@@ -1460,8 +1490,9 @@ async function verboseFetch(opts: {
   service: "node" | "schema";
   headers: Record<string, string>;
   timeoutMs?: number;
+  socketPath?: string;
 }): Promise<BoundedResponse> {
-  const url = `${opts.baseUrl}${opts.path}`;
+  const tcpUrl = `${opts.baseUrl}${opts.path}`;
   const tag = opts.service === "node" ? "NODE" : "SCHEMA";
   const headers = { ...opts.headers };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -1477,8 +1508,9 @@ async function verboseFetch(opts: {
   // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
   opts.verbose(
-    `→ ${tag} ${opts.method} ${url}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
+    `→ ${tag} ${opts.method} ${tcpUrl}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
   );
+  const useSocket = shouldUseNodeSocket(opts.service, opts.path, opts.socketPath);
 
   // One controller for the whole request lifecycle (headers + body). The timer
   // keeps running after the fetch resolves, so if the body read stalls past the
@@ -1491,15 +1523,45 @@ async function verboseFetch(opts: {
     if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
   }, timeoutMs);
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  const attempt = async (viaSocket: boolean): Promise<Response> => {
+    const url = viaSocket ? `http://localhost${opts.path}` : tcpUrl;
+    const transport = viaSocket ? `unix:${opts.socketPath}` : "tcp";
+    opts.verbose(
+      `→ ${tag} ${opts.method} ${url} [${transport}]` +
+        (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
+    );
+    const init: RequestInit & { unix?: string } = {
       method: opts.method,
       headers,
       body: bodyStr,
       signal: controller.signal,
-    });
-    opts.verbose(`← ${tag} ${opts.method} ${url} status=${res.status}`);
+    };
+    if (viaSocket) init.unix = opts.socketPath;
+    const r = await fetch(url, init);
+    opts.verbose(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
+    return r;
+  };
+
+  let res: Response;
+  try {
+    if (useSocket) {
+      try {
+        res = await attempt(true);
+      } catch (socketErr) {
+        if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
+          opts.verbose(
+            `node: socket ${opts.socketPath} unreachable (${
+              socketErr instanceof Error ? socketErr.message : String(socketErr)
+            }) — falling back to TCP ${opts.baseUrl}`,
+          );
+          res = await attempt(false);
+        } else {
+          throw socketErr;
+        }
+      }
+    } else {
+      res = await attempt(false);
+    }
   } catch (err) {
     done = true;
     clearTimeout(timer);
@@ -1763,6 +1825,7 @@ function fetchTransport(
   // unattested. Awaited per send so the SDK's consent/mutation calls carry the
   // same owner-session attestation the raw node path does.
   dynamicHeaders?: () => Promise<Record<string, string>>,
+  socketPath?: string,
 ): SdkTransport {
   return {
     target: baseUrl,
@@ -1798,14 +1861,34 @@ function fetchTransport(
         if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
       }, timeoutMs);
 
-      let res: Response;
-      try {
-        res = await fetch(`${baseUrl}${path}`, {
+      const useSocket = shouldUseNodeSocket("node", path, socketPath);
+      const attempt = async (viaSocket: boolean): Promise<Response> => {
+        const url = viaSocket ? `http://localhost${path}` : `${baseUrl}${path}`;
+        const init: RequestInit & { unix?: string } = {
           method,
           headers,
           body: bodyStr,
           signal: controller.signal,
-        });
+        };
+        if (viaSocket) init.unix = socketPath;
+        return fetch(url, init);
+      };
+
+      let res: Response;
+      try {
+        if (useSocket) {
+          try {
+            res = await attempt(true);
+          } catch (socketErr) {
+            if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
+              res = await attempt(false);
+            } else {
+              throw socketErr;
+            }
+          }
+        } else {
+          res = await attempt(false);
+        }
       } catch (err) {
         done = true;
         clearTimeout(timer);
