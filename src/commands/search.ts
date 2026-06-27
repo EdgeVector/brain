@@ -9,6 +9,8 @@
 
 import {
   newReadClientFromCfg,
+  type NativeIndexHit,
+  type NodeClient,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
   recordTypeForHash,
@@ -24,11 +26,14 @@ import {
 import {
   hasAnyLiveRecord,
   hydrateSchemaBySlug,
+  isTombstoned,
+  listRecords,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
+import { BM25Index, type BM25Document } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { type RecordType } from "../schemas.ts";
@@ -107,6 +112,16 @@ export type ResolvedHit = {
   record: FbrainRecord;
 };
 
+// Top score at/above this is a real hit regardless of distribution shape
+// (real-match band ~0.45-0.8 on the live brain; a dense strong band lands here).
+const STRONG_SCORE = 0.5;
+// Below STRONG_SCORE, a result set whose median is within this of its
+// minimum is a flat floor band -> weak. Noise measured at median-min <=0.014,
+// genuine sub-0.5 hits at >=0.035; 0.025 splits them with margin.
+const FLATNESS_GAP = 0.025;
+// Absolute low-top-score floor for sparse new-dev brains.
+const NOISE_CEILING = 0.3;
+
 // Weak-match classifier (separation-based; see the rationale block in
 // `searchCmd` below). A hit list is weak when its top score neither clears
 // `strongScore` on its own NOR rises out of a flat floor band: when the bulk
@@ -151,43 +166,12 @@ export function isWeakMatch(
   return median - min < flatnessGap;
 }
 
-export async function searchCmd(opts: SearchOptions): Promise<void> {
-  const { print, printErr } = resolvePrintSinks(opts);
-  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
-
-  const clientOpts: ClientSearchOptions = {};
-  if (opts.exact) clientOpts.exact = true;
-  if (typeof opts.minScore === "number") clientOpts.minScore = opts.minScore;
-  // Scope the server-side search to fbrain's registered schemas so the
-  // top-50 cosine cut isn't burned on unrelated schemas hosted by the
-  // same daemon (Persona / User Accounts / Contacts / CalendarEvent / …).
-  // See docs/phase-7-search-latency-spike.md (H2b). Requires fold_db
-  // PR #264; older daemons ignore the param so this is safe unconditionally.
-  //
-  // Dedupe: several record types share the unified MEMO hash (concept,
-  // preference, reference, agent, project, spike all map to the same
-  // schema), so Object.values() returns repeats. The server collapses
-  // duplicates too, but deduping here keeps the URL compact and the
-  // verbose count meaningful ("N unique schemas" vs N record types).
-  //
-  // When `--type T` is set, restrict to the hashes for those types only.
-  // For Phase 6 types (concept | preference | reference | agent | project |
-  // spike) that share the unified MEMO hash, the server filter alone can't
-  // tell e.g. concept from preference — it'll return any record on that
-  // hash. The post-filter on resolved hits (below) finishes the job.
-  const { typeFilter, activeTypes } = resolveTypeFilter(opts.types);
-  const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
-  if (fbrainSchemas.length > 0) {
-    clientOpts.schemas = fbrainSchemas;
-    opts.verbose?.(
-      `scope: native-index search restricted to ${fbrainSchemas.length} fbrain schema hash(es)` +
-        (typeFilter ? ` (types: ${[...typeFilter].join(",")})` : ""),
-    );
-  }
-
-  const hits = await node.search(opts.query, clientOpts);
-  opts.verbose?.(`search returned ${hits.length} fragment hit(s)`);
-
+async function resolveNativeHits(
+  node: NodeClient,
+  opts: SearchOptions,
+  hits: NativeIndexHit[],
+  typeFilter: Set<RecordType> | null,
+): Promise<ResolvedHit[]> {
   const unique = dedupeHits(hits, opts.verbose);
   opts.verbose?.(`dedupe collapsed to ${unique.length} unique record(s)`);
 
@@ -206,7 +190,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   //
   // Pass 1 (no node round-trips): classify each hit — resolve its type, apply
   // the `--type` filter, and record the distinct schema hashes to hydrate.
-  type Candidate = { hit: (typeof unique)[number]; slug: string; type: RecordType; schemaHash: string };
+  type Candidate = { hit: NativeIndexHit; slug: string; type: RecordType; schemaHash: string };
   const candidates: Candidate[] = [];
   const schemaHashByType = new Map<RecordType, string>();
   for (const hit of unique) {
@@ -280,6 +264,109 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       record,
     });
   }
+  return resolved;
+}
+
+async function bm25FallbackResults(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+  query: string,
+  limit: number | undefined,
+): Promise<ResolvedHit[]> {
+  return bm25FallbackFromCorpus(await loadBm25Corpus(node, cfg, types), cfg, query, limit);
+}
+
+type Bm25Corpus = {
+  docs: BM25Document[];
+  recordsById: Map<string, FbrainRecord>;
+};
+
+async function loadBm25Corpus(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+): Promise<Bm25Corpus> {
+  const docs: BM25Document[] = [];
+  const recordsById = new Map<string, FbrainRecord>();
+  for (const type of types) {
+    const records = await listRecords(node, type, schemaHashFor(type, cfg));
+    for (const record of records) {
+      if (isTombstoned(record)) continue;
+      docs.push({
+        type,
+        slug: record.slug,
+        title: record.title,
+        body: record.body,
+        updatedAt: record.updated_at,
+      });
+      recordsById.set(`${type}::${record.slug}`, record);
+    }
+  }
+  return { docs, recordsById };
+}
+
+function bm25FallbackFromCorpus(
+  corpus: Bm25Corpus,
+  cfg: Config,
+  query: string,
+  limit: number | undefined,
+): ResolvedHit[] {
+  const { docs, recordsById } = corpus;
+  const effectiveLimit = limit && limit > 0 ? limit : docs.length;
+  const index = BM25Index.build(docs);
+  return index.search(query, effectiveLimit).flatMap((hit) => {
+    const record = recordsById.get(`${hit.type}::${hit.slug}`);
+    if (!record) return [];
+    return [{
+      slug: hit.slug,
+      schemaDisplayName: capitalize(hit.type),
+      schemaHash: schemaHashFor(hit.type, cfg),
+      type: hit.type,
+      score: null,
+      matchType: "bm25-fallback",
+      record,
+    }];
+  });
+}
+
+export async function searchCmd(opts: SearchOptions): Promise<void> {
+  const { print, printErr } = resolvePrintSinks(opts);
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+
+  const clientOpts: ClientSearchOptions = {};
+  if (opts.exact) clientOpts.exact = true;
+  if (typeof opts.minScore === "number") clientOpts.minScore = opts.minScore;
+  // Scope the server-side search to fbrain's registered schemas so the
+  // top-50 cosine cut isn't burned on unrelated schemas hosted by the
+  // same daemon (Persona / User Accounts / Contacts / CalendarEvent / …).
+  // See docs/phase-7-search-latency-spike.md (H2b). Requires fold_db
+  // PR #264; older daemons ignore the param so this is safe unconditionally.
+  //
+  // Dedupe: several record types share the unified MEMO hash (concept,
+  // preference, reference, agent, project, spike all map to the same
+  // schema), so Object.values() returns repeats. The server collapses
+  // duplicates too, but deduping here keeps the URL compact and the
+  // verbose count meaningful ("N unique schemas" vs N record types).
+  //
+  // When `--type T` is set, restrict to the hashes for those types only.
+  // For Phase 6 types (concept | preference | reference | agent | project |
+  // spike) that share the unified MEMO hash, the server filter alone can't
+  // tell e.g. concept from preference — it'll return any record on that
+  // hash. The post-filter on resolved hits (below) finishes the job.
+  const { typeFilter, activeTypes } = resolveTypeFilter(opts.types);
+  const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
+  if (fbrainSchemas.length > 0) {
+    clientOpts.schemas = fbrainSchemas;
+    opts.verbose?.(
+      `scope: native-index search restricted to ${fbrainSchemas.length} fbrain schema hash(es)` +
+        (typeFilter ? ` (types: ${[...typeFilter].join(",")})` : ""),
+    );
+  }
+
+  const hits = await node.search(opts.query, clientOpts);
+  opts.verbose?.(`search returned ${hits.length} fragment hit(s)`);
+  let resolved = await resolveNativeHits(node, opts, hits, typeFilter);
 
   // Sort by score DESC, ties broken by (type::slug) ASC (code-unit order). Without
   // the id key, equal-score hits keep `dedupeHits`'s Map insertion order — which
@@ -299,7 +386,29 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     return aId < bId ? -1 : aId > bId ? 1 : 0;
   });
 
-  const trimmed = opts.limit && opts.limit > 0 ? resolved.slice(0, opts.limit) : resolved;
+  let trimmed = opts.limit && opts.limit > 0 ? resolved.slice(0, opts.limit) : resolved;
+  const canUseBm25Fallback =
+    !opts.exact && opts.minScore === undefined && fbrainSchemas.length > 0;
+  const topScoreBeforeFallback = trimmed[0]?.score ?? null;
+  let weakMatch =
+    canUseBm25Fallback &&
+    topScoreBeforeFallback !== null &&
+    isWeakMatch(topScoreBeforeFallback, trimmed, STRONG_SCORE, FLATNESS_GAP, NOISE_CEILING);
+  if (canUseBm25Fallback && (trimmed.length === 0 || weakMatch)) {
+    const fallback = await bm25FallbackResults(node, opts.cfg, activeTypes, opts.query, opts.limit);
+    const nativeSlugs = new Set(trimmed.map((hit) => hit.slug));
+    const fallbackAddsARecord = fallback.some((hit) => !nativeSlugs.has(hit.slug));
+    if (fallback.length > 0 && (trimmed.length === 0 || fallbackAddsARecord)) {
+      opts.verbose?.(
+        trimmed.length === 0
+          ? "bm25 fallback: native vector search returned no resolved matches"
+          : "bm25 fallback: native vector search result set was weak/noise-floor",
+      );
+      resolved = fallback;
+      trimmed = fallback;
+      weakMatch = false;
+    }
+  }
 
   if (trimmed.length === 0) {
     opts.onResult?.([]);
@@ -398,27 +507,6 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // points at `fbrain ask <query>`, which is the hybrid semantic + BM25 + RRF
   // retrieval — exactly the surface the user opted out of.
   //
-  // Top score at/above this is a real hit regardless of distribution shape
-  // (real-match band ~0.45–0.8 on the live brain; a dense strong band lands here).
-  const STRONG_SCORE = 0.5;
-  // Below STRONG_SCORE, a result set whose median is within this of its
-  // minimum is a flat floor band → weak. Noise measured at median−min ≤0.014,
-  // genuine sub-0.5 hits at ≥0.035 (data above); 0.025 splits them with margin.
-  const FLATNESS_GAP = 0.025;
-  // Absolute low-top-score floor for the SPARSE NEW-DEV brain, where too few
-  // records exist to form the flat floor pile FLATNESS_GAP keys off. A handful
-  // of scattered low noise scores keeps median−min above the gap, so the shape
-  // test alone misses obvious noise (dogfooded 2026-06-19 on a fresh 3-record
-  // brain: top 0.236, median−min 0.039 → NOT flagged). Any top below this is
-  // unambiguous noise regardless of shape: genuine sub-STRONG_SCORE hits land
-  // ~0.45–0.49 and noise tops ~0.39–0.44, so 0.30 clears the noise band with a
-  // wide margin and sits well below the lowest real sub-STRONG hit.
-  const NOISE_CEILING = 0.3;
-  const topScore = trimmed[0]?.score ?? null;
-  const weakMatch =
-    !opts.exact &&
-    topScore !== null &&
-    isWeakMatch(topScore, trimmed, STRONG_SCORE, FLATNESS_GAP, NOISE_CEILING);
   // On the MCP agent channel the advisory must name a TOOL the agent can call,
   // not a CLI command string. An MCP agent has no shell — telling it to run
   // `fbrain ask <query>` is a dead-end. Render the agent-voiced variant only
