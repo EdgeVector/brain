@@ -37,6 +37,10 @@ export type GetOptions = {
   // the `json` flag, so the MCP handler can run the command in human
   // mode for `content` text AND capture the typed record.
   onResult?: (payload: RecordJson) => void;
+  // Optional CLI body cap. Undefined preserves the historical full-body
+  // surface; when set, both human output and --json use the same truncated
+  // body string.
+  bodyLimit?: number;
 };
 
 export async function getRecord(opts: GetOptions): Promise<void> {
@@ -88,7 +92,16 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
-  const json = recordToJson(found.record, found.type, designMissing, designChildren);
+  const recordForOutput =
+    opts.bodyLimit === undefined
+      ? found.record
+      : { ...found.record, body: truncateBody(found.record.body, opts.bodyLimit) };
+  const json = recordToJson(
+    recordForOutput,
+    found.type,
+    designMissing,
+    designChildren,
+  );
   opts.onResult?.(json);
 
   if (opts.json) {
@@ -96,7 +109,11 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     return;
   }
 
-  print(formatRecord(found.record, found.type, designMissing, designChildren));
+  print(formatRecord(recordForOutput, found.type, designMissing, designChildren));
+}
+
+function truncateBody(body: string, limit: number): string {
+  return body.length > limit ? body.slice(0, limit) : body;
 }
 
 export type RecordJson = {

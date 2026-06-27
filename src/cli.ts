@@ -59,6 +59,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_type",
   "invalid_min_score",
   "invalid_limit",
+  "invalid_body_limit",
   "invalid_usage_window",
   "doctor_mode_conflict",
   "doctor_flag_requires_usage",
@@ -245,16 +246,17 @@ search). Empty body is valid as long as the type is set.
 Examples:
   cat note.md | fbrain put my-note --type concept
   echo "---\\ntype: concept\\nslug: concept-idempotency\\ntitle: Idempotency\\n---\\nbody" | fbrain put`,
-  get: `fbrain get <slug> [--type T] [--json]
+  get: `fbrain get <slug> [--type T] [--body-limit N] [--json]
 
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
-  --type    design | task | concept | preference | reference | agent | project | spike
-  --json    emit the resolved record as a single JSON object on stdout
-            (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
-            is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
-            print to stderr) so \`--json\` stdout is always parseable.`,
+  --type        design | task | concept | preference | reference | agent | project | spike
+  --body-limit  truncate body output to N chars (default: full body)
+  --json        emit the resolved record as a single JSON object on stdout
+                (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
+                is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
+                print to stderr) so \`--json\` stdout is always parseable.`,
   list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N] [--json]
 
   --type        design | task | concept | preference | reference | agent | project | spike
@@ -649,6 +651,7 @@ const PUT_OPTIONS = {
 } as const;
 const GET_OPTIONS = {
   type: { type: "string" },
+  "body-limit": { type: "string" },
   // Machine-readable mode: emit the resolved record as a single JSON
   // object on stdout. Mirrors LIST_OPTIONS / SEARCH_OPTIONS.
   json: { type: "boolean", default: false },
@@ -1733,6 +1736,7 @@ export async function withTypeAsPositionalHint<T>(
 }
 
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
+  validatePositiveIntFlag(args, "--body-limit", "invalid_body_limit");
   const { values, positionals } = parseCommandArgs(
     {
       args,
@@ -1775,9 +1779,14 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     );
   }
   const type = parseRecordType(values.type);
+  const bodyLimit =
+    values["body-limit"] === undefined
+      ? undefined
+      : parseInt(values["body-limit"], 10);
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
+  if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
   if (values.json) getOpts.json = true;
   await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
   return 0;
