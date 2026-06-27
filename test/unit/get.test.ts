@@ -63,6 +63,93 @@ function designFields(slug: string): RowFields {
   };
 }
 
+describe("getRecord — bodyLimit", () => {
+  test("truncates the human body when bodyLimit is set", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow("long", taskFields("long", { body: "abcdefghijklmnopqrstuvwxyz" })),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const lines: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "long",
+      type: "task",
+      bodyLimit: 10,
+      print: (l) => lines.push(l),
+    });
+
+    const out = lines.join("\n");
+    expect(out).toContain("---\nabcdefghij");
+    expect(out).not.toContain("abcdefghijk");
+  });
+
+  test("truncates the --json body from the same capped record view", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.reference) {
+        return queryResp([
+          asRow("note", {
+            slug: "note",
+            title: "Note",
+            body: "0123456789abcdef",
+            status: "draft",
+            tags: [],
+            created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-01T00:00:00Z",
+          }),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const lines: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "note",
+      type: "reference",
+      json: true,
+      bodyLimit: 6,
+      print: (l) => lines.push(l),
+    });
+
+    expect(lines).toHaveLength(1);
+    const payload = JSON.parse(lines[0]!) as { body: string };
+    expect(payload.body).toBe("012345");
+  });
+
+  test("omitting bodyLimit keeps the full body unchanged", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([asRow("full", taskFields("full", { body: "full body" }))]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const lines: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "full",
+      type: "task",
+      print: (l) => lines.push(l),
+    });
+
+    expect(lines.join("\n")).toContain("---\nfull body");
+  });
+});
+
 describe("getRecord — dangling design reference", () => {
   test("marks the design line '(deleted)' when the referenced design is gone", async () => {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
