@@ -3,7 +3,7 @@
 // without touching the network.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -768,6 +768,44 @@ describe("doctor verdict logic", () => {
     const line = lines.find((l) => l.includes("[PASS] node-reachable"));
     expect(line).toBeDefined();
     expect(line).toContain("lastdb 0.14.1 @ http://127.0.0.1:9077");
+  });
+
+  test("configured live socket is passed to the node client and named on node-reachable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-doctor-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    writeFileSync(socketPath, "");
+    const prevSocketEnv = process.env.FBRAIN_FOLDDB_SOCKET;
+    delete process.env.FBRAIN_FOLDDB_SOCKET;
+    try {
+      const cfg = makeCfg({
+        nodeUrl: "http://127.0.0.1:9077",
+        nodeSocketPath: socketPath,
+      });
+      const configPath = writeCfg(cfg);
+      const lines: string[] = [];
+      let captured:
+        | { baseUrl: string; userHash: string; verbose?: unknown; socketPath?: string }
+        | undefined;
+      const code = await doctor({
+        configPath,
+        print: (l) => lines.push(l),
+        schemaClientFactory: () => mockSchemaClient({}),
+        nodeClientFactory: (factoryOpts) => {
+          captured = factoryOpts;
+          return mockNodeClient({ healthVersion: "0.15.1" });
+        },
+      });
+      expect(code).toBe(0);
+      expect(captured?.socketPath).toBe(socketPath);
+      const line = lines.find((l) => l.includes("[PASS] node-reachable"));
+      expect(line).toBeDefined();
+      expect(line).toContain(`lastdb 0.15.1 @ unix:${socketPath}`);
+      expect(line).toContain("TCP fallback http://127.0.0.1:9077");
+    } finally {
+      if (prevSocketEnv === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+      else process.env.FBRAIN_FOLDDB_SOCKET = prevSocketEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // Older node that doesn't report a version: node-reachable stays PASS and
