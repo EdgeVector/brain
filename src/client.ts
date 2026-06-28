@@ -1449,14 +1449,46 @@ type BoundedResponse = {
   readBody: ReadBody;
 };
 
-// The node's Unix-domain socket is data-plane only: it serves `/api/query` and
-// `/api/mutation`, while system/schema/health routes remain TCP-only.
-const SOCKET_DATA_PLANE_PATHS = ["/api/query", "/api/mutation"];
+// The node's owner Unix-domain socket serves a small data-plane allowlist —
+// the exact set the node routes on the owner socket (`fold_db_node`'s
+// `uds_router::route` under `SocketKind::Owner`): read query, write mutation,
+// schema listing, the node-identity probe, and the native-index semantic
+// search. Everything else (system/health/control routes) is TCP-only.
+//
+// This MUST stay in lockstep with the node's owner-socket route table. Adding
+// a path here without the node also serving it on the socket would dial the
+// socket and get a 404; the inverse leaves the route reachable only over the
+// (now-retired) loopback TCP port. The native-index search route was the
+// motivating gap: `fbrain search` / `fbrain_ask` built `/api/native-index/search`
+// and fell through to TCP because it was absent here, failing with
+// "node not reachable at http://127.0.0.1:9001" on a socket-only node.
+export const SOCKET_DATA_PLANE_PATHS = [
+  "/api/query",
+  "/api/mutation",
+  "/api/schemas",
+  "/api/system/auto-identity",
+  "/api/native-index/search",
+];
 
-function shouldUseNodeSocket(service: "node" | "schema", path: string, socketPath?: string): boolean {
+// Compare the request path WITHOUT its `?query`/`#fragment` against the
+// allowlist, mirroring the node router's `path_only`. Several data-plane
+// routes are GETs that carry a query string (`/api/native-index/search?q=...`,
+// `/api/schemas?include_system=true`); matching the full path-with-query
+// against the allowlist would never hit, so a GET-with-query route could never
+// select the socket and would always fall through to the retired TCP port.
+function pathOnly(path: string): string {
+  const end = path.search(/[?#]/);
+  return end === -1 ? path : path.slice(0, end);
+}
+
+export function shouldUseNodeSocket(
+  service: "node" | "schema",
+  path: string,
+  socketPath?: string,
+): boolean {
   return (
     service === "node" &&
-    SOCKET_DATA_PLANE_PATHS.includes(path) &&
+    SOCKET_DATA_PLANE_PATHS.includes(pathOnly(path)) &&
     socketPath !== undefined &&
     socketPath.length > 0 &&
     existsSync(socketPath)
