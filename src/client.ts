@@ -355,6 +355,29 @@ export type SearchOptions = {
   // the app-namespaced hash) and harmless, and it protects search quality
   // during the migration window before every node carries namespaced data.
   schemas?: string[];
+  // Internal escape hatch for write-path semantic-index confirmation: that
+  // probe must verify the native/vector index itself, not satisfy itself from
+  // the local `/api/query` fallback used by user-facing reads on nodes that no
+  // longer expose `/api/native-index/search`.
+  localFallback?: boolean;
+};
+
+const LOCAL_SEARCH_FIELDS = [
+  "slug",
+  "title",
+  "body",
+  "status",
+  "tags",
+  "created_at",
+  "updated_at",
+];
+
+type LocalSearchDoc = {
+  schemaName: string;
+  key: { hash: string | null; range: string | null };
+  title: string;
+  body: string;
+  score: number;
 };
 
 export type RegisteredSchema = {
@@ -1327,6 +1350,12 @@ export function newNodeClient(opts: {
       }
       const path = `/api/native-index/search?${params.toString()}`;
       const { status, body } = await callJson(path, "GET");
+      if (status === 404 && searchOpts?.localFallback !== false) {
+        verbose(
+          "native-index search endpoint missing; falling back to local keyword search over /api/query",
+        );
+        return localSearchFallback(query, searchOpts, callJsonOk, verbose);
+      }
       if (status !== 200) throw mapNodeError(status, body, "/api/native-index/search");
       const b = body as Record<string, unknown>;
       const hits = Array.isArray(b.results) ? (b.results as NativeIndexHit[]) : [];
@@ -1339,6 +1368,110 @@ export function newNodeClient(opts: {
       return { status: res.status, headers: res.headers, body: text, json };
     },
   };
+}
+
+async function localSearchFallback(
+  query: string,
+  searchOpts: SearchOptions | undefined,
+  callJsonOk: (
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ) => Promise<unknown>,
+  verbose: Verbose,
+): Promise<NativeIndexHit[]> {
+  const schemas = uniqueStrings(searchOpts?.schemas ?? []);
+  if (schemas.length === 0) {
+    verbose("local search fallback: no schema scope supplied; returning no hits");
+    return [];
+  }
+
+  const docs: LocalSearchDoc[] = [];
+  for (const schemaName of schemas) {
+    const body = await callJsonOk("/api/query", "POST", {
+      schema_name: schemaName,
+      fields: LOCAL_SEARCH_FIELDS,
+      limit: QUERY_PAGE_SIZE,
+      offset: 0,
+    });
+    const b = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const rows = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+    for (const row of rows) {
+      const fields = row.fields ?? {};
+      const title = stringValue(fields.title);
+      const bodyText = stringValue(fields.body);
+      if (stringValue(fields.status) === "deleted") continue;
+      const key = row.key ?? { hash: stringValue(fields.slug) || null, range: null };
+      if (!key.hash) continue;
+      const text = `${title}\n${bodyText}\n${arrayText(fields.tags)}`;
+      if (searchOpts?.exact && !text.toLowerCase().includes(query.toLowerCase())) {
+        continue;
+      }
+      const score = localTextScore(query, text);
+      if (score <= 0) continue;
+      docs.push({ schemaName, key, title, body: bodyText, score });
+    }
+  }
+
+  if (docs.length === 0) return [];
+  const topScore = Math.max(...docs.map((d) => d.score));
+  return docs
+    .map((d) => ({ ...d, score: topScore > 0 ? d.score / topScore : d.score }))
+    .filter((d) => searchOpts?.minScore === undefined || d.score >= searchOpts.minScore)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        `${a.schemaName}:${a.key.hash}`.localeCompare(`${b.schemaName}:${b.key.hash}`),
+    )
+    .slice(0, 50)
+    .map((d): NativeIndexHit => ({
+      schema_name: d.schemaName,
+      schema_display_name: null,
+      field: "body",
+      key_value: d.key,
+      value: `${d.title}\n${d.body}`.trim(),
+      metadata: {
+        score: d.score,
+        match_type: "local_keyword_fallback",
+      },
+    }));
+}
+
+function localTextScore(query: string, text: string): number {
+  const queryTerms = tokenizeForLocalSearch(query);
+  if (queryTerms.length === 0) return 0;
+  const haystack = tokenizeForLocalSearch(text);
+  if (haystack.length === 0) return 0;
+  const frequencies = new Map<string, number>();
+  for (const token of haystack) frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+  let score = 0;
+  for (const term of new Set(queryTerms)) {
+    const count = frequencies.get(term) ?? 0;
+    if (count > 0) score += 1 + Math.log(count);
+  }
+  return score;
+}
+
+function tokenizeForLocalSearch(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter((s) => s.length >= 2);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter((s) => typeof s === "string" && s.length > 0)));
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function arrayText(value: unknown): string {
+  return Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === "string").join(" ")
+    : "";
 }
 
 // Thin convenience wrapper mirroring `newWriteClientFromCfg`: every plain

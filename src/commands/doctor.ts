@@ -920,7 +920,7 @@ export async function runEmbeddingProbe(
   verbose: Verbose | undefined,
 ): Promise<CheckResult> {
   try {
-    const hits = await node.search("fbrain");
+    const hits = await node.search("fbrain", { localFallback: false });
     verbose?.(`embedding-runtime: ok (${hits.length} hits to probe query)`);
     return {
       name: "embedding-runtime",
@@ -936,6 +936,16 @@ export async function runEmbeddingProbe(
         fix:
           err.hint ??
           "restart the node so it re-fetches the ONNX file (homebrew: `lastdb daemon stop && lastdb daemon start`)",
+      };
+    }
+    if (err instanceof FbrainError && err.code === "node_http_404") {
+      return {
+        name: "embedding-runtime",
+        ok: true,
+        tag: "WARN",
+        detail: "native semantic-search endpoint is unavailable; fbrain search will use local query fallback",
+        fix:
+          "upgrade the LastDB node to a build that serves native semantic search, or continue with local keyword fallback for Brain dedupe/search",
       };
     }
     return {

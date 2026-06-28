@@ -258,6 +258,43 @@ describe("searchCmd", () => {
     expect(lines.some((l) => l.startsWith("    ") && l.includes("blueberry octopus"))).toBe(true);
   });
 
+  test("falls back to local query search when native-index search is missing", async () => {
+    const recordRow = {
+      fields: {
+        slug: "dogfood-native-index-404",
+        title: "Dogfood native index fallback",
+        body: "dogfood routines should still dedupe when native-index search returns 404",
+        status: "active",
+        tags: ["dogfood"],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: "dogfood-native-index-404", range: null },
+    };
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 404, body: "Not Found" };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        const results = body.schema_name === DESIGN_HASH ? [recordRow] : [];
+        return {
+          status: 200,
+          body: { ok: true, results, total_count: results.length, returned_count: results.length },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "dogfood native-index", print: (l) => lines.push(l) });
+    const rows = rowsOf(lines);
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toContain("dogfood-native-index-404");
+    expect(rows[0]).toContain("1.000");
+    expect(rows[0]).toContain("Design");
+    expect(rows[0]).toContain("Dogfood native index fallback");
+  });
+
   test("retries findBySlug past a transient empty /api/query slice and surfaces the hit", async () => {
     // /api/query's top-100 slice is non-deterministic on a saturated daemon
     // (docs/phase-7-search-latency-spike.md H2 + PR #98). A bare findBySlug

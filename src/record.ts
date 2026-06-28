@@ -533,7 +533,7 @@ export async function verifyVectorIndexed(
     if (wait > 0) await sleep(wait);
     let hit = false;
     try {
-      const hits = await node.search(query, { schemas: [schemaHash] });
+      const hits = await node.search(query, { schemas: [schemaHash], localFallback: false });
       hit = hits.some((h) => h.key_value?.hash === slug);
     } catch {
       // A flaky/unavailable native index must not fail a persisted write —
