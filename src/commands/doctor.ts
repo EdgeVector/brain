@@ -69,7 +69,10 @@
 //
 // Exit code 0 on all-green, 1 if any check fails.
 
+import { existsSync } from "node:fs";
+
 import {
+  defaultFolddbSocketPath,
   FbrainError,
   isNodeReachableButErroring,
   newNodeClient,
@@ -123,7 +126,12 @@ export type DoctorOptions = {
   print?: (line: string) => void;
   // For testing: inject prebuilt clients to bypass the real fetches.
   schemaClientFactory?: (url: string, v?: Verbose) => SchemaServiceClient;
-  nodeClientFactory?: (opts: { baseUrl: string; userHash: string; verbose?: Verbose }) => NodeClient;
+  nodeClientFactory?: (opts: {
+    baseUrl: string;
+    userHash: string;
+    verbose?: Verbose;
+    socketPath?: string;
+  }) => NodeClient;
   // --freshness probes (G3a in docs/phase-7-search-latency-spike.md).
   freshness?: boolean;
   freshnessTrials?: number;            // default 5
@@ -244,10 +252,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     cfg.schemaServiceUrl,
     verbose,
   );
+  const nodeSocketPath = defaultFolddbSocketPath(cfg.nodeSocketPath);
   const nodeClient = (opts.nodeClientFactory ?? newNodeClient)({
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
     verbose,
+    socketPath: nodeSocketPath,
   });
 
   // --usage diverts to the team-adoption report (G13). It needs a valid
@@ -298,10 +308,11 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     // node with no /api/health, transient hiccup) must NOT flip node-reachable
     // to FAIL — auto-identity already answered that the node is up — so we keep
     // PASS and just omit the version, falling back to the node URL alone.
-    let nodeReachableDetail = cfg.nodeUrl;
+    const nodeTransport = nodeReachabilityTransportDetail(cfg.nodeUrl, nodeSocketPath);
+    let nodeReachableDetail = nodeTransport;
     try {
       const health = await nodeClient.health();
-      if (health.version) nodeReachableDetail = `lastdb ${health.version} @ ${cfg.nodeUrl}`;
+      if (health.version) nodeReachableDetail = `lastdb ${health.version} @ ${nodeTransport}`;
       verbose?.(`node health: version=${health.version ?? "—"}`);
     } catch (err) {
       verbose?.(`node health probe failed (non-fatal): ${errMsg(err)}`);
@@ -600,6 +611,13 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   }
 
   return finalize(checks, print, opts.json);
+}
+
+function nodeReachabilityTransportDetail(nodeUrl: string, socketPath: string): string {
+  if (existsSync(socketPath)) {
+    return `unix:${socketPath} (TCP fallback ${nodeUrl})`;
+  }
+  return nodeUrl;
 }
 
 async function checkSchemaDrift(
