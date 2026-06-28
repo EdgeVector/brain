@@ -1080,6 +1080,29 @@ describe("doctor verdict logic", () => {
     expect(fixLine).toContain("lastdb daemon stop && lastdb daemon start");
   });
 
+  test("embedding-runtime probe → WARN when the native search endpoint is missing", async () => {
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          searchThrows: new FbrainError({
+            code: "node_http_404",
+            message: "Node /api/native-index/search returned HTTP 404.",
+          }),
+        }),
+    });
+    expect(code).toBe(0);
+    const warnLine = lines.find((l) => l.startsWith("[WARN] embedding-runtime"));
+    expect(warnLine).toBeDefined();
+    expect(warnLine!).toContain("local query fallback");
+    const fixLine = lines[lines.indexOf(warnLine!) + 1] ?? "";
+    expect(fixLine).toContain("upgrade the LastDB node");
+  });
+
   test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
