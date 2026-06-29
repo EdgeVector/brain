@@ -19,7 +19,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import {
   CapabilityDeniedError,
@@ -61,9 +61,10 @@ export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
 // as the node owner; post app-isolation-flip (fold#739) the node's owner verbs
 // and owner-isolation bypass require an ATTESTED transport. fbrain mints a
 // one-time pairing code over the node's UDS control socket, exchanges it for a
-// session token over TCP, and presents that token here on every request — the
-// exact pairing the CLI's `attest_owner_session` performs (fold_db_node
-// `src/bin/folddb/commands/ui.rs`). Must match the node's session header name.
+// session token over the full-surface UDS when available (TCP on older nodes),
+// and presents that token here on every request — the exact pairing the CLI's
+// `attest_owner_session` performs (fold_db_node `src/bin/folddb/commands/ui.rs`).
+// Must match the node's session header name.
 export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
 
 // The node's body discriminator for "this transport is not attested" — fold's
@@ -72,12 +73,13 @@ export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
 // in-memory session token).
 export const TRANSPORT_NOT_ATTESTED = "transport_not_attested";
 
-// Filename of the node's Unix-domain control socket — must match
+// Filename of the node's Unix-domain data/control socket — must match
 // `fold_db_node::server::uds::SOCKET_FILE_NAME` ("folddb.sock"), the same
 // constant the CLI's attest path uses. NOTE: the FoldDB→LastDB rebrand moved
 // the node *data home* from `~/.folddb` to `~/.lastdb` (v0.15.1+), but the
 // socket *file name* is unchanged — only the home dir moved.
 const SOCKET_FILE_NAME = "folddb.sock";
+const FULL_SURFACE_SOCKET_FILE_NAME = "folddb-full.sock";
 
 // Resolve the running node's data home (the dir holding `port` and `data/`).
 //
@@ -174,6 +176,12 @@ export function defaultFolddbSocketPath(override?: string): string {
   return join(resolveNodeHome(), "data", SOCKET_FILE_NAME);
 }
 
+export function discoverFullSurfaceSocket(socketPath?: string): string | undefined {
+  if (socketPath === undefined || socketPath.length === 0) return undefined;
+  const fullSocketPath = join(dirname(socketPath), FULL_SURFACE_SOCKET_FILE_NAME);
+  return existsSync(fullSocketPath) ? fullSocketPath : undefined;
+}
+
 // Filename of fold's port breadcrumb — the running node writes its TCP listen
 // port here (`fold_db_node` drops `<home>/port`, where `<home>` is `~/.lastdb`
 // on a v0.15.1+ node, `~/.folddb` on a legacy 0.14.x node). Reading it lets
@@ -210,11 +218,12 @@ export function defaultNodeUrlFromBreadcrumb(): string | null {
   return `http://127.0.0.1:${port}`;
 }
 
-// Mint a one-time pairing code over the node's UDS control socket, then
-// exchange it over TCP for an owner-session token. Returns the token, or `null`
-// on ANY failure (no socket, mint refused, exchange non-2xx, parse error) —
-// null means "proceed unattested", exactly the CLI's behavior on a default
-// (non-isolation) build where nothing is gated and the control socket is absent.
+// Mint a one-time pairing code over the node's UDS control socket, then exchange
+// it for an owner-session token over `folddb-full.sock` when available (TCP on
+// older nodes). Returns the token, or `null` on ANY failure (no socket, mint
+// refused, exchange non-2xx, parse error) — null means "proceed unattested",
+// exactly the CLI's behavior on a default (non-isolation) build where nothing is
+// gated and the control socket is absent.
 //
 // Mirrors `attest_owner_session` + `mint_pairing_code` in fold_db_node's
 // `src/bin/folddb/commands/ui.rs`. We guard on `existsSync(socketPath)` BEFORE
@@ -299,11 +308,11 @@ export async function attestOwnerSession(
     verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
-  // Exchange the code over TCP for a session token.
-  try {
-    // trace-egress: loopback (local daemon TCP listener; pairing-code exchange,
-    // never leaves the host)
-    const body = await fetchJsonWithDeadline(
+  // Exchange the code over the full-surface UDS when a current node exposes it;
+  // older nodes do not have `folddb-full.sock`, so they keep the TCP fallback.
+  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
+  const exchangeOverTcp = async (): Promise<Record<string, unknown> | null> =>
+    fetchJsonWithDeadline(
       "/api/session/browser-pair",
       `${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`,
       {
@@ -312,6 +321,39 @@ export async function attestOwnerSession(
         body: JSON.stringify({ code: pairingCode }),
       },
     );
+  try {
+    let body: Record<string, unknown> | null;
+    if (fullSocketPath) {
+      try {
+        // trace-egress: loopback (UDS full-surface socket on the local machine;
+        // pairing-code exchange, never leaves the host)
+        body = await fetchJsonWithDeadline(
+          "/api/session/browser-pair",
+          "http://localhost/api/session/browser-pair",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: pairingCode }),
+            unix: fullSocketPath,
+          },
+        );
+      } catch (socketErr) {
+        if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
+          verbose(
+            `owner-session exchange full socket ${fullSocketPath} unreachable (${
+              socketErr instanceof Error ? socketErr.message : String(socketErr)
+            }) — falling back to TCP ${stripTrailingSlash(nodeUrl)}`,
+          );
+          body = await exchangeOverTcp();
+        } else {
+          throw socketErr;
+        }
+      }
+    } else {
+      // trace-egress: loopback (local daemon TCP listener; older-node fallback,
+      // never leaves the host)
+      body = await exchangeOverTcp();
+    }
     if (body === null) return null;
     const token = body.session_token;
     if (typeof token !== "string" || token.length === 0) {
@@ -1037,7 +1079,7 @@ export function newNodeClient(opts: {
     keyHash: string,
   ): Promise<void> => {
     const blob = capability?.() ?? null;
-    verbose(`→ NODE POST ${url}/api/mutation (sdk) schema=${schemaHash} type=${kind}`);
+    verbose(`→ NODE POST /api/mutation (sdk) schema=${schemaHash} type=${kind}`);
     try {
       await withSessionRepair(() =>
         sdkClient(blob).mutate(schemaHash, {
@@ -1046,7 +1088,7 @@ export function newNodeClient(opts: {
           key: { hash: keyHash, range: null },
         }),
       );
-      verbose(`← NODE POST ${url}/api/mutation status=200`);
+      verbose(`← NODE POST /api/mutation status=200`);
     } catch (err) {
       throw mapSdkDataError(err, url, "/api/mutation");
     }
@@ -1125,12 +1167,12 @@ export function newNodeClient(opts: {
       // {status, body} contract the capability layer (and `fbrain doctor`'s
       // write-ready probe) branches on — 202 / 404 / 403 / 400 per the
       // consent contract.
-      verbose(`→ NODE POST ${url}/api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
+      verbose(`→ NODE POST /api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
       try {
         const r = await withSessionRepair(() =>
           sdkClient(null, consentAppId).requestConsent(parseScope(scope)),
         );
-        verbose(`← NODE POST ${url}/api/apps/request-consent status=202`);
+        verbose(`← NODE POST /api/apps/request-consent status=202`);
         return {
           status: 202,
           body: { request_id: r.requestId, expires_at: r.expiresAt },
@@ -1582,23 +1624,24 @@ type BoundedResponse = {
   readBody: ReadBody;
 };
 
-// The node's owner Unix-domain socket serves a small data-plane allowlist —
-// the exact set the node routes on the owner socket (`fold_db_node`'s
-// `uds_router::route` under `SocketKind::Owner`): read query, write mutation,
-// schema listing, the node-identity probe, and the native-index semantic
-// search. Everything else (system/health/control routes) is TCP-only.
+// The node's data Unix-domain socket serves a small data-plane allowlist: read
+// query, write mutation, schema listing, `/health`, the node-identity probe, and
+// the native-index semantic search. Current nodes also expose
+// `folddb-full.sock` beside it, and that socket serves the whole HTTP surface
+// (owner/control routes included). Route selection mirrors the node client's
+// socket_for(method, path): data-plane routes use `folddb.sock`; every other
+// node route uses `folddb-full.sock` when present; older nodes without a full
+// socket fall back to TCP.
 //
-// This MUST stay in lockstep with the node's owner-socket route table. Adding
-// a path here without the node also serving it on the socket would dial the
-// socket and get a 404; the inverse leaves the route reachable only over the
-// (now-retired) loopback TCP port. The native-index search route was the
-// motivating gap: `fbrain search` / `fbrain_ask` built `/api/native-index/search`
-// and fell through to TCP because it was absent here, failing with
-// "node not reachable at http://127.0.0.1:9001" on a socket-only node.
+// This MUST stay in lockstep with the node's data-socket route table. Adding a
+// path here without the node also serving it on the data socket would dial the
+// socket and get a 404; the inverse leaves a data route needlessly dependent on
+// the full socket/TCP path.
 export const SOCKET_DATA_PLANE_PATHS = [
   "/api/query",
   "/api/mutation",
   "/api/schemas",
+  "/health",
   "/api/system/auto-identity",
   "/api/native-index/search",
 ];
@@ -1614,18 +1657,47 @@ function pathOnly(path: string): string {
   return end === -1 ? path : path.slice(0, end);
 }
 
+function isNodeDataPlaneRoute(method: string, path: string): boolean {
+  const m = method.toUpperCase();
+  const p = pathOnly(path);
+  if (m === "POST") return p === "/api/query" || p === "/api/mutation";
+  if (m !== "GET") return false;
+  return (
+    p === "/api/schemas" ||
+    p === "/health" ||
+    p === "/api/system/auto-identity" ||
+    p === "/api/native-index/search"
+  );
+}
+
+type NodeSocketSelection = {
+  socketPath: string;
+  kind: "data" | "full";
+};
+
+export function nodeSocketForRoute(
+  service: "node" | "schema",
+  method: string,
+  path: string,
+  socketPath?: string,
+): NodeSocketSelection | null {
+  if (service !== "node" || socketPath === undefined || socketPath.length === 0) {
+    return null;
+  }
+  if (isNodeDataPlaneRoute(method, path)) {
+    return existsSync(socketPath) ? { socketPath, kind: "data" } : null;
+  }
+  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
+  return fullSocketPath ? { socketPath: fullSocketPath, kind: "full" } : null;
+}
+
 export function shouldUseNodeSocket(
   service: "node" | "schema",
   path: string,
   socketPath?: string,
+  method: string = "GET",
 ): boolean {
-  return (
-    service === "node" &&
-    SOCKET_DATA_PLANE_PATHS.includes(pathOnly(path)) &&
-    socketPath !== undefined &&
-    socketPath.length > 0 &&
-    existsSync(socketPath)
-  );
+  return nodeSocketForRoute(service, method, path, socketPath) !== null;
 }
 
 function isConnectError(err: unknown): boolean {
@@ -1672,10 +1744,12 @@ async function verboseFetch(opts: {
   // write body grows the deadline so it isn't capped by the small-record flat
   // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
+  const routeSocket = nodeSocketForRoute(opts.service, opts.method, opts.path, opts.socketPath);
+  const preflightTarget = routeSocket ? `${opts.path} [${routeSocket.kind} socket selected]` : tcpUrl;
   opts.verbose(
-    `→ ${tag} ${opts.method} ${tcpUrl}` + (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
+    `→ ${tag} ${opts.method} ${preflightTarget}` +
+      (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
   );
-  const useSocket = shouldUseNodeSocket(opts.service, opts.path, opts.socketPath);
 
   // One controller for the whole request lifecycle (headers + body). The timer
   // keeps running after the fetch resolves, so if the body read stalls past the
@@ -1688,9 +1762,9 @@ async function verboseFetch(opts: {
     if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
   }, timeoutMs);
 
-  const attempt = async (viaSocket: boolean): Promise<Response> => {
-    const url = viaSocket ? `http://localhost${opts.path}` : tcpUrl;
-    const transport = viaSocket ? `unix:${opts.socketPath}` : "tcp";
+  const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
+    const url = socket ? `http://localhost${opts.path}` : tcpUrl;
+    const transport = socket ? `unix:${socket.socketPath} (${socket.kind})` : "tcp";
     opts.verbose(
       `→ ${tag} ${opts.method} ${url} [${transport}]` +
         (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
@@ -1701,7 +1775,7 @@ async function verboseFetch(opts: {
       body: bodyStr,
       signal: controller.signal,
     };
-    if (viaSocket) init.unix = opts.socketPath;
+    if (socket) init.unix = socket.socketPath;
     const r = await fetch(url, init);
     opts.verbose(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
     return r;
@@ -1709,23 +1783,23 @@ async function verboseFetch(opts: {
 
   let res: Response;
   try {
-    if (useSocket) {
+    if (routeSocket) {
       try {
-        res = await attempt(true);
+        res = await attempt(routeSocket);
       } catch (socketErr) {
         if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
           opts.verbose(
-            `node: socket ${opts.socketPath} unreachable (${
+            `node: socket ${routeSocket.socketPath} unreachable (${
               socketErr instanceof Error ? socketErr.message : String(socketErr)
             }) — falling back to TCP ${opts.baseUrl}`,
           );
-          res = await attempt(false);
+          res = await attempt(null);
         } else {
           throw socketErr;
         }
       }
     } else {
-      res = await attempt(false);
+      res = await attempt(null);
     }
   } catch (err) {
     done = true;
@@ -2026,33 +2100,33 @@ function fetchTransport(
         if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
       }, timeoutMs);
 
-      const useSocket = shouldUseNodeSocket("node", path, socketPath);
-      const attempt = async (viaSocket: boolean): Promise<Response> => {
-        const url = viaSocket ? `http://localhost${path}` : `${baseUrl}${path}`;
+      const routeSocket = nodeSocketForRoute("node", method, path, socketPath);
+      const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
+        const url = socket ? `http://localhost${path}` : `${baseUrl}${path}`;
         const init: RequestInit & { unix?: string } = {
           method,
           headers,
           body: bodyStr,
           signal: controller.signal,
         };
-        if (viaSocket) init.unix = socketPath;
+        if (socket) init.unix = socket.socketPath;
         return fetch(url, init);
       };
 
       let res: Response;
       try {
-        if (useSocket) {
+        if (routeSocket) {
           try {
-            res = await attempt(true);
+            res = await attempt(routeSocket);
           } catch (socketErr) {
             if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
-              res = await attempt(false);
+              res = await attempt(null);
             } else {
               throw socketErr;
             }
           }
         } else {
-          res = await attempt(false);
+          res = await attempt(null);
         }
       } catch (err) {
         done = true;

@@ -73,6 +73,7 @@ import { existsSync } from "node:fs";
 
 import {
   defaultFolddbSocketPath,
+  discoverFullSurfaceSocket,
   FbrainError,
   isNodeReachableButErroring,
   newNodeClient,
@@ -231,6 +232,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     if (probe) checks.push(probe);
     return finalize(checks, print, opts.json);
   }
+  const nodeSocketPath = defaultFolddbSocketPath(cfg.nodeSocketPath);
   const cfgIssues = validateConfigShape(cfg);
   if (cfgIssues.length > 0) {
     checks.push({
@@ -243,7 +245,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push({
       name: "config",
       ok: true,
-      detail: `nodeUrl=${cfg.nodeUrl} schemaServiceUrl=${cfg.schemaServiceUrl}`,
+      detail: `${doctorNodeConfigDetail(cfg.nodeUrl, nodeSocketPath)} schemaServiceUrl=${cfg.schemaServiceUrl}`,
     });
   }
   verbose?.(`config: ${cfgIssues.length === 0 ? "ok" : `bad — ${cfgIssues.join("; ")}`}`);
@@ -252,7 +254,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     cfg.schemaServiceUrl,
     verbose,
   );
-  const nodeSocketPath = defaultFolddbSocketPath(cfg.nodeSocketPath);
   const nodeClient = (opts.nodeClientFactory ?? newNodeClient)({
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
@@ -614,10 +615,23 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 }
 
 function nodeReachabilityTransportDetail(nodeUrl: string, socketPath: string): string {
+  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
+  if (fullSocketPath) {
+    return `unix:${socketPath} + unix:${fullSocketPath}`;
+  }
   if (existsSync(socketPath)) {
     return `unix:${socketPath} (TCP fallback ${nodeUrl})`;
   }
   return nodeUrl;
+}
+
+function doctorNodeConfigDetail(nodeUrl: string, socketPath: string): string {
+  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
+  if (fullSocketPath) {
+    return `node=unix:${socketPath} full=unix:${fullSocketPath}`;
+  }
+  if (existsSync(socketPath)) return `node=unix:${socketPath}`;
+  return `nodeUrl=${nodeUrl}`;
 }
 
 async function checkSchemaDrift(
