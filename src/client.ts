@@ -1090,7 +1090,7 @@ export function newNodeClient(opts: {
       );
       verbose(`← NODE POST /api/mutation status=200`);
     } catch (err) {
-      throw mapSdkDataError(err, url, "/api/mutation");
+      throw mapSdkDataError(err, url, "/api/mutation", socketPath);
     }
   };
 
@@ -1194,7 +1194,7 @@ export function newNodeClient(opts: {
           return { status: err.status, body: err.body };
         }
         if (err instanceof TransportError) {
-          throw connectionError(url, "node", err);
+          throw connectionError(url, "node", err, { socketPath });
         }
         throw err;
       }
@@ -1224,7 +1224,7 @@ export function newNodeClient(opts: {
           return { status: err.status, body: err.body };
         }
         if (err instanceof TransportError) {
-          throw connectionError(url, "node", err);
+          throw connectionError(url, "node", err, { socketPath });
         }
         throw err;
       }
@@ -1675,6 +1675,21 @@ type NodeSocketSelection = {
   kind: "data" | "full";
 };
 
+type ConnectionErrorContext = {
+  socketPath?: string;
+  routeSocket?: NodeSocketSelection | null;
+  socketCause?: unknown;
+};
+
+type SocketFailure = {
+  routeSocket: NodeSocketSelection;
+  cause: unknown;
+};
+
+type SocketFailureCarrier = {
+  __fbrainSocketFailure?: SocketFailure;
+};
+
 export function nodeSocketForRoute(
   service: "node" | "schema",
   method: string,
@@ -1782,12 +1797,14 @@ async function verboseFetch(opts: {
   };
 
   let res: Response;
+  let socketFailure: unknown;
   try {
     if (routeSocket) {
       try {
         res = await attempt(routeSocket);
       } catch (socketErr) {
         if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
+          socketFailure = socketErr;
           opts.verbose(
             `node: socket ${routeSocket.socketPath} unreachable (${
               socketErr instanceof Error ? socketErr.message : String(socketErr)
@@ -1807,7 +1824,11 @@ async function verboseFetch(opts: {
     if (isTimeoutError(err)) {
       throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
     }
-    throw connectionError(opts.baseUrl, opts.service, err);
+    throw connectionError(opts.baseUrl, opts.service, err, {
+      socketPath: opts.socketPath,
+      routeSocket,
+      socketCause: socketFailure,
+    });
   }
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
@@ -1823,7 +1844,11 @@ async function verboseFetch(opts: {
       if (isTimeoutError(err)) {
         throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
       }
-      throw connectionError(opts.baseUrl, opts.service, err);
+      throw connectionError(opts.baseUrl, opts.service, err, {
+        socketPath: opts.socketPath,
+        routeSocket,
+        socketCause: socketFailure,
+      });
     }
   }) as ReadBody;
 
@@ -1967,6 +1992,37 @@ export function nodeDownHint(
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
 }
 
+function socketMissingHint(socketPath: string): string {
+  return (
+    `Start LastDB so it creates the Unix socket at ${socketPath}: ` +
+    "`brew services start lastdb` (or `lastdb daemon start`). " +
+    "If your node uses a different home, set `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+    "or `LASTDB_HOME=<node-home>`."
+  );
+}
+
+function socketMissingAgentHint(socketPath: string): string {
+  return (
+    `The local node socket is absent at ${socketPath}. Start LastDB, or point ` +
+    "`FBRAIN_FOLDDB_SOCKET` / `LASTDB_HOME` at the running node's socket."
+  );
+}
+
+function socketUnreachableHint(socketPath: string): string {
+  return (
+    `A Unix socket file exists at ${socketPath}, but it did not accept a connection. ` +
+    "The node may still be starting, or the socket file may be stale. Check the node log; " +
+    "if the node is wedged, stop it before starting it again."
+  );
+}
+
+function socketUnreachableAgentHint(socketPath: string): string {
+  return (
+    `The Unix socket at ${socketPath} exists but did not accept a connection. ` +
+    "Check whether the node is still starting, wedged, or leaving a stale socket file."
+  );
+}
+
 // Discriminator for "node is UP but returned an HTTP error response" — as
 // opposed to a transport failure (connection refused / DNS / timeout), which
 // `connectionError` tags `service_unreachable`. Every node HTTP non-2xx flows
@@ -2033,8 +2089,37 @@ export function schemaDownHint(url: string): string {
   return "fbrain uses a cloud schema service (no local schema_service to run) — check your network connection or for a service outage.";
 }
 
-function connectionError(baseUrl: string, service: "node" | "schema", cause: unknown): FbrainError {
+function connectionError(
+  baseUrl: string,
+  service: "node" | "schema",
+  cause: unknown,
+  ctx: ConnectionErrorContext = {},
+): FbrainError {
   const which = service === "node" ? "node" : "schema service";
+  if (service === "node" && ctx.socketPath && isDefaultNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
+    return new FbrainError({
+      code: "service_unreachable",
+      message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,
+      hint: socketMissingHint(ctx.socketPath),
+      agentHint: socketMissingAgentHint(ctx.socketPath),
+      cause,
+    });
+  }
+  if (
+    service === "node" &&
+    ctx.routeSocket &&
+    ctx.socketCause !== undefined &&
+    isConnectError(ctx.socketCause) &&
+    existsSync(ctx.routeSocket.socketPath)
+  ) {
+    return new FbrainError({
+      code: "service_unreachable",
+      message: `node socket not reachable at unix:${ctx.routeSocket.socketPath} ${DOCTOR_TIP}.`,
+      hint: socketUnreachableHint(ctx.routeSocket.socketPath),
+      agentHint: socketUnreachableAgentHint(ctx.routeSocket.socketPath),
+      cause: { socket: ctx.socketCause, fallback: cause },
+    });
+  }
   return new FbrainError({
     code: "service_unreachable",
     message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
@@ -2114,12 +2199,14 @@ function fetchTransport(
       };
 
       let res: Response;
+      let socketFailure: unknown;
       try {
         if (routeSocket) {
           try {
             res = await attempt(routeSocket);
           } catch (socketErr) {
             if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
+              socketFailure = socketErr;
               res = await attempt(null);
             } else {
               throw socketErr;
@@ -2132,9 +2219,16 @@ function fetchTransport(
         done = true;
         clearTimeout(timer);
         if (isTimeoutError(err)) throw timeoutError(path, method, "node", timeoutMs, err);
-        throw new TransportError(
+        const transportErr = new TransportError(
           `request to ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
+        if (routeSocket && socketFailure !== undefined) {
+          (transportErr as TransportError & SocketFailureCarrier).__fbrainSocketFailure = {
+            routeSocket,
+            cause: socketFailure,
+          };
+        }
+        throw transportErr;
       }
 
       let text: string;
@@ -2225,7 +2319,12 @@ function isTransportNotAttested(err: unknown): boolean {
   return false;
 }
 
-function mapSdkDataError(err: unknown, baseUrl: string, path: string): FbrainError {
+function mapSdkDataError(
+  err: unknown,
+  baseUrl: string,
+  path: string,
+  socketPath?: string,
+): FbrainError {
   // NB: CapabilityDeniedError subclasses PermissionDeniedError — order matters.
   if (err instanceof CapabilityDeniedError) {
     const body: Record<string, unknown> = { status: 403, reason: err.reason };
@@ -2246,7 +2345,12 @@ function mapSdkDataError(err: unknown, baseUrl: string, path: string): FbrainErr
     return mapNodeError(err.status, err.body, path);
   }
   if (err instanceof TransportError) {
-    return connectionError(baseUrl, "node", err);
+    const socketFailure = (err as TransportError & SocketFailureCarrier).__fbrainSocketFailure;
+    return connectionError(baseUrl, "node", err, {
+      socketPath,
+      routeSocket: socketFailure?.routeSocket,
+      socketCause: socketFailure?.cause,
+    });
   }
   if (err instanceof FbrainError) return err;
   return new FbrainError({
