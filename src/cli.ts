@@ -107,6 +107,7 @@ export const COMMANDS = [
   "project",
   "spike",
   "sop",
+  "decision",
   "put",
   "append",
   "get",
@@ -230,6 +231,7 @@ live capability is already on disk.
   project: simpleNewHelp("project"),
   spike: simpleNewHelp("spike"),
   sop: simpleNewHelp("sop"),
+  decision: simpleNewHelp("decision"),
   put: `fbrain put [<slug>] [--type T] [--json]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
@@ -244,7 +246,7 @@ Type resolution: one of frontmatter \`type:\` or \`--type T\` is required.
 There is NO silent default — a stdin stream without a type errors out.
 If both are set and disagree, the put errors with type_conflict.
 
-  --type    design | task | concept | preference | reference | agent | project | spike | sop
+  --type    design | task | concept | preference | reference | agent | project | spike | sop | decision
             (case-insensitive; overrides absent frontmatter, errors on conflict)
   --json    emit \`{ok, slug, created}\` on stdout (\`created\` is true on insert,
             false on update); the human \`created/updated …\` line moves to
@@ -289,7 +291,7 @@ Examples:
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
-  --type        design | task | concept | preference | reference | agent | project | spike | sop
+  --type        design | task | concept | preference | reference | agent | project | spike | sop | decision
   --body-limit  truncate body output to N chars (default: full body)
   --json        emit the resolved record as a single JSON object on stdout
                 (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
@@ -298,7 +300,7 @@ exists in multiple types (specify --type to disambiguate).
   list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
              [--offset N] [-n N | --limit N] [--count] [--json]
 
-  --type          design | task | concept | preference | reference | agent | project | spike | sop
+  --type          design | task | concept | preference | reference | agent | project | spike | sop | decision
                   (omit to list across all types)
   --status        filter by status enum
   --tag           filter by tag membership
@@ -322,7 +324,7 @@ exists in multiple types (specify --type to disambiguate).
 Bare form prints current status. With a new-status, validates against the
 type's status enum, updates updated_at, and writes back.
 
-  --type    design | task | concept | preference | reference | agent | project | spike | sop
+  --type    design | task | concept | preference | reference | agent | project | spike | sop | decision
   --json    (show form only) emit the status as a single JSON object on
             stdout — \`{slug, type, status}\`, parseable by \`jq\`. Ignored
             with a new-status; the update form keeps its human transition
@@ -558,7 +560,7 @@ design). In single-slug mode this is a hard error; in filter mode the
 linked design is skipped+warned (the batch continues). Pass --force to
 delete anyway — the tasks' design references are then left dangling.
 
-  --type      design | task | concept | preference | reference | agent | project | spike | sop
+  --type      design | task | concept | preference | reference | agent | project | spike | sop | decision
   --tag T     filter mode: delete every live record carrying tag T
   --status S  filter mode: additionally require status S
   --force     delete a design even if live tasks still link to it
@@ -932,6 +934,7 @@ export const CLI_SPEC = {
   project: DESIGN_OPTIONS,
   spike: DESIGN_OPTIONS,
   sop: DESIGN_OPTIONS,
+  decision: DESIGN_OPTIONS,
   put: PUT_OPTIONS,
   append: APPEND_OPTIONS,
   get: GET_OPTIONS,
@@ -1473,6 +1476,7 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
     case "project":
     case "spike":
     case "sop":
+    case "decision":
       return runRecordNew(cmd, args, verboseFn);
     case "put":
       return runPut(args, verboseFn);

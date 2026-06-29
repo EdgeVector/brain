@@ -139,7 +139,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   }
   const now = nowIso();
 
-  const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, existing, now);
+  const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, parsed.raw, existing, now);
 
   const action: "created" | "updated" = existing ? "updated" : "created";
   if (existing) {
@@ -225,6 +225,11 @@ function buildFields(
   // type's default. Validated by the caller via `ensureStatus` before
   // we get here — invalid values can't reach this point.
   status: string | undefined,
+  // Every scalar frontmatter key (parseFrontmatter's `raw` map). Type-specific
+  // extra columns (e.g. a decision's program/gate_slug/decided_by/decided_on)
+  // are read from here: an explicit frontmatter value wins, else the existing
+  // record's value is preserved (mirroring how status/tags handle absence).
+  raw: Record<string, string | string[]>,
   existing: FbrainRecord | null,
   now: string,
 ): Record<string, unknown> {
@@ -240,6 +245,13 @@ function buildFields(
   };
   if (entry.hasDesignSlug) {
     base.design_slug = existing?.design_slug ?? "";
+  }
+  for (const ef of entry.extraStringFields ?? []) {
+    const fromRaw = raw[ef];
+    base[ef] =
+      typeof fromRaw === "string"
+        ? fromRaw
+        : ((existing?.[ef] as string | undefined) ?? "");
   }
   return base;
 }

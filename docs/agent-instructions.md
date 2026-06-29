@@ -57,6 +57,7 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    | `project` | Active in-flight feature work tracked over its lifecycle |
    | `spike` | Time-boxed investigation or exploration with a defined conclusion |
    | `sop` | Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task |
+   | `decision` | A call a human made — the choice, its rationale, and outcome — kept as an auditable trail |
 
    Link records with `fbrain_link`. Passing only `from_slug` and `to_slug`
    preserves the legacy task → design default; pass `from_type`/`to_type` for

@@ -88,7 +88,8 @@ type DriftKey =
   | "agent"
   | "project"
   | "spike"
-  | "sop";
+  | "sop"
+  | "decision";
 type DriftOverrides = Partial<Record<DriftKey, RegisteredSchema | null>>;
 
 function mockSchemaClient(opts: {
@@ -108,6 +109,7 @@ function mockSchemaClient(opts: {
     { hash: TEST_HASHES.project, driftKey: "project", schema: RECORDS.project.schema },
     { hash: TEST_HASHES.spike, driftKey: "spike", schema: RECORDS.spike.schema },
     { hash: TEST_HASHES.sop, driftKey: "sop", schema: RECORDS.sop.schema },
+    { hash: TEST_HASHES.decision, driftKey: "decision", schema: RECORDS.decision.schema },
   ];
   return {
     baseUrl: "mock",
