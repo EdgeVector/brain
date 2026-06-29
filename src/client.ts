@@ -744,6 +744,14 @@ export type LoadedSchema = {
   identity_hash?: string;
 };
 
+export type AppSchemaDeclaration = {
+  app_id: string;
+  schema: string;
+  canonical: string;
+  resolution: "mint" | "link" | string;
+  decision?: string;
+};
+
 // Parsed `GET /api/health` response. `version` is the running fold_db_node's
 // release string (e.g. "0.14.1"); it is OPTIONAL because an older node may not
 // report one — callers that surface it (e.g. `fbrain doctor`) must tolerate its
@@ -784,6 +792,10 @@ export type NodeClient = {
     schemas_loaded_to_db: number;
     failed_schemas: string[];
   }>;
+  // POST /api/apps/declare-schema — declare an app-owned local schema directly
+  // with the node. Newer local-first nodes persist an app-schema mapping and
+  // return the canonical local-mint hash without consulting schema_service.
+  declareAppSchema?(appId: string, schema: AddSchemaRequest["schema"]): Promise<AppSchemaDeclaration>;
   // GET /api/schemas — the schemas currently loaded into this node's DB,
   // each carrying the authoritative `identity_hash` the node computed. Used
   // by `fbrain init` to RESOLVE an already-published `fbrain/*` schema's
@@ -1245,6 +1257,30 @@ export function newNodeClient(opts: {
         available_schemas_loaded: numField(b, "available_schemas_loaded"),
         schemas_loaded_to_db: numField(b, "schemas_loaded_to_db"),
         failed_schemas: failed,
+      };
+    },
+    async declareAppSchema(appId, schema) {
+      const body = await callJsonOk("/api/apps/declare-schema", "POST", {
+        app_id: appId,
+        schema,
+      });
+      const b = body as Record<string, unknown>;
+      const canonical = typeof b.canonical === "string" ? b.canonical : "";
+      const schemaName = typeof b.schema === "string" ? b.schema : "";
+      const resolution = typeof b.resolution === "string" ? b.resolution : "";
+      if (!canonical || !schemaName || !resolution) {
+        throw new FbrainError({
+          code: "app_schema_declare_bad_response",
+          message: `Node /api/apps/declare-schema returned an incomplete response: ${JSON.stringify(body).slice(0, 300)}.`,
+          hint: "Upgrade the node or inspect the app-schema declaration response.",
+        });
+      }
+      return {
+        app_id: typeof b.app_id === "string" ? b.app_id : appId,
+        schema: schemaName,
+        canonical,
+        resolution,
+        decision: typeof b.decision === "string" ? b.decision : undefined,
       };
     },
     async listLoadedSchemas() {

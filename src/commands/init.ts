@@ -20,7 +20,7 @@
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultNodeUrlFromBreadcrumb, resolveNodeHome, type Verbose } from "../client.ts";
-import { UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
+import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   ConfigInvalidError,
@@ -253,11 +253,17 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 2/6: register the eight per-kind schemas — Design + Task +
-  // Concept/Preference/Reference/Agent/Project/Spike. Each entry has
+  // Step 2/6: obtain canonical hashes for the eight per-kind schemas — Design
+  // + Task + Concept/Preference/Reference/Agent/Project/Spike. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   //
-  // The fbrain/* schemas are pre-published org-wide on the canonical schema
+  // New local-first nodes expose `/api/apps/declare-schema`: fbrain declares
+  // its owned schema definitions directly with the node, receives deterministic
+  // local-mint hashes, and skips the shared schema_service load path entirely.
+  // That removes fresh-schema Lambda cache consistency from fbrain's hot path.
+  //
+  // Compatibility fallback: the fbrain/* schemas are pre-published org-wide on
+  // the canonical schema
   // service, so for a fresh consumer (no DevCert) the re-POST is rejected
   // with `401 cert_required`. That is the EXPECTED, documented state — not a
   // fatal error. Rather than dead-end, we record each cert-gated schema and
@@ -275,105 +281,27 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // NodeOwner — so on this read-side step it follows the same
   // namespaced-publish-or-resolve path as enforce-on.
   const enforceOn = appIdentityEnforceEnabled();
-  print(`[3/${STEPS}] registering ${UNIQUE_SCHEMAS.length} schemas`);
+  print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} fbrain schemas`);
   if (!enforceOn) {
     print(
       `        FBRAIN_APP_IDENTITY_ENFORCE=off → namespaced fbrain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
     );
   }
-  const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
   const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
   const schemaHashes: Record<string, string> = {};
-  const certBlocked: typeof UNIQUE_SCHEMAS = [];
-  for (const entry of UNIQUE_SCHEMAS) {
-    try {
-      const reg = await schemaClient.registerSchema(entry.schema);
-      for (const type of entry.types) {
-        schemaHashes[type] = reg.canonicalHash;
-      }
-      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
-    } catch (err) {
-      // Cert-gated re-POST of an already-published fbrain/* schema — defer it
-      // and resolve the canonical hash from the node catalog after load. Same
-      // behavior under enforce-on and enforce-off; the schema identity is
-      // identical, only the write-time auth differs.
-      if (err instanceof FbrainError && err.code === "schema_cert_required") {
-        certBlocked.push(entry);
-        print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → published already (cert-gated re-POST skipped; resolving from node)`);
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  // Step 3/6: load schemas into the node — scoped to JUST fbrain's 8 (fold
-  // #877), so a fresh node stays clean instead of pulling the entire global
-  // published catalog (~948 schemas). For each schema we pass its canonical
-  // identity hash when registration resolved it above; for cert-gated re-POSTs
-  // (the fresh-consumer path, where every fbrain/* schema is already published
-  // and we hold no DevCert) we don't yet have the hash, so we pass the
-  // `descriptive_name` — the node matches that too, and the (descriptive_name,
-  // owner_app_id) resolution below then pins the exact fbrain/* canonical hash.
-  // Forward-compatible: a pre-#877 node ignores the scope body and full-loads,
-  // and the resolution step still finds fbrain's schemas in the larger set.
-  const loadScope = UNIQUE_SCHEMAS.map((entry) => {
-    const firstType = entry.types[0];
-    const hash = firstType ? schemaHashes[firstType] : undefined;
-    return hash ?? entry.schema.schema.descriptive_name;
-  });
-  // The header + count text are decided AFTER the load returns so they tell
-  // the truth: a #877 node honors the scope and loads ~8, a pre-#877 node
-  // ignores it and full-loads the whole published catalog (~953). We defer the
-  // "scoped to 8" claim until we know the node actually honored the scope, so a
-  // pre-#877 node never sees the self-contradicting "scoped to 8 / loaded 953".
-  const loadResult = await nodeClient.loadSchemas(loadScope);
-  if (loadResult.failed_schemas.length > 0) {
-    throw new Error(
-      `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
-    );
-  }
-  // honored iff the node loaded no more than we asked for; a pre-#877 node
-  // loads the full catalog (~953) and the resolution step below still finds
-  // fbrain's schemas in it.
-  const loaded = loadResult.schemas_loaded_to_db;
-  if (loaded <= loadScope.length) {
-    print(`[4/${STEPS}] loading schemas into the node (scoped to fbrain's ${loadScope.length})`);
-    print(`        loaded ${loaded}/${loadScope.length} schemas (failed_schemas empty ✓)`);
-  } else {
-    print(`[4/${STEPS}] loading fbrain's ${loadScope.length} schemas into the node`);
+  const localDeclare = await tryDeclareOwnedSchemasLocally(nodeClient, schemaHashes, print);
+  if (!localDeclare.supported) {
     print(
-      `        node predates scoped load (fold #877) — loaded the full published catalog (${loaded}); ` +
-        `fbrain's ${loadScope.length} schemas resolved from it ✓`,
+      `        node does not expose local app-schema declaration yet (${localDeclare.reason}); ` +
+        `falling back to schema_service publish/load`,
     );
-  }
-
-  // Resolve every cert-gated schema from the node's authoritative hashes.
-  // This is the fresh-consumer happy path: no DevCert, no re-POST, the real
-  // namespaced fbrain/* canonical hashes (NOT the bare enforce-off variants).
-  if (certBlocked.length > 0) {
-    const loaded = await nodeClient.listLoadedSchemas();
-    const stillMissing: string[] = [];
-    for (const entry of certBlocked) {
-      const hash = resolveOwnedSchemaHash(entry.schema, loaded);
-      if (hash) {
-        for (const type of entry.types) {
-          schemaHashes[type] = hash;
-        }
-        print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published fbrain/* schema; no DevCert needed)`);
-      } else {
-        stillMissing.push(entry.schema.schema.descriptive_name);
-      }
-    }
-    if (stillMissing.length > 0) {
-      throw new FbrainError({
-        code: "schema_cert_required",
-        message:
-          `Schema service rejected publish with 401 cert_required, and these schemas are not yet ` +
-          `published on this schema service — so their canonical hashes could not be resolved from ` +
-          `the node either: ${stillMissing.join(", ")}. A maintainer must publish them once.`,
-        hint: CERT_REQUIRED_HINT,
-      });
-    }
+    await registerAndLoadSchemasFromCatalog({
+      nodeClient,
+      schemaServiceUrl,
+      schemaHashes,
+      verbose,
+      print,
+    });
   }
 
   // Step 4/6: persist config (config file written before consent so a Ctrl-C
@@ -425,6 +353,133 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
 
   return { config, bootstrapped, consent };
+}
+
+type InitNodeClient = ReturnType<typeof newNodeClient>;
+
+async function tryDeclareOwnedSchemasLocally(
+  nodeClient: InitNodeClient,
+  schemaHashes: Record<string, string>,
+  print: (line: string) => void,
+): Promise<{ supported: true } | { supported: false; reason: string }> {
+  print(`[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} fbrain-owned schemas locally`);
+  if (!nodeClient.declareAppSchema) {
+    return { supported: false, reason: "client does not support /api/apps/declare-schema" };
+  }
+  for (const entry of UNIQUE_SCHEMAS) {
+    try {
+      const declared = await nodeClient.declareAppSchema(OWNER_APP_ID, entry.schema.schema);
+      if (declared.resolution !== "mint") {
+        throw new FbrainError({
+          code: "app_schema_declare_not_local_mint",
+          message:
+            `Node declared ${entry.schema.schema.descriptive_name} as ${declared.resolution} ` +
+            `(${declared.canonical}), but fbrain-owned schemas must be local mints.`,
+          hint: "Disable schema-link matching for fbrain-owned schemas or declare this schema as a local mint, then re-run `fbrain init`.",
+        });
+      }
+      for (const type of entry.types) {
+        schemaHashes[type] = declared.canonical;
+      }
+      print(
+        `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
+          `(local mint; covers ${entry.types.join(", ")})`,
+      );
+    } catch (err) {
+      if (err instanceof FbrainError && err.code === "node_http_404") {
+        return { supported: false, reason: "/api/apps/declare-schema returned 404" };
+      }
+      throw err;
+    }
+  }
+  print(`[4/${STEPS}] loading schemas into the node`);
+  print(`        local app-schema declarations persisted; schema_service load skipped ✓`);
+  return { supported: true };
+}
+
+async function registerAndLoadSchemasFromCatalog(opts: {
+  nodeClient: InitNodeClient;
+  schemaServiceUrl: string;
+  schemaHashes: Record<string, string>;
+  verbose?: Verbose;
+  print: (line: string) => void;
+}): Promise<void> {
+  const { nodeClient, schemaServiceUrl, schemaHashes, verbose, print } = opts;
+  const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
+  const certBlocked: typeof UNIQUE_SCHEMAS = [];
+  for (const entry of UNIQUE_SCHEMAS) {
+    try {
+      const reg = await schemaClient.registerSchema(entry.schema);
+      for (const type of entry.types) {
+        schemaHashes[type] = reg.canonicalHash;
+      }
+      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
+    } catch (err) {
+      // Cert-gated re-POST of an already-published fbrain/* schema — defer it
+      // and resolve the canonical hash from the node catalog after load. Same
+      // behavior under enforce-on and enforce-off; the schema identity is
+      // identical, only the write-time auth differs.
+      if (err instanceof FbrainError && err.code === "schema_cert_required") {
+        certBlocked.push(entry);
+        print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → published already (cert-gated re-POST skipped; resolving from node)`);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // Load schemas into the node — scoped to JUST fbrain's schemas (fold #877),
+  // so a fresh node stays clean instead of pulling the entire global published
+  // catalog. This is only the compatibility path for nodes that predate local
+  // app-schema declaration.
+  const loadScope = UNIQUE_SCHEMAS.map((entry) => {
+    const firstType = entry.types[0];
+    const hash = firstType ? schemaHashes[firstType] : undefined;
+    return hash ?? entry.schema.schema.descriptive_name;
+  });
+  const loadResult = await nodeClient.loadSchemas(loadScope);
+  if (loadResult.failed_schemas.length > 0) {
+    throw new Error(
+      `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
+    );
+  }
+  const loaded = loadResult.schemas_loaded_to_db;
+  if (loaded <= loadScope.length) {
+    print(`[4/${STEPS}] loading schemas into the node (scoped to fbrain's ${loadScope.length})`);
+    print(`        loaded ${loaded}/${loadScope.length} schemas (failed_schemas empty ✓)`);
+  } else {
+    print(`[4/${STEPS}] loading fbrain's ${loadScope.length} schemas into the node`);
+    print(
+      `        node predates scoped load (fold #877) — loaded the full published catalog (${loaded}); ` +
+        `fbrain's ${loadScope.length} schemas resolved from it ✓`,
+    );
+  }
+
+  if (certBlocked.length > 0) {
+    const loaded = await nodeClient.listLoadedSchemas();
+    const stillMissing: string[] = [];
+    for (const entry of certBlocked) {
+      const hash = resolveOwnedSchemaHash(entry.schema, loaded);
+      if (hash) {
+        for (const type of entry.types) {
+          schemaHashes[type] = hash;
+        }
+        print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published fbrain/* schema; no DevCert needed)`);
+      } else {
+        stillMissing.push(entry.schema.schema.descriptive_name);
+      }
+    }
+    if (stillMissing.length > 0) {
+      throw new FbrainError({
+        code: "schema_cert_required",
+        message:
+          `Schema service rejected publish with 401 cert_required, and these schemas are not yet ` +
+          `published on this schema service — so their canonical hashes could not be resolved from ` +
+          `the node either: ${stillMissing.join(", ")}. A maintainer must publish them once.`,
+        hint: CERT_REQUIRED_HINT,
+      });
+    }
+  }
 }
 
 /**

@@ -33,7 +33,7 @@ import { newNodeClient } from "../../src/client.ts";
 import type { EstablishConsentResult } from "../../src/commands/init-consent.ts";
 import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import { FbrainError } from "../../src/client.ts";
-import { UNIQUE_SCHEMAS } from "../../src/schemas.ts";
+import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 describe("resolveUrls", () => {
@@ -371,6 +371,55 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
       return jsonResponse(404, { error: "unexpected_url", url });
     }) as unknown as typeof globalThis.fetch;
   }
+
+  test("local app-schema declare path skips schema_service publish/load", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-local-declare-"));
+    const configPath = join(tmpDir, "config.json");
+    const declareBodies: unknown[] = [];
+
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "local-declare-userhash-0001" });
+      }
+      if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        declareBodies.push(body);
+        const schema = body.schema?.descriptive_name ?? "unknown";
+        return jsonResponse(200, {
+          app_id: body.app_id,
+          schema,
+          canonical: `${String(schema).toLowerCase()}${"0".repeat(64)}`.slice(0, 64),
+          resolution: "mint",
+          decision: "mint",
+        });
+      }
+      if (url.endsWith("/v1/schemas") || url.endsWith("/api/schemas/load")) {
+        return jsonResponse(500, { error: "schema_service_or_load_should_not_be_called", url });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      consent: { isTty: () => false },
+    });
+
+    expect(declareBodies).toHaveLength(UNIQUE_SCHEMAS.length);
+    for (const body of declareBodies as Array<{ app_id?: string; schema?: { owner_app_id?: string } }>) {
+      expect(body.app_id).toBe(OWNER_APP_ID);
+      expect(body.schema?.owner_app_id).toBe(OWNER_APP_ID);
+    }
+    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
+      expect(result.config.schemaHashes[t]).toHaveLength(64);
+    }
+    expect(lines.some((l) => l.includes("local app-schema declarations persisted"))).toBe(true);
+    expect(lines.some((l) => l.includes("schema_service load skipped"))).toBe(true);
+  });
 
   test("cert_required POST → resolves all 8 namespaced hashes from GET /api/schemas, no throw", async () => {
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
