@@ -15,6 +15,7 @@ export const TEST_HASHES: Record<RecordType, string> = {
   agent: "a".repeat(64),
   project: "9".repeat(64),
   spike: "5".repeat(64),
+  sop: "6".repeat(64),
 };
 
 // Test URL defaults: homebrew `fold_db_node` daemon + the dev cloud Lambda.

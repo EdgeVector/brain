@@ -124,7 +124,7 @@ describe("runInit — FBRAIN_APP_IDENTITY_ENFORCE off vs on use the same namespa
 
     // EVERY POST carries owner_app_id="fbrain". The bug was the opposite —
     // stripping owner_app_id and hitting 400 owner_app_id_required.
-    expect(posts.length).toBe(8);
+    expect(posts.length).toBe(9);
     for (const p of posts) {
       const body = p.body as { schema?: Record<string, unknown> } | null;
       expect(body?.schema?.owner_app_id).toBe(OWNER_APP_ID);
@@ -132,7 +132,7 @@ describe("runInit — FBRAIN_APP_IDENTITY_ENFORCE off vs on use the same namespa
 
     // init didn't die on the 401: it resolved every type to the node's
     // authoritative hash (NOT a bare-publish variant).
-    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
+    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike", "sop"]) {
       expect(result.config.schemaHashes[t]).toMatch(/^resolvedhash\d/);
     }
 
@@ -162,12 +162,12 @@ describe("runInit — FBRAIN_APP_IDENTITY_ENFORCE off vs on use the same namespa
       consent: { isTty: () => false },
     });
 
-    expect(posts.length).toBe(8);
+    expect(posts.length).toBe(9);
     for (const p of posts) {
       const body = p.body as { schema?: Record<string, unknown> } | null;
       expect(body?.schema?.owner_app_id).toBe(OWNER_APP_ID);
     }
-    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
+    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike", "sop"]) {
       expect(result.config.schemaHashes[t]).toMatch(/^resolvedhash\d/);
     }
   });

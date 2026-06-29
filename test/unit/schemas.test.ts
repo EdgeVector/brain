@@ -11,6 +11,7 @@ import {
   RECORD_PURPOSES,
   RECORD_TYPES,
   REFERENCE_STATUSES,
+  SOP_STATUSES,
   SPIKE_STATUSES,
   TASK_STATUSES,
   UNIQUE_SCHEMAS,
@@ -25,6 +26,7 @@ import {
   purposeFor,
   referenceSchema,
   schemaFor,
+  sopSchema,
   spikeSchema,
   statusValuesFor,
   taskSchema,
@@ -91,10 +93,10 @@ describe("schemas", () => {
     expect(isRecordType("Design")).toBe(false); // case-sensitive
   });
 
-  test("each Phase 6 type owns a dedicated schema", () => {
-    // All six Phase 6 kinds share the same 7-field shape; the dual-signal
-    // gate (descriptive_name + purpose_statement) is what keeps the
-    // canonical hashes distinct.
+  test("each Phase 6 type (and sop) owns a dedicated schema", () => {
+    // All six Phase 6 kinds — plus the later sop type — share the same
+    // 7-field shape; the dual-signal gate (descriptive_name +
+    // purpose_statement) is what keeps the canonical hashes distinct.
     const phase6 = [
       ["concept", conceptSchema, CONCEPT_STATUSES, "active", "Concept"],
       ["preference", preferenceSchema, PREFERENCE_STATUSES, "active", "Preference"],
@@ -102,6 +104,7 @@ describe("schemas", () => {
       ["agent", agentSchema, AGENT_STATUSES, "active", "Agent"],
       ["project", projectSchema, PROJECT_STATUSES, "planning", "Project"],
       ["spike", spikeSchema, SPIKE_STATUSES, "active", "Spike"],
+      ["sop", sopSchema, SOP_STATUSES, "active", "Sop"],
     ] as const;
     for (const [typeKey, schema, statuses, defaultStatus, descriptive] of phase6) {
       expect(schema.schema.descriptive_name).toBe(descriptive);
@@ -123,7 +126,7 @@ describe("schemas", () => {
     }
   });
 
-  test("the six per-kind schemas are distinct instances (not aliased)", () => {
+  test("the per-kind schemas are distinct instances (not aliased)", () => {
     const distinct = new Set([
       conceptSchema,
       preferenceSchema,
@@ -131,8 +134,9 @@ describe("schemas", () => {
       agentSchema,
       projectSchema,
       spikeSchema,
+      sopSchema,
     ]);
-    expect(distinct.size).toBe(6);
+    expect(distinct.size).toBe(7);
   });
 
   test("purpose statements are pairwise distinct strings", () => {
@@ -143,12 +147,13 @@ describe("schemas", () => {
       agentSchema.schema.purpose_statement,
       projectSchema.schema.purpose_statement,
       spikeSchema.schema.purpose_statement,
+      sopSchema.schema.purpose_statement,
     ];
-    expect(new Set(purposes).size).toBe(6);
+    expect(new Set(purposes).size).toBe(7);
   });
 
-  test("UNIQUE_SCHEMAS has 8 entries: design + task + 6 per-kind", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(8);
+  test("UNIQUE_SCHEMAS has 9 entries: design + task + 6 per-kind + sop", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(9);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "agent",
@@ -157,6 +162,7 @@ describe("schemas", () => {
       "preference",
       "project",
       "reference",
+      "sop",
       "spike",
       "task",
     ]);

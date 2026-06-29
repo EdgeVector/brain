@@ -102,6 +102,7 @@ export const COMMANDS = [
   "agent",
   "project",
   "spike",
+  "sop",
   "put",
   "get",
   "list",
@@ -218,6 +219,7 @@ live capability is already on disk.
   agent: simpleNewHelp("agent"),
   project: simpleNewHelp("project"),
   spike: simpleNewHelp("spike"),
+  sop: simpleNewHelp("sop"),
   put: `fbrain put [<slug>] [--type T] [--json]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
@@ -232,7 +234,7 @@ Type resolution: one of frontmatter \`type:\` or \`--type T\` is required.
 There is NO silent default — a stdin stream without a type errors out.
 If both are set and disagree, the put errors with type_conflict.
 
-  --type    design | task | concept | preference | reference | agent | project | spike
+  --type    design | task | concept | preference | reference | agent | project | spike | sop
             (case-insensitive; overrides absent frontmatter, errors on conflict)
   --json    emit \`{ok, slug, created}\` on stdout (\`created\` is true on insert,
             false on update); the human \`created/updated …\` line moves to
@@ -241,7 +243,7 @@ If both are set and disagree, the put errors with type_conflict.
 
 Frontmatter (between leading \`---\` lines) keys honored:
   slug     string         (positional arg overrides; conflict if both differ)
-  type     same 8 values as --type
+  type     same 9 values as --type
   title    string         (default: first H1 in body, else slug)
   tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
 
@@ -256,7 +258,7 @@ Examples:
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
-  --type        design | task | concept | preference | reference | agent | project | spike
+  --type        design | task | concept | preference | reference | agent | project | spike | sop
   --body-limit  truncate body output to N chars (default: full body)
   --json        emit the resolved record as a single JSON object on stdout
                 (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
@@ -264,7 +266,7 @@ exists in multiple types (specify --type to disambiguate).
                 print to stderr) so \`--json\` stdout is always parseable.`,
   list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N] [--json]
 
-  --type        design | task | concept | preference | reference | agent | project | spike
+  --type        design | task | concept | preference | reference | agent | project | spike | sop
                 (omit to list across all types)
   --status      filter by status enum
   --tag         filter by tag membership
@@ -279,7 +281,7 @@ exists in multiple types (specify --type to disambiguate).
 Bare form prints current status. With a new-status, validates against the
 type's status enum, updates updated_at, and writes back.
 
-  --type    design | task | concept | preference | reference | agent | project | spike
+  --type    design | task | concept | preference | reference | agent | project | spike | sop
   --json    (show form only) emit the status as a single JSON object on
             stdout — \`{slug, type, status}\`, parseable by \`jq\`. Ignored
             with a new-status; the update form keeps its human transition
@@ -310,7 +312,7 @@ human outputs no longer invite a misleading score comparison.
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`).
                 One of: design | task | concept | preference | reference |
-                agent | project | spike. Omit to search across all 8 types.
+                agent | project | spike | sop. Omit to search across all 9 types.
   --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
                 on stdout (parseable by \`jq\`); \`snippet\` is the same
                 matching body extract shown under each human row. Empty
@@ -350,7 +352,7 @@ shows it as a debug column too).
                 (e.g. \`--type design --type task\`). Narrows both the BM25
                 corpus and the vector schemas filter.
                 One of: design | task | concept | preference | reference |
-                agent | project | spike. Omit to search across all 8 types.
+                agent | project | spike | sop. Omit to search across all 9 types.
   --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
                 on stdout (parseable by \`jq\`); \`snippet\` is the same
                 matching body extract shown under each human row. Empty
@@ -503,7 +505,7 @@ design). In single-slug mode this is a hard error; in filter mode the
 linked design is skipped+warned (the batch continues). Pass --force to
 delete anyway — the tasks' design references are then left dangling.
 
-  --type      design | task | concept | preference | reference | agent | project | spike
+  --type      design | task | concept | preference | reference | agent | project | spike | sop
   --tag T     filter mode: delete every live record carrying tag T
   --status S  filter mode: additionally require status S
   --force     delete a design even if live tasks still link to it
@@ -531,7 +533,7 @@ It is not a fix for high \`doctor --freshness\` pollution; that purge is
 upstream fold_db work (G3d/G3e), not available at the fbrain layer.
 
   --type            narrow to one of: design | task | concept | preference |
-                    reference | agent | project | spike (default: all 8)
+                    reference | agent | project | spike | sop (default: all 9)
   --dry-run         list records that would be reindexed; no writes
   --repair-titles   one-shot repair mode: skip the embedding refresh and
                     only fix records whose stored title is the literal text
@@ -818,13 +820,14 @@ export const CLI_SPEC = {
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
-  // The 6 Phase-6 types share design's flag set (no --design parent link).
+  // The 6 Phase-6 types + sop share design's flag set (no --design parent link).
   concept: DESIGN_OPTIONS,
   preference: DESIGN_OPTIONS,
   reference: DESIGN_OPTIONS,
   agent: DESIGN_OPTIONS,
   project: DESIGN_OPTIONS,
   spike: DESIGN_OPTIONS,
+  sop: DESIGN_OPTIONS,
   put: PUT_OPTIONS,
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
@@ -1297,6 +1300,7 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
     case "agent":
     case "project":
     case "spike":
+    case "sop":
       return runRecordNew(cmd, args, verboseFn);
     case "put":
       return runPut(args, verboseFn);

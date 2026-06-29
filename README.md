@@ -1,6 +1,6 @@
 # fbrain
 
-A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Eight record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe.
+A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Nine record types — **designs**, **tasks**, **concepts**, **preferences**, **references**, **agents**, **projects**, **spikes**, **sops** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe.
 
 ## Prerequisites
 
@@ -156,12 +156,12 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 
 ## Commands
 
-`<TYPE>` below is one of: `design | task | concept | preference | reference | agent | project | spike`.
+`<TYPE>` below is one of: `design | task | concept | preference | reference | agent | project | spike | sop`.
 
 | Command | What it does |
 |---|---|
 | `fbrain init` | Bootstraps the node + registers schemas + writes `~/.fbrain/config.json` with canonical hashes |
-| `fbrain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 8 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`. Status defaults to the type's first enum value |
+| `fbrain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 9 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`. Status defaults to the type's first enum value |
 | `fbrain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
 | `fbrain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
 | `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it prints all matches before erroring so you can pick one |
@@ -198,6 +198,7 @@ and this table can't drift.
 | `agent` | Persistent assistant identity with role and behavior conventions | `active \| archived` | dedicated `Agent` schema |
 | `project` | Active in-flight feature work tracked over its lifecycle | `planning \| in_progress \| done \| archived` | dedicated `Project` schema |
 | `spike` | Time-boxed investigation or exploration with a defined conclusion | `active \| concluded` | dedicated `Spike` schema |
+| `sop` | Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task | `active \| superseded \| archived` | dedicated `Sop` schema |
 
 Each of the six Phase 6 types gets its own dedicated schema with a distinct `descriptive_name` + `purpose_statement`. We originally landed a single combined schema (`FbrainKindNote`) plus a `kind` discriminator as a workaround for fold_db's structural canonicalization (the node merged schemas with overlapping field positions during `/api/schemas/load`, making the second schema's data inaccessible). As of Phase E (PR #63, dual-signal canonicalization cutover) the schema service consults the purpose-statement embedding alongside the structural signal, so distinct purpose statements veto the merge and all six can share the same 7-field shape without colliding onto one canonical hash. The combined-schema workaround was retired; the consolidation migration moved every pre-Phase-E row into its per-kind canonical, and the legacy `FbrainKindNote` schema is no longer registered or read.
 
@@ -211,7 +212,8 @@ Every type has an ergonomic `<type> new` verb:
 fbrain concept new idempotency --title "Idempotency" --body "mutations are keyed by canonical hash"
 fbrain preference new no-emojis --title "No emojis in code" --body "keep code comment-free of emojis"
 fbrain spike new vectors-eval --title "Evaluating vector ranker quality" --body "measure ranker precision/recall"
-# …same shape for reference / agent / project / spike
+fbrain sop new pr-merge-flow --title "Driving a PR to merged" --body "the step-by-step we follow on every PR"
+# …same shape for reference / agent / project / spike / sop
 ```
 
 Or pipe a body (with optional YAML frontmatter) through `fbrain put`:

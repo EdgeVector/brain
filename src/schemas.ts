@@ -1,6 +1,6 @@
 // Schema definitions for fbrain's record types.
 //
-// Eight schemas are registered:
+// Nine schemas are registered:
 //
 //   - **Design**, **Task** — Phase 1, unchanged.
 //   - **Concept**, **Preference**, **Reference**, **Agent**, **Project**,
@@ -10,6 +10,9 @@
 //     service's dual-signal gate uses the purpose-statement embedding to
 //     veto structural collapse, so all six can share the same 7-field
 //     shape without colliding onto a single canonical hash.
+//   - **Sop** — a later addition built on the same 7-field Phase 6 shape
+//     (same dedicated-schema + distinct-purpose-statement treatment), for
+//     storing standard operating procedures agents follow on recurring tasks.
 //
 // Why dedicated schemas now? Pre-Phase-E we used one shared
 // `FbrainKindNote` schema + a `kind` discriminator + `v1_marker_a/b`
@@ -111,6 +114,9 @@ export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
 export const SPIKE_STATUSES = ["active", "concluded"] as const;
 export type SpikeStatus = (typeof SPIKE_STATUSES)[number];
+
+export const SOP_STATUSES = ["active", "superseded", "archived"] as const;
+export type SopStatus = (typeof SOP_STATUSES)[number];
 
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 
@@ -320,6 +326,11 @@ export const spikeSchema: AddSchemaRequest = phase6Schema(
   "Time-boxed investigation or exploration with a defined conclusion",
   SPIKE_STATUSES,
 );
+export const sopSchema: AddSchemaRequest = phase6Schema(
+  "Sop",
+  "Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task",
+  SOP_STATUSES,
+);
 
 export const RECORD_TYPES = [
   "design",
@@ -330,6 +341,7 @@ export const RECORD_TYPES = [
   "agent",
   "project",
   "spike",
+  "sop",
 ] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
@@ -398,6 +410,13 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     defaultStatus: "active",
     hasDesignSlug: false,
   },
+  sop: {
+    type: "sop",
+    schema: sopSchema,
+    statuses: SOP_STATUSES,
+    defaultStatus: "active",
+    hasDesignSlug: false,
+  },
 };
 
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
@@ -416,6 +435,7 @@ export const UNIQUE_SCHEMAS: Array<{
   { key: "agent", schema: agentSchema, types: ["agent"] },
   { key: "project", schema: projectSchema, types: ["project"] },
   { key: "spike", schema: spikeSchema, types: ["spike"] },
+  { key: "sop", schema: sopSchema, types: ["sop"] },
 ];
 
 // Resolve an already-published fbrain schema's canonical hash from the set

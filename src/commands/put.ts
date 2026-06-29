@@ -15,7 +15,7 @@
 //     other keys are silently ignored (forward-compatible with future fields).
 //
 // As of Phase 6, every type in RECORDS routes to a real write:
-// design / task / concept / preference / reference / agent / project / spike.
+// design / task / concept / preference / reference / agent / project / spike / sop.
 // An unrecognised `type:` errors as `unsupported_type`.
 
 import { FbrainError, type Verbose } from "../client.ts";
@@ -284,7 +284,7 @@ function resolveRecordType(
         code: "missing_type",
         message:
           "fbrain put requires a `type:` field in frontmatter (or pass --type <T>).",
-        hint: "One of: design | task | concept | preference | reference | agent | project | spike.",
+        hint: "One of: design | task | concept | preference | reference | agent | project | spike | sop.",
       }),
   );
 }
@@ -297,7 +297,7 @@ function normaliseType(raw: string | undefined): RecordType | undefined {
     code: "unsupported_type",
     message: `type "${raw}" is not a recognised fbrain record type.`,
     hint:
-      "Supported: design | task | concept | preference | reference | agent | project | spike. " +
+      "Supported: design | task | concept | preference | reference | agent | project | spike | sop. " +
       "Check spelling or pick the closest type.",
   });
 }

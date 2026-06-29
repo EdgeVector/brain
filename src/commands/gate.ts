@@ -17,7 +17,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
-import type { RecordType } from "../schemas.ts";
+import { RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
 
 export const OPEN_DECISIONS_SLUG = "open-decisions";
 const OPEN_DECISIONS_TYPE: RecordType = "reference";
@@ -429,9 +429,7 @@ async function verifyFbrainEvidence(
     rest.length > 0 && isEvidenceRecordType(head) ? head : undefined;
   const slug = type ? rest.join(":") : trimmed;
   const node = newReadClientFromCfg(cfg);
-  const types: RecordType[] = type
-    ? [type]
-    : ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"];
+  const types: RecordType[] = type ? [type] : [...RECORD_TYPES];
   for (const t of types) {
     const record = await findBySlug(node, t, schemaHashFor(t, cfg), slug);
     if (record === null) continue;
@@ -450,16 +448,7 @@ async function verifyFbrainEvidence(
 }
 
 function isEvidenceRecordType(value: string): value is RecordType {
-  return (
-    value === "design" ||
-    value === "task" ||
-    value === "concept" ||
-    value === "preference" ||
-    value === "reference" ||
-    value === "agent" ||
-    value === "project" ||
-    value === "spike"
-  );
+  return isRecordType(value);
 }
 
 function isResolvedStatus(status: string): boolean {

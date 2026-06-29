@@ -206,7 +206,7 @@ describeIntegration("Phase 4 — fbrain put (errors)", () => {
 });
 
 describeIntegration("Phase 6 — fbrain put (new types)", () => {
-  const NEW_TYPES = ["concept", "preference", "reference", "agent", "project", "spike"] as const;
+  const NEW_TYPES = ["concept", "preference", "reference", "agent", "project", "spike", "sop"] as const;
 
   for (const type of NEW_TYPES) {
     test(`frontmatter type: ${type} creates a ${type} via put`, async () => {

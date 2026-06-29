@@ -114,6 +114,7 @@ export const TOMBSTONE_STATUS: Record<RecordType, string> = {
   agent: "archived",
   project: "archived",
   spike: "concluded",
+  sop: "archived",
 };
 
 export function buildTombstoneFields(
