@@ -1760,7 +1760,31 @@ async function verboseFetch(opts: {
   // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
   const routeSocket = nodeSocketForRoute(opts.service, opts.method, opts.path, opts.socketPath);
-  const preflightTarget = routeSocket ? `${opts.path} [${routeSocket.kind} socket selected]` : tcpUrl;
+  // A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
+  // retired (fold `fold-retire-tcp-listener`), so there is NO TCP fallback. When
+  // the node URL is loopback and a socket path is configured, select the route's
+  // socket UNCONDITIONALLY (data-plane → folddb.sock, else → folddb-full.sock),
+  // even when the file is absent: if the node is down the connect simply fails
+  // and the catch maps it to a clear node-not-running diagnostic instead of
+  // dialing :9001. (`nodeSocketForRoute` stays existsSync-gated for its other
+  // consumers; this is verboseFetch's own socket-only routing for a local node.)
+  const localNodeSocketOnly =
+    opts.service === "node" &&
+    isLoopbackNodeUrl(opts.baseUrl) &&
+    opts.socketPath !== undefined &&
+    opts.socketPath.length > 0;
+  const localRouteSocket: NodeSocketSelection | null = localNodeSocketOnly
+    ? isNodeDataPlaneRoute(opts.method, opts.path)
+      ? { socketPath: opts.socketPath as string, kind: "data" }
+      : {
+          socketPath: join(dirname(opts.socketPath as string), FULL_SURFACE_SOCKET_FILE_NAME),
+          kind: "full",
+        }
+    : null;
+  const effectiveRouteSocket = localRouteSocket ?? routeSocket;
+  const preflightTarget = effectiveRouteSocket
+    ? `${opts.path} [${effectiveRouteSocket.kind} socket selected]`
+    : tcpUrl;
   opts.verbose(
     `→ ${tag} ${opts.method} ${preflightTarget}` +
       (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
@@ -1799,7 +1823,18 @@ async function verboseFetch(opts: {
   let res: Response;
   let socketFailure: unknown;
   try {
-    if (routeSocket) {
+    if (localNodeSocketOnly) {
+      // Socket-only: never dial the retired loopback TCP port. A connect failure
+      // means the node is down (socket missing) or wedged (socket present); the
+      // catch maps it to the right diagnostic via `effectiveRouteSocket`.
+      try {
+        res = await attempt(localRouteSocket);
+      } catch (socketErr) {
+        socketFailure = socketErr;
+        throw socketErr;
+      }
+    } else if (routeSocket) {
+      // Non-loopback / remote node: prefer the socket, fall back to TCP/HTTP.
       try {
         res = await attempt(routeSocket);
       } catch (socketErr) {
@@ -1816,6 +1851,7 @@ async function verboseFetch(opts: {
         }
       }
     } else {
+      // Schema service (HTTPS Lambda) and any non-loopback target: plain HTTP.
       res = await attempt(null);
     }
   } catch (err) {
@@ -1826,7 +1862,7 @@ async function verboseFetch(opts: {
     }
     throw connectionError(opts.baseUrl, opts.service, err, {
       socketPath: opts.socketPath,
-      routeSocket,
+      routeSocket: effectiveRouteSocket,
       socketCause: socketFailure,
     });
   }
@@ -1846,7 +1882,7 @@ async function verboseFetch(opts: {
       }
       throw connectionError(opts.baseUrl, opts.service, err, {
         socketPath: opts.socketPath,
-        routeSocket,
+        routeSocket: effectiveRouteSocket,
         socketCause: socketFailure,
       });
     }
@@ -2096,7 +2132,11 @@ function connectionError(
   ctx: ConnectionErrorContext = {},
 ): FbrainError {
   const which = service === "node" ? "node" : "schema service";
-  if (service === "node" && ctx.socketPath && isDefaultNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
+  // Any LOCAL (loopback) node is socket-only — no TCP fallback — so an absent
+  // socket means the node isn't running, whatever the loopback port (not just
+  // the :9001 default). Broadened from isDefaultNodeUrl when the TCP fallback
+  // was removed.
+  if (service === "node" && ctx.socketPath && isLoopbackNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
     return new FbrainError({
       code: "service_unreachable",
       message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,

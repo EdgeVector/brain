@@ -620,7 +620,10 @@ function nodeReachabilityTransportDetail(nodeUrl: string, socketPath: string): s
     return `unix:${socketPath} + unix:${fullSocketPath}`;
   }
   if (existsSync(socketPath)) {
-    return `unix:${socketPath} (TCP fallback ${nodeUrl})`;
+    // Socket-only: the loopback TCP listener is retired, so there is no TCP
+    // fallback. An older node missing folddb-full.sock can't serve control
+    // routes until upgraded.
+    return `unix:${socketPath} (no full-surface socket — upgrade the node for control routes)`;
   }
   return nodeUrl;
 }
