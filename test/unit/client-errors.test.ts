@@ -2,6 +2,9 @@
 // every Error Registry row maps to a recognisable FbrainError.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   FbrainError,
@@ -321,6 +324,65 @@ describe("client error mapping", () => {
       // Doctor strips this tip from its own output (see doctor.test.ts);
       // here we pin that connectionError still appends it for everyone else.
       expect((err as FbrainError).message).toContain("fbrain doctor");
+    }
+  });
+
+  test("default local node down with no socket reports the missing Unix socket, not retired :9001", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-node-missing-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    const priorSocket = process.env.FBRAIN_FOLDDB_SOCKET;
+    process.env.FBRAIN_FOLDDB_SOCKET = socketPath;
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+      await c.autoIdentity();
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("service_unreachable");
+      expect(fe.message).toContain("node not running");
+      expect(fe.message).toContain("Unix socket not found");
+      expect(fe.message).toContain(socketPath);
+      expect(fe.message).not.toContain("http://127.0.0.1:9001");
+      expect(fe.hint ?? "").toContain("brew services start lastdb");
+      expect(fe.hint ?? "").not.toContain("brew services restart lastdb");
+      expect(fe.agentHint ?? "").toContain("FBRAIN_FOLDDB_SOCKET");
+    } finally {
+      if (priorSocket === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+      else process.env.FBRAIN_FOLDDB_SOCKET = priorSocket;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("default local node down with a stale socket reports the Unix socket that refused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-node-stale-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    writeFileSync(socketPath, "");
+    const priorSocket = process.env.FBRAIN_FOLDDB_SOCKET;
+    process.env.FBRAIN_FOLDDB_SOCKET = socketPath;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit & { unix?: string }) => {
+      if (init?.unix) throw new TypeError("connection refused on unix socket");
+      throw new TypeError("connection refused on tcp fallback");
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+      await c.autoIdentity();
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("service_unreachable");
+      expect(fe.message).toContain(`node socket not reachable at unix:${socketPath}`);
+      expect(fe.message).not.toContain("node not reachable at http://127.0.0.1:9001");
+      expect(fe.hint ?? "").toContain("socket file exists");
+      expect(fe.hint ?? "").toContain("did not accept a connection");
+    } finally {
+      if (priorSocket === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+      else process.env.FBRAIN_FOLDDB_SOCKET = priorSocket;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
