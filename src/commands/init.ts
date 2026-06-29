@@ -4,7 +4,7 @@
 // 6 steps:
 //   0. probe /api/system/auto-identity
 //   1. POST /api/setup/bootstrap if 503
-//   2. obtain all 8 canonical hashes: POST each schema (maintainer w/ DevCert)
+//   2. obtain all 9 canonical hashes: POST each schema (maintainer w/ DevCert)
 //      OR, when the cert gate returns 401 for a fresh consumer, defer and
 //      resolve the already-published fbrain/* hashes from the node (step 3)
 //   3. POST /api/schemas/load, then resolve any cert-gated hashes via
@@ -253,8 +253,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 2/6: obtain canonical hashes for the eight per-kind schemas — Design
-  // + Task + Concept/Preference/Reference/Agent/Project/Spike. Each entry has
+  // Step 2/6: obtain canonical hashes for the nine per-kind schemas — Design
+  // + Task + Concept/Preference/Reference/Agent/Project/Spike/Sop. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   //
   // New local-first nodes expose `/api/apps/declare-schema`: fbrain declares
@@ -512,7 +512,7 @@ export function printNextSteps(
   print(``);
   print(`You're ready. Next steps:`);
   print(`  1. Create your first record:  fbrain design new my-first-idea --title "My first idea" --body "what this idea is"`);
-  print(`        (also: concept/preference/reference/agent/project/spike new, or pipe markdown to \`fbrain put <slug>\`)`);
+  print(`        (also: concept/preference/reference/agent/project/spike/sop new, or pipe markdown to \`fbrain put <slug>\`)`);
   print(`  2. See what you've got:        fbrain list`);
   print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
   print(`  4. Re-check health anytime:    fbrain doctor`);

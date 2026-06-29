@@ -48,6 +48,7 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    | `agent` | Persistent assistant identity with role and behavior conventions |
    | `project` | Active in-flight feature work tracked over its lifecycle |
    | `spike` | Time-boxed investigation or exploration with a defined conclusion |
+   | `sop` | Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task |
 
    Link a `task` to its parent `design` with `fbrain_link`. Slugs are per-type, so
    pass `type` to `fbrain_get`/`fbrain_delete` whenever a slug could be ambiguous.
