@@ -42,6 +42,38 @@ afterEach(() => {
 });
 
 describe("client error mapping", () => {
+  // Regression: a LOCAL (loopback) node is socket-only — when the socket connect
+  // fails, the client must NOT fall back to the retired loopback TCP port. Every
+  // fetch attempt must carry a `unix:` socket, and the error must be the
+  // socket-accurate diagnostic, never a ":9001" message. (The harness points
+  // FBRAIN_FOLDDB_SOCKET at a guaranteed-nonexistent path — test/setup.ts.)
+  test("loopback node never falls back to TCP — every attempt is over a unix socket", async () => {
+    const calls: Array<{ url: string; unix?: string }> = [];
+    globalThis.fetch = (async (
+      input: unknown,
+      init?: RequestInit & { unix?: string },
+    ): Promise<Response> => {
+      calls.push({ url: typeof input === "string" ? input : String(input), unix: init?.unix });
+      throw new TypeError("Unable to connect. Is the computer able to access the url?");
+    }) as unknown as typeof globalThis.fetch;
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    let caught: unknown;
+    try {
+      await c.health();
+    } catch (e) {
+      caught = e;
+    }
+    // At least one attempt was made, and EVERY attempt carried a unix socket —
+    // i.e. a bare TCP fetch was never issued.
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((x) => typeof x.unix === "string" && x.unix.length > 0)).toBe(true);
+    // Socket-accurate diagnostic, never the retired :9001 port.
+    expect(caught).toBeInstanceOf(FbrainError);
+    const fe = caught as FbrainError;
+    expect(fe.code).toBe("service_unreachable");
+    expect(fe.message).not.toContain("9001");
+  });
+
   test("node 503 node_not_provisioned → identity{provisioned:false}", async () => {
     installMock([{ status: 503, body: { error: "node_not_provisioned" } }]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
