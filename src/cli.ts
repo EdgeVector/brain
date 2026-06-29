@@ -25,6 +25,7 @@ import { putCmd } from "./commands/put.ts";
 import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
+import { gateAdd, gateClear, gatesOpen, gateVerify } from "./commands/gate.ts";
 import {
   buildAgentInstructionsBlock,
   isRecordType,
@@ -108,6 +109,8 @@ export const COMMANDS = [
   "link",
   "search",
   "ask",
+  "gates",
+  "gate",
   "doctor",
   "raw",
   "share",
@@ -143,6 +146,8 @@ ${RECORD_NEW_HELP_LINES}
   link           link a task to a parent design
   search         semantic search over indexed records
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
+  gates          list structured open human gates from the canonical open-decisions record
+  gate           add, clear, or verify structured open-decisions gates
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — team sync is not wired up yet
@@ -362,6 +367,34 @@ section also prints a no-key notice instead of silently dropping.
 
 The LLM key (only needed for --expand) is read from \$ANTHROPIC_API_KEY
 (preferred) or an optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
+  gates: `fbrain gates --open
+
+List live human gates from the single canonical \`open-decisions\` reference
+record. Only structured one-line entries are authoritative:
+\`status=... slug=... program=... unblocks=... evidence=... surfaced=...\`.
+
+  --open   list live gates (status=open)`,
+  gate: `fbrain gate add <slug> --program P --unblocks U --evidence E [--recommendation R]
+fbrain gate clear <slug> --resolution TEXT
+fbrain gate verify
+
+Edit and verify the structured entries in the single canonical
+\`open-decisions\` reference record. This does not create a new schema/type.
+
+  add     appends an open structured gate; idempotent by slug
+  clear   flips one structured gate to status=cleared inline
+  verify  checks each open gate's evidence pointer and flags stale gates
+
+Evidence pointers understood by verify:
+  fbrain:<slug>                    stale if the record is missing/done/moot
+  fbrain:<type>:<slug>             same, scoped to a record type
+  origin/main:<file>[#needle]      stale if the file or optional text is gone
+
+  --program         owning program or durable program record
+  --unblocks        work/capability this human decision unblocks
+  --evidence        durable fbrain record and/or origin/main file pointer
+  --recommendation  optional recommended default/path
+  --resolution      required clear reason`,
   doctor: `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
@@ -703,6 +736,16 @@ const ASK_OPTIONS = {
   // on stdout; advisory notes and --explain expansions route to stderr.
   json: { type: "boolean", default: false },
 } as const;
+const GATES_OPTIONS = {
+  open: { type: "boolean", default: false },
+} as const;
+const GATE_OPTIONS = {
+  program: { type: "string" },
+  unblocks: { type: "string" },
+  evidence: { type: "string" },
+  recommendation: { type: "string" },
+  resolution: { type: "string" },
+} as const;
 const DOCTOR_OPTIONS = {
   freshness: { type: "boolean", default: false },
   usage: { type: "boolean", default: false },
@@ -789,6 +832,8 @@ export const CLI_SPEC = {
   link: LINK_OPTIONS,
   search: SEARCH_OPTIONS,
   ask: ASK_OPTIONS,
+  gates: GATES_OPTIONS,
+  gate: GATE_OPTIONS,
   doctor: DOCTOR_OPTIONS,
   raw: EMPTY_OPTIONS,
   share: EMPTY_OPTIONS,
@@ -1267,6 +1312,10 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runSearch(args, verboseFn);
     case "ask":
       return runAsk(args, verboseFn);
+    case "gates":
+      return runGates(args, verboseFn);
+    case "gate":
+      return runGate(args, verboseFn);
     case "doctor":
       return runDoctor(args, verboseFn);
     case "raw":
@@ -2037,6 +2086,100 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   if (values.json) aOpts.json = true;
   await askCmd(aOpts);
   return 0;
+}
+
+async function runGates(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: GATES_OPTIONS,
+    },
+    "gates",
+  );
+  if (positionals.length > 0 || !values.open) {
+    console.error(COMMAND_HELP.gates);
+    return USAGE_ERROR;
+  }
+  const cfg = readConfig();
+  await gatesOpen({ cfg, verbose });
+  return 0;
+}
+
+async function runGate(args: Argv, verbose: Verbose): Promise<number> {
+  const sub = args[0];
+  if (sub !== "add" && sub !== "clear" && sub !== "verify") {
+    console.error(COMMAND_HELP.gate);
+    return USAGE_ERROR;
+  }
+  const { values, positionals } = parseCommandArgs(
+    {
+      args: args.slice(1),
+      strict: true,
+      allowPositionals: true,
+      options: GATE_OPTIONS,
+    },
+    "gate",
+  );
+  const cfg = readConfig();
+  if (sub === "add") {
+    const slug = positionals[0];
+    if (
+      !slug ||
+      positionals.length > 1 ||
+      values.program === undefined ||
+      values.unblocks === undefined ||
+      values.evidence === undefined ||
+      values.resolution !== undefined
+    ) {
+      console.error(COMMAND_HELP.gate);
+      return USAGE_ERROR;
+    }
+    const addOpts: Parameters<typeof gateAdd>[0] = {
+      cfg,
+      slug,
+      program: values.program,
+      unblocks: values.unblocks,
+      evidence: values.evidence,
+      verbose,
+    };
+    if (values.recommendation !== undefined) {
+      addOpts.recommendation = values.recommendation;
+    }
+    await gateAdd(addOpts);
+    return 0;
+  }
+  if (sub === "clear") {
+    const slug = positionals[0];
+    if (
+      !slug ||
+      positionals.length > 1 ||
+      values.resolution === undefined ||
+      values.program !== undefined ||
+      values.unblocks !== undefined ||
+      values.evidence !== undefined ||
+      values.recommendation !== undefined
+    ) {
+      console.error(COMMAND_HELP.gate);
+      return USAGE_ERROR;
+    }
+    await gateClear({ cfg, slug, resolution: values.resolution, verbose });
+    return 0;
+  }
+  if (
+    positionals.length > 0 ||
+    values.program !== undefined ||
+    values.unblocks !== undefined ||
+    values.evidence !== undefined ||
+    values.recommendation !== undefined ||
+    values.resolution !== undefined
+  ) {
+    console.error(COMMAND_HELP.gate);
+    return USAGE_ERROR;
+  }
+  const result = await gateVerify({ cfg, verbose });
+  return result.stale.length > 0 ? 1 : 0;
 }
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
