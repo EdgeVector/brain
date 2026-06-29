@@ -808,6 +808,40 @@ describe("doctor verdict logic", () => {
     }
   });
 
+  test("configured full-surface socket suppresses TCP fallback prose on PASS lines", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-doctor-full-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    const fullSocketPath = join(dir, "folddb-full.sock");
+    writeFileSync(socketPath, "");
+    writeFileSync(fullSocketPath, "");
+    const prevSocketEnv = process.env.FBRAIN_FOLDDB_SOCKET;
+    delete process.env.FBRAIN_FOLDDB_SOCKET;
+    try {
+      const cfg = makeCfg({
+        nodeUrl: "http://127.0.0.1:9001",
+        nodeSocketPath: socketPath,
+      });
+      const configPath = writeCfg(cfg);
+      const lines: string[] = [];
+      const code = await doctor({
+        configPath,
+        print: (l) => lines.push(l),
+        schemaClientFactory: () => mockSchemaClient({}),
+        nodeClientFactory: () => mockNodeClient({ healthVersion: "0.19.1" }),
+      });
+      expect(code).toBe(0);
+      const out = lines.join("\n");
+      expect(out).toContain(`node=unix:${socketPath} full=unix:${fullSocketPath}`);
+      expect(out).toContain(`lastdb 0.19.1 @ unix:${socketPath} + unix:${fullSocketPath}`);
+      expect(out).not.toContain(":9001");
+      expect(out).not.toContain("TCP fallback");
+    } finally {
+      if (prevSocketEnv === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+      else process.env.FBRAIN_FOLDDB_SOCKET = prevSocketEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Older node that doesn't report a version: node-reachable stays PASS and
   // the detail falls back to the node URL alone (no "lastdb undefined").
   test("node up, no version reported → node-reachable falls back to the url alone", async () => {

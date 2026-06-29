@@ -1,4 +1,4 @@
-// Unit tests for client.ts's owner-socket selection (`shouldUseNodeSocket`).
+// Unit tests for client.ts's node-socket selection.
 //
 // Regression for the search-over-TCP bug: `fbrain search` / `fbrain_ask`
 // build `/api/native-index/search?q=...` and used to fall through to the
@@ -12,70 +12,121 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { SOCKET_DATA_PLANE_PATHS, shouldUseNodeSocket } from "../../src/client.ts";
+import {
+  SOCKET_DATA_PLANE_PATHS,
+  discoverFullSurfaceSocket,
+  nodeSocketForRoute,
+  shouldUseNodeSocket,
+} from "../../src/client.ts";
 
 // A real on-disk file standing in for a live node socket: `shouldUseNodeSocket`
 // guards on existsSync(socketPath), so the path must exist for selection to win.
-function makeSocketFile(): { path: string; cleanup: () => void } {
+function makeSocketFiles(opts: { full?: boolean } = {}): {
+  dataPath: string;
+  fullPath: string;
+  cleanup: () => void;
+} {
   const dir = mkdtempSync(join(tmpdir(), "fbrain-sock-sel-"));
-  const path = join(dir, "folddb.sock");
-  writeFileSync(path, "");
-  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  const dataPath = join(dir, "folddb.sock");
+  const fullPath = join(dir, "folddb-full.sock");
+  writeFileSync(dataPath, "");
+  if (opts.full) writeFileSync(fullPath, "");
+  return { dataPath, fullPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-describe("shouldUseNodeSocket", () => {
+describe("node socket selection", () => {
   let cleanups: Array<() => void> = [];
   afterEach(() => {
     for (const c of cleanups) c();
     cleanups = [];
   });
 
-  function liveSocket(): string {
-    const { path, cleanup } = makeSocketFile();
+  function liveSockets(opts: { full?: boolean } = {}): { dataPath: string; fullPath: string } {
+    const { dataPath, fullPath, cleanup } = makeSocketFiles(opts);
     cleanups.push(cleanup);
-    return path;
+    return { dataPath, fullPath };
   }
 
   test("native-index search WITH a query string selects the socket", () => {
     // The motivating case: a GET carrying `?q=foo`. The selector must strip the
     // query string before matching the allowlist, or this route can never use
     // the socket and dials the retired TCP port instead.
-    const socket = liveSocket();
-    expect(shouldUseNodeSocket("node", "/api/native-index/search?q=foo", socket)).toBe(true);
+    const { dataPath } = liveSockets();
+    expect(shouldUseNodeSocket("node", "/api/native-index/search?q=foo", dataPath)).toBe(true);
   });
 
   test("query-string stripping: the same path with and without `?q` both match", () => {
-    const socket = liveSocket();
-    expect(shouldUseNodeSocket("node", "/api/native-index/search", socket)).toBe(true);
+    const { dataPath } = liveSockets();
+    expect(shouldUseNodeSocket("node", "/api/native-index/search", dataPath)).toBe(true);
     expect(
-      shouldUseNodeSocket("node", "/api/native-index/search?q=foo&exact=true", socket),
+      shouldUseNodeSocket("node", "/api/native-index/search?q=foo&exact=true", dataPath),
     ).toBe(true);
     // A `#fragment` is stripped too.
-    expect(shouldUseNodeSocket("node", "/api/native-index/search#frag", socket)).toBe(true);
+    expect(shouldUseNodeSocket("node", "/api/native-index/search#frag", dataPath)).toBe(true);
   });
 
-  test("the full owner-socket data-plane allowlist selects the socket", () => {
-    const socket = liveSocket();
-    for (const path of SOCKET_DATA_PLANE_PATHS) {
-      expect(shouldUseNodeSocket("node", path, socket)).toBe(true);
+  test("the data-plane allowlist selects the data socket", () => {
+    const { dataPath } = liveSockets({ full: true });
+    const routeCases: Array<[string, string]> = [
+      ["POST", "/api/query"],
+      ["POST", "/api/mutation"],
+      ["GET", "/api/schemas"],
+      ["GET", "/health"],
+      ["GET", "/api/system/auto-identity"],
+      ["GET", "/api/native-index/search"],
+    ];
+    for (const [method, path] of routeCases) {
+      expect(nodeSocketForRoute("node", method, path, dataPath)).toEqual({
+        socketPath: dataPath,
+        kind: "data",
+      });
     }
     // The allowlist matches the node's owner-socket route table.
     expect(SOCKET_DATA_PLANE_PATHS).toContain("/api/native-index/search");
     expect(SOCKET_DATA_PLANE_PATHS).toContain("/api/schemas");
+    expect(SOCKET_DATA_PLANE_PATHS).toContain("/health");
     expect(SOCKET_DATA_PLANE_PATHS).toContain("/api/system/auto-identity");
   });
 
-  test("a non-data-plane path never selects the socket", () => {
-    const socket = liveSocket();
-    expect(shouldUseNodeSocket("node", "/api/system/status", socket)).toBe(false);
-    expect(shouldUseNodeSocket("node", "/health", socket)).toBe(false);
-    // A path that merely prefixes a known one is not a match.
-    expect(shouldUseNodeSocket("node", "/api/native-index/search-extra", socket)).toBe(false);
+  test("full-surface routes select folddb-full.sock when it exists", () => {
+    const { dataPath, fullPath } = liveSockets({ full: true });
+    const routeCases: Array<[string, string]> = [
+      ["GET", "/api/health"],
+      ["POST", "/api/apps/request-consent"],
+      ["POST", "/api/session/browser-pair"],
+      ["POST", "/api/setup/bootstrap"],
+      ["GET", "/api/system/status"],
+    ];
+    for (const [method, path] of routeCases) {
+      expect(nodeSocketForRoute("node", method, path, dataPath)).toEqual({
+        socketPath: fullPath,
+        kind: "full",
+      });
+    }
+  });
+
+  test("older nodes without folddb-full.sock keep TCP fallback for control routes", () => {
+    const { dataPath } = liveSockets();
+    expect(discoverFullSurfaceSocket(dataPath)).toBeUndefined();
+    expect(nodeSocketForRoute("node", "GET", "/api/health", dataPath)).toBeNull();
+    expect(nodeSocketForRoute("node", "POST", "/api/apps/request-consent", dataPath)).toBeNull();
+    expect(nodeSocketForRoute("node", "POST", "/api/query", dataPath)).toEqual({
+      socketPath: dataPath,
+      kind: "data",
+    });
+  });
+
+  test("a path that merely prefixes a data-plane route is full-surface or TCP, not data", () => {
+    const { dataPath, fullPath } = liveSockets({ full: true });
+    expect(nodeSocketForRoute("node", "GET", "/api/native-index/search-extra", dataPath)).toEqual({
+      socketPath: fullPath,
+      kind: "full",
+    });
   });
 
   test("the schema service never uses the node socket", () => {
-    const socket = liveSocket();
-    expect(shouldUseNodeSocket("schema", "/api/query", socket)).toBe(false);
+    const { dataPath } = liveSockets({ full: true });
+    expect(nodeSocketForRoute("schema", "POST", "/api/query", dataPath)).toBeNull();
   });
 
   test("an absent / missing socket path falls back to TCP", () => {

@@ -1,13 +1,13 @@
 // Unit tests for owner-session attestation (the app-isolation flip, fold#739).
 //
 // fbrain mints a one-time pairing code over the node's UDS control socket,
-// exchanges it for a session token over TCP, and presents that token as
-// `X-Folddb-Session` on every node request — mirroring the CLI's
-// `attest_owner_session` (fold_db_node `src/bin/folddb/commands/ui.rs`). These
-// tests pin: (1) the socketless fallback (no socket → null → no header → fbrain
-// behaves exactly as today), (2) the happy mint+exchange path attaches the
-// header to a node read, and (3) a `transport_not_attested` 403 re-pairs once
-// and retries.
+// exchanges it for a session token over the full-surface UDS when available
+// (TCP on older nodes), and presents that token as `X-Folddb-Session` on every
+// node request — mirroring the CLI's `attest_owner_session` (fold_db_node
+// `src/bin/folddb/commands/ui.rs`). These tests pin: (1) the socketless fallback
+// (no socket → null → no header → fbrain behaves exactly as today), (2) the happy
+// mint+exchange path attaches the header to a node read, and (3) a
+// `transport_not_attested` 403 re-pairs once and retries.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -41,12 +41,18 @@ afterEach(() => {
 // default), so point it at this fixture: the suite preload pins it elsewhere
 // to stay hermetic, and a test that wants attestation to actually fire must
 // re-point it here. afterEach restores the suite default.
-function fakeSocket(): { path: string; cleanup: () => void } {
+function fakeSocket(opts: { full?: boolean } = {}): {
+  path: string;
+  fullPath: string;
+  cleanup: () => void;
+} {
   const dir = mkdtempSync(join(tmpdir(), "fbrain-sock-"));
   const path = join(dir, "folddb.sock");
+  const fullPath = join(dir, "folddb-full.sock");
   writeFileSync(path, "");
+  if (opts.full) writeFileSync(fullPath, "");
   process.env.FBRAIN_FOLDDB_SOCKET = path;
-  return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { path, fullPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 describe("attestOwnerSession", () => {
@@ -83,6 +89,31 @@ describe("attestOwnerSession", () => {
       expect(token).toBe("tok-123");
       expect(seen.some((u) => u.includes("/control/browser-pairing-code"))).toBe(true);
       expect(seen.some((u) => u.includes("/api/session/browser-pair"))).toBe(true);
+    } finally {
+      sock.cleanup();
+    }
+  });
+
+  test("exchange uses folddb-full.sock when present", async () => {
+    const sock = fakeSocket({ full: true });
+    try {
+      const seen: Array<{ url: string; unix?: string }> = [];
+      globalThis.fetch = (async (input: unknown, init?: RequestInit & { unix?: string }): Promise<Response> => {
+        const url = typeof input === "string" ? input : String(input);
+        seen.push({ url, unix: init?.unix });
+        if (url.includes("/control/browser-pairing-code")) {
+          return new Response(JSON.stringify({ pairing_code: "code-xyz" }), { status: 200 });
+        }
+        if (url.includes("/api/session/browser-pair")) {
+          return new Response(JSON.stringify({ session_token: "tok-123" }), { status: 200 });
+        }
+        return new Response("{}", { status: 500 });
+      }) as unknown as typeof globalThis.fetch;
+      const token = await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+      expect(token).toBe("tok-123");
+      const exchange = seen.find((entry) => entry.url.includes("/api/session/browser-pair"));
+      expect(exchange?.url).toBe("http://localhost/api/session/browser-pair");
+      expect(exchange?.unix).toBe(sock.fullPath);
     } finally {
       sock.cleanup();
     }
@@ -223,6 +254,51 @@ describe("newNodeClient owner-session header injection", () => {
       await c.listLoadedSchemas();
       expect(headersSeen.length).toBe(1);
       expect(headersSeen[0]?.[FOLDDB_SESSION_HEADER]).toBe("tok-123");
+    } finally {
+      sock.cleanup();
+    }
+  });
+
+  test("doctor health and consent dry-run use the full-surface socket", async () => {
+    const sock = fakeSocket({ full: true });
+    try {
+      const seen: Array<{ url: string; unix?: string; headers: Record<string, string> }> = [];
+      globalThis.fetch = (async (input: unknown, init?: RequestInit & { unix?: string }): Promise<Response> => {
+        const url = typeof input === "string" ? input : String(input);
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        seen.push({ url, unix: init?.unix, headers });
+        if (url.includes("/control/browser-pairing-code")) {
+          return new Response(JSON.stringify({ pairing_code: "code-xyz" }), { status: 200 });
+        }
+        if (url.includes("/api/session/browser-pair")) {
+          return new Response(JSON.stringify({ session_token: "tok-123" }), { status: 200 });
+        }
+        if (url.includes("/api/health")) {
+          return new Response(JSON.stringify({ ok: true, version: "0.19.1" }), { status: 200 });
+        }
+        if (url.includes("/api/apps/request-consent")) {
+          return new Response(JSON.stringify({ request_id: "req-1", expires_at: "soon" }), {
+            status: 202,
+          });
+        }
+        return new Response("{}", { status: 500 });
+      }) as unknown as typeof globalThis.fetch;
+      const c = newNodeClient({
+        baseUrl: "http://127.0.0.1:9311",
+        userHash: "u",
+        socketPath: sock.path,
+      });
+      expect(await c.health()).toEqual({ ok: true, version: "0.19.1" });
+      expect(await c.requestConsent("fbrain", "wildcard")).toEqual({
+        status: 202,
+        body: { request_id: "req-1", expires_at: "soon" },
+      });
+      for (const route of ["/api/health", "/api/apps/request-consent"]) {
+        const entry = seen.find((item) => item.url.includes(route));
+        expect(entry?.url).toBe(`http://localhost${route}`);
+        expect(entry?.unix).toBe(sock.fullPath);
+        expect(entry?.headers[FOLDDB_SESSION_HEADER]).toBe("tok-123");
+      }
     } finally {
       sock.cleanup();
     }
