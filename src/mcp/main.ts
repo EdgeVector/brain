@@ -20,7 +20,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import { readConfig } from "../config.ts";
-import { createFbrainMcpServer } from "./server.ts";
+import { createFbrainMcpServer, makeIdleReaper, mcpIdleTimeoutMs } from "./server.ts";
 
 export async function runMcp(): Promise<number> {
   // Pass a config *loader* rather than an eager config: `readConfig()` runs
@@ -30,6 +30,18 @@ export async function runMcp(): Promise<number> {
   const server = createFbrainMcpServer({ getCfg: () => readConfig() });
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  const reaper = makeIdleReaper({ idleMs: mcpIdleTimeoutMs() });
+  const protocolOnMessage = transport.onmessage?.bind(transport);
+  transport.onmessage = (message) => {
+    reaper.touch();
+    protocolOnMessage?.(message);
+  };
+  const protocolOnClose = transport.onclose?.bind(transport);
+  transport.onclose = () => {
+    reaper.stop();
+    protocolOnClose?.();
+  };
+  reaper.touch();
   // server.connect() returns once the transport is started; the process
   // stays alive because stdin is held open by the transport's reader.
   // No further work to do here — the SDK dispatches incoming RPCs.

@@ -46,6 +46,45 @@ export const FBRAIN_MCP_TOOL_NAMES = [
 // clients (Claude Code, Codex) see the same build identifier the CLI does.
 export const FBRAIN_MCP_VERSION: string = getFbrainVersion();
 
+// Default idle-reap window: exit an MCP server that has received no request for
+// 30 minutes. A host can abandon a stdio MCP server while keeping the pipe open,
+// so transport close never fires and the process lingers. Reaping an idle server
+// is transparent: the host respawns it on the next tool call. Override via
+// FBRAIN_MCP_IDLE_TIMEOUT_MS; set it <= 0 to disable.
+export const DEFAULT_MCP_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+export function mcpIdleTimeoutMs(): number {
+  const raw = process.env.FBRAIN_MCP_IDLE_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : parseInt(raw, 10);
+  return Number.isFinite(n) ? n : DEFAULT_MCP_IDLE_TIMEOUT_MS;
+}
+
+// Transport-agnostic idle reaper: touch() (re)starts the clock; if it elapses
+// without another touch, onIdle fires. Pure + injectable for unit tests without
+// real stdio transport or process.exit. Non-positive idleMs disables it.
+export function makeIdleReaper(opts: { idleMs: number; onIdle?: () => void }): {
+  enabled: boolean;
+  touch: () => void;
+  stop: () => void;
+} {
+  const onIdle = opts.onIdle ?? ((): void => process.exit(0));
+  const enabled = Number.isFinite(opts.idleMs) && opts.idleMs > 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    enabled,
+    touch() {
+      if (!enabled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(onIdle, opts.idleMs);
+      (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+    },
+    stop() {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
 // Config can be supplied two ways:
 //   - `cfg`    — an already-loaded Config (the common case; what the CLI
 //                `fbrain mcp` subcommand and the test suite pass).
