@@ -462,6 +462,38 @@ The block instructs the agent to recall before answering (`fbrain_ask`), checkpo
 
 Single-user trust at stdio — no MCP auth layer. The server inherits the CLI's `~/.fbrain/config.json` credentials (your `userHash`), so every write is attributed to you. If you put fbrain behind a remote MCP transport one day, you'll want a real auth story first.
 
+## Performance
+
+Every fbrain call funnels into one of a few fold_db access patterns, each with
+a different cost curve. The table below maps each call to its complexity,
+current as of the fold_db bench baseline captured 2026-06-29/06-30
+(`fold/fold_db/crates/core/benches/baseline/baseline.json` in the `fold`
+monorepo — the source of truth the CI regression guard compares against).
+
+| Call | Underlying access | Complexity | Measured (M4 Max) |
+|---|---|---|---|
+| `fbrain get` / `fbrain_get` (known slug) | per-key Sled read via the canonical-key secondary index | O(1) | ~35–100µs, flat from 1K to 100K+ records |
+| `fbrain list --type/--tag/--status` / `fbrain_list` (filtered) | schema-keyed secondary index scan | O(result size) | ~550µs, flat regardless of corpus size (the prior full O(corpus) scan was retired by fold #1026) |
+| `fbrain list` (no filter) | secondary-index scan whose result is the whole corpus | O(corpus) | ~1ms @1K, ~11ms @10K — linear by design, since you asked for every record |
+| `fbrain ask` / `fbrain_ask`, `fbrain search` / `fbrain_search` — unscoped (no `--type`) | ANN/HNSW traversal over the full embedding pool | O(log N) | ~4ms @120K fragments, vs ~46ms for the exact brute-force scan it replaced |
+| `fbrain ask` / `fbrain_ask`, `fbrain search` / `fbrain_search` — scoped to one or more `--type` | exact cosine scoring over the scoped subset only (HNSW is only built over the unscoped pool) | O(scoped subset size) | fast in practice since a type-scoped subset is normally a small slice of the full brain |
+| `fbrain put` / `fbrain_put` (create or update) | per-key write; only changed fields are re-serialized | O(changed fields) | tens of µs to low ms; does not grow with corpus size |
+| `fbrain delete --tag` (bulk) | filter-mode scan over a `list`-style selector | O(matches) | scales with the filtered set, not the whole brain |
+
+Headline fixes behind these numbers: keyed reads moved from O(field
+cardinality) to O(1) (fold #905), `list_atoms_by_schema` gained a secondary
+index (fold #1026), and the embedding sidecar gained an HNSW path for
+unscoped search (landed 2026-06-26) that's roughly 10x faster than the exact
+scan it replaced at 120K fragments. This table is a translation of those
+numbers into fbrain's call surface, not a re-derivation — see
+`fold/fold_db/crates/core/benches/baseline/README.md` for the bench
+methodology and the regression-guard CI job that keeps these numbers honest.
+
+**Practical guidance:**
+- Prefer a known-slug `get` over `search`/`ask` whenever you have the slug — it's the cheapest call by a wide margin and never gets slower as the brain grows.
+- `ask`/`search` stay in the single-digit-millisecond range well past 100K records, so there's no need to economize on retrieval calls — recall first, as the agent loop above recommends.
+- The one pattern that gets more expensive as a brain grows is an unfiltered `list` — scope it with `--type`/`--tag`/`--status` (or the equivalent MCP filters) unless you actually want the entire corpus back.
+
 ## Architecture
 
 `fbrain` is a thin **two-service client** that splits across local + cloud:

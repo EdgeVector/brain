@@ -52,6 +52,16 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
 
    Link a `task` to its parent `design` with `fbrain_link`. Slugs are per-type, so
    pass `type` to `fbrain_get`/`fbrain_delete` whenever a slug could be ambiguous.
+
+4. **It scales — call it liberally.** Point lookups (`fbrain_get`, a filtered
+   `fbrain_list`) are index-backed and stay flat, well under a millisecond, from
+   a thousand records to well past a hundred thousand — recalling a known slug
+   never gets slower as the brain grows. `fbrain_ask`/`fbrain_search` run over
+   an ANN-indexed vector store, around 4ms at 120K embedded fragments versus
+   around 46ms for an exhaustive scan — fast enough to call before every
+   non-trivial answer, not just the hard ones. The one call whose cost tracks
+   corpus size is an unfiltered `fbrain_list` with no type, tag, or status — it
+   returns every live record, so scope it when browsing a large brain.
 ```
 
 The fenced block above is rendered from `buildAgentInstructionsBlock()` in
