@@ -1579,10 +1579,10 @@ describe("buildPutInput", () => {
 });
 
 describe("resolvePutBody", () => {
-  // body_path is the durable fix for the large-inline-body drop: a path is a
-  // short string the transport never truncates, so a big record can always be
-  // written by staging it to a file. resolvePutBody reads it back into `body`
-  // before buildPutInput runs, keeping that serializer pure.
+  // body_path and body_b64 are the durable fixes for inline-body transport
+  // failures: both keep the risky multiline/large markdown out of the JSON
+  // string that reaches the MCP server. resolvePutBody normalizes either one
+  // into `body` before buildPutInput runs, keeping that serializer pure.
   let dir: string;
   afterEach(() => {
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -1605,16 +1605,39 @@ describe("resolvePutBody", () => {
     expect(buildPutInput(resolved)).toBe(`---\ntype: reference\n---\n${big}`);
   });
 
-  test("rejects passing both body and body_path", () => {
+  test("decodes body_b64 into a UTF-8 multiline body", () => {
+    const body = "# Title\n\nLine one\nLine two with emoji 🚀\n";
+    const body_b64 = Buffer.from(body, "utf8").toString("base64");
+    const resolved = resolvePutBody({ slug: "x", type: "reference", body_b64 });
+    expect(resolved.body).toBe(body);
+    expect("body_b64" in resolved).toBe(false);
+    expect(buildPutInput(resolved)).toBe(`---\ntype: reference\n---\n${body}`);
+  });
+
+  test("rejects passing multiple body sources", () => {
     expect(() =>
       resolvePutBody({ slug: "x", type: "concept", body: "a", body_path: "/tmp/b.md" }),
-    ).toThrow(/either `body` or `body_path`, not both/);
+    ).toThrow(/only one of `body`, `body_path`, or `body_b64`/);
+    expect(() =>
+      resolvePutBody({
+        slug: "x",
+        type: "concept",
+        body_path: "/tmp/b.md",
+        body_b64: "Yg==",
+      }),
+    ).toThrow(/only one of `body`, `body_path`, or `body_b64`/);
   });
 
   test("errors clearly when body_path is unreadable", () => {
     expect(() =>
       resolvePutBody({ slug: "x", type: "concept", body_path: "/no/such/file-xyz.md" }),
     ).toThrow(/could not read body_path/);
+  });
+
+  test("errors clearly when body_b64 is not base64", () => {
+    expect(() =>
+      resolvePutBody({ slug: "x", type: "concept", body_b64: "not base64!!!" }),
+    ).toThrow(/body_b64 is not valid standard base64/);
   });
 });
 
@@ -1645,6 +1668,30 @@ describe("fbrain_put tool", () => {
     // Post-Phase-E concept lives in its own dedicated schema; the legacy
     // `kind` discriminator is no longer written on new records.
     expect("kind" in fields).toBe(false);
+  });
+
+  test("accepts a multiline emoji body via body_b64", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const body = "# Multiline\n\nLine one\nLine two with emoji 🚀";
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_put!({
+      slug: "body-b64-test",
+      type: "concept",
+      body_b64: Buffer.from(body, "utf8").toString("base64"),
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0]!.text).toBe("created concept body-b64-test");
+    expect(mutations).toHaveLength(1);
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.body).toBe(body);
   });
 
   test("raw frontmatter passthrough wins over title/tags args", async () => {
