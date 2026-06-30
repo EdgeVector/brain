@@ -1044,8 +1044,9 @@ describe("askCmd --json", () => {
     expect(parsed.length).toBeGreaterThan(0);
     for (const entry of parsed) {
       expect(Object.keys(entry).sort()).toEqual(
-        ["score", "slug", "snippet", "title", "type"],
+        ["confidence", "score", "slug", "snippet", "title", "type"],
       );
+      expect(entry.confidence).toBe("strong");
       expect(typeof entry.slug).toBe("string");
       expect(typeof entry.score).toBe("number");
       expect(typeof entry.title).toBe("string");

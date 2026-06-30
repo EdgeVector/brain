@@ -67,7 +67,7 @@ export type SearchOptions = {
   // ERROR path. Default (undefined) keeps the human CLI output byte-identical.
   agent?: boolean;
   // Structured-result sink. When set, receives the SAME array of
-  // `{slug,score,type,title}` objects that `--json` mode serializes to
+  // `{slug,score,type,title,snippet,confidence}` objects that `--json` mode serializes to
   // stdout — one source of truth for both the JSON CLI surface and the
   // MCP `structuredContent`. Fires once per call (with `[]` on no
   // matches) regardless of the `json` flag, so the MCP handler can run
@@ -91,6 +91,10 @@ export type SearchHitJson = {
   // `fbrain get`. `""` only when the record body is empty. Built from the
   // already-hydrated record (no extra fetch).
   snippet: string;
+  // Retrieval confidence from the weak-match classifier. `weak` means the
+  // result set looks like a noise-floor fallback; callers should treat those
+  // rows as closest-known candidates, not trusted answers.
+  confidence: "strong" | "weak";
 };
 
 export type ResolvedHit = {
@@ -449,6 +453,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     // pure-vector hit) so the answer shows inline. Built unconditionally so
     // the `--json` document and the MCP `structuredContent` carry it too.
     snippet: buildSnippet(hit.record.body, opts.query),
+    confidence: weakMatch ? "weak" : "strong",
   }));
   opts.onResult?.(payload);
 

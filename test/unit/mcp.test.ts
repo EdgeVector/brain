@@ -254,7 +254,7 @@ describe("fbrain_search tool", () => {
                 field: "body",
                 key_value: { hash: "alpha", range: null },
                 value: "fragment",
-                metadata: { score: 0.42, match_type: "semantic" },
+                metadata: { score: 0.62, match_type: "semantic" },
               },
             ],
           },
@@ -272,7 +272,7 @@ describe("fbrain_search tool", () => {
     expect(res.content[0]!.type).toBe("text");
     const text = res.content[0]!.text ?? "";
     expect(text).toContain("alpha");
-    expect(text).toContain("0.420");
+    expect(text).toContain("0.620");
     expect(text).toContain("Design");
     expect(text).toContain("Alpha design");
   });
@@ -347,7 +347,7 @@ describe("fbrain_search tool", () => {
                 field: "body",
                 key_value: { hash: "alpha", range: null },
                 value: "fragment",
-                metadata: { score: 0.42, match_type: "semantic" },
+                metadata: { score: 0.62, match_type: "semantic" },
               },
             ],
           },
@@ -982,7 +982,7 @@ describe("read tools — structuredContent + outputSchema", () => {
                 field: "body",
                 key_value: { hash: "alpha", range: null },
                 value: "fragment",
-                metadata: { score: 0.42, match_type: "semantic" },
+                metadata: { score: 0.62, match_type: "semantic" },
               },
             ],
           },
@@ -998,11 +998,20 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(res.isError).toBeFalsy();
     // Structured payload is present and non-null.
     expect(res.structuredContent).toBeDefined();
-    const sc = res.structuredContent as { matches: Array<Record<string, unknown>> };
+    const sc = res.structuredContent as {
+      matches: Array<Record<string, unknown>>;
+      confident: boolean;
+    };
+    expect(sc.confident).toBe(true);
     expect(Array.isArray(sc.matches)).toBe(true);
     expect(sc.matches).toHaveLength(1);
-    expect(sc.matches[0]).toMatchObject({ slug: "alpha", type: "design", title: "Alpha design" });
-    expect(sc.matches[0]!.score).toBeCloseTo(0.42, 6);
+    expect(sc.matches[0]).toMatchObject({
+      slug: "alpha",
+      type: "design",
+      title: "Alpha design",
+      confidence: "strong",
+    });
+    expect(sc.matches[0]!.score).toBeCloseTo(0.62, 6);
     // The matching body snippet rides structuredContent so an agent reads the
     // answer inline without a follow-up fbrain_get. recordRow's body is
     // "body text"; the query shares no literal token, so the snippet is the
@@ -1021,7 +1030,45 @@ describe("read tools — structuredContent + outputSchema", () => {
     installMock(() => ({ status: 200, body: { ok: true, results: [] } }));
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_search!({ query: "nothing" });
-    expect(res.structuredContent).toEqual({ matches: [] });
+    expect(res.structuredContent).toEqual({ matches: [], confident: false });
+    const schema = outputSchemaOf(server, "fbrain_search")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("fbrain_search labels weak structured matches and sets confident false", async () => {
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "alpha", range: null },
+                value: "fragment",
+                metadata: { score: 0.24, match_type: "semantic" },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha design")] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_search!({ query: "qwxz pqrlmn vbnghj" });
+    const sc = res.structuredContent as {
+      matches: Array<{ confidence: "strong" | "weak" }>;
+      confident: boolean;
+    };
+    expect(sc.confident).toBe(false);
+    expect(sc.matches).toHaveLength(1);
+    expect(sc.matches[0]!.confidence).toBe("weak");
     const schema = outputSchemaOf(server, "fbrain_search")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
@@ -1055,9 +1102,17 @@ describe("read tools — structuredContent + outputSchema", () => {
     const res = await toolsOf(server).fbrain_ask!({ query: "alpha" });
     expect(res.isError).toBeFalsy();
     expect(res.structuredContent).toBeDefined();
-    const sc = res.structuredContent as { matches: Array<Record<string, unknown>> };
+    const sc = res.structuredContent as {
+      matches: Array<Record<string, unknown>>;
+      confident: boolean;
+    };
+    expect(sc.confident).toBe(true);
     expect(sc.matches.length).toBeGreaterThanOrEqual(1);
-    expect(sc.matches[0]).toMatchObject({ slug: "alpha", type: "design" });
+    expect(sc.matches[0]).toMatchObject({
+      slug: "alpha",
+      type: "design",
+      confidence: "strong",
+    });
     expect(typeof sc.matches[0]!.score).toBe("number");
     const schema = outputSchemaOf(server, "fbrain_ask")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
@@ -1107,13 +1162,56 @@ describe("read tools — structuredContent + outputSchema", () => {
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_ask!({ query: "TTL" });
     expect(res.isError).toBeFalsy();
-    const sc = res.structuredContent as { matches: Array<{ slug: string; snippet: string }> };
+    const sc = res.structuredContent as {
+      matches: Array<{ slug: string; snippet: string; confidence: "strong" | "weak" }>;
+      confident: boolean;
+    };
+    expect(sc.confident).toBe(true);
     const hit = sc.matches.find((m) => m.slug === "caching-decision");
     expect(hit).toBeDefined();
     expect(hit!.snippet).toContain("5-minute TTL");
+    expect(hit!.confidence).toBe("strong");
     // Leading H1 (== title) is stripped, so the snippet isn't the title echo.
     expect(hit!.snippet).not.toContain("Caching layer decision");
     // outputSchema still validates with the new field present.
+    const schema = outputSchemaOf(server, "fbrain_ask")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("fbrain_ask labels weak structured matches and sets confident false", async () => {
+    installMock((url) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: DESIGN_HASH,
+                schema_display_name: "Design",
+                field: "body",
+                key_value: { hash: "alpha", range: null },
+                value: "fragment",
+                metadata: { score: 0.24, match_type: "semantic" },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha design")] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_ask!({ query: "qwxz pqrlmn vbnghj" });
+    const sc = res.structuredContent as {
+      matches: Array<{ confidence: "strong" | "weak" }>;
+      confident: boolean;
+    };
+    expect(sc.confident).toBe(false);
+    expect(sc.matches.length).toBeGreaterThanOrEqual(1);
+    expect(sc.matches[0]!.confidence).toBe("weak");
     const schema = outputSchemaOf(server, "fbrain_ask")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
