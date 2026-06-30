@@ -17,7 +17,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
@@ -182,48 +182,12 @@ export function discoverFullSurfaceSocket(socketPath?: string): string | undefin
   return existsSync(fullSocketPath) ? fullSocketPath : undefined;
 }
 
-// Filename of fold's port breadcrumb — the running node writes its TCP listen
-// port here (`fold_db_node` drops `<home>/port`, where `<home>` is `~/.lastdb`
-// on a v0.15.1+ node, `~/.folddb` on a legacy 0.14.x node). Reading it lets
-// `fbrain init` target whatever node is actually up on this machine instead of
-// assuming the homebrew default.
-const PORT_BREADCRUMB_FILE_NAME = "port";
-
-// Derive the running node's TCP URL from fold's `<home>/port` breadcrumb.
-// Returns `http://127.0.0.1:<port>` when the file holds a valid integer port,
-// or `null` when it is missing / empty / non-numeric (caller then falls back to
-// the hardcoded default).
-//
-// CRITICAL: resolve the home via `resolveNodeHome()` — the SAME resolver
-// `defaultFolddbSocketPath` uses — so the node URL and the owner-attestation UDS
-// socket always derive from the SAME root; otherwise the two can silently
-// resolve to different nodes and the owner-session attestation fails with a
-// misleading `transport_not_attested` (the dogfood bug this fixes).
-export function defaultNodeUrlFromBreadcrumb(): string | null {
-  const home = resolveNodeHome();
-  const breadcrumbPath = join(home, PORT_BREADCRUMB_FILE_NAME);
-  if (!existsSync(breadcrumbPath)) return null;
-  let raw: string;
-  try {
-    raw = readFileSync(breadcrumbPath, "utf8");
-  } catch {
-    return null;
-  }
-  const trimmed = raw.trim();
-  // Reject empty / non-numeric / out-of-range; only a clean positive integer
-  // port (1..65535) yields a URL.
-  if (!/^\d+$/.test(trimmed)) return null;
-  const port = Number.parseInt(trimmed, 10);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
-  return `http://127.0.0.1:${port}`;
-}
-
 // Mint a one-time pairing code over the node's UDS control socket, then exchange
-// it for an owner-session token over `folddb-full.sock` when available (TCP on
-// older nodes). Returns the token, or `null` on ANY failure (no socket, mint
-// refused, exchange non-2xx, parse error) — null means "proceed unattested",
-// exactly the CLI's behavior on a default (non-isolation) build where nothing is
-// gated and the control socket is absent.
+// it for an owner-session token over `folddb-full.sock`. Returns the token, or
+// `null` on ANY failure (no socket, mint refused, exchange non-2xx, parse
+// error) — null means "proceed unattested", exactly the CLI's behavior on a
+// default (non-isolation) build where nothing is gated and the control socket
+// is absent.
 //
 // Mirrors `attest_owner_session` + `mint_pairing_code` in fold_db_node's
 // `src/bin/folddb/commands/ui.rs`. We guard on `existsSync(socketPath)` BEFORE
@@ -231,7 +195,6 @@ export function defaultNodeUrlFromBreadcrumb(): string | null {
 // that on a socketless node — and in the unit suite, where no socket exists —
 // no HTTP request is made and the caller degrades cleanly.
 export async function attestOwnerSession(
-  nodeUrl: string,
   socketPath: string,
   verbose: Verbose = noopVerbose,
 ): Promise<string | null> {
@@ -308,52 +271,29 @@ export async function attestOwnerSession(
     verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
-  // Exchange the code over the full-surface UDS when a current node exposes it;
-  // older nodes do not have `folddb-full.sock`, so they keep the TCP fallback.
+  // Exchange the code over the full-surface UDS. A socket-only node always
+  // exposes `folddb-full.sock` beside the control socket; if it's absent there
+  // is no socket to exchange over (the retired loopback TCP listener is gone),
+  // so fail soft to `null` (proceed unattested) — the same degrade-cleanly
+  // contract as a missing control socket.
   const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  const exchangeOverTcp = async (): Promise<Record<string, unknown> | null> =>
-    fetchJsonWithDeadline(
+  if (!fullSocketPath) {
+    verbose(`owner-session exchange skipped: no full-surface socket beside ${socketPath}`);
+    return null;
+  }
+  try {
+    // trace-egress: loopback (UDS full-surface socket on the local machine;
+    // pairing-code exchange, never leaves the host)
+    const body = await fetchJsonWithDeadline(
       "/api/session/browser-pair",
-      `${stripTrailingSlash(nodeUrl)}/api/session/browser-pair`,
+      "http://localhost/api/session/browser-pair",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: pairingCode }),
+        unix: fullSocketPath,
       },
     );
-  try {
-    let body: Record<string, unknown> | null;
-    if (fullSocketPath) {
-      try {
-        // trace-egress: loopback (UDS full-surface socket on the local machine;
-        // pairing-code exchange, never leaves the host)
-        body = await fetchJsonWithDeadline(
-          "/api/session/browser-pair",
-          "http://localhost/api/session/browser-pair",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ code: pairingCode }),
-            unix: fullSocketPath,
-          },
-        );
-      } catch (socketErr) {
-        if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
-          verbose(
-            `owner-session exchange full socket ${fullSocketPath} unreachable (${
-              socketErr instanceof Error ? socketErr.message : String(socketErr)
-            }) — falling back to TCP ${stripTrailingSlash(nodeUrl)}`,
-          );
-          body = await exchangeOverTcp();
-        } else {
-          throw socketErr;
-        }
-      }
-    } else {
-      // trace-egress: loopback (local daemon TCP listener; older-node fallback,
-      // never leaves the host)
-      body = await exchangeOverTcp();
-    }
     if (body === null) return null;
     const token = body.session_token;
     if (typeof token !== "string" || token.length === 0) {
@@ -935,8 +875,8 @@ export function newNodeClient(opts: {
   // pairing code (see `attestOwnerSession`). Defaults to
   // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock` (overridable via the
   // `FBRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
-  // socket is absent (a non-isolation node — the current :9001 default) mint
-  // fails fast and fbrain proceeds unattested, exactly as today.
+  // socket is absent (a non-isolation node) mint fails fast and fbrain proceeds
+  // unattested, exactly as today.
   socketPath?: string;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
@@ -949,15 +889,15 @@ export function newNodeClient(opts: {
   // Owner-session attestation (app-isolation flip, fold#739). Attest ONCE per
   // client: the first node request that needs the token resolves a shared
   // promise; subsequent requests reuse the cached token. On a node whose
-  // control socket is absent (current :9001 default) this resolves to `null`
-  // and no `X-Folddb-Session` header is ever attached — fbrain behaves exactly
+  // control socket is absent this resolves to `null` and no `X-Folddb-Session`
+  // header is ever attached — fbrain behaves exactly
   // as before. `invalidateSession()` clears the cache so a `transport_not_
   // attested` 403 (a restarted node dropped its in-memory session) triggers a
   // single re-pair on retry.
   let sessionTokenPromise: Promise<string | null> | null = null;
   const sessionToken = (): Promise<string | null> => {
     if (sessionTokenPromise === null) {
-      sessionTokenPromise = attestOwnerSession(url, socketPath, verbose);
+      sessionTokenPromise = attestOwnerSession(socketPath, verbose);
     }
     return sessionTokenPromise;
   };
@@ -1948,21 +1888,6 @@ function parseBody(text: string): unknown {
   }
 }
 
-// True when a node URL is the default homebrew daemon (`:9001` on
-// loopback). A downloaded user runs exactly this; a fold contributor
-// running `./run.sh` from source gets an auto-slotted port (9101+) or
-// passes a custom `--node-url`.
-export function isDefaultNodeUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    return (
-      (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "9001"
-    );
-  } catch {
-    return false;
-  }
-}
-
 // True when a node URL points at the local machine (loopback host). The
 // write-path vector-index confirmation (`verifyVectorIndexed`) only matters
 // for a tight local create→search on the same warm node — over a remote node
@@ -2043,9 +1968,9 @@ export function defaultIsTargetPortListening(url: string): boolean {
 //      the TARGET port — a sibling node serving a DIFFERENT port must NOT make
 //      this down port look "wedged" (which would wrongly tell the dev to stop a
 //      node that has nothing to do with the port they pointed at).
-//   2. Nothing on the target port, but a downloaded user — port `:9001` OR the
-//      prebuilt `folddb` binary on PATH — gets a combined Homebrew install+start
-//      line first (`brew install` no-ops if already installed, so the same line
+//   2. Nothing on the target port, but a downloaded user — the prebuilt
+//      `folddb` binary on PATH — gets a combined Homebrew install+start line
+//      first (`brew install` no-ops if already installed, so the same line
 //      covers both the never-installed and forgot-to-start dev).
 //   3. Nothing on the target port and no prebuilt binary — a genuine fold
 //      contributor running from source against a custom port; give the
@@ -2058,7 +1983,7 @@ export function nodeDownHint(
   if (isTargetPortListening(url)) {
     return `A node is bound to ${url} but isn't responding — it may still be starting up, or it may be wedged. Check \`brew services list\` and the node log; if it's wedged, **stop it before restarting** (a restart of a wedged node just re-hangs): \`brew services stop lastdb\` then \`brew services start lastdb\`. Contributors running from source: stop the existing \`lastdb_server\`/\`folddb_server\` process, then \`cd fold/fold_db_node && ./run.sh --local\`.`;
   }
-  if (isDefaultNodeUrl(url) || isFolddbBinaryInstalled()) {
+  if (isFolddbBinaryInstalled()) {
     return "Install + start it: `brew install edgevector/lastdb/lastdb && brew services start lastdb` (already installed? `brew services restart lastdb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
   }
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
@@ -2169,9 +2094,7 @@ function connectionError(
 ): FbrainError {
   const which = service === "node" ? "node" : "schema service";
   // Any LOCAL (loopback) node is socket-only — no TCP fallback — so an absent
-  // socket means the node isn't running, whatever the loopback port (not just
-  // the :9001 default). Broadened from isDefaultNodeUrl when the TCP fallback
-  // was removed.
+  // socket means the node isn't running, whatever the loopback port.
   if (service === "node" && ctx.socketPath && isLoopbackNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
     return new FbrainError({
       code: "service_unreachable",

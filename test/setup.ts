@@ -36,17 +36,13 @@ if (process.env.FBRAIN_FOLDDB_SOCKET === undefined) {
   process.env.FBRAIN_FOLDDB_SOCKET = "/nonexistent/fbrain-unit-suite-no-socket.sock";
 }
 
-// Keep the unit suite hermetic w.r.t. fold's port breadcrumb. `resolveUrls`
-// now derives the default node URL from `${FOLDDB_HOME ?? ~/.folddb}/port`
-// (`defaultNodeUrlFromBreadcrumb`) when no --node-url is supplied. On a dev
-// machine running the daemon that file EXISTS and may hold a non-:9001 port,
-// which would silently shift the "fresh init → DEFAULT_NODE_URL" assertions.
-// Point FOLDDB_HOME at a guaranteed-nonexistent dir so the breadcrumb read
-// returns null and the suite resolves the hardcoded default identically with
-// or without a live folddb on the machine. (The socket default is unaffected:
-// FBRAIN_FOLDDB_SOCKET above wins over FOLDDB_HOME for the socket path. Tests
-// that exercise breadcrumb resolution set FOLDDB_HOME to a real fixture dir
-// for their duration.)
+// Keep the unit suite hermetic w.r.t. the resolved node home. `resolveNodeHome`
+// probes `${LASTDB_HOME ?? FOLDDB_HOME ?? ~/.lastdb|~/.folddb}` for a live
+// socket; on a dev machine running the daemon those dirs EXIST, which would
+// shift home-derived assertions. Point FOLDDB_HOME at a guaranteed-nonexistent
+// dir so the suite resolves identically with or without a live folddb on the
+// machine. (The socket default is unaffected: FBRAIN_FOLDDB_SOCKET above wins
+// over FOLDDB_HOME for the socket path.)
 if (process.env.FOLDDB_HOME === undefined) {
   process.env.FOLDDB_HOME = "/nonexistent/fbrain-unit-suite-no-folddb-home";
 }

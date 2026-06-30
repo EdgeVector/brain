@@ -117,69 +117,25 @@ describe("resolveUrls", () => {
   });
 });
 
-describe("resolveUrls — port-breadcrumb node-URL default", () => {
-  let tmp: string;
-  let priorHome: string | undefined;
-
-  function withBreadcrumb(content: string | null): void {
-    tmp = mkdtempSync(join(tmpdir(), "fbrain-breadcrumb-"));
-    if (content !== null) writeFileSync(join(tmp, "port"), content);
-    priorHome = process.env.FOLDDB_HOME;
-    process.env.FOLDDB_HOME = tmp;
-  }
-
-  afterEach(() => {
-    if (priorHome === undefined) delete process.env.FOLDDB_HOME;
-    else process.env.FOLDDB_HOME = priorHome;
-    priorHome = undefined;
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
-  });
-
-  test("fresh init with a breadcrumb → targets the breadcrumb port, not :9001", () => {
-    withBreadcrumb("9299");
+describe("resolveUrls — node-URL default (socket-only loopback)", () => {
+  test("fresh init → DEFAULT_NODE_URL (the loopback socket marker)", () => {
     const r = resolveUrls({}, null);
-    expect(r.nodeUrl).toBe("http://127.0.0.1:9299");
-    expect(r.nodeUrlFromBreadcrumb).toBe(true);
+    expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
     expect(r.healed).toEqual([]);
   });
 
-  test("fresh init, breadcrumb absent → falls back to DEFAULT_NODE_URL", () => {
-    withBreadcrumb(null);
-    const r = resolveUrls({}, null);
-    expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
-    expect(r.nodeUrlFromBreadcrumb).toBe(false);
+  test("--node-url wins on a fresh init", () => {
+    const r = resolveUrls({ nodeUrl: "http://127.0.0.1:9050" }, null);
+    expect(r.nodeUrl).toBe("http://127.0.0.1:9050");
   });
 
-  test("breadcrumb of 9001 → resolved URL is still http://127.0.0.1:9001", () => {
-    withBreadcrumb("9001");
-    const r = resolveUrls({}, null);
-    expect(r.nodeUrl).toBe("http://127.0.0.1:9001");
-    expect(r.nodeUrlFromBreadcrumb).toBe(true);
-  });
-
-  test("--node-url overrides the breadcrumb", () => {
-    withBreadcrumb("9299");
-    const r = resolveUrls({ nodeUrl: "http://127.0.0.1:9001" }, null);
-    expect(r.nodeUrl).toBe("http://127.0.0.1:9001");
-    expect(r.nodeUrlFromBreadcrumb).toBe(false);
-  });
-
-  test("existing config URL is reused over the breadcrumb (breadcrumb only seeds a FRESH init)", () => {
-    withBreadcrumb("9299");
+  test("existing config URL is reused over the default", () => {
     const existing = buildTestCfg({
       nodeUrl: "http://192.168.1.5:9001",
       schemaServiceUrl: "https://my-custom-lambda.example.com",
     });
     const r = resolveUrls({}, existing);
     expect(r.nodeUrl).toBe("http://192.168.1.5:9001");
-    expect(r.nodeUrlFromBreadcrumb).toBe(false);
-  });
-
-  test("junk breadcrumb → falls back to DEFAULT_NODE_URL", () => {
-    withBreadcrumb("not-a-port");
-    const r = resolveUrls({}, null);
-    expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
-    expect(r.nodeUrlFromBreadcrumb).toBe(false);
   });
 });
 
@@ -673,7 +629,7 @@ describe("printNextSteps", () => {
 
 // The node-down line `probeWithRetry` prints must reuse the canonical,
 // install-aware `nodeDownHint` (client.ts) rather than init's old hand-rolled
-// `isDefaultNodeUrl` ternary. The bug that ternary shipped: a dev who
+// node-URL ternary. The bug that ternary shipped: a dev who
 // brew-installed folddb but runs a non-default-port node and forgot to start
 // it was told "first run from source… compiling Rust" — useless, since they
 // never built from source. With the canonical helper, the prebuilt binary on
@@ -730,10 +686,12 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).not.toContain("compiles Rust");
   });
 
-  test("default :9001 URL → brew/daemon-start guidance, unchanged", async () => {
+  test("default loopback URL + prebuilt binary → brew/daemon-start guidance", async () => {
     const prior = process.env.FBRAIN_FOLDDB_BIN;
-    // Even with no prebuilt binary, the default daemon is always brew-first.
-    delete process.env.FBRAIN_FOLDDB_BIN;
+    // The downloaded user (prebuilt `folddb` on PATH, signalled via
+    // FBRAIN_FOLDDB_BIN) gets brew-first guidance. The retired `:9001` port is
+    // no longer special-cased — the binary probe is the signal.
+    process.env.FBRAIN_FOLDDB_BIN = "/opt/homebrew/bin/folddb";
     const lines: string[] = [];
     try {
       await probeWithRetry(
@@ -750,7 +708,8 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     } catch (err) {
       expect((err as FbrainError).code).toBe("service_unreachable");
     } finally {
-      if (prior !== undefined) process.env.FBRAIN_FOLDDB_BIN = prior;
+      if (prior === undefined) delete process.env.FBRAIN_FOLDDB_BIN;
+      else process.env.FBRAIN_FOLDDB_BIN = prior;
     }
     const out = lines.join("\n");
     expect(out).toContain(`node not reachable at ${DEFAULT_NODE_URL}`);

@@ -191,7 +191,7 @@ grant fbrain consent against this node so the first write doesn't stall.
 Idempotent — re-running skips bootstrap and the consent prompt when a
 live capability is already on disk.
 
-  --node-url             defaults to http://127.0.0.1:9001 (homebrew fold_db_node daemon)
+  --node-url             defaults to http://127.0.0.1:9001 (local node, reached over its Unix socket)
   --schema-service-url   defaults to the prod cloud Lambda
                          (https://axo709qs11.execute-api.us-east-1.amazonaws.com)
   --name                 bootstrap display name (default: fbrain)

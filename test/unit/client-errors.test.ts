@@ -8,7 +8,6 @@ import { join } from "node:path";
 
 import {
   FbrainError,
-  isDefaultNodeUrl,
   isNodeReachableButErroring,
   mapNodeError,
   newNodeClient,
@@ -419,16 +418,13 @@ describe("client error mapping", () => {
   });
 
   // DX: a downloaded user who simply forgot to start their daemon must be
-  // told to `brew services start lastdb`, NOT to compile Rust from source.
-  test("node-down hint leads with `brew services` for the default :9001 daemon", () => {
-    expect(isDefaultNodeUrl("http://127.0.0.1:9001")).toBe(true);
-    expect(isDefaultNodeUrl("http://localhost:9001")).toBe(true);
-    // :9001 is always brew-first, regardless of whether the prebuilt binary
-    // is detected — pin the binary probe to `false` so the assertion holds
-    // even on hosts that don't have `folddb` on PATH.
+  // told to `brew services start lastdb`, NOT to compile Rust from source. The
+  // prebuilt `folddb` binary on PATH is the signal that drives this — the
+  // retired `:9001` TCP port is no longer special-cased.
+  test("node-down hint leads with `brew services` when the prebuilt binary is on PATH", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
-      () => false,
+      () => true, // prebuilt binary on PATH (the downloaded-user signal)
       () => false,
     );
     // The hint must lead with a combined, copy-pasteable install+start line so
@@ -442,8 +438,7 @@ describe("client error mapping", () => {
     expect(hint).not.toContain("compiling Rust");
   });
 
-  test("node-down hint keeps the from-source/compile framing for a non-default node URL when no prebuilt binary is installed", () => {
-    expect(isDefaultNodeUrl("http://127.0.0.1:9101")).toBe(false);
+  test("node-down hint keeps the from-source/compile framing when no prebuilt binary is installed", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9101",
       () => false,
@@ -459,7 +454,6 @@ describe("client error mapping", () => {
   // sent to `brew services start lastdb` — not asked to clone the fold
   // monorepo and compile Rust. The prebuilt binary on PATH is the signal.
   test("node-down hint leads with `brew services` for a non-9001 port when the prebuilt binary is on PATH", () => {
-    expect(isDefaultNodeUrl("http://127.0.0.1:9050")).toBe(false);
     const hint = nodeDownHint(
       "http://127.0.0.1:9050",
       () => true,

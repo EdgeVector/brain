@@ -1,13 +1,16 @@
 // Unit tests for owner-session attestation (the app-isolation flip, fold#739).
 //
 // fbrain mints a one-time pairing code over the node's UDS control socket,
-// exchanges it for a session token over the full-surface UDS when available
-// (TCP on older nodes), and presents that token as `X-Folddb-Session` on every
-// node request — mirroring the CLI's `attest_owner_session` (fold_db_node
-// `src/bin/folddb/commands/ui.rs`). These tests pin: (1) the socketless fallback
-// (no socket → null → no header → fbrain behaves exactly as today), (2) the happy
-// mint+exchange path attaches the header to a node read, and (3) a
-// `transport_not_attested` 403 re-pairs once and retries.
+// exchanges it for a session token over the full-surface UDS (`folddb-full.sock`),
+// and presents that token as `X-Folddb-Session` on every node request —
+// mirroring the CLI's `attest_owner_session` (fold_db_node
+// `src/bin/folddb/commands/ui.rs`). The node is socket-only (the retired :9001
+// TCP listener is gone), so the exchange has no TCP fallback: a node without a
+// full-surface socket simply degrades to null (proceed unattested). These tests
+// pin: (1) the socketless fallback (no socket → null → no header → fbrain
+// behaves exactly as today), (2) the happy mint+exchange path attaches the
+// header to a node read, and (3) a `transport_not_attested` 403 re-pairs once
+// and retries.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -46,11 +49,15 @@ function fakeSocket(opts: { full?: boolean } = {}): {
   fullPath: string;
   cleanup: () => void;
 } {
+  // A current node always exposes `folddb-full.sock` beside the control socket,
+  // so default to creating it — the socket-only exchange requires it (no TCP
+  // fallback). Pass `{ full: false }` to model a node missing the full socket.
+  const full = opts.full ?? true;
   const dir = mkdtempSync(join(tmpdir(), "fbrain-sock-"));
   const path = join(dir, "folddb.sock");
   const fullPath = join(dir, "folddb-full.sock");
   writeFileSync(path, "");
-  if (opts.full) writeFileSync(fullPath, "");
+  if (full) writeFileSync(fullPath, "");
   process.env.FBRAIN_FOLDDB_SOCKET = path;
   return { path, fullPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -62,10 +69,7 @@ describe("attestOwnerSession", () => {
       fetched = true;
       return new Response("{}", { status: 200 });
     }) as unknown as typeof globalThis.fetch;
-    const token = await attestOwnerSession(
-      "http://127.0.0.1:9311",
-      "/nonexistent/path/folddb.sock",
-    );
+    const token = await attestOwnerSession("/nonexistent/path/folddb.sock");
     expect(token).toBeNull();
     expect(fetched).toBe(false);
   });
@@ -85,7 +89,7 @@ describe("attestOwnerSession", () => {
         }
         return new Response("{}", { status: 500 });
       }) as unknown as typeof globalThis.fetch;
-      const token = await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+      const token = await attestOwnerSession(sock.path);
       expect(token).toBe("tok-123");
       expect(seen.some((u) => u.includes("/control/browser-pairing-code"))).toBe(true);
       expect(seen.some((u) => u.includes("/api/session/browser-pair"))).toBe(true);
@@ -109,7 +113,7 @@ describe("attestOwnerSession", () => {
         }
         return new Response("{}", { status: 500 });
       }) as unknown as typeof globalThis.fetch;
-      const token = await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+      const token = await attestOwnerSession(sock.path);
       expect(token).toBe("tok-123");
       const exchange = seen.find((entry) => entry.url.includes("/api/session/browser-pair"));
       expect(exchange?.url).toBe("http://localhost/api/session/browser-pair");
@@ -138,7 +142,7 @@ describe("attestOwnerSession", () => {
       }) as unknown as typeof globalThis.fetch;
       let err: unknown;
       try {
-        await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+        await attestOwnerSession(sock.path);
       } catch (e) {
         err = e;
       }
@@ -157,7 +161,7 @@ describe("attestOwnerSession", () => {
     const prevTimeout = process.env.FBRAIN_HTTP_TIMEOUT_MS;
     process.env.FBRAIN_HTTP_TIMEOUT_MS = "100";
     try {
-      // Mint succeeds; the TCP exchange never resolves until aborted.
+      // Mint succeeds; the socket exchange never resolves until aborted.
       globalThis.fetch = ((input: unknown, init?: RequestInit): Promise<Response> => {
         const url = typeof input === "string" ? input : String(input);
         if (url.includes("/control/browser-pairing-code")) {
@@ -176,7 +180,7 @@ describe("attestOwnerSession", () => {
       }) as unknown as typeof globalThis.fetch;
       let err: unknown;
       try {
-        await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+        await attestOwnerSession(sock.path);
       } catch (e) {
         err = e;
       }
@@ -198,10 +202,7 @@ describe("attestOwnerSession", () => {
         fetched = true;
         return new Promise<Response>(() => {});
       }) as unknown as typeof globalThis.fetch;
-      const token = await attestOwnerSession(
-        "http://127.0.0.1:9311",
-        "/nonexistent/path/folddb.sock",
-      );
+      const token = await attestOwnerSession("/nonexistent/path/folddb.sock");
       expect(token).toBeNull();
       expect(fetched).toBe(false);
     } finally {
@@ -219,7 +220,29 @@ describe("attestOwnerSession", () => {
         if (url.includes("/api/session/browser-pair")) exchangeCalled = true;
         return new Response("{}", { status: 403 });
       }) as unknown as typeof globalThis.fetch;
-      const token = await attestOwnerSession("http://127.0.0.1:9311", sock.path);
+      const token = await attestOwnerSession(sock.path);
+      expect(token).toBeNull();
+      expect(exchangeCalled).toBe(false);
+    } finally {
+      sock.cleanup();
+    }
+  });
+
+  test("control socket present but no folddb-full.sock → null, no exchange (socket-only: no TCP fallback)", async () => {
+    const sock = fakeSocket({ full: false });
+    try {
+      let exchangeCalled = false;
+      globalThis.fetch = (async (input: unknown): Promise<Response> => {
+        const url = typeof input === "string" ? input : String(input);
+        if (url.includes("/control/browser-pairing-code")) {
+          return new Response(JSON.stringify({ pairing_code: "code-xyz" }), { status: 200 });
+        }
+        if (url.includes("/api/session/browser-pair")) exchangeCalled = true;
+        return new Response("{}", { status: 200 });
+      }) as unknown as typeof globalThis.fetch;
+      const token = await attestOwnerSession(sock.path);
+      // Mint succeeds, but there is no full-surface socket to exchange over and
+      // the retired loopback TCP listener is gone, so fbrain proceeds unattested.
       expect(token).toBeNull();
       expect(exchangeCalled).toBe(false);
     } finally {
