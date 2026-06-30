@@ -8,7 +8,7 @@
 //   2. `claude mcp add fbrain fbrain-mcp`    (registers the MCP server)
 //   3. `fbrain mcp instructions >> CLAUDE.md`(tells the agent to USE it)
 //
-// `fbrain mcp install` collapses 2 + 3 (and verifies 1) into one shot:
+// `fbrain mcp install` collapses 2 + 3 + 4 (and verifies 1) into one shot:
 //   1. Resolve the `fbrain-mcp` entrypoint on PATH (reusing doctor's
 //      `mcp-entrypoint` resolver). If absent, print the exact `bun link` fix
 //      and exit non-zero — we do NOT run `bun link` for the user (it depends on
@@ -21,16 +21,26 @@
 //   3. Append the `fbrain mcp instructions` block to ./CLAUDE.md (configurable
 //      via `--claude-md <path>`), idempotently — skip if the block is already
 //      present (stable marker: the `## fbrain (persistent memory)` heading).
+//   4. Add a Claude Code SessionStart hook to ./.claude/settings.json
+//      (configurable via `--claude-settings <path>`), idempotently, so
+//      strong-confidence fbrain matches are injected proactively at session
+//      start.
 //
 // Gating mirrors `fbrain init --grant-consent` exactly: the side effects (the
-// `claude mcp add` shell-out + the CLAUDE.md append) are prompted unless `--yes`
-// is passed; the flag IS the explicit approval. A final pointer to
+// `claude mcp add` shell-out + the CLAUDE.md/settings writes) are prompted
+// unless `--yes` is passed; the flag IS the explicit approval. A final pointer to
 // `fbrain doctor --mcp` proves the agent surface boots.
 
 import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import { buildAgentInstructionsBlock } from "../schemas.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -39,6 +49,7 @@ import { resolvePrintSink } from "../format.ts";
 // buildAgentInstructionsBlock(). If it's already in the target file we skip the
 // append so re-running `mcp install` never duplicates the block.
 export const INSTRUCTIONS_MARKER = "## fbrain (persistent memory)";
+export const SESSION_START_HOOK_COMMAND = "fbrain hook session-start";
 
 const CLAUDE_BIN = "claude";
 const MCP_ENTRYPOINT = "fbrain-mcp";
@@ -56,6 +67,9 @@ export type McpInstallOptions = {
   // The CLAUDE.md to append the instructions block to. Defaults to ./CLAUDE.md
   // (relative to the cwd the user ran the command in).
   claudeMd?: string;
+  // Claude Code settings file to update with the SessionStart hook. Defaults
+  // to ./.claude/settings.json beside the CLAUDE.md project instructions.
+  claudeSettings?: string;
   // Skip the [Y/n] confirmation — the flag IS the explicit approval (mirrors
   // `init --grant-consent`). Without it we prompt before any side effect.
   yes?: boolean;
@@ -113,12 +127,12 @@ export async function runMcpInstall(
   if (!opts.yes) {
     const isTty = (opts.isTty ?? defaultIsTty)();
     if (!isTty) {
-      print(`[mcp install] non-interactive shell — re-run with \`--yes\` to register \`${MCP_SERVER_NAME}\` with Claude Code and append the instructions block to ${claudeMdPath}.`);
+      print(`[mcp install] non-interactive shell — re-run with \`--yes\` to register \`${MCP_SERVER_NAME}\` with Claude Code, append the instructions block to ${claudeMdPath}, and install the SessionStart hook.`);
       return { code: 0, cancelled: true };
     }
     const ask = opts.ask ?? defaultAsk;
     const answer = await ask(
-      `Register \`${MCP_SERVER_NAME}\` with Claude Code and append the agent-instructions block to ${claudeMdPath}? [Y/n] `,
+      `Register \`${MCP_SERVER_NAME}\` with Claude Code, append the agent-instructions block to ${claudeMdPath}, and install the SessionStart hook? [Y/n] `,
     );
     if (!isAffirmative(answer)) {
       print(`[mcp install] cancelled — no changes made.`);
@@ -131,6 +145,13 @@ export async function runMcpInstall(
 
   // Step 3: append the instructions block to CLAUDE.md (idempotent).
   appendInstructions(claudeMdPath, print);
+  appendSessionStartHook(
+    resolve(
+      opts.claudeSettings ??
+        join(dirname(claudeMdPath), ".claude", "settings.json"),
+    ),
+    print,
+  );
 
   // Done — point at the boot probe that proves the agent surface actually works.
   print(``);
@@ -195,6 +216,55 @@ function appendInstructions(
   // precedes it (and is harmless prepended to a fresh file).
   appendFileSync(claudeMdPath, `\n${buildAgentInstructionsBlock()}\n`);
   print(`[mcp install] appended the agent-instructions block to ${claudeMdPath}.`);
+}
+
+export function appendSessionStartHook(
+  claudeSettingsPath: string,
+  print: (line: string) => void,
+): void {
+  const settings = readJsonObject(claudeSettingsPath);
+  const hooks = objectValue(settings.hooks) ?? {};
+  settings.hooks = hooks;
+  const sessionStart = Array.isArray(hooks.SessionStart)
+    ? hooks.SessionStart
+    : [];
+  hooks.SessionStart = sessionStart;
+
+  if (hasHookCommand(sessionStart, SESSION_START_HOOK_COMMAND)) {
+    print(`[mcp install] SessionStart hook already in ${claudeSettingsPath} — skipping.`);
+    return;
+  }
+
+  sessionStart.push({
+    matcher: "startup",
+    hooks: [{ type: "command", command: SESSION_START_HOOK_COMMAND }],
+  });
+  mkdirSync(dirname(claudeSettingsPath), { recursive: true });
+  writeFileSync(claudeSettingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+  print(`[mcp install] added SessionStart hook to ${claudeSettingsPath}.`);
+}
+
+function readJsonObject(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  return objectValue(parsed) ?? {};
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function hasHookCommand(entries: unknown[], command: string): boolean {
+  for (const entry of entries) {
+    const hooks = objectValue(entry)?.hooks;
+    if (!Array.isArray(hooks)) continue;
+    for (const hook of hooks) {
+      if (objectValue(hook)?.command === command) return true;
+    }
+  }
+  return false;
 }
 
 // `claude mcp add <name>` rejects a name that's already registered. The exact

@@ -119,6 +119,7 @@ export const COMMANDS = [
   "reindex",
   "migrate",
   "mcp",
+  "hook",
   "help",
 ] as const;
 export type Command = (typeof COMMANDS)[number];
@@ -158,6 +159,7 @@ ${RECORD_NEW_HELP_LINES}
   mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
+  hook session-start  Claude Code SessionStart hook: inject strong-confidence fbrain context
   help <cmd>     per-command usage
 
 Global flags:
@@ -593,10 +595,12 @@ fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
   a single command. It (1) verifies the \`fbrain-mcp\` entrypoint is on PATH,
   (2) registers the MCP server with Claude Code (\`claude mcp add fbrain
   fbrain-mcp\`; prints the command if \`claude\` isn't on PATH), and (3) appends
-  the agent-instructions block to ./CLAUDE.md. Re-running it is a safe no-op
-  (idempotent — won't double-register or duplicate the block).
+  the agent-instructions block to ./CLAUDE.md, and (4) installs the Claude Code
+  SessionStart hook into ./.claude/settings.json. Re-running it is a safe no-op
+  (idempotent — won't double-register or duplicate the block/hook).
   --yes        skip the [Y/n] confirmation before the side effects
   --claude-md  append the instructions block to PATH instead of ./CLAUDE.md
+  --claude-settings  add the SessionStart hook to PATH instead of ./.claude/settings.json
   If \`fbrain-mcp\` isn't on PATH yet, it exits non-zero and tells you to
   (re)install fbrain (\`bun add -g github:EdgeVector/fbrain\`, or \`bun link\`
   from a contributor checkout) first. Verify the result with \`fbrain doctor --mcp\`.
@@ -633,6 +637,16 @@ the path-based form from the repo root:
 
 The server reads ~/.fbrain/config.json (same as the CLI). Exits non-zero
 if config is missing — run \`fbrain init\` first.`,
+  hook: `fbrain hook session-start
+
+Claude Code SessionStart hook entrypoint. Reads the hook JSON event from stdin,
+runs \`fbrain ask\` against the opening session context (cwd/repo plus any
+prompt/transcript text present in the event), and emits Claude's
+\`hookSpecificOutput.additionalContext\` JSON only when the matches are
+strong-confidence. Weak/no matches and hook-time errors are quiet no-ops so a
+missing or unavailable brain never blocks session startup.
+
+This command is installed by \`fbrain mcp install\` into ./.claude/settings.json.`,
   help: `fbrain help <command>`,
 };
 
@@ -814,6 +828,8 @@ const MCP_OPTIONS = {
   yes: { type: "boolean", default: false },
   // Target CLAUDE.md for the appended agent-instructions block (default ./CLAUDE.md).
   "claude-md": { type: "string" },
+  // Target Claude settings file for the SessionStart hook (default ./.claude/settings.json).
+  "claude-settings": { type: "string" },
 } as const;
 
 export const CLI_SPEC = {
@@ -844,6 +860,7 @@ export const CLI_SPEC = {
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
   mcp: MCP_OPTIONS,
+  hook: EMPTY_OPTIONS,
   help: EMPTY_OPTIONS,
 } as const satisfies Record<Command, Record<string, unknown>>;
 
@@ -1334,6 +1351,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runMigrate(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
+    case "hook":
+      return runHookCmd(args);
     case "help": {
       const target = args[0];
       if (!target) {
@@ -2365,6 +2384,9 @@ export async function runMcpCmd(args: Argv): Promise<number> {
     const { runMcpInstall } = await import("./commands/mcp-install.ts");
     const installOpts: Parameters<typeof runMcpInstall>[0] = { yes: values.yes };
     if (values["claude-md"] !== undefined) installOpts.claudeMd = values["claude-md"];
+    if (values["claude-settings"] !== undefined) {
+      installOpts.claudeSettings = values["claude-settings"];
+    }
     const result = await runMcpInstall(installOpts);
     return result.code;
   }
@@ -2432,6 +2454,32 @@ export async function runMcpCmd(args: Argv): Promise<number> {
   // Block here so the server stays up serving RPCs.
   await new Promise<void>(() => {});
   return 0; // unreachable
+}
+
+async function runHookCmd(args: Argv): Promise<number> {
+  const { positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: EMPTY_OPTIONS,
+    },
+    "hook",
+  );
+  if (positionals.length !== 1 || positionals[0] !== "session-start") {
+    console.error(COMMAND_HELP.hook);
+    return USAGE_ERROR;
+  }
+  let cfg;
+  try {
+    cfg = readConfig();
+  } catch {
+    return 0;
+  }
+  const { readStdin, runSessionStartHook } = await import(
+    "./commands/session-start-hook.ts"
+  );
+  return runSessionStartHook({ cfg, input: await readStdin() });
 }
 
 async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
