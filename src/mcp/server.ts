@@ -22,9 +22,14 @@ import { listCmd, type RecordSummary } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
-import { FbrainError, stripDoctorTip } from "../client.ts";
+import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES } from "../schemas.ts";
 import { establishConsentInline } from "../commands/init-consent.ts";
+import {
+  isTombstoned,
+  listRecords,
+  schemaHashFor,
+} from "../record.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
 // The complete agent-integration surface this server exposes — 4 read tools
@@ -148,6 +153,15 @@ export const DROPPED_INPUT_HINT =
   "`body_path` (a short path survives where a large inline `body` is " +
   "dropped), or via the CLI `fbrain put <slug> --type <type> < body.md`, or " +
   "split the write into smaller records.";
+
+export const ASK_QUERY_REQUIRED_HINT =
+  "fbrain_ask requires a non-empty `query` string. Example: " +
+  '`fbrain_ask({"query":"deployment rollback decision","limit":5})`.';
+
+export const GET_SLUG_REQUIRED_HINT =
+  "fbrain_get requires a non-empty `slug` string. Example: " +
+  '`fbrain_get({"slug":"deployment-rollback-decision","type":"concept"})`. ' +
+  "For fuzzy/text lookup, call fbrain_ask first.";
 
 // Default char cap on the body a single `fbrain_get` returns. A record body
 // counts toward the agent harness's tool-result token budget twice over (the
@@ -458,6 +472,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       })
       .min(1)
       .describe(description);
+  const actionableRequiredText = (description: string, message: string) =>
+    z
+      .string({
+        error: () => message,
+      })
+      .trim()
+      .min(1, { error: message })
+      .describe(description);
 
   server.registerTool(
     "fbrain_search",
@@ -532,7 +554,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       description:
         "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns a best-first ranked list, one line per match: `rank · slug · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` (already ordered best-first) — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. The `score` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to `fbrain_search`'s cosine; read rank order, never magnitude, and never apply an absolute threshold (a ~0.016 top hit is the best match, not junk). Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
       inputSchema: {
-        query: requiredText("Search query."),
+        query: actionableRequiredText("Search query.", ASK_QUERY_REQUIRED_HINT),
         type: typeEnum
           .array()
           .optional()
@@ -607,7 +629,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "until `bodyNextOffset` is null). `body_limit` overrides the per-call cap. " +
         "A record that fits in one window returns unchanged (no window fields).",
       inputSchema: {
-        slug: requiredText("Record slug."),
+        slug: actionableRequiredText("Record slug.", GET_SLUG_REQUIRED_HINT),
         type: typeEnum
           .optional()
           .describe(
@@ -782,9 +804,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "frontmatter directly).",
           ),
         tags: z
-          .array(z.string())
+          .preprocess((v) => normalizeTagsArg(v), z.array(z.string()))
           .optional()
-          .describe("Tag list. Replaces existing tags on update."),
+          .describe(
+            "Tag list. Replaces existing tags on update. A string is accepted as one tag, or split on commas.",
+          ),
         frontmatter: z
           .string()
           .optional()
@@ -938,7 +962,7 @@ type PutArgs = {
   title?: string;
   body?: string;
   status?: string;
-  tags?: string[];
+  tags?: string[] | string;
   frontmatter?: string;
 };
 
@@ -1030,8 +1054,9 @@ export function buildPutInput(args: PutArgs): string {
   if (args.title !== undefined && args.title.length > 0) {
     lines.push(`title: ${yamlScalar(args.title)}`);
   }
-  if (args.tags !== undefined) {
-    const items = args.tags.map((t) => yamlScalar(t)).join(", ");
+  const tags = normalizeTagsArg(args.tags);
+  if (tags !== undefined) {
+    const items = tags.map((t) => yamlScalar(t)).join(", ");
     lines.push(`tags: [${items}]`);
   }
   // Status rides into the same frontmatter so putCmd's pre-flight
@@ -1048,6 +1073,18 @@ export function buildPutInput(args: PutArgs): string {
     lines.push(`status: ${yamlScalar(args.status)}`);
   }
   return `---\n${lines.join("\n")}\n---\n${body}`;
+}
+
+export function normalizeTagsArg(tags: unknown): string[] | undefined {
+  if (tags === undefined) return undefined;
+  if (typeof tags === "string") {
+    return tags
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+  if (Array.isArray(tags)) return tags;
+  return tags as string[];
 }
 
 function yamlScalar(value: string): string {
@@ -1180,7 +1217,7 @@ async function runGetTool(
   } catch (err) {
     // Unknown/ambiguous slug throws before onResult: same error envelope as
     // any read tool, no structuredContent — unchanged from the old path.
-    return errorResult(err);
+    return errorResult(await enrichGetNotFoundError(cfg, err, args));
   }
   // Defensive: a successful resolve always fires onResult, but if it somehow
   // didn't, fall back to the error envelope rather than emitting a partial.
@@ -1216,6 +1253,90 @@ async function runGetTool(
   const result = textResult(text);
   result.structuredContent = structured;
   return result;
+}
+
+async function enrichGetNotFoundError(
+  cfg: Config,
+  err: unknown,
+  args: { slug: string; type?: RecordJson["type"] },
+): Promise<unknown> {
+  if (!(err instanceof FbrainError) || err.code !== "not_found") return err;
+  const candidates = await nearestSlugCandidates(cfg, args.slug, args.type);
+  if (candidates.length === 0) return err;
+  const rendered = candidates
+    .map((c) => (args.type ? c.slug : `${c.slug} (${c.type})`))
+    .join(", ");
+  const suffix = `Nearest candidate slugs: ${rendered}.`;
+  return new FbrainError({
+    code: err.code,
+    message: err.message,
+    hint: err.hint ? `${err.hint} ${suffix}` : suffix,
+    agentHint: err.agentHint ? `${suffix} ${err.agentHint}` : suffix,
+  });
+}
+
+async function nearestSlugCandidates(
+  cfg: Config,
+  slug: string,
+  type?: RecordJson["type"],
+): Promise<Array<{ slug: string; type: RecordJson["type"] }>> {
+  const node = newReadClientFromCfg(cfg);
+  const types = type ? [type] : RECORD_TYPES;
+  const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
+  for (const t of types) {
+    try {
+      const records = await listRecords(node, t, schemaHashFor(t, cfg));
+      for (const record of records) {
+        if (isTombstoned(record)) continue;
+        candidates.push({
+          slug: record.slug,
+          type: t,
+          score: slugFuzzyScore(slug, record.slug),
+        });
+      }
+    } catch {
+      // Best-effort error hint only; preserve the original not_found error.
+    }
+  }
+  return candidates
+    .sort((a, b) => a.score - b.score || a.slug.localeCompare(b.slug) || a.type.localeCompare(b.type))
+    .slice(0, 3)
+    .map(({ slug: s, type: t }) => ({ slug: s, type: t }));
+}
+
+function slugFuzzyScore(query: string, candidate: string): number {
+  const q = query.trim().toLowerCase();
+  const c = candidate.trim().toLowerCase();
+  if (q.length === 0 || c.length === 0) return Number.POSITIVE_INFINITY;
+  const distance = levenshtein(q, c) / Math.max(q.length, c.length);
+  const prefix = commonPrefixLength(q, c);
+  const prefixBonus = Math.min(prefix, 8) * 0.025;
+  const substringBonus = q.includes(c) || c.includes(q) ? 0.15 : 0;
+  return distance - prefixBonus - substringBonus;
+}
+
+function commonPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  return i;
+}
+
+function levenshtein(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  const curr = Array<number>(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        curr[j - 1]! + 1,
+        prev[j]! + 1,
+        prev[j - 1]! + cost,
+      );
+    }
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j]!;
+  }
+  return prev[b.length]!;
 }
 
 // Write-tool runner: alongside the human text block, capture
