@@ -392,7 +392,7 @@ function hit(opts: {
 }
 
 describe("searchCmd --json", () => {
-  test("emits a JSON array of {slug, score, type, title, snippet} hits", async () => {
+  test("emits a JSON array of {slug, score, type, title, snippet, confidence} hits", async () => {
     const recordRow = {
       fields: {
         slug: "alpha",
@@ -456,6 +456,7 @@ describe("searchCmd --json", () => {
         // Body "blueberry octopus" with query "blueberry" → the snippet is the
         // (short) whole body, surfacing the answer inline in the JSON document.
         snippet: "blueberry octopus",
+        confidence: "strong",
       },
     ]);
     // 0.6 clears the STRONG_SCORE ceiling — a real hit, so no weak-match

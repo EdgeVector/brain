@@ -124,7 +124,7 @@ export type AskOptions = {
   // Default (undefined) keeps the human CLI output byte-identical.
   agent?: boolean;
   // Structured-result sink. When set, receives the SAME array of
-  // `{slug,score,type,title}` objects that `--json` mode serializes to
+  // `{slug,score,type,title,snippet,confidence}` objects that `--json` mode serializes to
   // stdout — one source of truth for both the JSON CLI surface and the
   // MCP `structuredContent`. Fires once per call (with `[]` on no
   // matches) regardless of the `json` flag, so the MCP handler can run
@@ -466,32 +466,6 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       explainSink("");
     }
   }
-  // {slug, score, type, title} per hit — type is the canonical lowercase
-  // RecordType (not the capitalized human display name) so consumers can
-  // match against `--type` values verbatim. Same shape as
-  // `fbrain search --json`. Empty result is `[]` rather than the human
-  // "no matches" sentinel.
-  //
-  // Score rounded to 6 decimals to match search --json's discipline and
-  // strip RRF's float noise — output-only; sort/rank ran on full precision.
-  //
-  // Built unconditionally (not just under --json) so the `onResult`
-  // structured sink and the `--json` stdout document are the SAME value
-  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
-  const payload: SearchHitJson[] = resolved.map((h) => ({
-    slug: h.slug,
-    score: Math.round(h.fusedScore * 1e6) / 1e6,
-    type: h.type,
-    title: h.record.title,
-    // Deterministic body extract from the already-hydrated record — no extra
-    // fetch. Centered on the first matching query term (or the body head when
-    // a hit came purely from the vector ranker with no literal overlap) so the
-    // answer shows inline. Built unconditionally so `--json` and the MCP
-    // `structuredContent` carry the same snippet the human render shows.
-    snippet: buildSnippet(h.record.body, opts.query),
-  }));
-  opts.onResult?.(payload);
-
   // Weak-match advisory. `ask` is the RECOMMENDED retrieval primitive, yet
   // until now it was the one that silently handed a no-match query five
   // confident-looking rows with no signal they're junk — while the secondary
@@ -548,6 +522,33 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   // Same copy as search's `weakMatchNote`, minus the "Try `fbrain ask`" tail
   // (the user is already in ask — pointing them back at it is a dead end).
   const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms.`;
+
+  // {slug, score, type, title} per hit — type is the canonical lowercase
+  // RecordType (not the capitalized human display name) so consumers can
+  // match against `--type` values verbatim. Same shape as
+  // `fbrain search --json`. Empty result is `[]` rather than the human
+  // "no matches" sentinel.
+  //
+  // Score rounded to 6 decimals to match search --json's discipline and
+  // strip RRF's float noise — output-only; sort/rank ran on full precision.
+  //
+  // Built unconditionally (not just under --json) so the `onResult`
+  // structured sink and the `--json` stdout document are the SAME value
+  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
+  const payload: SearchHitJson[] = resolved.map((h) => ({
+    slug: h.slug,
+    score: Math.round(h.fusedScore * 1e6) / 1e6,
+    type: h.type,
+    title: h.record.title,
+    // Deterministic body extract from the already-hydrated record — no extra
+    // fetch. Centered on the first matching query term (or the body head when
+    // a hit came purely from the vector ranker with no literal overlap) so the
+    // answer shows inline. Built unconditionally so `--json` and the MCP
+    // `structuredContent` carry the same snippet the human render shows.
+    snippet: buildSnippet(h.record.body, opts.query),
+    confidence: weakMatch ? "weak" : "strong",
+  }));
+  opts.onResult?.(payload);
 
   if (resolved.length === 0) {
     // Context-aware no-match hint, mirroring `fbrain search` (#276). `ask` is a

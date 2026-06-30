@@ -209,7 +209,7 @@ export function bodyWindow(
 // (`matches` / `records`) rather than returning a bare array; `get` returns
 // the single record object directly.
 
-// One search/ask match: `{slug, score, type, title, snippet}` (mirrors
+// One search/ask match: `{slug, score, type, title, snippet, confidence}` (mirrors
 // SearchHitJson). `type` is the canonical lowercase RecordType so a client
 // can match it against the input `type` filter verbatim; `score` is the
 // 6-decimal-rounded relevance — a 0–1 cosine for search, but a SMALL fused
@@ -218,7 +218,9 @@ export function bodyWindow(
 // — and is `null` only when the node reported no score for a search hit.
 // `snippet` is a short deterministic body extract (a window around the first
 // matching query term, or the body head for a pure-vector hit) so an agent
-// can read the answer inline without a follow-up `fbrain_get`.
+// can read the answer inline without a follow-up `fbrain_get`. `confidence`
+// labels the existing weak-match classifier: weak rows are additive closest
+// candidates, not trusted answers.
 const matchSchema = z.object({
   slug: z.string().describe("Record slug."),
   score: z
@@ -234,7 +236,15 @@ const matchSchema = z.object({
     .describe(
       "Short body extract (~120 chars) around the first matching query term — or the body head for a pure-vector hit — so the answer is visible inline without a follow-up fbrain_get. Empty only when the record body is empty.",
     ),
+  confidence: z
+    .enum(["strong", "weak"])
+    .describe(
+      "Retrieval confidence label. `weak` means the whole result set looks like a noise-floor fallback; treat rows as closest-known candidates, not trusted answers.",
+    ),
 });
+
+const confidenceFromMatches = (matches: readonly SearchHitJson[]): boolean =>
+  matches.length > 0 && matches.every((m) => m.confidence === "strong");
 
 // One `fbrain_list` row — the compact summary the CLI `list --json` emits
 // (body intentionally omitted; use `fbrain_get` for the full record).
@@ -486,7 +496,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Search fbrain",
       description:
-        "Pure-vector semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes, sops). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer `fbrain_ask`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to `fbrain_ask` when this returns weak or missing matches.",
+        "Pure-vector semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes, sops). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet, confidence}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. `structuredContent.confident` is false when the result set looks like the noise floor; if `confident:false`, treat it as not-found and do not trust the rows. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer `fbrain_ask`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to `fbrain_ask` when this returns weak or missing matches.",
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -511,13 +521,18 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe("Server-side score floor (?min_score=F)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
-      // `structuredContent` is `{ matches: [{slug,score,type,title}, …] }` —
+      // `structuredContent` is `{ matches: [{slug,score,type,title,...}, …], confident }` —
       // the SAME array the CLI `--json` emits, wrapped under `matches`
       // because MCP requires structuredContent to be an object.
       outputSchema: {
         matches: z
           .array(matchSchema)
           .describe("Matches, highest score first (empty array on no matches)."),
+        confident: z
+          .boolean()
+          .describe(
+            "False when no strong match was found; treat `matches` as not-found/closest candidates rather than trusted answers.",
+          ),
       },
     },
     (args) =>
@@ -543,7 +558,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             // the no-MCP-tool `fbrain reindex` / repo doc-path dead-end.
             agent: true,
           }),
-        (matches) => ({ matches }),
+        (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
       ),
   );
 
@@ -552,7 +567,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Ask fbrain (hybrid retrieval)",
       description:
-        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns a best-first ranked list, one line per match: `rank · slug · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet}` (already ordered best-first) — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. The `score` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to `fbrain_search`'s cosine; read rank order, never magnitude, and never apply an absolute threshold (a ~0.016 top hit is the best match, not junk). Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
+        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns a best-first ranked list, one line per match: `rank · slug · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet, confidence}` (already ordered best-first) — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. `structuredContent.confident` is false when the whole result set looks like the noise floor; if `confident:false`, treat it as not-found and do not trust the rows. The `score` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to `fbrain_search`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
       inputSchema: {
         query: actionableRequiredText("Search query.", ASK_QUERY_REQUIRED_HINT),
         type: typeEnum
@@ -569,7 +584,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe("Max results (default 5)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
-      // `structuredContent` is `{ matches: [{slug,score,type,title}, …] }` —
+      // `structuredContent` is `{ matches: [{slug,score,type,title,...}, …], confident }` —
       // identical shape to `fbrain_search`; `score` here is the fused RRF
       // score (always non-null for ask hits) — small by construction (a top
       // hit is ~0.02–0.03), so rank, never magnitude, is the signal.
@@ -578,6 +593,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .array(matchSchema)
           .describe(
             "Fused (BM25 + vector) matches, highest score first (empty on no matches). Scores are small by construction (a top hit is ~0.02–0.03) and are NOT comparable to fbrain_search's 0–1 cosine — read rank order, not magnitude.",
+          ),
+        confident: z
+          .boolean()
+          .describe(
+            "False when no strong match was found; treat `matches` as not-found/closest candidates rather than trusted answers.",
           ),
       },
     },
@@ -606,7 +626,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             // follow-up can add an optional `expand` param if wanted.
           });
         },
-        (matches) => ({ matches }),
+        (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
       ),
   );
 
