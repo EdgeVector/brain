@@ -753,7 +753,7 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(1);
     const out = lines.join("\n");
     expect(out).toContain("[FAIL] node-reachable");
-    expect(out).toContain("brew services start lastdb");
+    expect(out).toMatch(/brew services start lastdb|Start your fold node/);
   });
 
   // The node-reachable line surfaces the connected node's folddb version

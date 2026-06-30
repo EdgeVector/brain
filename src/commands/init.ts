@@ -19,7 +19,7 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultNodeUrlFromBreadcrumb, resolveNodeHome, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, type Verbose } from "../client.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -67,9 +67,11 @@ export type InitOptions = {
   >;
 };
 
-// New default targets — `:9001` is the homebrew `fold_db_node` daemon;
-// the schema service moved off `:9102` to the prod cloud Lambda. The dev
-// Lambda is reserved for the test harness so iteration doesn't pollute prod.
+// New default targets — the loopback node URL is the canonical local-node
+// marker (fbrain reaches a loopback node ONLY over its Unix socket; the `:9001`
+// TCP listener is retired). The schema service moved off `:9102` to the prod
+// cloud Lambda. The dev Lambda is reserved for the test harness so iteration
+// doesn't pollute prod.
 export const DEFAULT_NODE_URL = "http://127.0.0.1:9001";
 export const DEFAULT_SCHEMA_SERVICE_URL =
   "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
@@ -197,12 +199,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const schemaServiceUrl = resolved.schemaServiceUrl;
   // Always echo which node we're targeting and where the URL came from — a dev
   // re-running `init` to confirm "which node am I actually pointed at?" needs
-  // the answer on every run, not only on the first (breadcrumb) run.
+  // the answer on every run.
   let nodeUrlSource: string;
   if (opts.nodeUrl) {
     nodeUrlSource = "from --node-url";
-  } else if (resolved.nodeUrlFromBreadcrumb) {
-    nodeUrlSource = `from ${resolveNodeHome()}/port`;
   } else if (existing) {
     nodeUrlSource = `from ${configPath}`;
   } else {
@@ -601,10 +601,6 @@ type ResolvedUrls = {
   // Empty when no heal happened (fresh init, or existing URLs are already
   // current / are user overrides).
   healed: string[];
-  // True when `nodeUrl` was derived from fold's `${FOLDDB_HOME ?? ~/.folddb}/port`
-  // breadcrumb (no explicit --node-url, no existing config URL to reuse). Lets
-  // the caller surface which node it auto-targeted.
-  nodeUrlFromBreadcrumb: boolean;
 };
 
 export function resolveUrls(
@@ -614,22 +610,14 @@ export function resolveUrls(
   const healed: string[] = [];
 
   // When no explicit --node-url is given and there's no existing config URL to
-  // reuse, target whatever node is actually running on this machine by reading
-  // fold's `${FOLDDB_HOME ?? ~/.folddb}/port` breadcrumb (same home-resolution
-  // root as the owner-attestation UDS socket — they MUST agree). Fall back to
-  // the hardcoded `:9001` homebrew default only when the breadcrumb is absent.
+  // reuse, default to the loopback node URL. fbrain reaches a loopback node
+  // ONLY over its Unix socket (the retired :9001 TCP listener is gone); the URL
+  // is just the loopback marker that selects socket transport.
   let nodeUrl: string;
-  let nodeUrlFromBreadcrumb = false;
   if (opts.nodeUrl) {
     nodeUrl = opts.nodeUrl;
   } else if (!existing) {
-    const fromBreadcrumb = defaultNodeUrlFromBreadcrumb();
-    if (fromBreadcrumb) {
-      nodeUrl = fromBreadcrumb;
-      nodeUrlFromBreadcrumb = true;
-    } else {
-      nodeUrl = DEFAULT_NODE_URL;
-    }
+    nodeUrl = DEFAULT_NODE_URL;
   } else if (STALE_NODE_URLS.has(existing.nodeUrl)) {
     nodeUrl = DEFAULT_NODE_URL;
     healed.push(`nodeUrl ${existing.nodeUrl} → ${DEFAULT_NODE_URL}`);
@@ -649,7 +637,7 @@ export function resolveUrls(
     schemaServiceUrl = existing.schemaServiceUrl;
   }
 
-  return { nodeUrl, schemaServiceUrl, healed, nodeUrlFromBreadcrumb };
+  return { nodeUrl, schemaServiceUrl, healed };
 }
 
 function isUnreachable(err: unknown): boolean {
