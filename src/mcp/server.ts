@@ -11,6 +11,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
+import { TextDecoder } from "node:util";
 
 import { getFbrainVersion } from "../version.ts";
 import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.ts";
@@ -142,7 +143,8 @@ export const DROPPED_INPUT_HINT =
   "fbrain received no value for a required field — the tool arguments were " +
   "likely dropped before reaching the server. This happens when a call's " +
   "arguments are large (e.g. a long `fbrain_put` body) in a long agent " +
-  "session. Recover by staging the body to a file and passing its path as " +
+  "session. Recover by passing `body_b64` (UTF-8 body bytes encoded as " +
+  "standard base64), staging the body to a file and passing its path as " +
   "`body_path` (a short path survives where a large inline `body` is " +
   "dropped), or via the CLI `fbrain put <slug> --type <type> < body.md`, or " +
   "split the write into smaller records.";
@@ -704,9 +706,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "there is NO silent default. If `frontmatter` is provided it is " +
         "used verbatim (without the `---` fences); otherwise frontmatter is " +
         "synthesized from `type`, `title`, `tags`, and `status`. For a large " +
-        "body, stage it to a file and pass `body_path` instead of inlining " +
-        "`body` — a long inline `body` can be silently dropped in transit in " +
-        "long sessions, whereas a short path always survives. Returns " +
+        "or multiline body, pass `body_b64` (UTF-8 body bytes encoded as " +
+        "standard base64) or stage it to a file and pass `body_path` instead " +
+        "of inlining `body` — a long inline `body` can be silently dropped " +
+        "in transit in long sessions, whereas these shorter arguments " +
+        "survive. Returns " +
         "one line: `created|updated <type> <slug>`. Before returning, the " +
         "write is confirmed read-after-write consistent: the record is " +
         "record-list-visible AND a short bounded poll waits for it to land in " +
@@ -732,8 +736,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe(
             "Markdown body (indexed for search). Defaults to empty. For a " +
-              "large body prefer `body_path` — a long inline `body` can be " +
-              "dropped in transit. Mutually exclusive with `body_path`.",
+              "large or multiline body prefer `body_b64` or `body_path` — a " +
+              "long inline `body` can be dropped in transit. Mutually " +
+              "exclusive with `body_path` and `body_b64`.",
           ),
         body_path: z
           .string()
@@ -743,7 +748,16 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "Use this instead of `body` for large records: a path is a " +
               "short argument that survives the input-dropping that truncates " +
               "a long inline `body` in long agent sessions. Mutually " +
-              "exclusive with `body`.",
+              "exclusive with `body` and `body_b64`.",
+          ),
+        body_b64: z
+          .string()
+          .optional()
+          .describe(
+            "Standard base64 encoding of the UTF-8 markdown body bytes. Use " +
+              "this instead of inline `body` for multiline, emoji, or large " +
+              "records to avoid JSON string escaping failures. Whitespace is " +
+              "ignored. Mutually exclusive with `body` and `body_path`.",
           ),
         status: z
           .string()
@@ -928,35 +942,66 @@ type PutArgs = {
   frontmatter?: string;
 };
 
-// When `body_path` is set, read the body from that file. A path is a short
-// string immune to the large-inline-argument truncation that silently drops a
-// long `body` before it reaches the server (the case DROPPED_INPUT_HINT warns
-// about) — so an arbitrarily large record can always be written by staging it
-// to a file first. `body` and `body_path` are mutually exclusive. Returns a
-// normalized PutArgs (no `body_path`) so buildPutInput stays a pure function.
-export function resolvePutBody(args: PutArgs & { body_path?: string }): PutArgs {
-  const { body_path, ...rest } = args;
-  if (body_path === undefined) return rest;
-  if (rest.body !== undefined) {
+// When `body_path` or `body_b64` is set, resolve it into a normal inline
+// string before serialization. Both are short transport-safe alternatives to a
+// long/multiline inline `body`: `body_path` reads from a staged UTF-8 file, and
+// `body_b64` keeps multiline/emoji text out of JSON string escaping entirely.
+// The three body sources are mutually exclusive. Returns normalized PutArgs
+// (no `body_path`/`body_b64`) so buildPutInput stays a pure function.
+export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: string }): PutArgs {
+  const { body_path, body_b64, ...rest } = args;
+  const sources = [rest.body, body_path, body_b64].filter((v) => v !== undefined);
+  if (sources.length > 1) {
     throw new FbrainError({
-      code: "body_and_body_path",
-      message: "fbrain_put: pass either `body` or `body_path`, not both.",
-      hint: "Use `body_path` alone for large bodies; inline `body` for small ones.",
+      code: "multiple_body_sources",
+      message: "fbrain_put: pass only one of `body`, `body_path`, or `body_b64`.",
+      hint: "Use `body_b64` for inline multiline/emoji bodies, or `body_path` for large bodies; do not combine them.",
     });
   }
+  if (sources.length === 0) return rest;
+  if (rest.body !== undefined) return rest;
+  if (body_b64 !== undefined) return { ...rest, body: decodeBodyB64(body_b64) };
+
   let body: string;
   try {
-    body = readFileSync(body_path, "utf8");
+    body = readFileSync(body_path!, "utf8");
   } catch (err) {
     throw new FbrainError({
       code: "body_path_unreadable",
       message:
-        `fbrain_put: could not read body_path '${body_path}': ` +
+        `fbrain_put: could not read body_path '${body_path!}': ` +
         (err instanceof Error ? err.message : String(err)),
       hint: "Pass an absolute path to a readable UTF-8 file.",
     });
   }
   return { ...rest, body };
+}
+
+function decodeBodyB64(body_b64: string): string {
+  const compact = body_b64.replace(/\s+/g, "");
+  if (
+    compact.length % 4 === 1 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(compact) ||
+    /={1,2}[A-Za-z0-9+/]/.test(compact)
+  ) {
+    throw new FbrainError({
+      code: "body_b64_invalid",
+      message: "fbrain_put: body_b64 is not valid standard base64.",
+      hint: "Pass UTF-8 markdown body bytes encoded as standard base64, or use `body_path`.",
+    });
+  }
+  try {
+    const padded = compact.padEnd(compact.length + ((4 - (compact.length % 4)) % 4), "=");
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(padded, "base64"));
+  } catch (err) {
+    throw new FbrainError({
+      code: "body_b64_invalid_utf8",
+      message:
+        "fbrain_put: body_b64 decoded, but the bytes are not valid UTF-8: " +
+        (err instanceof Error ? err.message : String(err)),
+      hint: "Encode the markdown body as UTF-8 before base64 encoding, or use `body_path`.",
+    });
+  }
 }
 
 export function buildPutInput(args: PutArgs): string {
