@@ -17,12 +17,14 @@
 //   - `--yes` skips the [Y/n] prompt (the `ask` seam is never called).
 
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   INSTRUCTIONS_MARKER,
+  SESSION_START_HOOK_COMMAND,
+  appendSessionStartHook,
   runMcpInstall,
   type ClaudeAddResult,
 } from "../../src/commands/mcp-install.ts";
@@ -30,6 +32,10 @@ import { buildAgentInstructionsBlock } from "../../src/schemas.ts";
 
 function tmpClaudeMd(): string {
   return join(mkdtempSync(join(tmpdir(), "fbrain-mcp-install-")), "CLAUDE.md");
+}
+
+function settingsFor(claudeMd: string): string {
+  return join(dirname(claudeMd), ".claude", "settings.json");
 }
 
 // A `whichBin` stub: resolve only the names in `present` to a fake path.
@@ -59,6 +65,7 @@ describe("fbrain mcp install — entrypoint resolution", () => {
     // Hard prerequisite failed → no registration, no CLAUDE.md write.
     expect(claudeAddCalled).toBe(false);
     expect(() => readFileSync(claudeMd, "utf8")).toThrow();
+    expect(() => readFileSync(settingsFor(claudeMd), "utf8")).toThrow();
   });
 });
 
@@ -81,6 +88,9 @@ describe("fbrain mcp install — claude registration", () => {
     expect(claudeAddCalled).toBe(true);
     expect(lines.join("\n")).toContain("registered");
     expect(readFileSync(claudeMd, "utf8")).toContain(INSTRUCTIONS_MARKER);
+    expect(readFileSync(settingsFor(claudeMd), "utf8")).toContain(
+      SESSION_START_HOOK_COMMAND,
+    );
   });
 
   test("claude absent → prints the exact manual command, no-op on MCP config", async () => {
@@ -101,6 +111,9 @@ describe("fbrain mcp install — claude registration", () => {
     expect(out).toContain("realpath src/mcp/main.ts");
     // The CLAUDE.md append still runs even when claude is absent.
     expect(readFileSync(claudeMd, "utf8")).toContain(INSTRUCTIONS_MARKER);
+    expect(readFileSync(settingsFor(claudeMd), "utf8")).toContain(
+      SESSION_START_HOOK_COMMAND,
+    );
   });
 
   test("already-registered result is a success skip, not an error", async () => {
@@ -136,6 +149,8 @@ describe("fbrain mcp install — CLAUDE.md append idempotency", () => {
     // The stable marker appears exactly once.
     const occurrences = body.split(INSTRUCTIONS_MARKER).length - 1;
     expect(occurrences).toBe(1);
+    const settings = readFileSync(settingsFor(claudeMd), "utf8");
+    expect(settings.split(SESSION_START_HOOK_COMMAND).length - 1).toBe(1);
   });
 
   test("appends without clobbering existing CLAUDE.md content", async () => {
@@ -164,6 +179,42 @@ describe("fbrain mcp install — CLAUDE.md append idempotency", () => {
       runClaudeAdd: (): ClaudeAddResult => ({ status: 0 }),
     });
     expect(readFileSync(claudeMd, "utf8")).toContain(INSTRUCTIONS_MARKER);
+    expect(readFileSync(settingsFor(claudeMd), "utf8")).toContain(
+      SESSION_START_HOOK_COMMAND,
+    );
+  });
+});
+
+describe("fbrain mcp install — SessionStart hook settings", () => {
+  test("preserves existing settings and adds one startup SessionStart hook", () => {
+    const claudeMd = tmpClaudeMd();
+    const settings = settingsFor(claudeMd);
+    mkdirSync(dirname(settings), { recursive: true });
+    writeFileSync(
+      settings,
+      JSON.stringify({
+        permissions: { allow: ["Bash(git status:*)"] },
+        hooks: {
+          SessionStart: [
+            {
+              matcher: "resume",
+              hooks: [{ type: "command", command: "echo resume" }],
+            },
+          ],
+        },
+      }),
+    );
+
+    appendSessionStartHook(settings, () => {});
+    appendSessionStartHook(settings, () => {});
+
+    const parsed = JSON.parse(readFileSync(settings, "utf8"));
+    expect(parsed.permissions.allow).toEqual(["Bash(git status:*)"]);
+    expect(parsed.hooks.SessionStart).toHaveLength(2);
+    expect(parsed.hooks.SessionStart[1]).toEqual({
+      matcher: "startup",
+      hooks: [{ type: "command", command: SESSION_START_HOOK_COMMAND }],
+    });
   });
 });
 

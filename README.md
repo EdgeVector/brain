@@ -417,20 +417,22 @@ fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code
 ```bash
 # One-shot agent wiring (one-time, after installing fbrain in the Quick start):
 fbrain mcp install        # verifies the entrypoint, registers fbrain with
-                          # Claude Code, AND appends the agent-instructions
-                          # block to ./CLAUDE.md — re-running it is a safe no-op
+                          # Claude Code, appends the agent-instructions block,
+                          # and installs the SessionStart hook — safe to re-run
 
 # Or run the server standalone (useful for testing with @modelcontextprotocol/inspector):
 fbrain-mcp
 ```
 
-`fbrain mcp install` (alias `fbrain mcp setup`) collapses the three manual steps into one command — it's the recommended path. Pass `--yes` to skip the confirmation prompt (e.g. in scripts), or `--claude-md <path>` to target a different instructions file. If `claude` isn't on your `PATH` it prints the exact `claude mcp add` command for you to run; if `fbrain-mcp` isn't on `PATH` yet it tells you to (re)install fbrain (`bun add -g github:EdgeVector/fbrain`, or `bun link` from a contributor checkout) first. Verify with `fbrain doctor --mcp`.
+`fbrain mcp install` (alias `fbrain mcp setup`) collapses the manual setup into one command — it's the recommended path. Pass `--yes` to skip the confirmation prompt (e.g. in scripts), `--claude-md <path>` to target a different instructions file, or `--claude-settings <path>` to target a different Claude Code settings file for the SessionStart hook. If `claude` isn't on your `PATH` it prints the exact `claude mcp add` command for you to run; if `fbrain-mcp` isn't on `PATH` yet it tells you to (re)install fbrain (`bun add -g github:EdgeVector/fbrain`, or `bun link` from a contributor checkout) first. Verify with `fbrain doctor --mcp`.
 
-Prefer to wire it by hand (or already have part of it set up)? The two manual steps `install` runs for you are:
+Prefer to wire it by hand (or already have part of it set up)? The main manual steps `install` runs for you are:
 
 ```bash
 claude mcp add fbrain fbrain-mcp       # register the MCP server with Claude Code
 fbrain mcp instructions >> CLAUDE.md   # tell your agent to USE it (see below)
+# add this to .claude/settings.json hooks.SessionStart:
+# { "matcher": "startup", "hooks": [{ "type": "command", "command": "fbrain hook session-start" }] }
 ```
 
 Installing fbrain (Quick start step 1 — `bun add -g github:EdgeVector/fbrain`, or `bun link` from a contributor checkout) put `fbrain-mcp` on your `PATH` alongside `fbrain`, so this command works from any directory and survives moving or deleting any clone. `fbrain doctor` verifies this for you — its `mcp-entrypoint` check PASSes with the resolved path when `fbrain-mcp` is on `PATH`, and WARNs (without failing the verdict) with a re-link hint when it isn't, so a silently-broken agent integration is visible instead of surfacing only at agent-call time.
