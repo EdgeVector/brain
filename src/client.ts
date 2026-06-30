@@ -1957,6 +1957,25 @@ export function defaultIsTargetPortListening(url: string): boolean {
   return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
 }
 
+// True when a node URL is the default homebrew install target
+// (`127.0.0.1:9001` / `localhost:9001`). Used ONLY by `nodeDownHint` to choose
+// which "start it" command to recommend: a brand-new downloaded user whose node
+// won't even be on PATH yet still gets the brew install+start line for this
+// URL. This is install guidance, NOT a transport notion — fbrain reaches a
+// loopback node over its Unix socket; the `:9001` TCP listener is retired and
+// is never dialed. The port survives only because it is the URL the homebrew
+// formula configures the daemon to advertise.
+function isDefaultInstallNodeUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return (
+      (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "9001"
+    );
+  } catch {
+    return false;
+  }
+}
+
 // "Your node isn't reachable — start it" guidance. Three cases:
 //   1. SOMETHING is bound and LISTENING on the TARGET port but the socket isn't
 //      answering — the node is wedged, mid-boot, or hung (it did NOT just "not
@@ -1968,13 +1987,18 @@ export function defaultIsTargetPortListening(url: string): boolean {
 //      the TARGET port — a sibling node serving a DIFFERENT port must NOT make
 //      this down port look "wedged" (which would wrongly tell the dev to stop a
 //      node that has nothing to do with the port they pointed at).
-//   2. Nothing on the target port, but a downloaded user — the prebuilt
-//      `folddb` binary on PATH — gets a combined Homebrew install+start line
+//   2. Nothing on the target port, but the default install target (the
+//      `127.0.0.1:9001` homebrew daemon URL) OR the prebuilt `folddb` binary
+//      on PATH — a downloaded user. Gets a combined Homebrew install+start line
 //      first (`brew install` no-ops if already installed, so the same line
-//      covers both the never-installed and forgot-to-start dev).
-//   3. Nothing on the target port and no prebuilt binary — a genuine fold
-//      contributor running from source against a custom port; give the
-//      `./run.sh` + "compiling Rust" framing.
+//      covers both the never-installed and forgot-to-start dev). NB: this is an
+//      INSTALL-GUIDANCE check (which start command to recommend), NOT a
+//      transport notion — the local node is socket-only and the `:9001` TCP
+//      listener is retired; `127.0.0.1:9001` survives only as the canonical
+//      default-node URL the homebrew install targets.
+//   3. Nothing on the target port, not the default URL, and no prebuilt binary
+//      — a genuine fold contributor running from source against a custom port;
+//      give the `./run.sh` + "compiling Rust" framing.
 export function nodeDownHint(
   url: string,
   isFolddbBinaryInstalled: () => boolean = defaultIsFolddbBinaryInstalled,
@@ -1983,7 +2007,7 @@ export function nodeDownHint(
   if (isTargetPortListening(url)) {
     return `A node is bound to ${url} but isn't responding — it may still be starting up, or it may be wedged. Check \`brew services list\` and the node log; if it's wedged, **stop it before restarting** (a restart of a wedged node just re-hangs): \`brew services stop lastdb\` then \`brew services start lastdb\`. Contributors running from source: stop the existing \`lastdb_server\`/\`folddb_server\` process, then \`cd fold/fold_db_node && ./run.sh --local\`.`;
   }
-  if (isFolddbBinaryInstalled()) {
+  if (isDefaultInstallNodeUrl(url) || isFolddbBinaryInstalled()) {
     return "Install + start it: `brew install edgevector/lastdb/lastdb && brew services start lastdb` (already installed? `brew services restart lastdb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
   }
   return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";

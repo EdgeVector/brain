@@ -419,12 +419,14 @@ describe("client error mapping", () => {
 
   // DX: a downloaded user who simply forgot to start their daemon must be
   // told to `brew services start lastdb`, NOT to compile Rust from source. The
-  // prebuilt `folddb` binary on PATH is the signal that drives this — the
-  // retired `:9001` TCP port is no longer special-cased.
-  test("node-down hint leads with `brew services` when the prebuilt binary is on PATH", () => {
+  // default install URL (`127.0.0.1:9001`) drives brew-first guidance even
+  // before the prebuilt binary is detectable — pin the binary probe to `false`
+  // so the assertion holds on hosts without `folddb` on PATH. NB: `:9001` here
+  // is the default INSTALL URL, not a transport hint — the node is socket-only.
+  test("node-down hint leads with `brew services` for the default install URL", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
-      () => true, // prebuilt binary on PATH (the downloaded-user signal)
+      () => false,
       () => false,
     );
     // The hint must lead with a combined, copy-pasteable install+start line so

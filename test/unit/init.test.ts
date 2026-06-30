@@ -686,12 +686,13 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).not.toContain("compiles Rust");
   });
 
-  test("default loopback URL + prebuilt binary → brew/daemon-start guidance", async () => {
+  test("default install URL → brew/daemon-start guidance, even with no prebuilt binary", async () => {
     const prior = process.env.FBRAIN_FOLDDB_BIN;
-    // The downloaded user (prebuilt `folddb` on PATH, signalled via
-    // FBRAIN_FOLDDB_BIN) gets brew-first guidance. The retired `:9001` port is
-    // no longer special-cased — the binary probe is the signal.
-    process.env.FBRAIN_FOLDDB_BIN = "/opt/homebrew/bin/folddb";
+    // The default install URL (`:9001`) is always brew-first, regardless of
+    // whether the prebuilt binary is detectable — delete FBRAIN_FOLDDB_BIN so
+    // the binary probe can't be the thing driving the brew line. (`:9001` is
+    // the homebrew install URL, not a transport hint — the node is socket-only.)
+    delete process.env.FBRAIN_FOLDDB_BIN;
     const lines: string[] = [];
     try {
       await probeWithRetry(
