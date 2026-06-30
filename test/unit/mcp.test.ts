@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import pkg from "../../package.json" with { type: "json" };
 import {
+  ASK_QUERY_REQUIRED_HINT,
   buildPutInput,
   bodyWindow,
   CONFIG_MISSING_HINT,
@@ -18,8 +19,10 @@ import {
   DROPPED_INPUT_HINT,
   FBRAIN_GET_BODY_LIMIT_DEFAULT,
   FBRAIN_MCP_VERSION,
+  GET_SLUG_REQUIRED_HINT,
   MCP_AUTO_GRANT_ENV,
   mcpAutoGrantConsentEnabled,
+  normalizeTagsArg,
   resolvePutBody,
 } from "../../src/mcp/server.ts";
 import { ConfigMissingError } from "../../src/config.ts";
@@ -553,6 +556,37 @@ describe("fbrain_get tool", () => {
     const res = await tools.fbrain_get!({ slug: "ghost", type: "design" });
     expect(res.isError).toBe(true);
     expect(res.content[0]!.text ?? "").toContain("No design: ghost");
+  });
+
+  test("unknown slug error includes nearest candidate slugs", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              recordRow("deployment-rollback-decision", "Deployment rollback"),
+              recordRow("deploy-runbook", "Deploy runbook"),
+              recordRow("billing-cleanup", "Billing cleanup"),
+              recordRow("release-gate", "Release gate"),
+            ],
+          },
+        };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_get!({
+      slug: "deployment-rolback-decision",
+      type: "design",
+    });
+    expect(res.isError).toBe(true);
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("No design: deployment-rolback-decision");
+    expect(text).toContain("Nearest candidate slugs");
+    expect(text).toContain("deployment-rollback-decision");
+    expect(text).toContain("deploy-runbook");
   });
 
   test("ambiguous slug error names the `type` arg, not the CLI `--type` flag", async () => {
@@ -1459,6 +1493,19 @@ describe("buildPutInput", () => {
     expect(input).toBe("---\ntype: concept\ntitle: Hello\ntags: [a, b]\n---\nthe body");
   });
 
+  test("accepts string tags as one tag or comma-separated tags", () => {
+    expect(normalizeTagsArg("foo")).toEqual(["foo"]);
+    expect(normalizeTagsArg("foo, bar")).toEqual(["foo", "bar"]);
+    expect(
+      buildPutInput({
+        slug: "x",
+        type: "concept",
+        tags: "foo, bar",
+        body: "b",
+      }),
+    ).toContain("tags: [foo, bar]");
+  });
+
   test("throws missing_type when no type and no frontmatter (no silent default)", () => {
     // Mirror of the CLI `put` contract (#70): an untyped synthesized put
     // must error loudly instead of silently filing a `design` record.
@@ -1668,6 +1715,42 @@ describe("fbrain_put tool", () => {
     // Post-Phase-E concept lives in its own dedicated schema; the legacy
     // `kind` discriminator is no longer written on new records.
     expect("kind" in fields).toBe(false);
+  });
+
+  test("coerces a string tags argument and stores it as a tag array", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const parsed = inputSchemaOf(server, "fbrain_put")!.parse({
+      slug: "string-tag",
+      type: "concept",
+      tags: "foo",
+      body: "hello",
+    }) as { tags: string[] };
+    expect(parsed.tags).toEqual(["foo"]);
+    const res = await toolsOf(server).fbrain_put!(parsed as Record<string, unknown>);
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0]!.text).toBe("created concept string-tag");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.tags).toEqual(["foo"]);
+  });
+
+  test("coerces a comma-separated tags string into multiple tags", () => {
+    const server = createFbrainMcpServer({ cfg });
+    const parsed = inputSchemaOf(server, "fbrain_put")!.parse({
+      slug: "comma-tags",
+      type: "concept",
+      tags: "foo, bar",
+      body: "hello",
+    }) as { tags: string[] };
+    expect(parsed.tags).toEqual(["foo", "bar"]);
   });
 
   test("accepts a multiline emoji body via body_b64", async () => {
@@ -2196,7 +2279,7 @@ describe("empty/dropped tool input guard", () => {
     return map[name]!.inputSchema;
   }
 
-  for (const name of ["fbrain_put", "fbrain_get", "fbrain_delete"]) {
+  for (const name of ["fbrain_put", "fbrain_delete"]) {
     test(`${name}: empty {} input yields the dropped-input recovery hint`, () => {
       const res = z.safeParse(inputSchemaOf(name) as never, {});
       expect(res.success).toBe(false);
@@ -2221,6 +2304,28 @@ describe("empty/dropped tool input guard", () => {
     if (!res.success) {
       expect(res.error.issues[0]!.message).not.toBe(DROPPED_INPUT_HINT);
       expect(res.error.issues[0]!.message).toContain("Too small");
+    }
+  });
+
+  test("fbrain_ask missing or empty query yields an actionable example", () => {
+    for (const input of [{}, { query: "" }, { query: "   " }]) {
+      const res = z.safeParse(inputSchemaOf("fbrain_ask") as never, input);
+      expect(res.success).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]!.message).toBe(ASK_QUERY_REQUIRED_HINT);
+        expect(res.error.issues[0]!.message).toContain('fbrain_ask({"query"');
+      }
+    }
+  });
+
+  test("fbrain_get missing or empty slug yields an actionable example", () => {
+    for (const input of [{}, { slug: "" }, { slug: "   " }]) {
+      const res = z.safeParse(inputSchemaOf("fbrain_get") as never, input);
+      expect(res.success).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]!.message).toBe(GET_SLUG_REQUIRED_HINT);
+        expect(res.error.issues[0]!.message).toContain('fbrain_get({"slug"');
+      }
     }
   });
 });
