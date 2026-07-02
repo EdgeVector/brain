@@ -519,7 +519,14 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    beats a perfect note never. For a large body (a design, a long decision log),
    stage it to a file and pass \`body_path\` instead of inlining \`body\` — a long
    inline \`body\` can be silently dropped in transit in long sessions, whereas a
-   short path always survives.
+   short path always survives. To UPDATE an existing record, reach for the
+   right-sized tool instead of a full \`fbrain_put\`: \`fbrain_status\` changes only
+   the status, and \`fbrain_append\` adds to the body without a rewrite. This
+   matters because \`fbrain_put\` is a FULL REPLACE whose body defaults to empty —
+   a status-only re-put wipes the body, and a get-then-re-put truncates any
+   record bigger than one \`fbrain_get\` window. \`fbrain_put\` guards against that
+   (it refuses a re-put that would shrink the body dramatically), so let the
+   guard route you to \`fbrain_append\`/\`fbrain_status\` rather than overriding it.
 
 3. **Pick the right type.** Every record has a type; choose the one whose purpose
    matches what you're recording (\`fbrain_put\` requires a type — there is no

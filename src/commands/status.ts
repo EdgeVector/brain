@@ -26,6 +26,26 @@ export type StatusOptions = {
   // mode, which keeps its human transition line.
   json?: boolean;
   print?: (line: string) => void;
+  // Structured-output sink, mirroring the read/write commands' `onResult`:
+  // fires once on the UPDATE path with the SAME resolved `type`/`slug`/status
+  // transition the printed line uses, so the MCP `fbrain_status` tool's
+  // `structuredContent` can't drift from the human text. Never fires in show
+  // mode (that path is a read — `get --json` is its structured surface).
+  onResult?: (payload: StatusResult) => void;
+};
+
+// The structured payload the MCP `fbrain_status` tool returns in
+// `structuredContent` (mirrors the printed `<type> <slug>: <from> → <to>`
+// transition line). `action` is always `status_changed` so an agent can key
+// on the mutation kind uniformly with the other write tools' `action`.
+export type StatusResult = {
+  action: "status_changed";
+  type: RecordType;
+  slug: string;
+  // The record's status BEFORE this mutation.
+  from: string;
+  // The record's status AFTER this mutation (the value passed in).
+  to: string;
 };
 
 export async function statusCmd(opts: StatusOptions): Promise<void> {
@@ -67,6 +87,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   const hash = schemaHashFor(only.type, opts.cfg);
   const now = nowIso();
   const def = RECORDS[only.type];
+  const fromStatus = only.record.status;
   const fields: Record<string, unknown> = {
     ...only.record,
     status: opts.newStatus,
@@ -78,5 +99,14 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     keyHash: slug,
     fields,
   });
-  print(`${only.type} ${slug}: ${only.record.status} → ${opts.newStatus}`);
+  print(`${only.type} ${slug}: ${fromStatus} → ${opts.newStatus}`);
+  // Emit the structured payload from the SAME resolved type/slug/transition the
+  // printed line uses (one source of truth — see the read/delete/link commands).
+  opts.onResult?.({
+    action: "status_changed",
+    type: only.type,
+    slug,
+    from: fromStatus,
+    to: opts.newStatus,
+  });
 }

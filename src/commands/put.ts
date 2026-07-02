@@ -24,6 +24,7 @@ import type { Config } from "../config.ts";
 import {
   confirmVectorIndexed,
   crossTypeSlugNote,
+  ensureNotShrinking,
   ensureStatus,
   findCrossTypeSlugCollisions,
   findExistingForWrite,
@@ -65,6 +66,12 @@ export type PutOptions = {
   // attempt count + inject a no-op sleep so a timed-out probe is observable
   // without paying real backoff.
   vectorVerifyOptions?: ReadRetryOptions;
+  // Opt out of the body-shrink guard (`ensureNotShrinking`). When false/unset,
+  // a re-put whose body would drop >BODY_SHRINK_THRESHOLD of an existing
+  // non-empty body (or clear it to empty) is refused with `body_shrink_guard`
+  // — the data-loss protection for the get(windowed)→edit→re-put loop. Set
+  // true (`--allow-shrink` / MCP `allow_shrink`) for a deliberate truncation.
+  allowShrink?: boolean;
 };
 
 export type PutResult = {
@@ -120,6 +127,15 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // doesn't burn the whole retry budget (~1.1s) on every create. See the
   // helper's comment in record.ts.
   const existing = await findExistingForWrite(node, type, hash, slug);
+  // Body-shrink guard — data-loss protection for the get(windowed)→edit→re-put
+  // loop and status-only touch-up re-puts. Runs BEFORE the write (like
+  // `validateSlug`/`ensureStatus`) so a refused shrink never lands a partial
+  // write. Only an UPDATE over an existing non-empty body can shrink; a create
+  // has no prior body to lose. `allowShrink` is the deliberate-truncation
+  // escape hatch (`--allow-shrink` / MCP `allow_shrink`).
+  if (existing) {
+    ensureNotShrinking(type, slug, existing.body, body, opts.allowShrink === true);
+  }
   const now = nowIso();
 
   const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, existing, now);

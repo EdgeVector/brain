@@ -22,6 +22,7 @@ import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
 import { putCmd } from "./commands/put.ts";
+import { appendCmd } from "./commands/append.ts";
 import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
@@ -104,6 +105,7 @@ export const COMMANDS = [
   "spike",
   "sop",
   "put",
+  "append",
   "get",
   "list",
   "status",
@@ -142,6 +144,7 @@ Commands:
   init           bootstrap a node + register schemas + write config
 ${RECORD_NEW_HELP_LINES}
   put            upsert any record type from stdin (frontmatter-aware; type: picks schema)
+  append         append a chunk to a record's body without a full rewrite (grows only)
   get            print a record by slug
   list           list records, newest-first
   status         show or update a record's status
@@ -156,7 +159,7 @@ ${RECORD_NEW_HELP_LINES}
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
-  mcp            start an MCP server over stdio (7 tools: search/ask/get/list/put/delete/link)
+  mcp            start an MCP server over stdio (9 tools: search/ask/get/list/put/status/append/delete/link)
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
   hook session-start  Claude Code SessionStart hook: inject strong-confidence fbrain context
@@ -255,6 +258,27 @@ search). Empty body is valid as long as the type is set.
 Examples:
   cat note.md | fbrain put my-note --type concept
   echo "---\\ntype: concept\\nslug: concept-idempotency\\ntitle: Idempotency\\n---\\nbody" | fbrain put`,
+  append: `fbrain append <slug> [--type T] [--raw] [--json]  (chunk from stdin)
+
+Append a chunk to an existing record's body WITHOUT a full rewrite. The
+chunk is read from stdin. Unlike \`put\` (a full replace whose body defaults
+to empty), \`append\` does a bounded read-modify-write: it resolves the live
+record, concatenates the chunk to its existing body, and writes it back —
+preserving title/tags/status/created_at. It can only GROW the body, so it
+never trips the put-side shrink guard and never truncates a large record
+(the \`fbrain get\` window limit is irrelevant — the full body is read
+server-side, not through a windowed get).
+
+  --type    design | task | concept | preference | reference | agent | project | spike | sop
+            (omit to resolve across all types; errors on an ambiguous slug)
+  --raw     concatenate byte-exact (no auto-inserted blank-line separator)
+  --json    emit \`{ok, slug, appended, newBodyChars}\` on stdout; the human
+            \`appended …\` line moves to stderr so \`--json\` stdout is parseable.
+            On failure a \`{error, hint}\` JSON object is emitted to stdout too.
+
+Examples:
+  echo "- new bullet" | fbrain append my-tracker --type project
+  fbrain append design-notes --type design < addendum.md`,
   get: `fbrain get <slug> [--type T] [--body-limit N] [--json]
 
 Without --type, queries every registered schema. Errors if the slug
@@ -616,11 +640,11 @@ fbrain mcp instructions
   record type. (Same content as docs/agent-instructions.md, kept in sync.)
 
 fbrain mcp
-  Start a Model Context Protocol server over stdio. Exposes seven tools so
+  Start a Model Context Protocol server over stdio. Exposes nine tools so
 MCP clients (Claude Code, Codex, etc.) can read and write fbrain
 in-process:
   read:  fbrain_search, fbrain_ask, fbrain_get, fbrain_list
-  write: fbrain_put,    fbrain_delete, fbrain_link
+  write: fbrain_put, fbrain_status, fbrain_append, fbrain_delete, fbrain_link
 
 fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
 vector (RRF hybrid) for better recall than pure-vector fbrain_search.
@@ -693,9 +717,24 @@ const TASK_OPTIONS = {
 } as const;
 const PUT_OPTIONS = {
   type: { type: "string" },
+  // Opt out of the body-shrink guard: allow a re-put whose body is
+  // dramatically smaller than the existing record's (a deliberate truncation).
+  // Without it, a re-put that would drop >half the existing body — or clear a
+  // non-empty body to empty — is refused with `body_shrink_guard`, the
+  // data-loss protection for the get(windowed)→edit→re-put loop.
+  "allow-shrink": { type: "boolean", default: false },
   // Machine-readable mode: emit a `{ok,slug,created}` success object on
   // stdout; the human `created/updated …` line moves to stderr. See
   // DESIGN_OPTIONS.json.
+  json: { type: "boolean", default: false },
+} as const;
+const APPEND_OPTIONS = {
+  type: { type: "string" },
+  // Byte-exact concatenation: skip the auto-inserted "\n\n" separator
+  // between the existing body and the appended chunk.
+  raw: { type: "boolean", default: false },
+  // Machine-readable mode: emit `{ok, slug, appended, newBodyChars}` on stdout;
+  // the human `appended …` line moves to stderr so `--json` stdout is parseable.
   json: { type: "boolean", default: false },
 } as const;
 const GET_OPTIONS = {
@@ -768,7 +807,7 @@ const DOCTOR_OPTIONS = {
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
   write: { type: "boolean", default: false },
-  // --mcp: boot the resolved `fbrain-mcp` entrypoint and assert the 7-tool
+  // --mcp: boot the resolved `fbrain-mcp` entrypoint and assert the 9-tool
   // agent surface end-to-end (the opt-in companion to the PATH-only
   // mcp-entrypoint check). OFF by default so plain doctor never spawns it.
   mcp: { type: "boolean", default: false },
@@ -845,6 +884,7 @@ export const CLI_SPEC = {
   spike: DESIGN_OPTIONS,
   sop: DESIGN_OPTIONS,
   put: PUT_OPTIONS,
+  append: APPEND_OPTIONS,
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
   status: STATUS_OPTIONS,
@@ -1321,6 +1361,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runRecordNew(cmd, args, verboseFn);
     case "put":
       return runPut(args, verboseFn);
+    case "append":
+      return runAppend(args, verboseFn);
     case "get":
       return runGet(args, verboseFn);
     case "list":
@@ -1730,6 +1772,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   const pOpts: Parameters<typeof putCmd>[0] = { cfg, input };
   if (positionals[0]) pOpts.slug = positionals[0];
   if (values.type !== undefined) pOpts.typeOverride = values.type;
+  if (values["allow-shrink"]) pOpts.allowShrink = true;
   if (verbose) pOpts.verbose = verbose;
   let result;
   try {
@@ -1776,6 +1819,67 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
       `${result.action} ${result.type} ${result.slug}${indexPendingNote(result.indexPending)}`,
     );
   }
+  return 0;
+}
+
+async function runAppend(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: APPEND_OPTIONS,
+    },
+    "append",
+  );
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.append);
+    return USAGE_ERROR;
+  }
+  const cfg = readConfig();
+  // The chunk is the primary input, read from piped stdin — mirrors `put`'s
+  // documented stdin contract (silent, no announce).
+  const chunk = await maybeReadStdin();
+  const type = parseRecordType(values.type);
+  const aOpts: Parameters<typeof appendCmd>[0] = { cfg, slug, chunk };
+  if (type) aOpts.type = type;
+  if (values.raw) aOpts.raw = true;
+  if (verbose) aOpts.verbose = verbose;
+
+  if (values.json) {
+    // Capture the structured result via onResult; the human line moves to
+    // stderr (mirrors put/delete/link --json).
+    let captured: {
+      slug: string;
+      newBodyChars: number;
+      bytesAppended: number;
+    } | null = null;
+    aOpts.print = (line) => console.error(line);
+    aOpts.onResult = (r) => {
+      captured = {
+        slug: r.slug,
+        newBodyChars: r.newBodyChars,
+        bytesAppended: r.bytesAppended,
+      };
+    };
+    await withTypeAsPositionalHint(slug, () => appendCmd(aOpts));
+    const c = captured as {
+      slug: string;
+      newBodyChars: number;
+      bytesAppended: number;
+    } | null;
+    console.log(
+      JSON.stringify({
+        ok: true,
+        slug: c?.slug ?? slug,
+        appended: c?.bytesAppended ?? 0,
+        newBodyChars: c?.newBodyChars ?? 0,
+      }),
+    );
+    return 0;
+  }
+  await withTypeAsPositionalHint(slug, () => appendCmd(aOpts));
   return 0;
 }
 

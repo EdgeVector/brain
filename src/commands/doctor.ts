@@ -171,7 +171,7 @@ export type DoctorOptions = {
   bunVersion?: string;
   // --mcp boot probe: actually SPAWN the resolved `fbrain-mcp` entrypoint,
   // drive a JSON-RPC initialize + tools/list handshake over stdio, and assert
-  // the 7-tool agent surface. OFF by default so plain `fbrain doctor` never
+  // the 9-tool agent surface. OFF by default so plain `fbrain doctor` never
   // spawns the server (stays cheap + offline, like --write / --freshness).
   mcp?: boolean;
   // Override for tests: spawn the MCP boot probe against a fake transport
