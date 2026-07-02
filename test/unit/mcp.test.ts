@@ -28,6 +28,7 @@ import {
 import { ConfigMissingError } from "../../src/config.ts";
 import { COMMAND_HELP } from "../../src/cli.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1929,7 +1930,8 @@ describe("fbrain_put tool", () => {
     expect(fields.title).toBe("From Raw");
     expect(fields.tags).toEqual(["from-raw"]);
     const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-    expect(indexFields.slug).toBe("__fbrain_tag_index__");
+    expect(indexFields.slug).toBe(tagIndexSlug("from-raw"));
+    expect(indexFields.members).toEqual(["preference:raw-fm"]);
     // Per-kind preference schema has no `kind` field.
     expect("kind" in fields).toBe(false);
   });

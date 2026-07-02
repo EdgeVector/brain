@@ -21,6 +21,7 @@ import { join } from "node:path";
 
 import { recordNew } from "../../src/commands/new.ts";
 import { RECORDS, type RecordType } from "../../src/schemas.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
@@ -97,7 +98,8 @@ describe("recordNew dispatches against the correct schema for each type", () => 
       expect(fields.tags).toEqual(["t1"]);
       expect(fields.status).toBe(RECORDS[type].defaultStatus);
       const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-      expect(indexFields.slug).toBe("__fbrain_tag_index__");
+      expect(indexFields.slug).toBe(tagIndexSlug("t1"));
+      expect(indexFields.members).toEqual([`${type}:${type}-slug`]);
       // None of the Phase 6 types carry a design_slug field.
       expect(fields).not.toHaveProperty("design_slug");
     });

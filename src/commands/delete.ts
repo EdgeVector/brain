@@ -48,7 +48,7 @@ import {
   matchesListFilters,
   resolveListEntries,
 } from "./list.ts";
-import { removeFromTagIndex } from "../tag-index.ts";
+import { unindexRecordTags } from "../tag-index.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -243,7 +243,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   }
 
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
-  await removeFromTagIndex(node, opts.cfg, type, slug);
+  await unindexRecordTags(node, opts.cfg, type, slug, record.tags, opts.verbose);
 
   print(
     `deleted ${type} ${slug} (soft — fold_db is append-only)`,
@@ -413,7 +413,14 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
     if (resolved === null) continue; // already gone — nothing to do
 
     await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at);
-    await removeFromTagIndex(node, opts.cfg, m.type, slug);
+    await unindexRecordTags(
+      node,
+      opts.cfg,
+      m.type,
+      slug,
+      resolved.record.tags,
+      opts.verbose,
+    );
     print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
     deleted.push({ type: m.type, slug });
   }

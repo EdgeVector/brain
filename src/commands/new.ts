@@ -26,10 +26,9 @@ import {
   type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
-  type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
-import { updateTagIndexForRecord } from "../tag-index.ts";
+import { indexRecordTags } from "../tag-index.ts";
 
 export type RecordNewOptions = {
   cfg: Config;
@@ -144,17 +143,14 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     fields.design_slug = opts.designSlug ?? "";
   }
   await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
-  const indexedRecord: FbrainRecord = {
-    slug: opts.slug,
-    title: opts.title,
-    body: opts.body,
-    status: entry.defaultStatus,
-    tags: opts.tags,
-    created_at: now,
-    updated_at: now,
-  };
-  if (entry.hasDesignSlug) indexedRecord.design_slug = opts.designSlug ?? "";
-  await updateTagIndexForRecord(node, opts.cfg, opts.type, indexedRecord);
+  await indexRecordTags(
+    node,
+    opts.cfg,
+    opts.type,
+    opts.slug,
+    opts.tags,
+    opts.verbose,
+  );
 
   // Read-after-write SEARCH parity (#295, CLI half). The native (vector) index
   // `fbrain search` reads is populated asynchronously after the mutation

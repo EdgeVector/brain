@@ -12,6 +12,7 @@ import {
 } from "../../src/commands/put.ts";
 import { FbrainError } from "../../src/client.ts";
 import { RECORDS, type RecordType } from "../../src/schemas.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
@@ -1062,7 +1063,8 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.title).toBe("Smoke");
     expect(fields.tags).toEqual(["phase6"]);
     const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-    expect(indexFields.slug).toBe("__fbrain_tag_index__");
+    expect(indexFields.slug).toBe(tagIndexSlug("phase6"));
+    expect(indexFields.members).toEqual([`${type}:${type}-smoke`]);
     // Non-task types should NOT have design_slug.
     expect("design_slug" in fields).toBe(false);
   });
@@ -1148,10 +1150,8 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.action).toBe("updated");
     expect(queryCalls).toBeGreaterThanOrEqual(2);
-    expect(mutations).toHaveLength(2);
+    expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("update");
-    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-    expect(indexFields.slug).toBe("__fbrain_tag_index__");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.created_at).toBe("2026-03-03T00:00:00.000Z");
     expect(fields.updated_at).not.toBe("2026-03-03T00:00:00.000Z");

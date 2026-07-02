@@ -1,215 +1,273 @@
-import type { NodeClient } from "./client.ts";
+// Tag secondary index: one internal TagIndex record per tag. Tag-filtered
+// reads point-read that tag record, then point-read each member, so hot-path
+// cost scales with tag cardinality instead of total corpus size.
+
+import type { NodeClient, Verbose } from "./client.ts";
 import type { Config } from "./config.ts";
+import { sha256Hex } from "./hash.ts";
+import { isTombstoned, nowIso, type FbrainRecord } from "./record.ts";
 import {
-  findBySlugRaw,
-  isTombstoned,
-  listRecords,
-  nowIso,
-  schemaHashFor,
-  TOMBSTONE_TAG,
-  type FbrainRecord,
-} from "./record.ts";
-import { RECORD_TYPES, type RecordType } from "./schemas.ts";
+  RECORD_TYPES,
+  TAG_INDEX_SCHEMA_KEY,
+  type RecordType,
+} from "./schemas.ts";
 
-export const TAG_INDEX_TYPE: RecordType = "reference";
-export const TAG_INDEX_SLUG = "__fbrain_tag_index__";
-const TAG_INDEX_VERSION = 1;
+export const TAG_INDEX_SLUG_PREFIX = "__tagidx__";
 
-export type TagIndexEntry = {
-  type: RecordType;
+const TAG_INDEX_FIELDS = ["slug", "tag", "members", "created_at", "updated_at"];
+
+export type TagIndexRecord = {
   slug: string;
-  title: string;
-  status: string;
-  tags: string[];
-  design_slug?: string;
+  tag: string;
+  members: string[];
   created_at: string;
   updated_at: string;
 };
 
-type TagIndex = {
-  version: 1;
-  tags: Record<string, TagIndexEntry[]>;
+export type TaggedRecord = { type: RecordType; record: FbrainRecord };
+
+export type TagIndexRebuildResult = {
+  tagsIndexed: number;
+  membersIndexed: number;
 };
 
-export async function lookupTagIndex(
+export function tagIndexSlug(tag: string): string {
+  return `${TAG_INDEX_SLUG_PREFIX}${sha256Hex(tag)}`;
+}
+
+export function memberKey(type: RecordType, slug: string): string {
+  return `${type}:${slug}`;
+}
+
+export function parseMemberKey(
+  entry: string,
+): { type: RecordType; slug: string } | null {
+  const idx = entry.indexOf(":");
+  if (idx <= 0) return null;
+  const type = entry.slice(0, idx);
+  const slug = entry.slice(idx + 1);
+  if (!(RECORD_TYPES as readonly string[]).includes(type) || slug.length === 0) {
+    return null;
+  }
+  return { type: type as RecordType, slug };
+}
+
+export function tagIndexSchemaHash(cfg: Config): string | null {
+  const hash = cfg.schemaHashes[TAG_INDEX_SCHEMA_KEY];
+  return hash && hash.length > 0 ? hash : null;
+}
+
+export function tagIndexAvailable(cfg: Config): boolean {
+  return tagIndexSchemaHash(cfg) !== null;
+}
+
+export async function readTagIndex(
   node: NodeClient,
   cfg: Config,
   tag: string,
-): Promise<TagIndexEntry[] | null> {
-  const loaded = await loadTagIndex(node, cfg);
-  if (!loaded) return null;
-  const entries = loaded.index.tags[tag];
-  return entries ? entries.slice() : null;
+): Promise<TagIndexRecord | null> {
+  const schemaHash = tagIndexSchemaHash(cfg);
+  if (schemaHash === null) return null;
+  const slug = tagIndexSlug(tag);
+  const row = node.queryByKey
+    ? await node.queryByKey({
+        schemaHash,
+        fields: TAG_INDEX_FIELDS,
+        keyHash: slug,
+      })
+    : (await node.queryAll({ schemaHash, fields: TAG_INDEX_FIELDS })).results.find(
+        (r) => r.key?.hash === slug || r.fields?.slug === slug,
+      ) ?? null;
+  if (row === null) return null;
+  return rowToTagIndex((row.fields ?? {}) as Record<string, unknown>);
 }
 
-export async function updateTagIndexForRecord(
-  node: NodeClient,
-  cfg: Config,
-  type: RecordType,
-  record: FbrainRecord,
-): Promise<void> {
-  const liveTags = record.tags.filter((tag) => tag !== TOMBSTONE_TAG);
-  const loaded = await loadTagIndex(node, cfg);
-  if (!loaded && liveTags.length === 0) return;
-  const state = loaded ?? {
-    index: await rebuildTagIndexInMemory(node, cfg),
-    existing: null,
-  };
-  removeEntry(state.index, type, record.slug);
-  if (!isTombstoned(record)) {
-    const entry = entryFromRecord(type, record);
-    for (const tag of liveTags) {
-      if (!state.index.tags[tag]) state.index.tags[tag] = [];
-      state.index.tags[tag]!.push(entry);
-      state.index.tags[tag]!.sort(compareEntry);
-    }
-  }
-  await writeTagIndex(node, cfg, state.index, state.existing);
-}
-
-export async function removeFromTagIndex(
+export async function reconcileTagIndex(
   node: NodeClient,
   cfg: Config,
   type: RecordType,
   slug: string,
+  oldTags: readonly string[],
+  newTags: readonly string[],
+  verbose?: Verbose,
 ): Promise<void> {
-  const loaded = await loadTagIndex(node, cfg);
-  if (!loaded) return;
-  removeEntry(loaded.index, type, slug);
-  await writeTagIndex(node, cfg, loaded.index, loaded.existing);
-}
-
-function entryFromRecord(type: RecordType, record: FbrainRecord): TagIndexEntry {
-  const entry: TagIndexEntry = {
-    type,
-    slug: record.slug,
-    title: record.title,
-    status: record.status,
-    tags: record.tags.filter((tag) => tag !== TOMBSTONE_TAG),
-    created_at: record.created_at,
-    updated_at: record.updated_at,
-  };
-  if (record.design_slug !== undefined) entry.design_slug = record.design_slug;
-  return entry;
-}
-
-export function recordFromTagIndexEntry(entry: TagIndexEntry): FbrainRecord {
-  const record: FbrainRecord = {
-    slug: entry.slug,
-    title: entry.title,
-    body: "",
-    status: entry.status,
-    tags: entry.tags.slice(),
-    created_at: entry.created_at,
-    updated_at: entry.updated_at,
-  };
-  if (entry.design_slug !== undefined) record.design_slug = entry.design_slug;
-  return record;
-}
-
-async function loadTagIndex(
-  node: NodeClient,
-  cfg: Config,
-): Promise<{ index: TagIndex; existing: FbrainRecord } | null> {
-  const hash = schemaHashFor(TAG_INDEX_TYPE, cfg);
-  const existing = await findBySlugRaw(node, TAG_INDEX_TYPE, hash, TAG_INDEX_SLUG);
-  if (!existing) return null;
-  const parsed = parseTagIndex(existing.body);
-  if (!parsed) return null;
-  return { index: parsed, existing };
-}
-
-function parseTagIndex(body: string): TagIndex | null {
+  if (!tagIndexAvailable(cfg)) return;
+  const member = memberKey(type, slug);
+  const oldSet = new Set(userTags(oldTags));
+  const newSet = new Set(userTags(newTags));
+  const added = [...newSet].filter((tag) => !oldSet.has(tag));
+  const removed = [...oldSet].filter((tag) => !newSet.has(tag));
   try {
-    const raw = JSON.parse(body) as unknown;
-    if (!raw || typeof raw !== "object") return null;
-    const obj = raw as Record<string, unknown>;
-    if (obj.version !== TAG_INDEX_VERSION || !obj.tags || typeof obj.tags !== "object") {
-      return null;
-    }
-    const tags: Record<string, TagIndexEntry[]> = {};
-    for (const [tag, value] of Object.entries(obj.tags as Record<string, unknown>)) {
-      if (!Array.isArray(value)) continue;
-      const entries = value.filter(isTagIndexEntry).sort(compareEntry);
-      if (entries.length > 0) tags[tag] = entries;
-    }
-    return { version: TAG_INDEX_VERSION, tags };
-  } catch {
-    return null;
+    for (const tag of added) await addMember(node, cfg, tag, member);
+    for (const tag of removed) await removeMember(node, cfg, tag, member);
+  } catch (err) {
+    verbose?.(
+      `tag-index reconcile failed for ${member} (added=${added.join(",")} removed=${removed.join(",")}): ` +
+        `${err instanceof Error ? err.message : String(err)}; run \`fbrain reindex --tags\` to repair`,
+    );
   }
 }
 
-function isTagIndexEntry(value: unknown): value is TagIndexEntry {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Record<string, unknown>;
-  return (
-    typeof entry.slug === "string" &&
-    typeof entry.title === "string" &&
-    typeof entry.status === "string" &&
-    typeof entry.created_at === "string" &&
-    typeof entry.updated_at === "string" &&
-    Array.isArray(entry.tags) &&
-    entry.tags.every((tag) => typeof tag === "string") &&
-    typeof entry.type === "string" &&
-    (RECORD_TYPES as readonly string[]).includes(entry.type)
-  );
-}
-
-async function rebuildTagIndexInMemory(
+export async function indexRecordTags(
   node: NodeClient,
   cfg: Config,
-): Promise<TagIndex> {
-  const index: TagIndex = { version: TAG_INDEX_VERSION, tags: {} };
+  type: RecordType,
+  slug: string,
+  tags: readonly string[],
+  verbose?: Verbose,
+): Promise<void> {
+  await reconcileTagIndex(node, cfg, type, slug, [], tags, verbose);
+}
+
+export async function unindexRecordTags(
+  node: NodeClient,
+  cfg: Config,
+  type: RecordType,
+  slug: string,
+  tags: readonly string[],
+  verbose?: Verbose,
+): Promise<void> {
+  await reconcileTagIndex(node, cfg, type, slug, tags, [], verbose);
+}
+
+export async function resolveRecordsByTag(
+  node: NodeClient,
+  cfg: Config,
+  tag: string,
+  deps: {
+    findBySlug: (
+      type: RecordType,
+      schemaHash: string,
+      slug: string,
+    ) => Promise<FbrainRecord | null>;
+    schemaHashFor: (type: RecordType) => string;
+  },
+): Promise<TaggedRecord[] | null> {
+  const index = await readTagIndex(node, cfg, tag);
+  if (index === null) return null;
+
+  const out: TaggedRecord[] = [];
+  const seen = new Set<string>();
+  for (const member of index.members) {
+    if (seen.has(member)) continue;
+    seen.add(member);
+    const parsed = parseMemberKey(member);
+    if (parsed === null) continue;
+    const record = await deps.findBySlug(
+      parsed.type,
+      deps.schemaHashFor(parsed.type),
+      parsed.slug,
+    );
+    if (record === null) continue;
+    if (!record.tags.includes(tag)) continue;
+    out.push({ type: parsed.type, record });
+  }
+  return out;
+}
+
+export async function rebuildTagIndex(
+  node: NodeClient,
+  cfg: Config,
+  opts: {
+    listRecords: (type: RecordType, schemaHash: string) => Promise<FbrainRecord[]>;
+    schemaHashFor: (type: RecordType) => string;
+  },
+): Promise<TagIndexRebuildResult> {
+  if (!tagIndexAvailable(cfg)) return { tagsIndexed: 0, membersIndexed: 0 };
+
+  const map = new Map<string, Set<string>>();
   for (const type of RECORD_TYPES) {
-    const rows = await listRecords(node, type, schemaHashFor(type, cfg));
-    for (const record of rows) {
+    const records = await opts.listRecords(type, opts.schemaHashFor(type));
+    for (const record of records) {
       if (isTombstoned(record)) continue;
-      if (type === TAG_INDEX_TYPE && record.slug === TAG_INDEX_SLUG) continue;
-      const entry = entryFromRecord(type, record);
-      for (const tag of entry.tags) {
-        if (!index.tags[tag]) index.tags[tag] = [];
-        index.tags[tag]!.push(entry);
+      const member = memberKey(type, record.slug);
+      for (const tag of userTags(record.tags)) {
+        let set = map.get(tag);
+        if (!set) {
+          set = new Set<string>();
+          map.set(tag, set);
+        }
+        set.add(member);
       }
     }
   }
-  for (const entries of Object.values(index.tags)) entries.sort(compareEntry);
-  return index;
+
+  let membersIndexed = 0;
+  for (const [tag, members] of map) {
+    const existing = await readTagIndex(node, cfg, tag);
+    await writeTagIndex(node, cfg, tag, [...members], existing);
+    membersIndexed += members.size;
+  }
+  return { tagsIndexed: map.size, membersIndexed };
+}
+
+function rowToTagIndex(fields: Record<string, unknown>): TagIndexRecord {
+  const members = fields.members;
+  return {
+    slug: typeof fields.slug === "string" ? fields.slug : "",
+    tag: typeof fields.tag === "string" ? fields.tag : "",
+    members: Array.isArray(members)
+      ? members.filter((m): m is string => typeof m === "string" && m.length > 0)
+      : [],
+    created_at: typeof fields.created_at === "string" ? fields.created_at : "",
+    updated_at: typeof fields.updated_at === "string" ? fields.updated_at : "",
+  };
+}
+
+async function addMember(
+  node: NodeClient,
+  cfg: Config,
+  tag: string,
+  member: string,
+): Promise<void> {
+  const existing = await readTagIndex(node, cfg, tag);
+  const members = existing ? existing.members : [];
+  if (members.includes(member)) return;
+  await writeTagIndex(node, cfg, tag, [...members, member], existing);
+}
+
+async function removeMember(
+  node: NodeClient,
+  cfg: Config,
+  tag: string,
+  member: string,
+): Promise<void> {
+  const existing = await readTagIndex(node, cfg, tag);
+  if (!existing || !existing.members.includes(member)) return;
+  await writeTagIndex(
+    node,
+    cfg,
+    tag,
+    existing.members.filter((m) => m !== member),
+    existing,
+  );
 }
 
 async function writeTagIndex(
   node: NodeClient,
   cfg: Config,
-  index: TagIndex,
-  existing: FbrainRecord | null,
+  tag: string,
+  members: string[],
+  existing: TagIndexRecord | null,
 ): Promise<void> {
+  const schemaHash = tagIndexSchemaHash(cfg);
+  if (schemaHash === null) return;
+  const slug = tagIndexSlug(tag);
   const now = nowIso();
   const fields = {
-    slug: TAG_INDEX_SLUG,
-    title: "fbrain tag index",
-    body: JSON.stringify(index),
-    status: "archived",
-    tags: [TOMBSTONE_TAG, "fbrain-internal-index"],
+    slug,
+    tag,
+    members: [...new Set(members)].sort(),
     created_at: existing?.created_at ?? now,
     updated_at: now,
   };
-  const schemaHash = schemaHashFor(TAG_INDEX_TYPE, cfg);
   if (existing) {
-    await node.updateRecord({ schemaHash, fields, keyHash: TAG_INDEX_SLUG });
+    await node.updateRecord({ schemaHash, fields, keyHash: slug });
   } else {
-    await node.createRecord({ schemaHash, fields, keyHash: TAG_INDEX_SLUG });
+    await node.createRecord({ schemaHash, fields, keyHash: slug });
   }
 }
 
-function removeEntry(index: TagIndex, type: RecordType, slug: string): void {
-  for (const [tag, entries] of Object.entries(index.tags)) {
-    const kept = entries.filter((entry) => entry.type !== type || entry.slug !== slug);
-    if (kept.length === 0) delete index.tags[tag];
-    else index.tags[tag] = kept;
-  }
-}
-
-function compareEntry(a: TagIndexEntry, b: TagIndexEntry): number {
-  if (a.type !== b.type) return a.type < b.type ? -1 : 1;
-  if (a.slug !== b.slug) return a.slug < b.slug ? -1 : 1;
-  return 0;
+function userTags(tags: readonly string[]): string[] {
+  return tags.filter((tag) => tag.length > 0 && tag !== "__fbrain_deleted__");
 }

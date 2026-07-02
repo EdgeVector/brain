@@ -72,6 +72,7 @@ export async function runUsageReport(
   const perUser = new Map<string, Counts>();
 
   for (const entry of UNIQUE_SCHEMAS) {
+    if (entry.types.length === 0) continue;
     const schemaHash = cfg.schemaHashes[entry.key];
     if (!schemaHash) {
       verbose?.(`usage: skipping ${entry.key} — no schemaHash in config`);

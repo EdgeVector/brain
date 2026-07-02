@@ -345,6 +345,46 @@ export const RECORD_TYPES = [
 ] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
+// Internal tag secondary index. This is intentionally NOT a RecordType: it is
+// registered and stored in config like other fbrain schemas, but never appears
+// on user-facing list/get/search surfaces.
+export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
+
+export const tagIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "TagIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "TagIndex",
+    purpose_statement:
+      "Inverted index mapping a tag to the records that carry it, maintained by fbrain to make tag-filtered reads scale with tag cardinality instead of corpus size",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: ["slug", "tag", "members", "created_at", "updated_at"],
+    field_types: {
+      slug: "String",
+      tag: "String",
+      members: { Array: "String" },
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      slug: "reserved __tagidx__<sha256(tag)> key",
+      tag: "the indexed tag value",
+      members: "array of type:slug entries carrying this tag",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_data_classifications: {
+      slug: GENERAL,
+      tag: GENERAL,
+      members: GENERAL,
+      created_at: GENERAL,
+      updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
@@ -426,6 +466,7 @@ export const UNIQUE_SCHEMAS: Array<{
   key: string;
   schema: AddSchemaRequest;
   types: RecordType[];
+  extraKeys?: string[];
 }> = [
   { key: "design", schema: designSchema, types: ["design"] },
   { key: "task", schema: taskSchema, types: ["task"] },
@@ -436,7 +477,20 @@ export const UNIQUE_SCHEMAS: Array<{
   { key: "project", schema: projectSchema, types: ["project"] },
   { key: "spike", schema: spikeSchema, types: ["spike"] },
   { key: "sop", schema: sopSchema, types: ["sop"] },
+  {
+    key: TAG_INDEX_SCHEMA_KEY,
+    schema: tagIndexSchema,
+    types: [],
+    extraKeys: [TAG_INDEX_SCHEMA_KEY],
+  },
 ];
+
+export function schemaConfigKeys(entry: {
+  types: RecordType[];
+  extraKeys?: string[];
+}): string[] {
+  return [...entry.types, ...(entry.extraKeys ?? [])];
+}
 
 // Resolve an already-published fbrain schema's canonical hash from the set
 // the node loaded out of the schema-service catalog (GET /api/schemas). The
