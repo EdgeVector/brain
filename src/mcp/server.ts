@@ -1,7 +1,7 @@
 // MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_ask`,
-// `fbrain_get`, `fbrain_list`) and write (`fbrain_put`, `fbrain_status`,
+// `fbrain_get`, `fbrain_list`, `fbrain_backlinks`) and write (`fbrain_put`, `fbrain_status`,
 // `fbrain_append`, `fbrain_delete`, `fbrain_link`) tools to MCP clients
-// (Claude Code, Codex, etc.) over stdio. 9 tools total. `fbrain_status`
+// (Claude Code, Codex, etc.) over stdio. 10 tools total. `fbrain_status`
 // (status-only patch) and `fbrain_append` (grow a body without a full
 // rewrite) close the read/write asymmetry: without them the only write was
 // `fbrain_put`, a FULL replace whose body defaults to empty, so the natural
@@ -28,6 +28,7 @@ import { statusCmd } from "../commands/status.ts";
 import { appendCmd } from "../commands/append.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
+import { backlinksCmd, type BacklinksJson } from "../commands/backlinks.ts";
 import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
 import { RECORD_TYPES } from "../schemas.ts";
 import { establishConsentInline } from "../commands/init-consent.ts";
@@ -38,8 +39,8 @@ import {
 } from "../record.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
-// The complete agent-integration surface this server exposes — 4 read tools
-// + 5 write tools = 9. Single-sourced here so the `doctor --mcp` boot probe
+// The complete agent-integration surface this server exposes — 5 read tools
+// + 5 write tools = 10. Single-sourced here so the `doctor --mcp` boot probe
 // can assert the live `tools/list` reports EXACTLY this set (a renamed or
 // dropped tool fails the probe) without re-listing the names. Keep in sync
 // with the `registerTool` calls below.
@@ -48,6 +49,7 @@ export const FBRAIN_MCP_TOOL_NAMES = [
   "fbrain_ask",
   "fbrain_get",
   "fbrain_list",
+  "fbrain_backlinks",
   "fbrain_put",
   "fbrain_status",
   "fbrain_append",
@@ -291,6 +293,19 @@ const recordSchema = z.object({
     .array(z.object({ slug: z.string(), status: z.string() }))
     .optional()
     .describe("Child task summaries — only present for type=design."),
+  linked_from: z
+    .array(
+      z.object({
+        type: z.enum(RECORD_TYPES),
+        slug: z.string(),
+        status: z.string(),
+        via: z.array(z.enum(["explicit", "body"])),
+      }),
+    )
+    .optional()
+    .describe(
+      "Backlinks to this slug from explicit stored edges and body [[slug]] references.",
+    ),
   created_at: z.string().describe("ISO-8601 creation timestamp."),
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),
   body: z
@@ -385,14 +400,28 @@ const deleteResultSchema = z.object({
     .describe("Always true — the delete is a soft tombstone (fold_db is append-only)."),
 });
 
-// `fbrain_link` → `{action, from_type, from_slug, to_type, to_slug}`. v0
-// supports task → design only, so `from_type`/`to_type` are fixed.
+const backlinksResultSchema = z.object({
+  slug: z.string().describe("Target slug."),
+  type: z.enum(RECORD_TYPES).optional().describe("Target type filter, when provided."),
+  linked_from: z
+    .array(
+      z.object({
+        type: z.enum(RECORD_TYPES),
+        slug: z.string(),
+        status: z.string(),
+        via: z.array(z.enum(["explicit", "body"])),
+      }),
+    )
+    .describe("Records linking to the target slug."),
+});
+
+// `fbrain_link` → `{action, from_type, from_slug, to_type, to_slug}`.
 const linkResultSchema = z.object({
   action: z.literal("linked").describe("Always `linked`."),
-  from_type: z.literal("task").describe("Source record type (always `task` in v0)."),
-  from_slug: z.string().describe("Source task slug."),
-  to_type: z.literal("design").describe("Target record type (always `design` in v0)."),
-  to_slug: z.string().describe("Target design slug."),
+  from_type: z.enum(RECORD_TYPES).describe("Source record type."),
+  from_slug: z.string().describe("Source record slug."),
+  to_type: z.enum(RECORD_TYPES).describe("Target record type."),
+  to_slug: z.string().describe("Target record slug."),
 });
 
 // `fbrain_status` → `{action:"status_changed", type, slug, from, to}`, mirroring
@@ -773,6 +802,39 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
+    "fbrain_backlinks",
+    {
+      title: "List fbrain backlinks",
+      description:
+        "List records that link to a target slug through explicit stored edges " +
+        "or body [[slug]] references. This read does not require the target " +
+        "record to exist, so dangling wiki-link intent remains queryable. " +
+        "Pass `type` to filter typed explicit edges; body refs are slug-only.",
+      inputSchema: {
+        slug: actionableRequiredText("Target slug.", GET_SLUG_REQUIRED_HINT),
+        type: typeEnum
+          .optional()
+          .describe("Optional target type filter for typed explicit edges."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      outputSchema: backlinksResultSchema.shape,
+    },
+    (args) =>
+      runReadTool<BacklinksJson>(
+        getCfg,
+        (cfg, print, onResult) =>
+          backlinksCmd({
+            cfg,
+            slug: args.slug,
+            type: args.type,
+            print,
+            onResult,
+          }),
+        (result) => result,
+      ),
+  );
+
+  server.registerTool(
     "fbrain_put",
     {
       title: "Put fbrain record",
@@ -1113,46 +1175,32 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Link fbrain records",
       description:
-        "Link a task to a parent design — pass just `{from_slug, to_slug}` " +
-        "(mirrors the CLI `fbrain link <task-slug> <design-slug>`). v0 supports " +
-        "task → design only, so the types are inferred; `from_type`/`to_type` " +
-        "are optional and default to `task`/`design`. Pass them only for a " +
-        "non-default pair (none exist in v0), which errors with " +
-        "`unsupported_link_pair`.",
+        "Link fbrain records. Pass just `{from_slug, to_slug}` for the " +
+        "legacy task → design pair; `from_type`/`to_type` default to " +
+        "`task`/`design`. Other type pairs are valid explicit stored edges " +
+        "and are recorded on the source as a generic link tag. Missing " +
+        "explicit targets are rejected.",
       inputSchema: {
-        from_slug: requiredText("Slug of the task to link."),
-        to_slug: requiredText("Slug of the parent design to link it under."),
-        from_type: z
-          .literal("task")
-          .default("task")
-          .describe(
-            "Source record type. Optional — defaults to `task` (the only v0 source). Pass only for a non-default pair (none in v0).",
-          ),
-        to_type: z
-          .literal("design")
-          .default("design")
-          .describe(
-            "Target record type. Optional — defaults to `design` (the only v0 target). Pass only for a non-default pair (none in v0).",
-          ),
+        from_slug: requiredText("Slug of the source record to link."),
+        to_slug: requiredText("Slug of the target record to link to."),
+        from_type: typeEnum.default("task").describe("Source record type (default task)."),
+        to_type: typeEnum.default("design").describe("Target record type (default design)."),
       },
       // `structuredContent` is `{action:"linked", from_type, from_slug,
       // to_type, to_slug}` — the SAME normalized slugs `linkCmd` prints, via
-      // its `onResult` sink. v0 is strictly task → design.
+      // its `onResult` sink.
       outputSchema: linkResultSchema.shape,
     },
     (args) =>
       runWriteTool(getCfg, autoGrant, async (cfg, print, onResult) => {
-        if (args.from_type !== "task" || args.to_type !== "design") {
-          throw new FbrainError({
-            code: "unsupported_link_pair",
-            message: `Link pair ${args.from_type} → ${args.to_type} is not supported.`,
-            hint: "v0 supports task → design only.",
-          });
-        }
         await linkCmd({
           cfg,
           taskSlug: args.from_slug,
           designSlug: args.to_slug,
+          fromSlug: args.from_slug,
+          toSlug: args.to_slug,
+          fromType: args.from_type,
+          toType: args.to_type,
           print,
           onResult,
         });

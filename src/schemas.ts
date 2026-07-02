@@ -536,8 +536,12 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    |---|---|
 ${tableRows}
 
-   Link a \`task\` to its parent \`design\` with \`fbrain_link\`. Slugs are per-type, so
-   pass \`type\` to \`fbrain_get\`/\`fbrain_delete\` whenever a slug could be ambiguous.
+   Link records with \`fbrain_link\`. Passing only \`from_slug\` and \`to_slug\`
+   preserves the legacy task → design default; pass \`from_type\`/\`to_type\` for
+   non-default explicit links. Use \`fbrain_backlinks\` or \`fbrain_get\`'s
+   \`linked_from\` field to see both explicit edges and body \`[[slug]]\`
+   references. Slugs are per-type, so pass \`type\` to
+   \`fbrain_get\`/\`fbrain_delete\` whenever a slug could be ambiguous.
 
 4. **It scales — call it liberally.** Point lookups (\`fbrain_get\`, a filtered
    \`fbrain_list\`) are index-backed and stay flat, well under a millisecond, from

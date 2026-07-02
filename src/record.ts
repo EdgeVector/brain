@@ -6,6 +6,7 @@ import type { Config } from "./config.ts";
 import {
   RECORDS,
   RECORD_TYPES,
+  isRecordType,
   isValidStatus,
   statusValuesFor,
   type RecordType,
@@ -23,6 +24,47 @@ export type FbrainRecord = {
   created_at: string;
   updated_at: string;
 };
+
+export type BacklinkVia = "explicit" | "body";
+
+export type Backlink = {
+  type: RecordType;
+  slug: string;
+  status: string;
+  via: BacklinkVia[];
+  updated_at: string;
+};
+
+const GENERIC_LINK_TAG_PREFIX = "link:";
+
+export function genericLinkTag(toType: RecordType, toSlug: string): string {
+  return `${GENERIC_LINK_TAG_PREFIX}${toType}:${toSlug}`;
+}
+
+export function parseGenericLinkTag(
+  tag: string,
+): { to_type: RecordType; to_slug: string } | null {
+  if (!tag.startsWith(GENERIC_LINK_TAG_PREFIX)) return null;
+  const rest = tag.slice(GENERIC_LINK_TAG_PREFIX.length);
+  const sep = rest.indexOf(":");
+  if (sep <= 0) return null;
+  const rawType = rest.slice(0, sep);
+  const toSlug = rest.slice(sep + 1);
+  if (!isRecordType(rawType) || toSlug.length === 0) return null;
+  return { to_type: rawType, to_slug: toSlug };
+}
+
+export function wikiLinkSlugs(body: string): string[] {
+  const found = new Set<string>();
+  const re = /\[\[([^\]\n]+)\]\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(body)) !== null) {
+    const raw = match[1] ?? "";
+    const slug = normalizeSlug(raw.split(/[|#]/, 1)[0] ?? "");
+    if (slug.length > 0) found.add(slug);
+  }
+  return Array.from(found);
+}
 
 // Soft-delete sentinel — see docs/phase-5-delete-spike.md. fold_db is
 // append-only, so `fbrain delete` overwrites the record's user fields and
@@ -695,6 +737,85 @@ export async function findChildTasksByDesign(
     // up to EMPTY_PAGE_RETRY_ATTEMPTS before declaring "no children".
   }
   return [];
+}
+
+export async function findBacklinks(
+  node: NodeClient,
+  cfg: { schemaHashes: Record<string, string> },
+  targetSlug: string,
+  options?: { targetType?: RecordType },
+): Promise<Backlink[]> {
+  const normalized = normalizeSlug(targetSlug);
+  const bySource = new Map<string, Backlink>();
+
+  for (const type of RECORD_TYPES) {
+    const schemaHash = schemaHashFor(type, cfg);
+    const records = await listRecords(node, type, schemaHash);
+    for (const record of records) {
+      if (isTombstoned(record)) continue;
+      const via = backlinkVia(record, type, normalized, options?.targetType);
+      if (via.length === 0) continue;
+
+      const key = `${type}:${record.slug}`;
+      const existing = bySource.get(key);
+      if (existing) {
+        existing.via = mergeVia(existing.via, via);
+      } else {
+        bySource.set(key, {
+          type,
+          slug: record.slug,
+          status: record.status,
+          via,
+          updated_at: record.updated_at,
+        });
+      }
+    }
+  }
+
+  return Array.from(bySource.values()).sort(compareBacklinks);
+}
+
+function backlinkVia(
+  record: FbrainRecord,
+  sourceType: RecordType,
+  targetSlug: string,
+  targetType: RecordType | undefined,
+): BacklinkVia[] {
+  const via: BacklinkVia[] = [];
+
+  if (
+    sourceType === "task" &&
+    record.design_slug === targetSlug &&
+    (targetType === undefined || targetType === "design")
+  ) {
+    via.push("explicit");
+  }
+
+  for (const tag of record.tags) {
+    const parsed = parseGenericLinkTag(tag);
+    if (!parsed) continue;
+    if (parsed.to_slug !== targetSlug) continue;
+    if (targetType !== undefined && parsed.to_type !== targetType) continue;
+    via.push("explicit");
+    break;
+  }
+
+  if (wikiLinkSlugs(record.body).includes(targetSlug)) via.push("body");
+  return mergeVia([], via);
+}
+
+function mergeVia(existing: BacklinkVia[], incoming: BacklinkVia[]): BacklinkVia[] {
+  const out = new Set<BacklinkVia>(existing);
+  for (const item of incoming) out.add(item);
+  return Array.from(out).sort();
+}
+
+function compareBacklinks(a: Backlink, b: Backlink): number {
+  const byUpdated = b.updated_at.localeCompare(a.updated_at);
+  if (byUpdated !== 0) return byUpdated;
+  const byType = a.type.localeCompare(b.type);
+  if (byType !== 0) return byType;
+  return a.slug.localeCompare(b.slug);
 }
 
 function defaultSleep(ms: number): Promise<void> {

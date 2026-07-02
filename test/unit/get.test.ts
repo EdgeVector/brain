@@ -187,7 +187,7 @@ describe("getRecord — dangling design reference", () => {
     expect(out).not.toContain("(deleted)");
   });
 
-  test("a task with no design reference prints '(none)' and probes no design", async () => {
+  test("a task with no design reference prints '(none)' and only sees design during backlinks scan", async () => {
     let designProbes = 0;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
@@ -202,7 +202,7 @@ describe("getRecord — dangling design reference", () => {
     const lines: string[] = [];
     await getRecord({ cfg, slug: "freestanding", type: "task", print: (l) => lines.push(l) });
     expect(lines.join("\n")).toContain("design:     (none)");
-    expect(designProbes).toBe(0);
+    expect(designProbes).toBe(1);
   });
 });
 
@@ -285,10 +285,11 @@ describe("getRecord — design's child tasks listing", () => {
     const lines: string[] = [];
     await getRecord({ cfg, slug: "solo", type: "design", print: (l) => lines.push(l) });
     expect(lines.join("\n")).toContain("tasks:      (none)");
-    // Worst-case ride-out is EMPTY_PAGE_RETRY_ATTEMPTS task queries — never
+    // Worst-case ride-out is EMPTY_PAGE_RETRY_ATTEMPTS task queries, plus the
+    // one full-corpus backlinks scan added by the backlinks API — never
     // the 5× READ_RETRY_ATTEMPTS budget. Asserting equality (not <=) pins the
     // contract: the cap is the cap.
-    expect(taskQueries).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
+    expect(taskQueries).toBe(EMPTY_PAGE_RETRY_ATTEMPTS + 1);
   }, 30_000);
 
   test("design with populated task page but no matching children renders '(none)' on ONE query", async () => {
@@ -314,14 +315,14 @@ describe("getRecord — design's child tasks listing", () => {
     const lines: string[] = [];
     await getRecord({ cfg, slug: "standalone", type: "design", print: (l) => lines.push(l) });
     expect(lines.join("\n")).toContain("tasks:      (none)");
-    expect(taskQueries).toBe(1);
+    expect(taskQueries).toBe(2);
   });
 
-  test("non-design records do NOT issue a task-children probe (gating)", async () => {
+  test("non-design records do NOT issue a task-children probe beyond backlinks", async () => {
     // The reverse-direction probe is gated on `found.type === "design"`. A
     // task's `fbrain get` resolves with ONE task query (the type-narrowed
-    // sweep); if the gate ever regresses, a second task query (the children
-    // probe of the task itself) would land. Pin to exactly one.
+    // sweep) plus ONE backlinks scan. If the gate ever regresses, a third
+    // task query (the children probe of the task itself) would land.
     let taskQueries = 0;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
@@ -338,7 +339,47 @@ describe("getRecord — design's child tasks listing", () => {
     const lines: string[] = [];
     await getRecord({ cfg, slug: "loner", type: "task", print: (l) => lines.push(l) });
     expect(lines.join("\n")).toContain("[task] loner");
-    expect(taskQueries).toBe(1);
+    expect(taskQueries).toBe(2);
+  });
+
+  test("linked_from includes explicit design links and body wiki references", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.design) {
+        return queryResp([asRow("auth", designFields("auth"))]);
+      }
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow("wire-oauth", taskFields("wire-oauth", { design_slug: "auth" })),
+          asRow(
+            "note-auth",
+            taskFields("note-auth", { body: "See [[auth]] for the decision." }),
+          ),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    let captured: unknown;
+    const lines: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "auth",
+      type: "design",
+      print: (l) => lines.push(l),
+      onResult: (json) => {
+        captured = json;
+      },
+    });
+    expect(lines.join("\n")).toContain("linked_from: task note-auth (body), task wire-oauth (explicit)");
+    expect(captured).toMatchObject({
+      linked_from: [
+        { type: "task", slug: "note-auth", via: ["body"] },
+        { type: "task", slug: "wire-oauth", via: ["explicit"] },
+      ],
+    });
   });
 });
 
