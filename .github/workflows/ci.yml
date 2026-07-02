@@ -78,7 +78,7 @@ jobs:
           codesign --verify --verbose dist/fbrain-mcp
 
       # Boot the COMPILED binary directly (not via `bun run`) and confirm the
-      # MCP handshake returns all 7 fbrain tools — exactly the new-dev path.
+      # MCP handshake returns all 9 fbrain tools — exactly the new-dev path.
       - name: Smoke-test the compiled MCP surface
         run: |
           printf '%s\n%s\n' \
@@ -88,7 +88,7 @@ jobs:
           cat /tmp/mcp-stderr.log
           n=$(bun -e 'const ls=require("fs").readFileSync("/tmp/mcp-out.txt","utf8").trim().split("\n"); const r=JSON.parse(ls[1]); const names=r.result.tools.map(t=>t.name); console.log(names.join(",")); process.stderr.write(String(names.length));' 2>/tmp/mcp-count.txt)
           echo "tools: $n"
-          test "$(cat /tmp/mcp-count.txt)" = "7"
+          test "$(cat /tmp/mcp-count.txt)" = "9"
 
       - name: Upload fbrain-mcp artifact
         uses: actions/upload-artifact@v4
