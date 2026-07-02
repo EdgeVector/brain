@@ -32,6 +32,7 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   type FbrainRecord,
+  findBySlugPointRead,
   findBySlugRaw,
   isTombstoned,
   listRecords,
@@ -44,6 +45,11 @@ import {
   withReadRetry,
 } from "../record.ts";
 import { RECORD_TYPES, RECORDS, type RecordType } from "../schemas.ts";
+import {
+  resolveRecordsByTag,
+  tagIndexAvailable,
+  unindexRecordTags,
+} from "../tag-index.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -154,6 +160,13 @@ async function tombstoneOne(
   type: RecordType,
   slug: string,
   created: string,
+  // The record's tags at delete time, so the tag secondary index can drop this
+  // record from each tag it carried. Best-effort (see `unindexRecordTags`): an
+  // index-update failure never fails the delete. Empty/omitted when the caller
+  // has no tag list handy — the index then simply isn't updated here (a
+  // `fbrain reindex` still repairs it).
+  oldTags: readonly string[] = [],
+  verbose?: Verbose,
 ): Promise<void> {
   const schemaHash = schemaHashFor(type, cfg);
   const fields = buildTombstoneFields(type, slug, created, nowIso());
@@ -192,6 +205,13 @@ async function tombstoneOne(
         "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read still shows the record without the tombstone tag.",
     });
   }
+
+  // The soft-delete stuck — drop this record from the tag secondary index so a
+  // later `list --tag`/`delete --tag` for any of its tags no longer returns it.
+  // Best-effort: a failure here is logged and swallowed (the delete already
+  // succeeded), and the read path's live-membership re-check filters out the
+  // stale entry regardless. Only tags the record actually carried are removed.
+  await unindexRecordTags(node, cfg, type, slug, oldTags, verbose);
 }
 
 export async function deleteRecord(opts: DeleteOptions): Promise<void> {
@@ -237,7 +257,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     }
   }
 
-  await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
+  await tombstoneOne(node, opts.cfg, type, slug, record.created_at, record.tags, opts.verbose);
 
   print(
     `deleted ${type} ${slug} (soft — fold_db is append-only)`,
@@ -294,6 +314,29 @@ async function resolveFilterMatches(
 ): Promise<FilterMatch[]> {
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const matches: FilterMatch[] = [];
+
+  // Tag-filtered fast path: resolve the tag's live members through the secondary
+  // index so `delete --tag` scales with the tag's cardinality, not the scanned
+  // type size (mirrors `list --tag` — same helper, same index-miss fallback). A
+  // null return is an index MISS → fall through to the scan below.
+  if (opts.tag !== undefined && tagIndexAvailable(opts.cfg)) {
+    const viaIndex = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
+      findBySlug: (t, hash, slug) => findBySlugPointRead(node, t, hash, slug),
+      schemaHashFor: (t) => schemaHashFor(t, opts.cfg),
+    });
+    if (viaIndex !== null) {
+      for (const { type, record } of viaIndex) {
+        if (opts.type && type !== opts.type) continue;
+        if (opts.status && record.status !== opts.status) continue;
+        matches.push({ type, slug: record.slug, title: record.title });
+      }
+      matches.sort((a, b) =>
+        a.type !== b.type ? (a.type < b.type ? -1 : 1) : a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0,
+      );
+      return matches;
+    }
+  }
+
   for (const t of types) {
     const rows = await listRecords(node, t, schemaHashFor(t, opts.cfg));
     for (const r of rows) {
@@ -403,7 +446,7 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
     }).catch(() => null);
     if (resolved === null) continue; // already gone — nothing to do
 
-    await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at);
+    await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at, resolved.record.tags, opts.verbose);
     print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
     deleted.push({ type: m.type, slug });
   }

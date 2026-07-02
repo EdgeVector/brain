@@ -152,10 +152,11 @@ describe("schemas", () => {
     expect(new Set(purposes).size).toBe(7);
   });
 
-  test("UNIQUE_SCHEMAS has 9 entries: design + task + 6 per-kind + sop", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(9);
+  test("UNIQUE_SCHEMAS has 10 entries: design + task + 6 per-kind + sop + tag-index", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(10);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
+      "__tagindex__",
       "agent",
       "concept",
       "design",
@@ -166,8 +167,15 @@ describe("schemas", () => {
       "spike",
       "task",
     ]);
-    // Every entry covers exactly one RecordType.
+    // Every RECORD-TYPE entry covers exactly one RecordType (its key == type);
+    // the internal TagIndex entry is NOT a RecordType (types: []) and carries
+    // its config key via extraKeys instead.
     for (const entry of UNIQUE_SCHEMAS) {
+      if (entry.key === "__tagindex__") {
+        expect(entry.types.length).toBe(0);
+        expect(entry.extraKeys).toEqual(["__tagindex__"]);
+        continue;
+      }
       expect(entry.types.length).toBe(1);
       expect(entry.types[0]).toBe(entry.key as RecordType);
     }

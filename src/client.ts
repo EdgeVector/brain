@@ -753,6 +753,20 @@ export type NodeClient = {
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
+  // Point-read a single Hash-keyed record by its key (slug) via the node's
+  // `HashKey` query filter — a filter-aware read that materializes only the
+  // matching key (fold #905), so its cost is O(1) in the schema's row count
+  // rather than the O(rows) full-schema scan `queryAll` performs. Used by the
+  // tag secondary index to resolve members and read its own records without
+  // scanning. Returns the row, or null when the key isn't present. Forward/
+  // backward safe: a node that ignores the filter returns the full page, which
+  // the client narrows to the requested key — correct, just not flat on such a
+  // (pre-#905) node.
+  queryByKey(opts: {
+    schemaHash: string;
+    fields: string[];
+    keyHash: string;
+  }): Promise<QueryRow | null>;
   search(query: string, opts?: SearchOptions): Promise<NativeIndexHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
@@ -1355,6 +1369,37 @@ export function newNodeClient(opts: {
         total_count: lastTotalCount ?? allResults.length,
         returned_count: allResults.length,
       };
+    },
+    async queryByKey({ schemaHash, fields, keyHash }) {
+      // Filter-aware point read: the `HashKey` filter tells the node to
+      // materialize ONLY the row whose hash-key field (`slug`) equals `keyHash`,
+      // which fold #905 resolves to a single keyed load instead of a full-field
+      // scan — the flat-cost primitive the tag index needs. A node that predates
+      // the filter (or ignores an unknown one) returns the whole page; we
+      // defensively narrow to the requested key below, so the RESULT is correct
+      // on every node, only the COST is flat on a #905+ node. No pagination loop:
+      // a HashKey filter targets at most one row.
+      const body = await callJsonOk("/api/query", "POST", {
+        schema_name: schemaHash,
+        fields,
+        filter: { HashKey: keyHash },
+        limit: QUERY_PAGE_SIZE,
+        offset: 0,
+      });
+      const b = body as Record<string, unknown>;
+      const results = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      // Narrow to the exact key: on a filter-aware node `results` is already just
+      // this row (or empty); on a filter-blind node it's the page, so match by
+      // the key hash. `key.hash` is the authoritative match; fall back to the
+      // `slug` field for a node that doesn't echo the key.
+      for (const row of results) {
+        if (row.key?.hash === keyHash) return row;
+      }
+      for (const row of results) {
+        const f = (row.fields ?? {}) as Record<string, unknown>;
+        if (f.slug === keyHash) return row;
+      }
+      return null;
     },
     async search(query, searchOpts) {
       const params = new URLSearchParams();

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { dedupeHits, isWeakMatch, searchCmd } from "../../src/commands/search.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { buildTestCfg, RECORD_TYPES, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 const TASK_HASH = TEST_HASHES.task;
@@ -1010,10 +1010,14 @@ describe("searchCmd", () => {
     const schemas = parsed.searchParams.get("schemas");
     expect(schemas).not.toBeNull();
     const sent = (schemas ?? "").split(",").filter((s) => s.length > 0);
-    // Every test-config schema hash must be present on the wire.
-    for (const h of Object.values(cfg.schemaHashes)) {
-      expect(sent).toContain(h);
+    // Every RECORD-TYPE schema hash must be present on the wire. The internal
+    // TagIndex schema hash is intentionally NOT among them — it's never
+    // semantically searched (point-read by its reserved slug only), so search
+    // scopes to the record types via `uniqueSchemaHashes(cfg, RECORD_TYPES)`.
+    for (const t of RECORD_TYPES) {
+      expect(sent).toContain(cfg.schemaHashes[t]!);
     }
+    expect(sent).not.toContain(cfg.schemaHashes.__tagindex__!);
   });
 
   test("--type design restricts the schemas filter to the design hash and drops non-design hits", async () => {

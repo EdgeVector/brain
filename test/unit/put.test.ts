@@ -1054,10 +1054,14 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.type).toBe(type as RecordType);
     expect(r.action).toBe("created");
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    expect(mutations[0]!.schema).toBe(TEST_HASHES[type as RecordType]);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Filter to the record's own schema — a create with tags also writes the
+    // tag secondary index (a mutation against the TagIndex schema), covered in
+    // tag-index.test.ts.
+    const recordMutations = mutations.filter((m) => m.schema === TEST_HASHES[type as RecordType]);
+    expect(recordMutations).toHaveLength(1);
+    expect(recordMutations[0]!.mutation_type).toBe("create");
+    expect(recordMutations[0]!.schema).toBe(TEST_HASHES[type as RecordType]);
+    const fields = recordMutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe(RECORDS[type as RecordType].defaultStatus);
     expect(fields.title).toBe("Smoke");
     expect(fields.tags).toEqual(["phase6"]);
@@ -1146,9 +1150,13 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.action).toBe("updated");
     expect(queryCalls).toBeGreaterThanOrEqual(2);
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("update");
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Filter to the concept-schema mutation — this re-put also moves the record
+    // between tags in the secondary index (mutations against the TagIndex
+    // schema), covered in tag-index.test.ts.
+    const recordMutations = mutations.filter((m) => m.schema === TEST_HASHES.concept);
+    expect(recordMutations).toHaveLength(1);
+    expect(recordMutations[0]!.mutation_type).toBe("update");
+    const fields = recordMutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.created_at).toBe("2026-03-03T00:00:00.000Z");
     expect(fields.updated_at).not.toBe("2026-03-03T00:00:00.000Z");
     expect(typeof fields.updated_at).toBe("string");

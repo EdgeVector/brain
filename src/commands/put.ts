@@ -40,6 +40,7 @@ import {
   isRecordType,
   type RecordType,
 } from "../schemas.ts";
+import { reconcileTagIndex } from "../tag-index.ts";
 
 export type PutOptions = {
   cfg: Config;
@@ -176,6 +177,24 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
     });
   }
+  // Maintain the tag secondary index: diff the record's OLD tags (from the
+  // existing row, or none on a create) against its NEW tags and add/remove its
+  // member entry from each affected tag's index record. Runs after the write is
+  // confirmed visible so the index only ever references a persisted record.
+  // Best-effort — `reconcileTagIndex` swallows its own failures so a stale index
+  // can never fail the user's write (see src/tag-index.ts). A no-op when the
+  // TagIndex schema isn't in config (older init) or tags didn't change.
+  const newTags = (fields.tags as string[] | undefined) ?? [];
+  await reconcileTagIndex(
+    node,
+    opts.cfg,
+    type,
+    slug,
+    existing?.tags ?? [],
+    newTags,
+    opts.verbose,
+  );
+
   // Read-after-write SEARCH parity (#295, CLI half). `verifyRecordVisible`
   // above proves the row is queryable via /api/query (the record-list / BM25
   // surface `get`/`list`/`ask` read), but says nothing about the native

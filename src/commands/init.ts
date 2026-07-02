@@ -20,7 +20,7 @@
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, type Verbose } from "../client.ts";
-import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveOwnedSchemaHash } from "../schemas.ts";
+import { OWNER_APP_ID, UNIQUE_SCHEMAS, resolveOwnedSchemaHash, schemaConfigKeys } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   ConfigInvalidError,
@@ -378,12 +378,12 @@ async function tryDeclareOwnedSchemasLocally(
           hint: "Disable schema-link matching for fbrain-owned schemas or declare this schema as a local mint, then re-run `fbrain init`.",
         });
       }
-      for (const type of entry.types) {
-        schemaHashes[type] = declared.canonical;
+      for (const key of schemaConfigKeys(entry)) {
+        schemaHashes[key] = declared.canonical;
       }
       print(
         `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
-          `(local mint; covers ${entry.types.join(", ")})`,
+          `(local mint; covers ${schemaConfigKeys(entry).join(", ")})`,
       );
     } catch (err) {
       if (err instanceof FbrainError && err.code === "node_http_404") {
@@ -410,10 +410,10 @@ async function registerAndLoadSchemasFromCatalog(opts: {
   for (const entry of UNIQUE_SCHEMAS) {
     try {
       const reg = await schemaClient.registerSchema(entry.schema);
-      for (const type of entry.types) {
-        schemaHashes[type] = reg.canonicalHash;
+      for (const key of schemaConfigKeys(entry)) {
+        schemaHashes[key] = reg.canonicalHash;
       }
-      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${entry.types.join(", ")})`);
+      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${schemaConfigKeys(entry).join(", ")})`);
     } catch (err) {
       // Cert-gated re-POST of an already-published fbrain/* schema — defer it
       // and resolve the canonical hash from the node catalog after load. Same
@@ -461,8 +461,8 @@ async function registerAndLoadSchemasFromCatalog(opts: {
     for (const entry of certBlocked) {
       const hash = resolveOwnedSchemaHash(entry.schema, loaded);
       if (hash) {
-        for (const type of entry.types) {
-          schemaHashes[type] = hash;
+        for (const key of schemaConfigKeys(entry)) {
+          schemaHashes[key] = hash;
         }
         print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published fbrain/* schema; no DevCert needed)`);
       } else {

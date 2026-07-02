@@ -1,6 +1,6 @@
 // Test helpers shared across unit and integration suites.
 
-import { RECORD_TYPES, type RecordType } from "../src/schemas.ts";
+import { RECORD_TYPES, TAG_INDEX_SCHEMA_KEY, type RecordType } from "../src/schemas.ts";
 import { CONFIG_VERSION, type Config } from "../src/config.ts";
 
 // Synthetic 64-hex hashes for unit tests — distinct first byte per type so
@@ -18,6 +18,12 @@ export const TEST_HASHES: Record<RecordType, string> = {
   sop: "6".repeat(64),
 };
 
+// Synthetic hash for the internal TagIndex schema (not a RecordType, so kept
+// out of TEST_HASHES which is typed `Record<RecordType,string>`). A real init
+// writes this under `cfg.schemaHashes[TAG_INDEX_SCHEMA_KEY]`; buildTestCfg does
+// the same so the tag secondary index is ON by default in unit tests.
+export const TEST_TAG_INDEX_HASH = "7".repeat(64);
+
 // Test URL defaults: homebrew `fold_db_node` daemon + the dev cloud Lambda.
 // Dev (us-west-2) — not prod — so iteration-test runs don't pollute the
 // production schema registry. CI / per-env overrides via env vars.
@@ -33,11 +39,28 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
     nodeUrl: TEST_NODE_URL,
     schemaServiceUrl: TEST_SCHEMA_SERVICE_URL,
     userHash: "uh-test",
-    schemaHashes: { ...TEST_HASHES },
+    schemaHashes: { ...TEST_HASHES, [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH },
     designSchemaHash: TEST_HASHES.design,
     taskSchemaHash: TEST_HASHES.task,
   };
   const merged: Config = { ...base, ...over };
+  // A caller-supplied `schemaHashes` REPLACES the base map (object spread), so
+  // re-inject the TagIndex hash if the override didn't set it — otherwise every
+  // test that narrows `schemaHashes` (e.g. to inject one custom type hash) would
+  // silently turn the tag secondary index OFF and drift from a real config,
+  // where init always writes it. Callers testing the feature-OFF path set
+  // `schemaHashes` with the key explicitly absent AND can delete it after.
+  if (
+    "schemaHashes" in over &&
+    over.schemaHashes !== undefined &&
+    Object.keys(over.schemaHashes).length > 0 &&
+    !(TAG_INDEX_SCHEMA_KEY in over.schemaHashes)
+  ) {
+    merged.schemaHashes = {
+      ...over.schemaHashes,
+      [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH,
+    };
+  }
   // Keep mirrors in sync unless caller explicitly overrode them.
   if (!("designSchemaHash" in over)) {
     merged.designSchemaHash = merged.schemaHashes.design ?? "";

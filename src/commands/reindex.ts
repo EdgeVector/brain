@@ -36,6 +36,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { rebuildTagIndex, tagIndexAvailable, type TagIndexRebuildResult } from "../tag-index.ts";
 
 export type ReindexOptions = {
   cfg: Config;
@@ -49,6 +50,13 @@ export type ReindexOptions = {
   // H1 of the body, or the slug as last resort (the original folded text
   // is unrecoverable). Idempotent: a second run finds nothing to fix.
   repairTitles?: boolean;
+  // Tag-index rebuild mode (`fbrain reindex --tags`): skip the embedding refresh
+  // and instead rebuild the tag SECONDARY INDEX from a full corpus scan — the
+  // authoritative repair for a stale/incomplete tag index (e.g. after records
+  // were written by a build that predated the index, or a best-effort index
+  // update was dropped). Overwrites every tag's index record from the live
+  // corpus. No-op (with a note) when the TagIndex schema isn't in config.
+  tags?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -67,6 +75,8 @@ export type ReindexResult = {
     source: "h1" | "slug";
   }>;
   byType: Partial<Record<RecordType, { reindexed: number; skippedTombstone: number }>>;
+  // Populated only when `tags` is set — the tag-index rebuild summary.
+  tagIndex?: TagIndexRebuildResult;
 };
 
 // Literal text the corrupted import wrote into the title slot. Matches the
@@ -97,6 +107,38 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   // --dry-run issues no writes, so it never invokes the capability provider
   // and never triggers consent; a real reindex acquires on its first update.
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+
+  // Tag-index rebuild is a self-contained mode: it rebuilds the tag SECONDARY
+  // INDEX from a corpus scan and returns, without touching embeddings or titles.
+  if (opts.tags) {
+    const result: ReindexResult = {
+      scanned: 0,
+      reindexed: 0,
+      skippedTombstone: 0,
+      byType: {},
+    };
+    if (!tagIndexAvailable(opts.cfg)) {
+      print(
+        "tag index not available in this config (re-run `fbrain init` to register the TagIndex schema) — nothing to rebuild",
+      );
+      result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
+      return result;
+    }
+    if (opts.dryRun) {
+      print("dry-run: --tags would rebuild the tag secondary index from a full corpus scan");
+      result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
+      return result;
+    }
+    const rebuilt = await rebuildTagIndex(node, opts.cfg, {
+      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash),
+      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
+    });
+    result.tagIndex = rebuilt;
+    print(
+      `rebuilt tag index: ${rebuilt.tagsIndexed} tag(s), ${rebuilt.membersIndexed} membership(s)`,
+    );
+    return result;
+  }
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const result: ReindexResult = {

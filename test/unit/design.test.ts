@@ -57,10 +57,14 @@ describe("designNew", () => {
       tags: ["a", "b"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    expect(mutations[0]!.schema).toBe(DESIGN_HASH);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Filter to the design-schema mutation — a create with tags also writes the
+    // tag secondary index (mutations against the TagIndex schema), covered in
+    // tag-index.test.ts.
+    const designMutations = mutations.filter((m) => m.schema === DESIGN_HASH);
+    expect(designMutations).toHaveLength(1);
+    expect(designMutations[0]!.mutation_type).toBe("create");
+    expect(designMutations[0]!.schema).toBe(DESIGN_HASH);
+    const fields = designMutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.slug).toBe("fresh-design");
     expect(fields.title).toBe("Fresh");
     expect(fields.tags).toEqual(["a", "b"]);

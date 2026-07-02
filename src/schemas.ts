@@ -345,6 +345,68 @@ export const RECORD_TYPES = [
 ] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
+// ── Tag secondary index ────────────────────────────────────────────────────
+//
+// A tag→members inverted index, maintained by fbrain (fold_db has no
+// server-side field index — `/api/query` can't filter by tag, so an
+// un-indexed `list --tag` must scan every record of the type(s) and filter
+// client-side, O(type size) not O(tag matches); see the `queryAll` comment in
+// client.ts and papercut `papercut-fbrain-tag-query-no-index`).
+//
+// One `TagIndex` record per tag, keyed (`slug`) by `tagIndexSlug(tag)` — a
+// reserved `__tagidx__…`-prefixed namespace no user record can collide with
+// (slugs are validated to reject it — see `validateSlug`). The `members` array
+// holds `"<type>:<slug>"` entries, one per live record carrying the tag.
+// Tag-filtered reads (`list --tag`, `delete --tag`) resolve the member set from
+// this record, then point-look-up each member by slug (index-backed, flat per
+// fold #905) — so query cost scales with the tag's cardinality, not the size of
+// the type(s) being scanned. On an index MISS (no TagIndex record, or the
+// schema isn't in this config) the caller falls back to the legacy scan, so the
+// index is always a pure optimization, never the source of truth.
+//
+// This schema is NOT a RecordType: it never appears in a `list`/`get`/`search`
+// surface, has no status enum, and is not user-writable via `put`. It rides the
+// same registration + load machinery as the record schemas (UNIQUE_SCHEMAS) so
+// `fbrain init` resolves its canonical hash into `cfg.schemaHashes.__tagindex__`.
+export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
+
+export const tagIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "TagIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "TagIndex",
+    purpose_statement:
+      "Inverted index mapping a tag to the records that carry it, maintained by fbrain to make tag-filtered reads scale with tag cardinality instead of corpus size",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: ["slug", "tag", "members", "created_at", "updated_at"],
+    field_types: {
+      slug: "String",
+      tag: "String",
+      members: { Array: "String" },
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      slug: "reserved __tagidx__<tag> key",
+      tag: "the indexed tag value",
+      members: "array of type:slug entries carrying this tag",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    // No `field_classifications` (no word-indexed fields): the tag index is
+    // never semantically searched, only point-read by its reserved slug.
+    field_data_classifications: {
+      slug: GENERAL,
+      tag: GENERAL,
+      members: GENERAL,
+      created_at: GENERAL,
+      updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
@@ -421,11 +483,21 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
 
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
 // entry binds a config-key (where `init` writes the canonical hash) to
-// the AddSchemaRequest. One entry per RecordType — no legacy alias.
+// the AddSchemaRequest. One entry per RecordType — no legacy alias — plus
+// the internal TagIndex schema, which is NOT a RecordType (`types: []`) and
+// carries its own config key via `extraKeys` so init writes its hash under
+// `cfg.schemaHashes[TAG_INDEX_SCHEMA_KEY]` without adding it to the record
+// surface.
+//
+// `types` fans the resolved canonical hash to each RecordType key; `extraKeys`
+// (optional) writes it to additional non-type config keys. A record schema
+// leaves `extraKeys` unset; TagIndex sets `types: []` + `extraKeys:
+// [TAG_INDEX_SCHEMA_KEY]`.
 export const UNIQUE_SCHEMAS: Array<{
   key: string;
   schema: AddSchemaRequest;
   types: RecordType[];
+  extraKeys?: string[];
 }> = [
   { key: "design", schema: designSchema, types: ["design"] },
   { key: "task", schema: taskSchema, types: ["task"] },
@@ -436,7 +508,19 @@ export const UNIQUE_SCHEMAS: Array<{
   { key: "project", schema: projectSchema, types: ["project"] },
   { key: "spike", schema: spikeSchema, types: ["spike"] },
   { key: "sop", schema: sopSchema, types: ["sop"] },
+  { key: TAG_INDEX_SCHEMA_KEY, schema: tagIndexSchema, types: [], extraKeys: [TAG_INDEX_SCHEMA_KEY] },
 ];
+
+// The config-key set a UNIQUE_SCHEMAS entry writes its resolved canonical hash
+// under — its RecordType keys plus any `extraKeys`. init's declare + catalog
+// paths (and the test harness) all fan the hash through this so a schema that
+// isn't a RecordType (TagIndex) still lands in `cfg.schemaHashes`.
+export function schemaConfigKeys(entry: {
+  types: RecordType[];
+  extraKeys?: string[];
+}): string[] {
+  return [...entry.types, ...(entry.extraKeys ?? [])];
+}
 
 // Resolve an already-published fbrain schema's canonical hash from the set
 // the node loaded out of the schema-service catalog (GET /api/schemas). The

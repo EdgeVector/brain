@@ -72,12 +72,16 @@ export async function runUsageReport(
   const perUser = new Map<string, Counts>();
 
   for (const entry of UNIQUE_SCHEMAS) {
+    // Skip internal (non-RecordType) schemas like TagIndex — they carry no
+    // user-authored records and aren't a usage-reportable type (`entry.types`
+    // is empty for them).
+    const type = entry.types[0];
+    if (type === undefined) continue;
     const schemaHash = cfg.schemaHashes[entry.key];
     if (!schemaHash) {
       verbose?.(`usage: skipping ${entry.key} — no schemaHash in config`);
       continue;
     }
-    const type = entry.types[0]!;
     const fields = fieldsFor(type);
     let rows: QueryRow[];
     try {

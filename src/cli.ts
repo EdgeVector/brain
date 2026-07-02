@@ -545,7 +545,7 @@ delete anyway — the tasks' design references are then left dangling.
 
 After delete, a slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--repair-titles]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--repair-titles] [--tags]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -569,6 +569,11 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     the first H1 of the body, or the slug as last resort.
                     Idempotent; prints every change. Combine with --dry-run
                     to preview without writing.
+  --tags            rebuild the TAG SECONDARY INDEX from a full corpus scan —
+                    the repair path for a stale/incomplete tag index (records
+                    written before the index existed, or a dropped best-effort
+                    update). Overwrites every tag's index record from the live
+                    corpus. Standalone mode: ignores --type/--repair-titles.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone, or ok | repaired | would-repair
@@ -847,6 +852,8 @@ const REINDEX_OPTIONS = {
   type: { type: "string" },
   "dry-run": { type: "boolean", default: false },
   "repair-titles": { type: "boolean", default: false },
+  // Rebuild the tag secondary index from a full corpus scan (repair path).
+  tags: { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -2602,6 +2609,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (type) rOpts.type = type;
   if (values["dry-run"]) rOpts.dryRun = true;
   if (values["repair-titles"]) rOpts.repairTitles = true;
+  if (values.tags) rOpts.tags = true;
   await reindexCmd(rOpts);
   return 0;
 }

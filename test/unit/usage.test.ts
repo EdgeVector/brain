@@ -100,6 +100,10 @@ function mockNodeWithRows(rows: FakeRow[]): NodeClient {
       const results = store.get(schemaHash) ?? [];
       return { ok: true, results, total_count: results.length, returned_count: results.length };
     },
+    async queryByKey({ schemaHash, keyHash }): Promise<QueryRow | null> {
+      const rows = store.get(schemaHash) ?? [];
+      return rows.find((r) => (r.fields as { slug?: unknown }).slug === keyHash) ?? null;
+    },
     async search(): Promise<NativeIndexHit[]> { return []; },
     async rawCall() { return { status: 200, headers: new Headers(), body: "", json: null }; },
   };

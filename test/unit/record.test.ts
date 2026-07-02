@@ -24,6 +24,7 @@ import {
   type NativeIndexHit,
   type NodeClient,
   type QueryResponse,
+  type QueryRow,
 } from "../../src/client.ts";
 import { RECORD_TYPES, type RecordType } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
@@ -703,6 +704,12 @@ describe("resolveBySlug", () => {
           returned_count: results.length,
         };
       },
+      async queryByKey({ schemaHash, keyHash }): Promise<QueryRow | null> {
+        const match = (seed[schemaHash] ?? []).find((r) => r.fields.slug === keyHash);
+        return match
+          ? { fields: match.fields, key: { hash: keyHash, range: null } }
+          : null;
+      },
       async search() {
         return [];
       },
@@ -964,6 +971,9 @@ describe("resolveBySlug", () => {
           }
           return { ok: true, results: [], total_count: 0, returned_count: 0 };
         },
+        async queryByKey() {
+          return null; // not exercised by this resolveBySlug sweep
+        },
         async search() {
           return [];
         },
@@ -1093,6 +1103,9 @@ describe("resolveBySlug", () => {
             total_count: results.length,
             returned_count: results.length,
           };
+        },
+        async queryByKey() {
+          return null; // not exercised by these paged findExistingForWrite tests
         },
         async search() {
           return [];

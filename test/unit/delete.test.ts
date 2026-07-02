@@ -99,6 +99,10 @@ function mockNode(state: MockState): NodeClient {
       }));
       return { ok: true, results, total_count: results.length, returned_count: results.length };
     },
+    async queryByKey({ schemaHash, keyHash }) {
+      const fields = state.store.get(schemaHash)?.get(keyHash);
+      return fields ? { fields, key: { hash: keyHash, range: null } } : null;
+    },
     async search() {
       return [];
     },

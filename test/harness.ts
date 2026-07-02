@@ -26,8 +26,8 @@ import { join } from "node:path";
 
 import {
   UNIQUE_SCHEMAS,
+  schemaConfigKeys,
   type AddSchemaRequest,
-  type RecordType,
 } from "../src/schemas.ts";
 import { newNodeClient, newSchemaServiceClient } from "../src/client.ts";
 import { TEST_SCHEMA_SERVICE_URL } from "./util.ts";
@@ -65,7 +65,10 @@ export type Harness = {
   nodeUrl: string;
   schemaServiceUrl: string;
   userHash: string;
-  schemaHashes: Record<RecordType, string>;
+  // Keyed by RecordType plus the internal TagIndex config key (see
+  // `schemaConfigKeys` / TAG_INDEX_SCHEMA_KEY), so a `Record<string,string>`
+  // rather than `Record<RecordType,string>`.
+  schemaHashes: Record<string, string>;
   // Legacy mirrors — same values as schemaHashes.design / schemaHashes.task.
   designSchemaHash: string;
   taskSchemaHash: string;
@@ -261,11 +264,11 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
     // Register every UNIQUE fbrain schema (3 total — Phase 6 types share
     // one) → capture canonical hashes and fan to all RecordType keys.
     const schemaClient = newSchemaServiceClient(schemaServiceUrl);
-    const schemaHashes = {} as Record<RecordType, string>;
+    const schemaHashes = {} as Record<string, string>;
     for (const entry of UNIQUE_SCHEMAS) {
       const reg = await schemaClient.registerSchema(entry.schema);
-      for (const type of entry.types) {
-        schemaHashes[type] = reg.canonicalHash;
+      for (const key of schemaConfigKeys(entry)) {
+        schemaHashes[key] = reg.canonicalHash;
       }
     }
 
@@ -283,8 +286,8 @@ export async function startHarness(opts?: { name?: string }): Promise<Harness> {
       schemaServiceUrl,
       userHash,
       schemaHashes,
-      designSchemaHash: schemaHashes.design,
-      taskSchemaHash: schemaHashes.task,
+      designSchemaHash: schemaHashes.design ?? "",
+      taskSchemaHash: schemaHashes.task ?? "",
       home,
       pid: slot.pid,
       teardown: dispose,

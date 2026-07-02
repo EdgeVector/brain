@@ -5,6 +5,7 @@ import type { Config } from "../config.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
+  findBySlugPointRead,
   hasAnyLiveRecord,
   isTombstoned,
   listRecords,
@@ -13,6 +14,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { resolveRecordsByTag, tagIndexAvailable } from "../tag-index.ts";
 
 // Default cap for an unfiltered `fbrain list`. Without it an
 // unfiltered list dumps every record in the index — 80+ already, and
@@ -67,6 +69,27 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     }
     return acc;
   };
+
+  // Tag-filtered fast path: resolve the tag's members THROUGH the secondary
+  // index so cost scales with the tag's cardinality, not the size of the
+  // scanned type(s) (see src/tag-index.ts + papercut-fbrain-tag-query-no-index).
+  // `resolveRecordsByTag` returns the LIVE records carrying the tag (each
+  // re-checked, so a stale index entry is dropped), or null on an index MISS —
+  // in which case we fall through to the legacy scan below, so correctness never
+  // depends on the index being present or current. `--type`/`--status` are
+  // applied on top of the index hit exactly as they are on the scan.
+  let all: Array<{ type: RecordType; record: FbrainRecord }> | null = null;
+  if (opts.tag !== undefined && tagIndexAvailable(opts.cfg)) {
+    const viaIndex = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
+      findBySlug: (t, hash, slug) => findBySlugPointRead(node, t, hash, slug),
+      schemaHashFor: (t) => schemaHashFor(t, opts.cfg),
+    });
+    if (viaIndex !== null) {
+      all = opts.type ? viaIndex.filter(({ type }) => type === opts.type) : viaIndex;
+    }
+  }
+
+  // Legacy scan path — used when there's no tag filter, or on an index miss.
   // The dogfood read-flake repro (2026-05-26): a status write lands, but
   // the immediately-following filtered list returns empty for ~1s. Retry
   // the sweep only when --status/--tag are present — without them, empty
@@ -76,12 +99,14 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // sweep that surfaces a row but the row doesn't match the filter still
   // stops retrying (we're riding out the empty-sweep flake, not searching
   // for a matching row). See withReadRetry in ../record.ts.
-  const wantsRetry = opts.status !== undefined || opts.tag !== undefined;
-  const all = wantsRetry
-    ? await withReadRetry(sweep, (acc) =>
-        acc.some(({ record }) => !isTombstoned(record)),
-      )
-    : await sweep();
+  if (all === null) {
+    const wantsRetry = opts.status !== undefined || opts.tag !== undefined;
+    all = wantsRetry
+      ? await withReadRetry(sweep, (acc) =>
+          acc.some(({ record }) => !isTombstoned(record)),
+        )
+      : await sweep();
+  }
 
   const filtered = all.filter(({ record }) => {
     if (isTombstoned(record)) return false;

@@ -69,10 +69,14 @@ describe("taskNew", () => {
       tags: ["a"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    expect(mutations[0]!.schema).toBe(TASK_HASH);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Filter to the task-schema mutation — a create with tags also writes the
+    // tag secondary index (mutations against the TagIndex schema), covered in
+    // tag-index.test.ts.
+    const taskMutations = mutations.filter((m) => m.schema === TASK_HASH);
+    expect(taskMutations).toHaveLength(1);
+    expect(taskMutations[0]!.mutation_type).toBe("create");
+    expect(taskMutations[0]!.schema).toBe(TASK_HASH);
+    const fields = taskMutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe("open");
     expect(fields.design_slug).toBe("");
   });

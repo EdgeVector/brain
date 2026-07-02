@@ -1896,8 +1896,12 @@ describe("fbrain_put tool", () => {
       frontmatter: "type: preference\ntitle: From Raw\ntags: [from-raw]",
       body: "raw body",
     });
-    expect(mutations).toHaveLength(1);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // Filter to the preference-schema mutation — a create with tags also writes
+    // the tag secondary index (a mutation against the TagIndex schema), covered
+    // in tag-index.test.ts.
+    const recordMutations = mutations.filter((m) => m.schema === TEST_HASHES.preference);
+    expect(recordMutations).toHaveLength(1);
+    const fields = recordMutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.title).toBe("From Raw");
     expect(fields.tags).toEqual(["from-raw"]);
     // Per-kind preference schema has no `kind` field.

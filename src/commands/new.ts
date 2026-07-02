@@ -28,6 +28,7 @@ import {
   validateSlug,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
+import { indexRecordTags } from "../tag-index.ts";
 
 export type RecordNewOptions = {
   cfg: Config;
@@ -142,6 +143,11 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     fields.design_slug = opts.designSlug ?? "";
   }
   await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
+
+  // Index the new record's tags in the tag secondary index (a create has no
+  // prior tags, so this only adds). Best-effort + no-op when the feature's
+  // schema isn't in config — see `indexRecordTags` / src/tag-index.ts.
+  await indexRecordTags(node, opts.cfg, opts.type, opts.slug, opts.tags, opts.verbose);
 
   // Read-after-write SEARCH parity (#295, CLI half). The native (vector) index
   // `fbrain search` reads is populated asynchronously after the mutation

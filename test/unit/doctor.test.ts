@@ -25,6 +25,7 @@ import {
   RECORD_TYPES,
   designSchema,
   projectSchema,
+  tagIndexSchema,
   type AddSchemaRequest,
   type RecordType,
 } from "../../src/schemas.ts";
@@ -47,7 +48,7 @@ import { inMemoryCapabilityStore } from "../../src/keychain.ts";
 import { canonicalize, type JsonValue } from "../../src/jcs.ts";
 import { sha256Hex } from "../../src/hash.ts";
 import type { WriteNodeClient, WriteNodeClientOptions } from "../../src/write-context.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { buildTestCfg, TEST_HASHES, TEST_TAG_INDEX_HASH } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -88,7 +89,8 @@ type DriftKey =
   | "agent"
   | "project"
   | "spike"
-  | "sop";
+  | "sop"
+  | "__tagindex__";
 type DriftOverrides = Partial<Record<DriftKey, RegisteredSchema | null>>;
 
 function mockSchemaClient(opts: {
@@ -108,6 +110,7 @@ function mockSchemaClient(opts: {
     { hash: TEST_HASHES.project, driftKey: "project", schema: RECORDS.project.schema },
     { hash: TEST_HASHES.spike, driftKey: "spike", schema: RECORDS.spike.schema },
     { hash: TEST_HASHES.sop, driftKey: "sop", schema: RECORDS.sop.schema },
+    { hash: TEST_TAG_INDEX_HASH, driftKey: "__tagindex__", schema: tagIndexSchema },
   ];
   return {
     baseUrl: "mock",
@@ -208,11 +211,19 @@ function mockNodeClient(opts: {
       // config writes against (TEST_HASHES), so the read-path schemas-loaded
       // check sees them as present. Omit any caller-requested types to drive
       // a FAIL.
-      return RECORD_TYPES.filter((t) => !omit.has(t)).map((t) => ({
+      const loaded = RECORD_TYPES.filter((t) => !omit.has(t)).map((t) => ({
         descriptive_name: t.charAt(0).toUpperCase() + t.slice(1),
         owner_app_id: "fbrain",
         identity_hash: opts.loadedHashOverrides?.[t] ?? TEST_HASHES[t],
       }));
+      // The internal TagIndex schema is a UNIQUE_SCHEMAS entry too, so the
+      // schemas-loaded check expects it present in the node DB under its hash.
+      loaded.push({
+        descriptive_name: "TagIndex",
+        owner_app_id: "fbrain",
+        identity_hash: TEST_TAG_INDEX_HASH,
+      });
+      return loaded;
     },
     async loadSchemas() {
       if (opts.loadOk === false) throw new Error("load failed");
@@ -250,6 +261,10 @@ function mockNodeClient(opts: {
         key: { hash: r.slug, range: null },
       }));
       return { ok: true, results: rows, total_count: rows.length, returned_count: rows.length };
+    },
+    async queryByKey({ schemaHash, keyHash }): Promise<QueryRow | null> {
+      const match = (store[schemaHash] ?? []).find((r) => r.slug === keyHash);
+      return match ? { fields: match.fields, key: { hash: match.slug, range: null } } : null;
     },
     async search(query: string): Promise<NativeIndexHit[]> {
       if (opts.searchThrows) throw opts.searchThrows;

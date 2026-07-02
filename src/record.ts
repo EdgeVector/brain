@@ -252,6 +252,24 @@ export async function findBySlugRaw(
   return list.find((r) => r.slug === slug) ?? null;
 }
 
+// Flat-cost point read of one live record by slug, via the node's `HashKey`
+// filter (`queryByKey`) — O(1) in the schema's row count (fold #905), NOT the
+// O(rows) full-schema scan `findBySlug`/`findBySlugRaw` do. This is the resolver
+// the tag secondary index uses to hydrate its members, so a tag query's cost
+// scales with the tag's cardinality rather than the corpus size. Returns null
+// when the row is absent OR tombstoned (a live-only lookup, like `findBySlug`).
+export async function findBySlugPointRead(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  const row = await node.queryByKey({ schemaHash, fields: fieldsFor(type), keyHash: slug });
+  if (row === null) return null;
+  const record = rowToRecord(row, type);
+  return isTombstoned(record) ? null : record;
+}
+
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
 // case). The same /api/query intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:
