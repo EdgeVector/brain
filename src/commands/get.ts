@@ -9,12 +9,14 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
+  findBacklinks,
   findBySlugFast,
   findChildTasksByDesign,
   NOT_FOUND_TYPED,
   normalizeSlug,
   resolveBySlug,
   schemaHashFor,
+  type Backlink,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
@@ -89,6 +91,10 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     );
   }
 
+  const linkedFrom = await findBacklinks(node, opts.cfg, found.record.slug, {
+    targetType: found.type,
+  });
+
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
@@ -101,6 +107,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     found.type,
     designMissing,
     designChildren,
+    linkedFrom,
   );
   opts.onResult?.(json);
 
@@ -109,7 +116,15 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     return;
   }
 
-  print(formatRecord(recordForOutput, found.type, designMissing, designChildren));
+  print(
+    formatRecord(
+      recordForOutput,
+      found.type,
+      designMissing,
+      designChildren,
+      linkedFrom,
+    ),
+  );
 }
 
 function truncateBody(body: string, limit: number): string {
@@ -131,6 +146,15 @@ export type RecordJson = {
   // reverse-direction parent ↔ child link the human surface renders
   // on the `tasks:` line.
   children?: Array<{ slug: string; status: string }>;
+  // Records that link to this slug, either through an explicit stored edge
+  // (`task.design_slug` or a generic `link:<type>:<slug>` tag) or through a
+  // `[[slug]]` body reference.
+  linked_from?: Array<{
+    type: RecordType;
+    slug: string;
+    status: string;
+    via: Array<"explicit" | "body">;
+  }>;
   created_at: string;
   updated_at: string;
   body: string;
@@ -141,6 +165,7 @@ export function recordToJson(
   type: RecordType,
   designMissing = false,
   children?: ReadonlyArray<FbrainRecord>,
+  linkedFrom?: ReadonlyArray<Backlink>,
 ): RecordJson {
   const out: RecordJson = {
     type,
@@ -160,6 +185,14 @@ export function recordToJson(
     const sorted = sortChildrenByUpdated(children);
     out.children = sorted.map((t) => ({ slug: t.slug, status: t.status }));
   }
+  if (linkedFrom !== undefined) {
+    out.linked_from = linkedFrom.map((link) => ({
+      type: link.type,
+      slug: link.slug,
+      status: link.status,
+      via: link.via,
+    }));
+  }
   return out;
 }
 
@@ -174,6 +207,7 @@ export function formatRecord(
   type: RecordType,
   designMissing = false,
   children?: ReadonlyArray<FbrainRecord>,
+  linkedFrom?: ReadonlyArray<Backlink>,
 ): string {
   const lines = [
     `[${type}] ${r.slug}`,
@@ -198,6 +232,18 @@ export function formatRecord(
         .join(", ");
       lines.push(`tasks:      ${rendered}`);
     }
+  }
+  if (linkedFrom !== undefined) {
+    lines.push(
+      `linked_from: ${formatLinkedFrom(
+        linkedFrom.map((link) => ({
+          type: link.type,
+          slug: link.slug,
+          status: link.status,
+          via: link.via,
+        })),
+      )}`,
+    );
   }
   lines.push(`created_at: ${r.created_at}`);
   lines.push(`updated_at: ${r.updated_at}`);
@@ -244,6 +290,9 @@ export function formatRecordJsonWindow(
       lines.push(`tasks:      ${rendered}`);
     }
   }
+  if (json.linked_from !== undefined) {
+    lines.push(`linked_from: ${formatLinkedFrom(json.linked_from)}`);
+  }
   lines.push(`created_at: ${json.created_at}`);
   lines.push(`updated_at: ${json.updated_at}`);
   if (window.total > 0) {
@@ -260,4 +309,13 @@ export function formatRecordJsonWindow(
     }
   }
   return lines.join("\n");
+}
+
+function formatLinkedFrom(
+  linkedFrom: NonNullable<RecordJson["linked_from"]>,
+): string {
+  if (linkedFrom.length === 0) return "(none)";
+  return linkedFrom
+    .map((link) => `${link.type} ${link.slug} (${link.via.join(", ")})`)
+    .join(", ");
 }

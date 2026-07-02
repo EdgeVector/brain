@@ -1294,13 +1294,14 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
 
-  test("all 9 tools — read AND write — declare an outputSchema", () => {
+  test("all 10 tools — read AND write — declare an outputSchema", () => {
     const server = createFbrainMcpServer({ cfg });
     // Read tools (typed since #262).
     expect(outputSchemaOf(server, "fbrain_search")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_ask")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_get")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_list")).toBeDefined();
+    expect(outputSchemaOf(server, "fbrain_backlinks")).toBeDefined();
     // Write tools (this card closes the gap #262 opened for the read tools).
     expect(outputSchemaOf(server, "fbrain_put")).toBeDefined();
     expect(outputSchemaOf(server, "fbrain_delete")).toBeDefined();
@@ -1563,11 +1564,32 @@ describe("write tools — structuredContent + outputSchema", () => {
     expect(res.content[0]!.text).toBe("linked task t1 → design d1");
   });
 
-  test("fbrain_link error (unsupported pair) returns the agent-voiced unsupported_link_pair, NO structuredContent", async () => {
-    // The handler's `unsupported_link_pair` guard stays as defense-in-depth for
-    // any explicit non-default pair. We call the handler directly (bypassing
-    // the inputSchema's literal defaults) to exercise that guard and prove it
-    // surfaces an agent-voiced FbrainError, not a raw schema dump.
+  test("fbrain_link links a generic non-legacy pair and returns structuredContent", async () => {
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === TEST_HASHES.concept) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [
+                {
+                  ...recordRow("c1"),
+                  fields: { ...recordRow("c1").fields, status: "active" },
+                },
+              ],
+            },
+          };
+        }
+        if (body.schema_name === TEST_HASHES.design) {
+          return { status: 200, body: { ok: true, results: [recordRow("d1")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      return { status: 404 };
+    });
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_link!({
       from_type: "concept",
@@ -1575,11 +1597,17 @@ describe("write tools — structuredContent + outputSchema", () => {
       to_type: "design",
       to_slug: "d1",
     });
-    expect(res.isError).toBe(true);
-    expect(res.structuredContent).toBeUndefined();
-    const text = res.content[0]!.text;
-    expect(text).toContain("not supported");
-    expect(text).toContain("v0 supports task → design only");
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toEqual({
+      action: "linked",
+      from_type: "concept",
+      from_slug: "c1",
+      to_type: "design",
+      to_slug: "d1",
+    });
+    const schema = outputSchemaOf(server, "fbrain_link")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toBe("linked concept c1 → design d1");
   });
 });
 
@@ -2573,11 +2601,62 @@ describe("fbrain_link tool", () => {
     expect(fields.design_slug).toBe("d1");
   });
 
-  test("unsupported pair (concept → design) errors with unsupported_link_pair", async () => {
-    let touched = false;
-    installMock(() => {
-      touched = true;
-      return { status: 500 };
+  test("generic pair (concept → design) stores a link tag on the source", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === TEST_HASHES.concept) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [
+                {
+                  fields: {
+                    slug: "c1",
+                    title: "C1",
+                    body: "b",
+                    status: "active",
+                    tags: ["existing"],
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                  key: { hash: "c1", range: null },
+                },
+              ],
+            },
+          };
+        }
+        if (body.schema_name === TEST_HASHES.design) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [
+                {
+                  fields: {
+                    slug: "d1",
+                    title: "D1",
+                    body: "b",
+                    status: "draft",
+                    tags: [],
+                    created_at: "2026-01-01T00:00:00Z",
+                    updated_at: "2026-01-01T00:00:00Z",
+                  },
+                  key: { hash: "d1", range: null },
+                },
+              ],
+            },
+          };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
     });
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
     const res = await tools.fbrain_link!({
@@ -2586,9 +2665,11 @@ describe("fbrain_link tool", () => {
       to_type: "design",
       to_slug: "d1",
     });
-    expect(res.isError).toBe(true);
-    expect(res.content[0]!.text ?? "").toContain("not supported");
-    expect(touched).toBe(false);
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0]!.text ?? "").toContain("linked concept c1 → design d1");
+    expect(mutations).toHaveLength(1);
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.tags).toEqual(["existing", "link:design:d1"]);
   });
 
   test("missing design surfaces dangling_design_slug via isError", async () => {
@@ -2703,11 +2784,12 @@ describe("empty/dropped tool input guard", () => {
 });
 
 describe("createFbrainMcpServer", () => {
-  test("registers the 7 read+write tools", () => {
+  test("registers the 10 read+write tools", () => {
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
     expect(Object.keys(tools).sort()).toEqual([
       "fbrain_append",
       "fbrain_ask",
+      "fbrain_backlinks",
       "fbrain_delete",
       "fbrain_get",
       "fbrain_link",
@@ -2722,18 +2804,19 @@ describe("createFbrainMcpServer", () => {
   // subcommand help can't drift behind the server again (it claimed "six
   // tools" and omitted fbrain_ask long after the tool shipped — done card
   // help-mcp-says-six-tools-omits-ask, dogfood run 30, 2026-06-16).
-  test("COMMAND_HELP.mcp names every registered tool and says nine", () => {
+  test("COMMAND_HELP.mcp names every registered tool and says ten", () => {
     const help = COMMAND_HELP.mcp;
     const registered = Object.keys(toolsOf(createFbrainMcpServer({ cfg })));
-    // 9 is the contract — the help must not undercount the server.
-    expect(registered).toHaveLength(9);
+    // 10 is the contract — the help must not undercount the server.
+    expect(registered).toHaveLength(10);
     for (const name of registered) {
       expect(help).toContain(name);
     }
     // fbrain_ask was the specific omission; assert it explicitly.
     expect(help).toContain("fbrain_ask");
-    expect(help).toContain("nine tools");
+    expect(help).toContain("ten tools");
     expect(help).not.toContain("seven tools");
+    expect(help).not.toContain("nine tools");
   });
 });
 
@@ -2754,7 +2837,7 @@ describe("server starts without a config (lazy config resolution)", () => {
     };
   }
 
-  test("constructs and lists all 9 tools with no config (handshake survives)", () => {
+  test("constructs and lists all 10 tools with no config (handshake survives)", () => {
     let loaderCalls = 0;
     const getCfg = () => {
       loaderCalls += 1;
@@ -2766,6 +2849,7 @@ describe("server starts without a config (lazy config resolution)", () => {
     expect(Object.keys(tools).sort()).toEqual([
       "fbrain_append",
       "fbrain_ask",
+      "fbrain_backlinks",
       "fbrain_delete",
       "fbrain_get",
       "fbrain_link",
@@ -2786,6 +2870,7 @@ describe("server starts without a config (lazy config resolution)", () => {
       "fbrain_ask",
       "fbrain_get",
       "fbrain_list",
+      "fbrain_backlinks",
       "fbrain_put",
       "fbrain_delete",
       "fbrain_link",
@@ -2796,7 +2881,7 @@ describe("server starts without a config (lazy config resolution)", () => {
         // don't matter — config resolution happens first.
         name === "fbrain_link"
           ? { from_type: "task", from_slug: "t", to_type: "design", to_slug: "d" }
-          : name === "fbrain_get" || name === "fbrain_delete"
+          : name === "fbrain_get" || name === "fbrain_delete" || name === "fbrain_backlinks"
             ? { slug: "x" }
             : name === "fbrain_put"
               ? { slug: "x", type: "concept", body: "b" }

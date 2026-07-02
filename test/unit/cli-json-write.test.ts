@@ -96,7 +96,7 @@ describe("write-verb help documents --json + the emitted object", () => {
     { cmd: "design", shape: /\{ok, type, slug\}/ },
     { cmd: "task", shape: /\{ok, type, slug\}/ },
     { cmd: "put", shape: /\{ok, slug, created\}/ },
-    { cmd: "link", shape: /\{ok, task, design\}/ },
+    { cmd: "link", shape: /\{ok, from_type, from_slug, to_type, to_slug\}/ },
     { cmd: "delete", shape: /\{ok, slug, deleted\}/ },
   ];
   for (const { cmd, shape } of helpCases) {

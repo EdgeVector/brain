@@ -244,6 +244,7 @@ describe("getRecord --json", () => {
       tags: ["x", "y"],
       created_at: "2026-05-01T00:00:00Z",
       updated_at: "2026-05-26T00:00:00Z",
+      linked_from: [],
       body: "this is the body",
     });
     // No human-formatted lines like `[spike] my-spike` mixed in.

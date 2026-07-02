@@ -326,6 +326,78 @@ describe("linkCmd", () => {
     expect(fields.design_slug).toBe("d1");
   });
 
+  test("links non-legacy record pairs by storing a generic link tag on the source", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    const conceptRow = {
+      fields: {
+        slug: "api-shape",
+        title: "API shape",
+        body: "body",
+        status: "active",
+        tags: ["existing"],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+      key: { hash: "api-shape", range: null },
+    };
+    const referenceRow = {
+      fields: {
+        slug: "review-note",
+        title: "Review note",
+        body: "body",
+        status: "active",
+        tags: [],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+      key: { hash: "review-note", range: null },
+    };
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const schema = querySchema(init);
+        if (schema === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow] } };
+        }
+        if (schema === TEST_HASHES.reference) {
+          return { status: 200, body: { ok: true, results: [referenceRow] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+
+    let payload: unknown;
+    await linkCmd({
+      cfg,
+      taskSlug: "api-shape",
+      designSlug: "review-note",
+      fromSlug: "api-shape",
+      toSlug: "review-note",
+      fromType: "concept",
+      toType: "reference",
+      print: () => {},
+      onResult: (p) => {
+        payload = p;
+      },
+    });
+
+    expect(payload).toMatchObject({
+      action: "linked",
+      from_type: "concept",
+      from_slug: "api-shape",
+      to_type: "reference",
+      to_slug: "review-note",
+    });
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.schema).toBe(TEST_HASHES.concept);
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.tags).toEqual(["existing", "link:reference:review-note"]);
+  });
+
   test("a design that genuinely doesn't exist still errors with dangling_design_slug", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {

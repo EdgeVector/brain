@@ -16,6 +16,7 @@ import { getRecord } from "./commands/get.ts";
 import { listCmd } from "./commands/list.ts";
 import { statusCmd } from "./commands/status.ts";
 import { linkCmd } from "./commands/link.ts";
+import { backlinksCmd } from "./commands/backlinks.ts";
 import { searchCmd } from "./commands/search.ts";
 import { askCmd } from "./commands/ask.ts";
 import { doctor } from "./commands/doctor.ts";
@@ -110,6 +111,7 @@ export const COMMANDS = [
   "list",
   "status",
   "link",
+  "backlinks",
   "search",
   "ask",
   "gates",
@@ -148,7 +150,8 @@ ${RECORD_NEW_HELP_LINES}
   get            print a record by slug
   list           list records, newest-first
   status         show or update a record's status
-  link           link a task to a parent design
+  link           link records (legacy default: task to parent design)
+  backlinks      list records linking to a slug
   search         semantic search over indexed records
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
   gates          list structured open human gates from the canonical open-decisions record
@@ -159,7 +162,7 @@ ${RECORD_NEW_HELP_LINES}
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
-  mcp            start an MCP server over stdio (9 tools: search/ask/get/list/put/status/append/delete/link)
+  mcp            start an MCP server over stdio (10 tools: search/ask/get/list/backlinks/put/status/append/delete/link)
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
   hook session-start  Claude Code SessionStart hook: inject strong-confidence fbrain context
@@ -313,13 +316,25 @@ type's status enum, updates updated_at, and writes back.
             with a new-status; the update form keeps its human transition
             line. On failure, a \`{error, hint}\` JSON object is emitted to
             stdout too (human \`error:\`/\`hint:\` lines still go to stderr).`,
-  link: `fbrain link <task-slug> <design-slug> [--json]
+  link: `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T] [--json]
 
-Rejects a non-existent design slug.
+Rejects a non-existent explicit target. With no type flags, preserves the
+legacy task → design behavior and writes task.design_slug. Other valid pairs
+store a generic explicit link tag on the source record.
 
-  --json    emit \`{ok, task, design}\` on stdout; the human \`linked …\` line
+  --from-type  source type (default task)
+  --to-type    target type (default design)
+  --json       emit \`{ok, from_type, from_slug, to_type, to_slug}\` on stdout; the human \`linked …\` line
             moves to stderr so \`--json\` stdout is always parseable. On failure
             a \`{error, hint}\` JSON object is emitted to stdout too.`,
+  backlinks: `fbrain backlinks <slug> [--type T] [--json]
+
+Lists records that link to <slug> through explicit stored edges or mention it
+with a body \`[[slug]]\` reference. Does not require the target slug to exist,
+so dangling wiki-link intent remains queryable.
+
+  --type    target type for typed explicit edges (body refs are slug-only)
+  --json    emit \`{slug, type?, linked_from:[...]}\` on stdout.`,
   search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
 
 Semantic search across indexed records. Dedupes fragment hits per record
@@ -640,10 +655,10 @@ fbrain mcp instructions
   record type. (Same content as docs/agent-instructions.md, kept in sync.)
 
 fbrain mcp
-  Start a Model Context Protocol server over stdio. Exposes nine tools so
+  Start a Model Context Protocol server over stdio. Exposes ten tools so
 MCP clients (Claude Code, Codex, etc.) can read and write fbrain
 in-process:
-  read:  fbrain_search, fbrain_ask, fbrain_get, fbrain_list
+  read:  fbrain_search, fbrain_ask, fbrain_get, fbrain_list, fbrain_backlinks
   write: fbrain_put, fbrain_status, fbrain_append, fbrain_delete, fbrain_link
 
 fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
@@ -807,7 +822,7 @@ const DOCTOR_OPTIONS = {
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
   write: { type: "boolean", default: false },
-  // --mcp: boot the resolved `fbrain-mcp` entrypoint and assert the 9-tool
+  // --mcp: boot the resolved `fbrain-mcp` entrypoint and assert the 10-tool
   // agent surface end-to-end (the opt-in companion to the PATH-only
   // mcp-entrypoint check). OFF by default so plain doctor never spawns it.
   mcp: { type: "boolean", default: false },
@@ -836,11 +851,16 @@ const DELETE_OPTIONS = {
   // DESIGN_OPTIONS.json.
   json: { type: "boolean", default: false },
 } as const;
-// `link` takes no value flags, only `--json` for machine-readable success.
 const LINK_OPTIONS = {
+  "from-type": { type: "string" },
+  "to-type": { type: "string" },
   // Machine-readable mode: emit a `{ok,task,design}` success object on
   // stdout; the human `linked …` line moves to stderr. See
   // DESIGN_OPTIONS.json.
+  json: { type: "boolean", default: false },
+} as const;
+const BACKLINKS_OPTIONS = {
+  type: { type: "string" },
   json: { type: "boolean", default: false },
 } as const;
 const REINDEX_OPTIONS = {
@@ -889,6 +909,7 @@ export const CLI_SPEC = {
   list: LIST_OPTIONS,
   status: STATUS_OPTIONS,
   link: LINK_OPTIONS,
+  backlinks: BACKLINKS_OPTIONS,
   search: SEARCH_OPTIONS,
   ask: ASK_OPTIONS,
   gates: GATES_OPTIONS,
@@ -1371,6 +1392,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runStatus(args, verboseFn);
     case "link":
       return runLink(args, verboseFn);
+    case "backlinks":
+      return runBacklinks(args, verboseFn);
     case "search":
       return runSearch(args, verboseFn);
     case "ask":
@@ -2098,7 +2121,18 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     });
   }
   const cfg = readConfig();
-  const lOpts: Parameters<typeof linkCmd>[0] = { cfg, taskSlug, designSlug, verbose };
+  const fromType = parseRecordType(values["from-type"]) ?? "task";
+  const toType = parseRecordType(values["to-type"]) ?? "design";
+  const lOpts: Parameters<typeof linkCmd>[0] = {
+    cfg,
+    taskSlug,
+    designSlug,
+    fromSlug: taskSlug,
+    toSlug: designSlug,
+    fromType,
+    toType,
+    verbose,
+  };
   // Under --json the structured success object is the stdout document; route
   // linkCmd's human `linked …` line to stderr and emit the payload from the
   // `onResult` sink (the same value the MCP tool returns).
@@ -2106,10 +2140,46 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     lOpts.print = (line: string) => console.error(line);
     lOpts.onResult = (payload) =>
       console.log(
-        JSON.stringify({ ok: true, task: payload.from_slug, design: payload.to_slug }),
+        JSON.stringify({
+          ok: true,
+          task: payload.from_slug,
+          design: payload.to_slug,
+          from_type: payload.from_type,
+          from_slug: payload.from_slug,
+          to_type: payload.to_type,
+          to_slug: payload.to_slug,
+        }),
       );
   }
   await linkCmd(lOpts);
+  return 0;
+}
+
+async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: BACKLINKS_OPTIONS,
+    },
+    "backlinks",
+  );
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.backlinks);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `backlinks takes exactly one positional: <slug> (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain backlinks <slug>` once per target slug.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  await backlinksCmd({ cfg, slug, type, json: values.json, verbose });
   return 0;
 }
 

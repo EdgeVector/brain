@@ -1,8 +1,8 @@
 # MCP server smoketest
 
 End-to-end check that fbrain's MCP server (`fbrain mcp`) exposes the
-nine tools — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`,
-`fbrain_list`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`,
+ten tools — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`,
+`fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`,
 `fbrain_delete`, `fbrain_link` —
 and that an MCP client (Claude Code or
 `@modelcontextprotocol/inspector`) can call them against a live
@@ -41,8 +41,8 @@ In a new Claude Code session, ask:
 
 > List the tools exposed by the `fbrain` MCP server.
 
-Expected: Claude reports nine tools — `fbrain_search`, `fbrain_ask`,
-`fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_status`,
+Expected: Claude reports ten tools — `fbrain_search`, `fbrain_ask`,
+`fbrain_get`, `fbrain_list`, `fbrain_backlinks`, `fbrain_put`, `fbrain_status`,
 `fbrain_append`, `fbrain_delete`, `fbrain_link`. If you
 see "no tools" or "server not connected", check the Claude Code logs
 (`~/Library/Logs/Claude` on macOS) for stderr from the
@@ -138,8 +138,8 @@ and surfaces
 Verify with `fbrain get mcp-smoketest-task` — the `design_slug:` line
 should show `mcp-smoketest-design`.
 
-v0 supports `task → design` only. Any other pair errors with
-`unsupported_link_pair` before any HTTP traffic.
+Other type pairs are also valid explicit links; pass `from_type` and `to_type`
+when linking non-default records.
 
 ## D. Inspector fallback (no Claude Code needed)
 
@@ -151,7 +151,7 @@ bunx @modelcontextprotocol/inspector bun src/mcp/main.ts
 ```
 
 The inspector opens a local web UI. Use the "List Tools" button — you
-should see nine tools registered. Click each tool, fill in the args
+should see ten tools registered. Click each tool, fill in the args
 panel (e.g. `query: "replacement"` for search), hit "Call Tool".
 
 ## E. Common failure modes
