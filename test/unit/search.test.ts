@@ -215,6 +215,208 @@ afterEach(() => {
 const rowsOf = (lines: string[]): string[] => lines.filter((l) => !l.startsWith("    "));
 
 describe("searchCmd", () => {
+  test("falls back to BM25 records when native vector results are weak", async () => {
+    const rows = [
+      {
+        fields: {
+          slug: "socket-note",
+          title: "Socket transport note",
+          body: "native vector search can be unavailable while query still works over the socket",
+          status: "active",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        },
+        key: { hash: "socket-note", range: null },
+      },
+      {
+        fields: {
+          slug: "other-note",
+          title: "Other note",
+          body: "unrelated content",
+          status: "active",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        },
+        key: { hash: "other-note", range: null },
+      },
+    ];
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "other-note",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.24, match_type: "semantic" },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: body.schema_name === DESIGN_HASH ? rows : [],
+            total_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+            returned_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "vector socket",
+      limit: 1,
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+
+    expect(stderr).toEqual([]);
+    const rowsOut = rowsOf(stdout);
+    expect(rowsOut).toHaveLength(1);
+    expect(rowsOut[0]).toContain("socket-note");
+    expect(rowsOut[0]).toContain("—");
+    expect(stdout.some((l) => l.includes("query still works over the socket"))).toBe(true);
+  });
+
+  test("falls back to BM25 records when native vector search returns no matches", async () => {
+    const rows = [
+      {
+        fields: {
+          slug: "rare-token-design",
+          title: "Rare token design",
+          body: "Exact fragment zzqx-913 should be findable by keyword fallback",
+          status: "active",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        },
+        key: { hash: "rare-token-design", range: null },
+      },
+    ];
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: body.schema_name === DESIGN_HASH ? rows : [],
+            total_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+            returned_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+
+    const stdout: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "zzqx-913",
+      limit: 1,
+      print: (l) => stdout.push(l),
+    });
+
+    const rowsOut = rowsOf(stdout);
+    expect(rowsOut).toHaveLength(1);
+    expect(rowsOut[0]).toContain("rare-token-design");
+    expect(rowsOut[0]).toContain("—");
+    expect(stdout.join("\n")).not.toContain("no matches");
+  });
+
+  test("does not replace strong native vector results with BM25 keyword hits", async () => {
+    const rows = [
+      {
+        fields: {
+          slug: "semantic-winner",
+          title: "Semantic winner",
+          body: "This is the strong semantic result.",
+          status: "active",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        },
+        key: { hash: "semantic-winner", range: null },
+      },
+      {
+        fields: {
+          slug: "keyword-only",
+          title: "Keyword-only hit",
+          body: "Contains zxq-strong-token but should not replace a confident vector result.",
+          status: "active",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        },
+        key: { hash: "keyword-only", range: null },
+      },
+    ];
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "semantic-winner",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.72, match_type: "semantic" },
+              }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: body.schema_name === DESIGN_HASH ? rows : [],
+            total_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+            returned_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+
+    const stdout: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "zxq-strong-token",
+      limit: 1,
+      print: (l) => stdout.push(l),
+    });
+
+    const rowsOut = rowsOf(stdout);
+    expect(rowsOut).toHaveLength(1);
+    expect(rowsOut[0]).toContain("semantic-winner");
+    expect(rowsOut[0]).toContain("0.720");
+    expect(stdout.join("\n")).not.toContain("keyword-only");
+  });
+
   test("resolves a single hit and prints slug+score+type+title", async () => {
     const recordRow = {
       fields: {
