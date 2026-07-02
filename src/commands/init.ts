@@ -90,9 +90,9 @@ const STALE_SCHEMA_URLS: ReadonlySet<string> = new Set([
 ]);
 
 // Default cold-build retry schedule. Two competing cases share one budget:
-//   - The COMMON new-dev miss: the node just isn't running yet (forgot
-//     `brew services start folddb`). init prints the fix immediately; the dev
-//     reads it, starts the daemon, and wants init to notice *promptly*.
+//   - The COMMON new-dev miss: the node just isn't running yet. init prints
+//     socket-first recovery guidance immediately; the dev reads it, starts the
+//     node, and wants init to notice *promptly*.
 //   - The contributor-from-source case: first `fold/run.sh` compiles Rust and
 //     can take a few minutes before the node starts listening, so the TOTAL
 //     wait must stay generous.

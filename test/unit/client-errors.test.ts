@@ -378,7 +378,11 @@ describe("client error mapping", () => {
       expect(fe.message).toContain("Unix socket not found");
       expect(fe.message).toContain(socketPath);
       expect(fe.message).not.toContain("http://127.0.0.1:9001");
-      expect(fe.hint ?? "").toContain("brew services start lastdb");
+      expect(fe.hint ?? "").toContain("Unix socket");
+      expect(fe.hint ?? "").toContain("fbrain doctor");
+      expect(fe.hint ?? "").toContain("LastDB.app");
+      expect(fe.hint ?? "").toContain("run.sh --local");
+      expect(fe.hint ?? "").not.toContain("brew services start lastdb");
       expect(fe.hint ?? "").not.toContain("brew services restart lastdb");
       expect(fe.agentHint ?? "").toContain("FBRAIN_FOLDDB_SOCKET");
     } finally {
@@ -417,53 +421,56 @@ describe("client error mapping", () => {
     }
   });
 
-  // DX: a downloaded user who simply forgot to start their daemon must be
-  // told to `brew services start lastdb`, NOT to compile Rust from source. The
-  // default install URL (`127.0.0.1:9001`) drives brew-first guidance even
-  // before the prebuilt binary is detectable — pin the binary probe to `false`
-  // so the assertion holds on hosts without `folddb` on PATH. NB: `:9001` here
-  // is the default INSTALL URL, not a transport hint — the node is socket-only.
-  test("node-down hint leads with `brew services` for the default install URL", () => {
+  // DX: the legacy default install URL (`127.0.0.1:9001`) is NOT a transport
+  // hint anymore. fbrain uses a Unix socket, so node-down guidance must lead
+  // with the socket + doctor path and only include CLI/Homebrew wording as a
+  // clearly conditional note.
+  test("node-down hint leads with the Unix socket for the default install URL", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
       () => false,
       () => false,
     );
-    // The hint must lead with a combined, copy-pasteable install+start line so
-    // a brand-new dev who never ran `brew install` (the common case) doesn't
-    // dead-end on `Error: Formula 'folddb' is not installed.`.
-    expect(hint).toContain("brew install edgevector/lastdb/lastdb");
-    expect(hint).toContain("brew services start lastdb");
-    // The from-source path is still mentioned, but only as the secondary
-    // contributor note — it must not lead.
-    expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("folddb.sock");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).toContain("LastDB.app");
+    expect(hint).toContain("lastdb daemon start");
+    expect(hint).not.toContain("brew services start lastdb");
+    expect(hint).not.toContain("brew install edgevector/lastdb/lastdb");
+    expect(hint.indexOf("Unix socket")).toBeLessThan(hint.indexOf("lastdb daemon start"));
     expect(hint).not.toContain("compiling Rust");
   });
 
-  test("node-down hint keeps the from-source/compile framing when no prebuilt binary is installed", () => {
+  test("node-down hint keeps the from-source/compile framing when no CLI install path is detected", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9101",
       () => false,
       () => false,
     );
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).toContain("LastDB.app");
     expect(hint).toContain("run.sh");
     expect(hint).toContain("compiles Rust");
     expect(hint).not.toContain("brew services");
   });
 
   // DX regression: a downloaded user whose `folddb` is on a non-9001 port
-  // (port conflict, two nodes, custom `--node-url` at init) must STILL be
-  // sent to `brew services start lastdb` — not asked to clone the fold
-  // monorepo and compile Rust. The prebuilt binary on PATH is the signal.
-  test("node-down hint leads with `brew services` for a non-9001 port when the prebuilt binary is on PATH", () => {
+  // (port conflict, two nodes, custom `--node-url` at init) still gets the
+  // socket-first path, plus a conditional CLI/Homebrew note. The prebuilt
+  // binary on PATH is the signal for that extra note.
+  test("node-down hint is socket-first for a non-9001 port when the prebuilt binary is on PATH", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9050",
       () => true,
       () => false,
     );
-    expect(hint).toContain("brew install edgevector/lastdb/lastdb");
-    expect(hint).toContain("brew services start lastdb");
-    expect(hint.indexOf("brew services")).toBeLessThan(hint.indexOf("run.sh"));
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).toContain("lastdb daemon start");
+    expect(hint).not.toContain("brew services start lastdb");
+    expect(hint.indexOf("Unix socket")).toBeLessThan(hint.indexOf("lastdb daemon start"));
     expect(hint).not.toContain("compiles Rust");
   });
 
@@ -483,19 +490,22 @@ describe("client error mapping", () => {
     );
     expect(hint).toContain("isn't responding");
     expect(hint).toContain("http://127.0.0.1:9711");
-    expect(hint).toContain("brew services list");
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).toContain("LastDB.app");
     expect(hint).toContain("stop it before restarting");
-    expect(hint).toContain("brew services stop lastdb");
+    expect(hint).not.toContain("brew services stop lastdb");
     // It must NOT lead the dev back into the install/`brew services restart`
     // reflex that re-hangs a wedged node.
     expect(hint).not.toContain("brew install edgevector/lastdb/lastdb");
+    expect(hint).not.toContain("brew services start lastdb");
     expect(hint).not.toContain("brew services restart lastdb");
   });
 
   // The wedged branch wins regardless of the node URL or whether the prebuilt
   // binary is detected — a listener on the target port is a stronger signal
   // than either.
-  test("node-down hint prefers the 'bound but not responding' branch over the install/start branch", () => {
+  test("node-down hint prefers the 'bound but not responding' branch over the not-started branch", () => {
     // Default :9001 daemon, binary NOT on PATH, but something IS listening.
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
@@ -507,15 +517,17 @@ describe("client error mapping", () => {
   });
 
   // The genuine not-started case (nothing listening on the target port) must be
-  // UNCHANGED — still the install/start line for a default/installed node.
-  test("node-down hint keeps the install/start line when nothing is listening on the target port", () => {
+  // socket-first even for a default/installed node.
+  test("node-down hint keeps socket-first guidance when nothing is listening on the target port", () => {
     const hint = nodeDownHint(
       "http://127.0.0.1:9001",
       () => true,
       () => false,
     );
-    expect(hint).toContain("brew install edgevector/lastdb/lastdb");
-    expect(hint).toContain("brew services start lastdb");
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).toContain("LastDB.app");
+    expect(hint).not.toContain("brew services start lastdb");
     expect(hint).not.toContain("isn't responding");
   });
 
@@ -523,8 +535,8 @@ describe("client error mapping", () => {
   // on a DIFFERENT port while the TARGET port is down. The target-port probe
   // reports false (nothing on the target port) even though a host-wide `pgrep`
   // would have matched the sibling node — so the dev must get the
-  // "not started / install+start" branch, NOT a false "wedged / stop lastdb".
-  test("node-down hint: sibling node on a different port + target down ⇒ install+start, NOT 'wedged/stop'", () => {
+  // socket-first not-started branch, NOT a false "wedged / stop lastdb".
+  test("node-down hint: sibling node on a different port + target down ⇒ socket-first, NOT 'wedged/stop'", () => {
     // Simulate the dogfooded bug: target :9876 is down (nothing listening),
     // a sibling node is alive on :55564 — but the probe is scoped to :9876.
     const isTargetPortListening = (url: string) =>
@@ -538,8 +550,10 @@ describe("client error mapping", () => {
     // their (unrelated) running node.
     expect(hint).not.toContain("isn't responding");
     expect(hint).not.toContain("brew services stop lastdb");
-    // Must give the correct "start a node on this port" guidance.
-    expect(hint).toContain("brew services start lastdb");
+    // Must give the correct socket-first start guidance.
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).not.toContain("brew services start lastdb");
   });
 
   // CARD case (b): something is bound to the TARGET port but not serving
@@ -554,7 +568,9 @@ describe("client error mapping", () => {
     );
     expect(hint).toContain("isn't responding");
     expect(hint).toContain("stop it before restarting");
-    expect(hint).toContain("brew services stop lastdb");
+    expect(hint).toContain("Unix socket");
+    expect(hint).toContain("fbrain doctor");
+    expect(hint).not.toContain("brew services stop lastdb");
   });
 
   // The port extractor underpins the scoping — pin its behaviour.
@@ -566,7 +582,7 @@ describe("client error mapping", () => {
     expect(nodePortOf("not a url")).toBeNull();
   });
 
-  test("connectionError node hint mentions `brew services` for the default daemon", async () => {
+  test("connectionError node hint is socket-first for the default daemon", async () => {
     globalThis.fetch = (async () => {
       throw new TypeError("fetch failed");
     }) as unknown as typeof globalThis.fetch;
@@ -575,7 +591,9 @@ describe("client error mapping", () => {
       await c.autoIdentity();
       throw new Error("did not throw");
     } catch (err) {
-      expect((err as FbrainError).hint ?? "").toContain("brew services start lastdb");
+      expect((err as FbrainError).hint ?? "").toContain("Unix socket");
+      expect((err as FbrainError).hint ?? "").toContain("fbrain doctor");
+      expect((err as FbrainError).hint ?? "").not.toContain("brew services start lastdb");
     }
   });
 
