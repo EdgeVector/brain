@@ -1924,10 +1924,12 @@ describe("fbrain_put tool", () => {
       frontmatter: "type: preference\ntitle: From Raw\ntags: [from-raw]",
       body: "raw body",
     });
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.title).toBe("From Raw");
     expect(fields.tags).toEqual(["from-raw"]);
+    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(indexFields.slug).toBe("__fbrain_tag_index__");
     // Per-kind preference schema has no `kind` field.
     expect("kind" in fields).toBe(false);
   });

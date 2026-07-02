@@ -87,7 +87,7 @@ describe("recordNew dispatches against the correct schema for each type", () => 
         tags: ["t1"],
         ...VEC,
       });
-      expect(mutations).toHaveLength(1);
+      expect(mutations).toHaveLength(2);
       expect(mutations[0]!.mutation_type).toBe("create");
       expect(mutations[0]!.schema).toBe(TEST_HASHES[type]);
       const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
@@ -96,6 +96,8 @@ describe("recordNew dispatches against the correct schema for each type", () => 
       expect(fields.body).toBe(`${type} body`);
       expect(fields.tags).toEqual(["t1"]);
       expect(fields.status).toBe(RECORDS[type].defaultStatus);
+      const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+      expect(indexFields.slug).toBe("__fbrain_tag_index__");
       // None of the Phase 6 types carry a design_slug field.
       expect(fields).not.toHaveProperty("design_slug");
     });

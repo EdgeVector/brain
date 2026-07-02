@@ -22,7 +22,8 @@ import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.t
 import { searchCmd, type SearchHitJson } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
 import { getRecord, formatRecordJsonWindow, type RecordJson } from "../commands/get.ts";
-import { listCmd, type RecordSummary } from "../commands/list.ts";
+import { listCmd, type ListResult } from "../commands/list.ts";
+import { parseUpdatedSince } from "../cli.ts";
 import { putCmd } from "../commands/put.ts";
 import { statusCmd } from "../commands/status.ts";
 import { appendCmd } from "../commands/append.ts";
@@ -756,7 +757,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "List fbrain records",
       description:
-        "List records (newest-first), optionally filtered by type/status/tag. Output: `type · slug · status · title [tags]` per line.",
+        "List records (newest-first), optionally filtered by type/status/tag and " +
+        "`updated_since` (records changed at/after an instant). Page past `limit` " +
+        "with `offset`. Set `count: true` for a match count only (no bodies) — the " +
+        "cheap way to answer \"how many …\". Output: `type · slug · status · title " +
+        "[tags]` per line (or a bare number in count mode).",
       inputSchema: {
         type: typeEnum.optional().describe("Restrict to one record type."),
         status: z
@@ -764,40 +769,82 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe("Filter by status enum value."),
         tag: z.string().optional().describe("Filter by tag membership."),
+        updated_since: z
+          .string()
+          .optional()
+          .describe(
+            "Keep only records updated at/after this instant — an ISO-8601 " +
+              "timestamp (`2026-07-01T12:00:00Z`) or a relative window token " +
+              "(`45s`, `30m`, `24h`, `7d`, `2w`).",
+          ),
+        offset: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe(
+            "Skip the first N matches (after filter+sort) before `limit` applies — " +
+              "pages past `limit` (offset 50 + limit 50 → records 51–100).",
+          ),
         limit: z
           .number()
           .int()
           .positive()
           .optional()
           .describe("Max results."),
+        count: z
+          .boolean()
+          .optional()
+          .describe(
+            "Count-only mode: return just how many records match the filters " +
+              "(no bodies). Ignores offset/limit (a count is of the whole match set).",
+          ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
-      // `structuredContent` is `{ records: [summary, …] }` — the SAME array
-      // the CLI `list --json` emits (body omitted; use `fbrain_get` for the
-      // full record), wrapped under `records` because MCP requires an object.
+      // `structuredContent` is either `{ records: [summary, …] }` (row mode —
+      // the SAME array the CLI `list --json` emits, body omitted; use
+      // `fbrain_get` for the full record) or `{ count: N }` (count mode).
       outputSchema: {
         records: z
           .array(summarySchema)
-          .describe("Record summaries, newest-first (empty array on no records)."),
+          .optional()
+          .describe(
+            "Record summaries, newest-first (empty array on no records). " +
+              "Present in row mode; absent when `count` is set.",
+          ),
+        count: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe("Number of matching records. Present only when `count` is set."),
       },
     },
     (args) =>
-      runReadTool<RecordSummary[]>(
+      runReadTool<ListResult>(
         getCfg,
-        (cfg, print, onResult) =>
-          listCmd({
+        (cfg, print, onResult) => {
+          const listOpts: Parameters<typeof listCmd>[0] = {
             cfg,
             print,
             type: args.type,
             status: args.status,
             tag: args.tag,
+            offset: args.offset,
             limit: args.limit,
+            count: args.count,
             onResult,
             // Agent channel: render the empty/filter-no-match recovery hint in
             // MCP-tool terms (`fbrain_put`/`fbrain_list`), never CLI verbs.
             agent: true,
-          }),
-        (records) => ({ records }),
+          };
+          if (args.updated_since !== undefined) {
+            listOpts.updatedSinceMs = parseUpdatedSince(args.updated_since);
+          }
+          return listCmd(listOpts);
+        },
+        (result) =>
+          Array.isArray(result) ? { records: result } : { count: result.count },
       ),
   );
 

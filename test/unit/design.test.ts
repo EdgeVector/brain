@@ -57,7 +57,7 @@ describe("designNew", () => {
       tags: ["a", "b"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(DESIGN_HASH);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
@@ -65,6 +65,8 @@ describe("designNew", () => {
     expect(fields.title).toBe("Fresh");
     expect(fields.tags).toEqual(["a", "b"]);
     expect(fields.status).toBe("draft");
+    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(indexFields.slug).toBe("__fbrain_tag_index__");
   });
 
   test("rejects with slug_already_exists when the row is on the first query page", async () => {
@@ -175,7 +177,7 @@ describe("designNew", () => {
       force: true,
       ...VEC,
     });
-    expect(queryCalls).toBe(0);
+    expect(queryCalls).toBe(1);
     expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("create");
   });

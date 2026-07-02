@@ -69,12 +69,14 @@ describe("taskNew", () => {
       tags: ["a"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(TASK_HASH);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe("open");
     expect(fields.design_slug).toBe("");
+    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(indexFields.slug).toBe("__fbrain_tag_index__");
   });
 
   // Regression: /api/query truncation hides the existing row on the

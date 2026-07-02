@@ -1054,13 +1054,15 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.type).toBe(type as RecordType);
     expect(r.action).toBe("created");
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(TEST_HASHES[type as RecordType]);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe(RECORDS[type as RecordType].defaultStatus);
     expect(fields.title).toBe("Smoke");
     expect(fields.tags).toEqual(["phase6"]);
+    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(indexFields.slug).toBe("__fbrain_tag_index__");
     // Non-task types should NOT have design_slug.
     expect("design_slug" in fields).toBe(false);
   });
@@ -1146,8 +1148,10 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.action).toBe("updated");
     expect(queryCalls).toBeGreaterThanOrEqual(2);
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("update");
+    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(indexFields.slug).toBe("__fbrain_tag_index__");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.created_at).toBe("2026-03-03T00:00:00.000Z");
     expect(fields.updated_at).not.toBe("2026-03-03T00:00:00.000Z");

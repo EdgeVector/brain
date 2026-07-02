@@ -62,6 +62,8 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_type",
   "invalid_min_score",
   "invalid_limit",
+  "invalid_offset",
+  "invalid_updated_since",
   "invalid_body_limit",
   "invalid_usage_window",
   "doctor_mode_conflict",
@@ -293,18 +295,28 @@ exists in multiple types (specify --type to disambiguate).
                 (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
                 is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
                 print to stderr) so \`--json\` stdout is always parseable.`,
-  list: `fbrain list [--type T] [--status S] [--tag T] [-n N | --limit N] [--json]
+  list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
+             [--offset N] [-n N | --limit N] [--count] [--json]
 
-  --type        design | task | concept | preference | reference | agent | project | spike | sop
-                (omit to list across all types)
-  --status      filter by status enum
-  --tag         filter by tag membership
-  -n, --limit   max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
-  --json        emit a JSON array of record summaries on stdout
-                ({type, slug, title, status, tags, design_slug?, created_at,
-                updated_at}); truncation hint routes to stderr. On failure, a
-                \`{error, hint}\` JSON object is emitted to stdout too, so
-                \`--json\` stdout is always parseable.`,
+  --type          design | task | concept | preference | reference | agent | project | spike | sop
+                  (omit to list across all types)
+  --status        filter by status enum
+  --tag           filter by tag membership
+  --updated-since keep only records updated at/after WHEN — an ISO-8601
+                  timestamp (\`2026-07-01\`, \`2026-07-01T12:00:00Z\`) or a
+                  relative window: \`45s\` \`30m\` \`24h\` \`7d\` \`2w\`
+  --offset N      skip the first N matches (after filter+sort), then apply the
+                  limit — pages past \`--limit\` (\`--offset 50 -n 50\` → records
+                  51–100). Non-negative integer.
+  -n, --limit     max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
+  --count         print only how many records match the filters (no bodies);
+                  ignores --offset/--limit (a count is of the whole match set)
+  --json          emit a JSON array of record summaries on stdout
+                  ({type, slug, title, status, tags, design_slug?, created_at,
+                  updated_at}); truncation hint routes to stderr. With --count,
+                  emits \`{"count": N}\` instead. On failure, a \`{error, hint}\`
+                  JSON object is emitted to stdout too, so \`--json\` stdout is
+                  always parseable.`,
   status: `fbrain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
@@ -766,6 +778,18 @@ const LIST_OPTIONS = {
   // `--limit` with `-n` short alias — mirrors SEARCH_OPTIONS / ASK_OPTIONS so a
   // user who learned `search --limit N` doesn't hit "Unknown option" on list.
   limit: { type: "string", short: "n" },
+  // `--offset N` — skip the first N matches (after filter+sort) before the
+  // limit applies. The paging companion to --limit: `--offset 50 -n 50`
+  // yields records 51–100. Non-negative integer; validated before parseArgs.
+  offset: { type: "string" },
+  // `--updated-since <ISO|relative>` — keep only records whose updated_at is
+  // at or after the given instant. Accepts an ISO-8601 timestamp or a
+  // relative window token (`7d`, `24h`, `2w`, `30m`, `45s`).
+  "updated-since": { type: "string" },
+  // `--count` — count-only mode: emit just how many records match the
+  // filters (no bodies, no per-row summaries). Keeps wire cost flat for
+  // "how many …" queries.
+  count: { type: "boolean", default: false },
   // Machine-readable mode: emit a JSON array of record summaries on
   // stdout. Truncation hint moves to stderr so `jq` pipelines stay clean.
   json: { type: "boolean", default: false },
@@ -1166,6 +1190,71 @@ function validatePositiveIntFlag(
 function validateLimitFlag(argv: Argv): void {
   validatePositiveIntFlag(argv, "-n", "invalid_limit");
   validatePositiveIntFlag(argv, "--limit", "invalid_limit");
+}
+
+// Validate that `flag`'s value is a NON-negative integer (>= 0) BEFORE
+// parseArgs runs. Same junk-tail / ambiguous-option guards as
+// `validatePositiveIntFlag`, but `--offset 0` is legal (page from the
+// top), so the lower bound is 0 rather than 1.
+function validateNonNegativeIntFlag(
+  argv: Argv,
+  flag: string,
+  code: string,
+): void {
+  const raw = peekNextValue(argv, flag);
+  if (raw === undefined) return;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || String(n) !== raw.trim() || n < 0) {
+    throw new FbrainError({
+      code,
+      message: `${flag} must be a non-negative integer (got "${raw}").`,
+    });
+  }
+}
+
+// Parse a `--updated-since` value into epoch-millis. Accepts either an
+// absolute ISO-8601 timestamp (`2026-07-01`, `2026-07-01T12:00:00Z`) or a
+// relative "ago" token — an integer followed by a unit suffix:
+//   s(ec) · m(in) · h(our) · d(ay) · w(eek)
+// e.g. `24h`, `7d`, `2w`, `30m`. Relative tokens resolve against `now`
+// (injected for testability; defaults to Date.now()). Returns epoch-millis
+// on success. Throws a usage FbrainError (`invalid_updated_since`) on an
+// unparseable value so `fbrain list --updated-since garbage` fails loud
+// with exit 2, not a silent empty list.
+const RELATIVE_SINCE_RE = /^(\d+)\s*(s|m|h|d|w)$/i;
+const RELATIVE_UNIT_MS: Record<string, number> = {
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+  w: 604_800_000,
+};
+export function parseUpdatedSince(raw: string, now: number = Date.now()): number {
+  const trimmed = raw.trim();
+  const rel = RELATIVE_SINCE_RE.exec(trimmed);
+  if (rel) {
+    const magnitude = parseInt(rel[1]!, 10);
+    const unitMs = RELATIVE_UNIT_MS[rel[2]!.toLowerCase()]!;
+    return now - magnitude * unitMs;
+  }
+  // A bare integer is rejected: `Date.parse("7")` reads it as year 2007, so
+  // a fat-fingered `7` (meant as `7d`) would silently mean "since year 7"
+  // and match everything. Relative durations must carry a unit; a lone
+  // number is far likelier a missing-unit typo than a year request.
+  if (/^\d+$/.test(trimmed)) {
+    throw new FbrainError({
+      code: "invalid_updated_since",
+      message: `--updated-since "${raw}" is ambiguous — add a unit for a relative window (e.g. \`${trimmed}d\`) or pass a full ISO-8601 timestamp.`,
+    });
+  }
+  const ms = Date.parse(trimmed);
+  if (!Number.isFinite(ms)) {
+    throw new FbrainError({
+      code: "invalid_updated_since",
+      message: `--updated-since "${raw}" is not a valid ISO-8601 timestamp or relative window (e.g. \`7d\`, \`24h\`, \`2026-07-01\`).`,
+    });
+  }
+  return ms;
 }
 
 // Pull the offending option name (without leading dashes) out of a caught
@@ -1993,6 +2082,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
   validateLimitFlag(args);
+  validateNonNegativeIntFlag(args, "--offset", "invalid_offset");
   let parsed;
   try {
     parsed = parseCommandArgs(
@@ -2029,11 +2119,18 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   const cfg = readConfig();
   const type = parseRecordType(values.type);
   const limit = values.limit ? parseInt(values.limit, 10) : undefined;
+  const offset =
+    values.offset !== undefined ? parseInt(values.offset, 10) : undefined;
   const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose };
   if (type) lOpts.type = type;
   if (values.status) lOpts.status = values.status;
   if (values.tag) lOpts.tag = values.tag;
   if (typeof limit === "number" && Number.isFinite(limit)) lOpts.limit = limit;
+  if (typeof offset === "number" && Number.isFinite(offset)) lOpts.offset = offset;
+  if (values["updated-since"]) {
+    lOpts.updatedSinceMs = parseUpdatedSince(values["updated-since"]);
+  }
+  if (values.count) lOpts.count = true;
   if (values.json) lOpts.json = true;
   await listCmd(lOpts);
   return 0;

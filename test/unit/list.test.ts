@@ -765,6 +765,93 @@ describe("listCmd — deterministic ordering on tied updated_at", () => {
   });
 });
 
+describe("listCmd — updated_since, offset, count, and tag index", () => {
+  test("updatedSinceMs filters before offset/limit; count ignores offset/limit", async () => {
+    const rows: Fields[] = [
+      spikeRow("old", { updated_at: "2026-06-30T00:00:00Z" }),
+      spikeRow("middle", { updated_at: "2026-07-01T00:00:00Z" }),
+      spikeRow("new", { updated_at: "2026-07-02T00:00:00Z" }),
+    ];
+    const run = async (count: boolean): Promise<string[]> => {
+      const responses = new Map<string, Array<Fields[]>>([
+        [TEST_HASHES.spike, [rows]],
+      ]);
+      const { restore } = stubFetch(responses);
+      const lines: string[] = [];
+      try {
+        await listCmd({
+          cfg,
+          type: "spike",
+          updatedSinceMs: Date.parse("2026-07-01T00:00:00Z"),
+          offset: 1,
+          limit: 1,
+          count,
+          print: (l) => lines.push(l),
+        });
+      } finally {
+        restore();
+      }
+      return lines;
+    };
+
+    const page = await run(false);
+    expect(page).toHaveLength(1);
+    expect(page[0]).toContain("middle");
+    expect(page[0]).not.toContain("old");
+
+    const counted = await run(true);
+    expect(counted).toEqual(["2"]);
+  });
+
+  test("--tag can resolve from the hidden tag index without scanning the tagged schema", async () => {
+    const indexRow = {
+      slug: "__fbrain_tag_index__",
+      title: "fbrain tag index",
+      body: JSON.stringify({
+        version: 1,
+        tags: {
+          indexed: [
+            {
+              type: "spike",
+              slug: "from-index",
+              title: "Indexed row",
+              status: "exploring",
+              tags: ["indexed"],
+              created_at: "2026-07-01T00:00:00Z",
+              updated_at: "2026-07-02T00:00:00Z",
+            },
+          ],
+        },
+      }),
+      status: "archived",
+      tags: [TOMBSTONE_TAG, "fbrain-internal-index"],
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-02T00:00:00Z",
+    };
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.reference, [[indexRow]]],
+      [TEST_HASHES.spike, [[]]],
+    ]);
+    const { restore, callsBySchema } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        tag: "indexed",
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("from-index");
+    expect(callsBySchema.get(TEST_HASHES.reference)).toBe(1);
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBeUndefined();
+  });
+});
+
 describe("listCmd — empty-node create-your-first hint (parity with search/ask)", () => {
   test("brand-new EMPTY brain points the new dev at creating their first record", async () => {
     // `fbrain list` is step 2 of init's Next-steps — the FIRST content command
