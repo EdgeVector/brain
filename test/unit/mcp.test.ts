@@ -1294,6 +1294,102 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
 
+  // ── updated_since / offset / count mirror the CLI on the MCP tool ─────────
+  // Card fbrain-list-updated-since-offset-count. A datedRow helper stamps a
+  // distinct updated_at per row so offset/updated_since order deterministically.
+  function datedRow(slug: string, isoDay: string) {
+    return {
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body: "",
+        status: "draft",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: `${isoDay}T00:00:00Z`,
+      },
+      key: { hash: slug, range: null },
+    };
+  }
+  const fiveDaily = [
+    datedRow("d21", "2026-05-21"),
+    datedRow("d22", "2026-05-22"),
+    datedRow("d23", "2026-05-23"),
+    datedRow("d24", "2026-05-24"),
+    datedRow("d25", "2026-05-25"),
+  ];
+
+  test("fbrain_list count mode returns { count } and validates against outputSchema", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: fiveDaily } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_list!({ type: "design", count: true });
+    expect(res.isError).toBeFalsy();
+    // Count mode → { count } (no records key), and the text is the bare number.
+    expect(res.structuredContent).toEqual({ count: 5 });
+    expect(res.content[0]!.text).toBe("5");
+    const schema = outputSchemaOf(server, "fbrain_list")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("fbrain_list offset pages past the newest rows (offset 2 + limit 2)", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: fiveDaily } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_list!({
+      type: "design",
+      offset: 2,
+      limit: 2,
+    });
+    const sc = res.structuredContent as { records: Array<{ slug: string }> };
+    // Newest-first: d25, d24, d23, d22, d21. offset 2 → d23, d22.
+    expect(sc.records.map((r) => r.slug)).toEqual(["d23", "d22"]);
+  });
+
+  test("fbrain_list updated_since filters by timestamp (relative token parsed by shared parser)", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: fiveDaily } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    // Absolute ISO cut at 2026-05-24 → d24, d25 (2 of 5). Using an absolute
+    // value keeps the assertion clock-independent.
+    const res = await toolsOf(server).fbrain_list!({
+      type: "design",
+      updated_since: "2026-05-24",
+    });
+    const sc = res.structuredContent as { records: Array<{ slug: string }> };
+    expect(sc.records.map((r) => r.slug)).toEqual(["d25", "d24"]);
+  });
+
+  test("fbrain_list rejects a malformed updated_since with an error result", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: fiveDaily } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_list!({
+      type: "design",
+      updated_since: "garbage",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain(
+      "not a valid ISO-8601 timestamp or relative window",
+    );
+  });
+
   test("all 10 tools — read AND write — declare an outputSchema", () => {
     const server = createFbrainMcpServer({ cfg });
     // Read tools (typed since #262).

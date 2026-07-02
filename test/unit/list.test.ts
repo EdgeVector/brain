@@ -835,3 +835,218 @@ describe("listCmd — empty-node create-your-first hint (parity with search/ask)
     expect(stderr[0]).toContain("no records yet");
   });
 });
+
+// `--updated-since`, `--offset`, `--count` — the three options added by the
+// 2026-07-02 API review (card fbrain-list-updated-since-offset-count). All
+// three route through the same `stubFetch` sweep as the filters above and are
+// applied in-memory after the per-type read: updated_since filters, offset
+// pages, count short-circuits to a number.
+describe("listCmd — updated_since / offset / count", () => {
+  // Five spikes, one per day 2026-05-21 … 2026-05-25 (newest = slug-25).
+  const daily: Fields[] = Array.from({ length: 5 }, (_, i) =>
+    spikeRow(`slug-${21 + i}`, {
+      updated_at: `2026-05-${21 + i}T00:00:00Z`,
+    }),
+  );
+
+  test("--updated-since keeps only records at/after the instant (inclusive)", async () => {
+    // Cut at 2026-05-23 → keep slug-23, slug-24, slug-25 (3 of 5). The
+    // CLI parses the token to epoch-millis; here we pass updatedSinceMs
+    // directly to exercise listCmd's numeric compare.
+    const since = Date.parse("2026-05-23T00:00:00Z");
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        updatedSinceMs: since,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines).toHaveLength(3);
+    // Newest-first: slug-25, slug-24, slug-23. The boundary (slug-23) is
+    // included; slug-21/slug-22 are dropped.
+    expect(lines[0]).toContain("slug-25");
+    expect(lines[2]).toContain("slug-23");
+    expect(lines.some((l) => l.includes("slug-22"))).toBe(false);
+    expect(lines.some((l) => l.includes("slug-21"))).toBe(false);
+  });
+
+  test("--updated-since matching nothing → 'no records' + filter hint (brain non-empty)", async () => {
+    const since = Date.parse("2027-01-01T00:00:00Z"); // future → matches none
+    const responses = new Map<string, Array<Fields[]>>([
+      // Sweep sees the rows (brain non-empty) but none pass the since filter;
+      // the empty-result hint path re-probes and must also see a live row.
+      [TEST_HASHES.spike, [daily, daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        updatedSinceMs: since,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines[0]).toBe("no records");
+    // updated_since counts as an active filter → the filter nudge, not
+    // "create your first" (the brain has records).
+    expect(lines[1]).toContain("no records match that filter");
+    expect(lines[1]).not.toContain("no records yet");
+  });
+
+  test("--offset pages past the window (offset 2 + limit 2 → the 3rd/4th newest)", async () => {
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        offset: 2,
+        limit: 2,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    // Newest-first order is slug-25, slug-24, slug-23, slug-22, slug-21.
+    // offset 2 skips slug-25/slug-24; limit 2 takes slug-23, slug-22.
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("slug-23");
+    expect(lines[1]).toContain("slug-22");
+  });
+
+  test("--offset past the end yields an empty page (no rows, no crash)", async () => {
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        offset: 99,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    // 5 records, offset 99 → nothing to show. The genuinely-empty MATCH set
+    // returned before offset applied, so we don't re-enter the empty hint;
+    // the row loop simply prints nothing.
+    expect(lines).toHaveLength(0);
+  });
+
+  test("--count prints just the match count (respects filters, ignores offset/limit)", async () => {
+    const since = Date.parse("2026-05-23T00:00:00Z"); // 3 of 5 match
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        updatedSinceMs: since,
+        // offset/limit must NOT clip the count — a count is of the whole set.
+        offset: 1,
+        limit: 1,
+        count: true,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(lines).toEqual(["3"]);
+  });
+
+  test("--count --json emits { count: N } on stdout", async () => {
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const stdout: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        count: true,
+        json: true,
+        print: (l) => stdout.push(l),
+      });
+    } finally {
+      restore();
+    }
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!)).toEqual({ count: 5 });
+  });
+
+  test("--count on an empty match prints a bare 0, not the create-first hint", async () => {
+    const since = Date.parse("2027-01-01T00:00:00Z"); // matches none
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        updatedSinceMs: since,
+        count: true,
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+    // Count mode short-circuits before the empty-node hint — just `0`.
+    expect(lines).toEqual(["0"]);
+  });
+
+  test("onResult single-sources both modes (discriminated ListResult)", async () => {
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [daily, daily]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const rowResults: unknown[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        onResult: (r) => rowResults.push(r),
+        print: () => {},
+      });
+      await listCmd({
+        cfg,
+        type: "spike",
+        count: true,
+        onResult: (r) => rowResults.push(r),
+        print: () => {},
+      });
+    } finally {
+      restore();
+    }
+    // First call → rows mode with 5 summaries; second → count mode.
+    expect(rowResults).toHaveLength(2);
+    const rowRes = rowResults[0] as { mode: string; records: unknown[] };
+    expect(rowRes.mode).toBe("rows");
+    expect(rowRes.records).toHaveLength(5);
+    const countRes = rowResults[1] as { mode: string; count: number };
+    expect(countRes.mode).toBe("count");
+    expect(countRes.count).toBe(5);
+  });
+});

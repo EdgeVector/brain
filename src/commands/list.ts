@@ -30,6 +30,24 @@ export type ListOptions = {
   // Must be a positive integer when set — non-positive values are
   // rejected by the CLI before they reach here.
   limit?: number;
+  // Skip the first N matches after filter+sort, before `limit` is
+  // applied — the paging companion to `limit` (records N+1 … N+limit).
+  // A non-negative integer when set; validated by the CLI. Applies to
+  // the sorted, filtered set, so `--offset 50 -n 50` yields records
+  // 51–100 in the same newest-first order a bare list would show.
+  offset?: number;
+  // Lower-bound filter on `updated_at`: keep only records whose
+  // updated_at is >= this instant. Parsed by the CLI (ISO-8601 or a
+  // relative token like `7d`/`24h`) into epoch-millis so this module
+  // stays clock-free and testable. Applied alongside the status/tag
+  // filters, BEFORE sort/offset/limit.
+  updatedSinceMs?: number;
+  // Count-only mode. When true, emit just the number of records that
+  // match the filters (updated-since/status/tag) — no bodies, no
+  // per-row summaries. `offset`/`limit` do NOT clip a count (a count is
+  // of the whole matching set); the truncation/paging window only shapes
+  // the row output. Keeps token/wire cost flat for "how many …" queries.
+  count?: boolean;
   // Machine-readable mode. Emits a single JSON array document via
   // `print` (one call) and routes any advisory "K more" hint to
   // `printErr` so stdout remains pure JSON parseable by `jq`.
@@ -44,15 +62,25 @@ export type ListOptions = {
   // `FbrainError.agentHint` for the ERROR path. Default (undefined) keeps the
   // human CLI output byte-identical.
   agent?: boolean;
-  // Structured-result sink. When set, receives the SAME array of
-  // `RecordSummary` objects that `--json` mode serializes to stdout —
-  // one source of truth for both the JSON CLI surface and the MCP
-  // `structuredContent`. Fires once per call (with `[]` on no records)
-  // regardless of the `json` flag, so the MCP handler can run the
-  // command in human mode for `content` text AND capture the typed
-  // payload without re-parsing the printed line.
-  onResult?: (payload: RecordSummary[]) => void;
+  // Structured-result sink. When set, receives the SAME payload that
+  // `--json` mode serializes to stdout — one source of truth for both the
+  // JSON CLI surface and the MCP `structuredContent`. Fires once per call
+  // regardless of the `json` flag, so the MCP handler can run the command
+  // in human mode for `content` text AND capture the typed payload without
+  // re-parsing the printed line. In row mode the payload is the array of
+  // `RecordSummary` (`[]` on no records); in `count` mode it is a
+  // `{ count }` object — the discriminated `ListResult`.
+  onResult?: (payload: ListResult) => void;
 };
+
+// The single-sourced result of a `listCmd` invocation, handed to both the
+// `--json` stdout serializer and the MCP `onResult` sink. Row mode returns
+// the summary array; `--count` mode returns the match count only. The
+// `mode` discriminant lets the MCP wrapper map to `{ records }` vs
+// `{ count }` without re-inspecting the shape.
+export type ListResult =
+  | { mode: "rows"; records: RecordSummary[] }
+  | { mode: "count"; count: number };
 
 export async function listCmd(opts: ListOptions): Promise<void> {
   const { print, printErr } = resolvePrintSinks(opts);
@@ -87,6 +115,17 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     if (isTombstoned(record)) return false;
     if (opts.status && record.status !== opts.status) return false;
     if (opts.tag && !record.tags.includes(opts.tag)) return false;
+    // `--updated-since` lower bound. The CLI parses the ISO/relative token
+    // into epoch-millis, so the compare is a plain numeric >= against the
+    // record's parsed updated_at. Records with an unparseable updated_at
+    // (Date.parse → NaN) are excluded — `NaN >= x` is false — the safe
+    // default for a "changed since T" query.
+    if (
+      opts.updatedSinceMs !== undefined &&
+      !(Date.parse(record.updated_at) >= opts.updatedSinceMs)
+    ) {
+      return false;
+    }
     return true;
   });
 
@@ -115,11 +154,30 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     return compareByUpdatedThenSlug(a.record, b.record);
   });
 
+  // `--count` short-circuit: emit only how many records match the
+  // filters, before the row-shaping (offset/limit) and the empty-node
+  // hint path. A count is of the WHOLE matching set — `offset`/`limit`
+  // shape row output, not a count — so it reports `filtered.length`
+  // regardless of those flags. Count 0 prints a bare `0` (or `{count: 0}`
+  // JSON), never the create-your-first hint: a caller asking "how many
+  // match" wants a number, not new-dev guidance. This keeps token/wire
+  // cost flat for "how many open papercuts" style queries.
+  if (opts.count) {
+    const count = filtered.length;
+    opts.onResult?.({ mode: "count", count });
+    if (opts.json) {
+      print(JSON.stringify({ count }));
+    } else {
+      print(String(count));
+    }
+    return;
+  }
+
   // Genuinely-empty result wins over the truncation path — print
   // `no records` even when the implicit default cap would have taken
   // effect. (Iron: the cap is a UX guard against floods, not a signal.)
   if (filtered.length === 0) {
-    opts.onResult?.([]);
+    opts.onResult?.({ mode: "rows", records: [] });
     // Context-aware no-result hint, completing the empty-node-hint trilogy
     // (list/search/ask). `list` is step 2 of init's own Next-steps — the
     // FIRST content command a brand-new dev runs — so a bare `no records`
@@ -134,7 +192,10 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     // `!filteredQuery && non-empty` is impossible (no filter on a non-empty
     // brain can't yield zero), so it falls through to the empty-brain hint.
     const filteredQuery =
-      opts.type !== undefined || opts.status !== undefined || opts.tag !== undefined;
+      opts.type !== undefined ||
+      opts.status !== undefined ||
+      opts.tag !== undefined ||
+      opts.updatedSinceMs !== undefined;
     const empty = !(await hasAnyLiveRecord(node, opts.cfg));
     // Filter hint only when a filter is active AND the brain has records;
     // every other shape (empty brain; or the impossible no-filter-yet-zero
@@ -163,12 +224,26 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     return;
   }
 
+  // Paging window: drop the first `--offset` rows, then apply the limit.
+  // Offset is a non-negative integer (validated upstream in cli.ts); it
+  // slices the sorted, filtered set, so `--offset 50 -n 50` yields records
+  // 51–100 in the same newest-first order. A huge offset simply produces
+  // `paged.length === 0` and the row loop prints nothing (the empty-brain
+  // hint path is not re-entered — that only guards a genuinely empty match
+  // set, which already returned above).
+  const offset = opts.offset ?? 0;
+  const paged = offset > 0 ? filtered.slice(offset) : filtered;
+
   // Explicit `-n N` overrides the default. Non-positive values are
   // rejected upstream in cli.ts, so any `opts.limit` reaching here is
   // a positive integer.
   const effectiveLimit = opts.limit ?? DEFAULT_LIST_LIMIT;
-  const trimmed = filtered.slice(0, effectiveLimit);
-  const truncated = filtered.length - trimmed.length;
+  const trimmed = paged.slice(0, effectiveLimit);
+  // Rows remaining AFTER this offset+limit window — what a follow-up page
+  // (advance `--offset` by `effectiveLimit`) would surface. Measured from
+  // the post-offset `paged` set so the "K more" hint counts only rows the
+  // caller hasn't seen yet, not rows already skipped by `--offset`.
+  const truncated = paged.length - trimmed.length;
 
   // One JSON document — exact same field set the human table surfaces,
   // plus created_at/updated_at and the optional design_slug parent link.
@@ -179,7 +254,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // structured sink and the `--json` stdout document are the SAME value
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
   const payload = trimmed.map(({ type, record }) => recordSummary(type, record));
-  opts.onResult?.(payload);
+  opts.onResult?.({ mode: "rows", records: payload });
 
   if (opts.json) {
     print(JSON.stringify(payload));
