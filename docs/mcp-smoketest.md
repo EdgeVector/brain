@@ -1,8 +1,9 @@
 # MCP server smoketest
 
 End-to-end check that fbrain's MCP server (`fbrain mcp`) exposes the
-seven tools — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`,
-`fbrain_list`; write: `fbrain_put`, `fbrain_delete`, `fbrain_link` —
+nine tools — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`,
+`fbrain_list`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`,
+`fbrain_delete`, `fbrain_link` —
 and that an MCP client (Claude Code or
 `@modelcontextprotocol/inspector`) can call them against a live
 `~/.fbrain/config.json`.
@@ -40,9 +41,9 @@ In a new Claude Code session, ask:
 
 > List the tools exposed by the `fbrain` MCP server.
 
-Expected: Claude reports seven tools — `fbrain_search`, `fbrain_ask`,
-`fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_delete`,
-`fbrain_link`. If you
+Expected: Claude reports nine tools — `fbrain_search`, `fbrain_ask`,
+`fbrain_get`, `fbrain_list`, `fbrain_put`, `fbrain_status`,
+`fbrain_append`, `fbrain_delete`, `fbrain_link`. If you
 see "no tools" or "server not connected", check the Claude Code logs
 (`~/Library/Logs/Claude` on macOS) for stderr from the
 `bun src/mcp/main.ts` process. The most common failure is
@@ -150,7 +151,7 @@ bunx @modelcontextprotocol/inspector bun src/mcp/main.ts
 ```
 
 The inspector opens a local web UI. Use the "List Tools" button — you
-should see seven tools registered. Click each tool, fill in the args
+should see nine tools registered. Click each tool, fill in the args
 panel (e.g. `query: "replacement"` for search), hit "Call Tool".
 
 ## E. Common failure modes

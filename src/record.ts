@@ -970,3 +970,76 @@ export function ensureStatus(type: RecordType, status: string): void {
     });
   }
 }
+
+// ── Body-shrink guard (data-loss protection on re-put) ───────────────────
+// `fbrain put` is a full REPLACE, and the MCP `fbrain_put` body defaults to
+// empty. The natural agent loop `fbrain_get` (which WINDOWS a large body at
+// ~40K chars) → edit → re-put therefore silently destroys the tail of any
+// record larger than one get-window, and a status-only touch-up re-put with
+// no body wipes the body entirely (the run132 clobber incident). This guard
+// refuses a re-put that would shrink an existing non-empty body past a
+// threshold unless the caller explicitly opts in (`--allow-shrink` /
+// `allow_shrink: true`). It runs BEFORE any HTTP write, mirroring the
+// pre-flight `validateSlug` / `ensureStatus` checks.
+
+// Fraction of the existing body a re-put may drop before the guard trips.
+// A re-put that keeps > (1 - THRESHOLD) of the old body is allowed silently
+// (ordinary edits trim text); dropping MORE than this fraction — or clearing
+// a non-empty body to empty — is treated as probable accidental truncation.
+// 0.5 = "losing more than half the body is suspicious"; tuned to catch the
+// windowed-get truncation (a 100K body re-put as its first 40K window drops
+// 60% > 50%) while not tripping on normal editing.
+export const BODY_SHRINK_THRESHOLD = 0.5;
+
+// True when replacing `oldBody` with `newBody` would drop MORE than
+// BODY_SHRINK_THRESHOLD of the existing body (including clearing a non-empty
+// body to empty). An empty/absent existing body can never shrink — a first
+// write or a re-put over an empty record is always fine.
+export function wouldShrinkBody(oldBody: string, newBody: string): boolean {
+  const oldLen = oldBody.length;
+  if (oldLen === 0) return false;
+  const dropped = oldLen - newBody.length;
+  if (dropped <= 0) return false;
+  return dropped / oldLen > BODY_SHRINK_THRESHOLD;
+}
+
+// Throw `body_shrink_guard` with an actionable hint when a re-put would
+// shrink the existing body past the threshold. No-op when the write is safe,
+// or when the caller opted into the shrink via `allowShrink`. The hint names
+// the recovery: re-read the FULL body first (paginate a windowed get to the
+// end), or pass the allow-shrink escape hatch for a deliberate truncation.
+export function ensureNotShrinking(
+  type: RecordType,
+  slug: string,
+  oldBody: string,
+  newBody: string,
+  allowShrink: boolean,
+): void {
+  if (allowShrink) return;
+  if (!wouldShrinkBody(oldBody, newBody)) return;
+  const oldLen = oldBody.length;
+  const newLen = newBody.length;
+  const pct = Math.round(((oldLen - newLen) / oldLen) * 100);
+  const toEmpty = newLen === 0;
+  throw new FbrainError({
+    code: "body_shrink_guard",
+    message:
+      `Refusing to re-put ${type} "${slug}": the new body ` +
+      (toEmpty
+        ? `is EMPTY but the existing record has ${oldLen} chars`
+        : `is ${newLen} chars, ${pct}% smaller than the existing ${oldLen}`) +
+      ` — this looks like accidental truncation, not an edit.`,
+    hint:
+      "fbrain_put/`fbrain put` is a FULL REPLACE, not an append. If you did a " +
+      "get→edit→re-put, note that `fbrain_get` WINDOWS large bodies (~40K chars) " +
+      "— re-read the FULL body first (page a windowed get to the end via " +
+      "`body_offset`), or use `fbrain_append` to add to the body without a " +
+      "rewrite. To truncate on purpose, pass `--allow-shrink` (CLI) / " +
+      "`allow_shrink: true` (MCP).",
+    agentHint:
+      "fbrain_put is a FULL REPLACE. fbrain_get windows large bodies (~40K " +
+      "chars) — page the whole body (body_offset) before re-putting, or use " +
+      "fbrain_append to add without a rewrite. Pass allow_shrink: true only to " +
+      "truncate on purpose.",
+  });
+}

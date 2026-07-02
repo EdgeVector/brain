@@ -2536,7 +2536,7 @@ function bootRunnerReturning(result: McpBootResult) {
 }
 
 describe("runMcpBootProbe", () => {
-  test("valid handshake + all 7 tools, version MATCHES CLI → PASS with count + serverInfo", async () => {
+  test("valid handshake + all 9 tools, version MATCHES CLI → PASS with count + serverInfo", async () => {
     const check = await runMcpBootProbe(
       "/Users/x/.bun/bin/fbrain-mcp",
       {
@@ -2554,7 +2554,7 @@ describe("runMcpBootProbe", () => {
     expect(check.name).toBe("mcp-boot");
     expect(check.ok).toBe(true);
     expect(check.tag).toBeUndefined(); // plain PASS
-    expect(check.detail).toContain("tools=7");
+    expect(check.detail).toContain("tools=9");
     expect(check.detail).toContain("fbrain 0.8.0 (abc1234)");
   });
 
@@ -2600,7 +2600,7 @@ describe("runMcpBootProbe", () => {
     expect(check.detail).toContain("serverInfo (none)");
   });
 
-  test("handshake reports only 6 tools → FAIL naming the missing tool", async () => {
+  test("handshake reports only 8 tools → FAIL naming the missing tool", async () => {
     const check = await runMcpBootProbe(
       "/Users/x/.bun/bin/fbrain-mcp",
       {
@@ -2615,7 +2615,7 @@ describe("runMcpBootProbe", () => {
     expect(check.ok).toBe(false);
     expect(check.detail).toContain("mismatch");
     expect(check.detail).toContain("missing: fbrain_link");
-    expect(check.detail).toContain("expected exactly 7");
+    expect(check.detail).toContain("expected exactly 9");
     expect(check.fix).toContain("bun link");
     expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
   });
@@ -2736,7 +2736,7 @@ describe("doctor --mcp integration", () => {
     expect(lines.find((l) => l.includes("mcp-boot"))).toBeUndefined();
   });
 
-  test("--mcp with a healthy server → [PASS] mcp-boot tools=7, exit 0", async () => {
+  test("--mcp with a healthy server → [PASS] mcp-boot tools=9, exit 0", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -2758,7 +2758,7 @@ describe("doctor --mcp integration", () => {
     const line = lines.find((l) => l.includes("mcp-boot"));
     expect(line).toBeDefined();
     expect(line!.startsWith("[PASS]")).toBe(true);
-    expect(line!).toContain("tools=7");
+    expect(line!).toContain("tools=9");
   });
 
   test("--mcp with a broken tool surface → [FAIL] mcp-boot, exit 1", async () => {

@@ -1,7 +1,11 @@
 // MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_ask`,
-// `fbrain_get`, `fbrain_list`) and write (`fbrain_put`, `fbrain_delete`,
-// `fbrain_link`) tools to MCP clients (Claude Code, Codex, etc.) over stdio.
-// 7 tools total.
+// `fbrain_get`, `fbrain_list`) and write (`fbrain_put`, `fbrain_status`,
+// `fbrain_append`, `fbrain_delete`, `fbrain_link`) tools to MCP clients
+// (Claude Code, Codex, etc.) over stdio. 9 tools total. `fbrain_status`
+// (status-only patch) and `fbrain_append` (grow a body without a full
+// rewrite) close the read/write asymmetry: without them the only write was
+// `fbrain_put`, a FULL replace whose body defaults to empty, so the natural
+// get(windowed)→edit→re-put loop silently truncated large records.
 //
 // Each handler wraps the existing CLI command function and captures its
 // printed output as a single text content block. No shell-out — the
@@ -20,6 +24,8 @@ import { askCmd } from "../commands/ask.ts";
 import { getRecord, formatRecordJsonWindow, type RecordJson } from "../commands/get.ts";
 import { listCmd, type RecordSummary } from "../commands/list.ts";
 import { putCmd } from "../commands/put.ts";
+import { statusCmd } from "../commands/status.ts";
+import { appendCmd } from "../commands/append.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
@@ -33,7 +39,7 @@ import {
 
 export const FBRAIN_MCP_NAME = "fbrain";
 // The complete agent-integration surface this server exposes — 4 read tools
-// + 3 write tools = 7. Single-sourced here so the `doctor --mcp` boot probe
+// + 5 write tools = 9. Single-sourced here so the `doctor --mcp` boot probe
 // can assert the live `tools/list` reports EXACTLY this set (a renamed or
 // dropped tool fails the probe) without re-listing the names. Keep in sync
 // with the `registerTool` calls below.
@@ -43,6 +49,8 @@ export const FBRAIN_MCP_TOOL_NAMES = [
   "fbrain_get",
   "fbrain_list",
   "fbrain_put",
+  "fbrain_status",
+  "fbrain_append",
   "fbrain_delete",
   "fbrain_link",
 ] as const;
@@ -385,6 +393,32 @@ const linkResultSchema = z.object({
   from_slug: z.string().describe("Source task slug."),
   to_type: z.literal("design").describe("Target record type (always `design` in v0)."),
   to_slug: z.string().describe("Target design slug."),
+});
+
+// `fbrain_status` → `{action:"status_changed", type, slug, from, to}`, mirroring
+// the CLI's `<type> <slug>: <from> → <to>` transition line. `from`/`to` bracket
+// the change so an agent can confirm the record's prior status before the patch.
+const statusResultSchema = z.object({
+  action: z.literal("status_changed").describe("Always `status_changed`."),
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
+  slug: z.string().describe("Resolved record slug."),
+  from: z.string().describe("The record's status BEFORE this mutation."),
+  to: z.string().describe("The record's status AFTER this mutation."),
+});
+
+// `fbrain_append` → `{action:"appended", type, slug, oldBodyChars, newBodyChars,
+// bytesAppended}`. The char counts bracket the growth so an agent can confirm
+// the body GREW (never shrank/truncated) — the whole point of the primitive.
+const appendResultSchema = z.object({
+  action: z.literal("appended").describe("Always `appended`."),
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
+  slug: z.string().describe("Resolved record slug."),
+  oldBodyChars: z.number().int().describe("Body length in characters BEFORE the append."),
+  newBodyChars: z.number().int().describe("Body length in characters AFTER the append."),
+  bytesAppended: z
+    .number()
+    .int()
+    .describe("Characters added (chunk length plus any auto-inserted separator)."),
 });
 
 // ── Cold-capability self-warm (opt-in) ───────────────────────────────────
@@ -836,6 +870,19 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             "Raw YAML-subset frontmatter (no `---` fences). When set, " +
               "overrides synthesis from `type`/`title`/`tags`.",
           ),
+        allow_shrink: z
+          .boolean()
+          .optional()
+          .describe(
+            "Bypass the body-shrink guard. fbrain_put is a FULL REPLACE, so a " +
+              "re-put whose body drops >half of an existing non-empty body — or " +
+              "clears it to empty — is REFUSED with `body_shrink_guard` by " +
+              "default (the common get(windowed)→edit→re-put truncation, or a " +
+              "status-only re-put that wipes the body). To ADD to a body without " +
+              "a rewrite use `fbrain_append`; to change only status use " +
+              "`fbrain_status`. Set `allow_shrink: true` ONLY to truncate on " +
+              "purpose.",
+          ),
       },
       // `structuredContent` is `{action, type, slug, indexPending}` — the
       // first three are the SAME values that compose the
@@ -846,7 +893,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     },
     (args) =>
       runWriteTool(getCfg, autoGrant, async (cfg, print, onResult) => {
-        const input = buildPutInput(resolvePutBody(args));
+        // Strip the non-body `allow_shrink` control before body resolution so
+        // it never leaks into synthesized frontmatter; thread it to putCmd's
+        // shrink guard below.
+        const { allow_shrink, ...putArgs } = args;
+        const input = buildPutInput(resolvePutBody(putArgs));
         // Read-after-write confirmation for the agent loop. `putCmd` already
         // guarantees the row is record-list-visible (its own verify-read), AND
         // — as of the CLI search-parity change (#295 CLI half) — confirms the
@@ -860,7 +911,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         // We just thread its result through to the agent — the deeper
         // server-side synchronous-indexing change is a separate fold/native-
         // index item (docs/phase-7-search-latency-spike.md, G3d/G3e).
-        const result = await putCmd({ cfg, slug: args.slug, input });
+        const result = await putCmd({
+          cfg,
+          slug: args.slug,
+          input,
+          allowShrink: allow_shrink === true,
+        });
         const indexPending = result.indexPending;
         print(
           `${result.action} ${result.type} ${result.slug}` +
@@ -875,6 +931,136 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           indexPending,
         });
       }),
+  );
+
+  server.registerTool(
+    "fbrain_status",
+    {
+      title: "Set fbrain record status",
+      description:
+        "Change ONLY a record's status — the most common single mutation — " +
+        "WITHOUT a full re-put. This is the safe status-patch primitive: it " +
+        "reads the live record, swaps in the new `status`, and writes back " +
+        "preserving the body/title/tags/created_at. Prefer this over " +
+        "`fbrain_put` for a status change: `fbrain_put` is a FULL REPLACE " +
+        "whose body defaults to empty, so a status-only re-put WIPES the body " +
+        "(the read/write asymmetry this tool fixes). The status is validated " +
+        "against the resolved type's enum BEFORE any write. Without `type`, " +
+        "resolves across every type and errors on an ambiguous slug. Returns " +
+        "one line: `<type> <slug>: <from> → <to>`.",
+      inputSchema: {
+        slug: requiredText("Record slug."),
+        status: requiredText(
+          "New status enum value for the record's type. Valid values DIFFER " +
+            "per type: design = draft|reviewed|approved|implemented|archived; " +
+            "task = open|in_progress|blocked|done|cancelled; " +
+            "project = planning|in_progress|done|archived; " +
+            "concept/agent = active|archived; " +
+            "preference = active|superseded; " +
+            "reference = active|broken|archived; " +
+            "spike = active|concluded; " +
+            "sop = active|superseded|archived. Validated before any write — an " +
+            "invalid value errors without mutating.",
+        ),
+        type: typeEnum
+          .optional()
+          .describe(
+            "Restrict lookup to one record type. Omit to resolve across all " +
+              "types (errors on an ambiguous slug).",
+          ),
+      },
+      // `structuredContent` is `{action:"status_changed", type, slug, from, to}`
+      // — the SAME resolved values `statusCmd` prints via its `onResult` sink.
+      outputSchema: statusResultSchema.shape,
+    },
+    (args) =>
+      runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
+        statusCmd({
+          cfg,
+          slug: args.slug,
+          newStatus: args.status,
+          type: args.type,
+          print,
+          onResult: (r) => onResult(r),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "fbrain_append",
+    {
+      title: "Append to fbrain record body",
+      description:
+        "Append a chunk to an existing record's body WITHOUT a full rewrite. " +
+        "This is the primitive that unblocks growing a LARGE record: " +
+        "`fbrain_get` WINDOWS a big body (~40K chars) and `fbrain_put` is a " +
+        "full replace, so the get→edit→re-put loop truncates past the window " +
+        "AND times out on a big record. `fbrain_append` instead reads the " +
+        "live record server-side (full body, no window), concatenates your " +
+        "chunk, and writes it back preserving title/tags/status/created_at. " +
+        "It can only GROW the body, so it never truncates and never trips the " +
+        "put shrink guard. Pass the chunk as `chunk` (short/inline), " +
+        "`chunk_b64` (multiline/emoji — standard base64 of the UTF-8 bytes), " +
+        "or `chunk_path` (a large chunk staged to a file); exactly one is " +
+        "required. A single blank line separates the chunk from a non-empty " +
+        "body unless `raw:true`. Without `type`, resolves across every type " +
+        "and errors on an ambiguous slug. Returns one line: " +
+        "`appended <n> chars to <type> <slug> (<old> → <new>)`.",
+      inputSchema: {
+        slug: requiredText("Record slug."),
+        chunk: z
+          .string()
+          .optional()
+          .describe(
+            "Text to append to the body. For a large or multiline chunk prefer " +
+              "`chunk_b64` or `chunk_path` — a long inline `chunk` can be " +
+              "dropped in transit. Mutually exclusive with `chunk_path`/`chunk_b64`.",
+          ),
+        chunk_path: z
+          .string()
+          .optional()
+          .describe(
+            "Absolute path to a UTF-8 file whose contents are appended. Use for " +
+              "a large chunk. Mutually exclusive with `chunk`/`chunk_b64`.",
+          ),
+        chunk_b64: z
+          .string()
+          .optional()
+          .describe(
+            "Standard base64 of the UTF-8 chunk bytes. Use for multiline/emoji " +
+              "chunks to avoid JSON escaping issues. Whitespace ignored. " +
+              "Mutually exclusive with `chunk`/`chunk_path`.",
+          ),
+        type: typeEnum
+          .optional()
+          .describe(
+            "Restrict lookup to one record type. Omit to resolve across all " +
+              "types (errors on an ambiguous slug).",
+          ),
+        raw: z
+          .boolean()
+          .optional()
+          .describe(
+            "Concatenate byte-exact (no auto-inserted blank-line separator).",
+          ),
+      },
+      // `structuredContent` is `{action:"appended", type, slug, oldBodyChars,
+      // newBodyChars, bytesAppended}` — the SAME values `appendCmd` prints via
+      // its `onResult` sink.
+      outputSchema: appendResultSchema.shape,
+    },
+    (args) =>
+      runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
+        appendCmd({
+          cfg,
+          slug: args.slug,
+          chunk: resolveAppendChunk(args),
+          type: args.type,
+          raw: args.raw,
+          print,
+          onResult: (r) => onResult(r),
+        }),
+      ),
   );
 
   server.registerTool(
@@ -1019,6 +1205,51 @@ export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: 
     });
   }
   return { ...rest, body };
+}
+
+type AppendChunkArgs = {
+  chunk?: string;
+  chunk_path?: string;
+  chunk_b64?: string;
+};
+
+// Resolve the append chunk from exactly one of `chunk` / `chunk_path` /
+// `chunk_b64`, mirroring `resolvePutBody`'s three-source contract (a path or
+// base64 survives the input-dropping that truncates a long inline value). All
+// three unset errors — appendCmd separately rejects an empty resolved chunk.
+export function resolveAppendChunk(args: AppendChunkArgs): string {
+  const sources = [args.chunk, args.chunk_path, args.chunk_b64].filter(
+    (v) => v !== undefined,
+  );
+  if (sources.length > 1) {
+    throw new FbrainError({
+      code: "multiple_chunk_sources",
+      message: "fbrain_append: pass only one of `chunk`, `chunk_path`, or `chunk_b64`.",
+      hint: "Use `chunk_b64` for inline multiline/emoji chunks, or `chunk_path` for large chunks; do not combine them.",
+    });
+  }
+  if (sources.length === 0) {
+    throw new FbrainError({
+      code: "missing_chunk",
+      message: "fbrain_append: one of `chunk`, `chunk_path`, or `chunk_b64` is required.",
+      hint: "Pass the text to append as `chunk` (inline), `chunk_b64` (base64), or `chunk_path` (a staged file).",
+    });
+  }
+  if (args.chunk !== undefined) return args.chunk;
+  if (args.chunk_b64 !== undefined) return decodeBodyB64(args.chunk_b64);
+  let chunk: string;
+  try {
+    chunk = readFileSync(args.chunk_path!, "utf8");
+  } catch (err) {
+    throw new FbrainError({
+      code: "chunk_path_unreadable",
+      message:
+        `fbrain_append: could not read chunk_path '${args.chunk_path!}': ` +
+        (err instanceof Error ? err.message : String(err)),
+      hint: "Pass an absolute path to a readable UTF-8 file.",
+    });
+  }
+  return chunk;
 }
 
 function decodeBodyB64(body_b64: string): string {

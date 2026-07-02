@@ -1294,7 +1294,7 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
 
-  test("all 7 tools — read AND write — declare an outputSchema", () => {
+  test("all 9 tools — read AND write — declare an outputSchema", () => {
     const server = createFbrainMcpServer({ cfg });
     // Read tools (typed since #262).
     expect(outputSchemaOf(server, "fbrain_search")).toBeDefined();
@@ -1390,9 +1390,13 @@ describe("write tools — structuredContent + outputSchema", () => {
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
+    // Carry a body so the re-put doesn't clear the existing "body text" to
+    // empty — that would (correctly) trip the shrink guard. This test pins the
+    // `updated` ACTION, not a body edit, so any non-shrinking body is fine.
     const res = await toolsOf(server).fbrain_put!({
       slug: "mcp-write-probe",
       type: "design",
+      body: "body text (revised)",
     });
     expect(res.isError).toBeFalsy();
     expect(res.structuredContent).toMatchObject({ action: "updated", type: "design", slug: "mcp-write-probe", indexPending: false });
@@ -2226,6 +2230,276 @@ describe("fbrain_delete tool", () => {
   });
 });
 
+type MutationBody = {
+  mutation_type?: string;
+  fields_and_values?: Record<string, unknown>;
+  schema_name?: string;
+};
+function parseBody(init?: RequestInit): Record<string, unknown> {
+  return JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>;
+}
+
+describe("fbrain_status tool", () => {
+  // A concept row the status handler resolves, then re-puts (status-only).
+  function conceptRow(slug: string, body = "existing body", status = "active") {
+    return {
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body,
+        status,
+        tags: ["k"],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    };
+  }
+
+  test("changes only the status and returns {action:'status_changed',from,to} matching its outputSchema", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "the body", "active")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_status!({
+      slug: "c1",
+      status: "archived",
+      type: "concept",
+    });
+    expect(res.isError).toBeFalsy();
+    // The body is PRESERVED — the whole point vs a status-only fbrain_put.
+    expect(mutations).toHaveLength(1);
+    const fields = mutations[0]!.fields_and_values!;
+    expect(fields.status).toBe("archived");
+    expect(fields.body).toBe("the body");
+    // Structured output + schema conformance.
+    expect(res.structuredContent).toEqual({
+      action: "status_changed",
+      type: "concept",
+      slug: "c1",
+      from: "active",
+      to: "archived",
+    });
+    const schema = outputSchemaOf(server, "fbrain_status")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toContain("c1: active → archived");
+  });
+
+  test("an invalid status errors (validated against the type enum) with no mutation", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_status!({
+      slug: "c1",
+      status: "bogus-status",
+      type: "concept",
+    });
+    expect(res.isError).toBe(true);
+    expect(mutations).toHaveLength(0);
+    expect(res.structuredContent).toBeUndefined();
+  });
+});
+
+describe("fbrain_append tool", () => {
+  function conceptRow(slug: string, body: string) {
+    return {
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body,
+        status: "active",
+        tags: ["k"],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    };
+  }
+
+  test("appends a chunk (grows the body) and returns {action:'appended',...} matching its outputSchema", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "head")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_append!({
+      slug: "c1",
+      chunk: "tail",
+      type: "concept",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(mutations).toHaveLength(1);
+    // Grown body: "head" + "\n\n" + "tail".
+    expect(mutations[0]!.fields_and_values!.body).toBe("head\n\ntail");
+    expect(res.structuredContent).toMatchObject({
+      action: "appended",
+      type: "concept",
+      slug: "c1",
+      oldBodyChars: 4,
+      newBodyChars: "head\n\ntail".length,
+    });
+    const schema = outputSchemaOf(server, "fbrain_append")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("chunk_b64 decodes to the appended text", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "head")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const b64 = Buffer.from("bullet 🎯", "utf8").toString("base64");
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_append!({
+      slug: "c1",
+      chunk_b64: b64,
+      type: "concept",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(mutations[0]!.fields_and_values!.body).toBe("head\n\nbullet 🎯");
+  });
+
+  test("passing two chunk sources errors before any mutation", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 200, body: { ok: true, results: [] } };
+    });
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_append!({
+      slug: "c1",
+      chunk: "a",
+      chunk_b64: "YQ==",
+      type: "concept",
+    });
+    expect(res.isError).toBe(true);
+    expect(mutations).toHaveLength(0);
+  });
+});
+
+describe("fbrain_put — body-shrink guard", () => {
+  function conceptRow(slug: string, body: string) {
+    return {
+      fields: {
+        slug,
+        title: `T-${slug}`,
+        body,
+        status: "active",
+        tags: ["k"],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: slug, range: null },
+    };
+  }
+
+  test("a status-only re-put that would WIPE an existing body is refused (body preserved, no mutation)", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.includes("/api/native-index/search")) return { status: 200, body: { results: [] } };
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "x".repeat(500))] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    // No body → empty → would clear the 500-char body. Guard must fire.
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_put!({
+      slug: "c1",
+      type: "concept",
+      status: "archived",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0]!.text).toContain("Refusing to re-put");
+    expect(res.content[0]!.text).toContain("fbrain_append");
+    expect(mutations).toHaveLength(0);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  test("allow_shrink: true lets the deliberate truncation through", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.includes("/api/native-index/search")) return { status: 200, body: { results: [] } };
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "x".repeat(500))] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_put!({
+      slug: "c1",
+      type: "concept",
+      body: "tiny",
+      allow_shrink: true,
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ action: "updated", slug: "c1" });
+    // The truncating write actually landed.
+    const upd = mutations.find((m) => m.mutation_type === "update");
+    expect(upd?.fields_and_values!.body).toBe("tiny");
+  });
+});
+
 describe("fbrain_link tool", () => {
   test("happy path — task → design fires an update on the task with design_slug set", async () => {
     const mutations: Array<Record<string, unknown>> = [];
@@ -2432,6 +2706,7 @@ describe("createFbrainMcpServer", () => {
   test("registers the 7 read+write tools", () => {
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
     expect(Object.keys(tools).sort()).toEqual([
+      "fbrain_append",
       "fbrain_ask",
       "fbrain_delete",
       "fbrain_get",
@@ -2439,6 +2714,7 @@ describe("createFbrainMcpServer", () => {
       "fbrain_list",
       "fbrain_put",
       "fbrain_search",
+      "fbrain_status",
     ]);
   });
 
@@ -2446,18 +2722,18 @@ describe("createFbrainMcpServer", () => {
   // subcommand help can't drift behind the server again (it claimed "six
   // tools" and omitted fbrain_ask long after the tool shipped — done card
   // help-mcp-says-six-tools-omits-ask, dogfood run 30, 2026-06-16).
-  test("COMMAND_HELP.mcp names every registered tool and says seven, not six", () => {
+  test("COMMAND_HELP.mcp names every registered tool and says nine", () => {
     const help = COMMAND_HELP.mcp;
     const registered = Object.keys(toolsOf(createFbrainMcpServer({ cfg })));
-    // 7 is the contract — the help must not undercount the server.
-    expect(registered).toHaveLength(7);
+    // 9 is the contract — the help must not undercount the server.
+    expect(registered).toHaveLength(9);
     for (const name of registered) {
       expect(help).toContain(name);
     }
     // fbrain_ask was the specific omission; assert it explicitly.
     expect(help).toContain("fbrain_ask");
-    expect(help).toContain("seven tools");
-    expect(help).not.toContain("six tools");
+    expect(help).toContain("nine tools");
+    expect(help).not.toContain("seven tools");
   });
 });
 
@@ -2478,7 +2754,7 @@ describe("server starts without a config (lazy config resolution)", () => {
     };
   }
 
-  test("constructs and lists all 7 tools with no config (handshake survives)", () => {
+  test("constructs and lists all 9 tools with no config (handshake survives)", () => {
     let loaderCalls = 0;
     const getCfg = () => {
       loaderCalls += 1;
@@ -2488,6 +2764,7 @@ describe("server starts without a config (lazy config resolution)", () => {
     // tools/list never resolves config — the loader must not have run yet.
     expect(loaderCalls).toBe(0);
     expect(Object.keys(tools).sort()).toEqual([
+      "fbrain_append",
       "fbrain_ask",
       "fbrain_delete",
       "fbrain_get",
@@ -2495,6 +2772,7 @@ describe("server starts without a config (lazy config resolution)", () => {
       "fbrain_list",
       "fbrain_put",
       "fbrain_search",
+      "fbrain_status",
     ]);
   });
 
