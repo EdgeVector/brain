@@ -6,6 +6,7 @@ import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
   hasAnyLiveRecord,
+  findBySlugPointRead,
   isTombstoned,
   listRecords,
   schemaHashFor,
@@ -13,7 +14,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
-import { lookupTagIndex, recordFromTagIndexEntry } from "../tag-index.ts";
+import { resolveRecordsByTag } from "../tag-index.ts";
 
 // Default cap for an unfiltered `fbrain list`. Without it an
 // unfiltered list dumps every record in the index — 80+ already, and
@@ -306,14 +307,14 @@ export async function resolveListEntries(
 ): Promise<ListEntry[]> {
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   if (opts.tag) {
-    const indexed = await lookupTagIndex(node, opts.cfg, opts.tag);
+    const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
+      findBySlug: (type, hash, slug) =>
+        findBySlugPointRead(node, type, hash, slug),
+      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
+    });
     if (indexed !== null) {
       return indexed
-        .filter((entry) => types.includes(entry.type))
-        .map((entry) => ({
-          type: entry.type,
-          record: recordFromTagIndexEntry(entry),
-        }));
+        .filter((entry) => types.includes(entry.type));
     }
   }
 

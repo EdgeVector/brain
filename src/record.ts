@@ -294,6 +294,23 @@ export async function findBySlugRaw(
   return list.find((r) => r.slug === slug) ?? null;
 }
 
+export async function findBySlugPointRead(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  const fields = fieldsFor(type);
+  const row = node.queryByKey
+    ? await node.queryByKey({ schemaHash, fields, keyHash: slug })
+    : (await node.queryAll({ schemaHash, fields })).results.find(
+        (r) => r.key?.hash === slug || r.fields?.slug === slug,
+      ) ?? null;
+  if (row === null) return null;
+  const record = rowToRecord(row, type);
+  return isTombstoned(record) ? null : record;
+}
+
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
 // case). The same /api/query intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:

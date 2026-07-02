@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { designNew } from "../../src/commands/design.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
@@ -57,7 +58,7 @@ describe("designNew", () => {
       tags: ["a", "b"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(2);
+    expect(mutations).toHaveLength(3);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(DESIGN_HASH);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
@@ -65,8 +66,17 @@ describe("designNew", () => {
     expect(fields.title).toBe("Fresh");
     expect(fields.tags).toEqual(["a", "b"]);
     expect(fields.status).toBe("draft");
-    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-    expect(indexFields.slug).toBe("__fbrain_tag_index__");
+    const indexFields = mutations
+      .slice(1)
+      .map((m) => m.fields_and_values as Record<string, unknown>);
+    expect(indexFields.map((f) => f.slug).sort()).toEqual([
+      tagIndexSlug("a"),
+      tagIndexSlug("b"),
+    ].sort());
+    expect(indexFields.map((f) => f.members)).toEqual([
+      ["design:fresh-design"],
+      ["design:fresh-design"],
+    ]);
   });
 
   test("rejects with slug_already_exists when the row is on the first query page", async () => {
@@ -177,7 +187,7 @@ describe("designNew", () => {
       force: true,
       ...VEC,
     });
-    expect(queryCalls).toBe(1);
+    expect(queryCalls).toBe(0);
     expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("create");
   });

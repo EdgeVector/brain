@@ -40,7 +40,7 @@ import {
   isRecordType,
   type RecordType,
 } from "../schemas.ts";
-import { updateTagIndexForRecord } from "../tag-index.ts";
+import { reconcileTagIndex } from "../tag-index.ts";
 
 export type PutOptions = {
   cfg: Config;
@@ -177,7 +177,15 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
     });
   }
-  await updateTagIndexForRecord(node, opts.cfg, type, visible);
+  await reconcileTagIndex(
+    node,
+    opts.cfg,
+    type,
+    slug,
+    existing?.tags ?? [],
+    visible.tags,
+    opts.verbose,
+  );
   // Read-after-write SEARCH parity (#295, CLI half). `verifyRecordVisible`
   // above proves the row is queryable via /api/query (the record-list / BM25
   // surface `get`/`list`/`ask` read), but says nothing about the native

@@ -382,7 +382,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
           .map((s) => s.identity_hash)
           .filter((h): h is string => typeof h === "string" && h.length > 0),
       );
-      const missing = UNIQUE_SCHEMAS.filter((entry) => {
+      const missing = DOCTOR_RECORD_SCHEMAS.filter((entry) => {
         const hash = cfg.schemaHashes[entry.key];
         return !hash || !loadedHashes.has(hash);
       }).map((entry) => entry.schema.schema.descriptive_name);
@@ -391,9 +391,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         checks.push({
           name: "schemas-loaded",
           ok: true,
-          detail: `${UNIQUE_SCHEMAS.length}/${UNIQUE_SCHEMAS.length} fbrain schemas present in the node DB`,
+          detail: `${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length} fbrain record schemas present in the node DB`,
         });
-        verbose?.(`schemas-loaded: ok (${UNIQUE_SCHEMAS.length}/${UNIQUE_SCHEMAS.length})`);
+        verbose?.(`schemas-loaded: ok (${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length})`);
       } else {
         checks.push({
           name: "schemas-loaded",
@@ -441,7 +441,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       skippedByNodeUnreachable("schema-drift", "can't compare against the node DB"),
     );
   } else if (cfgIssues.length === 0) {
-    for (const entry of UNIQUE_SCHEMAS) {
+    for (const entry of DOCTOR_RECORD_SCHEMAS) {
       const hash = cfg.schemaHashes[entry.key];
       const label = entry.schema.schema.descriptive_name;
       if (!hash) {
@@ -2049,3 +2049,6 @@ function skippedByPrereqs(name: string): CheckResult {
     fix: "resolve the earlier failures and retry",
   };
 }
+const DOCTOR_RECORD_SCHEMAS = UNIQUE_SCHEMAS.filter(
+  (entry) => entry.types.length > 0,
+);

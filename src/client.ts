@@ -753,6 +753,11 @@ export type NodeClient = {
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
   queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
+  queryByKey?(opts: {
+    schemaHash: string;
+    fields: string[];
+    keyHash: string;
+  }): Promise<QueryRow | null>;
   search(query: string, opts?: SearchOptions): Promise<NativeIndexHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
@@ -1355,6 +1360,25 @@ export function newNodeClient(opts: {
         total_count: lastTotalCount ?? allResults.length,
         returned_count: allResults.length,
       };
+    },
+    async queryByKey({ schemaHash, fields, keyHash }) {
+      const body = await callJsonOk("/api/query", "POST", {
+        schema_name: schemaHash,
+        fields,
+        filter: { HashKey: keyHash },
+        limit: QUERY_PAGE_SIZE,
+        offset: 0,
+      });
+      const b = body as Record<string, unknown>;
+      const results = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      for (const row of results) {
+        if (row.key?.hash === keyHash) return row;
+      }
+      for (const row of results) {
+        const f = (row.fields ?? {}) as Record<string, unknown>;
+        if (f.slug === keyHash) return row;
+      }
+      return null;
     },
     async search(query, searchOpts) {
       const params = new URLSearchParams();

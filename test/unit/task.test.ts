@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { taskNew } from "../../src/commands/task.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
@@ -76,7 +77,8 @@ describe("taskNew", () => {
     expect(fields.status).toBe("open");
     expect(fields.design_slug).toBe("");
     const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
-    expect(indexFields.slug).toBe("__fbrain_tag_index__");
+    expect(indexFields.slug).toBe(tagIndexSlug("a"));
+    expect(indexFields.members).toEqual(["task:t-fresh"]);
   });
 
   // Regression: /api/query truncation hides the existing row on the

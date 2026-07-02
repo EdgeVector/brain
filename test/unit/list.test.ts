@@ -15,7 +15,8 @@ import { describe, expect, test } from "bun:test";
 
 import { listCmd } from "../../src/commands/list.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
+import { buildTestCfg, TEST_HASHES, TEST_TAG_INDEX_HASH } from "../util.ts";
 
 const cfg = buildTestCfg({
   userHash: "uh",
@@ -803,34 +804,18 @@ describe("listCmd — updated_since, offset, count, and tag index", () => {
     expect(counted).toEqual(["2"]);
   });
 
-  test("--tag can resolve from the hidden tag index without scanning the tagged schema", async () => {
+  test("--tag can resolve from the per-tag index with only member point reads", async () => {
     const indexRow = {
-      slug: "__fbrain_tag_index__",
-      title: "fbrain tag index",
-      body: JSON.stringify({
-        version: 1,
-        tags: {
-          indexed: [
-            {
-              type: "spike",
-              slug: "from-index",
-              title: "Indexed row",
-              status: "exploring",
-              tags: ["indexed"],
-              created_at: "2026-07-01T00:00:00Z",
-              updated_at: "2026-07-02T00:00:00Z",
-            },
-          ],
-        },
-      }),
-      status: "archived",
-      tags: [TOMBSTONE_TAG, "fbrain-internal-index"],
+      slug: tagIndexSlug("indexed"),
+      tag: "indexed",
+      members: ["spike:from-index"],
       created_at: "2026-07-01T00:00:00Z",
       updated_at: "2026-07-02T00:00:00Z",
     };
+    const indexedSpike = spikeRow("from-index", { tags: ["indexed"] });
     const responses = new Map<string, Array<Fields[]>>([
-      [TEST_HASHES.reference, [[indexRow]]],
-      [TEST_HASHES.spike, [[]]],
+      [TEST_TAG_INDEX_HASH, [[indexRow]]],
+      [TEST_HASHES.spike, [[indexedSpike]]],
     ]);
     const { restore, callsBySchema } = stubFetch(responses);
     const lines: string[] = [];
@@ -847,8 +832,8 @@ describe("listCmd — updated_since, offset, count, and tag index", () => {
 
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("from-index");
-    expect(callsBySchema.get(TEST_HASHES.reference)).toBe(1);
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBeUndefined();
+    expect(callsBySchema.get(TEST_TAG_INDEX_HASH)).toBe(1);
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
   });
 });
 
