@@ -43,7 +43,12 @@ import {
   TOMBSTONE_TAG,
   withReadRetry,
 } from "../record.ts";
-import { RECORD_TYPES, RECORDS, type RecordType } from "../schemas.ts";
+import { RECORDS, type RecordType } from "../schemas.ts";
+import {
+  matchesListFilters,
+  resolveListEntries,
+} from "./list.ts";
+import { removeFromTagIndex } from "../tag-index.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -238,6 +243,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   }
 
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
+  await removeFromTagIndex(node, opts.cfg, type, slug);
 
   print(
     `deleted ${type} ${slug} (soft — fold_db is append-only)`,
@@ -251,7 +257,12 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
 
 // One record matched by a filter-mode delete (`type · slug · title`), the
 // unit both the dry-run preview and the actual delete operate on.
-type FilterMatch = { type: RecordType; slug: string; title: string };
+type FilterMatch = {
+  type: RecordType;
+  slug: string;
+  title: string;
+  created_at: string;
+};
 
 // The structured payload `fbrain delete --tag …` emits under `--json`. `deleted`
 // is the list that WAS (or, under `dryRun`, WOULD BE) tombstoned. In dry-run
@@ -292,17 +303,15 @@ async function resolveFilterMatches(
   node: NodeClient,
   opts: DeleteByFilterOptions,
 ): Promise<FilterMatch[]> {
-  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const matches: FilterMatch[] = [];
-  for (const t of types) {
-    const rows = await listRecords(node, t, schemaHashFor(t, opts.cfg));
-    for (const r of rows) {
-      if (isTombstoned(r)) continue;
-      if (opts.status && r.status !== opts.status) continue;
-      if (opts.tag && !r.tags.includes(opts.tag)) continue;
-      matches.push({ type: t, slug: r.slug, title: r.title });
-    }
-  }
+  const entries = await resolveListEntries(node, opts);
+  const matches: FilterMatch[] = entries
+    .filter(({ record }) => matchesListFilters(record, opts))
+    .map(({ type, record }) => ({
+      type,
+      slug: record.slug,
+      title: record.title,
+      created_at: record.created_at,
+    }));
   // Stable, human-scannable order: type then slug. The node's row order is
   // unstable (see list.ts), so without this the preview and the delete could
   // print the same set in different orders across invocations.
@@ -404,6 +413,7 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
     if (resolved === null) continue; // already gone — nothing to do
 
     await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at);
+    await removeFromTagIndex(node, opts.cfg, m.type, slug);
     print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
     deleted.push({ type: m.type, slug });
   }
