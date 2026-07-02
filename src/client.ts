@@ -1957,14 +1957,12 @@ export function defaultIsTargetPortListening(url: string): boolean {
   return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
 }
 
-// True when a node URL is the default homebrew install target
-// (`127.0.0.1:9001` / `localhost:9001`). Used ONLY by `nodeDownHint` to choose
-// which "start it" command to recommend: a brand-new downloaded user whose node
-// won't even be on PATH yet still gets the brew install+start line for this
-// URL. This is install guidance, NOT a transport notion — fbrain reaches a
-// loopback node over its Unix socket; the `:9001` TCP listener is retired and
-// is never dialed. The port survives only because it is the URL the homebrew
-// formula configures the daemon to advertise.
+// True when a node URL is the legacy/default CLI install target
+// (`127.0.0.1:9001` / `localhost:9001`). Used ONLY by `nodeDownHint` to decide
+// whether to include a conditional CLI/Homebrew note after the socket-first
+// recovery path. This is install guidance, NOT a transport notion — fbrain
+// reaches a loopback node over its Unix socket; the `:9001` TCP listener is
+// retired and is never dialed.
 function isDefaultInstallNodeUrl(url: string): boolean {
   try {
     const u = new URL(url);
@@ -1976,47 +1974,71 @@ function isDefaultInstallNodeUrl(url: string): boolean {
   }
 }
 
-// "Your node isn't reachable — start it" guidance. Three cases:
+function socketFirstNodeHint(
+  socketPath: string,
+  opts: { cliInstallPath?: boolean; sourceCompileNote?: boolean } = {},
+): string {
+  const sourceNote = opts.sourceCompileNote
+    ? " (first run compiles Rust — give it a few minutes)"
+    : "";
+  const cliNote = opts.cliInstallPath
+    ? " If this is an intentional CLI/Homebrew node, start the foreground daemon with `lastdb daemon start` or repair its launchd service."
+    : "";
+  return (
+    `fbrain uses the local LastDB Unix socket at ${socketPath}; run \`fbrain doctor\` for a full diagnosis. ` +
+    "Start or reopen LastDB.app so that socket exists. " +
+    `Contributors running from source: \`cd fold/fold_db_node && ./run.sh --local\`${sourceNote}. ` +
+    "If your node uses a different home, set `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+    "or `LASTDB_HOME=<node-home>`." +
+    cliNote
+  );
+}
+
+// "Your node isn't reachable — start it" guidance. Three cases, all
+// socket-first:
 //   1. SOMETHING is bound and LISTENING on the TARGET port but the socket isn't
 //      answering — the node is wedged, mid-boot, or hung (it did NOT just "not
-//      start"). A restart of a wedged node just re-hangs, so telling the dev to
-//      `brew services restart` is actively wrong: point them at the logs and
-//      tell them to STOP it before restarting. This branch wins first because a
-//      live-but-dead node is the most misdiagnosed failure (it looks identical
-//      to "not started" to a naive reachability check). The probe is scoped to
-//      the TARGET port — a sibling node serving a DIFFERENT port must NOT make
-//      this down port look "wedged" (which would wrongly tell the dev to stop a
-//      node that has nothing to do with the port they pointed at).
-//   2. Nothing on the target port, but the default install target (the
-//      `127.0.0.1:9001` homebrew daemon URL) OR the prebuilt `folddb` binary
-//      on PATH — a downloaded user. Gets a combined Homebrew install+start line
-//      first (`brew install` no-ops if already installed, so the same line
-//      covers both the never-installed and forgot-to-start dev). NB: this is an
-//      INSTALL-GUIDANCE check (which start command to recommend), NOT a
-//      transport notion — the local node is socket-only and the `:9001` TCP
-//      listener is retired; `127.0.0.1:9001` survives only as the canonical
-//      default-node URL the homebrew install targets.
+//      start"). A restart of a wedged node just re-hangs, so point them at the
+//      socket, `fbrain doctor`, logs, and stop-before-start recovery. This
+//      branch wins first because a live-but-dead node is the most misdiagnosed
+//      failure. The probe is scoped to the TARGET port — a sibling node serving
+//      a DIFFERENT port must NOT make this down port look "wedged".
+//   2. Nothing on the target port, but the default install target OR a prebuilt
+//      `folddb` binary is on PATH — a downloaded/CLI user. Still lead with the
+//      socket and LastDB.app recovery; include a conditional CLI/Homebrew note.
 //   3. Nothing on the target port, not the default URL, and no prebuilt binary
-//      — a genuine fold contributor running from source against a custom port;
-//      give the `./run.sh` + "compiling Rust" framing.
+//      — a genuine fold contributor running from source against a custom port.
 export function nodeDownHint(
   url: string,
   isFolddbBinaryInstalled: () => boolean = defaultIsFolddbBinaryInstalled,
   isTargetPortListening: (url: string) => boolean = defaultIsTargetPortListening,
 ): string {
+  const socketPath = defaultFolddbSocketPath();
+  const cliInstallPath = isDefaultInstallNodeUrl(url) || isFolddbBinaryInstalled();
   if (isTargetPortListening(url)) {
-    return `A node is bound to ${url} but isn't responding — it may still be starting up, or it may be wedged. Check \`brew services list\` and the node log; if it's wedged, **stop it before restarting** (a restart of a wedged node just re-hangs): \`brew services stop lastdb\` then \`brew services start lastdb\`. Contributors running from source: stop the existing \`lastdb_server\`/\`folddb_server\` process, then \`cd fold/fold_db_node && ./run.sh --local\`.`;
+    const cliNote = cliInstallPath
+      ? " If this is an intentional CLI/Homebrew node, stop that daemon before starting it again."
+      : "";
+    return (
+      `A node is bound to ${url} but isn't responding — it may still be starting up, or it may be wedged. ` +
+      `fbrain uses the local LastDB Unix socket at ${socketPath}; run \`fbrain doctor\` for a full diagnosis. ` +
+      "Check the node log; if it's wedged, stop it before restarting: stop the existing node process before starting it again. " +
+      "Desktop app: quit LastDB.app, then reopen it. " +
+      "Contributors running from source: stop the existing `lastdb_server`/`folddb_server` process, then `cd fold/fold_db_node && ./run.sh --local`." +
+      cliNote
+    );
   }
-  if (isDefaultInstallNodeUrl(url) || isFolddbBinaryInstalled()) {
-    return "Install + start it: `brew install edgevector/lastdb/lastdb && brew services start lastdb` (already installed? `brew services restart lastdb`). Contributors running from source: `cd fold/fold_db_node && ./run.sh --local`.";
+  if (cliInstallPath) {
+    return socketFirstNodeHint(socketPath, { cliInstallPath: true });
   }
-  return "Start your fold node, e.g. `cd fold/fold_db_node && ./run.sh --local` (first run compiles Rust — give it a few minutes).";
+  return socketFirstNodeHint(socketPath, { sourceCompileNote: true });
 }
 
 function socketMissingHint(socketPath: string): string {
   return (
-    `Start LastDB so it creates the Unix socket at ${socketPath}: ` +
-    "`brew services start lastdb` (or `lastdb daemon start`). " +
+    `Start or reopen LastDB.app so it creates the Unix socket at ${socketPath}. ` +
+    "Run `fbrain doctor` for a full diagnosis. Contributors running from source: " +
+    "`cd fold/fold_db_node && ./run.sh --local`. " +
     "If your node uses a different home, set `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
     "or `LASTDB_HOME=<node-home>`."
   );

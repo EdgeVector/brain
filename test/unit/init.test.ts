@@ -628,13 +628,10 @@ describe("printNextSteps", () => {
 });
 
 // The node-down line `probeWithRetry` prints must reuse the canonical,
-// install-aware `nodeDownHint` (client.ts) rather than init's old hand-rolled
-// node-URL ternary. The bug that ternary shipped: a dev who
-// brew-installed folddb but runs a non-default-port node and forgot to start
-// it was told "first run from source… compiling Rust" — useless, since they
-// never built from source. With the canonical helper, the prebuilt binary on
-// PATH (signalled here via FBRAIN_FOLDDB_BIN) drives brew/daemon-start
-// guidance even on a custom port.
+// socket-first `nodeDownHint` (client.ts) rather than init's old hand-rolled
+// node-URL ternary. The prebuilt binary on PATH (signalled here via
+// FBRAIN_FOLDDB_BIN) only adds a conditional CLI/Homebrew note; it must not
+// bring back the stale brew-services-first recovery path.
 describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => {
   // A probe client whose only behaviour is to fail unreachable, so the hint
   // is printed once and then the (zero-length) retry schedule rethrows.
@@ -646,7 +643,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     } as unknown as ReturnType<typeof newNodeClient>;
   }
 
-  test("non-default URL + prebuilt binary on PATH → brew/daemon-start guidance, NOT 'compiling Rust'", async () => {
+  test("non-default URL + prebuilt binary on PATH → socket-first guidance, NOT 'compiling Rust'", async () => {
     const prior = process.env.FBRAIN_FOLDDB_BIN;
     // FBRAIN_FOLDDB_BIN makes defaultIsFolddbBinaryInstalled() return true
     // without depending on the host PATH — the "downloaded user" signal.
@@ -678,20 +675,23 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     }
     const out = lines.join("\n");
     expect(out).toContain("node not reachable at http://127.0.0.1:9050");
-    // Canonical helper sends a downloaded user (binary on PATH) to brew, even
-    // on a non-default port — the whole point of the fix.
-    expect(out).toContain("brew services start lastdb");
+    expect(out).toContain("Unix socket");
+    expect(out).toContain("fbrain doctor");
+    expect(out).toContain("LastDB.app");
+    expect(out).toContain("lastdb daemon start");
+    expect(out).not.toContain("brew services start lastdb");
     // The misleading from-source framing must be gone for this case.
     expect(out).not.toContain("compiling Rust");
     expect(out).not.toContain("compiles Rust");
   });
 
-  test("default install URL → brew/daemon-start guidance, even with no prebuilt binary", async () => {
+  test("default install URL → socket-first guidance, even with no prebuilt binary", async () => {
     const prior = process.env.FBRAIN_FOLDDB_BIN;
-    // The default install URL (`:9001`) is always brew-first, regardless of
-    // whether the prebuilt binary is detectable — delete FBRAIN_FOLDDB_BIN so
-    // the binary probe can't be the thing driving the brew line. (`:9001` is
-    // the homebrew install URL, not a transport hint — the node is socket-only.)
+    // The default install URL (`:9001`) still gets a conditional CLI/Homebrew
+    // note even when the prebuilt binary is not detectable — delete
+    // FBRAIN_FOLDDB_BIN so the binary probe can't be the thing driving it.
+    // (`:9001` is a legacy install URL, not a transport hint — the node is
+    // socket-only.)
     delete process.env.FBRAIN_FOLDDB_BIN;
     const lines: string[] = [];
     try {
@@ -714,7 +714,10 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     }
     const out = lines.join("\n");
     expect(out).toContain(`node not reachable at ${DEFAULT_NODE_URL}`);
-    expect(out).toContain("brew services start lastdb");
+    expect(out).toContain("Unix socket");
+    expect(out).toContain("fbrain doctor");
+    expect(out).toContain("LastDB.app");
+    expect(out).not.toContain("brew services start lastdb");
     expect(out).not.toContain("compiling Rust");
   });
 
@@ -747,6 +750,7 @@ describe("probeWithRetry — node-down hint uses canonical nodeDownHint", () => 
     expect(out).toContain("stop it before restarting");
     // Must NOT loop the dev back into the re-install/restart reflex.
     expect(out).not.toContain("brew install edgevector/lastdb/lastdb");
+    expect(out).not.toContain("brew services start lastdb");
     expect(out).not.toContain("brew services restart lastdb");
   });
 });
@@ -957,6 +961,9 @@ describe("probeWithRetry — interactivity-aware down-node budget", () => {
     }
     const out = lines.join("\n");
     expect(out).toContain("node not reachable at http://127.0.0.1:9099");
-    expect(out).toContain("brew services start lastdb");
+    expect(out).toContain("Unix socket");
+    expect(out).toContain("fbrain doctor");
+    expect(out).toContain("LastDB.app");
+    expect(out).not.toContain("brew services start lastdb");
   });
 });

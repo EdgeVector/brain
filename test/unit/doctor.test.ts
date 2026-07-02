@@ -736,8 +736,8 @@ describe("doctor verdict logic", () => {
   });
 
   // The complementary half: a genuinely DOWN node (transport failure) MUST
-  // still get the "start the node" hint.
-  test("node genuinely down (service_unreachable) → node-reachable fix still says 'start it'", async () => {
+  // still get a socket-first recovery hint.
+  test("node genuinely down (service_unreachable) → node-reachable fix is socket-first", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const unreachable = new FbrainError({
@@ -753,7 +753,10 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(1);
     const out = lines.join("\n");
     expect(out).toContain("[FAIL] node-reachable");
-    expect(out).toMatch(/brew services start lastdb|Start your fold node/);
+    expect(out).toContain("Unix socket");
+    expect(out).toContain("fbrain doctor");
+    expect(out).toContain("LastDB.app");
+    expect(out).not.toContain("brew services start lastdb");
   });
 
   // The node-reachable line surfaces the connected node's folddb version
