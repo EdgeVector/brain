@@ -24,6 +24,7 @@ import {
   normalizeTagsArg,
   probeNodeStatus,
   renderNodeStatus,
+  resolveAppendChunk,
   resolveAskQuery,
   resolvePutBody,
 } from "../../src/mcp/server.ts";
@@ -2606,6 +2607,46 @@ describe("fbrain_append tool", () => {
     expect(res.isError).toBe(true);
     expect(mutations).toHaveLength(0);
   });
+
+  test("accepts `text` as an alias for `chunk` and appends it", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "head")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_append!({
+      slug: "c1",
+      text: "tail",
+      type: "concept",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.fields_and_values!.body).toBe("head\n\ntail");
+  });
+
+  test("resolveAppendChunk: `text` is an alias for `chunk`, mutually exclusive with the others", () => {
+    // The bite: agents pass `text`; the schema only knew `chunk`. `text`
+    // now resolves like `chunk`, and `chunk` wins when both are present.
+    expect(resolveAppendChunk({ chunk: "c" })).toBe("c");
+    expect(resolveAppendChunk({ text: "t" })).toBe("t");
+    expect(resolveAppendChunk({ chunk: "c", text: "t" })).toBe("c");
+    // `text` is treated as an inline source, so combining it with a path or
+    // b64 is the same multiple-source error as combining `chunk` would be.
+    expect(() => resolveAppendChunk({ text: "t", chunk_path: "/x" })).toThrow();
+    expect(() => resolveAppendChunk({ text: "t", chunk_b64: "YQ==" })).toThrow();
+    // None of chunk/text/path/b64 → the required-one-of error.
+    expect(() => resolveAppendChunk({})).toThrow();
+  });
 });
 
 describe("fbrain_put — body-shrink guard", () => {
@@ -2898,6 +2939,22 @@ describe("empty/dropped tool input guard", () => {
       }
     });
   }
+
+  // Part (b) of the papercut: when a large/multiline inline `fbrain_put` body
+  // fails to arrive, the call lands as an empty `{}` and the required `slug`
+  // is undefined, so this is the message the agent actually sees. It MUST
+  // explicitly name `body_path` as the remedy (not a generic parse error).
+  test("a dropped large-body fbrain_put surfaces a hint that names `body_path`", () => {
+    const res = z.safeParse(inputSchemaOf("fbrain_put") as never, {});
+    expect(res.success).toBe(false);
+    if (!res.success) {
+      expect(res.error.issues[0]!.message).toBe(DROPPED_INPUT_HINT);
+      expect(res.error.issues[0]!.message).toContain("body_path");
+    }
+    // And the standalone hint constant names it too (belt and suspenders —
+    // this is what pins the fix against a future reword that drops it).
+    expect(DROPPED_INPUT_HINT).toContain("body_path");
+  });
 
   test("a valid fbrain_put still parses cleanly (no regression)", () => {
     const res = z.safeParse(inputSchemaOf("fbrain_put") as never, {
