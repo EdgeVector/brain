@@ -2004,6 +2004,40 @@ describe("fbrain_put tool", () => {
     expect(fields.body).toBe(body);
   });
 
+  test("preserves risky inline bodies that reach fbrain_put", async () => {
+    const cases = [
+      ["large", "# Large\n\n" + "x".repeat(8_500)],
+      ["newlines", "# Multiline\n\nLine one\nLine two\nLine three"],
+      ["emoji", "# Emoji\n\nLaunch note 🚀 with check ✅"],
+    ] as const;
+
+    for (const [name, body] of cases) {
+      const mutations: Array<Record<string, unknown>> = [];
+      installMock((url, init) => {
+        if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+        if (url.endsWith("/api/mutation")) {
+          mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+          return { status: 200, body: { ok: true } };
+        }
+        return { status: 404 };
+      });
+
+      const server = createFbrainMcpServer({ cfg });
+      const parsed = inputSchemaOf(server, "fbrain_put")!.parse({
+        slug: `inline-${name}`,
+        type: "concept",
+        body,
+      });
+      const res = await toolsOf(server).fbrain_put!(parsed as Record<string, unknown>);
+
+      expect(res.isError, name).toBeFalsy();
+      expect(res.content[0]!.text, name).toBe(`created concept inline-${name}`);
+      expect(mutations, name).toHaveLength(1);
+      const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+      expect(fields.body, name).toBe(body);
+    }
+  });
+
   test("raw frontmatter passthrough wins over title/tags args", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
