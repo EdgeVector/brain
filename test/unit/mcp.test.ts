@@ -11,7 +11,6 @@ import { z } from "zod";
 
 import pkg from "../../package.json" with { type: "json" };
 import {
-  ASK_QUERY_REQUIRED_HINT,
   buildPutInput,
   bodyWindow,
   CONFIG_MISSING_HINT,
@@ -23,6 +22,9 @@ import {
   MCP_AUTO_GRANT_ENV,
   mcpAutoGrantConsentEnabled,
   normalizeTagsArg,
+  probeNodeStatus,
+  renderNodeStatus,
+  resolveAskQuery,
   resolvePutBody,
 } from "../../src/mcp/server.ts";
 import { ConfigMissingError } from "../../src/config.ts";
@@ -519,6 +521,66 @@ describe("fbrain_ask tool", () => {
     // The corpus walk is restricted to the requested type's schema hash.
     expect(queriedSchemas).toContain(TEST_HASHES.design);
     expect(queriedSchemas).not.toContain(TEST_HASHES.task);
+  });
+
+  // The papercut: agents call `fbrain_ask` with `{question}` (the natural param
+  // name) and the first call errored. `question` is now accepted as an alias
+  // for `query` — the same pipeline runs, so a `{question}` call succeeds.
+  test("accepts `question` as an alias for `query`", async () => {
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                fields: {
+                  slug: "alias-hit",
+                  title: "Alias hit",
+                  body: "blueberry zzqx keyword body",
+                  status: "draft",
+                  tags: ["x"],
+                  created_at: "2026-01-01T00:00:00Z",
+                  updated_at: "2026-01-02T00:00:00Z",
+                },
+                key: { hash: "alias-hit", range: null },
+              },
+            ],
+          },
+        };
+      }
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_ask!({ question: "blueberry zzqx" });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0]!.text ?? "").toContain("alias-hit");
+  });
+
+  // Neither `query` nor `question` present → the handler returns the actionable
+  // hint (the schema no longer rejects `{}` because the alias needs cross-field
+  // validation, so the check moved into the handler).
+  test("with neither query nor question, returns the actionable hint", async () => {
+    installMock(() => ({ status: 200, body: { ok: true, results: [] } }));
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    for (const input of [{}, { query: "" }, { question: "   " }]) {
+      const res = await tools.fbrain_ask!(input);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text ?? "").toContain('fbrain_ask({"query"');
+    }
+  });
+
+  test("resolveAskQuery maps question→query and errors when both absent", () => {
+    expect(resolveAskQuery({ query: "q" })).toBe("q");
+    expect(resolveAskQuery({ question: "qq" })).toBe("qq");
+    // query wins when both are present.
+    expect(resolveAskQuery({ query: "q", question: "qq" })).toBe("q");
+    expect(() => resolveAskQuery({})).toThrow();
+    expect(() => resolveAskQuery({ query: "   " })).toThrow();
   });
 });
 
@@ -2354,6 +2416,97 @@ describe("fbrain_status tool", () => {
     expect(mutations).toHaveLength(0);
     expect(res.structuredContent).toBeUndefined();
   });
+
+  // The papercut: agents call a bare `fbrain_status {}` expecting a node health
+  // check, and it errored on a missing slug. With no slug it now returns the
+  // node/overall status as a READ (no write/mutation), matching outputSchema.
+  test("with NO slug returns node/overall status (a read, no mutation)", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/system/auto-identity")) {
+        return { status: 200, body: { user_hash: "uh-test" } };
+      }
+      if (url.endsWith("/api/health")) {
+        return { status: 200, body: { ok: true, uptime_s: 42, version: "9.9.9" } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_status!({});
+    expect(res.isError).toBeFalsy();
+    // It's a read — nothing was mutated.
+    expect(mutations).toHaveLength(0);
+    expect(res.structuredContent).toMatchObject({
+      action: "node_status",
+      reachable: true,
+      provisioned: true,
+      version: "9.9.9",
+      uptimeSeconds: 42,
+    });
+    // Conforms to the declared (union) outputSchema.
+    const schema = outputSchemaOf(server, "fbrain_status")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text ?? "").toContain("reachable");
+  });
+
+  test("node status reports `not provisioned` on a 503 auto-identity", async () => {
+    installMock((url) => {
+      if (url.endsWith("/api/system/auto-identity")) {
+        return { status: 503, body: { error: "node_not_provisioned" } };
+      }
+      if (url.endsWith("/api/health")) {
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_status!({});
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      action: "node_status",
+      reachable: true,
+      provisioned: false,
+    });
+    expect(res.content[0]!.text ?? "").toContain("not provisioned");
+  });
+
+  test("node status reports unreachable (never throws) when the node is down", async () => {
+    installMock(() => ({ status: 500, body: { error: "boom" } }));
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_status!({});
+    // A down node yields a status object, not an error envelope.
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      action: "node_status",
+      reachable: false,
+    });
+    expect(res.content[0]!.text ?? "").toContain("unreachable");
+  });
+
+  test("probeNodeStatus + renderNodeStatus surface reachable/provisioned/version", async () => {
+    installMock((url) => {
+      if (url.endsWith("/api/system/auto-identity")) {
+        return { status: 200, body: { user_hash: "uh-test" } };
+      }
+      if (url.endsWith("/api/health")) {
+        return { status: 200, body: { ok: true, uptime_s: 7, version: "1.2.3" } };
+      }
+      return { status: 404 };
+    });
+    const payload = await probeNodeStatus(cfg);
+    expect(payload).toMatchObject({
+      action: "node_status",
+      reachable: true,
+      provisioned: true,
+      version: "1.2.3",
+      uptimeSeconds: 7,
+    });
+    const line = renderNodeStatus(payload);
+    expect(line).toContain("reachable");
+    expect(line).toContain("v1.2.3");
+  });
 });
 
 describe("fbrain_append tool", () => {
@@ -2764,15 +2917,16 @@ describe("empty/dropped tool input guard", () => {
     }
   });
 
-  test("fbrain_ask missing or empty query yields an actionable example", () => {
-    for (const input of [{}, { query: "" }, { query: "   " }]) {
-      const res = z.safeParse(inputSchemaOf("fbrain_ask") as never, input);
-      expect(res.success).toBe(false);
-      if (!res.success) {
-        expect(res.error.issues[0]!.message).toBe(ASK_QUERY_REQUIRED_HINT);
-        expect(res.error.issues[0]!.message).toContain('fbrain_ask({"query"');
-      }
-    }
+  // `query` is now OPTIONAL at the schema layer so `question` can serve as an
+  // alias (cross-field "one of query/question" can't live on a single field's
+  // schema). A bare `{}` therefore PASSES schema validation and the actionable
+  // hint is enforced by the handler — see the "fbrain_ask tool" describe
+  // ("with neither query nor question, returns the actionable hint").
+  test("fbrain_ask accepts a bare {} at the schema layer (handler enforces the hint)", () => {
+    const res = z.safeParse(inputSchemaOf("fbrain_ask") as never, {});
+    expect(res.success).toBe(true);
+    // `question` is a valid alias field too.
+    expect(z.safeParse(inputSchemaOf("fbrain_ask") as never, { question: "q" }).success).toBe(true);
   });
 
   test("fbrain_get missing or empty slug yields an actionable example", () => {
