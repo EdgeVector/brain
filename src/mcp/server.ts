@@ -166,7 +166,8 @@ export const DROPPED_INPUT_HINT =
   "split the write into smaller records.";
 
 export const ASK_QUERY_REQUIRED_HINT =
-  "fbrain_ask requires a non-empty `query` string. Example: " +
+  "fbrain_ask requires a non-empty `query` string (`question` is accepted " +
+  "as an alias). Example: " +
   '`fbrain_ask({"query":"deployment rollback decision","limit":5})`.';
 
 export const GET_SLUG_REQUIRED_HINT =
@@ -425,16 +426,44 @@ const linkResultSchema = z.object({
   to_slug: z.string().describe("Target record slug."),
 });
 
-// `fbrain_status` → `{action:"status_changed", type, slug, from, to}`, mirroring
-// the CLI's `<type> <slug>: <from> → <to>` transition line. `from`/`to` bracket
-// the change so an agent can confirm the record's prior status before the patch.
-const statusResultSchema = z.object({
-  action: z.literal("status_changed").describe("Always `status_changed`."),
-  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
-  slug: z.string().describe("Resolved record slug."),
-  from: z.string().describe("The record's status BEFORE this mutation."),
-  to: z.string().describe("The record's status AFTER this mutation."),
-});
+// `fbrain_status` returns one of two payloads depending on how it was called:
+//   • per-record patch (a `slug` was given) → `{action:"status_changed", type,
+//     slug, from, to}`, mirroring the CLI's `<type> <slug>: <from> → <to>`
+//     transition line (`from`/`to` bracket the change).
+//   • node/overall status (NO `slug`) → `{action:"node_status", reachable,
+//     provisioned, nodeUrl, version?, uptimeSeconds?, detail?}` — the health
+//     check an agent expects from a bare `fbrain_status {}` (a READ; it never
+//     touches the write/consent path, so it works with zero write capability).
+//
+// MCP builds a single `z.object` from the shape handed to `registerTool`, so
+// the declared `outputSchema` can't be a bare union. Instead this LOOSE shape
+// lets `action` be either literal and marks every mode-specific field optional,
+// so a `status_changed` OR a `node_status` payload both validate.
+const statusOutputShape = {
+  action: z
+    .enum(["status_changed", "node_status"])
+    .describe(
+      "`status_changed` for a record status patch, `node_status` for a bare node/overall health check.",
+    ),
+  // ── status_changed (per-record patch) fields ──
+  type: z.enum(RECORD_TYPES).optional().describe("Canonical lowercase record type (status_changed mode)."),
+  slug: z.string().optional().describe("Resolved record slug (status_changed mode)."),
+  from: z.string().optional().describe("The record's status BEFORE this mutation (status_changed mode)."),
+  to: z.string().optional().describe("The record's status AFTER this mutation (status_changed mode)."),
+  // ── node_status (bare call) fields ──
+  reachable: z.boolean().optional().describe("True when the node answered the status probe (node_status mode)."),
+  provisioned: z
+    .boolean()
+    .optional()
+    .describe("True when the node has completed onboarding (node_status mode)."),
+  nodeUrl: z.string().optional().describe("The configured node URL the probe targeted (node_status mode)."),
+  version: z.string().optional().describe("Node release string, when reported (node_status mode)."),
+  uptimeSeconds: z.number().optional().describe("Node uptime in seconds, when reported (node_status mode)."),
+  detail: z
+    .string()
+    .optional()
+    .describe("Reason when the node is unreachable or not provisioned (node_status mode)."),
+};
 
 // `fbrain_append` → `{action:"appended", type, slug, oldBodyChars, newBodyChars,
 // bytesAppended}`. The char counts bracket the growth so an agent can confirm
@@ -633,7 +662,20 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       description:
         "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns a best-first ranked list, one line per match: `rank · slug · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet, confidence}` (already ordered best-first) — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. `structuredContent.confident` is false when the whole result set looks like the noise floor; if `confident:false`, treat it as not-found and do not trust the rows. The `score` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to `fbrain_search`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
       inputSchema: {
-        query: actionableRequiredText("Search query.", ASK_QUERY_REQUIRED_HINT),
+        query: z
+          .string()
+          .optional()
+          .describe(
+            "Search query. `question` is accepted as an alias — pass either " +
+              "(agents naturally reach for `question`). At least one is required.",
+          ),
+        question: z
+          .string()
+          .optional()
+          .describe(
+            "Alias for `query` — the natural param name agents guess. Mapped " +
+              "to `query` when `query` is absent. Pass one of `query`/`question`.",
+          ),
         type: typeEnum
           .array()
           .optional()
@@ -669,9 +711,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       runReadTool<SearchHitJson[]>(
         getCfg,
         async (cfg, print, onResult) => {
+          // Accept `question` as an alias for `query`: map it in when `query`
+          // is absent. Neither present (or all-whitespace) → the same
+          // actionable hint the old required-`query` schema raised, so a bare
+          // call still gets a helpful example instead of an opaque arg error.
+          const resolvedQuery = resolveAskQuery(args);
           await askCmd({
             cfg,
-            query: args.query,
+            query: resolvedQuery,
             print,
             // MCP bundles every printed line into one text block — fold
             // CLI-stderr advisories (e.g. the all-stopword note) back into
@@ -1045,54 +1092,86 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   server.registerTool(
     "fbrain_status",
     {
-      title: "Set fbrain record status",
+      title: "Get or set fbrain status",
       description:
-        "Change ONLY a record's status — the most common single mutation — " +
-        "WITHOUT a full re-put. This is the safe status-patch primitive: it " +
-        "reads the live record, swaps in the new `status`, and writes back " +
-        "preserving the body/title/tags/created_at. Prefer this over " +
-        "`fbrain_put` for a status change: `fbrain_put` is a FULL REPLACE " +
-        "whose body defaults to empty, so a status-only re-put WIPES the body " +
-        "(the read/write asymmetry this tool fixes). The status is validated " +
-        "against the resolved type's enum BEFORE any write. Without `type`, " +
-        "resolves across every type and errors on an ambiguous slug. Returns " +
-        "one line: `<type> <slug>: <from> → <to>`.",
+        "Two modes, keyed on `slug`:\n" +
+        "• With NO `slug` → NODE/OVERALL STATUS: a cheap health check of the " +
+        "configured LastDB node (reachable? provisioned? version/uptime). This " +
+        "is a READ — it needs no write capability. A bare `fbrain_status {}` " +
+        "returns this instead of erroring on a missing slug.\n" +
+        "• With a `slug` and `status` → PATCH one record's status WITHOUT a " +
+        "full re-put: reads the live record, swaps in the new `status`, and " +
+        "writes back preserving body/title/tags/created_at. Prefer this over " +
+        "`fbrain_put` for a status change (`fbrain_put` is a FULL REPLACE whose " +
+        "body defaults to empty, so a status-only re-put WIPES the body). The " +
+        "status is validated against the resolved type's enum BEFORE any write. " +
+        "Without `type`, resolves across every type and errors on an ambiguous " +
+        "slug. Returns one line: `<type> <slug>: <from> → <to>`.",
       inputSchema: {
-        slug: requiredText("Record slug."),
-        status: requiredText(
-          "New status enum value for the record's type. Valid values DIFFER " +
-            "per type: design = draft|reviewed|approved|implemented|archived; " +
-            "task = open|in_progress|blocked|done|cancelled; " +
-            "project = planning|in_progress|done|archived; " +
-            "concept/agent = active|archived; " +
-            "preference = active|superseded; " +
-            "reference = active|broken|archived; " +
-            "spike = active|concluded; " +
-            "sop = active|superseded|archived. Validated before any write — an " +
-            "invalid value errors without mutating.",
-        ),
+        slug: z
+          .string()
+          .optional()
+          .describe(
+            "Record slug to patch. OMIT to get the node/overall status " +
+              "(a bare `fbrain_status {}` is a node health check).",
+          ),
+        status: z
+          .string()
+          .optional()
+          .describe(
+            "New status enum value for the record's type (required with `slug` " +
+              "to patch). Valid values DIFFER per type: " +
+              "design = draft|reviewed|approved|implemented|archived; " +
+              "task = open|in_progress|blocked|done|cancelled; " +
+              "project = planning|in_progress|done|archived; " +
+              "concept/agent = active|archived; " +
+              "preference = active|superseded; " +
+              "reference = active|broken|archived; " +
+              "spike = active|concluded; " +
+              "sop = active|superseded|archived. Validated before any write — an " +
+              "invalid value errors without mutating.",
+          ),
         type: typeEnum
           .optional()
           .describe(
             "Restrict lookup to one record type. Omit to resolve across all " +
-              "types (errors on an ambiguous slug).",
+              "types (errors on an ambiguous slug). Ignored in node-status mode.",
           ),
       },
-      // `structuredContent` is `{action:"status_changed", type, slug, from, to}`
-      // — the SAME resolved values `statusCmd` prints via its `onResult` sink.
-      outputSchema: statusResultSchema.shape,
+      // `structuredContent` is either `{action:"status_changed", …}` (patch) or
+      // `{action:"node_status", …}` (bare call) — the loose shape accepts both.
+      outputSchema: statusOutputShape,
     },
-    (args) =>
-      runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
+    (args) => {
+      // No slug → node/overall status. This is a READ (auto-identity + health),
+      // so it runs on the read path and never demands write capability. This is
+      // the papercut fix: a bare `fbrain_status {}` health check no longer
+      // errors on a missing slug.
+      if (args.slug === undefined || args.slug.trim().length === 0) {
+        return runReadTool<NodeStatusPayload>(
+          getCfg,
+          async (cfg, print, onResult) => {
+            const payload = await probeNodeStatus(cfg);
+            print(renderNodeStatus(payload));
+            onResult(payload);
+          },
+          (payload) => payload as unknown as Record<string, unknown>,
+        );
+      }
+      // Slug + status → the original per-record status patch (a write). A slug
+      // without a status is rejected by `statusCmd`'s own resolution with an
+      // actionable error.
+      return runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
         statusCmd({
           cfg,
-          slug: args.slug,
+          slug: args.slug!,
           newStatus: args.status,
           type: args.type,
           print,
           onResult: (r) => onResult(r),
         }),
-      ),
+      );
+    },
   );
 
   server.registerTool(
@@ -1255,6 +1334,88 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   return server;
+}
+
+// Resolve `fbrain_ask`'s query, accepting `question` as an alias for `query`
+// (agents naturally guess `question`). `query` wins when both are present.
+// Neither present, or all-whitespace → the same actionable hint the old
+// required-`query` schema raised, surfaced through `runReadTool`'s error
+// envelope so a bare call still gets a helpful example.
+export function resolveAskQuery(args: { query?: string; question?: string }): string {
+  const raw = args.query ?? args.question;
+  if (raw === undefined || raw.trim().length === 0) {
+    throw new FbrainError({
+      code: "missing_query",
+      message: ASK_QUERY_REQUIRED_HINT,
+      agentHint: ASK_QUERY_REQUIRED_HINT,
+    });
+  }
+  return raw;
+}
+
+// The structured payload `fbrain_status {}` returns: a node/overall health
+// snapshot (mirrors nodeStatusResultSchema).
+export type NodeStatusPayload = {
+  action: "node_status";
+  reachable: boolean;
+  provisioned: boolean;
+  nodeUrl: string;
+  version?: string;
+  uptimeSeconds?: number;
+  detail?: string;
+};
+
+// Probe the configured node's overall status via the read client: auto-identity
+// (reachable + provisioned) and health (version/uptime). Best-effort — a
+// probe failure is reported as `reachable:false` with a detail, never thrown,
+// so a bare `fbrain_status {}` always returns a status object rather than an
+// error envelope for a merely-down node.
+export async function probeNodeStatus(cfg: Config): Promise<NodeStatusPayload> {
+  const node = newReadClientFromCfg(cfg);
+  const payload: NodeStatusPayload = {
+    action: "node_status",
+    reachable: false,
+    provisioned: false,
+    nodeUrl: cfg.nodeUrl,
+  };
+  try {
+    const identity = await node.autoIdentity();
+    payload.reachable = true;
+    payload.provisioned = identity.provisioned;
+    if (!identity.provisioned) payload.detail = identity.reason;
+  } catch (err) {
+    payload.reachable = false;
+    payload.detail =
+      err instanceof FbrainError
+        ? stripDoctorTip(err.message)
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return payload;
+  }
+  // Health is informational — a failure here doesn't flip `reachable` (the
+  // auto-identity probe already answered that); we just skip version/uptime.
+  try {
+    const health = await node.health();
+    if (health.version !== undefined) payload.version = health.version;
+    if (health.uptime_s !== undefined) payload.uptimeSeconds = health.uptime_s;
+  } catch {
+    // best-effort; leave version/uptime unset.
+  }
+  return payload;
+}
+
+// One-line human rendering of the node/overall status, mirroring the terse
+// style of the other MCP text blocks.
+export function renderNodeStatus(p: NodeStatusPayload): string {
+  if (!p.reachable) {
+    return `node ${p.nodeUrl}: unreachable${p.detail ? ` (${p.detail})` : ""}`;
+  }
+  const bits: string[] = [p.provisioned ? "provisioned" : "not provisioned"];
+  if (p.version !== undefined) bits.push(`v${p.version}`);
+  if (p.uptimeSeconds !== undefined) bits.push(`up ${p.uptimeSeconds}s`);
+  if (!p.provisioned && p.detail) bits.push(`(${p.detail})`);
+  return `node ${p.nodeUrl}: reachable, ${bits.join(", ")}`;
 }
 
 type PutArgs = {
