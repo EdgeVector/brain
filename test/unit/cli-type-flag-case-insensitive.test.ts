@@ -93,23 +93,36 @@ describe("shared --type flag: case-insensitive normalization", () => {
     expect(stderr).not.toContain("--type must be one of");
   });
 
-  test("every record type, Capitalized, passes --type validation on list", async () => {
-    // Belt-and-braces: ensures a new entry added to RECORD_TYPES won't
-    // silently regress to case-sensitive parsing.
-    for (const t of RECORD_TYPES) {
+  // One spawned CLI process per record type. These were originally two
+  // `for` loops inside single tests, which put all 9 cold `bun` spawns under
+  // one 5000ms per-test cap — under machine load the aggregate wall time
+  // crossed 5000ms and the test flaked (timed out at ~5002ms, a different
+  // record type on different runs). Splitting into per-type tests via
+  // `test.each` gives each single spawn its own timeout budget; the explicit
+  // generous timeout is belt-and-braces against pathological load. This keeps
+  // the "belt-and-braces: a new entry in RECORD_TYPES can't silently regress
+  // to case-sensitive parsing" coverage without the shared-budget flake.
+  const PER_TYPE_TIMEOUT_MS = 15_000;
+
+  test.each(RECORD_TYPES)(
+    "record type `%s`, Capitalized, passes --type validation on list",
+    async (t) => {
       const cap = t.charAt(0).toUpperCase() + t.slice(1);
       const { stderr } = await runCli(["list", "--type", cap]);
       expect(stderr).not.toContain("--type must be one of");
-    }
-  });
+    },
+    PER_TYPE_TIMEOUT_MS,
+  );
 
-  test("every record type, Capitalized, passes --type validation on search", async () => {
-    for (const t of RECORD_TYPES) {
+  test.each(RECORD_TYPES)(
+    "record type `%s`, Capitalized, passes --type validation on search",
+    async (t) => {
       const cap = t.charAt(0).toUpperCase() + t.slice(1);
       const { stderr } = await runCli(["search", "q", "--type", cap]);
       expect(stderr).not.toContain("--type must be one of");
-    }
-  });
+    },
+    PER_TYPE_TIMEOUT_MS,
+  );
 
   test("canonical lowercase still works unchanged", async () => {
     const { stderr } = await runCli(["list", "--type", "design"]);
