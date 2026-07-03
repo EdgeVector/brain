@@ -23,6 +23,11 @@ export type FbrainRecord = {
   design_slug?: string;
   created_at: string;
   updated_at: string;
+  // Type-specific extra String columns (see RecordTypeDef.extraStringFields),
+  // e.g. a `decision` record's program/gate_slug/decided_by/decided_on. Carried
+  // generically by rowToRecord/buildFields so dedicated-shape types need no
+  // per-field plumbing.
+  [extraField: string]: string | string[] | undefined;
 };
 
 export type BacklinkVia = "explicit" | "body";
@@ -92,7 +97,7 @@ export function schemaHashFor(
     throw new FbrainError({
       code: "missing_schema_hash",
       message: `No canonical hash registered for type "${type}" in config.`,
-      hint: "Re-run `fbrain init` so the config picks up all 8 schema hashes.",
+      hint: `Re-run \`fbrain init\` so the config picks up all ${RECORD_TYPES.length} schema hashes.`,
     });
   }
   return hash;
@@ -148,6 +153,9 @@ export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
     updated_at: stringField(f, "updated_at"),
   };
   if (RECORDS[type].hasDesignSlug) base.design_slug = stringField(f, "design_slug");
+  for (const ef of RECORDS[type].extraStringFields ?? []) {
+    base[ef] = stringField(f, ef);
+  }
   return base;
 }
 

@@ -4,6 +4,7 @@ import {
   AGENT_STATUSES,
   buildAgentInstructionsBlock,
   CONCEPT_STATUSES,
+  DECISION_STATUSES,
   DESIGN_STATUSES,
   PREFERENCE_STATUSES,
   PROJECT_STATUSES,
@@ -17,6 +18,7 @@ import {
   UNIQUE_SCHEMAS,
   agentSchema,
   conceptSchema,
+  decisionSchema,
   defaultStatusFor,
   designSchema,
   isRecordType,
@@ -148,17 +150,44 @@ describe("schemas", () => {
       projectSchema.schema.purpose_statement,
       spikeSchema.schema.purpose_statement,
       sopSchema.schema.purpose_statement,
+      decisionSchema.schema.purpose_statement,
     ];
-    expect(new Set(purposes).size).toBe(7);
+    expect(new Set(purposes).size).toBe(8);
   });
 
-  test("UNIQUE_SCHEMAS has 10 entries: user record schemas plus internal tag index", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(10);
+  test("Decision has a dedicated 11-field shape with real query columns", () => {
+    expect(decisionSchema.schema.descriptive_name).toBe("Decision");
+    expect(decisionSchema.schema.key.hash_field).toBe("slug");
+    expect(decisionSchema.schema.fields.length).toBe(11);
+    // The whole point: program/gate_slug/decided_by/decided_on are real
+    // columns, not prose — so decisions are filterable/sortable.
+    for (const col of ["program", "gate_slug", "decided_by", "decided_on"]) {
+      expect(decisionSchema.schema.fields).toContain(col);
+      expect(decisionSchema.schema.field_types[col]).toBe("String");
+    }
+    // …and the standard envelope is still present.
+    for (const col of ["slug", "title", "body", "status", "tags", "created_at", "updated_at"]) {
+      expect(decisionSchema.schema.fields).toContain(col);
+    }
+    expect(decisionSchema.schema.field_types.tags).toEqual({ Array: "String" });
+    expect(statusValuesFor("decision")).toEqual(DECISION_STATUSES);
+    expect(defaultStatusFor("decision")).toBe("go");
+    expect(RECORDS.decision.extraStringFields).toEqual([
+      "program",
+      "gate_slug",
+      "decided_by",
+      "decided_on",
+    ]);
+  });
+
+  test("UNIQUE_SCHEMAS has 11 entries: user record schemas plus internal tag index", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(11);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "__tagindex__",
       "agent",
       "concept",
+      "decision",
       "design",
       "preference",
       "project",

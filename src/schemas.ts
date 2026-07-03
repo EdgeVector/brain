@@ -118,6 +118,23 @@ export type SpikeStatus = (typeof SPIKE_STATUSES)[number];
 export const SOP_STATUSES = ["active", "superseded", "archived"] as const;
 export type SopStatus = (typeof SOP_STATUSES)[number];
 
+// A `decision` is one call a human made. Status is the OUTCOME, not a
+// workflow state: `go` (approved/proceed), `hold` (deferred/parked),
+// `done` (decided AND the resulting work has landed), `moot` (the premise
+// went away so no action is needed), `superseded` (a later decision
+// replaced it). `proposed` is the pre-decision draft state. Replaces the
+// single monolithic `decisions-log` reference record — one record per
+// decision so appending is a tiny write, not a 19 KB rewrite.
+export const DECISION_STATUSES = [
+  "proposed",
+  "go",
+  "hold",
+  "done",
+  "moot",
+  "superseded",
+] as const;
+export type DecisionStatus = (typeof DECISION_STATUSES)[number];
+
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 
 // The seven-field shape shared by Design + all six Phase 6 kinds. Building
@@ -331,6 +348,80 @@ export const sopSchema: AddSchemaRequest = phase6Schema(
   "Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task",
   SOP_STATUSES,
 );
+// Decision gets a DEDICATED shape (not the shared 7-field envelope): the
+// whole point of promoting decisions out of the monolithic `decisions-log`
+// is to make them queryable, so the things you filter/sort by are real
+// columns — `program`, `gate_slug`, `decided_by`, `decided_on` — not buried
+// in prose or tags. LastDB stores arbitrary schema fields fine; the extra
+// columns are plumbed through fbrain's generic record path via
+// `RecordTypeDef.extraStringFields`. The distinct field shape also keeps its
+// canonical hash separate from every other type without relying on the
+// dual-signal purpose gate.
+export const decisionSchema: AddSchemaRequest = {
+  schema: {
+    name: "Decision",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Decision",
+    purpose_statement:
+      "A call a human made — the choice, its rationale, and outcome — kept as an auditable trail",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [
+      "slug",
+      "title",
+      "body",
+      "status",
+      "program",
+      "gate_slug",
+      "decided_by",
+      "decided_on",
+      "tags",
+      "created_at",
+      "updated_at",
+    ],
+    field_types: {
+      slug: "String",
+      title: "String",
+      body: "String",
+      status: "String",
+      program: "String",
+      gate_slug: "String",
+      decided_by: "String",
+      decided_on: "String",
+      tags: { Array: "String" },
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      slug: "stable url-style id",
+      title: "one-line decision summary",
+      body: "rationale, evidence, and context",
+      status: DECISION_STATUSES.join("|"),
+      program: "owning program / North Star slug (empty string if none)",
+      gate_slug: "open-decisions gate this clears (empty string if none)",
+      decided_by: "who made the call (e.g. Tom)",
+      decided_on: "RFC 3339 date the decision was made",
+      tags: "array of freeform tags",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: { title: ["word"], body: ["word"] },
+    field_data_classifications: {
+      slug: GENERAL,
+      title: GENERAL,
+      body: GENERAL,
+      status: GENERAL,
+      program: GENERAL,
+      gate_slug: GENERAL,
+      decided_by: GENERAL,
+      decided_on: GENERAL,
+      tags: GENERAL,
+      created_at: GENERAL,
+      updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
 
 export const RECORD_TYPES = [
   "design",
@@ -342,6 +433,7 @@ export const RECORD_TYPES = [
   "project",
   "spike",
   "sop",
+  "decision",
 ] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
@@ -391,6 +483,13 @@ export type RecordTypeDef = {
   statuses: readonly string[];
   defaultStatus: string;
   hasDesignSlug: boolean;
+  // Type-specific String columns beyond the shared envelope
+  // (slug/title/body/status/tags/created_at/updated_at). The generic record
+  // read path (rowToRecord) and write path (buildFields) carry these through
+  // from the schema + frontmatter so a dedicated-shape type like `decision`
+  // needs no per-field special-casing. `design_slug` predates this and stays
+  // on its own `hasDesignSlug` flag.
+  extraStringFields?: readonly string[];
 };
 
 export const RECORDS: Record<RecordType, RecordTypeDef> = {
@@ -457,6 +556,14 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     defaultStatus: "active",
     hasDesignSlug: false,
   },
+  decision: {
+    type: "decision",
+    schema: decisionSchema,
+    statuses: DECISION_STATUSES,
+    defaultStatus: "go",
+    hasDesignSlug: false,
+    extraStringFields: ["program", "gate_slug", "decided_by", "decided_on"],
+  },
 };
 
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
@@ -477,6 +584,7 @@ export const UNIQUE_SCHEMAS: Array<{
   { key: "project", schema: projectSchema, types: ["project"] },
   { key: "spike", schema: spikeSchema, types: ["spike"] },
   { key: "sop", schema: sopSchema, types: ["sop"] },
+  { key: "decision", schema: decisionSchema, types: ["decision"] },
   {
     key: TAG_INDEX_SCHEMA_KEY,
     schema: tagIndexSchema,

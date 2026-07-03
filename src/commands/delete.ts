@@ -120,6 +120,7 @@ export const TOMBSTONE_STATUS: Record<RecordType, string> = {
   project: "archived",
   spike: "concluded",
   sop: "archived",
+  decision: "superseded",
 };
 
 export function buildTombstoneFields(
