@@ -228,23 +228,32 @@ describe("attestOwnerSession", () => {
     }
   });
 
-  test("control socket present but no folddb-full.sock → null, no exchange (socket-only: no TCP fallback)", async () => {
+  test("collapsed node (no folddb-full.sock): exchange rides the control socket and attests", async () => {
+    // fold #1246 (2026-06-30) collapsed the separate full-surface socket into
+    // `folddb.sock`. So on a current node the mint AND the exchange both ride
+    // the control socket; attestation must succeed there instead of degrading
+    // to null (which fails every owner verb — the FailedToOpenSocket regression).
     const sock = fakeSocket({ full: false });
     try {
       let exchangeCalled = false;
-      globalThis.fetch = (async (input: unknown): Promise<Response> => {
+      let exchangeUnix: string | undefined;
+      globalThis.fetch = (async (input: unknown, init?: { unix?: string }): Promise<Response> => {
         const url = typeof input === "string" ? input : String(input);
         if (url.includes("/control/browser-pairing-code")) {
           return new Response(JSON.stringify({ pairing_code: "code-xyz" }), { status: 200 });
         }
-        if (url.includes("/api/session/browser-pair")) exchangeCalled = true;
+        if (url.includes("/api/session/browser-pair")) {
+          exchangeCalled = true;
+          exchangeUnix = init?.unix;
+          return new Response(JSON.stringify({ session_token: "tok-123" }), { status: 200 });
+        }
         return new Response("{}", { status: 200 });
       }) as unknown as typeof globalThis.fetch;
       const token = await attestOwnerSession(sock.path);
-      // Mint succeeds, but there is no full-surface socket to exchange over and
-      // the retired loopback TCP listener is gone, so fbrain proceeds unattested.
-      expect(token).toBeNull();
-      expect(exchangeCalled).toBe(false);
+      expect(exchangeCalled).toBe(true);
+      // The exchange opened the control socket itself, not a nonexistent sibling.
+      expect(exchangeUnix).toBe(sock.path);
+      expect(token).toBe("tok-123");
     } finally {
       sock.cleanup();
     }

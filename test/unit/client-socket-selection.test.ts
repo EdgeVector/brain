@@ -105,15 +105,36 @@ describe("node socket selection", () => {
     }
   });
 
-  test("older nodes without folddb-full.sock keep TCP fallback for control routes", () => {
+  test("collapsed node (no folddb-full.sock) serves owner routes over the control socket", () => {
+    // fold #1246 (2026-06-30) collapsed the separate full-surface socket into
+    // the canonical `folddb.sock`, so a CURRENT node exposes only `folddb.sock`
+    // and serves the owner-attested verbs there too. When the sibling is
+    // absent, `discoverFullSurfaceSocket` must fall back to the control socket
+    // — NOT undefined — or owner verbs (declare-schema, browser-pair) fail to
+    // open a socket (the FailedToOpenSocket regression this pins). Loopback TCP
+    // is retired, so there is no TCP fallback to preserve.
     const { dataPath } = liveSockets();
-    expect(discoverFullSurfaceSocket(dataPath)).toBeUndefined();
-    expect(nodeSocketForRoute("node", "GET", "/api/health", dataPath)).toBeNull();
-    expect(nodeSocketForRoute("node", "POST", "/api/apps/request-consent", dataPath)).toBeNull();
+    expect(discoverFullSurfaceSocket(dataPath)).toBe(dataPath);
+    expect(nodeSocketForRoute("node", "GET", "/api/health", dataPath)).toEqual({
+      socketPath: dataPath,
+      kind: "full",
+    });
+    expect(nodeSocketForRoute("node", "POST", "/api/apps/request-consent", dataPath)).toEqual({
+      socketPath: dataPath,
+      kind: "full",
+    });
+    // Data-plane routes still select the control socket as `data`.
     expect(nodeSocketForRoute("node", "POST", "/api/query", dataPath)).toEqual({
       socketPath: dataPath,
       kind: "data",
     });
+  });
+
+  test("a genuinely dead socket path (neither file exists) still yields no socket", () => {
+    // The fallback is guarded on existsSync(controlSocket): a path where NOTHING
+    // exists must stay undefined so a down node maps to a clear diagnostic
+    // rather than dialing a nonexistent socket.
+    expect(discoverFullSurfaceSocket("/no/such/dir/folddb.sock")).toBeUndefined();
   });
 
   test("a path that merely prefixes a data-plane route is full-surface or TCP, not data", () => {

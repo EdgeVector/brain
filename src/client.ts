@@ -179,7 +179,16 @@ export function defaultFolddbSocketPath(override?: string): string {
 export function discoverFullSurfaceSocket(socketPath?: string): string | undefined {
   if (socketPath === undefined || socketPath.length === 0) return undefined;
   const fullSocketPath = join(dirname(socketPath), FULL_SURFACE_SOCKET_FILE_NAME);
-  return existsSync(fullSocketPath) ? fullSocketPath : undefined;
+  if (existsSync(fullSocketPath)) return fullSocketPath;
+  // fold #1246 (2026-06-30) collapsed the separate `folddb-full.sock` owner
+  // surface INTO the canonical control socket: a current node serves the
+  // owner-attested verbs (`/api/session/browser-pair`, declare-schema, …) on
+  // `folddb.sock` itself, and no `folddb-full.sock` sibling is created. When
+  // that sibling is absent, fall back to the control socket so owner-session
+  // attestation completes against a collapsed node instead of silently
+  // degrading to unattested (which fails the owner verb). A pre-collapse node
+  // that still exposes the separate sibling is handled by the branch above.
+  return existsSync(socketPath) ? socketPath : undefined;
 }
 
 // Mint a one-time pairing code over the node's UDS control socket, then exchange
@@ -1777,7 +1786,13 @@ async function verboseFetch(opts: {
     ? isNodeDataPlaneRoute(opts.method, opts.path)
       ? { socketPath: opts.socketPath as string, kind: "data" }
       : {
-          socketPath: join(dirname(opts.socketPath as string), FULL_SURFACE_SOCKET_FILE_NAME),
+          // fold #1246 collapsed `folddb-full.sock` into the control socket, so
+          // `discoverFullSurfaceSocket` returns the separate sibling when a
+          // pre-collapse node exposes it, else the control socket itself. The
+          // `?? opts.socketPath` keeps the unconditional socket-only contract
+          // (never dial TCP) even in the impossible undefined case.
+          socketPath:
+            discoverFullSurfaceSocket(opts.socketPath as string) ?? (opts.socketPath as string),
           kind: "full",
         }
     : null;

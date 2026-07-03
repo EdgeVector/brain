@@ -69,8 +69,6 @@
 //
 // Exit code 0 on all-green, 1 if any check fails.
 
-import { existsSync } from "node:fs";
-
 import {
   defaultFolddbSocketPath,
   discoverFullSurfaceSocket,
@@ -616,24 +614,25 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 
 function nodeReachabilityTransportDetail(nodeUrl: string, socketPath: string): string {
   const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  if (fullSocketPath) {
+  // A pre-collapse node exposes a distinct folddb-full.sock beside the control
+  // socket; name both.
+  if (fullSocketPath && fullSocketPath !== socketPath) {
     return `unix:${socketPath} + unix:${fullSocketPath}`;
   }
-  if (existsSync(socketPath)) {
-    // Socket-only: the loopback TCP listener is retired, so there is no TCP
-    // fallback. An older node missing folddb-full.sock can't serve control
-    // routes until upgraded.
-    return `unix:${socketPath} (no full-surface socket — upgrade the node for control routes)`;
+  // fold #1246 collapsed the full-surface socket INTO the control socket, so a
+  // current node serves every route (data-plane AND owner) on the one socket.
+  if (fullSocketPath === socketPath) {
+    return `unix:${socketPath}`;
   }
   return nodeUrl;
 }
 
 function doctorNodeConfigDetail(nodeUrl: string, socketPath: string): string {
   const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  if (fullSocketPath) {
+  if (fullSocketPath && fullSocketPath !== socketPath) {
     return `node=unix:${socketPath} full=unix:${fullSocketPath}`;
   }
-  if (existsSync(socketPath)) return `node=unix:${socketPath}`;
+  if (fullSocketPath === socketPath) return `node=unix:${socketPath}`;
   return `nodeUrl=${nodeUrl}`;
 }
 
