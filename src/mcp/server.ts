@@ -158,12 +158,14 @@ export const CONFIG_MISSING_HINT =
 export const DROPPED_INPUT_HINT =
   "fbrain received no value for a required field — the tool arguments were " +
   "likely dropped before reaching the server. This happens when a call's " +
-  "arguments are large (e.g. a long `fbrain_put` body) in a long agent " +
-  "session. Recover by passing `body_b64` (UTF-8 body bytes encoded as " +
-  "standard base64), staging the body to a file and passing its path as " +
-  "`body_path` (a short path survives where a large inline `body` is " +
-  "dropped), or via the CLI `fbrain put <slug> --type <type> < body.md`, or " +
-  "split the write into smaller records.";
+  "arguments are large (e.g. a `fbrain_put` body over ~1KB, or one with " +
+  "newlines/emoji) in a long agent session: the oversized inline body fails " +
+  "to parse or is dropped in transit before it reaches the server. RECOVER " +
+  "by staging the body to a file and passing its path as `body_path` (a " +
+  "short path always survives where a large inline `body` is dropped), or " +
+  "pass `body_b64` (UTF-8 body bytes encoded as standard base64), or use the " +
+  "CLI `fbrain put <slug> --type <type> < body.md`, or split the write into " +
+  "smaller records.";
 
 export const ASK_QUERY_REQUIRED_HINT =
   "fbrain_ask requires a non-empty `query` string (`question` is accepted " +
@@ -968,8 +970,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe(
             "Markdown body (indexed for search). Defaults to empty. For a " +
-              "large or multiline body prefer `body_b64` or `body_path` — a " +
-              "long inline `body` can be dropped in transit. Mutually " +
+              "body over ~1KB or one containing newlines/emoji, DO NOT inline " +
+              "it here — stage it to a file and pass `body_path`, or pass " +
+              "`body_b64`. A long or multiline inline `body` can fail to " +
+              "parse or be dropped in transit before it ever reaches the " +
+              "server; `body_path` (a short path) always survives. Mutually " +
               "exclusive with `body_path` and `body_b64`.",
           ),
         body_path: z
@@ -1190,19 +1195,30 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "put shrink guard. Pass the chunk as `chunk` (short/inline), " +
         "`chunk_b64` (multiline/emoji — standard base64 of the UTF-8 bytes), " +
         "or `chunk_path` (a large chunk staged to a file); exactly one is " +
-        "required. A single blank line separates the chunk from a non-empty " +
-        "body unless `raw:true`. Without `type`, resolves across every type " +
-        "and errors on an ambiguous slug. Returns one line: " +
-        "`appended <n> chars to <type> <slug> (<old> → <new>)`.",
+        "required (`text` is accepted as an alias for `chunk` — the natural " +
+        "param name agents reach for). A single blank line separates the " +
+        "chunk from a non-empty body unless `raw:true`. Without `type`, " +
+        "resolves across every type and errors on an ambiguous slug. Returns " +
+        "one line: `appended <n> chars to <type> <slug> (<old> → <new>)`.",
       inputSchema: {
         slug: requiredText("Record slug."),
         chunk: z
           .string()
           .optional()
           .describe(
-            "Text to append to the body. For a large or multiline chunk prefer " +
-              "`chunk_b64` or `chunk_path` — a long inline `chunk` can be " +
-              "dropped in transit. Mutually exclusive with `chunk_path`/`chunk_b64`.",
+            "Text to append to the body. `text` is accepted as an alias — pass " +
+              "either (agents naturally reach for `text`). For a large or " +
+              "multiline chunk prefer `chunk_b64` or `chunk_path` — a long " +
+              "inline `chunk` can be dropped in transit. Mutually exclusive " +
+              "with `text`/`chunk_path`/`chunk_b64`.",
+          ),
+        text: z
+          .string()
+          .optional()
+          .describe(
+            "Alias for `chunk` — the natural param name agents guess. Mapped " +
+              "to `chunk` when `chunk` is absent. Mutually exclusive with " +
+              "`chunk`/`chunk_path`/`chunk_b64`.",
           ),
         chunk_path: z
           .string()
@@ -1465,33 +1481,44 @@ export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: 
 
 type AppendChunkArgs = {
   chunk?: string;
+  // `text` is an alias for `chunk` — the natural param name agents guess.
+  // Both are plain inline strings; `chunk` wins when both are present.
+  text?: string;
   chunk_path?: string;
   chunk_b64?: string;
 };
 
-// Resolve the append chunk from exactly one of `chunk` / `chunk_path` /
-// `chunk_b64`, mirroring `resolvePutBody`'s three-source contract (a path or
-// base64 survives the input-dropping that truncates a long inline value). All
-// three unset errors — appendCmd separately rejects an empty resolved chunk.
+// Resolve the append chunk from exactly one of `chunk` (alias: `text`) /
+// `chunk_path` / `chunk_b64`, mirroring `resolvePutBody`'s three-source
+// contract (a path or base64 survives the input-dropping that truncates a
+// long inline value). `text` is folded into `chunk` first (agents naturally
+// reach for `text`); `chunk` wins when both are present. All unset errors —
+// appendCmd separately rejects an empty resolved chunk.
 export function resolveAppendChunk(args: AppendChunkArgs): string {
-  const sources = [args.chunk, args.chunk_path, args.chunk_b64].filter(
+  // `text` is an alias for `chunk`: fold it in when `chunk` is absent so the
+  // rest of the mutual-exclusion + source-count logic sees a single inline
+  // source. `chunk` wins when both are present (mirrors `query`/`question`).
+  const inlineChunk = args.chunk ?? args.text;
+  const sources = [inlineChunk, args.chunk_path, args.chunk_b64].filter(
     (v) => v !== undefined,
   );
   if (sources.length > 1) {
     throw new FbrainError({
       code: "multiple_chunk_sources",
-      message: "fbrain_append: pass only one of `chunk`, `chunk_path`, or `chunk_b64`.",
+      message:
+        "fbrain_append: pass only one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64`.",
       hint: "Use `chunk_b64` for inline multiline/emoji chunks, or `chunk_path` for large chunks; do not combine them.",
     });
   }
   if (sources.length === 0) {
     throw new FbrainError({
       code: "missing_chunk",
-      message: "fbrain_append: one of `chunk`, `chunk_path`, or `chunk_b64` is required.",
-      hint: "Pass the text to append as `chunk` (inline), `chunk_b64` (base64), or `chunk_path` (a staged file).",
+      message:
+        "fbrain_append: one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64` is required.",
+      hint: "Pass the text to append as `chunk`/`text` (inline), `chunk_b64` (base64), or `chunk_path` (a staged file).",
     });
   }
-  if (args.chunk !== undefined) return args.chunk;
+  if (inlineChunk !== undefined) return inlineChunk;
   if (args.chunk_b64 !== undefined) return decodeBodyB64(args.chunk_b64);
   let chunk: string;
   try {
