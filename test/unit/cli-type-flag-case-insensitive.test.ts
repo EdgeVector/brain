@@ -103,8 +103,11 @@ describe("shared --type flag: case-insensitive normalization", () => {
   // the "belt-and-braces: a new entry in RECORD_TYPES can't silently regress
   // to case-sensitive parsing" coverage without the shared-budget flake.
   const PER_TYPE_TIMEOUT_MS = 15_000;
+  // One-element tuples so `test.each`'s table typing resolves the callback
+  // param to `string` (a bare `readonly string[]` matches no overload).
+  const TYPE_ROWS = RECORD_TYPES.map((t) => [t] as [string]);
 
-  test.each(RECORD_TYPES)(
+  test.each(TYPE_ROWS)(
     "record type `%s`, Capitalized, passes --type validation on list",
     async (t) => {
       const cap = t.charAt(0).toUpperCase() + t.slice(1);
@@ -114,7 +117,7 @@ describe("shared --type flag: case-insensitive normalization", () => {
     PER_TYPE_TIMEOUT_MS,
   );
 
-  test.each(RECORD_TYPES)(
+  test.each(TYPE_ROWS)(
     "record type `%s`, Capitalized, passes --type validation on search",
     async (t) => {
       const cap = t.charAt(0).toUpperCase() + t.slice(1);
