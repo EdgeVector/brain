@@ -774,7 +774,8 @@ export async function findBacklinks(
   const bySource = new Map<string, Backlink>();
 
   for (const type of RECORD_TYPES) {
-    const schemaHash = schemaHashFor(type, cfg);
+    const schemaHash = cfg.schemaHashes[type];
+    if (schemaHash === undefined) continue;
     const records = await listRecords(node, type, schemaHash);
     for (const record of records) {
       if (isTombstoned(record)) continue;
@@ -911,6 +912,19 @@ export type ResolvedRecord = {
   record: FbrainRecord;
 };
 
+export const GET_RECORD_TYPE_PRECEDENCE = [
+  "reference",
+  "project",
+  "sop",
+  "decision",
+  "concept",
+  "preference",
+  "agent",
+  "design",
+  "task",
+  "spike",
+] as const satisfies readonly RecordType[];
+
 // Canonical typed not_found wording shared by `get` and `delete` so the literal
 // lives in one place. `resolveBySlug`'s built-in fallback intentionally stays
 // the more generic `No record with slug "<s>".` (see record.test.ts).
@@ -944,6 +958,9 @@ export interface ResolveBySlugOpts {
   // Three callers share this sweep; each passes its own verb. Defaults to
   // "get" so the throw stays well-formed for any future caller that omits it.
   recoveryVerb?: "get" | "status" | "delete";
+  // Read-only callers can opt into deterministic ambiguity resolution while
+  // mutating callers keep the safer default of erroring unless --type is set.
+  ambiguousTypePrecedence?: readonly RecordType[];
   // Forwarded to the per-type lookup loop so tests can mock sleep / shrink
   // the budget without paying the real backoff schedule. Production callers
   // leave it unset and inherit the smoketest-tuned defaults.
@@ -955,7 +972,9 @@ export interface ResolveBySlugOpts {
 // status, delete) carried near-identical 25–35 line variants of this block
 // before consolidation — see commit history for refactor/resolve-by-slug.
 export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRecord> {
-  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
+  const types: readonly RecordType[] = opts.type
+    ? [opts.type]
+    : RECORD_TYPES.filter((t) => opts.cfg.schemaHashes[t] !== undefined);
   // Per-type retry, run in parallel. The previous shape wrapped one
   // outer withReadRetry around a sequential sweep that returned the
   // FIRST attempt with any hit — but the `/api/query` top-100 page
@@ -1000,6 +1019,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
       opts.type !== undefined
         ? (opts.notFoundMessage?.typed?.(opts.type, opts.slug) ?? fallback)
         : (opts.notFoundMessage?.untyped?.(opts.slug) ?? fallback);
+    const memoryHint = memoryFilenameStemHint(opts.slug);
     // Mirror the ambiguous-slug throw below: carry a runnable, type-aware
     // recovery hint (+ channel-neutral agentHint) so a slug miss isn't a
     // dead end. Additive only — the `code` and `message` above are unchanged
@@ -1011,8 +1031,14 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
       throw new FbrainError({
         code: "not_found",
         message,
-        hint: `No ${opts.type} with that slug. Drop --type to search every type (\`fbrain ${verb} ${opts.slug}\`), or \`fbrain list\` to see existing slugs.`,
-        agentHint: `Omit the \`type\` argument to search all record types, or call fbrain_list to see existing slugs.`,
+        hint: appendHint(
+          `No ${opts.type} with that slug. Drop --type to search every type (\`fbrain ${verb} ${opts.slug}\`), or \`fbrain list\` to see existing slugs.`,
+          memoryHint?.hint,
+        ),
+        agentHint: appendHint(
+          `Omit the \`type\` argument to search all record types, or call fbrain_list to see existing slugs.`,
+          memoryHint?.agentHint,
+        ),
       });
     }
     // Untyped lookup: every type was scanned, so the slug truly doesn't exist
@@ -1020,12 +1046,25 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
     throw new FbrainError({
       code: "not_found",
       message,
-      hint: `Run \`fbrain list\` to see existing slugs (slugs are case-sensitive).`,
-      agentHint: `Call fbrain_list to see existing slugs (slugs are case-sensitive).`,
+      hint: appendHint(
+        `Run \`fbrain list\` to see existing slugs (slugs are case-sensitive).`,
+        memoryHint?.hint,
+      ),
+      agentHint: appendHint(
+        `Call fbrain_list to see existing slugs (slugs are case-sensitive).`,
+        memoryHint?.agentHint,
+      ),
     });
   }
 
   if (matches.length > 1) {
+    const preferredType = opts.ambiguousTypePrecedence?.find((t) =>
+      matches.some((m) => m.type === t),
+    );
+    if (preferredType !== undefined) {
+      return matches.find((m) => m.type === preferredType)!;
+    }
+
     const matchedTypes = matches.map((m) => m.type).join(", ");
     // Name the exact recovery command, not just "Specify a `type`." — a new dev
     // shouldn't have to hunt that the flag is `--type`. The example uses the
@@ -1043,6 +1082,19 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   }
 
   return matches[0]!;
+}
+
+function appendHint(base: string, extra?: string): string {
+  return extra === undefined ? base : `${base} ${extra}`;
+}
+
+function memoryFilenameStemHint(
+  slug: string,
+): { hint: string; agentHint: string } | undefined {
+  if (!slug.includes("_")) return undefined;
+  const path = `memory/${slug}.md`;
+  const text = `MEMORY files are not fbrain slugs; read ${path} instead.`;
+  return { hint: text, agentHint: text };
 }
 
 // Single source of truth for slug input normalization. Mirrors `put`'s

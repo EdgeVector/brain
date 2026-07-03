@@ -785,6 +785,21 @@ describe("resolveBySlug", () => {
     });
   });
 
+  test("untyped not-found hints when the input looks like a MEMORY filename stem", async () => {
+    const node = mockNode({});
+    await expect(
+      resolveBySlug({ node, cfg, slug: "project_scheduled_routines_kanban_free" }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      hint: expect.stringContaining(
+        "MEMORY files are not fbrain slugs; read memory/project_scheduled_routines_kanban_free.md instead.",
+      ),
+      agentHint: expect.stringContaining(
+        "MEMORY files are not fbrain slugs; read memory/project_scheduled_routines_kanban_free.md instead.",
+      ),
+    });
+  });
+
   test("typed not-found hint tells you to drop --type, naming the invoking verb", async () => {
     const node = mockNode({});
     // The slug may exist under a different type that `--type` hid — the hint
@@ -840,6 +855,62 @@ describe("resolveBySlug", () => {
       // have to hunt that the flag is `--type`.
       hint: "Re-run with --type, e.g. `fbrain get dual --type design`.",
     });
+  });
+
+  test("ambiguous slug can resolve through caller-provided type precedence", async () => {
+    const node = mockNode({
+      [TEST_HASHES.reference]: [row("routine-heartbeats", { status: "active" })],
+      [TEST_HASHES.project]: [
+        row("routine-heartbeats", { status: "planning" }),
+      ],
+    });
+
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "routine-heartbeats",
+        ambiguousTypePrecedence: ["reference", "project"],
+      }),
+    ).resolves.toMatchObject({
+      type: "reference",
+      record: { slug: "routine-heartbeats" },
+    });
+  });
+
+  test("untyped lookup skips record types absent from older configs", async () => {
+    const oldCfg = buildTestCfg({
+      schemaHashes: {
+        ...TEST_HASHES,
+        reference: "referencehash",
+        project: "projecthash",
+      },
+    });
+    delete oldCfg.schemaHashes.decision;
+    const seen = new Set<string>();
+    const node: NodeClient = {
+      ...mockNode({
+        referencehash: [row("routine-heartbeats", { status: "active" })],
+        projecthash: [row("routine-heartbeats", { status: "planning" })],
+      }),
+      async queryAll(args) {
+        seen.add(args.schemaHash);
+        return mockNode({
+          referencehash: [row("routine-heartbeats", { status: "active" })],
+          projecthash: [row("routine-heartbeats", { status: "planning" })],
+        }).queryAll(args);
+      },
+    };
+
+    const found = await resolveBySlug({
+      node,
+      cfg: oldCfg,
+      slug: "routine-heartbeats",
+      ambiguousTypePrecedence: ["reference", "project"],
+    });
+
+    expect(found.type).toBe("reference");
+    expect(seen).not.toContain(TEST_HASHES.decision);
   });
 
   test("ambiguous-slug hint echoes the invoking verb, defaulting to get", async () => {
