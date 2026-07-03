@@ -808,11 +808,11 @@ describe("doctor verdict logic", () => {
       const line = lines.find((l) => l.includes("[PASS] node-reachable"));
       expect(line).toBeDefined();
       expect(line).toContain(`lastdb 0.15.1 @ unix:${socketPath}`);
-      // Socket-only: the loopback TCP listener is retired, so a data-socket-only
-      // (older) node reports no TCP fallback — it needs an upgrade for control
-      // routes rather than a dead :9077 to dial.
+      // fold #1246 collapsed the full-surface socket into the one control
+      // socket, so a current single-socket node is fully served (owner routes
+      // included) — no TCP fallback and NO "no full-surface socket" deficiency.
       expect(line).not.toContain("TCP fallback");
-      expect(line).toContain("no full-surface socket");
+      expect(line).not.toContain("no full-surface socket");
     } finally {
       if (prevSocketEnv === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
       else process.env.FBRAIN_FOLDDB_SOCKET = prevSocketEnv;
