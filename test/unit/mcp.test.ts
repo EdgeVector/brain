@@ -653,23 +653,56 @@ describe("fbrain_get tool", () => {
     expect(text).toContain("deploy-runbook");
   });
 
-  test("ambiguous slug error names the `type` arg, not the CLI `--type` flag", async () => {
-    // A slug present in multiple schemas resolves to ambiguous_slug. The
-    // shared message is consumed by the CLI (`--type`) AND this MCP tool
-    // (a `type` argument), so it must not reference the CLI-only flag.
+  test("unknown MEMORY filename stem points agents at the memory file path", async () => {
     installMock((url) => {
       if (url.includes("/api/query")) {
-        return { status: 200, body: { ok: true, results: [recordRow("dual")] } };
+        return { status: 200, body: { ok: true, results: [] } };
       }
       return { status: 404 };
     });
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
-    const res = await tools.fbrain_get!({ slug: "dual" });
+    const res = await tools.fbrain_get!({
+      slug: "project_scheduled_routines_kanban_free",
+    });
     expect(res.isError).toBe(true);
     const text = res.content[0]!.text ?? "";
-    expect(text).toContain("exists in multiple schemas");
-    expect(text).not.toContain("--type");
-    expect(text).toContain("Specify a `type`");
+    expect(text).toContain("MEMORY files are not fbrain slugs");
+    expect(text).toContain("memory/project_scheduled_routines_kanban_free.md");
+  });
+
+  test("ambiguous slug returns the highest-precedence matching type", async () => {
+    installMock((url, init) => {
+      if (url.includes("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name === TEST_HASHES.reference) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [recordRow("routine-heartbeats", "Reference")],
+            },
+          };
+        }
+        if (body.schema_name === TEST_HASHES.project) {
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [recordRow("routine-heartbeats", "Project")],
+            },
+          };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_get!({ slug: "routine-heartbeats" });
+    expect(res.isError).toBeFalsy();
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("[reference] routine-heartbeats");
+    expect(text).toContain("title:      Reference");
+    expect(text).not.toContain("Project");
   });
 
   // ── Body pagination (large-record token-budget guard) ──────────────────

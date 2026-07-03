@@ -1,8 +1,6 @@
 // `fbrain get <slug> [--type T]` — print a record.
 // If --type is omitted, queries every registered schema. If the slug exists in
-// multiple schemas, throws `ambiguous_slug` (stderr-only, exit 1, no stdout) —
-// byte-consistent with `status` / `delete`, so a script doing
-// `r=$(fbrain get foo)` either captures one record cleanly or sees a failure.
+// multiple schemas, returns the match selected by GET_RECORD_TYPE_PRECEDENCE.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -12,6 +10,7 @@ import {
   findBacklinks,
   findBySlugFast,
   findChildTasksByDesign,
+  GET_RECORD_TYPE_PRECEDENCE,
   NOT_FOUND_TYPED,
   normalizeSlug,
   resolveBySlug,
@@ -57,6 +56,8 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     type: opts.type,
     notFoundMessage: NOT_FOUND_TYPED,
     recoveryVerb: "get",
+    ambiguousTypePrecedence:
+      opts.type === undefined ? GET_RECORD_TYPE_PRECEDENCE : undefined,
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on

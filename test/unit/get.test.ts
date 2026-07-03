@@ -1,5 +1,6 @@
-// Unit tests for `fbrain get` — focused on the dangling-design annotation
-// and the reverse-direction child-tasks listing for designs.
+// Unit tests for `fbrain get` — focused on ambiguous-slug precedence,
+// the dangling-design annotation, and the reverse-direction child-tasks listing
+// for designs.
 //
 // A task's design_slug is validated on write (`task new --design` / `link`),
 // so a reference that no longer resolves to a live design means the design
@@ -383,31 +384,37 @@ describe("getRecord — design's child tasks listing", () => {
   });
 });
 
-// Ambiguous-slug contract. Before this fix, `fbrain get <slug>` on a slug that
-// existed under multiple types printed EVERY matching record's full body to
-// stdout AND THEN errored — contradictory output that broke `r=$(fbrain get
-// foo)` scripts (two record bodies on stdout, exit 1). Now `get` defers to the
-// same single clean `ambiguous_slug` throw `status` and `delete` already emit:
-// nothing on stdout, the error on stderr, exit 1.
+// Ambiguous-slug contract. `get` is read-only, so bare-slug ambiguity now picks
+// a deterministic type winner; `--type` remains the explicit override.
 describe("getRecord — ambiguous slug", () => {
-  test("ambiguous slug throws ambiguous_slug AND writes nothing via print", async () => {
-    // Same slug under TWO schemas (task + concept) — the dogfood evidence
-    // case. Pre-fix: print fired twice with full record bodies before the
-    // throw. Post-fix: print MUST NOT fire — stdout stays empty.
+  test("ambiguous slug returns the highest-precedence matching type", async () => {
+    // Same slug under two schemas from the dogfood evidence. Bare get is
+    // read-only, so it can pick a deterministic winner while --type remains
+    // available as an override.
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
-      if (body.schema_name === TEST_HASHES.task) {
-        return queryResp([asRow("t1", taskFields("t1", { title: "first task" }))]);
-      }
-      if (body.schema_name === TEST_HASHES.concept) {
+      if (body.schema_name === TEST_HASHES.reference) {
         return queryResp([
-          asRow("t1", {
-            slug: "t1",
-            title: "T",
+          asRow("routine-heartbeats", {
+            slug: "routine-heartbeats",
+            title: "reference winner",
             body: "",
-            status: "draft",
+            status: "active",
+            tags: [],
+            created_at: "2026-05-01T00:00:00Z",
+            updated_at: "2026-05-01T00:00:00Z",
+          }),
+        ]);
+      }
+      if (body.schema_name === TEST_HASHES.project) {
+        return queryResp([
+          asRow("routine-heartbeats", {
+            slug: "routine-heartbeats",
+            title: "project fallback",
+            body: "",
+            status: "planning",
             tags: [],
             created_at: "2026-05-01T00:00:00Z",
             updated_at: "2026-05-01T00:00:00Z",
@@ -417,20 +424,15 @@ describe("getRecord — ambiguous slug", () => {
       return queryResp([]);
     }) as unknown as typeof fetch;
     const lines: string[] = [];
-    let err: unknown;
-    try {
-      await getRecord({ cfg, slug: "t1", print: (l) => lines.push(l) });
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(FbrainError);
-    expect((err as FbrainError).code).toBe("ambiguous_slug");
-    expect((err as FbrainError).message).toContain(
-      'Slug "t1" exists in multiple schemas',
-    );
-    // The bug: stdout (here, print) emitted both record bodies before the
-    // throw. The fix's whole point — assert zero writes.
-    expect(lines).toEqual([]);
+    await getRecord({
+      cfg,
+      slug: "routine-heartbeats",
+      print: (l) => lines.push(l),
+    });
+    const out = lines.join("\n");
+    expect(out).toContain("[reference] routine-heartbeats");
+    expect(out).toContain("title:      reference winner");
+    expect(out).not.toContain("project fallback");
   }, 30_000);
 
   test("--type disambiguates: prints the one matching record, no throw", async () => {
