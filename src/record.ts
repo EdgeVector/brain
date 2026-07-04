@@ -130,14 +130,50 @@ export function uniqueSchemaHashes(
 // or empty `types` returns `null` filter + all 8 RECORD_TYPES so callers can
 // branch on the null instead of a length check. `activeTypes` preserves
 // RECORD_TYPES order regardless of the order the user passed `--type` in.
-export function resolveTypeFilter(types?: readonly RecordType[]): {
+//
+// Config-guard (papercut-fbrain-decision-type-hash-missing): every downstream
+// consumer of `activeTypes` calls `schemaHashFor(t, cfg)`, which THROWS
+// `missing_schema_hash` for a type absent from the local config. A partially
+// initialised config (e.g. one predating the `decision` schema) therefore made
+// `fbrain search --type decision,…` / `fbrain ask --type decision,…` fail the
+// WHOLE query the instant one requested type lacked a hash — even though the
+// other requested types were perfectly resolvable. When a `cfg` is supplied we
+// DROP the unavailable types (both from `activeTypes` and from the returned
+// `typeFilter` Set the native-hit resolver consults) and report each skipped
+// type via `onSkip`, so typed search degrades gracefully instead of aborting.
+// This mirrors `resolveBySlug`'s existing
+// `RECORD_TYPES.filter((t) => cfg.schemaHashes[t] !== undefined)` discipline.
+// Callers omit `cfg` to keep the pre-existing "walk every requested type"
+// behavior (e.g. non-query call sites / tests that don't touch config hashes).
+export function resolveTypeFilter(
+  types?: readonly RecordType[],
+  cfg?: { schemaHashes: Record<string, string> },
+  onSkip?: (skipped: readonly RecordType[]) => void,
+): {
   typeFilter: Set<RecordType> | null;
   activeTypes: readonly RecordType[];
 } {
-  const typeFilter = types && types.length > 0 ? new Set(types) : null;
-  const activeTypes: readonly RecordType[] = typeFilter
-    ? RECORD_TYPES.filter((t) => typeFilter.has(t))
-    : RECORD_TYPES;
+  const hasHash = (t: RecordType): boolean =>
+    cfg === undefined ||
+    (typeof cfg.schemaHashes[t] === "string" && cfg.schemaHashes[t]!.length > 0);
+
+  const requested = types && types.length > 0 ? new Set(types) : null;
+
+  // Which requested (or, when unfiltered, all) types are actually resolvable
+  // against the config, in canonical order.
+  const available = RECORD_TYPES.filter(
+    (t) => (requested ? requested.has(t) : true) && hasHash(t),
+  );
+
+  if (requested && onSkip) {
+    const skipped = RECORD_TYPES.filter((t) => requested.has(t) && !hasHash(t));
+    if (skipped.length > 0) onSkip(skipped);
+  }
+
+  // Keep the filter Set only for an EXPLICIT `--type` request, narrowed to the
+  // available types so the native-hit resolver never gates on a hash-less type.
+  const typeFilter = requested ? new Set(available) : null;
+  const activeTypes: readonly RecordType[] = available;
   return { typeFilter, activeTypes };
 }
 

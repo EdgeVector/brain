@@ -294,6 +294,88 @@ describe("searchCmd", () => {
     expect(stdout.some((l) => l.includes("query still works over the socket"))).toBe(true);
   });
 
+  // Regression: papercut-fbrain-decision-type-hash-missing. A `--type` request
+  // that spans a type ABSENT from the local config (a config predating the
+  // `decision` schema) used to throw `missing_schema_hash` and fail the WHOLE
+  // query. Now the hash-less type is skipped (with a stderr note) and the
+  // resolvable types still answer.
+  test("--type spanning a config-missing type degrades gracefully (no throw)", async () => {
+    const oldCfg = buildTestCfg({ userHash: "test-hash" });
+    delete oldCfg.schemaHashes.decision;
+
+    const rows = [
+      {
+        fields: {
+          slug: "socket-design",
+          title: "Socket design",
+          body: "decision to route owner verbs over the socket",
+          status: "active",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z",
+        },
+        key: { hash: "socket-design", range: null },
+      },
+    ];
+
+    // If any leg tried to resolve the `decision` hash it would query the
+    // undefined schema (or throw); assert the wire never carries it.
+    const queriedSchemas: string[] = [];
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({
+                slug: "socket-design",
+                schemaName: DESIGN_HASH,
+                schema_display_name: "Design",
+                metadata: { score: 0.8, match_type: "semantic" },
+              }),
+            ],
+            user_hash: oldCfg.userHash,
+          },
+        };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        if (body.schema_name) queriedSchemas.push(body.schema_name);
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: body.schema_name === DESIGN_HASH ? rows : [],
+            total_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+            returned_count: body.schema_name === DESIGN_HASH ? rows.length : 0,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    // Must NOT throw even though `decision` has no hash in oldCfg.
+    await searchCmd({
+      cfg: oldCfg,
+      query: "socket",
+      types: ["decision", "design"],
+      print: (l) => stdout.push(l),
+      printErr: (l) => stderr.push(l),
+    });
+
+    // The resolvable type still answers.
+    const rowsOut = rowsOf(stdout);
+    expect(rowsOut.some((l) => l.includes("socket-design"))).toBe(true);
+    // The undefined `decision` hash never reaches the wire.
+    expect(queriedSchemas).not.toContain(undefined);
+    expect(queriedSchemas.every((s) => typeof s === "string" && s.length > 0)).toBe(true);
+    // The skip is surfaced to the user (stderr, not stdout).
+    expect(stderr.some((l) => l.includes("decision") && l.includes("skipping"))).toBe(true);
+  });
+
   test("falls back to BM25 records when native vector search returns no matches", async () => {
     const rows = [
       {

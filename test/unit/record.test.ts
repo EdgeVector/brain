@@ -11,6 +11,7 @@ import {
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
   resolveBySlug,
+  resolveTypeFilter,
   rowToRecord,
   schemaHashFor,
   TOMBSTONE_TAG,
@@ -47,6 +48,79 @@ describe("record", () => {
       schemaHashes: { design: "d", task: "t" },
     });
     expect(() => schemaHashFor("concept", partial)).toThrow(FbrainError);
+  });
+
+  describe("resolveTypeFilter", () => {
+    test("no --type selection walks every type; null filter", () => {
+      const { typeFilter, activeTypes } = resolveTypeFilter(undefined, cfg);
+      expect(typeFilter).toBeNull();
+      expect(activeTypes).toEqual(RECORD_TYPES);
+    });
+
+    test("explicit --type narrows to the requested types in canonical order", () => {
+      const { typeFilter, activeTypes } = resolveTypeFilter(
+        ["task", "design"],
+        cfg,
+      );
+      expect(activeTypes).toEqual(["design", "task"]);
+      expect(typeFilter).toEqual(new Set(["design", "task"]));
+    });
+
+    // The papercut: `fbrain ask/search --type decision,concept` on a config
+    // that predates the `decision` schema used to THROW `missing_schema_hash`
+    // for the whole query. Now the hash-less type is dropped (and reported via
+    // onSkip) so the resolvable types still answer.
+    test("drops a requested type with no config hash and reports it via onSkip", () => {
+      const oldCfg = buildTestCfg({
+        schemaHashes: { ...TEST_HASHES },
+      });
+      delete oldCfg.schemaHashes.decision;
+
+      const skipped: RecordType[][] = [];
+      const { typeFilter, activeTypes } = resolveTypeFilter(
+        ["decision", "concept"],
+        oldCfg,
+        (s) => skipped.push([...s]),
+      );
+
+      // `decision` is gone from BOTH the walk list and the resolver filter Set,
+      // so no downstream `schemaHashFor("decision")` can throw.
+      expect(activeTypes).toEqual(["concept"]);
+      expect(typeFilter).toEqual(new Set(["concept"]));
+      expect([...(typeFilter ?? [])]).not.toContain("decision");
+      expect(skipped).toEqual([["decision"]]);
+    });
+
+    test("dedupe query spanning ONLY a misconfigured type yields an empty walk, not a throw", () => {
+      const oldCfg = buildTestCfg({ schemaHashes: { ...TEST_HASHES } });
+      delete oldCfg.schemaHashes.decision;
+
+      const skipped: RecordType[][] = [];
+      const { typeFilter, activeTypes } = resolveTypeFilter(
+        ["decision"],
+        oldCfg,
+        (s) => skipped.push([...s]),
+      );
+
+      // Empty (not null) filter: an explicit request that resolved to nothing
+      // must not fall back to "all types". The native-hit resolver then keeps
+      // zero hits, and the query returns a clean no-match instead of throwing.
+      expect(activeTypes).toEqual([]);
+      expect(typeFilter).toEqual(new Set());
+      expect(skipped).toEqual([["decision"]]);
+    });
+
+    test("without cfg, keeps legacy behavior (no config gating, no onSkip)", () => {
+      const seen: RecordType[][] = [];
+      const { typeFilter, activeTypes } = resolveTypeFilter(
+        ["decision", "concept"],
+        undefined,
+        (s) => seen.push([...s]),
+      );
+      expect(activeTypes).toEqual(["concept", "decision"]);
+      expect(typeFilter).toEqual(new Set(["concept", "decision"]));
+      expect(seen).toEqual([]);
+    });
   });
 
   test("fieldsFor returns design fields", () => {

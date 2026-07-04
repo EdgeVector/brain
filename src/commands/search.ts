@@ -354,7 +354,15 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   // spike) that share the unified MEMO hash, the server filter alone can't
   // tell e.g. concept from preference — it'll return any record on that
   // hash. The post-filter on resolved hits (below) finishes the job.
-  const { typeFilter, activeTypes } = resolveTypeFilter(opts.types);
+  const { typeFilter, activeTypes } = resolveTypeFilter(
+    opts.types,
+    opts.cfg,
+    (skipped) =>
+      printErr(
+        `note: skipping requested type(s) ${skipped.join(", ")} — no schema hash in this config ` +
+          `(searching the rest). Run \`fbrain init\` to register every schema hash.`,
+      ),
+  );
   const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
   if (fbrainSchemas.length > 0) {
     clientOpts.schemas = fbrainSchemas;
