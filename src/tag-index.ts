@@ -153,9 +153,15 @@ export async function resolveRecordsByTag(
     seen.add(member);
     const parsed = parseMemberKey(member);
     if (parsed === null) continue;
+    let schemaHash: string;
+    try {
+      schemaHash = deps.schemaHashFor(parsed.type);
+    } catch {
+      continue;
+    }
     const record = await deps.findBySlug(
       parsed.type,
-      deps.schemaHashFor(parsed.type),
+      schemaHash,
       parsed.slug,
     );
     if (record === null) continue;

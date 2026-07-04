@@ -97,10 +97,24 @@ export function schemaHashFor(
     throw new FbrainError({
       code: "missing_schema_hash",
       message: `No canonical hash registered for type "${type}" in config.`,
-      hint: `Re-run \`fbrain init\` so the config picks up all ${RECORD_TYPES.length} schema hashes.`,
+      hint:
+        "This config is stale or partial. Routine reads skip unavailable types; " +
+        "for setup/repair, run `fbrain init --grant-consent` against the configured " +
+        "socket-backed node to refresh schema hashes.",
     });
   }
   return hash;
+}
+
+export function missingSchemaHashReadNote(
+  skipped: readonly RecordType[],
+  action: string,
+): string {
+  return (
+    `note: skipping type(s) ${skipped.join(", ")} — no schema hash in this config ` +
+    `(${action}). Routine reads continue over available socket-backed schemas; ` +
+    "repair the stale config with a deliberate `fbrain init --grant-consent`."
+  );
 }
 
 // Deduped list of canonical schema hashes for the given record types. Used
@@ -135,12 +149,11 @@ export function uniqueSchemaHashes(
 // consumer of `activeTypes` calls `schemaHashFor(t, cfg)`, which THROWS
 // `missing_schema_hash` for a type absent from the local config. A partially
 // initialised config (e.g. one predating the `decision` schema) therefore made
-// `fbrain search --type decision,…` / `fbrain ask --type decision,…` fail the
-// WHOLE query the instant one requested type lacked a hash — even though the
-// other requested types were perfectly resolvable. When a `cfg` is supplied we
-// DROP the unavailable types (both from `activeTypes` and from the returned
-// `typeFilter` Set the native-hit resolver consults) and report each skipped
-// type via `onSkip`, so typed search degrades gracefully instead of aborting.
+// read commands fail the WHOLE query the instant one walked type lacked a hash
+// — even though the other types were perfectly resolvable. When a `cfg` is
+// supplied we DROP the unavailable types (both from `activeTypes` and from the
+// returned `typeFilter` Set the native-hit resolver consults) and report each
+// skipped type via `onSkip`, so reads degrade gracefully instead of aborting.
 // This mirrors `resolveBySlug`'s existing
 // `RECORD_TYPES.filter((t) => cfg.schemaHashes[t] !== undefined)` discipline.
 // Callers omit `cfg` to keep the pre-existing "walk every requested type"
@@ -165,8 +178,10 @@ export function resolveTypeFilter(
     (t) => (requested ? requested.has(t) : true) && hasHash(t),
   );
 
-  if (requested && onSkip) {
-    const skipped = RECORD_TYPES.filter((t) => requested.has(t) && !hasHash(t));
+  if (onSkip) {
+    const skipped = RECORD_TYPES.filter(
+      (t) => (requested ? requested.has(t) : true) && !hasHash(t),
+    );
     if (skipped.length > 0) onSkip(skipped);
   }
 
