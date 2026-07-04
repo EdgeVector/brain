@@ -176,7 +176,15 @@ export type AskResult = {
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const { print, printErr } = resolvePrintSinks(opts);
   const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
-  const { activeTypes } = resolveTypeFilter(opts.types);
+  const { activeTypes } = resolveTypeFilter(
+    opts.types,
+    opts.cfg,
+    (skipped) =>
+      printErr(
+        `note: skipping requested type(s) ${skipped.join(", ")} — no schema hash in this config ` +
+          `(answering from the rest). Run \`fbrain init\` to register every schema hash.`,
+      ),
+  );
 
   // ── Stage 0: query expansion ─────────────────────────────────────────
   let expansions: string[] = [];
