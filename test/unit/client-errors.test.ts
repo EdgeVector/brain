@@ -73,6 +73,128 @@ describe("client error mapping", () => {
     expect(fe.message).not.toContain("9001");
   });
 
+  // Regression (papercut-fbrain-cli-socket-route-regression, 2026-07-04): the
+  // WRITE/mutation path rides the SDK transport (`fetchTransport`), which — unlike
+  // the read path (`verboseFetch`, pinned above) — still fell through to the
+  // retired loopback TCP port when the existsSync-gated socket selection returned
+  // null. A local `fbrain put` then failed with "node not reachable at
+  // http://127.0.0.1:9001" even with `FBRAIN_FOLDDB_SOCKET` set. A LOCAL node is
+  // socket-only for writes too: every attempt must carry a `unix:` socket, and a
+  // down node must produce the socket-accurate diagnostic — never a `:9001`
+  // message that misreports the socket config as ignored.
+  test("loopback WRITE never falls back to TCP — every attempt is over a unix socket", async () => {
+    const calls: Array<{ url: string; unix?: string }> = [];
+    globalThis.fetch = (async (
+      input: unknown,
+      init?: RequestInit & { unix?: string },
+    ): Promise<Response> => {
+      calls.push({ url: typeof input === "string" ? input : String(input), unix: init?.unix });
+      throw new TypeError("Unable to connect. Is the computer able to access the url?");
+    }) as unknown as typeof globalThis.fetch;
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    let caught: unknown;
+    try {
+      await c.createRecord({ schemaHash: "abc", fields: { slug: "x" }, keyHash: "x" });
+    } catch (e) {
+      caught = e;
+    }
+    // At least one attempt was made, and EVERY attempt carried a unix socket —
+    // i.e. a bare TCP fetch to the retired :9001 port was never issued.
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.every((x) => typeof x.unix === "string" && x.unix.length > 0)).toBe(true);
+    expect(calls.every((x) => !x.url.includes("9001"))).toBe(true);
+    expect(caught).toBeInstanceOf(FbrainError);
+    const fe = caught as FbrainError;
+    expect(fe.code).toBe("service_unreachable");
+    expect(fe.message).not.toContain("9001");
+  });
+
+  // The write-path twin of the read-path diagnostics below: a MISSING socket
+  // (config honored, but the node is down) reports "Unix socket not found" —
+  // NOT a :9001 message. This is the "socket config ignored" vs "real socket
+  // outage" distinction the card's END STATE requires, proven on the write path.
+  test("local WRITE with a missing socket reports the absent Unix socket, not retired :9001", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-write-missing-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    const priorSocket = process.env.FBRAIN_FOLDDB_SOCKET;
+    process.env.FBRAIN_FOLDDB_SOCKET = socketPath;
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+      await c.createRecord({ schemaHash: "abc", fields: { slug: "x" }, keyHash: "x" });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("service_unreachable");
+      expect(fe.message).toContain("node not running");
+      expect(fe.message).toContain("Unix socket not found");
+      expect(fe.message).toContain(socketPath);
+      expect(fe.message).not.toContain("http://127.0.0.1:9001");
+    } finally {
+      if (priorSocket === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+      else process.env.FBRAIN_FOLDDB_SOCKET = priorSocket;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The other side of that distinction on the write path: a socket that EXISTS
+  // but refuses the connection is a genuine outage of THAT socket — reported as
+  // "node socket not reachable at unix:<path>", never a TCP-fallback :9001
+  // message. Pins that the write path never silently retries the retired port.
+  test("local WRITE with a stale socket reports the Unix socket that refused, not retired :9001", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-write-stale-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    writeFileSync(socketPath, "");
+    const priorSocket = process.env.FBRAIN_FOLDDB_SOCKET;
+    process.env.FBRAIN_FOLDDB_SOCKET = socketPath;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit & { unix?: string }) => {
+      if (init?.unix) throw new TypeError("connection refused on unix socket");
+      throw new TypeError("connection refused on tcp fallback");
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+      await c.createRecord({ schemaHash: "abc", fields: { slug: "x" }, keyHash: "x" });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      const fe = err as FbrainError;
+      expect(fe.code).toBe("service_unreachable");
+      expect(fe.message).toContain(`node socket not reachable at unix:${socketPath}`);
+      expect(fe.message).not.toContain("node not reachable at http://127.0.0.1:9001");
+    } finally {
+      if (priorSocket === undefined) delete process.env.FBRAIN_FOLDDB_SOCKET;
+      else process.env.FBRAIN_FOLDDB_SOCKET = priorSocket;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The write path over a REMOTE (non-loopback) node keeps the socket→TCP
+  // fallback: a remote node has no local socket, so the SDK transport must dial
+  // the configured URL. This guards the fix from over-reaching — only LOCAL
+  // nodes are socket-only.
+  test("remote WRITE falls back to the configured URL (socket-only is local-node only)", async () => {
+    const calls: Array<{ url: string; unix?: string }> = [];
+    globalThis.fetch = (async (
+      input: unknown,
+      init?: RequestInit & { unix?: string },
+    ): Promise<Response> => {
+      calls.push({ url: typeof input === "string" ? input : String(input), unix: init?.unix });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const c = newNodeClient({ baseUrl: "http://10.0.0.1:9001", userHash: "u" });
+    await c.createRecord({ schemaHash: "abc", fields: { slug: "x" }, keyHash: "x" });
+    expect(calls.length).toBeGreaterThan(0);
+    // No unix socket for a remote node; the request lands on the configured URL.
+    expect(calls.every((x) => x.unix === undefined)).toBe(true);
+    expect(calls.some((x) => x.url.startsWith("http://10.0.0.1:9001"))).toBe(true);
+  });
+
   test("node 503 node_not_provisioned → identity{provisioned:false}", async () => {
     installMock([{ status: 503, body: { error: "node_not_provisioned" } }]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });

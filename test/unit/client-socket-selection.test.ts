@@ -15,6 +15,7 @@ import { join } from "node:path";
 import {
   SOCKET_DATA_PLANE_PATHS,
   discoverFullSurfaceSocket,
+  localNodeRouteSocket,
   nodeSocketForRoute,
   shouldUseNodeSocket,
 } from "../../src/client.ts";
@@ -156,5 +157,75 @@ describe("node socket selection", () => {
     expect(
       shouldUseNodeSocket("node", "/api/native-index/search?q=foo", "/no/such/socket.sock"),
     ).toBe(false);
+  });
+});
+
+// `localNodeRouteSocket` is the socket-only selector both transports share
+// (verboseFetch for reads/search, fetchTransport for writes). Unlike
+// `nodeSocketForRoute` it is NOT existsSync-gated: for a loopback node with a
+// configured socket it ALWAYS returns the route socket, so a local write/search
+// never dials the retired `:9001` TCP port even when the socket file is absent.
+// This is the pure-function pin for the papercut-fbrain-cli-socket-route
+// regression (2026-07-04): the WRITE path (`/api/mutation`) and the SEARCH path
+// (`/api/native-index/search`) must both select the socket for a local node.
+describe("localNodeRouteSocket — socket-only routing for local nodes", () => {
+  const LOOPBACK = "http://127.0.0.1:9001";
+  // A path that need NOT exist on disk — the whole point is unconditional
+  // selection so a down node maps to a socket-accurate diagnostic, not `:9001`.
+  const socketPath = "/no/such/dir/folddb.sock";
+
+  test("local WRITE (/api/mutation) selects the data socket unconditionally", () => {
+    expect(localNodeRouteSocket("node", "POST", "/api/mutation", LOOPBACK, socketPath)).toEqual({
+      socketPath,
+      kind: "data",
+    });
+  });
+
+  test("local SEARCH (/api/native-index/search?q=...) selects the data socket unconditionally", () => {
+    // With the query string — the exact shape `fbrain search` / `fbrain ask` build.
+    expect(
+      localNodeRouteSocket("node", "GET", "/api/native-index/search?q=foo", LOOPBACK, socketPath),
+    ).toEqual({ socketPath, kind: "data" });
+  });
+
+  test("local READ (/api/query) selects the data socket unconditionally", () => {
+    expect(localNodeRouteSocket("node", "POST", "/api/query", LOOPBACK, socketPath)).toEqual({
+      socketPath,
+      kind: "data",
+    });
+  });
+
+  test("a non-data-plane local route selects the full/control socket unconditionally", () => {
+    // No `folddb-full.sock` beside a nonexistent control socket, so the
+    // fold #1246 collapse falls back to the control socket itself.
+    expect(
+      localNodeRouteSocket("node", "POST", "/api/apps/request-consent", LOOPBACK, socketPath),
+    ).toEqual({ socketPath, kind: "full" });
+  });
+
+  test("localhost / ::1 loopback hosts also select the socket", () => {
+    expect(
+      localNodeRouteSocket("node", "POST", "/api/mutation", "http://localhost:9001", socketPath),
+    ).toEqual({ socketPath, kind: "data" });
+    expect(
+      localNodeRouteSocket("node", "POST", "/api/mutation", "http://[::1]:9001", socketPath),
+    ).toEqual({ socketPath, kind: "data" });
+  });
+
+  test("a REMOTE node yields no local socket (keeps the socket→TCP fallback)", () => {
+    expect(
+      localNodeRouteSocket("node", "POST", "/api/mutation", "http://10.0.0.1:9001", socketPath),
+    ).toBeNull();
+  });
+
+  test("no configured socket path yields no local socket", () => {
+    expect(localNodeRouteSocket("node", "POST", "/api/mutation", LOOPBACK, undefined)).toBeNull();
+    expect(localNodeRouteSocket("node", "POST", "/api/mutation", LOOPBACK, "")).toBeNull();
+  });
+
+  test("the schema service never selects a local node socket", () => {
+    expect(
+      localNodeRouteSocket("schema", "POST", "/api/mutation", LOOPBACK, socketPath),
+    ).toBeNull();
   });
 });

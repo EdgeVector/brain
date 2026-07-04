@@ -1724,6 +1724,49 @@ export function shouldUseNodeSocket(
   return nodeSocketForRoute(service, method, path, socketPath) !== null;
 }
 
+// A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
+// retired (fold `fold-retire-tcp-listener`), so there is NO TCP fallback. When
+// the node URL is loopback and a socket path is configured, this returns the
+// route's socket UNCONDITIONALLY (data-plane → the control socket; every other
+// node route → `folddb-full.sock` when a pre-collapse node exposes it, else the
+// control socket per fold #1246's collapse) EVEN WHEN the socket file is absent:
+// if the node is down the connect simply fails and the caller maps it to a clear
+// node-not-running diagnostic instead of silently dialing the retired `:9001`.
+//
+// This is deliberately DISTINCT from `nodeSocketForRoute` (which stays
+// existsSync-gated for its other consumers, e.g. `shouldUseNodeSocket`): both the
+// read/search transport (`verboseFetch`) and the SDK write/mutation transport
+// (`fetchTransport`) MUST route through THIS helper so a local write never falls
+// through to `:9001`. Returns null when the node isn't a local-socket target
+// (remote node, schema service, or no socket configured), leaving the caller on
+// its existsSync-gated `nodeSocketForRoute` + TCP-fallback path.
+export function localNodeRouteSocket(
+  service: "node" | "schema",
+  method: string,
+  path: string,
+  baseUrl: string,
+  socketPath?: string,
+): NodeSocketSelection | null {
+  const localNodeSocketOnly =
+    service === "node" &&
+    isLoopbackNodeUrl(baseUrl) &&
+    socketPath !== undefined &&
+    socketPath.length > 0;
+  if (!localNodeSocketOnly) return null;
+  if (isNodeDataPlaneRoute(method, path)) {
+    return { socketPath: socketPath as string, kind: "data" };
+  }
+  return {
+    // fold #1246 collapsed `folddb-full.sock` into the control socket, so
+    // `discoverFullSurfaceSocket` returns the separate sibling when a
+    // pre-collapse node exposes it, else the control socket itself. The
+    // `?? socketPath` keeps the unconditional socket-only contract (never dial
+    // TCP) even in the impossible undefined case.
+    socketPath: discoverFullSurfaceSocket(socketPath as string) ?? (socketPath as string),
+    kind: "full",
+  };
+}
+
 function isConnectError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const msg = `${err.message} ${(err as { cause?: unknown }).cause instanceof Error ? ((err as { cause?: Error }).cause?.message ?? "") : ""}`.toLowerCase();
@@ -1769,33 +1812,17 @@ async function verboseFetch(opts: {
   // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
   const routeSocket = nodeSocketForRoute(opts.service, opts.method, opts.path, opts.socketPath);
-  // A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
-  // retired (fold `fold-retire-tcp-listener`), so there is NO TCP fallback. When
-  // the node URL is loopback and a socket path is configured, select the route's
-  // socket UNCONDITIONALLY (data-plane → folddb.sock, else → folddb-full.sock),
-  // even when the file is absent: if the node is down the connect simply fails
-  // and the catch maps it to a clear node-not-running diagnostic instead of
-  // dialing :9001. (`nodeSocketForRoute` stays existsSync-gated for its other
-  // consumers; this is verboseFetch's own socket-only routing for a local node.)
-  const localNodeSocketOnly =
-    opts.service === "node" &&
-    isLoopbackNodeUrl(opts.baseUrl) &&
-    opts.socketPath !== undefined &&
-    opts.socketPath.length > 0;
-  const localRouteSocket: NodeSocketSelection | null = localNodeSocketOnly
-    ? isNodeDataPlaneRoute(opts.method, opts.path)
-      ? { socketPath: opts.socketPath as string, kind: "data" }
-      : {
-          // fold #1246 collapsed `folddb-full.sock` into the control socket, so
-          // `discoverFullSurfaceSocket` returns the separate sibling when a
-          // pre-collapse node exposes it, else the control socket itself. The
-          // `?? opts.socketPath` keeps the unconditional socket-only contract
-          // (never dial TCP) even in the impossible undefined case.
-          socketPath:
-            discoverFullSurfaceSocket(opts.socketPath as string) ?? (opts.socketPath as string),
-          kind: "full",
-        }
-    : null;
+  // A LOCAL node speaks ONLY over its Unix socket (no retired `:9001` TCP
+  // fallback) — see `localNodeRouteSocket`. When it returns a socket we route
+  // there UNCONDITIONALLY, never dialing TCP even if the socket file is absent.
+  const localRouteSocket = localNodeRouteSocket(
+    opts.service,
+    opts.method,
+    opts.path,
+    opts.baseUrl,
+    opts.socketPath,
+  );
+  const localNodeSocketOnly = localRouteSocket !== null;
   const effectiveRouteSocket = localRouteSocket ?? routeSocket;
   const preflightTarget = effectiveRouteSocket
     ? `${opts.path} [${effectiveRouteSocket.kind} socket selected]`
@@ -2269,7 +2296,18 @@ function fetchTransport(
         if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
       }, timeoutMs);
 
+      // Mirror `verboseFetch`'s routing so the SDK write/mutation path is
+      // socket-only for a LOCAL node too (the regression this fixes: a local
+      // `fbrain put` used to fall through to the retired `:9001` TCP port and
+      // report "node not reachable at http://127.0.0.1:9001" whenever the
+      // existsSync-gated `nodeSocketForRoute` returned null). `localRouteSocket`
+      // is chosen UNCONDITIONALLY for a loopback node — no TCP attempt is ever
+      // made — so a down/absent socket surfaces the socket-accurate diagnostic
+      // via `__fbrainSocketFailure`, not a `:9001` message.
       const routeSocket = nodeSocketForRoute("node", method, path, socketPath);
+      const localRouteSocket = localNodeRouteSocket("node", method, path, baseUrl, socketPath);
+      const localNodeSocketOnly = localRouteSocket !== null;
+      const effectiveRouteSocket = localRouteSocket ?? routeSocket;
       const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
         const url = socket ? `http://localhost${path}` : `${baseUrl}${path}`;
         const init: RequestInit & { unix?: string } = {
@@ -2285,7 +2323,18 @@ function fetchTransport(
       let res: Response;
       let socketFailure: unknown;
       try {
-        if (routeSocket) {
+        if (localNodeSocketOnly) {
+          // Socket-only: never dial the retired loopback TCP port. A connect
+          // failure means the node is down (socket missing) or wedged (socket
+          // present); the catch tags it via `effectiveRouteSocket`.
+          try {
+            res = await attempt(localRouteSocket);
+          } catch (socketErr) {
+            socketFailure = socketErr;
+            throw socketErr;
+          }
+        } else if (routeSocket) {
+          // Non-loopback / remote node: prefer the socket, fall back to TCP/HTTP.
           try {
             res = await attempt(routeSocket);
           } catch (socketErr) {
@@ -2306,9 +2355,9 @@ function fetchTransport(
         const transportErr = new TransportError(
           `request to ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-        if (routeSocket && socketFailure !== undefined) {
+        if (effectiveRouteSocket && socketFailure !== undefined) {
           (transportErr as TransportError & SocketFailureCarrier).__fbrainSocketFailure = {
-            routeSocket,
+            routeSocket: effectiveRouteSocket,
             cause: socketFailure,
           };
         }
