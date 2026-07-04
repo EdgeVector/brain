@@ -45,6 +45,7 @@ import {
   isTombstoned,
   listRecordKeys,
   listRecords,
+  missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
@@ -179,11 +180,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const { activeTypes } = resolveTypeFilter(
     opts.types,
     opts.cfg,
-    (skipped) =>
-      printErr(
-        `note: skipping requested type(s) ${skipped.join(", ")} — no schema hash in this config ` +
-          `(answering from the rest). Run \`fbrain init\` to register every schema hash.`,
-      ),
+    (skipped) => printErr(missingSchemaHashReadNote(skipped, "answering from the rest")),
   );
 
   // ── Stage 0: query expansion ─────────────────────────────────────────

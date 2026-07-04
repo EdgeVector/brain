@@ -28,6 +28,7 @@ import {
   hydrateSchemaBySlug,
   isTombstoned,
   listRecords,
+  missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
@@ -357,11 +358,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const { typeFilter, activeTypes } = resolveTypeFilter(
     opts.types,
     opts.cfg,
-    (skipped) =>
-      printErr(
-        `note: skipping requested type(s) ${skipped.join(", ")} — no schema hash in this config ` +
-          `(searching the rest). Run \`fbrain init\` to register every schema hash.`,
-      ),
+    (skipped) => printErr(missingSchemaHashReadNote(skipped, "searching the rest")),
   );
   const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
   if (fbrainSchemas.length > 0) {

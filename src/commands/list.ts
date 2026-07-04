@@ -9,11 +9,13 @@ import {
   findBySlugPointRead,
   isTombstoned,
   listRecords,
+  missingSchemaHashReadNote,
+  resolveTypeFilter,
   schemaHashFor,
   withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
-import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { type RecordType } from "../schemas.ts";
 import { resolveRecordsByTag } from "../tag-index.ts";
 
 // Default cap for an unfiltered `fbrain list`. Without it an
@@ -303,9 +305,13 @@ function recordSummary(type: RecordType, r: FbrainRecord): RecordSummary {
 
 export async function resolveListEntries(
   node: NodeClient,
-  opts: Pick<ListOptions, "cfg" | "type" | "tag">,
+  opts: Pick<ListOptions, "cfg" | "type" | "tag" | "printErr">,
 ): Promise<ListEntry[]> {
-  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
+  const { activeTypes: types } = resolveTypeFilter(
+    opts.type ? [opts.type] : undefined,
+    opts.cfg,
+    (skipped) => opts.printErr?.(missingSchemaHashReadNote(skipped, "listing the rest")),
+  );
   if (opts.tag) {
     const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
       findBySlug: (type, hash, slug) =>

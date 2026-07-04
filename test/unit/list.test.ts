@@ -837,6 +837,68 @@ describe("listCmd — updated_since, offset, count, and tag index", () => {
   });
 });
 
+describe("listCmd — stale config missing decision hash", () => {
+  test("unfiltered list skips the missing decision hash and returns other records", async () => {
+    const oldCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: { ...TEST_HASHES },
+    });
+    delete oldCfg.schemaHashes.decision;
+
+    const row = spikeRow("usable-output");
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [[row]]],
+    ]);
+    const { restore, callsBySchema } = stubFetch(responses);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      await listCmd({
+        cfg: oldCfg,
+        print: (l) => stdout.push(l),
+        printErr: (l) => stderr.push(l),
+      });
+    } finally {
+      restore();
+    }
+
+    expect(stdout).toHaveLength(1);
+    expect(stdout[0]).toContain("usable-output");
+    expect(stderr.some((l) => l.includes("decision") && l.includes("skipping"))).toBe(true);
+    expect(stderr.some((l) => l.includes("init --grant-consent"))).toBe(true);
+    expect(callsBySchema.has(TEST_HASHES.decision)).toBe(false);
+    expect([...callsBySchema.keys()]).not.toContain("undefined");
+  });
+
+  test("explicit --type decision with no hash returns a normal empty result, not missing_schema_hash", async () => {
+    const oldCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: { ...TEST_HASHES },
+    });
+    delete oldCfg.schemaHashes.decision;
+
+    const responses = new Map<string, Array<Fields[]>>();
+    const { restore, callsBySchema } = stubFetch(responses);
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      await listCmd({
+        cfg: oldCfg,
+        type: "decision",
+        print: (l) => stdout.push(l),
+        printErr: (l) => stderr.push(l),
+      });
+    } finally {
+      restore();
+    }
+
+    expect(stdout[0]).toBe("no records");
+    expect(stderr.some((l) => l.includes("decision") && l.includes("skipping"))).toBe(true);
+    expect(callsBySchema.has(TEST_HASHES.decision)).toBe(false);
+    expect([...callsBySchema.keys()]).not.toContain("undefined");
+  });
+});
+
 describe("listCmd — empty-node create-your-first hint (parity with search/ask)", () => {
   test("brand-new EMPTY brain points the new dev at creating their first record", async () => {
     // `fbrain list` is step 2 of init's Next-steps — the FIRST content command
