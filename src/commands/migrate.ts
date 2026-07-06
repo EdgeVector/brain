@@ -191,6 +191,35 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
     newDescriptiveName,
   });
 
+  const fromHash = schemaHashFor(scope.affectedTypes[0]!, cfg);
+  const appliedAt = nowIso();
+  const id = buildManifestId(scope.schemaKey, mode.fieldName, appliedAt);
+
+  if (mode.dryRun) {
+    const manifest: MigrationManifest = {
+      id,
+      scope: { schema_key: scope.schemaKey, affected_types: scope.affectedTypes },
+      from_hash: fromHash,
+      to_hash: "dry-run:not-registered",
+      descriptive_name_from: baseSchema.schema.descriptive_name,
+      descriptive_name_to: newDescriptiveName,
+      field_added: mode.fieldName,
+      field_type: fieldType,
+      default: defaultValue,
+      applied_at: appliedAt,
+      status: "dry_run",
+      migrated_count: 0,
+      total_count: 0,
+    };
+    ensureMigrationsDir(dir);
+    writeManifest(manifest, dir);
+    print(`[dry-run] would register ${newDescriptiveName} with schema service`);
+    print(`        schema=${newSchema.schema.name} field=${mode.fieldName}:${JSON.stringify(fieldType)}`);
+    print(`        affected=${scope.affectedTypes.join(",")} old=${shortHash(fromHash)} new=<not registered>`);
+    print(`[dry-run] manifest ${id} written (dry_run); no schema registration, node load, record writes, or config swap.`);
+    return { manifest };
+  }
+
   // 5. Register + load.
   print(`[1/7] registering ${newDescriptiveName} with schema service`);
   const schemaClient = newSchemaServiceClient(cfg.schemaServiceUrl, verbose);
@@ -218,9 +247,6 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   }
 
   // 6. Build manifest + persist as in_progress.
-  const fromHash = schemaHashFor(scope.affectedTypes[0]!, cfg);
-  const appliedAt = nowIso();
-  const id = buildManifestId(scope.schemaKey, mode.fieldName, appliedAt);
   const manifest: MigrationManifest = {
     id,
     scope: { schema_key: scope.schemaKey, affected_types: scope.affectedTypes },
@@ -232,7 +258,7 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
     field_type: fieldType,
     default: defaultValue,
     applied_at: appliedAt,
-    status: mode.dryRun ? "dry_run" : "in_progress",
+    status: "in_progress",
     migrated_count: 0,
     total_count: 0,
   };
@@ -248,14 +274,6 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   manifest.total_count = records.length;
   writeManifest(manifest, dir);
   print(`        found ${records.length} record(s) to migrate`);
-
-  if (mode.dryRun) {
-    print(`[dry-run] no record writes, no config swap. Manifest left as dry_run.`);
-    print(
-      `migrated 0/${records.length} (dry-run) · old=${shortHash(fromHash)} · new=${shortHash(toHash)} · field=${mode.fieldName}=${JSON.stringify(defaultValue)}`,
-    );
-    return { manifest };
-  }
 
   // 8 + 9. Re-put under new hash; swap config; mark complete.
   await rePutAndSwap({

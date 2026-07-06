@@ -291,7 +291,7 @@ describe("newNodeClient owner-session header injection", () => {
     }
   });
 
-  test("doctor health and consent dry-run use the full-surface socket", async () => {
+  test("doctor health uses the data socket and consent dry-run uses the full-surface socket", async () => {
     const sock = fakeSocket({ full: true });
     try {
       const seen: Array<{ url: string; unix?: string; headers: Record<string, string> }> = [];
@@ -325,12 +325,15 @@ describe("newNodeClient owner-session header injection", () => {
         status: 202,
         body: { request_id: "req-1", expires_at: "soon" },
       });
-      for (const route of ["/api/health", "/api/apps/request-consent"]) {
-        const entry = seen.find((item) => item.url.includes(route));
-        expect(entry?.url).toBe(`http://localhost${route}`);
-        expect(entry?.unix).toBe(sock.fullPath);
-        expect(entry?.headers[FOLDDB_SESSION_HEADER]).toBe("tok-123");
-      }
+      const health = seen.find((item) => item.url.includes("/api/health"));
+      expect(health?.url).toBe("http://localhost/api/health");
+      expect(health?.unix).toBe(sock.path);
+      expect(health?.headers[FOLDDB_SESSION_HEADER]).toBe("tok-123");
+
+      const consent = seen.find((item) => item.url.includes("/api/apps/request-consent"));
+      expect(consent?.url).toBe("http://localhost/api/apps/request-consent");
+      expect(consent?.unix).toBe(sock.fullPath);
+      expect(consent?.headers[FOLDDB_SESSION_HEADER]).toBe("tok-123");
     } finally {
       sock.cleanup();
     }

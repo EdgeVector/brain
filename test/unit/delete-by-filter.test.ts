@@ -12,7 +12,7 @@
 //   5. The design-with-live-tasks referential-integrity guard is honored per
 //      record: skip+warn by default, delete+warn under --force — and one linked
 //      design never aborts the whole batch.
-//   6. `--json` (via onResult) emits {ok, deleted:[{type,slug}], dryRun}.
+//   6. `--json` (via onResult) emits {ok, deleted:[{type,slug}], failed, dryRun}.
 //
 // The mock node mimics fold_db: update writes the row; delete is a storage
 // no-op; queryAll serves whatever is in the per-schema store. After an update
@@ -138,12 +138,22 @@ function taskRow(slug: string, over: Partial<RowFields> = {}): RowFields {
 // hits `globalThis.fetch`. The unit tests above use a mock NodeClient for shape
 // documentation, but the runtime cases stub fetch like delete.test.ts does so
 // the real client path is exercised end to end.
-function stubFetch(state: MockState): () => void {
+function stubFetch(
+  state: MockState,
+  opts: { failQueryByKeySlug?: string } = {},
+): () => void {
   const original = globalThis.fetch;
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : (input as Request).url;
     if (url.endsWith("/api/query")) {
       const body = JSON.parse((init?.body as string) ?? "{}");
+      const keyHash = body.filter?.HashKey;
+      if (typeof keyHash === "string" && keyHash === opts.failQueryByKeySlug) {
+        return new Response(JSON.stringify({ error: "injected 503" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
       const schemaHash = body.schema_name as string;
       const rows = state.store.get(schemaHash);
       const results = rows
@@ -224,7 +234,7 @@ describe("deleteByFilter — dry-run (default)", () => {
       });
       expect(lines.join("\n")).toContain("no live records match --tag junk");
       expect(state.updateCalls.length).toBe(0);
-      expect(payload).toEqual({ ok: true, deleted: [], dryRun: true });
+      expect(payload).toEqual({ ok: true, deleted: [], failed: [], dryRun: true });
     } finally {
       restore();
     }
@@ -280,6 +290,7 @@ describe("deleteByFilter — --yes (apply)", () => {
       // The non-matching record was untouched.
       expect(state.updateCalls.some((c) => c.keyHash === "keep-me")).toBe(false);
       expect(payload?.dryRun).toBe(false);
+      expect(payload?.failed).toEqual([]);
       expect(payload?.deleted.map((d) => d.slug).sort()).toEqual(["junk-a", "junk-b"]);
     } finally {
       restore();
@@ -302,6 +313,7 @@ describe("deleteByFilter — --yes (apply)", () => {
         onResult: (p) => (payload = p),
       });
       expect(payload?.deleted).toEqual([{ type: "task", slug: "t1" }]);
+      expect(payload?.failed).toEqual([]);
       expect(state.updateCalls.some((c) => c.keyHash === "d1")).toBe(false);
     } finally {
       restore();
@@ -324,6 +336,55 @@ describe("deleteByFilter — --yes (apply)", () => {
         onResult: (p) => (payload = p),
       });
       expect(payload?.deleted).toEqual([{ type: "design", slug: "open-junk" }]);
+      expect(payload?.failed).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("reports a per-record resolve failure instead of treating it as already gone", async () => {
+    const state = newMockState();
+    seed(state, "designhash", "junk-a", designRow("junk-a", { tags: ["junk"] }));
+    seed(state, "designhash", "junk-b", designRow("junk-b", { tags: ["junk"] }));
+    seed(state, "designhash", "junk-c", designRow("junk-c", { tags: ["junk"] }));
+    const restore = stubFetch(state, { failQueryByKeySlug: "junk-b" });
+    try {
+      const lines: string[] = [];
+      let payload: DeleteBatchResult | undefined;
+      await expect(
+        deleteByFilter({
+          cfg,
+          tag: "junk",
+          type: "design",
+          yes: true,
+          print: (l) => lines.push(l),
+          onResult: (p) => (payload = p),
+        }),
+      ).rejects.toMatchObject({ code: "batch_delete_failed" });
+
+      const out = lines.join("\n");
+      expect(out).toContain("deleted design junk-a");
+      expect(out).toContain("failed design junk-b");
+      expect(out).toContain("node_http_503");
+      expect(out).toContain("deleted design junk-c");
+      expect(out).toContain("2 records matching --type design --tag junk; 1 record failed");
+      expect(state.updateCalls.map((c) => c.keyHash).sort()).toEqual(["junk-a", "junk-c"]);
+      expect(state.deleteCalls.map((c) => c.keyHash).sort()).toEqual(["junk-a", "junk-c"]);
+      expect(payload).toMatchObject({
+        ok: false,
+        deleted: [
+          { type: "design", slug: "junk-a" },
+          { type: "design", slug: "junk-c" },
+        ],
+        dryRun: false,
+      });
+      expect(payload?.failed).toEqual([
+        {
+          type: "design",
+          slug: "junk-b",
+          error: expect.stringContaining("node_http_503"),
+        },
+      ]);
     } finally {
       restore();
     }
@@ -378,6 +439,7 @@ describe("deleteByFilter — design referential-integrity guard in batch mode", 
       // …but the un-linked junk design WAS deleted (batch didn't abort).
       expect(out).toContain("deleted design lonely-junk");
       expect(payload?.deleted).toEqual([{ type: "design", slug: "lonely-junk" }]);
+      expect(payload?.failed).toEqual([]);
       expect(state.updateCalls.some((c) => c.keyHash === "linked-design")).toBe(false);
       expect(state.updateCalls.some((c) => c.keyHash === "lonely-junk")).toBe(true);
     } finally {
@@ -406,6 +468,7 @@ describe("deleteByFilter — design referential-integrity guard in batch mode", 
       expect(out).toContain("child-task");
       expect(out).toContain("deleted design linked-design");
       expect(payload?.deleted).toEqual([{ type: "design", slug: "linked-design" }]);
+      expect(payload?.failed).toEqual([]);
     } finally {
       restore();
     }

@@ -7,6 +7,7 @@ import {
   compareByUpdatedThenSlug,
   hasAnyLiveRecord,
   findBySlugPointRead,
+  isSchemaNotFoundReadError,
   isTombstoned,
   listRecords,
   missingSchemaHashReadNote,
@@ -326,7 +327,16 @@ export async function resolveListEntries(
 
   const acc: ListEntry[] = [];
   for (const t of types) {
-    const rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
+    let rs: FbrainRecord[];
+    try {
+      rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
+    } catch (err) {
+      if (isSchemaNotFoundReadError(err)) {
+        opts.printErr?.(missingSchemaHashReadNote([t], "listing the rest"));
+        continue;
+      }
+      throw err;
+    }
     for (const r of rs) acc.push({ type: t, record: r });
   }
   return acc;

@@ -160,15 +160,19 @@ rest, and runs steps 6 + 7. Safe to re-run as many times as needed.
 
 `fbrain migrate --add-field … --dry-run`:
 
-- Registers the new schema with the schema service (so the hash is
-  knowable).
-- Writes the manifest as `dry_run` with `total_count` populated.
+- Computes the field-added schema request and would-be
+  `descriptive_name`.
+- Writes the manifest as `dry_run` with `to_hash` set to
+  `dry-run:not-registered`.
+- Does NOT register the schema with the schema service.
+- Does NOT load schemas into the node.
 - Does NOT re-put any records.
 - Does NOT swap the config.
 - Cannot be `--resume`d — re-run with a real (non-dry) invocation.
 
-Use this to preview the new hash, the affected type count, or to
-verify the field name is well-formed before committing to the writes.
+Use this to preview the planned schema name, affected types, field
+shape, and manifest before committing to the schema-service and node
+writes.
 
 ## CLI
 
