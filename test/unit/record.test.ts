@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 
 import {
   computeBackoffMs,
+  buildRecordFields,
   EMPTY_PAGE_RETRY_ATTEMPTS,
   ensureStatus,
   fieldsFor,
   findBySlug,
+  GET_RECORD_TYPE_PRECEDENCE,
   hydrateSchemaBySlug,
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
@@ -14,6 +16,7 @@ import {
   rowToRecord,
   schemaHashFor,
   TOMBSTONE_TAG,
+  updateFieldsFrom,
   VECTOR_INDEX_VERIFY_CONSECUTIVE,
   verifyVectorIndexed,
   withReadRetry,
@@ -47,6 +50,11 @@ describe("record", () => {
       schemaHashes: { design: "d", task: "t" },
     });
     expect(() => schemaHashFor("concept", partial)).toThrow(FbrainError);
+  });
+
+  test("GET_RECORD_TYPE_PRECEDENCE covers RECORD_TYPES exactly", () => {
+    expect(new Set(GET_RECORD_TYPE_PRECEDENCE).size).toBe(RECORD_TYPES.length);
+    expect([...GET_RECORD_TYPE_PRECEDENCE].sort()).toEqual([...RECORD_TYPES].sort());
   });
 
   describe("resolveTypeFilter", () => {
@@ -240,6 +248,61 @@ describe("record", () => {
       );
       expect(r.tags).toEqual(expected);
     }
+  });
+
+  describe("record field builders", () => {
+    const base: FbrainRecord = {
+      slug: "r1",
+      title: "Title",
+      body: "Body",
+      status: "active",
+      tags: ["a"],
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-02T00:00:00.000Z",
+      design_slug: "legacy-parent",
+      program: "north-star",
+      gate_slug: "gate-1",
+      decided_by: "Tom",
+      decided_on: "2026-01-03",
+    };
+
+    test("buildRecordFields includes only fields declared for the record type", () => {
+      const design = buildRecordFields("design", base, {
+        updated_at: "2026-02-01T00:00:00.000Z",
+      });
+      expect(design).toEqual({
+        slug: "r1",
+        title: "Title",
+        body: "Body",
+        status: "active",
+        tags: ["a"],
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-02-01T00:00:00.000Z",
+      });
+      expect("design_slug" in design).toBe(false);
+      expect("program" in design).toBe(false);
+    });
+
+    test("updateFieldsFrom preserves task design_slug and decision extras", () => {
+      const task = updateFieldsFrom(base, "task", {
+        status: "blocked",
+        updated_at: "2026-02-01T00:00:00.000Z",
+      });
+      expect(task.design_slug).toBe("legacy-parent");
+      expect(task.status).toBe("blocked");
+
+      const decision = updateFieldsFrom(base, "decision", {
+        gate_slug: "gate-2",
+        updated_at: "2026-02-01T00:00:00.000Z",
+      });
+      expect(decision).toMatchObject({
+        program: "north-star",
+        gate_slug: "gate-2",
+        decided_by: "Tom",
+        decided_on: "2026-01-03",
+      });
+      expect("design_slug" in decision).toBe(false);
+    });
   });
 
   test("ensureStatus accepts valid status", () => {

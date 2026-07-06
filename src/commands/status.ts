@@ -11,8 +11,9 @@ import {
   nowIso,
   resolveBySlug,
   schemaHashFor,
+  updateFieldsFrom,
 } from "../record.ts";
-import { RECORDS, type RecordType } from "../schemas.ts";
+import { type RecordType } from "../schemas.ts";
 
 export type StatusOptions = {
   cfg: Config;
@@ -107,14 +108,11 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
 
   const hash = schemaHashFor(only.type, opts.cfg);
   const now = nowIso();
-  const def = RECORDS[only.type];
   const fromStatus = only.record.status;
-  const fields: Record<string, unknown> = {
-    ...only.record,
+  const fields = updateFieldsFrom(only.record, only.type, {
     status: opts.newStatus,
     updated_at: now,
-  };
-  if (!def.hasDesignSlug) delete fields.design_slug;
+  });
   await node.updateRecord({
     schemaHash: hash,
     keyHash: slug,

@@ -52,10 +52,10 @@ import {
   listRecords,
   nowIso,
   schemaHashFor,
+  updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
 import {
-  RECORDS,
   UNIQUE_SCHEMAS,
   type FieldType,
   type RecordType,
@@ -532,19 +532,9 @@ export function buildMigratedFields(
   now: string,
   descriptiveNameTo?: string,
 ): Record<string, unknown> {
-  const entry = RECORDS[type];
-  const fields: Record<string, unknown> = {
-    slug: record.slug,
-    title: record.title,
-    body: record.body,
-    status: record.status,
-    tags: record.tags,
-    created_at: record.created_at,
+  const fields = updateFieldsFrom(record, type, {
     updated_at: now,
-  };
-  if (entry.hasDesignSlug) {
-    fields.design_slug = record.design_slug ?? "";
-  }
+  });
   fields[fieldAdded] = defaultValue;
   if (descriptiveNameTo) {
     fields[versionMarkerField(descriptiveNameTo)] = versionMarkerValue(descriptiveNameTo);

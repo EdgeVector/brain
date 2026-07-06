@@ -34,9 +34,10 @@ import {
   missingSchemaHashReadNote,
   nowIso,
   schemaHashFor,
+  updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
-import { RECORDS, RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
   rebuildTagIndex,
   tagIndexAvailable,
@@ -157,18 +158,7 @@ export function buildReindexFields(
   record: FbrainRecord,
   now: string,
 ): Record<string, unknown> {
-  const entry = RECORDS[type];
-  const fields: Record<string, unknown> = {
-    slug: record.slug,
-    title: record.title,
-    body: record.body,
-    status: record.status,
-    tags: record.tags,
-    created_at: record.created_at,
+  return updateFieldsFrom(record, type, {
     updated_at: now,
-  };
-  if (entry.hasDesignSlug) {
-    fields.design_slug = record.design_slug ?? "";
-  }
-  return fields;
+  });
 }

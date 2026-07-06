@@ -1031,6 +1031,25 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.status).toBe("open");
   });
 
+  test("type: task honors design_slug from frontmatter on create", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "t-with-frontmatter-parent",
+      input: "---\ntype: task\ntitle: Task\ndesign_slug: parent-design\n---\nbody",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.design_slug).toBe("parent-design");
+  });
+
   test.each([
     "concept",
     "preference",
@@ -1102,6 +1121,41 @@ describe("putCmd — pre-request validation + dispatch", () => {
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("parent-design");
     expect(fields.status).toBe("in_progress");
+    expect(fields.created_at).toBe("2026-02-02T00:00:00.000Z");
+  });
+
+  test("task design_slug in frontmatter overrides the existing value on update", async () => {
+    const existing = {
+      fields: {
+        slug: "t-reparent",
+        title: "Old",
+        body: "old",
+        status: "in_progress",
+        tags: [],
+        design_slug: "old-parent",
+        created_at: "2026-02-02T00:00:00.000Z",
+        updated_at: "2026-02-02T00:00:00.000Z",
+      },
+      key: { hash: "t-reparent", range: null },
+    };
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [existing] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "t-reparent",
+      input: "---\ntype: task\ntitle: New\ndesign_slug: new-parent\n---\nnew body",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.design_slug).toBe("new-parent");
     expect(fields.created_at).toBe("2026-02-02T00:00:00.000Z");
   });
 

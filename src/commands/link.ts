@@ -13,6 +13,7 @@ import {
   normalizeSlug,
   nowIso,
   schemaHashFor,
+  updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -162,20 +163,12 @@ function fieldsForLinkUpdate(
     fromType === "task" && toType === "design"
       ? source.tags
       : Array.from(new Set([...source.tags, genericLinkTag(toType, toSlug)]));
-  const fields: Record<string, unknown> = {
-    slug: source.slug,
-    title: source.title,
-    body: source.body,
-    status: source.status,
+  return updateFieldsFrom(source, fromType, {
     tags,
-    created_at: source.created_at,
     updated_at: now,
-  };
-  if (fromType === "task") {
-    fields.design_slug =
-      toType === "design" ? toSlug : source.design_slug ?? "";
-  }
-  return fields;
+    design_slug:
+      toType === "design" ? toSlug : source.design_slug ?? "",
+  });
 }
 
 // Best-effort cross-type lookup: returns the first non-target type the slug
