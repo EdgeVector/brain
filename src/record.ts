@@ -111,9 +111,23 @@ export function missingSchemaHashReadNote(
   action: string,
 ): string {
   return (
-    `note: skipping type(s) ${skipped.join(", ")} — no schema hash in this config ` +
+    `note: skipping type(s) ${skipped.join(", ")} — schema unavailable in this config or node ` +
     `(${action}). Routine reads continue over available socket-backed schemas; ` +
     "repair the stale config with a deliberate `fbrain init --grant-consent`."
+  );
+}
+
+export function isSchemaNotFoundReadError(err: unknown): boolean {
+  if (!(err instanceof FbrainError)) return false;
+  if (err.code === "missing_schema_hash") return true;
+  if (err.code !== "node_http_404" && err.code !== "node_http_400") {
+    return false;
+  }
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("schema not found") ||
+    msg.includes("not found as schema or view") ||
+    msg.includes("unknown schema")
   );
 }
 
@@ -321,7 +335,13 @@ export async function hasAnyLiveRecord(
     // share fields, so any type on the hash hydrates the slug/tags we read.
     const type = RECORD_TYPES.find((t) => cfg.schemaHashes[t] === schemaHash);
     if (!type) continue;
-    const res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
+    let res;
+    try {
+      res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
+    } catch (err) {
+      if (isSchemaNotFoundReadError(err)) continue;
+      throw err;
+    }
     for (const row of res.results) {
       if (!isTombstoned(rowToRecord(row, type))) return true;
     }

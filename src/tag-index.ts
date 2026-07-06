@@ -5,7 +5,12 @@
 import type { NodeClient, Verbose } from "./client.ts";
 import type { Config } from "./config.ts";
 import { sha256Hex } from "./hash.ts";
-import { isTombstoned, nowIso, type FbrainRecord } from "./record.ts";
+import {
+  isSchemaNotFoundReadError,
+  isTombstoned,
+  nowIso,
+  type FbrainRecord,
+} from "./record.ts";
 import {
   RECORD_TYPES,
   TAG_INDEX_SCHEMA_KEY,
@@ -177,13 +182,23 @@ export async function rebuildTagIndex(
   opts: {
     listRecords: (type: RecordType, schemaHash: string) => Promise<FbrainRecord[]>;
     schemaHashFor: (type: RecordType) => string;
+    onSkipUnavailableType?: (type: RecordType) => void;
   },
 ): Promise<TagIndexRebuildResult> {
   if (!tagIndexAvailable(cfg)) return { tagsIndexed: 0, membersIndexed: 0 };
 
   const map = new Map<string, Set<string>>();
   for (const type of RECORD_TYPES) {
-    const records = await opts.listRecords(type, opts.schemaHashFor(type));
+    let records: FbrainRecord[];
+    try {
+      records = await opts.listRecords(type, opts.schemaHashFor(type));
+    } catch (err) {
+      if (isSchemaNotFoundReadError(err)) {
+        opts.onSkipUnavailableType?.(type);
+        continue;
+      }
+      throw err;
+    }
     for (const record of records) {
       if (isTombstoned(record)) continue;
       const member = memberKey(type, record.slug);

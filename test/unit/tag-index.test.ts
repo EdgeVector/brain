@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import type { NodeClient, QueryResponse, QueryRow } from "../../src/client.ts";
+import {
+  FbrainError,
+  type NodeClient,
+  type QueryResponse,
+  type QueryRow,
+} from "../../src/client.ts";
 import type { Config } from "../../src/config.ts";
 import { findBySlugPointRead, schemaHashFor, TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
 import { TAG_INDEX_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
@@ -197,6 +202,37 @@ describe("tag secondary index", () => {
       "concept:c1",
       "reference:r1",
     ]);
+  });
+
+  test("rebuild skips stale registered schema hashes", async () => {
+    const state = newState();
+    const node = mockNode(state);
+    seed(state, conceptHash, "c1", recordFields("c1", ["a"]));
+    const staleDecisionHash = "0".repeat(64);
+    const activeCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: { ...TEST_HASHES, decision: staleDecisionHash },
+    });
+    const skipped: RecordType[] = [];
+
+    const result = await rebuildTagIndex(node, activeCfg, {
+      listRecords: async (type, hash) => {
+        if (type === "decision" && hash === staleDecisionHash) {
+          throw new FbrainError({
+            code: "node_http_404",
+            message: `Node /api/query returned HTTP 404: Schema not found: ${hash}.`,
+          });
+        }
+        const rows = state.store.get(hash);
+        if (!rows) return [];
+        return [...rows.values()] as unknown as FbrainRecord[];
+      },
+      schemaHashFor: (type) => schemaHashFor(type, activeCfg),
+      onSkipUnavailableType: (type) => skipped.push(type),
+    });
+
+    expect(result).toEqual({ tagsIndexed: 1, membersIndexed: 1 });
+    expect(skipped).toEqual(["decision"]);
   });
 
   test("feature off returns index miss without writes", async () => {
