@@ -134,6 +134,14 @@ function truncateBody(body: string, limit: number): string {
   return body.length > limit ? body.slice(0, limit) : body;
 }
 
+// Render a `field:` label padded to the same fixed column the built-in
+// metadata lines (`title:      `, `status:     `) use, so extra-field lines
+// like a decision's `program:`/`decided_on:` align with them.
+const EXTRA_LABEL_WIDTH = 12;
+function padLabel(field: string): string {
+  return `${field}:`.padEnd(EXTRA_LABEL_WIDTH);
+}
+
 export type RecordJson = {
   type: RecordType;
   slug: string;
@@ -145,6 +153,13 @@ export type RecordJson = {
   // design has been deleted since the link was written. Same signal
   // the human output flags as "(deleted)".
   design_missing?: boolean;
+  // Type-specific extra String columns beyond the shared envelope, for a
+  // dedicated-shape type like `decision` (program/gate_slug/decided_by/
+  // decided_on). Present only when the type declares `extraStringFields`;
+  // each key maps to its stored value (empty string when unset). Without
+  // this the write path stores these columns but the read surface drops
+  // them, so `fbrain get --json`/human output showed nothing for them.
+  extra_fields?: Record<string, string>;
   // Only present for type=design — child task summaries for the
   // reverse-direction parent ↔ child link the human surface renders
   // on the `tasks:` line.
@@ -183,6 +198,15 @@ export function recordToJson(
   if (RECORDS[type].hasDesignSlug) {
     out.design_slug = r.design_slug ?? "";
     if (designMissing) out.design_missing = true;
+  }
+  const extraFields = RECORDS[type].extraStringFields;
+  if (extraFields !== undefined && extraFields.length > 0) {
+    const extra: Record<string, string> = {};
+    for (const ef of extraFields) {
+      const value = r[ef];
+      extra[ef] = typeof value === "string" ? value : "";
+    }
+    out.extra_fields = extra;
   }
   if (type === "design" && children !== undefined) {
     const sorted = sortChildrenByUpdated(children);
@@ -224,6 +248,11 @@ export function formatRecord(
       ? `${r.design_slug}${designMissing ? " (deleted)" : ""}`
       : "(none)";
     lines.push(`design:     ${designValue}`);
+  }
+  for (const ef of RECORDS[type].extraStringFields ?? []) {
+    const value = r[ef];
+    const rendered = typeof value === "string" && value.length > 0 ? value : "(none)";
+    lines.push(`${padLabel(ef)}${rendered}`);
   }
   if (type === "design" && children !== undefined) {
     if (children.length === 0) {
@@ -282,6 +311,12 @@ export function formatRecordJsonWindow(
       ? `${json.design_slug}${json.design_missing ? " (deleted)" : ""}`
       : "(none)";
     lines.push(`design:     ${designValue}`);
+  }
+  if (json.extra_fields !== undefined) {
+    for (const [ef, value] of Object.entries(json.extra_fields)) {
+      const rendered = value.length > 0 ? value : "(none)";
+      lines.push(`${padLabel(ef)}${rendered}`);
+    }
   }
   if (json.type === "design" && json.children !== undefined) {
     if (json.children.length === 0) {
