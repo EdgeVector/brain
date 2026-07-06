@@ -532,6 +532,11 @@ export function printNextSteps(
   if (ctx.consent.state === "skipped" && ctx.consent.reason === "non_tty") {
     print(`  Note: running non-interactively — re-run \`fbrain init --grant-consent\` to authorize writes in one shot.`);
   }
+  if (ctx.consent.state === "skipped" && ctx.consent.reason === "no_folddb_bin") {
+    print(
+      `  Note: \`lastdb\` was not found, so \`--grant-consent\` could not authorize writes. Install the lastdb CLI, then re-run \`fbrain init --grant-consent\`.`,
+    );
+  }
 }
 
 type ProbeResult = Awaited<ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>>;

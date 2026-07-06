@@ -125,7 +125,7 @@ export type EstablishConsentResult =
   | { state: "already_granted" }
   | { state: "granted_inline"; folddbUsed: boolean };
 
-export type SkipReason = "enforce_off" | "non_tty" | "declined";
+export type SkipReason = "enforce_off" | "non_tty" | "no_folddb_bin" | "declined";
 
 // The node's CLI binary name. The FoldDB→LastDB rebrand renamed the binary to
 // `lastdb` (fold#951), keeping `folddb` as a back-compat shim. We display and
@@ -181,7 +181,7 @@ export async function establishConsentInline(
     print(
       `        \`${FOLDDB_BIN}\` not found on PATH — cannot complete \`--grant-consent\` non-interactively. Install the lastdb CLI (\`brew install edgevector/lastdb/lastdb\`) and re-run, or grant manually in a second terminal while your first write polls.`,
     );
-    return { state: "skipped", reason: "non_tty" };
+    return { state: "skipped", reason: "no_folddb_bin" };
   }
 
   // --grant-consent: the operator typed the flag, so we skip the [Y/n] ask

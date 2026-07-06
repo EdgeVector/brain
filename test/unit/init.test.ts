@@ -615,6 +615,21 @@ describe("printNextSteps", () => {
     expect(out).toContain("--grant-consent");
   });
 
+  test("no lastdb binary skip → points at installing lastdb before retrying --grant-consent", () => {
+    const lines: string[] = [];
+    printNextSteps((l) => lines.push(l), {
+      nodeUrl: "http://127.0.0.1:9001",
+      configPath: "/tmp/fbrain-config.json",
+      consent: { state: "skipped", reason: "no_folddb_bin" },
+      reinitialized: false,
+    });
+
+    const out = lines.join("\n");
+    expect(out).toContain("lastdb");
+    expect(out).toContain("Install the lastdb CLI");
+    expect(out).toContain("fbrain init --grant-consent");
+  });
+
   test("consent granted → no --grant-consent note (writes already authorized)", () => {
     const lines: string[] = [];
     printNextSteps((l) => lines.push(l), {

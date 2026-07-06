@@ -16,6 +16,7 @@ import { describe, expect, test } from "bun:test";
 import {
   acquireCapability,
   decodeCapabilityBlob,
+  MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS,
   reactionFor,
   tokenIntegrityValid,
   type CapabilityToken,
@@ -388,6 +389,37 @@ describe("first-run consent acquisition", () => {
         isTty: interactive,
       }),
     ).rejects.toMatchObject({ code: "consent_timeout" });
+  });
+
+  test("persistent consent-status 503 fails fast and names the status", async () => {
+    let statusCalls = 0;
+    const start = Date.now();
+    const err = await acquireCapability({
+      nodeUrl: NODE_URL,
+      store: inMemoryCapabilityStore(),
+      transport: mockTransport({
+        consentStatus: () => {
+          statusCalls++;
+          return { status: 503, body: { error: "unavailable" } };
+        },
+      }),
+      print: () => {},
+      pollIntervalMs: 1,
+      sleep: noSleep,
+      maxWaitMs: 5 * 60 * 1000,
+      isTty: interactive,
+    }).then(
+      () => {
+        throw new Error("expected acquireCapability to reject");
+      },
+      (e) => e as { code?: string; message?: string; hint?: string },
+    );
+
+    expect(statusCalls).toBe(MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS);
+    expect(Date.now() - start).toBeLessThan(10_000);
+    expect(err.code).toBe("consent_status_http_503");
+    expect(err.message).toContain("HTTP 503");
+    expect(err.hint).toContain("HTTP 503");
   });
 
   // Audience binding on acquire: the consent-status response is an external API

@@ -13,6 +13,8 @@
 // results as the matching `fbrain` subcommand from the terminal.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage, MessageExtraInfo, RequestId } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { TextDecoder } from "node:util";
@@ -64,8 +66,20 @@ export const DEFAULT_MCP_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function mcpIdleTimeoutMs(): number {
   const raw = process.env.FBRAIN_MCP_IDLE_TIMEOUT_MS;
-  const n = raw === undefined ? NaN : parseInt(raw, 10);
-  return Number.isFinite(n) ? n : DEFAULT_MCP_IDLE_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_MCP_IDLE_TIMEOUT_MS;
+  const trimmed = raw.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    throw new Error(
+      `FBRAIN_MCP_IDLE_TIMEOUT_MS must be an integer number of milliseconds; got ${JSON.stringify(raw)}.`,
+    );
+  }
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n)) {
+    throw new Error(
+      `FBRAIN_MCP_IDLE_TIMEOUT_MS must be a safe integer number of milliseconds; got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return n;
 }
 
 // Transport-agnostic idle reaper: touch() (re)starts the clock; if it elapses
@@ -74,24 +88,136 @@ export function mcpIdleTimeoutMs(): number {
 export function makeIdleReaper(opts: { idleMs: number; onIdle?: () => void }): {
   enabled: boolean;
   touch: () => void;
+  beginRequest: (id: RequestId) => void;
+  endRequest: (id: RequestId) => void;
   stop: () => void;
 } {
   const onIdle = opts.onIdle ?? ((): void => process.exit(0));
   const enabled = Number.isFinite(opts.idleMs) && opts.idleMs > 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const inFlight = new Set<RequestId>();
+  let elapsedWhileBusy = false;
+
+  const schedule = (): void => {
+    if (!enabled) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (inFlight.size > 0) {
+        elapsedWhileBusy = true;
+        return;
+      }
+      onIdle();
+    }, opts.idleMs);
+    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+  };
+
   return {
     enabled,
     touch() {
+      elapsedWhileBusy = false;
+      schedule();
+    },
+    beginRequest(id: RequestId) {
       if (!enabled) return;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(onIdle, opts.idleMs);
-      (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+      inFlight.add(id);
+    },
+    endRequest(id: RequestId) {
+      if (!enabled) return;
+      inFlight.delete(id);
+      if (inFlight.size === 0 && elapsedWhileBusy) {
+        elapsedWhileBusy = false;
+        schedule();
+      }
     },
     stop() {
       if (timer) clearTimeout(timer);
       timer = undefined;
+      inFlight.clear();
+      elapsedWhileBusy = false;
     },
   };
+}
+
+export function withIdleReaper(transport: Transport, reaper: ReturnType<typeof makeIdleReaper>): Transport {
+  return new IdleReapingTransport(transport, reaper);
+}
+
+class IdleReapingTransport implements Transport {
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: <T extends JSONRPCMessage>(message: T, extra?: MessageExtraInfo) => void;
+
+  constructor(
+    private readonly inner: Transport,
+    private readonly reaper: ReturnType<typeof makeIdleReaper>,
+  ) {}
+
+  get sessionId(): string | undefined {
+    return this.inner.sessionId;
+  }
+
+  set sessionId(value: string | undefined) {
+    this.inner.sessionId = value;
+  }
+
+  setProtocolVersion(version: string): void {
+    this.inner.setProtocolVersion?.(version);
+  }
+
+  async start(): Promise<void> {
+    this.inner.onclose = () => {
+      this.reaper.stop();
+      this.onclose?.();
+    };
+    this.inner.onerror = (error) => {
+      this.onerror?.(error);
+    };
+    this.inner.onmessage = (message, extra) => {
+      const id = incomingRequestId(message);
+      if (id !== undefined) this.reaper.beginRequest(id);
+      this.reaper.touch();
+      this.onmessage?.(message, extra);
+    };
+    await this.inner.start();
+  }
+
+  async send(message: JSONRPCMessage, options?: TransportSendOptions): Promise<void> {
+    try {
+      await this.inner.send(message, options);
+    } finally {
+      const id = outgoingResponseId(message);
+      if (id !== undefined) this.reaper.endRequest(id);
+      this.reaper.touch();
+    }
+  }
+
+  async close(): Promise<void> {
+    this.reaper.stop();
+    await this.inner.close();
+  }
+}
+
+function incomingRequestId(message: JSONRPCMessage): RequestId | undefined {
+  if (!isJsonObject(message)) return undefined;
+  const record = message as Record<string, unknown>;
+  if (typeof record.method !== "string") return undefined;
+  return requestId(record.id);
+}
+
+function outgoingResponseId(message: JSONRPCMessage): RequestId | undefined {
+  if (!isJsonObject(message)) return undefined;
+  const record = message as Record<string, unknown>;
+  if ("method" in record) return undefined;
+  return requestId(record.id);
+}
+
+function requestId(id: unknown): RequestId | undefined {
+  return typeof id === "string" || typeof id === "number" ? id : undefined;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // Config can be supplied two ways:

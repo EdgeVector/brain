@@ -56,6 +56,7 @@ export { APP_CAPABILITY_HEADER, CAPABILITY_TS_HEADER };
 
 /** Poll interval for consent-status, per the design contract (every 2s). */
 export const CONSENT_POLL_INTERVAL_MS = 2000;
+export const MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS = 3;
 
 // Token wire types + decode + the JCS integrity check come from the SDK — the
 // exact same shapes and checks every FoldDB app runs (and the same the Rust
@@ -379,6 +380,8 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   }
 
   const deadline = Date.now() + maxWaitMs;
+  let consecutiveUnexpectedStatuses = 0;
+  let lastUnexpectedStatus = 0;
   for (;;) {
     const res = await opts.transport.consentStatus(requestId);
     if (res.status === 200) {
@@ -452,7 +455,24 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
         hint: `Re-run the fbrain command to start a fresh request.`,
       });
     }
-    // 202 pending (or any transient) → keep polling until the deadline.
+    if (res.status === 202) {
+      consecutiveUnexpectedStatuses = 0;
+      lastUnexpectedStatus = 0;
+    } else {
+      consecutiveUnexpectedStatuses++;
+      lastUnexpectedStatus = res.status;
+      if (consecutiveUnexpectedStatuses >= MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS) {
+        throw new FbrainError({
+          code: `consent_status_http_${lastUnexpectedStatus}`,
+          message:
+            `consent-status returned HTTP ${lastUnexpectedStatus} ` +
+            `${consecutiveUnexpectedStatuses} times while waiting for consent.`,
+          hint:
+            `Inspect the node log for consent-status HTTP ${lastUnexpectedStatus}, then re-run the fbrain command.`,
+        });
+      }
+    }
+    // 202 pending (or a bounded run of unexpected statuses) → keep polling until the deadline.
     if (Date.now() >= deadline) {
       throw new FbrainError({
         code: "consent_timeout",

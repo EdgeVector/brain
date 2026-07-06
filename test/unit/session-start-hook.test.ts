@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   buildAdditionalContext,
@@ -111,5 +114,27 @@ describe("session-start hook", () => {
     expect(body).toContain("alpha - Alpha");
     expect(body).toContain("...");
     expect(body.length).toBeLessThan(280);
+  });
+
+  test("transcript scan skips torn JSON lines and still uses older user context", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-session-hook-"));
+    try {
+      const transcript = join(dir, "transcript.jsonl");
+      writeFileSync(
+        transcript,
+        [
+          JSON.stringify({ type: "user", message: "older context survives" }),
+          "{\"type\":\"assistant\",\"message\":\"ok\"",
+        ].join("\n"),
+      );
+      const query = buildSessionStartQuery(
+        { transcript_path: transcript },
+        "/tmp/project",
+        {},
+      );
+      expect(query).toContain("transcript: older context survives");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

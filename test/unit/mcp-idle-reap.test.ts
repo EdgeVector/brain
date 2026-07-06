@@ -8,7 +8,10 @@ import {
   DEFAULT_MCP_IDLE_TIMEOUT_MS,
   makeIdleReaper,
   mcpIdleTimeoutMs,
+  withIdleReaper,
 } from "../../src/mcp/server.ts";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -38,8 +41,13 @@ describe("mcpIdleTimeoutMs", () => {
     withEnv("60000", () => expect(mcpIdleTimeoutMs()).toBe(60000));
   });
 
-  test("a non-numeric value falls back to the default", () => {
-    withEnv("banana", () => expect(mcpIdleTimeoutMs()).toBe(DEFAULT_MCP_IDLE_TIMEOUT_MS));
+  test("non-integer values are rejected loudly", () => {
+    withEnv("banana", () => {
+      expect(() => mcpIdleTimeoutMs()).toThrow("FBRAIN_MCP_IDLE_TIMEOUT_MS");
+    });
+    withEnv("30m", () => {
+      expect(() => mcpIdleTimeoutMs()).toThrow("integer number of milliseconds");
+    });
   });
 
   test("0 and negative values are honored so the caller can disable", () => {
@@ -86,5 +94,44 @@ describe("makeIdleReaper", () => {
     reaper.touch();
     await sleep(30);
     expect(fired).toBe(0);
+  });
+});
+
+describe("withIdleReaper", () => {
+  class FakeTransport implements Transport {
+    onclose?: () => void;
+    onerror?: (error: Error) => void;
+    onmessage?: (message: JSONRPCMessage) => void;
+    sent: JSONRPCMessage[] = [];
+
+    async start(): Promise<void> {}
+    async send(message: JSONRPCMessage): Promise<void> {
+      this.sent.push(message);
+    }
+    async close(): Promise<void> {
+      this.onclose?.();
+    }
+    receive(message: JSONRPCMessage): void {
+      this.onmessage?.(message);
+    }
+  }
+
+  test("does not reap while a request is in flight, then reaps after the response", async () => {
+    let fired = 0;
+    const inner = new FakeTransport();
+    const transport = withIdleReaper(
+      inner,
+      makeIdleReaper({ idleMs: 100, onIdle: () => fired++ }),
+    );
+    transport.onmessage = () => {};
+    await transport.start();
+
+    inner.receive({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} });
+    await sleep(180);
+    expect(fired).toBe(0);
+
+    await transport.send({ jsonrpc: "2.0", id: 1, result: {} });
+    await sleep(140);
+    expect(fired).toBe(1);
   });
 });
