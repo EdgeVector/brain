@@ -59,12 +59,13 @@ export const USAGE_ERROR = 2;
 // with the `throw new FbrainError({ code: ... })` sites in this file that
 // reject malformed invocations (flag parsing, positional arity, flag
 // combinations, numeric/type validation) — see `parseCommandArgs`,
-// `validatePositiveIntFlag`, `parseRecordType`, and the per-command guards.
+// `strictInt`, `parseRecordType`, and the per-command guards.
 export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "unknown_option",
   "unknown_init_option",
   "node_url_is_init_only",
   "extra_positional_args",
+  "slug_and_filter",
   "unexpected_positional",
   "invalid_type",
   "invalid_min_score",
@@ -1156,67 +1157,85 @@ function consumeFlag(argv: Argv, name: string): boolean {
   return true;
 }
 
-// Return the token immediately following `flag` in argv (e.g. peek the
-// value of `-n` before parseArgs runs). Returns undefined if the flag
-// isn't present or is the last token. Used to validate values that
-// would otherwise trip parseArgs's short-option detection — `-n -1`
-// reads `-1` as a new option and produces a cryptic error.
-function peekNextValue(argv: Argv, flag: string): string | undefined {
-  const i = argv.indexOf(flag);
-  if (i === -1 || i === argv.length - 1) return undefined;
-  return argv[i + 1];
+type IntFlagSpec = {
+  flag: string;
+  canonical: string;
+};
+
+const LIMIT_INT_FLAGS: readonly IntFlagSpec[] = [
+  { flag: "-n", canonical: "--limit" },
+  { flag: "--limit", canonical: "--limit" },
+];
+const BODY_LIMIT_INT_FLAGS: readonly IntFlagSpec[] = [
+  { flag: "--body-limit", canonical: "--body-limit" },
+];
+const OFFSET_INT_FLAGS: readonly IntFlagSpec[] = [
+  { flag: "--offset", canonical: "--offset" },
+];
+const USAGE_WINDOW_INT_FLAGS: readonly IntFlagSpec[] = [
+  { flag: "--usage-window", canonical: "--usage-window" },
+];
+
+// node:util parseArgs treats `--limit -1` as an ambiguous option value, while
+// `--limit=-1` parses cleanly. Normalize only the known integer flags and only
+// negative-looking value tokens, then validate the parsed last value below.
+function normalizeNegativeIntFlagValues(
+  argv: Argv,
+  flags: readonly IntFlagSpec[],
+): Argv {
+  const out: Argv = [];
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === "--") {
+      out.push(...argv.slice(i));
+      break;
+    }
+    const spec = flags.find((candidate) => candidate.flag === token);
+    const next = argv[i + 1];
+    if (spec && next !== undefined && /^-\d/.test(next)) {
+      out.push(`${spec.canonical}=${next}`);
+      i++;
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
 }
 
-// Validate that `flag`'s value is a positive integer BEFORE parseArgs runs.
-// Three failure modes parseArgs doesn't catch cleanly:
-//   - `flag -1` produces parseArgs's cryptic "Option '<flag>' argument is
-//     ambiguous" (it reads `-1` as a new option, not <flag>'s value).
-//   - `flag 3.5` is silently parseInt'd to 3.
-//   - `flag 5abc` is silently parseInt'd to 5.
-// The strict `String(n) !== raw.trim()` check rejects both junk-tail forms;
-// running before parseArgs avoids the ambiguous-option error. Same shape as
-// the integer-flag chain in PRs #87/#88/#89.
-function validatePositiveIntFlag(
-  argv: Argv,
-  flag: string,
-  code: string,
-): void {
-  const raw = peekNextValue(argv, flag);
-  if (raw === undefined) return;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || String(n) !== raw.trim() || n < 1) {
+function lastIntFlagSpelling(argv: Argv, flags: readonly IntFlagSpec[]): string {
+  let last = flags[0]?.flag ?? "flag";
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === "--") break;
+    for (const spec of flags) {
+      if (token === spec.flag || token.startsWith(`${spec.flag}=`)) {
+        last = spec.flag;
+      }
+    }
+  }
+  return last;
+}
+
+function strictInt(
+  raw: string | undefined,
+  opts: {
+    flag: string;
+    min: number;
+    code: string;
+  },
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  const n = parseInt(trimmed, 10);
+  if (!Number.isFinite(n) || String(n) !== trimmed || n < opts.min) {
     throw new FbrainError({
-      code,
-      message: `${flag} must be a positive integer (got "${raw}").`,
+      code: opts.code,
+      message: `${opts.flag} must be a ${
+        opts.min === 0 ? "non-negative" : "positive"
+      } integer (got "${raw}").`,
     });
   }
-}
-
-// `-n` and `--limit` are interchangeable aliases across list/search/ask.
-// Validate whichever spelling the user typed before parseArgs runs.
-function validateLimitFlag(argv: Argv): void {
-  validatePositiveIntFlag(argv, "-n", "invalid_limit");
-  validatePositiveIntFlag(argv, "--limit", "invalid_limit");
-}
-
-// Validate that `flag`'s value is a NON-negative integer (>= 0) BEFORE
-// parseArgs runs. Same junk-tail / ambiguous-option guards as
-// `validatePositiveIntFlag`, but `--offset 0` is legal (page from the
-// top), so the lower bound is 0 rather than 1.
-function validateNonNegativeIntFlag(
-  argv: Argv,
-  flag: string,
-  code: string,
-): void {
-  const raw = peekNextValue(argv, flag);
-  if (raw === undefined) return;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || String(n) !== raw.trim() || n < 0) {
-    throw new FbrainError({
-      code,
-      message: `${flag} must be a non-negative integer (got "${raw}").`,
-    });
-  }
+  return n;
 }
 
 // Parse a `--updated-since` value into epoch-millis. Accepts either an
@@ -1636,7 +1655,11 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     // at the status-update intent; genuinely unrecognizable input (a bad flag,
     // a typo'd verb that missed the Levenshtein threshold) still falls through
     // to the bare help dump below.
-    const statusValue = peekNextValue(args, "--status");
+    const statusFlagIndex = args.indexOf("--status");
+    const statusValue =
+      statusFlagIndex === -1 || statusFlagIndex === args.length - 1
+        ? undefined
+        : args[statusFlagIndex + 1];
     const subIsSlugShaped =
       sub !== undefined && !sub.startsWith("-") && /^[a-z0-9][a-z0-9-_]*$/.test(sub);
     if (subIsSlugShaped || statusValue !== undefined) {
@@ -2032,10 +2055,10 @@ export async function withTypeAsPositionalHint<T>(
 }
 
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
-  validatePositiveIntFlag(args, "--body-limit", "invalid_body_limit");
+  const intArgs = normalizeNegativeIntFlagValues(args, BODY_LIMIT_INT_FLAGS);
   const { values, positionals } = parseCommandArgs(
     {
-      args,
+      args: intArgs,
       strict: true,
       allowPositionals: true,
       options: GET_OPTIONS,
@@ -2059,26 +2082,24 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   // is untouched — it still gets the `list --type design` hint below.
   if (positionals.length > 1 && isRecordType(slug)) {
     throw new FbrainError({
-      code: "not_found",
+      code: "unexpected_positional",
       message: `No record with slug "${slug}".`,
       hint: `"${slug}" is a record type — did you mean \`fbrain get ${positionals[1]} --type ${slug}\`?`,
     });
   }
-  // Surplus positionals where the first ISN'T a type: `get` only consumes the
-  // slug, so don't let the rest vanish without a trace — warn that they're
-  // ignored (still proceeds to look up positionals[0]).
   if (positionals.length > 1) {
-    console.error(
-      `note: \`get\` takes a single slug; ignoring extra positional${
-        positionals.length > 2 ? "s" : ""
-      } ${positionals.slice(1).map((p) => `"${p}"`).join(", ")}.`,
-    );
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `get takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain get <slug>` once per record, or use `--type T` to disambiguate a slug.",
+    });
   }
   const type = parseRecordType(values.type);
-  const bodyLimit =
-    values["body-limit"] === undefined
-      ? undefined
-      : parseInt(values["body-limit"], 10);
+  const bodyLimit = strictInt(values["body-limit"], {
+    flag: lastIntFlagSpelling(args, BODY_LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_body_limit",
+  });
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
@@ -2089,13 +2110,15 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
-  validateLimitFlag(args);
-  validateNonNegativeIntFlag(args, "--offset", "invalid_offset");
+  const intArgs = normalizeNegativeIntFlagValues(args, [
+    ...LIMIT_INT_FLAGS,
+    ...OFFSET_INT_FLAGS,
+  ]);
   let parsed;
   try {
     parsed = parseCommandArgs(
       {
-        args,
+        args: intArgs,
         strict: true,
         allowPositionals: false,
         options: LIST_OPTIONS,
@@ -2124,11 +2147,18 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     throw err;
   }
   const { values } = parsed;
-  const cfg = readConfig();
   const type = parseRecordType(values.type);
-  const limit = values.limit ? parseInt(values.limit, 10) : undefined;
-  const offset =
-    values.offset !== undefined ? parseInt(values.offset, 10) : undefined;
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
+  const offset = strictInt(values.offset, {
+    flag: lastIntFlagSpelling(args, OFFSET_INT_FLAGS),
+    min: 0,
+    code: "invalid_offset",
+  });
+  const cfg = readConfig();
   const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose };
   if (type) lOpts.type = type;
   if (values.status) lOpts.status = values.status;
@@ -2289,10 +2319,10 @@ async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
-  validateLimitFlag(args);
+  const intArgs = normalizeNegativeIntFlagValues(args, LIMIT_INT_FLAGS);
   const { values, positionals } = parseCommandArgs(
     {
-      args,
+      args: intArgs,
       strict: true,
       allowPositionals: true,
       options: SEARCH_OPTIONS,
@@ -2326,8 +2356,12 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
     }
     minScore = n;
   }
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
   const cfg = readConfig();
-  const limit = values.limit ? parseInt(values.limit, 10) : undefined;
   const sOpts: Parameters<typeof searchCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number" && Number.isFinite(limit)) sOpts.limit = limit;
   if (values.exact) sOpts.exact = true;
@@ -2339,10 +2373,10 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
-  validateLimitFlag(args);
+  const intArgs = normalizeNegativeIntFlagValues(args, LIMIT_INT_FLAGS);
   const { values, positionals } = parseCommandArgs(
     {
-      args,
+      args: intArgs,
       strict: true,
       allowPositionals: true,
       options: ASK_OPTIONS,
@@ -2378,7 +2412,11 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   // Validate --type before readConfig so an unknown type surfaces even on
   // an un-init'd machine.
   const askTypes = parseRecordTypeList(values.type);
-  const limit = values.limit ? parseInt(values.limit, 10) : undefined;
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
   const cfg = readConfig();
   const aOpts: Parameters<typeof askCmd>[0] = { cfg, query, verbose };
   if (typeof limit === "number") aOpts.limit = limit;
@@ -2485,10 +2523,10 @@ async function runGate(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
-  validatePositiveIntFlag(args, "--usage-window", "invalid_usage_window");
+  const intArgs = normalizeNegativeIntFlagValues(args, USAGE_WINDOW_INT_FLAGS);
   const { values } = parseCommandArgs(
     {
-      args,
+      args: intArgs,
       strict: true,
       allowPositionals: false,
       options: DOCTOR_OPTIONS,
@@ -2537,7 +2575,12 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     dOpts.usage = true;
     const windowArg = values["usage-window"];
     const usageOpts: NonNullable<typeof dOpts.usageOptions> = {};
-    if (windowArg !== undefined) usageOpts.windowDays = parseInt(windowArg, 10);
+    const windowDays = strictInt(windowArg, {
+      flag: lastIntFlagSpelling(args, USAGE_WINDOW_INT_FLAGS),
+      min: 1,
+      code: "invalid_usage_window",
+    });
+    if (windowDays !== undefined) usageOpts.windowDays = windowDays;
     if (values["usage-path"]) usageOpts.usagePath = values["usage-path"];
     dOpts.usageOptions = usageOpts;
   }
@@ -2545,10 +2588,16 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runShare(args: Argv): Promise<number> {
-  parseCommandArgs(
+  const { positionals } = parseCommandArgs(
     { args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS },
     "share",
   );
+  if (positionals.length > 0) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `share takes no positional arguments (got ${positionals.length}: ${positionals.join(", ")}).`,
+    });
+  }
   return shareCmd();
 }
 
@@ -2653,7 +2702,7 @@ export async function runMcpCmd(args: Argv): Promise<number> {
   // `install`/`setup` accept `--yes` + `--claude-md`, while `instructions` and
   // bare `mcp` accept none. Peek the subcommand from the first positional
   // (flags can't precede it) before parsing so each gets the right option set.
-  const sub = args.find((a) => !a.startsWith("-"));
+  const sub = args[0]?.startsWith("-") ? undefined : args[0];
 
   // `fbrain mcp install` (alias `setup`) — the one-shot agent-wiring command:
   // verify the `fbrain-mcp` entrypoint, register the MCP server with Claude
@@ -2892,6 +2941,12 @@ async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
   if (!method || !path) {
     console.error(COMMAND_HELP.raw);
     return USAGE_ERROR;
+  }
+  if (positionals.length > 3) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `raw takes method, path, and optional body (got ${positionals.length}: ${positionals.join(", ")}).`,
+    });
   }
   const cfg = readConfig();
   const rOpts: Parameters<typeof rawCmd>[0] = {

@@ -189,7 +189,7 @@ describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
 
   test("two positionals with a record-type first nudge at `get <slug> --type <type>`", async () => {
     const { code, stderr } = await runCli(["get", "design", "my-first-idea"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain('"design" is a record type');
     // Points at the corrected command, preserving the slug they typed.
     expect(stderr).toContain("fbrain get my-first-idea --type design");
@@ -217,10 +217,14 @@ describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
     expect(stderr).not.toContain("--type design`?");
   });
 
-  test("two positionals where the first is NOT a type warns the extra is ignored", async () => {
-    // `fbrain get my-slug stray` — "my-slug" isn't a type, so we still look
-    // it up, but the surplus positional must not vanish silently.
-    const { stderr } = await runCli(["get", "my-slug", "stray"]);
-    expect(stderr).toContain('ignoring extra positional "stray"');
+  test("two positionals where the first is NOT a type are rejected", async () => {
+    // `fbrain get my-slug stray` — "my-slug" isn't a type, so the generic
+    // extra-positional guard should fire before config/node access.
+    const { code, stderr } = await runCli(["get", "my-slug", "stray"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("get takes exactly one slug");
+    expect(stderr).toContain("my-slug");
+    expect(stderr).toContain("stray");
+    expect(stderr.toLowerCase()).not.toContain("config");
   });
 });

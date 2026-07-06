@@ -48,7 +48,7 @@ describe("fbrain delete filter-mode argument routing", () => {
 
   test("`fbrain delete <slug> --tag T` (slug AND filter) is rejected", async () => {
     const { code, stderr } = await runCli(["delete", "some-slug", "--tag", "junk"]);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain("EITHER a <slug> OR filter selectors");
     expect(stderr).toContain("some-slug");
     // Never reaches config — guard fires before any I/O.
