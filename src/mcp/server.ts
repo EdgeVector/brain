@@ -34,8 +34,7 @@ import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts"
 import { RECORD_TYPES } from "../schemas.ts";
 import { establishConsentInline } from "../commands/init-consent.ts";
 import {
-  isTombstoned,
-  listRecords,
+  listLiveSlugsPage,
   schemaHashFor,
 } from "../record.ts";
 
@@ -1809,6 +1808,13 @@ async function enrichGetNotFoundError(
   });
 }
 
+// Fuzzy-match candidates for the get-miss hint. COST-BOUNDED by design: one
+// small slug+tags page per type (`listLiveSlugsPage` — no bodies, no
+// pagination), never `listRecords`' full-field full-corpus fetch. The hint is
+// best-effort decoration on an error path, so sampling the first page per
+// type is the contract; on a brain whose type outgrows the page the hint may
+// simply miss a candidate, which is acceptable — the not_found error itself
+// is unchanged.
 async function nearestSlugCandidates(
   cfg: Config,
   slug: string,
@@ -1819,13 +1825,12 @@ async function nearestSlugCandidates(
   const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
   for (const t of types) {
     try {
-      const records = await listRecords(node, t, schemaHashFor(t, cfg));
-      for (const record of records) {
-        if (isTombstoned(record)) continue;
+      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg));
+      for (const candidateSlug of slugs) {
         candidates.push({
-          slug: record.slug,
+          slug: candidateSlug,
           type: t,
-          score: slugFuzzyScore(slug, record.slug),
+          score: slugFuzzyScore(slug, candidateSlug),
         });
       }
     } catch {

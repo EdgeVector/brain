@@ -310,16 +310,61 @@ export async function listRecordKeys(
   return keys;
 }
 
+// Page size for the no-match probe/hint paths (`hasAnyLiveRecord`,
+// `listLiveSlugsPage`). Matches the node's own `/api/query` default page
+// (DEFAULT_QUERY_LIMIT=100 in fold_db_node) — small enough that a probe on a
+// populated brain stays a single cheap round trip, large enough that a page
+// made entirely of tombstones is vanishingly unlikely to hide a live record.
+export const NO_MATCH_PROBE_PAGE_LIMIT = 100;
+
+// The two projections the no-match paths need: `tags` to drop tombstones,
+// `slug` for the nearest-slug hint. Critically NO `body`/`title` — those are
+// the heavy fields whose fetch on every no-match path this projection removes.
+const LIVE_SLUG_PAGE_FIELDS = ["slug", "tags"];
+
+// ONE small `/api/query` page of live (non-tombstoned) slugs for a schema —
+// slug+tags projection only, `limit` rows max, never paginated. This is the
+// bounded primitive behind the no-match hint paths: the empty-brain probe
+// (`hasAnyLiveRecord`) and the MCP fbrain_get nearest-slug candidate scan.
+// Both are best-effort decoration, so sampling the first page is the
+// contract — callers that need the COMPLETE row set use `listRecords` /
+// `listRecordKeys` (paginated, guarded) instead. Falls back to `queryAll`
+// only for a NodeClient without `queryPage` (hand-built test mocks); the
+// real client always has it.
+export async function listLiveSlugsPage(
+  node: NodeClient,
+  schemaHash: string,
+  limit: number = NO_MATCH_PROBE_PAGE_LIMIT,
+): Promise<string[]> {
+  const rows = node.queryPage
+    ? await node.queryPage({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS, limit })
+    : (await node.queryAll({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS })).results.slice(
+        0,
+        limit,
+      );
+  const slugs: string[] = [];
+  for (const row of rows) {
+    const f = (row.fields ?? {}) as Record<string, unknown>;
+    // Same tombstone test the full read path uses, via the shared array
+    // parser, so a phantom empty tag / string-encoded list can't make the
+    // probe disagree with `listRecords` on what's live.
+    const tags = arrayStringField(f, "tags");
+    if (tags.includes(TOMBSTONE_TAG)) continue;
+    slugs.push(stringField(f, "slug"));
+  }
+  return slugs;
+}
+
 // Cheap "does this brain hold ANY live record?" probe, used only on the
-// search/ask no-match path to distinguish a brand-new EMPTY brain (a new dev
-// who hasn't created anything yet) from a populated brain whose query simply
-// matched nothing. Walks fbrain's distinct schema hashes and asks each for a
-// small page (the node's `/api/query` defaults to 100 rows — enough that a
-// page made entirely of tombstones is vanishingly unlikely to hide the one
-// live record we care about), returning true on the FIRST live (non-tombstone)
-// row seen. The types in `RECORD_TYPES` collapse onto a handful of unique
-// schema hashes (the Phase 6 types share the unified MEMO hash), so this is at
-// most a few round trips and short-circuits the instant any record is found.
+// search/ask/list no-match path to distinguish a brand-new EMPTY brain (a new
+// dev who hasn't created anything yet) from a populated brain whose query
+// simply matched nothing. Walks fbrain's distinct schema hashes and asks each
+// for ONE small slug+tags page (`listLiveSlugsPage` — never a paginated
+// full-field fetch), returning true on the FIRST live (non-tombstone) row
+// seen. The types in `RECORD_TYPES` collapse onto a handful of unique schema
+// hashes (the Phase 6 types share the unified MEMO hash), so this is at most
+// a few single-page round trips and short-circuits the instant any record is
+// found.
 //
 // Returns `false` only when every schema hash comes back with no live row —
 // i.e. the empty-brain case. Errors propagate (a probe that can't reach the
@@ -330,21 +375,14 @@ export async function hasAnyLiveRecord(
 ): Promise<boolean> {
   const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
   for (const schemaHash of hashes) {
-    // We only need to know whether a live row EXISTS, so map each hash back to
-    // one representative type for field selection. The unified MEMO types all
-    // share fields, so any type on the hash hydrates the slug/tags we read.
-    const type = RECORD_TYPES.find((t) => cfg.schemaHashes[t] === schemaHash);
-    if (!type) continue;
-    let res;
+    let slugs: string[];
     try {
-      res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
+      slugs = await listLiveSlugsPage(node, schemaHash);
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) continue;
       throw err;
     }
-    for (const row of res.results) {
-      if (!isTombstoned(rowToRecord(row, type))) return true;
-    }
+    if (slugs.length > 0) return true;
   }
   return false;
 }

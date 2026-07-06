@@ -183,29 +183,58 @@ function fieldsForLinkUpdate(
   return fields;
 }
 
-// Best-effort cross-type lookup: returns the first non-design type the slug
-// resolves under, or null if it resolves nowhere (or only flakes). Each per-
-// type query is wrapped so a missing schema hash or a thrown lookup doesn't
+// Best-effort cross-type lookup: returns the first non-target type the slug
+// resolves under, or null if it resolves nowhere (or only flakes). Each
+// lookup is wrapped so a missing schema hash or a thrown lookup doesn't
 // crash the wrong-type hint — a flake just falls through to the existing
 // "No design / Create the design first" message, preserving the pre-fix UX
 // on the unhappy path while improving it on the happy one.
+//
+// COST-BOUNDED error decoration: this fires only to dress up a failure, so it
+// must stay cheaper than the happy path, not fan out wider. Two bounds:
+//   1. Lookups are grouped by UNIQUE schema hash — the Phase 6 types share
+//      the unified MEMO hash, so querying per-TYPE issued the same keyed
+//      lookup several times over; one probe per hash answers for all the
+//      types mapped onto it.
+//   2. Probes run SEQUENTIALLY with an early exit on the first hit (instead
+//      of the previous unconditional parallel fan-out across every type), so
+//      the typical wrong-type case costs one or two single-attempt keyed
+//      point-reads (`findBySlug` — no retry budget), and the worst case is
+//      one small keyed query per unique schema hash.
 async function findOtherTypeForSlug(
   node: Parameters<typeof findBySlug>[0],
   cfg: Config,
   slug: string,
   targetType: RecordType,
 ): Promise<RecordType | null> {
-  const otherTypes = RECORD_TYPES.filter((t): t is RecordType => t !== targetType);
-  const matches = await Promise.all(
-    otherTypes.map(async (t) => {
-      try {
-        const hash = schemaHashFor(t, cfg);
-        const row = await findBySlug(node, t, hash, slug);
-        return row ? t : null;
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return matches.find((t): t is RecordType => t !== null) ?? null;
+  // Group the non-target types by schema hash, preserving RECORD_TYPES order
+  // (the returned type label for a shared-hash hit is the first type mapped
+  // onto that hash — the same first-match-wins answer the old per-type sweep
+  // produced).
+  const typesByHash = new Map<string, RecordType>();
+  for (const t of RECORD_TYPES) {
+    if (t === targetType) continue;
+    let hash: string;
+    try {
+      hash = schemaHashFor(t, cfg);
+    } catch {
+      continue; // partially-initialised config — skip, as before
+    }
+    if (!typesByHash.has(hash)) typesByHash.set(hash, t);
+  }
+  // Don't re-probe the target type's own schema through a shared hash.
+  try {
+    typesByHash.delete(schemaHashFor(targetType, cfg));
+  } catch {
+    // target hash unavailable — nothing to exclude
+  }
+  for (const [hash, t] of typesByHash) {
+    try {
+      const row = await findBySlug(node, t, hash, slug);
+      if (row) return t;
+    } catch {
+      // Best-effort: a flaked probe falls through to the next hash.
+    }
+  }
+  return null;
 }
