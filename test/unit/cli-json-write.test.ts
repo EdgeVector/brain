@@ -21,7 +21,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { CLI_SPEC } from "../../src/cli.ts";
+import { CLI_SPEC, main } from "../../src/cli.ts";
+import { writeConfig } from "../../src/config.ts";
+import { buildTestCfg } from "../util.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
@@ -107,4 +109,103 @@ describe("write-verb help documents --json + the emitted object", () => {
       expect(stdout).toMatch(shape);
     });
   }
+});
+
+describe("filter delete --json partial failure", () => {
+  test("emits one batch payload on stdout when a per-record failure makes the command exit non-zero", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-json-delete-batch-"));
+    const configPath = join(dir, "config.json");
+    const cfg = buildTestCfg({ nodeUrl: "http://node.test" });
+    writeConfig(cfg, configPath);
+
+    const rows = new Map<string, Record<string, unknown>>();
+    for (const slug of ["json-a", "json-b", "json-c"]) {
+      rows.set(slug, {
+        slug,
+        title: slug,
+        body: "B",
+        status: "draft",
+        tags: [],
+        created_at: "2026-05-01T00:00:00Z",
+        updated_at: "2026-05-01T00:00:00Z",
+      });
+    }
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    const originalFetch = globalThis.fetch;
+    const originalConfig = process.env.FBRAIN_CONFIG;
+    console.log = ((line?: unknown) => stdout.push(String(line ?? ""))) as typeof console.log;
+    console.error = ((line?: unknown) => stderr.push(String(line ?? ""))) as typeof console.error;
+    process.env.FBRAIN_CONFIG = configPath;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        const keyHash = body.filter?.HashKey;
+        if (keyHash === "json-b") {
+          return new Response(JSON.stringify({ error: "injected 503" }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const results = [...rows.entries()].map(([hash, fields]) => ({
+          fields,
+          key: { hash, range: null },
+        }));
+        return new Response(JSON.stringify({ ok: true, results }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/mutation")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.mutation_type === "update") {
+          rows.set(body.key_value.hash, body.fields_and_values);
+        }
+        return new Response(JSON.stringify({ ok: true, success: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const code = await main([
+        "delete",
+        "--status",
+        "draft",
+        "--type",
+        "design",
+        "--yes",
+        "--json",
+      ]);
+      expect(code).toBe(1);
+      expect(stdout).toHaveLength(1);
+      const payload = JSON.parse(stdout[0]!);
+      expect(payload.ok).toBe(false);
+      expect(payload.deleted.map((d: { slug: string }) => d.slug)).toEqual([
+        "json-a",
+        "json-c",
+      ]);
+      expect(payload.failed).toEqual([
+        {
+          type: "design",
+          slug: "json-b",
+          error: expect.stringContaining("node_http_503"),
+        },
+      ]);
+      expect(stderr.join("\n")).toContain("failed design json-b");
+      expect(stderr.join("\n")).not.toContain("error: Bulk delete");
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+      globalThis.fetch = originalFetch;
+      if (originalConfig === undefined) delete process.env.FBRAIN_CONFIG;
+      else process.env.FBRAIN_CONFIG = originalConfig;
+    }
+  });
 });
