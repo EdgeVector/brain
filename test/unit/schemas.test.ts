@@ -209,6 +209,16 @@ describe("schemas", () => {
     }
   });
 
+  test("UNIQUE_SCHEMAS user entries are derived from RECORD_TYPES/RECORDS order", () => {
+    const userEntries = UNIQUE_SCHEMAS.filter((entry) => entry.key !== "__tagindex__");
+    expect(userEntries.map((entry) => entry.key)).toEqual([...RECORD_TYPES]);
+    for (const entry of userEntries) {
+      const type = entry.key as RecordType;
+      expect(entry.schema).toBe(RECORDS[type].schema);
+      expect(entry.types).toEqual([type]);
+    }
+  });
+
   test.each([...RECORD_TYPES])(
     "isValidStatus accepts %s's default status",
     (type) => {

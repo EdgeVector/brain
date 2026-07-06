@@ -31,6 +31,7 @@ import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
+  buildRecordFields,
   type FbrainRecord,
   findBySlugRaw,
   isTombstoned,
@@ -43,7 +44,7 @@ import {
   TOMBSTONE_TAG,
   withReadRetry,
 } from "../record.ts";
-import { RECORDS, type RecordType } from "../schemas.ts";
+import { type RecordType } from "../schemas.ts";
 import {
   matchesListFilters,
   resolveListEntries,
@@ -129,8 +130,7 @@ export function buildTombstoneFields(
   createdAt: string,
   now: string,
 ): Record<string, unknown> {
-  const def = RECORDS[type];
-  const fields: Record<string, unknown> = {
+  return buildRecordFields(type, {
     slug,
     title: "(deleted)",
     body: "",
@@ -138,9 +138,7 @@ export function buildTombstoneFields(
     tags: [TOMBSTONE_TAG],
     created_at: createdAt,
     updated_at: now,
-  };
-  if (def.hasDesignSlug) fields.design_slug = "";
-  return fields;
+  });
 }
 
 // Soft-delete a single, ALREADY-RESOLVED live record: stamp the tombstone

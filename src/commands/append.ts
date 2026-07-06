@@ -18,8 +18,9 @@ import {
   nowIso,
   resolveBySlug,
   schemaHashFor,
+  updateFieldsFrom,
 } from "../record.ts";
-import { RECORDS, type RecordType } from "../schemas.ts";
+import { type RecordType } from "../schemas.ts";
 
 export type AppendOptions = {
   cfg: Config;
@@ -90,13 +91,10 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
 
   const hash = schemaHashFor(only.type, opts.cfg);
   const now = nowIso();
-  const def = RECORDS[only.type];
-  const fields: Record<string, unknown> = {
-    ...only.record,
+  const fields = updateFieldsFrom(only.record, only.type, {
     body: newBody,
     updated_at: now,
-  };
-  if (!def.hasDesignSlug) delete fields.design_slug;
+  });
   await node.updateRecord({
     schemaHash: hash,
     keyHash: slug,

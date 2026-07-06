@@ -1,6 +1,6 @@
 // Schema definitions for fbrain's record types.
 //
-// Nine schemas are registered:
+// fbrain registers one schema per record type, plus internal support schemas:
 //
 //   - **Design**, **Task** — Phase 1, unchanged.
 //   - **Concept**, **Preference**, **Reference**, **Agent**, **Project**,
@@ -193,54 +193,11 @@ function phase6Schema(
   };
 }
 
-export const designSchema: AddSchemaRequest = {
-  schema: {
-    name: "Design",
-    owner_app_id: OWNER_APP_ID,
-    descriptive_name: "Design",
-    purpose_statement: "Design",
-    schema_type: "Hash",
-    key: { hash_field: "slug" },
-    fields: [
-      "slug",
-      "title",
-      "body",
-      "status",
-      "tags",
-      "created_at",
-      "updated_at",
-    ],
-    field_types: {
-      slug: "String",
-      title: "String",
-      body: "String",
-      status: "String",
-      tags: { Array: "String" },
-      created_at: "String",
-      updated_at: "String",
-    },
-    field_descriptions: {
-      slug: "stable url-style id",
-      title: "one-line name",
-      body: "markdown content",
-      status: DESIGN_STATUSES.join("|"),
-      tags: "array of freeform tags",
-      created_at: "RFC 3339 timestamp",
-      updated_at: "RFC 3339 timestamp",
-    },
-    field_classifications: { title: ["word"], body: ["word"] },
-    field_data_classifications: {
-      slug: GENERAL,
-      title: GENERAL,
-      body: GENERAL,
-      status: GENERAL,
-      tags: GENERAL,
-      created_at: GENERAL,
-      updated_at: GENERAL,
-    },
-  },
-  mutation_mappers: {},
-};
+export const designSchema: AddSchemaRequest = phase6Schema(
+  "Design",
+  "Design",
+  DESIGN_STATUSES,
+);
 
 export const taskSchema: AddSchemaRequest = {
   schema: {
@@ -562,22 +519,21 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
 // entry binds a config-key (where `init` writes the canonical hash) to
 // the AddSchemaRequest. One entry per RecordType — no legacy alias.
-export const UNIQUE_SCHEMAS: Array<{
+export type UniqueSchemaEntry = {
   key: string;
   schema: AddSchemaRequest;
   types: RecordType[];
   extraKeys?: string[];
-}> = [
-  { key: "design", schema: designSchema, types: ["design"] },
-  { key: "task", schema: taskSchema, types: ["task"] },
-  { key: "concept", schema: conceptSchema, types: ["concept"] },
-  { key: "preference", schema: preferenceSchema, types: ["preference"] },
-  { key: "reference", schema: referenceSchema, types: ["reference"] },
-  { key: "agent", schema: agentSchema, types: ["agent"] },
-  { key: "project", schema: projectSchema, types: ["project"] },
-  { key: "spike", schema: spikeSchema, types: ["spike"] },
-  { key: "sop", schema: sopSchema, types: ["sop"] },
-  { key: "decision", schema: decisionSchema, types: ["decision"] },
+};
+
+export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
+  ...RECORD_TYPES.map(
+    (type): UniqueSchemaEntry => ({
+      key: type,
+      schema: RECORDS[type].schema,
+      types: [type],
+    }),
+  ),
   {
     key: TAG_INDEX_SCHEMA_KEY,
     schema: tagIndexSchema,
@@ -597,7 +553,7 @@ export function schemaConfigKeys(entry: {
 // the node loaded out of the schema-service catalog (GET /api/schemas). The
 // match key is (descriptive_name, owner_app_id) — exactly the two signals the
 // schema service folds into a namespaced identity. This is the fresh-consumer
-// path: the 8 `fbrain/*` schemas are pre-published org-wide, so init reads
+// path: the `fbrain/*` record schemas are pre-published org-wide, so init reads
 // their canonical hashes here instead of re-POSTing (which needs a DevCert).
 export function resolveOwnedSchemaHash(
   req: AddSchemaRequest,
@@ -619,7 +575,7 @@ export function resolveOwnedSchemaHash(
 }
 
 // Human-facing "what is this type for" one-liners, surfaced in the README
-// and the top-level CLI help so a brand-new dev can tell which of the 8
+// and the top-level CLI help so a brand-new dev can tell which record type
 // record types to reach for. SINGLE SHARED SOURCE — both surfaces read this
 // map, so they cannot drift.
 //

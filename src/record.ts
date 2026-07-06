@@ -224,6 +224,87 @@ export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
   return base;
 }
 
+export type RecordFieldBase = {
+  slug: string;
+  title: string;
+  body: string;
+  status: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  design_slug?: string;
+  [extraField: string]: unknown;
+};
+
+export type RecordFieldPatch = {
+  slug?: string;
+  title?: string;
+  body?: string;
+  status?: string;
+  tags?: string[];
+  created_at?: string;
+  updated_at?: string;
+  design_slug?: string;
+  [extraField: string]: unknown;
+};
+
+function patchedValue(
+  base: RecordFieldBase,
+  patch: RecordFieldPatch,
+  key: string,
+): unknown {
+  return Object.prototype.hasOwnProperty.call(patch, key) && patch[key] !== undefined
+    ? patch[key]
+    : base[key];
+}
+
+function patchedString(
+  base: RecordFieldBase,
+  patch: RecordFieldPatch,
+  key: string,
+  fallback = "",
+): string {
+  const value = patchedValue(base, patch, key);
+  return typeof value === "string" ? value : fallback;
+}
+
+function patchedTags(base: RecordFieldBase, patch: RecordFieldPatch): string[] {
+  const value = patchedValue(base, patch, "tags");
+  return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
+}
+
+export function buildRecordFields(
+  type: RecordType,
+  base: RecordFieldBase,
+  patch: RecordFieldPatch = {},
+): Record<string, unknown> {
+  const entry = RECORDS[type];
+  const fields: Record<string, unknown> = {
+    slug: patchedString(base, patch, "slug"),
+    title: patchedString(base, patch, "title"),
+    body: patchedString(base, patch, "body"),
+    status: patchedString(base, patch, "status", entry.defaultStatus),
+    tags: patchedTags(base, patch),
+    created_at: patchedString(base, patch, "created_at"),
+    updated_at: patchedString(base, patch, "updated_at"),
+  };
+  if (entry.hasDesignSlug) {
+    fields.design_slug = patchedString(base, patch, "design_slug");
+  }
+  for (const ef of entry.extraStringFields ?? []) {
+    fields[ef] = patchedString(base, patch, ef);
+  }
+  return fields;
+}
+
+export function updateFieldsFrom(
+  record: FbrainRecord,
+  type: RecordType,
+  patch: RecordFieldPatch,
+): Record<string, unknown> {
+  return buildRecordFields(type, record, patch);
+}
+
 export function stringField(f: Record<string, unknown>, key: string): string {
   const v = f[key];
   if (typeof v === "string") return v;

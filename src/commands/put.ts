@@ -27,12 +27,14 @@ import {
   ensureStatus,
   findBySlug,
   findCrossTypeSlugCollisions,
+  buildRecordFields,
   nowIso,
   type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
   verifyRecordVisible,
   type FbrainRecord,
+  type RecordFieldPatch,
 } from "../record.ts";
 import {
   RECORDS,
@@ -134,7 +136,31 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   }
   const now = nowIso();
 
-  const fields = buildFields(type, slug, title, body, parsed.tags, parsed.status, parsed.raw, existing, now);
+  const base: FbrainRecord = existing ?? {
+    slug,
+    title,
+    body,
+    status: RECORDS[type].defaultStatus,
+    tags: [],
+    created_at: now,
+    updated_at: now,
+  };
+  const patch: RecordFieldPatch = {
+    slug,
+    title,
+    body,
+    updated_at: now,
+  };
+  if (parsed.status !== undefined) patch.status = parsed.status;
+  if (parsed.tags !== undefined) patch.tags = parsed.tags;
+  if (type === "task" && typeof parsed.raw.design_slug === "string") {
+    patch.design_slug = parsed.raw.design_slug;
+  }
+  for (const ef of RECORDS[type].extraStringFields ?? []) {
+    const fromRaw = parsed.raw[ef];
+    if (typeof fromRaw === "string") patch[ef] = fromRaw;
+  }
+  const fields = buildRecordFields(type, base, patch);
 
   const action: "created" | "updated" = existing ? "updated" : "created";
   if (existing) {
@@ -199,56 +225,6 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     opts.vectorVerifyOptions,
   );
   return { type, slug, action, title, indexPending };
-}
-
-function buildFields(
-  type: RecordType,
-  slug: string,
-  title: string,
-  body: string,
-  // Optional explicit tags from frontmatter `tags:`. When the user wrote
-  // any `tags:` line — including `tags: []` — the parsed array wins (so
-  // an explicit clear is honored). When the user did NOT write `tags:`
-  // at all, this is `undefined` and existing tags are preserved on
-  // update, mirroring how `status` handles absence. Pre-fix, the parser
-  // defaulted to `[]` and a re-put without `tags:` silently clobbered
-  // the existing record's tags.
-  tags: string[] | undefined,
-  // Optional explicit status from frontmatter `status:`. When set, it
-  // wins over the existing record's status (so a `put` that carries
-  // `status: in_progress` actually lands that status) and over the
-  // type's default. Validated by the caller via `ensureStatus` before
-  // we get here — invalid values can't reach this point.
-  status: string | undefined,
-  // Every scalar frontmatter key (parseFrontmatter's `raw` map). Type-specific
-  // extra columns (e.g. a decision's program/gate_slug/decided_by/decided_on)
-  // are read from here: an explicit frontmatter value wins, else the existing
-  // record's value is preserved (mirroring how status/tags handle absence).
-  raw: Record<string, string | string[]>,
-  existing: FbrainRecord | null,
-  now: string,
-): Record<string, unknown> {
-  const entry = RECORDS[type];
-  const base: Record<string, unknown> = {
-    slug,
-    title,
-    body,
-    status: status ?? existing?.status ?? entry.defaultStatus,
-    tags: tags ?? existing?.tags ?? [],
-    created_at: existing?.created_at ?? now,
-    updated_at: now,
-  };
-  if (entry.hasDesignSlug) {
-    base.design_slug = existing?.design_slug ?? "";
-  }
-  for (const ef of entry.extraStringFields ?? []) {
-    const fromRaw = raw[ef];
-    base[ef] =
-      typeof fromRaw === "string"
-        ? fromRaw
-        : ((existing?.[ef] as string | undefined) ?? "");
-  }
-  return base;
 }
 
 // Two optional sources, must agree if both set, at least one required —
