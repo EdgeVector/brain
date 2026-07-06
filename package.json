@@ -26,10 +26,11 @@
     "bun": ">=1.3.10"
   },
   "bin": {
-    "fbrain": "src/cli.ts",
-    "fbrain-mcp": "src/mcp/main.ts"
+    "fbrain": "bin/fbrain",
+    "fbrain-mcp": "bin/fbrain-mcp"
   },
   "files": [
+    "bin",
     "src",
     "vendor",
     "tsconfig.json",
