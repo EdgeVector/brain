@@ -229,3 +229,79 @@ describe("newNodeClient.queryAll pagination guard", () => {
     expect(r.total_count).toBe(5);
   });
 });
+
+describe("newNodeClient.queryByKey ignored-filter guard", () => {
+  test("healthy keyed hit stays one filtered page", async () => {
+    const { calls } = installMockSequence([
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: [row("target")],
+          total_count: 1,
+          has_more: false,
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    const hit = await c.queryByKey?.({ schemaHash: "h", fields: ["slug"], keyHash: "target" });
+
+    expect(hit?.key?.hash).toBe("target");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.body).toMatchObject({
+      schema_name: "h",
+      fields: ["slug"],
+      filter: { HashKey: "target" },
+      limit: 1000,
+      offset: 0,
+    });
+  });
+
+  test("falls back to guarded scan when node ignores HashKey filter past first page", async () => {
+    const rows = Array.from({ length: 1500 }, (_, i) => row(`r${i}`));
+    rows[1200] = row("target");
+    const { calls } = installMockSequence([
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: rows.slice(0, 1000),
+          total_count: rows.length,
+          has_more: true,
+        },
+      },
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: rows.slice(0, 1000),
+          total_count: rows.length,
+          has_more: true,
+        },
+      },
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: rows.slice(1000),
+          total_count: rows.length,
+          has_more: false,
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    const hit = await c.queryByKey?.({ schemaHash: "h", fields: ["slug"], keyHash: "target" });
+
+    expect(hit?.key?.hash).toBe("target");
+    expect(calls).toHaveLength(3);
+    expect(calls[0]?.body).toMatchObject({
+      filter: { HashKey: "target" },
+      limit: 1000,
+      offset: 0,
+    });
+    expect(calls[1]?.body).toMatchObject({ limit: 1000, offset: 0 });
+    expect(calls[1]?.body).not.toHaveProperty("filter");
+    expect(calls[2]?.body).toMatchObject({ limit: 1000, offset: 1000 });
+    expect(calls[2]?.body).not.toHaveProperty("filter");
+  });
+});
