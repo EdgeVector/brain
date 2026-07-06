@@ -1,9 +1,8 @@
 // Single-source version string for `fbrain --version` (cli.ts) and the MCP
 // `serverInfo.version` (mcp/server.ts). Appends a git short-SHA suffix when
-// the running source lives in a git checkout — the `fbrain` bin runs
-// src/cli.ts directly out of the repo (`package.json` `bin.fbrain =
-// "src/cli.ts"`), so the SHA distinguishes one downloaded build from
-// another in bug reports. Falls back to bare `pkg.version` when git or
+// the running source lives in a git checkout — the global `fbrain` shim runs
+// src/cli.ts directly out of the repo, so the SHA distinguishes one downloaded
+// build from another in bug reports. Falls back to bare `pkg.version` when git or
 // `.git` is unavailable (installed outside a repo, sandboxed run, etc.).
 
 import { execFileSync } from "node:child_process";
