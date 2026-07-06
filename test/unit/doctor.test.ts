@@ -1073,6 +1073,9 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(1);
     expect(lines.some((l) => l.includes("[FAIL] node-provisioned"))).toBe(true);
     expect(lines.some((l) => l.includes("fbrain init"))).toBe(true);
+    for (const name of ["schemas-loaded", "schema-drift", "embedding-runtime", "write-ready"]) {
+      expect(lines.some((l) => l.startsWith(`[SKIP] ${name}`))).toBe(true);
+    }
   });
 
   test("schema absent from the node DB → schemas-loaded FAIL", async () => {
@@ -1804,7 +1807,7 @@ describe("doctor --freshness probes", () => {
       nodeClientFactory: () => mockNodeClient({ missingFromNode: ["concept"] }),
     });
     expect(code).toBe(1);
-    expect(lines.some((l) => l.includes("[FAIL] freshness-probe") && l.includes("skipped"))).toBe(true);
+    expect(lines.some((l) => l.includes("[SKIP] freshness-probe") && l.includes("skipped"))).toBe(true);
   });
 });
 
@@ -1881,10 +1884,21 @@ describe("doctor write-readiness probe", () => {
 
   function nodeWithConsent(consent: { status: number; body?: unknown }): NodeClient {
     const base = mockNodeClient({});
+    const result =
+      consent.status === 202
+        ? "no_pending"
+        : consent.status === 404
+          ? "not_registered"
+          : undefined;
     return {
       ...base,
-      async requestConsent() {
-        return { status: consent.status, body: consent.body ?? {} };
+      async rawCall() {
+        return {
+          status: consent.status === 202 || consent.status === 404 ? 200 : consent.status,
+          headers: new Headers(),
+          body: "",
+          json: result ? { result } : (consent.body ?? {}),
+        };
       },
     };
   }
@@ -1905,6 +1919,45 @@ describe("doctor write-readiness probe", () => {
     const pass = lines.find((l) => l.startsWith("[PASS] write-ready"));
     expect(pass).toBeDefined();
     expect(pass!).toContain("capability cached");
+  });
+
+  test("plain doctor checks app registration without POSTing request-consent", async () => {
+    const cfg = makeCfg();
+    const configPath = writeCfg(cfg);
+    const store = await withCachedCapability(cfg.nodeUrl);
+    let requestConsentCalls = 0;
+    let rawCalls = 0;
+    const base = mockNodeClient({});
+    const node: NodeClient = {
+      ...base,
+      async requestConsent() {
+        requestConsentCalls++;
+        throw new Error("requestConsent must not run during plain doctor");
+      },
+      async rawCall(method, path) {
+        rawCalls++;
+        expect(method).toBe("GET");
+        expect(path).toBe("/api/apps/consent-request/fbrain");
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: "",
+          json: { result: "no_pending" },
+        };
+      },
+    };
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      capabilityStore: store,
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () => node,
+    });
+
+    expect(code).toBe(0);
+    expect(rawCalls).toBe(1);
+    expect(requestConsentCalls).toBe(0);
   });
 
   test("FAIL: app not registered (request-consent → 404) reports write-blocked with cold-registry hint", async () => {
@@ -1999,7 +2052,7 @@ describe("doctor write-readiness probe", () => {
     const base = mockNodeClient({});
     const throwingNode: NodeClient = {
       ...base,
-      async requestConsent() {
+      async rawCall() {
         throw new Error("consent endpoint exploded");
       },
     };
@@ -2098,6 +2151,21 @@ describe("doctor --write round-trip probe", () => {
     };
   }
 
+  function nodeWithRegisteredApp(): NodeClient {
+    const base = mockNodeClient({});
+    return {
+      ...base,
+      async rawCall() {
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: "",
+          json: { result: "no_pending" },
+        };
+      },
+    };
+  }
+
   test("PASS: put → get → soft-delete round-trip, cleanup tombstone written", async () => {
     const cfg = makeCfg();
     const configPath = writeCfg(cfg);
@@ -2111,9 +2179,9 @@ describe("doctor --write round-trip probe", () => {
       nonceFn: () => "rt1",
       capabilityStore: inMemoryCapabilityStore(),
       schemaClientFactory: () => mockSchemaClient({}),
-      // Write-ready probe also runs in this codepath; give it a passable
-      // 202 so its WARN/FAIL doesn't mask the round-trip PASS we're testing.
-      nodeClientFactory: () => mockNodeClient({}),
+      // Write-ready probe also runs in this codepath; give it a registered
+      // app lookup so its no-capability failure is deterministic.
+      nodeClientFactory: () => nodeWithRegisteredApp(),
       writeNodeFactory: captureWriteClient({ mutations }),
     });
     expect(code).toBe(1); // write-ready FAILs (no cached capability) but the round-trip itself PASSes
@@ -2245,7 +2313,7 @@ describe("doctor --write round-trip probe", () => {
     });
     expect(code).toBe(1);
     expect(
-      lines.some((l) => l.includes("[FAIL] write-roundtrip") && l.includes("skipped")),
+      lines.some((l) => l.includes("[SKIP] write-roundtrip") && l.includes("skipped")),
     ).toBe(true);
   });
 });
