@@ -1377,6 +1377,55 @@ describe("verifyVectorIndexed — consecutive-hit (anti-flicker) contract", () =
     expect(calls()).toBe(2); // first probe + one confirming probe (the common warm case)
   });
 
+  // The warm-path latency contract (card fbrain-put-vector-verify-no-warm-sleep):
+  // while the hit streak is alive the confirming probe fires immediately — a
+  // caught-up index costs ZERO sleeps, so a warm `fbrain put` no longer pays a
+  // mandatory 350ms inter-probe wait. Backoff is burned only after a miss.
+  test("warm path (index caught up) pays ZERO sleeps", async () => {
+    const { node, calls } = flickerNode("s3w", [true, true]);
+    const sleeps: number[] = [];
+    const visible = await verifyVectorIndexed(node, "sh", "s3w", "q", {
+      maxAttempts: 6,
+      sleep: async (ms) => void sleeps.push(ms),
+    });
+    expect(visible).toBe(true);
+    expect(calls()).toBe(2);
+    expect(sleeps).toEqual([]); // hit → confirming hit, back-to-back, no backoff
+  });
+
+  test("lagging path budget unchanged: a persistent miss sleeps once per retry", async () => {
+    const { node, calls } = flickerNode("s3l", [false]);
+    const sleeps: number[] = [];
+    const visible = await verifyVectorIndexed(node, "sh", "s3l", "q", {
+      maxAttempts: 6,
+      backoffMs: 7,
+      sleep: async (ms) => void sleeps.push(ms),
+    });
+    expect(visible).toBe(false);
+    expect(calls()).toBe(6);
+    // Same budget as before the warm-path fix: one backoff before each of
+    // attempts 2..6 (never before the first probe).
+    expect(sleeps).toEqual([7, 7, 7, 7, 7]);
+  });
+
+  test("a miss re-arms the backoff; a live streak suppresses it", async () => {
+    // HIT, miss, HIT, HIT:
+    //   probe 1 (hit, streak 1)  → no sleep before it (first attempt)
+    //   probe 2 (miss, streak 0) → no sleep before it (streak was alive)
+    //   probe 3 (hit, streak 1)  → SLEEPS first (previous probe missed)
+    //   probe 4 (hit, streak 2)  → no sleep (streak alive) → visible
+    const { node, calls } = flickerNode("s3m", [true, false, true, true]);
+    const sleeps: number[] = [];
+    const visible = await verifyVectorIndexed(node, "sh", "s3m", "q", {
+      maxAttempts: 6,
+      backoffMs: 7,
+      sleep: async (ms) => void sleeps.push(ms),
+    });
+    expect(visible).toBe(true);
+    expect(calls()).toBe(4);
+    expect(sleeps).toEqual([7]);
+  });
+
   test("consecutiveHits is tunable: 3-in-a-row required", async () => {
     // HIT, HIT, miss, HIT, HIT, HIT — first pair is broken by the miss; the
     // streak of 3 only closes on the final probe.

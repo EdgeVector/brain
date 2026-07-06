@@ -268,9 +268,16 @@ type FilterMatch = {
 // The structured payload `fbrain delete --tag …` emits under `--json`. `deleted`
 // is the list that WAS (or, under `dryRun`, WOULD BE) tombstoned. In dry-run
 // mode nothing is mutated, so the same list is the preview.
+export type DeleteBatchFailure = {
+  type: RecordType;
+  slug: string;
+  error: string;
+};
+
 export type DeleteBatchResult = {
-  ok: true;
+  ok: boolean;
   deleted: Array<{ type: RecordType; slug: string }>;
+  failed: DeleteBatchFailure[];
   dryRun: boolean;
 };
 
@@ -332,6 +339,16 @@ function describeSelector(opts: DeleteByFilterOptions): string {
   return parts.join(" ");
 }
 
+function isNotFound(err: unknown): boolean {
+  return err instanceof FbrainError && err.code === "not_found";
+}
+
+function formatBatchError(err: unknown): string {
+  if (err instanceof FbrainError) return `${err.code}: ${err.message}`;
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void> {
   const print = resolvePrintSink(opts);
 
@@ -352,7 +369,7 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
   const matches = await resolveFilterMatches(node, opts);
   if (matches.length === 0) {
     print(`no live records match ${selector}`);
-    opts.onResult?.({ ok: true, deleted: [], dryRun: !opts.yes });
+    opts.onResult?.({ ok: true, deleted: [], failed: [], dryRun: !opts.yes });
     return;
   }
 
@@ -366,6 +383,7 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
     opts.onResult?.({
       ok: true,
       deleted: matches.map((m) => ({ type: m.type, slug: m.slug })),
+      failed: [],
       dryRun: true,
     });
     return;
@@ -378,55 +396,81 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
   // — skip+warn by default, delete-and-warn under --force — so one linked
   // design never aborts the whole batch.
   const deleted: Array<{ type: RecordType; slug: string }> = [];
+  const failed: DeleteBatchFailure[] = [];
   for (const m of matches) {
     const slug = normalizeSlug(m.slug);
 
-    if (m.type === "design") {
-      const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
-      if (linked.length > 0) {
-        const n = linked.length;
-        const lnoun = n === 1 ? "task" : "tasks";
-        const verb = n === 1 ? "links" : "link";
-        if (!opts.force) {
+    try {
+      if (m.type === "design") {
+        const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
+        if (linked.length > 0) {
+          const n = linked.length;
+          const lnoun = n === 1 ? "task" : "tasks";
+          const verb = n === 1 ? "links" : "link";
+          if (!opts.force) {
+            print(
+              `skipped design ${slug} — ${n} ${lnoun} still ${verb} to it (${linked.join(", ")}); pass --force to delete anyway.`,
+            );
+            continue;
+          }
           print(
-            `skipped design ${slug} — ${n} ${lnoun} still ${verb} to it (${linked.join(", ")}); pass --force to delete anyway.`,
+            `warning: ${n} ${lnoun} still ${verb} to design "${slug}" (${linked.join(", ")}); after this delete their design references will dangle.`,
           );
-          continue;
         }
-        print(
-          `warning: ${n} ${lnoun} still ${verb} to design "${slug}" (${linked.join(", ")}); after this delete their design references will dangle.`,
-        );
       }
+
+      // Re-read the live row so we tombstone with its real created_at (and skip
+      // anything that vanished between the sweep and now). raw:true bypasses the
+      // tombstone filter at the lookup layer; resolveBySlug drops tombstones.
+      let resolved: Awaited<ReturnType<typeof resolveBySlug>>;
+      try {
+        resolved = await resolveBySlug({
+          node,
+          cfg: opts.cfg,
+          slug,
+          type: m.type,
+          raw: true,
+          notFoundMessage: NOT_FOUND_TYPED,
+          recoveryVerb: "delete",
+        });
+      } catch (err) {
+        if (isNotFound(err)) continue; // already gone — nothing to do
+        throw err;
+      }
+
+      await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at);
+      await unindexRecordTags(
+        node,
+        opts.cfg,
+        m.type,
+        slug,
+        resolved.record.tags,
+        opts.verbose,
+      );
+      print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
+      deleted.push({ type: m.type, slug });
+    } catch (err) {
+      const error = formatBatchError(err);
+      failed.push({ type: m.type, slug, error });
+      print(`failed ${m.type} ${slug} — ${error}`);
     }
-
-    // Re-read the live row so we tombstone with its real created_at (and skip
-    // anything that vanished between the sweep and now). raw:true bypasses the
-    // tombstone filter at the lookup layer; resolveBySlug drops tombstones.
-    const resolved = await resolveBySlug({
-      node,
-      cfg: opts.cfg,
-      slug,
-      type: m.type,
-      raw: true,
-      notFoundMessage: NOT_FOUND_TYPED,
-      recoveryVerb: "delete",
-    }).catch(() => null);
-    if (resolved === null) continue; // already gone — nothing to do
-
-    await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at);
-    await unindexRecordTags(
-      node,
-      opts.cfg,
-      m.type,
-      slug,
-      resolved.record.tags,
-      opts.verbose,
-    );
-    print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
-    deleted.push({ type: m.type, slug });
   }
 
   const noun = deleted.length === 1 ? "record" : "records";
-  print(`deleted ${deleted.length} ${noun} matching ${selector}.`);
-  opts.onResult?.({ ok: true, deleted, dryRun: false });
+  if (failed.length === 0) {
+    print(`deleted ${deleted.length} ${noun} matching ${selector}.`);
+    opts.onResult?.({ ok: true, deleted, failed: [], dryRun: false });
+    return;
+  }
+
+  const fnoun = failed.length === 1 ? "record" : "records";
+  print(
+    `deleted ${deleted.length} ${noun} matching ${selector}; ${failed.length} ${fnoun} failed.`,
+  );
+  opts.onResult?.({ ok: false, deleted, failed, dryRun: false });
+  throw new FbrainError({
+    code: "batch_delete_failed",
+    message: `Bulk delete matching ${selector} failed for ${failed.length} ${fnoun}.`,
+    hint: "Review the failed slug(s) above and retry once the node error is resolved.",
+  });
 }

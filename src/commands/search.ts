@@ -41,6 +41,24 @@ import { type RecordType } from "../schemas.ts";
 
 export { dedupeHits };
 
+// Default result cap when the caller passes no `--limit`. Before this, `search`
+// had NO default limit: a query that fell through to the BM25 keyword-rescue
+// path printed the ENTIRE corpus (bm25FallbackFromCorpus defaults its own limit
+// to `docs.length`), and the native path printed the server's full top-50. An
+// explicit `--limit N` overrides this.
+//
+// This is the canonical page-size constant for both retrieval surfaces:
+// `ask`'s DEFAULT_LIMIT is derived from it (ask.ts imports it), so `search`
+// and `ask` stay consistent by construction. It is defined HERE (not in
+// ask.ts) because ask.ts already imports from search.ts — keeping the
+// dependency edge one-way avoids a module-init cycle where a re-export could
+// read `undefined`.
+export const SEARCH_DEFAULT_LIMIT = 5;
+
+// Confidence label for a BM25 keyword-rescue row. Isolated as a constant so
+// the "fallback rows are NOT strong" contract has one source of truth.
+const FALLBACK_CONFIDENCE = "fallback" as const;
+
 export type SearchOptions = {
   cfg: Config;
   query: string;
@@ -97,10 +115,14 @@ export type SearchHitJson = {
   // `fbrain get`. `""` only when the record body is empty. Built from the
   // already-hydrated record (no extra fetch).
   snippet: string;
-  // Retrieval confidence from the weak-match classifier. `weak` means the
-  // result set looks like a noise-floor fallback; callers should treat those
-  // rows as closest-known candidates, not trusted answers.
-  confidence: "strong" | "weak";
+  // Retrieval confidence for this row. `strong` = a real vector match.
+  // `weak` = the native vector result set looks like a noise-floor band, so
+  // the row is a closest-known candidate, not a trusted answer. `fallback` =
+  // the native vector search found nothing usable and this row came from the
+  // BM25 keyword-rescue path — a literal keyword match with no semantic
+  // confidence signal (score is always `null`). Both `weak` and `fallback`
+  // are "do not trust as a confident answer" for the MCP `confident` flag.
+  confidence: "strong" | "weak" | "fallback";
 };
 
 export type ResolvedHit = {
@@ -391,29 +413,91 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     return aId < bId ? -1 : aId > bId ? 1 : 0;
   });
 
-  let trimmed = opts.limit && opts.limit > 0 ? resolved.slice(0, opts.limit) : resolved;
+  // Result cap. With no explicit `--limit`, fall back to SEARCH_DEFAULT_LIMIT
+  // (== ask's DEFAULT_LIMIT) so a query that drops to the BM25 keyword-rescue
+  // path can't print the whole corpus, and the default page size matches
+  // `ask`. `--limit N` (N > 0) overrides.
+  const effectiveLimit =
+    opts.limit && opts.limit > 0 ? opts.limit : SEARCH_DEFAULT_LIMIT;
+
   const canUseBm25Fallback =
     !opts.exact && opts.minScore === undefined && fbrainSchemas.length > 0;
-  const topScoreBeforeFallback = trimmed[0]?.score ?? null;
+
+  // STEP 3: classify weak-match over the FULL resolved list, BEFORE slicing to
+  // the limit. The classifier is a distribution-shape test — its flat-floor /
+  // separation signal is only meaningful over the full sample the server
+  // returned; classifying on a post-`--limit` slice (e.g. the top 5) throws
+  // away the floor pile the test needs and mis-reads a truncated head as a
+  // spike (the sparse-sample failure ask.ts:489-491 documents for its own
+  // small resolved set).
+  const topScoreBeforeFallback = resolved[0]?.score ?? null;
   let weakMatch =
     canUseBm25Fallback &&
     topScoreBeforeFallback !== null &&
-    isWeakMatch(topScoreBeforeFallback, trimmed, STRONG_SCORE, FLATNESS_GAP, NOISE_CEILING);
-  if (canUseBm25Fallback && (trimmed.length === 0 || weakMatch)) {
-    const fallback = await bm25FallbackResults(node, opts.cfg, activeTypes, opts.query, opts.limit);
-    const nativeSlugs = new Set(trimmed.map((hit) => hit.slug));
-    const fallbackAddsARecord = fallback.some((hit) => !nativeSlugs.has(hit.slug));
-    if (fallback.length > 0 && (trimmed.length === 0 || fallbackAddsARecord)) {
+    isWeakMatch(topScoreBeforeFallback, resolved, STRONG_SCORE, FLATNESS_GAP, NOISE_CEILING);
+
+  // Track which resolved rows are BM25 keyword-rescue rows so per-row
+  // confidence stays truthful: fallback rows are keyword matches with no
+  // semantic score, NOT strong vector hits. Keyed on `type::slug` (identity
+  // everywhere else in fbrain) so a Design and a Task that share a slug are
+  // distinct entries — not collapsed by a bare-slug key.
+  const fallbackIds = new Set<string>();
+  if (canUseBm25Fallback && (resolved.length === 0 || weakMatch)) {
+    // STEP 4: pass the same effective limit into the corpus scorer so the
+    // rescue set is bounded too (it otherwise defaults to `docs.length`).
+    const fallback = await bm25FallbackResults(
+      node,
+      opts.cfg,
+      activeTypes,
+      opts.query,
+      effectiveLimit,
+    );
+    // STEP 2: MERGE the rescue rows with the native rows keyed on `type::slug`,
+    // rather than wholesale-replacing the native set (which discarded every
+    // native vector hit even when only one rescue record was new). Append only
+    // rescue rows not already present, and mark them `fallback` so they never
+    // read as `strong`/confident.
+    //
+    // Ordering: rescue rows come FIRST, then the native rows. This branch only
+    // runs when the native set was EMPTY or graded WEAK (noise-floor) — a
+    // strong native set never reaches here — so the keyword-rescue rows are the
+    // better answers for this query. Putting them ahead means a tight `--limit`
+    // keeps the rescue matches instead of burying them under the weak native
+    // noise. (`type::slug` keeps a Design and a Task that share a slug distinct
+    // rather than collapsing on a bare-slug key.)
+    const nativeIds = new Set(resolved.map((hit) => `${hit.type}::${hit.slug}`));
+    const newFallback = fallback.filter(
+      (hit) => !nativeIds.has(`${hit.type}::${hit.slug}`),
+    );
+    if (resolved.length === 0 || newFallback.length > 0) {
       opts.verbose?.(
-        trimmed.length === 0
+        resolved.length === 0
           ? "bm25 fallback: native vector search returned no resolved matches"
-          : "bm25 fallback: native vector search result set was weak/noise-floor",
+          : "bm25 fallback: native vector search result set was weak/noise-floor — merging keyword rescue rows",
       );
-      resolved = fallback;
-      trimmed = fallback;
-      weakMatch = false;
+      for (const hit of newFallback) fallbackIds.add(`${hit.type}::${hit.slug}`);
+      resolved = [...newFallback, ...resolved];
     }
   }
+
+  // Slice to the effective limit AFTER the merge/classification, so the
+  // classifier saw the full sample and the limit bounds the final output.
+  const trimmed = resolved.slice(0, effectiveLimit);
+  // Per-row confidence: a rescue row is `fallback`; a native row is `weak` when
+  // the whole native set graded as noise-floor, else `strong`. `confidenceFor`
+  // is index-agnostic (keyed on the row's identity), so it's correct after the
+  // slice too.
+  const confidenceFor = (hit: ResolvedHit): SearchHitJson["confidence"] =>
+    fallbackIds.has(`${hit.type}::${hit.slug}`)
+      ? FALLBACK_CONFIDENCE
+      : weakMatch
+        ? "weak"
+        : "strong";
+  // The advisory note fires whenever the visible set is not all-strong — i.e.
+  // the native set was weak OR any rescue row is shown.
+  const showWeakNote =
+    canUseBm25Fallback &&
+    trimmed.some((hit) => confidenceFor(hit) !== "strong");
 
   if (trimmed.length === 0) {
     opts.onResult?.([]);
@@ -546,18 +630,18 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     // pure-vector hit) so the answer shows inline. Built unconditionally so
     // the `--json` document and the MCP `structuredContent` carry it too.
     snippet: buildSnippet(hit.record.body, opts.query),
-    confidence: weakMatch ? "weak" : "strong",
+    confidence: confidenceFor(hit),
   }));
   opts.onResult?.(payload);
 
   if (opts.json) {
     print(JSON.stringify(payload));
-    if (weakMatch) printErr(weakMatchNote);
+    if (showWeakNote) printErr(weakMatchNote);
     return;
   }
 
   // Advisory → stderr so `fbrain search q 2>/dev/null` stays parseable.
-  if (weakMatch) printErr(weakMatchNote);
+  if (showWeakNote) printErr(weakMatchNote);
 
   // Human-only column legend (TTY, non-JSON). `trimmed` is non-empty here (the
   // empty-result path returned above), so this never sits above a no-match
