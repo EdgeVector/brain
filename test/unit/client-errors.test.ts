@@ -171,11 +171,37 @@ describe("client error mapping", () => {
     }
   });
 
-  // The write path over a REMOTE (non-loopback) node keeps the socket→TCP
-  // fallback: a remote node has no local socket, so the SDK transport must dial
-  // the configured URL. This guards the fix from over-reaching — only LOCAL
-  // nodes are socket-only.
-  test("remote WRITE falls back to the configured URL (socket-only is local-node only)", async () => {
+  test("remote READ uses the configured URL even when a local socket exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-remote-read-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    writeFileSync(socketPath, "");
+    const calls: Array<{ url: string; unix?: string }> = [];
+    globalThis.fetch = (async (
+      input: unknown,
+      init?: RequestInit & { unix?: string },
+    ): Promise<Response> => {
+      calls.push({ url: typeof input === "string" ? input : String(input), unix: init?.unix });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      const c = newNodeClient({
+        baseUrl: "http://10.0.0.1:9001",
+        userHash: "u",
+        socketPath,
+      });
+      await c.health();
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.every((x) => x.unix === undefined)).toBe(true);
+      expect(calls.some((x) => x.url === "http://10.0.0.1:9001/api/health")).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("remote WRITE uses the configured URL even when a local socket exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-remote-write-socket-"));
+    const socketPath = join(dir, "folddb.sock");
+    writeFileSync(socketPath, "");
     const calls: Array<{ url: string; unix?: string }> = [];
     globalThis.fetch = (async (
       input: unknown,
@@ -187,12 +213,19 @@ describe("client error mapping", () => {
         headers: { "Content-Type": "application/json" },
       });
     }) as unknown as typeof globalThis.fetch;
-    const c = newNodeClient({ baseUrl: "http://10.0.0.1:9001", userHash: "u" });
-    await c.createRecord({ schemaHash: "abc", fields: { slug: "x" }, keyHash: "x" });
-    expect(calls.length).toBeGreaterThan(0);
-    // No unix socket for a remote node; the request lands on the configured URL.
-    expect(calls.every((x) => x.unix === undefined)).toBe(true);
-    expect(calls.some((x) => x.url.startsWith("http://10.0.0.1:9001"))).toBe(true);
+    try {
+      const c = newNodeClient({
+        baseUrl: "http://10.0.0.1:9001",
+        userHash: "u",
+        socketPath,
+      });
+      await c.createRecord({ schemaHash: "abc", fields: { slug: "x" }, keyHash: "x" });
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.every((x) => x.unix === undefined)).toBe(true);
+      expect(calls.some((x) => x.url.startsWith("http://10.0.0.1:9001"))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("node 503 node_not_provisioned → identity{provisioned:false}", async () => {
