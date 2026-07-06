@@ -28,7 +28,6 @@
 import {
   newReadClientFromCfg,
   recordTypeForHash,
-  type NodeClient,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
 } from "../client.ts";
@@ -42,24 +41,15 @@ import {
 } from "../format.ts";
 import {
   hasAnyLiveRecord,
-  isTombstoned,
-  listRecordKeys,
-  listRecords,
   missingSchemaHashReadNote,
   resolveTypeFilter,
-  schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
-  type RecordKey,
 } from "../record.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
 import {
-  BM25Index,
-  computeFingerprint,
-  loadCachedIndex,
-  saveCachedIndex,
+  loadOrBuildBm25Index,
   tokenize,
-  type BM25Document,
 } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
@@ -231,47 +221,13 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   // ── Stage 1: BM25 corpus build (cached, cache-aware FETCH) ───────────
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
-  // Cheap listing FIRST. Pull only slug + updated_at (+ tags to drop
-  // tombstones) per active type — no `body`, the heavy field. The fingerprint
-  // over this body-less listing is bit-identical to the one a full corpus
-  // build stamps (both `computeFingerprint`, both tombstone-filtered), so it
-  // alone decides cache hit vs miss. This is the cut: pre-fix `ask` fetched
-  // every record's full body on EVERY call just to compute this fingerprint;
-  // now the full-body fetch happens only on a MISS.
-  const keys = await loadBm25Keys(node, opts.cfg, activeTypes);
-  const fingerprint = computeFingerprint(keys);
-  let index = loadCachedIndex(opts.cfg.userHash);
-  let bm25CacheHit = false;
-  // `liveById` is the Stage-4 resolve lookup. On a cache MISS the full corpus
-  // walk populates it for free; on a cache HIT we never fetch bodies, so it
-  // stays empty and Stage 4 resolves its (≤ limit) chosen hits from the cached
-  // index's persisted render text instead (no network).
-  let liveById = new Map<string, FbrainRecord>();
-  // Corpus size for the AskResult / no-match probe. On a hit it's the cheap
-  // listing's live-record count (no bodies fetched); on a miss it's the same
-  // number, counted from the docs we did fetch.
-  let corpusSize = keys.length;
-
-  if (index && index.fingerprint === fingerprint) {
-    // WARM PATH: corpus unchanged since the last `ask`. Reuse the cached
-    // postings AND skip `loadBm25Documents` entirely — no body fetch at all.
-    bm25CacheHit = true;
-    opts.verbose?.(
-      `bm25: cache hit (fingerprint ${fingerprint.slice(0, 12)}…) — skipping corpus body fetch`,
-    );
-  } else {
-    // COLD/STALE PATH: corpus changed (or no cache). Fall back to the full
-    // body fetch + rebuild — unchanged behavior, correctness preserved. The
-    // body fetch ALSO hydrates `liveById` for Stage 4.
-    const built = await loadBm25Documents(node, opts.cfg, activeTypes);
-    liveById = built.liveById;
-    corpusSize = built.docs.length;
-    index = BM25Index.build(built.docs);
-    saveCachedIndex(opts.cfg.userHash, index);
-    opts.verbose?.(
-      `bm25: rebuilt index (${built.docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}…)`,
-    );
-  }
+  const bm25 = await loadOrBuildBm25Index(node, opts.cfg, activeTypes, {
+    verbose: opts.verbose,
+  });
+  const index = bm25.index;
+  const liveById = bm25.liveById;
+  const corpusSize = bm25.corpusSize;
+  const bm25CacheHit = bm25.cacheHit;
 
   // ── Stage 2: per-query BM25 + vector ─────────────────────────────────
   const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
@@ -407,7 +363,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     const cached = liveById.get(id);
     if (cached) return cached;
     if (!bm25CacheHit) return null; // cold path had the full map; a miss is stale
-    const text = index!.recordText(id);
+    const text = index.recordText(id);
     if (!text) return null; // not in the (warm) index → stale ranker hit
     // Minimal record: only title/body are consumed downstream. design_slug is
     // omitted (optional); the slug is authoritative from the parsed doc id (the
@@ -706,58 +662,6 @@ export function formatCost(usd: number | null, model: string): string {
   return usd === null
     ? `cost≈unknown (${model} not in price table)`
     : `cost≈$${usd.toFixed(6)}`;
-}
-
-// The cache-decision listing: walk the active types fetching ONLY the
-// body-less keys (slug + updated_at + tags-for-tombstone-drop). Mirrors
-// `loadBm25Documents`'s type walk and `--type` narrowing, but issues the cheap
-// `listRecordKeys` query instead of the full-body `listRecords`. The keys feed
-// `computeFingerprint`, whose hash is bit-identical to the one a full corpus
-// build stamps — so a hit here is a real hit there. This is the only fetch a
-// warm `ask` does for the BM25 half.
-async function loadBm25Keys(
-  node: NodeClient,
-  cfg: Config,
-  types: readonly RecordType[],
-): Promise<RecordKey[]> {
-  const keys: RecordKey[] = [];
-  for (const t of types) {
-    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg));
-    for (const k of typeKeys) keys.push(k);
-  }
-  return keys;
-}
-
-async function loadBm25Documents(
-  node: NodeClient,
-  cfg: Config,
-  types: readonly RecordType[],
-): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {
-  const docs: BM25Document[] = [];
-  // `liveById` doubles as the Stage-4 resolve lookup: we keep the full
-  // FbrainRecord here so Stage 4 can hand it back without a second
-  // listRecords call. Tombstones are excluded — they're not in the index
-  // either, so anything fused back to a tombstone is a stale ranker hit
-  // and Stage 4 will skip on a miss.
-  const liveById = new Map<string, FbrainRecord>();
-  // Walk the active record types. When --type narrows the set we skip the
-  // others entirely — smaller index, fewer HTTP calls. listRecords returns
-  // live + tombstoned; we drop tombstones for the index.
-  for (const t of types) {
-    const records = await listRecords(node, t, schemaHashFor(t, cfg));
-    for (const r of records) {
-      if (isTombstoned(r)) continue;
-      docs.push({
-        type: t,
-        slug: r.slug,
-        title: r.title,
-        body: r.body,
-        updatedAt: r.updated_at,
-      });
-      liveById.set(docId(t, r.slug), r);
-    }
-  }
-  return { docs, liveById };
 }
 
 export function docId(type: RecordType, slug: string): string {

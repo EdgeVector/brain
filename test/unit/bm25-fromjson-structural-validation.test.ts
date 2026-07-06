@@ -1,12 +1,11 @@
 // Regression: BM25Index.fromJSON must treat a structurally-inconsistent
 // payload as corrupt and return null, the same way loadCachedIndex's
 // JSON.parse error path already does. The cache file at
-// ~/.fbrain/cache/bm25-<userHash>.json is written non-atomically, so a
-// truncated write (interrupted `fbrain ask`, ENOSPC, or a stale-schema
-// file from an older fbrain version) can land on disk with the field
-// types intact but the cross-array invariants broken.
+// ~/.fbrain/cache/bm25-<userHash>-<typesHash>.json is written through a
+// tmp+rename path, but older or manually-written files can still land on disk
+// with the field types intact and the cross-array invariants broken.
 //
-// Pre-fix: fromJSON only validated field TYPES (version === 1, fingerprint
+// Pre-fix: fromJSON only validated field TYPES (current version, fingerprint
 // is a string, documents/docLengths are arrays, postings is an object). It
 // never checked docLengths.length === documents.length, nor that every
 // posting's `d` is an in-bounds doc index. A payload with `documents`
@@ -26,13 +25,14 @@ describe("BM25Index.fromJSON structural validation", () => {
     // documents has length 1, but a posting references d=5 — impossible.
     // Pre-fix this returned a non-null index whose search() crashed.
     const malformed = {
-      version: 1,
+      version: 2,
       fingerprint: "abc",
       generatedAt: "2026-01-01T00:00:00Z",
       documents: [{ type: "design", slug: "alpha" }],
       docLengths: [3],
       avgDocLength: 3,
       postings: { foo: [{ d: 5, f: 1 }] },
+      docText: [{ title: "alpha", body: "body" }],
     };
     expect(BM25Index.fromJSON(malformed)).toBeNull();
   });
@@ -43,7 +43,7 @@ describe("BM25Index.fromJSON structural validation", () => {
     // and silently proceeding would feed `docLengths[d] ?? 0` zeros for
     // valid d's, quietly corrupting every score.
     const malformed = {
-      version: 1,
+      version: 2,
       fingerprint: "abc",
       generatedAt: "2026-01-01T00:00:00Z",
       documents: [
@@ -53,6 +53,10 @@ describe("BM25Index.fromJSON structural validation", () => {
       docLengths: [3], // missing entry for "beta"
       avgDocLength: 3,
       postings: { foo: [{ d: 0, f: 1 }] },
+      docText: [
+        { title: "alpha", body: "body" },
+        { title: "beta", body: "body" },
+      ],
     };
     expect(BM25Index.fromJSON(malformed)).toBeNull();
   });
@@ -61,13 +65,14 @@ describe("BM25Index.fromJSON structural validation", () => {
     // Same crash class — documents[-1] is undefined in JS, search()
     // would TypeError on doc.type. Pin the lower bound too.
     const malformed = {
-      version: 1,
+      version: 2,
       fingerprint: "abc",
       generatedAt: "2026-01-01T00:00:00Z",
       documents: [{ type: "design", slug: "alpha" }],
       docLengths: [3],
       avgDocLength: 3,
       postings: { foo: [{ d: -1, f: 1 }] },
+      docText: [{ title: "alpha", body: "body" }],
     };
     expect(BM25Index.fromJSON(malformed)).toBeNull();
   });
@@ -76,13 +81,28 @@ describe("BM25Index.fromJSON structural validation", () => {
     // search() does `for (const { d, f } of list)` — a non-array list
     // throws on destructuring. Catch it at validation, not at query time.
     const malformed = {
-      version: 1,
+      version: 2,
       fingerprint: "abc",
       generatedAt: "2026-01-01T00:00:00Z",
       documents: [{ type: "design", slug: "alpha" }],
       docLengths: [3],
       avgDocLength: 3,
       postings: { foo: "not-an-array" },
+      docText: [{ title: "alpha", body: "body" }],
+    };
+    expect(BM25Index.fromJSON(malformed)).toBeNull();
+  });
+
+  test("posting frequency must be a finite positive number", () => {
+    const malformed = {
+      version: 2,
+      fingerprint: "abc",
+      generatedAt: "2026-01-01T00:00:00Z",
+      documents: [{ type: "design", slug: "alpha" }],
+      docLengths: [3],
+      avgDocLength: 3,
+      postings: { foo: [{ d: 0, f: "nan" }] },
+      docText: [{ title: "alpha", body: "body" }],
     };
     expect(BM25Index.fromJSON(malformed)).toBeNull();
   });
