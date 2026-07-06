@@ -1122,7 +1122,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "One of `type` or a `type:` field in `frontmatter` is required — " +
         "there is NO silent default. If `frontmatter` is provided it is " +
         "used verbatim (without the `---` fences); otherwise frontmatter is " +
-        "synthesized from `type`, `title`, `tags`, and `status`. Unless the " +
+        "synthesized from `type`, `title`, `tags`, and `status`. Pass `tags` " +
+        'as a JSON array of strings, e.g. `"tags": ["a","b"]`, never as a ' +
+        'bare comma list like `"tags": a,b`; a comma string such as ' +
+        '`"tags": "a,b"` is accepted and coerced for compatibility. Unless the ' +
         "body is a short single line, prefer `body_b64` (UTF-8 body bytes " +
         "encoded as standard base64) or stage it to a file and pass " +
         "`body_path` instead of inlining `body` — an inline `body` with " +
@@ -1202,7 +1205,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .preprocess((v) => normalizeTagsArg(v), z.array(z.string()))
           .optional()
           .describe(
-            "Tag list. Replaces existing tags on update. A string is accepted as one tag, or split on commas.",
+            'Tag list. Use a JSON array of strings, e.g. `"tags": ["a","b"]`; never a bare comma list like `"tags": a,b`. Replaces existing tags on update. For compatibility, a string is accepted as one tag, or split on commas (`"tags": "a,b"` -> `["a","b"]`).',
           ),
         frontmatter: z
           .string()

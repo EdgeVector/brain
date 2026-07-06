@@ -2054,6 +2054,19 @@ describe("fbrain_put tool", () => {
     expect(parsed.tags).toEqual(["foo", "bar"]);
   });
 
+  test("fbrain_put tags schema description shows array shape and comma-string compatibility", () => {
+    const server = createFbrainMcpServer({ cfg });
+    const toolDescription = toolMetadataOf(server, "fbrain_put")?.description ?? "";
+    const tagsDescription = inputFieldDescription(server, "fbrain_put", "tags");
+
+    for (const description of [toolDescription, tagsDescription]) {
+      expect(description).toContain('"tags": ["a","b"]');
+      expect(description).toContain("never");
+      expect(description).toContain('"tags": a,b');
+      expect(description).toContain('"tags": "a,b"');
+    }
+  });
+
   test("accepts a multiline emoji body via body_b64", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
