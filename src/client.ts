@@ -1056,7 +1056,7 @@ export function newNodeClient(opts: {
       );
       verbose(`← NODE POST /api/mutation status=200`);
     } catch (err) {
-      throw mapSdkDataError(err, url, "/api/mutation", socketPath);
+      throw mapSdkDataError(err, url, "POST", "/api/mutation", socketPath);
     }
   };
 
@@ -1160,7 +1160,17 @@ export function newNodeClient(opts: {
           return { status: err.status, body: err.body };
         }
         if (err instanceof TransportError) {
-          throw connectionError(url, "node", err, { socketPath });
+          throw connectionError(url, "node", err, {
+            socketPath,
+            routeSocket: localNodeRouteSocket(
+              "node",
+              "POST",
+              "/api/apps/request-consent",
+              url,
+              socketPath,
+            ),
+            socketCause: err,
+          });
         }
         throw err;
       }
@@ -1190,7 +1200,17 @@ export function newNodeClient(opts: {
           return { status: err.status, body: err.body };
         }
         if (err instanceof TransportError) {
-          throw connectionError(url, "node", err, { socketPath });
+          throw connectionError(url, "node", err, {
+            socketPath,
+            routeSocket: localNodeRouteSocket(
+              "node",
+              "GET",
+              "/api/apps/consent-status",
+              url,
+              socketPath,
+            ),
+            socketCause: err,
+          });
         }
         throw err;
       }
@@ -1634,26 +1654,27 @@ type BoundedResponse = {
 };
 
 // The node's data Unix-domain socket serves a small data-plane allowlist: read
-// query, write mutation, schema listing, `/health`, the node-identity probe, and
-// the native-index semantic search. Current nodes also expose
+// query, write mutation, schema listing, `/api/health`, the node-identity probe,
+// and the native-index semantic search. Current nodes also expose
 // `folddb-full.sock` beside it, and that socket serves the whole HTTP surface
 // (owner/control routes included). Route selection mirrors the node client's
 // socket_for(method, path): data-plane routes use `folddb.sock`; every other
-// node route uses `folddb-full.sock` when present; older nodes without a full
-// socket fall back to TCP.
+// loopback-node route uses `folddb-full.sock` when present, else the collapsed
+// control socket. Non-loopback node URLs never use the local socket.
 //
 // This MUST stay in lockstep with the node's data-socket route table. Adding a
 // path here without the node also serving it on the data socket would dial the
 // socket and get a 404; the inverse leaves a data route needlessly dependent on
-// the full socket/TCP path.
-export const SOCKET_DATA_PLANE_PATHS = [
-  "/api/query",
-  "/api/mutation",
-  "/api/schemas",
-  "/health",
-  "/api/system/auto-identity",
-  "/api/native-index/search",
-];
+// the full socket path.
+const NODE_DATA_PLANE_ROUTES = {
+  GET: [
+    "/api/health",
+    "/api/schemas",
+    "/api/system/auto-identity",
+    "/api/native-index/search",
+  ],
+  POST: ["/api/query", "/api/mutation"],
+} as const;
 
 // Compare the request path WITHOUT its `?query`/`#fragment` against the
 // allowlist, mirroring the node router's `path_only`. Several data-plane
@@ -1667,16 +1688,9 @@ function pathOnly(path: string): string {
 }
 
 function isNodeDataPlaneRoute(method: string, path: string): boolean {
-  const m = method.toUpperCase();
-  const p = pathOnly(path);
-  if (m === "POST") return p === "/api/query" || p === "/api/mutation";
-  if (m !== "GET") return false;
-  return (
-    p === "/api/schemas" ||
-    p === "/health" ||
-    p === "/api/system/auto-identity" ||
-    p === "/api/native-index/search"
-  );
+  const routes =
+    NODE_DATA_PLANE_ROUTES[method.toUpperCase() as keyof typeof NODE_DATA_PLANE_ROUTES];
+  return routes === undefined ? false : (routes as readonly string[]).includes(pathOnly(path));
 }
 
 type NodeSocketSelection = {
@@ -1690,40 +1704,6 @@ type ConnectionErrorContext = {
   socketCause?: unknown;
 };
 
-type SocketFailure = {
-  routeSocket: NodeSocketSelection;
-  cause: unknown;
-};
-
-type SocketFailureCarrier = {
-  __fbrainSocketFailure?: SocketFailure;
-};
-
-export function nodeSocketForRoute(
-  service: "node" | "schema",
-  method: string,
-  path: string,
-  socketPath?: string,
-): NodeSocketSelection | null {
-  if (service !== "node" || socketPath === undefined || socketPath.length === 0) {
-    return null;
-  }
-  if (isNodeDataPlaneRoute(method, path)) {
-    return existsSync(socketPath) ? { socketPath, kind: "data" } : null;
-  }
-  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  return fullSocketPath ? { socketPath: fullSocketPath, kind: "full" } : null;
-}
-
-export function shouldUseNodeSocket(
-  service: "node" | "schema",
-  path: string,
-  socketPath?: string,
-  method: string = "GET",
-): boolean {
-  return nodeSocketForRoute(service, method, path, socketPath) !== null;
-}
-
 // A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
 // retired (fold `fold-retire-tcp-listener`), so there is NO TCP fallback. When
 // the node URL is loopback and a socket path is configured, this returns the
@@ -1732,14 +1712,8 @@ export function shouldUseNodeSocket(
 // control socket per fold #1246's collapse) EVEN WHEN the socket file is absent:
 // if the node is down the connect simply fails and the caller maps it to a clear
 // node-not-running diagnostic instead of silently dialing the retired `:9001`.
-//
-// This is deliberately DISTINCT from `nodeSocketForRoute` (which stays
-// existsSync-gated for its other consumers, e.g. `shouldUseNodeSocket`): both the
-// read/search transport (`verboseFetch`) and the SDK write/mutation transport
-// (`fetchTransport`) MUST route through THIS helper so a local write never falls
-// through to `:9001`. Returns null when the node isn't a local-socket target
-// (remote node, schema service, or no socket configured), leaving the caller on
-// its existsSync-gated `nodeSocketForRoute` + TCP-fallback path.
+// Returns null when the node isn't a local-socket target (remote node, schema
+// service, or no socket configured), leaving the caller on plain HTTP.
 export function localNodeRouteSocket(
   service: "node" | "schema",
   method: string,
@@ -1765,20 +1739,6 @@ export function localNodeRouteSocket(
     socketPath: discoverFullSurfaceSocket(socketPath as string) ?? (socketPath as string),
     kind: "full",
   };
-}
-
-function isConnectError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const msg = `${err.message} ${(err as { cause?: unknown }).cause instanceof Error ? ((err as { cause?: Error }).cause?.message ?? "") : ""}`.toLowerCase();
-  return (
-    msg.includes("unable to connect") ||
-    msg.includes("connection refused") ||
-    msg.includes("econnrefused") ||
-    msg.includes("enoent") ||
-    msg.includes("failed to connect") ||
-    msg.includes("socket") ||
-    msg.includes("connection closed")
-  );
 }
 
 // Shared inner fetch for both service clients. Differs only by the verbose
@@ -1811,10 +1771,6 @@ async function verboseFetch(opts: {
   // write body grows the deadline so it isn't capped by the small-record flat
   // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
-  const routeSocket = nodeSocketForRoute(opts.service, opts.method, opts.path, opts.socketPath);
-  // A LOCAL node speaks ONLY over its Unix socket (no retired `:9001` TCP
-  // fallback) — see `localNodeRouteSocket`. When it returns a socket we route
-  // there UNCONDITIONALLY, never dialing TCP even if the socket file is absent.
   const localRouteSocket = localNodeRouteSocket(
     opts.service,
     opts.method,
@@ -1822,10 +1778,8 @@ async function verboseFetch(opts: {
     opts.baseUrl,
     opts.socketPath,
   );
-  const localNodeSocketOnly = localRouteSocket !== null;
-  const effectiveRouteSocket = localRouteSocket ?? routeSocket;
-  const preflightTarget = effectiveRouteSocket
-    ? `${opts.path} [${effectiveRouteSocket.kind} socket selected]`
+  const preflightTarget = localRouteSocket
+    ? `${opts.path} [${localRouteSocket.kind} socket selected]`
     : tcpUrl;
   opts.verbose(
     `→ ${tag} ${opts.method} ${preflightTarget}` +
@@ -1865,32 +1819,13 @@ async function verboseFetch(opts: {
   let res: Response;
   let socketFailure: unknown;
   try {
-    if (localNodeSocketOnly) {
-      // Socket-only: never dial the retired loopback TCP port. A connect failure
-      // means the node is down (socket missing) or wedged (socket present); the
-      // catch maps it to the right diagnostic via `effectiveRouteSocket`.
+    if (localRouteSocket) {
+      // Loopback node URL: socket-only, never the retired TCP port.
       try {
         res = await attempt(localRouteSocket);
       } catch (socketErr) {
         socketFailure = socketErr;
         throw socketErr;
-      }
-    } else if (routeSocket) {
-      // Non-loopback / remote node: prefer the socket, fall back to TCP/HTTP.
-      try {
-        res = await attempt(routeSocket);
-      } catch (socketErr) {
-        if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
-          socketFailure = socketErr;
-          opts.verbose(
-            `node: socket ${routeSocket.socketPath} unreachable (${
-              socketErr instanceof Error ? socketErr.message : String(socketErr)
-            }) — falling back to TCP ${opts.baseUrl}`,
-          );
-          res = await attempt(null);
-        } else {
-          throw socketErr;
-        }
       }
     } else {
       // Schema service (HTTPS Lambda) and any non-loopback target: plain HTTP.
@@ -1904,7 +1839,7 @@ async function verboseFetch(opts: {
     }
     throw connectionError(opts.baseUrl, opts.service, err, {
       socketPath: opts.socketPath,
-      routeSocket: effectiveRouteSocket,
+      routeSocket: localRouteSocket,
       socketCause: socketFailure,
     });
   }
@@ -1924,7 +1859,7 @@ async function verboseFetch(opts: {
       }
       throw connectionError(opts.baseUrl, opts.service, err, {
         socketPath: opts.socketPath,
-        routeSocket: effectiveRouteSocket,
+        routeSocket: localRouteSocket,
         socketCause: socketFailure,
       });
     }
@@ -2220,7 +2155,6 @@ function connectionError(
     service === "node" &&
     ctx.routeSocket &&
     ctx.socketCause !== undefined &&
-    isConnectError(ctx.socketCause) &&
     existsSync(ctx.routeSocket.socketPath)
   ) {
     return new FbrainError({
@@ -2296,18 +2230,9 @@ function fetchTransport(
         if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
       }, timeoutMs);
 
-      // Mirror `verboseFetch`'s routing so the SDK write/mutation path is
-      // socket-only for a LOCAL node too (the regression this fixes: a local
-      // `fbrain put` used to fall through to the retired `:9001` TCP port and
-      // report "node not reachable at http://127.0.0.1:9001" whenever the
-      // existsSync-gated `nodeSocketForRoute` returned null). `localRouteSocket`
-      // is chosen UNCONDITIONALLY for a loopback node — no TCP attempt is ever
-      // made — so a down/absent socket surfaces the socket-accurate diagnostic
-      // via `__fbrainSocketFailure`, not a `:9001` message.
-      const routeSocket = nodeSocketForRoute("node", method, path, socketPath);
+      // Mirror `verboseFetch`'s routing so the SDK path is socket-only for a
+      // loopback node and plain HTTP for a remote node.
       const localRouteSocket = localNodeRouteSocket("node", method, path, baseUrl, socketPath);
-      const localNodeSocketOnly = localRouteSocket !== null;
-      const effectiveRouteSocket = localRouteSocket ?? routeSocket;
       const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
         const url = socket ? `http://localhost${path}` : `${baseUrl}${path}`;
         const init: RequestInit & { unix?: string } = {
@@ -2321,30 +2246,9 @@ function fetchTransport(
       };
 
       let res: Response;
-      let socketFailure: unknown;
       try {
-        if (localNodeSocketOnly) {
-          // Socket-only: never dial the retired loopback TCP port. A connect
-          // failure means the node is down (socket missing) or wedged (socket
-          // present); the catch tags it via `effectiveRouteSocket`.
-          try {
-            res = await attempt(localRouteSocket);
-          } catch (socketErr) {
-            socketFailure = socketErr;
-            throw socketErr;
-          }
-        } else if (routeSocket) {
-          // Non-loopback / remote node: prefer the socket, fall back to TCP/HTTP.
-          try {
-            res = await attempt(routeSocket);
-          } catch (socketErr) {
-            if (isConnectError(socketErr) && !isTimeoutError(socketErr)) {
-              socketFailure = socketErr;
-              res = await attempt(null);
-            } else {
-              throw socketErr;
-            }
-          }
+        if (localRouteSocket) {
+          res = await attempt(localRouteSocket);
         } else {
           res = await attempt(null);
         }
@@ -2355,12 +2259,6 @@ function fetchTransport(
         const transportErr = new TransportError(
           `request to ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-        if (effectiveRouteSocket && socketFailure !== undefined) {
-          (transportErr as TransportError & SocketFailureCarrier).__fbrainSocketFailure = {
-            routeSocket: effectiveRouteSocket,
-            cause: socketFailure,
-          };
-        }
         throw transportErr;
       }
 
@@ -2455,6 +2353,7 @@ function isTransportNotAttested(err: unknown): boolean {
 function mapSdkDataError(
   err: unknown,
   baseUrl: string,
+  method: string,
   path: string,
   socketPath?: string,
 ): FbrainError {
@@ -2478,11 +2377,10 @@ function mapSdkDataError(
     return mapNodeError(err.status, err.body, path);
   }
   if (err instanceof TransportError) {
-    const socketFailure = (err as TransportError & SocketFailureCarrier).__fbrainSocketFailure;
     return connectionError(baseUrl, "node", err, {
       socketPath,
-      routeSocket: socketFailure?.routeSocket,
-      socketCause: socketFailure?.cause,
+      routeSocket: localNodeRouteSocket("node", method, path, baseUrl, socketPath),
+      socketCause: err,
     });
   }
   if (err instanceof FbrainError) return err;
