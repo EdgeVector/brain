@@ -641,7 +641,12 @@ export async function verifyVectorIndexed(
   // we need a running streak of consecutive hits, with any miss resetting it.
   let streak = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const wait = computeBackoffMs(attempt, ceilingMs);
+    // Back off only after a MISS. While the hit streak is alive the index has
+    // already proven it can answer, so the confirming probe(s) fire
+    // back-to-back — the warm path (index caught up) pays ZERO sleeps. A miss
+    // is the only evidence propagation actually lags, and it both resets the
+    // streak and re-arms the backoff for the next probe.
+    const wait = streak > 0 ? 0 : computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
     let hit = false;
     try {
