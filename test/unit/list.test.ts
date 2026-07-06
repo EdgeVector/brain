@@ -16,7 +16,12 @@ import { describe, expect, test } from "bun:test";
 import { listCmd } from "../../src/commands/list.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
-import { buildTestCfg, TEST_HASHES, TEST_TAG_INDEX_HASH } from "../util.ts";
+import {
+  buildTestCfg,
+  RECORD_TYPES,
+  TEST_HASHES,
+  TEST_TAG_INDEX_HASH,
+} from "../util.ts";
 
 const cfg = buildTestCfg({
   userHash: "uh",
@@ -44,7 +49,10 @@ function spikeRow(slug: string, over: Partial<Fields> = {}): Fields {
 // returned for successive /api/query calls against that schema. Anything
 // not enqueued returns []. Non-query endpoints (autoIdentity, bootstrap)
 // get harmless OKs.
-function stubFetch(responsesBySchema: Map<string, Array<Fields[]>>): {
+function stubFetch(
+  responsesBySchema: Map<string, Array<Fields[]>>,
+  opts: { missingSchemas?: ReadonlySet<string> } = {},
+): {
   restore: () => void;
   callsBySchema: Map<string, number>;
 } {
@@ -57,6 +65,12 @@ function stubFetch(responsesBySchema: Map<string, Array<Fields[]>>): {
       const schema = String(body.schema_name);
       const n = (callsBySchema.get(schema) ?? 0) + 1;
       callsBySchema.set(schema, n);
+      if (opts.missingSchemas?.has(schema)) {
+        return new Response(
+          JSON.stringify({ error: `Schema not found: ${schema}` }),
+          { status: 404, headers: { "content-type": "application/json" } },
+        );
+      }
       const queue = responsesBySchema.get(schema) ?? [];
       const rows = queue.shift() ?? [];
       const results = rows.map((fields) => ({
@@ -868,6 +882,43 @@ describe("listCmd — stale config missing decision hash", () => {
     expect(stderr.some((l) => l.includes("init --grant-consent"))).toBe(true);
     expect(callsBySchema.has(TEST_HASHES.decision)).toBe(false);
     expect([...callsBySchema.keys()]).not.toContain("undefined");
+  });
+
+  test("unfiltered list skips a stale registered decision hash and returns all healthy records", async () => {
+    const staleDecisionHash = "0".repeat(64);
+    const staleCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: { ...TEST_HASHES, decision: staleDecisionHash },
+    });
+
+    const responses = new Map<string, Array<Fields[]>>();
+    for (const type of RECORD_TYPES) {
+      if (type === "decision") continue;
+      responses.set(TEST_HASHES[type], [[spikeRow(`${type}-healthy`)]]);
+    }
+    const { restore, callsBySchema } = stubFetch(responses, {
+      missingSchemas: new Set([staleDecisionHash]),
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      await listCmd({
+        cfg: staleCfg,
+        print: (l) => stdout.push(l),
+        printErr: (l) => stderr.push(l),
+      });
+    } finally {
+      restore();
+    }
+
+    expect(stdout).toHaveLength(RECORD_TYPES.length - 1);
+    for (const type of RECORD_TYPES) {
+      if (type === "decision") continue;
+      expect(stdout.some((l) => l.includes(`${type}-healthy`))).toBe(true);
+    }
+    expect(stderr.some((l) => l.includes("decision") && l.includes("skipping"))).toBe(true);
+    expect(stderr.some((l) => l.includes("init --grant-consent"))).toBe(true);
+    expect(callsBySchema.get(staleDecisionHash)).toBe(1);
   });
 
   test("explicit --type decision with no hash returns a normal empty result, not missing_schema_hash", async () => {

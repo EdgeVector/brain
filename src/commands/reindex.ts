@@ -31,6 +31,7 @@ import { resolvePrintSink } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
+  missingSchemaHashReadNote,
   nowIso,
   schemaHashFor,
   type FbrainRecord,
@@ -127,6 +128,8 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     const rebuilt = await rebuildTagIndex(node, opts.cfg, {
       listRecords: (type, schemaHash) => listRecords(node, type, schemaHash),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
+      onSkipUnavailableType: (type) =>
+        print(missingSchemaHashReadNote([type], "rebuilding the tag index from the rest")),
     });
     result.tagIndex = rebuilt;
     print(
