@@ -235,7 +235,7 @@ function toolsOf(server: ReturnType<typeof createFbrainMcpServer>): Record<strin
 }
 
 describe("MCP fbrain_get miss — candidate scan cost + unchanged hint", () => {
-  test("typed miss: one keyed lookup + one small candidate page, hint identical", async () => {
+  test("typed miss: two keyed lookups + one small candidate page, hint identical", async () => {
     const { calls } = installQueryMock((call) => {
       if (call.keyed) return emptyPage(); // the get lookup: slug not found
       // Candidate scan: rows plus has_more bait — the enrichment must take
@@ -259,12 +259,13 @@ describe("MCP fbrain_get miss — candidate scan cost + unchanged hint", () => {
     expect(text).toContain("deployment-rollback-decision");
     expect(text).toContain("deploy-runbook");
 
-    // Exactly two design-schema queries: the keyed point-read miss, then ONE
-    // bounded slug+tags page for the fuzzy candidates. No full-field listing,
-    // no pagination.
+    // Exactly three design-schema queries: the keyed point-read miss, one
+    // normalized separator/case point-read retry, then ONE bounded slug+tags
+    // page for the fuzzy candidates. No full-field listing, no pagination.
     const designCalls = calls.filter((c) => c.schema === TEST_HASHES.design);
-    expect(designCalls).toHaveLength(2);
-    expect(calls).toHaveLength(2); // no other schema touched on a typed miss
+    expect(designCalls).toHaveLength(3);
+    expect(calls).toHaveLength(3); // no other schema touched on a typed miss
+    expect(designCalls.filter((c) => c.keyed)).toHaveLength(2);
     const scan = designCalls.find((c) => !c.keyed)!;
     expect(scan.fields.sort()).toEqual(["slug", "tags"]);
     expect(scan.fields).not.toContain("body");
@@ -272,7 +273,7 @@ describe("MCP fbrain_get miss — candidate scan cost + unchanged hint", () => {
     expect(scan.offset).toBe(0);
   });
 
-  test("untyped miss: at most one keyed lookup + one small page per type", async () => {
+  test("untyped miss: at most two keyed lookups + one small page per type", async () => {
     const { calls } = installQueryMock((call) => {
       if (call.keyed) return emptyPage();
       if (call.schema === TEST_HASHES.design) {
@@ -286,19 +287,20 @@ describe("MCP fbrain_get miss — candidate scan cost + unchanged hint", () => {
     const text = res.content[0]!.text ?? "";
     expect(text).toContain("Nearest candidate slugs: alpha-beta (design)");
 
-    // Per schema: one keyed resolve miss + one bounded candidate page — never
-    // more, even with has_more=true on every page response.
+    // Per schema: one keyed resolve miss, one normalized keyed retry, and one
+    // bounded candidate page — never more, even with has_more=true on every
+    // page response.
     for (const hash of ALL_HASHES) {
       const perSchema = calls.filter((c) => c.schema === hash);
-      expect(perSchema).toHaveLength(2);
+      expect(perSchema).toHaveLength(3);
       const keyed = perSchema.filter((c) => c.keyed);
       const scans = perSchema.filter((c) => !c.keyed);
-      expect(keyed).toHaveLength(1);
+      expect(keyed).toHaveLength(2);
       expect(scans).toHaveLength(1);
       expect(scans[0]!.fields).not.toContain("body");
       expect(scans[0]!.limit).toBe(NO_MATCH_PROBE_PAGE_LIMIT);
     }
-    expect(calls).toHaveLength(ALL_HASHES.length * 2);
+    expect(calls).toHaveLength(ALL_HASHES.length * 3);
   });
 });
 

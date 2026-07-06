@@ -797,6 +797,78 @@ describe("resolveBySlug", () => {
     });
   });
 
+  test("normalized slug fallback resolves underscore input to a hyphenated record", async () => {
+    const node = mockNode({
+      designhash: [row("a-b-c")],
+    });
+
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "a_b_c",
+        normalizedSlugFallback: true,
+      }),
+    ).resolves.toMatchObject({
+      type: "design",
+      record: { slug: "a-b-c" },
+    });
+  });
+
+  test("normalized slug fallback resolves hyphen input to an underscored record", async () => {
+    const node = mockNode({
+      designhash: [row("a_b_c")],
+    });
+
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "a-b-c",
+        normalizedSlugFallback: true,
+      }),
+    ).resolves.toMatchObject({
+      type: "design",
+      record: { slug: "a_b_c" },
+    });
+  });
+
+  test("normalized slug fallback resolves uppercase caller input to lowercase slug", async () => {
+    const node = mockNode({
+      designhash: [row("a-b-c")],
+    });
+
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "A_B_C",
+        normalizedSlugFallback: true,
+      }),
+    ).resolves.toMatchObject({
+      type: "design",
+      record: { slug: "a-b-c" },
+    });
+  });
+
+  test("normalized slug fallback preserves not-found when folded slug is ambiguous", async () => {
+    const node = mockNode({
+      designhash: [row("a-b-c"), row("a_b_c")],
+    });
+
+    await expect(
+      resolveBySlug({
+        node,
+        cfg,
+        slug: "A_B_C",
+        normalizedSlugFallback: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      message: 'No record with slug "A_B_C".',
+    });
+  });
+
   test("typed not-found hint tells you to drop --type, naming the invoking verb", async () => {
     const node = mockNode({});
     // The slug may exist under a different type that `--type` hid — the hint
