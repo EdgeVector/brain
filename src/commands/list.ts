@@ -76,6 +76,10 @@ export type ListOptions = {
   // `RecordSummary` (`[]` on no records); in `count` mode it is a
   // `{ count: number }` object.
   onResult?: (payload: ListResult) => void;
+  // Structured advisory sink for read-degraded configs. The human/CLI surface
+  // still receives the existing note via printErr; MCP uses this to expose
+  // skipped record types in structuredContent.
+  onSkippedTypes?: (skipped: readonly RecordType[]) => void;
 };
 
 // The single-sourced result of a `listCmd` invocation, handed to both the
@@ -306,12 +310,15 @@ function recordSummary(type: RecordType, r: FbrainRecord): RecordSummary {
 
 export async function resolveListEntries(
   node: NodeClient,
-  opts: Pick<ListOptions, "cfg" | "type" | "tag" | "printErr">,
+  opts: Pick<ListOptions, "cfg" | "type" | "tag" | "printErr" | "onSkippedTypes">,
 ): Promise<ListEntry[]> {
   const { activeTypes: types } = resolveTypeFilter(
     opts.type ? [opts.type] : undefined,
     opts.cfg,
-    (skipped) => opts.printErr?.(missingSchemaHashReadNote(skipped, "listing the rest")),
+    (skipped) => {
+      opts.onSkippedTypes?.(skipped);
+      opts.printErr?.(missingSchemaHashReadNote(skipped, "listing the rest"));
+    },
   );
   if (opts.tag) {
     const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
@@ -332,6 +339,7 @@ export async function resolveListEntries(
       rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) {
+        opts.onSkippedTypes?.([t]);
         opts.printErr?.(missingSchemaHashReadNote([t], "listing the rest"));
         continue;
       }

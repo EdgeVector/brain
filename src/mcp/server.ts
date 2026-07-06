@@ -39,6 +39,7 @@ import {
   recordTypeCount,
   recordTypeList,
   RECORD_TYPES,
+  type RecordType,
 } from "../schemas.ts";
 import { establishConsentInline } from "../commands/init-consent.ts";
 import {
@@ -384,6 +385,18 @@ const matchSchema = z.object({
 const confidenceFromMatches = (matches: readonly SearchHitJson[]): boolean =>
   matches.length > 0 && matches.every((m) => m.confidence === "strong");
 
+const skippedTypesSchema = z
+  .array(z.enum(RECORD_TYPES))
+  .describe(
+    "Record types requested or walked but skipped because this config/node lacks their schema hash. Empty when no type was skipped; when non-empty, treat empty matches/records as a degraded read, not a definitive not-found.",
+  );
+
+const collectSkippedType = (acc: RecordType[], skipped: readonly RecordType[]): void => {
+  for (const type of skipped) {
+    if (!acc.includes(type)) acc.push(type);
+  }
+};
+
 // One `fbrain_list` row — the compact summary the CLI `list --json` emits
 // (body intentionally omitted; use `fbrain_get` for the full record).
 const summarySchema = z.object({
@@ -728,7 +741,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Search fbrain",
       description:
-        `Pure-vector semantic search across indexed fbrain records (${recordTypeList(", ")}). Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns one line per match: \`slug · score · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer \`fbrain_ask\`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to \`fbrain_ask\` when this returns weak or missing matches.`,
+        `Pure-vector semantic search across indexed fbrain records (${recordTypeList(", ")}). Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns one line per match: \`slug · score · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`: non-empty means some requested/walked types were skipped because their schema hash is unavailable, so empty matches are degraded rather than definitive. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer \`fbrain_ask\`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to \`fbrain_ask\` when this returns weak or missing matches.`,
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -765,10 +778,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "False when no strong match was found; treat `matches` as not-found/closest candidates rather than trusted answers.",
           ),
+        skipped_types: skippedTypesSchema,
       },
     },
-    (args) =>
-      runTool<SearchHitJson[]>({
+    (args) => {
+      const skippedTypes: RecordType[] = [];
+      return runTool<SearchHitJson[]>({
         mode: "read",
         getCfg,
         exec: (cfg, print, onResult) =>
@@ -786,13 +801,19 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             minScore: args.min_score,
             types: args.type,
             onResult,
+            onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
             // Agent channel: render the empty/no-match recovery hint in
             // MCP-tool terms (`fbrain_put`/`fbrain_ask`), never CLI verbs or
             // the no-MCP-tool `fbrain reindex` / repo doc-path dead-end.
             agent: true,
           }),
-        wrap: (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
-      }),
+        wrap: (matches) => ({
+          matches,
+          confident: confidenceFromMatches(matches),
+          skipped_types: skippedTypes,
+        }),
+      });
+    },
   );
 
   server.registerTool(
@@ -800,7 +821,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Ask fbrain (hybrid retrieval)",
       description:
-        `Hybrid retrieval over fbrain records (${recordTypeList(", ")}): runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so \`fbrain_ask\` surfaces keyword-relevant records that pure-vector \`fbrain_search\` ranks out of the top results. Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first) — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. The \`score\` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to \`fbrain_search\`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over \`fbrain_search\` when you want the best recall.`,
+        `Hybrid retrieval over fbrain records (${recordTypeList(", ")}): runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so \`fbrain_ask\` surfaces keyword-relevant records that pure-vector \`fbrain_search\` ranks out of the top results. Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first) — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`: non-empty means some requested/walked types were skipped because their schema hash is unavailable, so empty matches are degraded rather than definitive. The \`score\` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to \`fbrain_search\`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over \`fbrain_search\` when you want the best recall.`,
       inputSchema: {
         query: z
           .string()
@@ -845,10 +866,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "False when no strong match was found; treat `matches` as not-found/closest candidates rather than trusted answers.",
           ),
+        skipped_types: skippedTypesSchema,
       },
     },
-    (args) =>
-      runTool<SearchHitJson[]>({
+    (args) => {
+      const skippedTypes: RecordType[] = [];
+      return runTool<SearchHitJson[]>({
         mode: "read",
         getCfg,
         exec: async (cfg, print, onResult) => {
@@ -869,6 +892,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             limit: args.limit,
             types: args.type,
             onResult,
+            onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
             // Agent channel: render the empty-brain recovery hint in MCP-tool
             // terms (`fbrain_put`), never the `fbrain <type> new` CLI verb.
             agent: true,
@@ -878,8 +902,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             // follow-up can add an optional `expand` param if wanted.
           });
         },
-        wrap: (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
-      }),
+        wrap: (matches) => ({
+          matches,
+          confident: confidenceFromMatches(matches),
+          skipped_types: skippedTypes,
+        }),
+      });
+    },
   );
 
   server.registerTool(
@@ -949,7 +978,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "`updated_since` (records changed at/after an instant). Page past `limit` " +
         "with `offset`. Set `count: true` for a match count only (no bodies) — the " +
         "cheap way to answer \"how many …\". Output: `type · slug · status · title " +
-        "[tags]` per line (or a bare number in count mode).",
+        "[tags]` per line (or a bare number in count mode). Always check " +
+        "`structuredContent.skipped_types`: non-empty means some requested/walked " +
+        "types were skipped because their schema hash is unavailable, so empty " +
+        "records/counts are degraded rather than definitive.",
       inputSchema: {
         type: typeEnum.optional().describe("Restrict to one record type."),
         status: z
@@ -1006,16 +1038,22 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .nonnegative()
           .optional()
           .describe("Number of matching records. Present only when `count` is set."),
+        skipped_types: skippedTypesSchema,
       },
     },
-    (args) =>
-      runTool<ListResult>({
+    (args) => {
+      const skippedTypes: RecordType[] = [];
+      return runTool<ListResult>({
         mode: "read",
         getCfg,
         exec: (cfg, print, onResult) => {
           const listOpts: Parameters<typeof listCmd>[0] = {
             cfg,
             print,
+            // MCP bundles every printed line into one text block — fold
+            // CLI-stderr advisories such as skipped schema notes back into
+            // the same sink so agents see the degraded-read warning inline.
+            printErr: print,
             type: args.type,
             status: args.status,
             tag: args.tag,
@@ -1023,6 +1061,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             limit: args.limit,
             count: args.count,
             onResult,
+            onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
             // Agent channel: render the empty/filter-no-match recovery hint in
             // MCP-tool terms (`fbrain_put`/`fbrain_list`), never CLI verbs.
             agent: true,
@@ -1033,8 +1072,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           return listCmd(listOpts);
         },
         wrap: (result) =>
-          Array.isArray(result) ? { records: result } : { count: result.count },
-      }),
+          Array.isArray(result)
+            ? { records: result, skipped_types: skippedTypes }
+            : { count: result.count, skipped_types: skippedTypes },
+      });
+    },
   );
 
   server.registerTool(

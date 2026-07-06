@@ -77,6 +77,12 @@ const DESIGN_HASH = TEST_HASHES.design;
 
 const cfg = buildTestCfg({ userHash: "test-hash" });
 
+function cfgWithoutSchemaHash(type: keyof typeof TEST_HASHES) {
+  const schemaHashes = { ...cfg.schemaHashes };
+  delete schemaHashes[type];
+  return buildTestCfg({ schemaHashes });
+}
+
 const realFetch = globalThis.fetch;
 
 type MockResponse = { status: number; body?: unknown };
@@ -1152,7 +1158,11 @@ describe("read tools — structuredContent + outputSchema", () => {
     installMock(() => ({ status: 200, body: { ok: true, results: [] } }));
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_search!({ query: "nothing" });
-    expect(res.structuredContent).toEqual({ matches: [], confident: false });
+    expect(res.structuredContent).toEqual({
+      matches: [],
+      confident: false,
+      skipped_types: [],
+    });
     const schema = outputSchemaOf(server, "fbrain_search")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
@@ -1193,6 +1203,45 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(sc.matches[0]!.confidence).toBe("weak");
     const schema = outputSchemaOf(server, "fbrain_search")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
+  });
+
+  test("fbrain_search/ask/list expose skipped_types for degraded type reads", async () => {
+    installMock(() => ({ status: 200, body: { ok: true, results: [] } }));
+    const degradedCfg = cfgWithoutSchemaHash("decision");
+    const server = createFbrainMcpServer({ cfg: degradedCfg });
+    const tools = toolsOf(server);
+
+    const searchRes = await tools.fbrain_search!({
+      query: "missing schema marker",
+      type: ["decision"],
+    });
+    expect(searchRes.structuredContent).toEqual({
+      matches: [],
+      confident: false,
+      skipped_types: ["decision"],
+    });
+    expect(searchRes.content[0]!.text).toContain("skipping type(s) decision");
+    expect(() => outputSchemaOf(server, "fbrain_search")!.parse(searchRes.structuredContent)).not.toThrow();
+
+    const askRes = await tools.fbrain_ask!({
+      query: "missing schema marker",
+      type: ["decision"],
+    });
+    expect(askRes.structuredContent).toEqual({
+      matches: [],
+      confident: false,
+      skipped_types: ["decision"],
+    });
+    expect(askRes.content[0]!.text).toContain("skipping type(s) decision");
+    expect(() => outputSchemaOf(server, "fbrain_ask")!.parse(askRes.structuredContent)).not.toThrow();
+
+    const listRes = await tools.fbrain_list!({ type: "decision" });
+    expect(listRes.structuredContent).toEqual({
+      records: [],
+      skipped_types: ["decision"],
+    });
+    expect(listRes.content[0]!.text).toContain("skipping type(s) decision");
+    expect(() => outputSchemaOf(server, "fbrain_list")!.parse(listRes.structuredContent)).not.toThrow();
   });
 
   test("fbrain_ask returns { matches } matching its outputSchema", async () => {
@@ -1411,7 +1460,7 @@ describe("read tools — structuredContent + outputSchema", () => {
     });
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_list!({ type: "design" });
-    expect(res.structuredContent).toEqual({ records: [] });
+    expect(res.structuredContent).toEqual({ records: [], skipped_types: [] });
     const schema = outputSchemaOf(server, "fbrain_list")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
@@ -3213,7 +3262,11 @@ describe("createFbrainMcpServer", () => {
       const description = toolMetadataOf(server, name)?.description ?? "";
       expect(description).toContain(`(${typeList})`);
       expect(description).toContain(`omit to search all ${recordTypeCount()}`);
+      expect(description).toContain("structuredContent.skipped_types");
     }
+    expect(toolMetadataOf(server, "fbrain_list")?.description ?? "").toContain(
+      "structuredContent.skipped_types",
+    );
     const statusLines = recordStatusLines();
     const putStatusDescription = inputFieldDescription(server, "fbrain_put", "status");
     const statusStatusDescription = inputFieldDescription(server, "fbrain_status", "status");
