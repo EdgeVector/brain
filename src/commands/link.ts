@@ -4,6 +4,7 @@
 // source record. Explicit edges reject missing targets.
 
 import { FbrainError, type Verbose } from "../client.ts";
+import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -139,6 +140,15 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     keyHash: fromSlug,
     fields,
   });
+  await reconcileBacklinkIndex(
+    node,
+    opts.cfg,
+    fromType,
+    fromSlug,
+    source,
+    fields as FbrainRecord,
+    opts.verbose,
+  );
 
   print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}`);
   // Emit the structured payload from the SAME normalized slugs the printed

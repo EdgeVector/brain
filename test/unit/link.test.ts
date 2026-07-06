@@ -88,7 +88,7 @@ describe("linkCmd", () => {
       return { status: 404 };
     });
     await linkCmd({ cfg, taskSlug: "t1", designSlug: "d1", print: () => {} });
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("update");
     expect(mutations[0]!.schema).toBe(TASK_HASH);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
@@ -120,7 +120,7 @@ describe("linkCmd", () => {
     });
     await linkCmd({ cfg, taskSlug: "t1", designSlug: "d1", print: () => {} });
     expect(taskQueryCalls).toBe(1);
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("d1");
   });
@@ -150,7 +150,7 @@ describe("linkCmd", () => {
     });
     await linkCmd({ cfg, taskSlug: "t1", designSlug: "d1", print: () => {} });
     expect(designQueryCalls).toBe(1);
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("d1");
   });
@@ -307,7 +307,7 @@ describe("linkCmd", () => {
       return { status: 404 };
     });
     await linkCmd({ cfg, taskSlug: "  t1  ", designSlug: "\td1\n", print: () => {} });
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("update");
     const keyValue = mutations[0]!.key_value as { hash: string };
     expect(keyValue.hash).toBe("t1");
@@ -385,7 +385,7 @@ describe("linkCmd", () => {
       to_type: "reference",
       to_slug: "review-note",
     });
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.schema).toBe(TEST_HASHES.concept);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.tags).toEqual(["existing", "link:reference:review-note"]);

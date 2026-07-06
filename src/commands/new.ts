@@ -12,6 +12,7 @@
 // than silently ignored.
 
 import { FbrainError, type Verbose } from "../client.ts";
+import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { capitalize } from "../format.ts";
@@ -24,6 +25,7 @@ import {
   type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
+  type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
 import { indexRecordTags } from "../tag-index.ts";
@@ -136,6 +138,16 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     fields.design_slug = opts.designSlug ?? "";
   }
   await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
+  const record = fields as FbrainRecord;
+  await reconcileBacklinkIndex(
+    node,
+    opts.cfg,
+    opts.type,
+    opts.slug,
+    null,
+    record,
+    opts.verbose,
+  );
   await indexRecordTags(
     node,
     opts.cfg,

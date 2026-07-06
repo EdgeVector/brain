@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { backlinkIndexTag } from "../../src/backlink-index.ts";
 import { backlinksCmd } from "../../src/commands/backlinks.ts";
-import { TEST_HASHES, buildTestCfg } from "../util.ts";
+import { tagIndexSlug } from "../../src/tag-index.ts";
+import { TEST_HASHES, TEST_TAG_INDEX_HASH, buildTestCfg } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
 const realFetch = globalThis.fetch;
@@ -34,13 +36,38 @@ function base(slug: string, over: Record<string, unknown> = {}) {
   };
 }
 
+function backlinkIndexRow(targetSlug: string, members: string[]) {
+  const tag = backlinkIndexTag(targetSlug);
+  return row(tagIndexSlug(tag), {
+    slug: tagIndexSlug(tag),
+    tag,
+    members,
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+  });
+}
+
 describe("backlinksCmd", () => {
   test("returns explicit legacy, explicit generic, and body wiki backlinks", async () => {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      const key = body.filter?.HashKey;
+      if (body.schema_name === TEST_TAG_INDEX_HASH) {
+        if (key === tagIndexSlug(backlinkIndexTag("target"))) {
+          return queryResp([
+            backlinkIndexRow("target", [
+              "task:task-edge",
+              "concept:concept-edge",
+              "reference:dangling-note",
+            ]),
+          ]);
+        }
+        return queryResp([]);
+      }
       if (body.schema_name === TEST_HASHES.task) {
+        if (key !== "task-edge") return queryResp([]);
         return queryResp([
           row("task-edge", {
             ...base("task-edge", { status: "open" }),
@@ -49,6 +76,7 @@ describe("backlinksCmd", () => {
         ]);
       }
       if (body.schema_name === TEST_HASHES.concept) {
+        if (key !== "concept-edge") return queryResp([]);
         return queryResp([
           row("concept-edge", {
             ...base("concept-edge"),
@@ -57,6 +85,7 @@ describe("backlinksCmd", () => {
         ]);
       }
       if (body.schema_name === TEST_HASHES.reference) {
+        if (key !== "dangling-note") return queryResp([]);
         return queryResp([
           row("dangling-note", {
             ...base("dangling-note", { status: "broken" }),
@@ -96,7 +125,17 @@ describe("backlinksCmd", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      const key = body.filter?.HashKey;
+      if (body.schema_name === TEST_TAG_INDEX_HASH) {
+        if (key === tagIndexSlug(backlinkIndexTag("future-target"))) {
+          return queryResp([
+            backlinkIndexRow("future-target", ["reference:future-note"]),
+          ]);
+        }
+        return queryResp([]);
+      }
       if (body.schema_name === TEST_HASHES.reference) {
+        if (key !== "future-note") return queryResp([]);
         return queryResp([
           row("future-note", {
             ...base("future-note"),

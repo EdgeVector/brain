@@ -176,7 +176,7 @@ describe("taskNew", () => {
     });
     // Two keyed point-reads of the parent (validate + link), no empty-page retry.
     expect(designQueryCalls).toBe(2);
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("create");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("parent-design");

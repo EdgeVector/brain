@@ -3,11 +3,11 @@
 // multiple schemas, returns the match selected by GET_RECORD_TYPE_PRECEDENCE.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
+import { findBacklinks } from "../backlink-index.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
-  findBacklinks,
   findBySlug,
   findChildTasksByDesign,
   GET_RECORD_TYPE_PRECEDENCE,
@@ -95,6 +95,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
 
   const linkedFrom = await findBacklinks(node, opts.cfg, found.record.slug, {
     targetType: found.type,
+    verbose: opts.verbose,
   });
 
   // Built unconditionally (not just under --json) so the `onResult`

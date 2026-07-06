@@ -3000,7 +3000,7 @@ describe("fbrain_link tool", () => {
     });
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text ?? "").toContain("linked task t1 → design d1");
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("d1");
   });
@@ -3071,7 +3071,7 @@ describe("fbrain_link tool", () => {
     });
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text ?? "").toContain("linked concept c1 → design d1");
-    expect(mutations).toHaveLength(1);
+    expect(mutations).toHaveLength(2);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.tags).toEqual(["existing", "link:design:d1"]);
   });
