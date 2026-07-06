@@ -631,10 +631,12 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
 2. **Checkpoint as you go.** When a decision, learning, or durable fact is
    settled, write it with \`fbrain_put\` *then* — don't wait to be asked, and don't
    batch it all to the end of the session where it gets lost. A one-line note now
-   beats a perfect note never. For a large body (a design, a long decision log),
-   stage it to a file and pass \`body_path\` instead of inlining \`body\` — a long
-   inline \`body\` can be silently dropped in transit in long sessions, whereas a
-   short path always survives. To UPDATE an existing record, reach for the
+   beats a perfect note never. Unless the body is a short single line, stage it
+   to a file and pass \`body_path\` (or pass \`body_b64\`) instead of inlining
+   \`body\` — an inline \`body\` with newlines, quotes, or emoji can fail to parse
+   (an opaque \`could not be parsed as JSON\` error) or be dropped in transit at
+   ANY size, so this is not size-gated; a short path/base64 always survives. To
+   UPDATE an existing record, reach for the
    right-sized tool instead of a full \`fbrain_put\`: \`fbrain_status\` changes only
    the status, and \`fbrain_append\` adds to the body without a rewrite. This
    matters because \`fbrain_put\` is a FULL REPLACE whose body defaults to empty —

@@ -275,10 +275,10 @@ export const CONFIG_MISSING_HINT =
 // actionable message instead of a bare "expected string, received undefined".
 export const DROPPED_INPUT_HINT =
   "fbrain received no value for a required field — the tool arguments were " +
-  "likely dropped before reaching the server. This happens when a call's " +
-  "arguments are large (e.g. a `fbrain_put` body over ~1KB, or one with " +
-  "newlines/emoji) in a long agent session: the oversized inline body fails " +
-  "to parse or is dropped in transit before it reaches the server. RECOVER " +
+  "likely dropped before reaching the server. This happens when a call " +
+  "carries a multiline/quote-heavy/emoji `fbrain_put` body inline (at ANY " +
+  "size — not just large bodies): the inline body fails to serialize as JSON " +
+  "or is dropped in transit before it reaches the server. RECOVER " +
   "by staging the body to a file and passing its path as `body_path` (a " +
   "short path always survives where a large inline `body` is dropped), or " +
   "pass `body_b64` (UTF-8 body bytes encoded as standard base64), or use the " +
@@ -1080,12 +1080,15 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "One of `type` or a `type:` field in `frontmatter` is required — " +
         "there is NO silent default. If `frontmatter` is provided it is " +
         "used verbatim (without the `---` fences); otherwise frontmatter is " +
-        "synthesized from `type`, `title`, `tags`, and `status`. For a large " +
-        "or multiline body, pass `body_b64` (UTF-8 body bytes encoded as " +
-        "standard base64) or stage it to a file and pass `body_path` instead " +
-        "of inlining `body` — a long inline `body` can be silently dropped " +
-        "in transit in long sessions, whereas these shorter arguments " +
-        "survive. Returns " +
+        "synthesized from `type`, `title`, `tags`, and `status`. Unless the " +
+        "body is a short single line, prefer `body_b64` (UTF-8 body bytes " +
+        "encoded as standard base64) or stage it to a file and pass " +
+        "`body_path` instead of inlining `body` — an inline `body` with " +
+        "newlines, quotes, or emoji can fail to serialize as JSON (an opaque " +
+        "`could not be parsed as JSON` error) or be dropped in transit " +
+        "BEFORE it reaches the server, at ANY size (seen as small as " +
+        "~250 bytes), so this is not size-gated; the base64/path arguments " +
+        "sidestep JSON string escaping entirely. Returns " +
         "one line: `created|updated <type> <slug>`. Before returning, the " +
         "write is confirmed read-after-write consistent: the record is " +
         "record-list-visible AND a short bounded poll waits for it to land in " +
@@ -1110,23 +1113,26 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Markdown body (indexed for search). Defaults to empty. For a " +
-              "body over ~1KB or one containing newlines/emoji, DO NOT inline " +
-              "it here — stage it to a file and pass `body_path`, or pass " +
-              "`body_b64`. A long or multiline inline `body` can fail to " +
-              "parse or be dropped in transit before it ever reaches the " +
-              "server; `body_path` (a short path) always survives. Mutually " +
-              "exclusive with `body_path` and `body_b64`.",
+            "Markdown body (indexed for search). Defaults to empty. Use ONLY " +
+              "for a short single-line body. If it contains newlines, quotes, " +
+              "or emoji — at ANY size, not just large bodies — DO NOT inline " +
+              "it here: it can fail to parse (an opaque `could not be parsed " +
+              "as JSON` error, seen as small as ~250 bytes) or be dropped in " +
+              "transit before it ever reaches the server. Instead pass " +
+              "`body_b64` (base64 of the UTF-8 bytes) or stage it to a file " +
+              "and pass `body_path`. Mutually exclusive with `body_path` and " +
+              "`body_b64`.",
           ),
         body_path: z
           .string()
           .optional()
           .describe(
             "Absolute path to a UTF-8 file whose contents become the body. " +
-              "Use this instead of `body` for large records: a path is a " +
-              "short argument that survives the input-dropping that truncates " +
-              "a long inline `body` in long agent sessions. Mutually " +
-              "exclusive with `body` and `body_b64`.",
+              "Prefer this (or `body_b64`) over inlining `body` for anything " +
+              "beyond a short single line: a path is a short argument that " +
+              "survives the JSON-parse failure / input-dropping that a " +
+              "multiline or large inline `body` hits before reaching the " +
+              "server. Mutually exclusive with `body` and `body_b64`.",
           ),
         body_b64: z
           .string()
