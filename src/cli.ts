@@ -31,10 +31,17 @@ import { gateAdd, gateClear, gatesOpen, gateVerify } from "./commands/gate.ts";
 import {
   buildAgentInstructionsBlock,
   isRecordType,
+  recordTypeCount,
+  recordTypeList,
   RECORD_PURPOSES,
   RECORD_TYPES,
   type RecordType,
 } from "./schemas.ts";
+import {
+  FBRAIN_MCP_READ_TOOL_NAMES,
+  FBRAIN_MCP_TOOL_NAMES,
+  FBRAIN_MCP_WRITE_TOOL_NAMES,
+} from "./mcp/tools.ts";
 
 // Exit code for usage/argument errors — "you invoked fbrain wrong" (unknown
 // command, typo'd command, missing required arg, unknown/misapplied flag,
@@ -131,8 +138,11 @@ export const COMMANDS = [
 ] as const;
 export type Command = (typeof COMMANDS)[number];
 
+const RECORD_TYPE_LIST = recordTypeList();
+const RECORD_TYPE_COUNT = recordTypeCount();
+
 // The `<type> new` command lines carry each record type's "use it for"
-// one-liner so a new dev sees, in the bare `fbrain` help, which of the 8
+// one-liner so a new dev sees, in the bare `fbrain` help, which of the
 // types to reach for. Purposes come from the SINGLE SHARED RECORD_PURPOSES
 // map (schemas.ts) — the same source the README uses, so the two can't drift.
 const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.map((t) => {
@@ -165,7 +175,7 @@ ${RECORD_NEW_HELP_LINES}
   delete         soft-delete a record (fold_db is append-only)
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
-  mcp            start an MCP server over stdio (10 tools: search/ask/get/list/backlinks/put/status/append/delete/link)
+  mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
   hook session-start  Claude Code SessionStart hook: inject strong-confidence fbrain context
@@ -178,7 +188,7 @@ Global flags:
 
 Run \`fbrain help <command>\` for per-command usage.`;
 
-// Shared help shape for the 7 record types that take the common
+// Shared help shape for the record types that take the common
 // (--title/--tag/--body/--force) flag set. Task is the one type with an extra
 // --design parent-link arg, so it keeps its own bespoke help block.
 function simpleNewHelp(type: RecordType): string {
@@ -246,7 +256,7 @@ Type resolution: one of frontmatter \`type:\` or \`--type T\` is required.
 There is NO silent default — a stdin stream without a type errors out.
 If both are set and disagree, the put errors with type_conflict.
 
-  --type    design | task | concept | preference | reference | agent | project | spike | sop | decision
+  --type    ${RECORD_TYPE_LIST}
             (case-insensitive; overrides absent frontmatter, errors on conflict)
   --json    emit \`{ok, slug, created}\` on stdout (\`created\` is true on insert,
             false on update); the human \`created/updated …\` line moves to
@@ -255,7 +265,7 @@ If both are set and disagree, the put errors with type_conflict.
 
 Frontmatter (between leading \`---\` lines) keys honored:
   slug     string         (positional arg overrides; conflict if both differ)
-  type     same 9 values as --type
+  type     same ${RECORD_TYPE_COUNT} values as --type
   title    string         (default: first H1 in body, else slug)
   tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
 
@@ -276,7 +286,7 @@ never trips the put-side shrink guard and never truncates a large record
 (the \`fbrain get\` window limit is irrelevant — the full body is read
 server-side, not through a windowed get).
 
-  --type    design | task | concept | preference | reference | agent | project | spike | sop
+  --type    ${RECORD_TYPE_LIST}
             (omit to resolve across all types; errors on an ambiguous slug)
   --raw     concatenate byte-exact (no auto-inserted blank-line separator)
   --json    emit \`{ok, slug, appended, newBodyChars}\` on stdout; the human
@@ -291,7 +301,7 @@ Examples:
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
-  --type        design | task | concept | preference | reference | agent | project | spike | sop | decision
+  --type        ${RECORD_TYPE_LIST}
   --body-limit  truncate body output to N chars (default: full body)
   --json        emit the resolved record as a single JSON object on stdout
                 (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
@@ -300,7 +310,7 @@ exists in multiple types (specify --type to disambiguate).
   list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
              [--offset N] [-n N | --limit N] [--count] [--json]
 
-  --type          design | task | concept | preference | reference | agent | project | spike | sop | decision
+  --type          ${RECORD_TYPE_LIST}
                   (omit to list across all types)
   --status        filter by status enum
   --tag           filter by tag membership
@@ -324,7 +334,7 @@ exists in multiple types (specify --type to disambiguate).
 Bare form prints current status. With a new-status, validates against the
 type's status enum, updates updated_at, and writes back.
 
-  --type    design | task | concept | preference | reference | agent | project | spike | sop | decision
+  --type    ${RECORD_TYPE_LIST}
   --json    (show form only) emit the status as a single JSON object on
             stdout — \`{slug, type, status}\`, parseable by \`jq\`. Ignored
             with a new-status; the update form keeps its human transition
@@ -366,8 +376,7 @@ human outputs no longer invite a misleading score comparison.
   --min-score   server-side score floor (passes ?min_score=F)
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`).
-                One of: design | task | concept | preference | reference |
-                agent | project | spike | sop. Omit to search across all 9 types.
+                One of: ${RECORD_TYPE_LIST}. Omit to search across all ${RECORD_TYPE_COUNT} types.
   --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
                 on stdout (parseable by \`jq\`); \`snippet\` is the same
                 matching body extract shown under each human row. Empty
@@ -406,8 +415,7 @@ shows it as a debug column too).
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`). Narrows both the BM25
                 corpus and the vector schemas filter.
-                One of: design | task | concept | preference | reference |
-                agent | project | spike | sop. Omit to search across all 9 types.
+                One of: ${RECORD_TYPE_LIST}. Omit to search across all ${RECORD_TYPE_COUNT} types.
   --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
                 on stdout (parseable by \`jq\`); \`snippet\` is the same
                 matching body extract shown under each human row. Empty
@@ -560,7 +568,7 @@ design). In single-slug mode this is a hard error; in filter mode the
 linked design is skipped+warned (the batch continues). Pass --force to
 delete anyway — the tasks' design references are then left dangling.
 
-  --type      design | task | concept | preference | reference | agent | project | spike | sop | decision
+  --type      ${RECORD_TYPE_LIST}
   --tag T     filter mode: delete every live record carrying tag T
   --status S  filter mode: additionally require status S
   --force     delete a design even if live tasks still link to it
@@ -587,8 +595,8 @@ index and does NOT reduce pollution (it adds one stale entry per record).
 It is not a fix for high \`doctor --freshness\` pollution; that purge is
 upstream fold_db work (G3d/G3e), not available at the fbrain layer.
 
-  --type            narrow to one of: design | task | concept | preference |
-                    reference | agent | project | spike | sop (default: all 9)
+  --type            narrow to one of: ${RECORD_TYPE_LIST}
+                    (default: all ${RECORD_TYPE_COUNT})
   --dry-run         list records that would be reindexed; no writes
   --repair-titles   one-shot repair mode: skip the embedding refresh and
                     only fix records whose stored title is the literal text
@@ -674,11 +682,11 @@ fbrain mcp instructions
   record type. (Same content as docs/agent-instructions.md, kept in sync.)
 
 fbrain mcp
-  Start a Model Context Protocol server over stdio. Exposes ten tools so
+  Start a Model Context Protocol server over stdio. Exposes ${FBRAIN_MCP_TOOL_NAMES.length} tools so
 MCP clients (Claude Code, Codex, etc.) can read and write fbrain
 in-process:
-  read:  fbrain_search, fbrain_ask, fbrain_get, fbrain_list, fbrain_backlinks
-  write: fbrain_put, fbrain_status, fbrain_append, fbrain_delete, fbrain_link
+  read:  ${FBRAIN_MCP_READ_TOOL_NAMES.join(", ")}
+  write: ${FBRAIN_MCP_WRITE_TOOL_NAMES.join(", ")}
 
 fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
 vector (RRF hybrid) for better recall than pure-vector fbrain_search.
@@ -927,7 +935,7 @@ export const CLI_SPEC = {
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
-  // The 6 Phase-6 types + sop share design's flag set (no --design parent link).
+  // Every non-task type shares design's flag set (no --design parent link).
   concept: DESIGN_OPTIONS,
   preference: DESIGN_OPTIONS,
   reference: DESIGN_OPTIONS,
@@ -1607,7 +1615,7 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   return 0;
 }
 
-// Shared `<type> new` dispatcher. Handles all 8 record types — task is the
+// Shared `<type> new` dispatcher. Handles all record types — task is the
 // only one with a per-type extra (--design), so we pick the option set on
 // type but funnel everything through one parse + envelope. The pre-Phase-6
 // runDesign/runTask functions did the same work copy-pasted; keeping the

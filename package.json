@@ -1,7 +1,7 @@
 {
   "name": "fbrain",
   "version": "0.8.0",
-  "description": "fbrain — a CLI brain over fold_db (designs, tasks, concepts, preferences, references, agents, projects, spikes) with semantic search and an MCP agent surface",
+  "description": "fbrain — a CLI brain over fold_db (design, task, concept, preference, reference, agent, project, spike, sop, decision) with semantic search and an MCP agent surface",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/EdgeVector/fbrain#readme",

@@ -432,7 +432,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   if (cfgIssues.length === 0 && !nodeReachable) {
     // checkSchemaDrift only reads the cloud schema-SERVICE, so it would still
     // PASS with the node dead — but the `schema-drift[…]` label promises a
-    // comparison against the user's node, and eight green lines next to a red
+    // comparison against the user's node, and one green line per schema next to a red
     // `node-reachable` read as "my schemas are fine on my node," which was
     // never checked. Collapse to a single honest SKIP when the node is down.
     checks.push(
@@ -1016,7 +1016,7 @@ export async function runFreshnessProbe(
       name: "freshness-probe",
       ok: false,
       detail: 'config has no schemaHashes["concept"]',
-      fix: "re-run `fbrain init` so the config picks up all 8 schema hashes",
+      fix: "re-run `fbrain init` so the config picks up all schema hashes",
     };
   }
 
@@ -1864,7 +1864,7 @@ export async function runWriteRoundtripProbe(
       name: "write-roundtrip",
       ok: false,
       detail: 'config has no schemaHashes["concept"]',
-      fix: "re-run `fbrain init` so the config picks up all 8 schema hashes",
+      fix: "re-run `fbrain init` so the config picks up all schema hashes",
     };
   }
 
@@ -1951,14 +1951,14 @@ export async function runSchemaPublishGateProbe(
   const url = DEFAULT_SCHEMA_SERVICE_URL;
   const factory = opts.schemaClientFactory ?? newSchemaServiceClient;
   const client = factory(url, verbose);
-  // Pick a fbrain-namespaced schema with a stable hash; any of the 8 schemas
+  // Pick a fbrain-namespaced schema with a stable hash; any fbrain schema
   // would trip the same cert_required gate, since the schema service checks
   // for a DevCert before deciding the operation is idempotent.
   const probe = UNIQUE_SCHEMAS.find((s) => s.key === "design") ?? UNIQUE_SCHEMAS[0];
   if (!probe) return null;
   try {
     await client.registerSchema(probe.schema);
-    // EXPECTED on prod: fbrain's 8 schemas are ALREADY published there (that's
+    // EXPECTED on prod: fbrain's schemas are ALREADY published there (that's
     // how `init` resolves their canonical hashes without a DevCert), so this
     // re-register is idempotent and succeeds. Success means the publish gate
     // isn't blocking onboarding — a calm PASS, not an alarm. Don't imply
@@ -1980,7 +1980,7 @@ export async function runSchemaPublishGateProbe(
       // for the namespaced `fbrain/*` schemas — but `fbrain init` never needs
       // to publish: it loads the cert-free catalog and resolves the
       // already-published canonical hashes from the node (proven by the
-      // init.ts "cert_required POST → resolves all 8 hashes, no throw" path).
+      // init.ts "cert_required POST → resolves all hashes, no throw" path).
       // Reporting this as a FAIL with "init cannot complete" is a false
       // dead-end that scares fresh adopters away before they've even run
       // init. Surface it as a calm PASS; the no-config `[FAIL] config` line

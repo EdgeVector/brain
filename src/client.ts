@@ -2665,7 +2665,7 @@ export function mapNodeError(status: number, body: unknown, path: string): Fbrai
 // `runSchemaPublishGateProbe` (doctor's stand-alone diagnosis). Keeping a
 // single source so the two surfaces never drift.
 export const CERT_REQUIRED_HINT =
-  "fbrain's 8 schemas under `fbrain/*` are namespaced — POSTing them to the " +
+  "fbrain's schemas under `fbrain/*` are namespaced — POSTing them to the " +
   "schema service requires a DevCert held by a maintainer (per app_identity v3.1). " +
   "A fresh consumer is expected to skip publishing entirely; init resolves the " +
   "already-published canonical hashes from the node after the cert-free catalog " +
@@ -2680,7 +2680,7 @@ export function mapSchemaServiceError(res: Response, body: unknown, path: string
   const reason = bodyStringField(body, "reason");
   // App-identity v3.1 publish gate. The schema service rejects an
   // `owner_app_id`-tagged schema POST from a caller without a DevCert with
-  // `401 {"reason":"cert_required"}`. For fbrain — whose 8 schemas under
+  // `401 {"reason":"cert_required"}`. For fbrain — whose schemas under
   // `fbrain/*` are pre-published org-wide — this is the canonical "fresh
   // consumer following the documented path" failure: re-POSTing canonical
   // hashes requires publish authority the consumer doesn't (and shouldn't) have.

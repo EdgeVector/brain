@@ -1,8 +1,7 @@
 // `fbrain <type> new <slug>` — table-driven record creator.
 //
-// One creator for all 8 record types. Pre-Phase-6 only `design new` and
-// `task new` existed as ergonomic verbs; the other 6 (concept, preference,
-// reference, agent, project, spike) were reachable only via `fbrain put
+// One creator for all record types. Pre-Phase-6 only `design new` and
+// `task new` existed as ergonomic verbs; later types were reachable only via `fbrain put
 // --type <t>` even though their schemas were fully registered. This shared
 // implementation closes that gap without duplicating the slug-exists guard,
 // the /api/query top-100 read-flake hedge, or the parent-design dangling-ref

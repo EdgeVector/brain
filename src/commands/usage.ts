@@ -1,6 +1,6 @@
 // `fbrain doctor --usage` — team-adoption telemetry (G13).
 //
-// Iterates every record across the eight registered schemas via
+// Iterates every record across the registered schemas via
 // /api/query, derives a per-record userHash from the author public key,
 // and counts records created in the last N days (default 7) — grouped
 // by userHash and broken down by record type. Prints only the 8-char

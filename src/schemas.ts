@@ -437,6 +437,14 @@ export const RECORD_TYPES = [
 ] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
+export function recordTypeList(separator = " | "): string {
+  return RECORD_TYPES.join(separator);
+}
+
+export function recordTypeCount(): number {
+  return RECORD_TYPES.length;
+}
+
 // Internal tag secondary index. This is intentionally NOT a RecordType: it is
 // registered and stored in config like other fbrain schemas, but never appears
 // on user-facing list/get/search surfaces.
@@ -650,6 +658,10 @@ export const RECORD_PURPOSES: Record<RecordType, string> = Object.fromEntries(
 
 export function purposeFor(type: RecordType): string {
   return RECORD_PURPOSES[type];
+}
+
+export function recordStatusLines(): string {
+  return RECORD_TYPES.map((type) => `${type} = ${RECORDS[type].statuses.join("|")}`).join("; ");
 }
 
 // The single copy-paste CLAUDE.md block that teaches an agent *when* and *why*

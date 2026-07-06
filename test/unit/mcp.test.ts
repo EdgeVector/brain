@@ -32,6 +32,7 @@ import {
 import { ConfigMissingError } from "../../src/config.ts";
 import { COMMAND_HELP } from "../../src/cli.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
+import { recordStatusLines, recordTypeCount, recordTypeList } from "../../src/schemas.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -227,6 +228,29 @@ function inputSchemaOf(
     }
   )._registeredTools;
   return map[name]?.inputSchema;
+}
+
+function toolMetadataOf(
+  server: ReturnType<typeof createFbrainMcpServer>,
+  name: string,
+): { description?: string; inputSchema?: z.ZodObject<z.ZodRawShape> } | undefined {
+  const map = (
+    server as unknown as {
+      _registeredTools: Record<string, { description?: string; inputSchema?: z.ZodObject<z.ZodRawShape> }>;
+    }
+  )._registeredTools;
+  return map[name];
+}
+
+function inputFieldDescription(
+  server: ReturnType<typeof createFbrainMcpServer>,
+  tool: string,
+  field: string,
+): string {
+  const schema = toolMetadataOf(server, tool)?.inputSchema as unknown as
+    | { shape?: Record<string, { description?: string }> }
+    | undefined;
+  return schema?.shape?.[field]?.description ?? "";
 }
 
 function recordRow(slug: string, title = `T-${slug}`, body = "body text") {
@@ -3167,7 +3191,7 @@ describe("createFbrainMcpServer", () => {
   // subcommand help can't drift behind the server again (it claimed "six
   // tools" and omitted fbrain_ask long after the tool shipped — done card
   // help-mcp-says-six-tools-omits-ask, dogfood run 30, 2026-06-16).
-  test("COMMAND_HELP.mcp names every registered tool and says ten", () => {
+  test("COMMAND_HELP.mcp names every registered tool and says the registered count", () => {
     const help = COMMAND_HELP.mcp;
     const registered = Object.keys(toolsOf(createFbrainMcpServer({ cfg })));
     // 10 is the contract — the help must not undercount the server.
@@ -3177,9 +3201,24 @@ describe("createFbrainMcpServer", () => {
     }
     // fbrain_ask was the specific omission; assert it explicitly.
     expect(help).toContain("fbrain_ask");
-    expect(help).toContain("ten tools");
+    expect(help).toContain(`${registered.length} tools`);
     expect(help).not.toContain("seven tools");
     expect(help).not.toContain("nine tools");
+  });
+
+  test("MCP descriptions render record types and statuses from the registry", () => {
+    const server = createFbrainMcpServer({ cfg });
+    const typeList = recordTypeList(", ");
+    for (const name of ["fbrain_search", "fbrain_ask"]) {
+      const description = toolMetadataOf(server, name)?.description ?? "";
+      expect(description).toContain(`(${typeList})`);
+      expect(description).toContain(`omit to search all ${recordTypeCount()}`);
+    }
+    const statusLines = recordStatusLines();
+    const putStatusDescription = inputFieldDescription(server, "fbrain_put", "status");
+    const statusStatusDescription = inputFieldDescription(server, "fbrain_status", "status");
+    expect(putStatusDescription).toContain(statusLines);
+    expect(statusStatusDescription).toContain(statusLines);
   });
 });
 

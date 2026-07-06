@@ -155,7 +155,7 @@ export function uniqueSchemaHashes(
 
 // Shared by `ask` and `search`: turn an optional `--type` selection into a
 // membership Set plus the canonical-order RecordType list to walk. Undefined
-// or empty `types` returns `null` filter + all 8 RECORD_TYPES so callers can
+// or empty `types` returns `null` filter + all RECORD_TYPES so callers can
 // branch on the null instead of a length check. `activeTypes` preserves
 // RECORD_TYPES order regardless of the order the user passed `--type` in.
 //

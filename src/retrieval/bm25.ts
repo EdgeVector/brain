@@ -2,7 +2,7 @@
 //
 // fold_db doesn't expose a BM25 layer, so we build a tiny inverted index in
 // the CLI process. Documents are `title + "\n" + body` for every live
-// (non-tombstoned) record across all 8 types. The vector layer already
+// (non-tombstoned) record across all record types. The vector layer already
 // dedupes per (schema, slug); BM25 here mirrors that — one document per
 // (type, slug).
 //
