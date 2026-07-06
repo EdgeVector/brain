@@ -99,7 +99,7 @@ export type AskOptions = {
   // so existing scripts/agents don't break. Ignored when `expand` is set.
   noLlm?: boolean;
   explain?: boolean;
-  // Restrict results to these record types. Undefined / empty = all 8 types.
+  // Restrict results to these record types. Undefined / empty = all record types.
   // Repeatable on the CLI via `--type T` (e.g. `--type design --type task`).
   // BM25 corpus is built only over the requested types and the vector call
   // is server-side schema-scoped, so both rankers see the narrowed slice.

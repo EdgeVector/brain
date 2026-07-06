@@ -14,15 +14,15 @@
 app_id = "fbrain"
 
 # Cross-app schemas / transform outputs this app declares it *consumes*.
-# fbrain owns all of its eight record types (Design, Task, Concept,
-# Preference, Reference, Agent, Project, Spike) under its own `fbrain/*`
+# fbrain owns all of its ten record types (Design, Task, Concept,
+# Preference, Reference, Agent, Project, Spike, Sop, Decision) under its own `fbrain/*`
 # namespace and consumes no other app's schemas, so this is empty. Declared
 # explicitly to mark the discovery/intent front door as reviewed for Phase 1.
 uses = []
 
 [metadata]
 display_name = "fbrain"
-description = "EdgeVector's CLI brain over fold_db — eight record types (designs, tasks, concepts, preferences, references, agents, projects, spikes) with semantic search, sharing, and migration. Tom's local prototype graduating into the gbrain replacement."
+description = "EdgeVector's CLI brain over fold_db — ten record types (design, task, concept, preference, reference, agent, project, spike, sop, decision) with semantic search, sharing, and migration. Tom's local prototype graduating into the gbrain replacement."
 homepage_url = "https://github.com/EdgeVector/fbrain"
 
 # Code-signing identity of fbrain's shipped binary. The signed `fbrain-mcp`

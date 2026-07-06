@@ -28,7 +28,8 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import { CLI_SPEC, COMMAND_HELP, COMMANDS, TOP_HELP } from "../../src/cli.ts";
-import { RECORD_TYPES } from "../../src/schemas.ts";
+import { recordTypeCount, recordTypeList, RECORD_TYPES } from "../../src/schemas.ts";
+import { FBRAIN_MCP_TOOL_NAMES } from "../../src/mcp/tools.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
@@ -84,6 +85,23 @@ describe("COMMAND_HELP <-> CLI_SPEC alignment", () => {
     const help = COMMAND_HELP.delete;
     for (const type of RECORD_TYPES) {
       expect(help).toContain(type);
+    }
+  });
+
+  test("type-list help surfaces render from RECORD_TYPES", () => {
+    const list = recordTypeList();
+    for (const cmd of ["put", "append", "get", "list", "status", "delete", "reindex"] as const) {
+      expect(COMMAND_HELP[cmd]).toContain(list);
+    }
+    expect(COMMAND_HELP.search).toContain(`One of: ${list}. Omit to search across all ${recordTypeCount()} types.`);
+    expect(COMMAND_HELP.ask).toContain(`One of: ${list}. Omit to search across all ${recordTypeCount()} types.`);
+  });
+
+  test("MCP help renders from FBRAIN_MCP_TOOL_NAMES", () => {
+    const help = COMMAND_HELP.mcp;
+    expect(help).toContain(`${FBRAIN_MCP_TOOL_NAMES.length} tools`);
+    for (const name of FBRAIN_MCP_TOOL_NAMES) {
+      expect(help).toContain(name);
     }
   });
 });

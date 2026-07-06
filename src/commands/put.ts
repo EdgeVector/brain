@@ -14,8 +14,7 @@
 //   - `slug:`, `type:`, `title:`, `status:`, and `tags:` have meaning here;
 //     other keys are silently ignored (forward-compatible with future fields).
 //
-// As of Phase 6, every type in RECORDS routes to a real write:
-// design / task / concept / preference / reference / agent / project / spike / sop.
+// Every type in RECORDS routes to a real write.
 // An unrecognised `type:` errors as `unsupported_type`.
 
 import { FbrainError, type Verbose } from "../client.ts";
@@ -38,6 +37,7 @@ import {
 import {
   RECORDS,
   isRecordType,
+  recordTypeList,
   type RecordType,
 } from "../schemas.ts";
 import { reconcileTagIndex } from "../tag-index.ts";
@@ -322,7 +322,7 @@ function resolveRecordType(
         code: "missing_type",
         message:
           "fbrain put requires a `type:` field in frontmatter (or pass --type <T>).",
-        hint: "One of: design | task | concept | preference | reference | agent | project | spike | sop.",
+        hint: `One of: ${recordTypeList()}.`,
       }),
   );
 }
@@ -334,9 +334,7 @@ function normaliseType(raw: string | undefined): RecordType | undefined {
   throw new FbrainError({
     code: "unsupported_type",
     message: `type "${raw}" is not a recognised fbrain record type.`,
-    hint:
-      "Supported: design | task | concept | preference | reference | agent | project | spike | sop. " +
-      "Check spelling or pick the closest type.",
+    hint: `Supported: ${recordTypeList()}. Check spelling or pick the closest type.`,
   });
 }
 

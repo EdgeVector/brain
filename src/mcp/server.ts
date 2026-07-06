@@ -31,31 +31,23 @@ import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { backlinksCmd, type BacklinksJson } from "../commands/backlinks.ts";
 import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
-import { RECORD_TYPES } from "../schemas.ts";
+import {
+  recordStatusLines,
+  recordTypeCount,
+  recordTypeList,
+  RECORD_TYPES,
+} from "../schemas.ts";
 import { establishConsentInline } from "../commands/init-consent.ts";
 import {
   listLiveSlugsPage,
   schemaHashFor,
 } from "../record.ts";
+export { FBRAIN_MCP_TOOL_NAMES } from "./tools.ts";
 
 export const FBRAIN_MCP_NAME = "fbrain";
-// The complete agent-integration surface this server exposes — 5 read tools
-// + 5 write tools = 10. Single-sourced here so the `doctor --mcp` boot probe
-// can assert the live `tools/list` reports EXACTLY this set (a renamed or
-// dropped tool fails the probe) without re-listing the names. Keep in sync
-// with the `registerTool` calls below.
-export const FBRAIN_MCP_TOOL_NAMES = [
-  "fbrain_search",
-  "fbrain_ask",
-  "fbrain_get",
-  "fbrain_list",
-  "fbrain_backlinks",
-  "fbrain_put",
-  "fbrain_status",
-  "fbrain_append",
-  "fbrain_delete",
-  "fbrain_link",
-] as const;
+// The complete agent-integration surface is single-sourced in mcp/tools.ts so
+// the `doctor --mcp` boot probe can assert the live `tools/list` reports
+// EXACTLY this set without re-listing the names.
 // Single-sourced via getFbrainVersion() so `fbrain --version` (cli.ts) and
 // the MCP `serverInfo.version` reported here can't drift. Includes the git
 // short-SHA suffix when the running source lives in a git checkout, so MCP
@@ -609,7 +601,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Search fbrain",
       description:
-        "Pure-vector semantic search across indexed fbrain records (designs, tasks, concepts, preferences, references, agents, projects, spikes, sops). Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns one line per match: `slug · score · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet, confidence}` — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. `structuredContent.confident` is false when the result set looks like the noise floor; if `confident:false`, treat it as not-found and do not trust the rows. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer `fbrain_ask`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to `fbrain_ask` when this returns weak or missing matches.",
+        `Pure-vector semantic search across indexed fbrain records (${recordTypeList(", ")}). Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns one line per match: \`slug · score · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer \`fbrain_ask\`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to \`fbrain_ask\` when this returns weak or missing matches.`,
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -680,7 +672,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Ask fbrain (hybrid retrieval)",
       description:
-        "Hybrid retrieval over fbrain records: runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so `fbrain_ask` surfaces keyword-relevant records that pure-vector `fbrain_search` ranks out of the top results. Pass `type` to restrict to one or more record types (mirrors the CLI's repeatable `--type` flag); omit to search all 9. Returns a best-first ranked list, one line per match: `rank · slug · type · title`, with a short matching body snippet under each. `structuredContent.matches[]` carries `{slug, score, type, title, snippet, confidence}` (already ordered best-first) — the `snippet` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up `fbrain_get`. `structuredContent.confident` is false when the whole result set looks like the noise floor; if `confident:false`, treat it as not-found and do not trust the rows. The `score` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to `fbrain_search`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over `fbrain_search` when you want the best recall.",
+        `Hybrid retrieval over fbrain records (${recordTypeList(", ")}): runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so \`fbrain_ask\` surfaces keyword-relevant records that pure-vector \`fbrain_search\` ranks out of the top results. Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first) — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. The \`score\` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to \`fbrain_search\`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over \`fbrain_search\` when you want the best recall.`,
       inputSchema: {
         query: z
           .string()
@@ -1019,16 +1011,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe(
             "Status enum value for the type. Valid values DIFFER per type — " +
-              "`active` is accepted by concept/preference/reference/agent/spike/sop " +
-              "but is NOT valid for project, design, or task. Per type: " +
-              "design = draft|reviewed|approved|implemented|archived; " +
-              "task = open|in_progress|blocked|done|cancelled; " +
-              "project = planning|in_progress|done|archived; " +
-              "concept/agent = active|archived; " +
-              "preference = active|superseded; " +
-              "reference = active|broken|archived; " +
-              "spike = active|concluded; " +
-              "sop = active|superseded|archived. Omit to use the type's default " +
+              `per type: ${recordStatusLines()}. Omit to use the type's default ` +
               "(first enum value). Synthesized into the put's frontmatter so " +
               "it lands atomically in the same mutation and is validated " +
               "against the type's enum BEFORE any HTTP write — an invalid " +
@@ -1148,15 +1131,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "New status enum value for the record's type (pass with `slug` " +
               "to patch; omit to READ the record's current status). Valid " +
-              "values DIFFER per type: " +
-              "design = draft|reviewed|approved|implemented|archived; " +
-              "task = open|in_progress|blocked|done|cancelled; " +
-              "project = planning|in_progress|done|archived; " +
-              "concept/agent = active|archived; " +
-              "preference = active|superseded; " +
-              "reference = active|broken|archived; " +
-              "spike = active|concluded; " +
-              "sop = active|superseded|archived. Validated before any write — an " +
+              `values DIFFER per type: ${recordStatusLines()}. Validated before any write — an ` +
               "invalid value errors without mutating.",
           ),
         type: typeEnum
@@ -1634,7 +1609,7 @@ export function buildPutInput(args: PutArgs): string {
       code: "missing_type",
       message:
         "fbrain_put requires a `type` (or a `type:` field in `frontmatter`).",
-      hint: "One of: design | task | concept | preference | reference | agent | project | spike | sop.",
+      hint: `One of: ${recordTypeList()}.`,
     });
   }
   const lines: string[] = [];

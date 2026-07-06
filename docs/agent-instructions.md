@@ -6,9 +6,10 @@ the `fbrain_*` tools — but installed tools sit idle unless the agent is told
 below into your agent's instructions (`CLAUDE.md`, system prompt, or equivalent)
 so the brain is actually used, not just connected.
 
-The block is self-contained — it relies only on the nine MCP tools fbrain
+The block is self-contained — it relies only on the ten MCP tools fbrain
 registers (`fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`,
-`fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link`).
+`fbrain_backlinks`, `fbrain_put`, `fbrain_status`, `fbrain_append`,
+`fbrain_delete`, `fbrain_link`).
 See the [`## MCP`](../README.md#mcp)
 section of the README for registration, the per-tool reference, and
 `fbrain doctor --mcp` troubleshooting.

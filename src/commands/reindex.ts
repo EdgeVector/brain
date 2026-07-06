@@ -17,7 +17,7 @@
 // tombstone-purge / G3d schema-scoped search) and not available at the
 // fbrain layer. See `fbrain doctor --freshness` pollution-probe.
 //
-// Iterates all 8 types by default; --type narrows. Tombstoned records
+// Iterates all record types by default; --type narrows. Tombstoned records
 // (those carrying TOMBSTONE_TAG) are skipped, NOT reindexed.
 //
 // Per Step 6 of the G3c task: pollution-ratio reporting is deferred to

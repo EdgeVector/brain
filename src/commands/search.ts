@@ -65,7 +65,7 @@ export type SearchOptions = {
   limit?: number;
   exact?: boolean;
   minScore?: number;
-  // Restrict results to these record types. Undefined / empty = all 8 types.
+  // Restrict results to these record types. Undefined / empty = all record types.
   // Repeatable on the CLI via `--type T` (e.g. `--type design --type task`).
   types?: readonly RecordType[];
   // Machine-readable mode. Emits a single JSON array document via

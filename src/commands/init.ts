@@ -4,7 +4,7 @@
 // 6 steps:
 //   0. probe /api/system/auto-identity
 //   1. POST /api/setup/bootstrap if 503
-//   2. obtain all 9 canonical hashes: POST each schema (maintainer w/ DevCert)
+//   2. obtain every canonical hash: POST each schema (maintainer w/ DevCert)
 //      OR, when the cert gate returns 401 for a fresh consumer, defer and
 //      resolve the already-published fbrain/* hashes from the node (step 3)
 //   3. POST /api/schemas/load, then resolve any cert-gated hashes via
@@ -258,8 +258,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 2/6: obtain canonical hashes for the nine per-kind schemas — Design
-  // + Task + Concept/Preference/Reference/Agent/Project/Spike/Sop. Each entry has
+  // Step 2/6: obtain canonical hashes for every per-kind schema. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   //
   // New local-first nodes expose `/api/apps/declare-schema`: fbrain declares
