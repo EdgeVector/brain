@@ -96,6 +96,10 @@ export type SearchOptions = {
   // the command in human mode for `content` text AND capture the typed
   // payload without re-parsing the printed line.
   onResult?: (payload: SearchHitJson[]) => void;
+  // Structured advisory sink for read-degraded configs. The human/CLI surface
+  // still receives the existing note via printErr; MCP uses this to expose
+  // skipped record types in structuredContent.
+  onSkippedTypes?: (skipped: readonly RecordType[]) => void;
 };
 
 // One match in the machine-readable search/ask result. `type` is the
@@ -357,7 +361,10 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const { typeFilter, activeTypes } = resolveTypeFilter(
     opts.types,
     opts.cfg,
-    (skipped) => printErr(missingSchemaHashReadNote(skipped, "searching the rest")),
+    (skipped) => {
+      opts.onSkippedTypes?.(skipped);
+      printErr(missingSchemaHashReadNote(skipped, "searching the rest"));
+    },
   );
   const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
   if (fbrainSchemas.length > 0) {

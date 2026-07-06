@@ -125,6 +125,10 @@ export type AskOptions = {
   // payload without re-parsing the printed line. Same shape as
   // `fbrain search --json` (every `ask` hit carries a non-null score).
   onResult?: (payload: SearchHitJson[]) => void;
+  // Structured advisory sink for read-degraded configs. The human/CLI surface
+  // still receives the existing note via printErr; MCP uses this to expose
+  // skipped record types in structuredContent.
+  onSkippedTypes?: (skipped: readonly RecordType[]) => void;
   // For tests: stub the expansion HTTP call.
   fetchImpl?: typeof fetch;
 };
@@ -172,7 +176,10 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const { activeTypes } = resolveTypeFilter(
     opts.types,
     opts.cfg,
-    (skipped) => printErr(missingSchemaHashReadNote(skipped, "answering from the rest")),
+    (skipped) => {
+      opts.onSkippedTypes?.(skipped);
+      printErr(missingSchemaHashReadNote(skipped, "answering from the rest"));
+    },
   );
 
   // ── Stage 0: query expansion ─────────────────────────────────────────
