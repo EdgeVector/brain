@@ -3,7 +3,14 @@
 // without touching the network.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,6 +18,7 @@ import {
   classifySchemaDrift,
   diffSchemas,
   doctor,
+  runCliEntrypointProbe,
   runMcpBootProbe,
   runMcpEntrypointProbe,
   runRuntimeProbe,
@@ -2357,6 +2365,70 @@ describe("schemaServiceFixHint", () => {
     expect(hint).toContain(DEV_URL);
     expect(hint).toContain(PROD_URL);
     expect(hint).not.toContain("--local-schema");
+  });
+});
+
+// fbrain-entrypoint probe — catches a broken global CLI install before
+// scripts/routines that shell out to bare `fbrain` hit command-not-found.
+describe("runCliEntrypointProbe", () => {
+  test("resolved → PASS, detail names the resolved path", () => {
+    const check = runCliEntrypointProbe(
+      { whichBin: () => "/Users/x/.bun/bin/fbrain" },
+      undefined,
+    );
+    expect(check.name).toBe("fbrain-entrypoint");
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBeUndefined();
+    expect(check.detail).toContain("fbrain -> /Users/x/.bun/bin/fbrain");
+  });
+
+  test("unresolved → WARN (ok:true) with the relink hint, never FAIL", () => {
+    const check = runCliEntrypointProbe(
+      {
+        whichBin: () => null,
+        homeDir: mkdtempSync(join(tmpdir(), "fbrain-no-bin-")),
+      },
+      undefined,
+    );
+    expect(check.name).toBe("fbrain-entrypoint");
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBe("WARN");
+    expect(check.detail).toContain("command not found");
+    expect(check.fix).toContain("bun add -g github:EdgeVector/fbrain");
+    expect(check.fix).toContain("fbrain --version");
+  });
+
+  test("unresolved with dangling ~/.bun/bin/fbrain → WARN names the broken symlink", () => {
+    const home = mkdtempSync(join(tmpdir(), "fbrain-dangling-bin-"));
+    const bunBin = join(home, ".bun", "bin");
+    mkdirSync(bunBin, { recursive: true });
+    symlinkSync("../install/global/node_modules/fbrain/bin/fbrain", join(bunBin, "fbrain"));
+
+    const check = runCliEntrypointProbe(
+      { whichBin: () => null, homeDir: home },
+      undefined,
+    );
+    expect(check.name).toBe("fbrain-entrypoint");
+    expect(check.ok).toBe(true);
+    expect(check.tag).toBe("WARN");
+    expect(check.detail).toContain("dangling ~/.bun/bin/fbrain");
+    expect(check.detail).toContain("../install/global/node_modules/fbrain/bin/fbrain");
+    expect(check.fix).toContain("remove it before relinking");
+  });
+
+  test("probes the fbrain bin name", () => {
+    const asked: string[] = [];
+    runCliEntrypointProbe(
+      {
+        whichBin: (n) => {
+          asked.push(n);
+          return null;
+        },
+        homeDir: mkdtempSync(join(tmpdir(), "fbrain-probe-name-")),
+      },
+      undefined,
+    );
+    expect(asked).toEqual(["fbrain"]);
   });
 });
 

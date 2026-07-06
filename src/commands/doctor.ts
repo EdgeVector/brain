@@ -35,6 +35,7 @@ import {
 import {
   type McpBootInput,
   type McpBootResult,
+  runCliEntrypointProbe,
   runMcpEntrypointProbe,
   runMcpBootProbe,
   skippedByMcpUnresolved,
@@ -64,6 +65,7 @@ export {
 export {
   type McpBootInput,
   type McpBootResult,
+  runCliEntrypointProbe,
   runMcpBootProbe,
   runMcpEntrypointProbe,
 } from "./doctor/mcp-boot.ts";
@@ -112,10 +114,13 @@ export type DoctorOptions = {
   // probe. Defaults to newWriteNodeClient.
   writeNodeFactory?: (opts: WriteNodeClientOptions) => WriteNodeClient;
   // Override for tests: resolve a bin name to its absolute path on PATH (or
-  // null when unresolved). Defaults to Bun.which. Lets the mcp-entrypoint
-  // probe be exercised in both the resolved + unresolved states without
-  // mutating the test process's real PATH.
+  // null when unresolved). Defaults to Bun.which. Lets the fbrain-entrypoint
+  // and mcp-entrypoint probes be exercised in both the resolved + unresolved
+  // states without mutating the test process's real PATH.
   whichBin?: (name: string) => string | null;
+  // Override for tests: HOME used when entrypoint probes inspect common Bun
+  // global-bin locations for stale/dangling symlinks. Defaults to process.env.HOME.
+  homeDir?: string;
   // Override for tests: the running Bun version the `runtime` check compares
   // against fbrain's documented minimum (MIN_BUN_VERSION). Defaults to the live
   // `Bun.version`. An explicit seam (like `whichBin`) so doctor.test.ts can
@@ -474,6 +479,14 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // (not WARN) when too old, with an actionable upgrade hint.
   const runtimeCheck = runRuntimeProbe(opts, verbose);
   checks.push(runtimeCheck);
+
+  // CLI-entrypoint probe — catches the common "global install left a dangling
+  // ~/.bun/bin/fbrain symlink" state before agent/routine shells fail with
+  // `command not found`. WARN, never FAIL: source-checkout users can still run
+  // `bun run src/cli.ts`, and the fix is local relinking rather than a node or
+  // schema problem.
+  const cliEntrypointCheck = runCliEntrypointProbe(opts, verbose);
+  checks.push(cliEntrypointCheck);
 
   // MCP-entrypoint probe — the headline agent-integration path. The README
   // front-loads `claude mcp add fbrain fbrain-mcp`, which only works if the
