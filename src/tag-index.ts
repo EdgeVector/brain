@@ -108,14 +108,14 @@ export async function reconcileTagIndex(
   const failures: string[] = [];
   for (const tag of added) {
     try {
-      await addMember(node, cfg, tag, member);
+      await addTagIndexMember(node, cfg, tag, member);
     } catch (err) {
       failures.push(`add:${tag}:${errorMessage(err)}`);
     }
   }
   for (const tag of removed) {
     try {
-      await removeMember(node, cfg, tag, member);
+      await removeTagIndexMember(node, cfg, tag, member);
     } catch (err) {
       failures.push(`remove:${tag}:${errorMessage(err)}`);
     }
@@ -250,7 +250,7 @@ function rowToTagIndex(fields: Record<string, unknown>): TagIndexRecord {
   };
 }
 
-async function addMember(
+export async function addTagIndexMember(
   node: NodeClient,
   cfg: Config,
   tag: string,
@@ -262,7 +262,7 @@ async function addMember(
   }, (members) => members.includes(member));
 }
 
-async function removeMember(
+export async function removeTagIndexMember(
   node: NodeClient,
   cfg: Config,
   tag: string,
@@ -299,7 +299,7 @@ async function mutateMember(
   throw new Error(`tag-index write for "${tag}" did not converge after bounded retry`);
 }
 
-async function writeTagIndex(
+export async function writeTagIndex(
   node: NodeClient,
   cfg: Config,
   tag: string,

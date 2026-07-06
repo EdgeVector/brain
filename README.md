@@ -168,14 +168,14 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T]` | Links records. Defaults to legacy Task → Design (`task.design_slug`); non-legacy pairs store a generic explicit link tag on the source |
-| `fbrain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; dangling wiki-link intent is queryable |
+| `fbrain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; reads the backlink secondary index instead of scanning every schema |
 | `fbrain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
 | `fbrain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
 | `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `fbrain delete <slug> [--type T]`<br>`fbrain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
-| `fbrain reindex [--type T] [--dry-run]` | Re-puts every live record so fold_db refreshes its embedding entry — workaround for index pollution (see [Recovery](#recovery)) |
+| `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks]` | Re-puts every live record so fold_db refreshes its embedding entry, or rebuilds secondary indexes with `--tags` / `--backlinks` (see [Recovery](#recovery)) |
 | `fbrain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.fbrain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
 | `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
 
@@ -375,9 +375,12 @@ If `fbrain search` starts returning stale or empty results — most often after 
 ```bash
 fbrain reindex             # all record types
 fbrain reindex --type concept --dry-run   # preview what would be touched
+fbrain reindex --backlinks # rebuild the backlink secondary index
 ```
 
 `fbrain reindex` walks every live (non-tombstoned) record and re-issues an `update` mutation. fold_db's mutation pipeline re-runs `index_record` synchronously, which refreshes the record's embedding entry in the native index. The fresh embeddings then survive the top-50 budget even when tombstoned-but-not-purged phantoms still sit in the index alongside them.
+
+`fbrain reindex --backlinks` is a secondary-index rebuild, not an embedding refresh. It scans the live corpus once and writes backlink membership rows so `fbrain get` / `fbrain backlinks` can answer `linked_from` from keyed index reads instead of walking every schema on each lookup. Re-run `fbrain init` first if your local config predates the internal index schema.
 
 What it does **not** do:
 

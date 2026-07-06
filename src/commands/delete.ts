@@ -27,6 +27,7 @@
 // tag" raises delete_not_applied.
 
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
+import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -243,6 +244,15 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
 
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
   await unindexRecordTags(node, opts.cfg, type, slug, record.tags, opts.verbose);
+  await reconcileBacklinkIndex(
+    node,
+    opts.cfg,
+    type,
+    slug,
+    record,
+    null,
+    opts.verbose,
+  );
 
   print(
     `deleted ${type} ${slug} (soft — fold_db is append-only)`,
@@ -443,6 +453,15 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
         m.type,
         slug,
         resolved.record.tags,
+        opts.verbose,
+      );
+      await reconcileBacklinkIndex(
+        node,
+        opts.cfg,
+        m.type,
+        slug,
+        resolved.record,
+        null,
         opts.verbose,
       );
       print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);

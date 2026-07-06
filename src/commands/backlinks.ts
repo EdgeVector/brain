@@ -4,10 +4,10 @@
 // references are intentional notes-to-self in fbrain bodies.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
+import { findBacklinks } from "../backlink-index.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
-  findBacklinks,
   normalizeSlug,
   type Backlink,
 } from "../record.ts";
@@ -38,7 +38,10 @@ export async function backlinksCmd(opts: BacklinksOptions): Promise<void> {
   const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
-  const links = await findBacklinks(node, opts.cfg, slug, { targetType: opts.type });
+  const links = await findBacklinks(node, opts.cfg, slug, {
+    targetType: opts.type,
+    verbose: opts.verbose,
+  });
   const json = backlinksToJson(slug, opts.type, links);
   opts.onResult?.(json);
   if (opts.json) {

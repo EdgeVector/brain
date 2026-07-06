@@ -585,7 +585,7 @@ delete anyway — the tasks' design references are then left dangling.
 
 After delete, a slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -605,6 +605,10 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     Repairs records written before the index existed or after
                     a best-effort index update failed. Standalone mode: skips
                     the embedding refresh.
+  --backlinks       rebuild the backlink secondary index from a full corpus scan.
+                    Repairs records written before the index existed or after
+                    a best-effort backlink update failed. Standalone mode:
+                    skips the embedding refresh.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
@@ -900,6 +904,7 @@ const REINDEX_OPTIONS = {
   type: { type: "string" },
   "dry-run": { type: "boolean", default: false },
   tags: { type: "boolean", default: false },
+  backlinks: { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -2781,6 +2786,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (type) rOpts.type = type;
   if (values["dry-run"]) rOpts.dryRun = true;
   if (values.tags) rOpts.tags = true;
+  if (values.backlinks) rOpts.backlinks = true;
   await reindexCmd(rOpts);
   return 0;
 }

@@ -25,6 +25,10 @@
 // records reindexed.
 
 import { type Verbose } from "../client.ts";
+import {
+  rebuildBacklinkIndex,
+  type BacklinkIndexRebuildResult,
+} from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -49,6 +53,7 @@ export type ReindexOptions = {
   type?: RecordType;
   dryRun?: boolean;
   tags?: boolean;
+  backlinks?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -59,6 +64,7 @@ export type ReindexResult = {
   skippedTombstone: number;
   byType: Partial<Record<RecordType, { reindexed: number; skippedTombstone: number }>>;
   tagIndex?: TagIndexRebuildResult;
+  backlinkIndex?: BacklinkIndexRebuildResult;
 };
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
@@ -95,6 +101,38 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     result.tagIndex = rebuilt;
     print(
       `rebuilt tag index: ${rebuilt.tagsIndexed} tag(s), ${rebuilt.membersIndexed} membership(s)`,
+    );
+    return result;
+  }
+
+  if (opts.backlinks) {
+    const result: ReindexResult = {
+      scanned: 0,
+      reindexed: 0,
+      skippedTombstone: 0,
+      byType: {},
+    };
+    if (!tagIndexAvailable(opts.cfg)) {
+      print(
+        "backlink index not available in this config (run `fbrain init` to register the internal index schema) — nothing to rebuild",
+      );
+      result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
+      return result;
+    }
+    if (opts.dryRun) {
+      print("dry-run: --backlinks would rebuild the backlink secondary index from a full corpus scan");
+      result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
+      return result;
+    }
+    const rebuilt = await rebuildBacklinkIndex(node, opts.cfg, {
+      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash),
+      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
+      onSkipUnavailableType: (type) =>
+        print(missingSchemaHashReadNote([type], "rebuilding the backlink index from the rest")),
+    });
+    result.backlinkIndex = rebuilt;
+    print(
+      `rebuilt backlink index: ${rebuilt.targetsIndexed} target(s), ${rebuilt.membersIndexed} membership(s)`,
     );
     return result;
   }

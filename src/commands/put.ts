@@ -18,6 +18,7 @@
 // An unrecognised `type:` errors as `unsupported_type`.
 
 import { FbrainError, type Verbose } from "../client.ts";
+import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
@@ -205,6 +206,15 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     slug,
     existing?.tags ?? [],
     visible.tags,
+    opts.verbose,
+  );
+  await reconcileBacklinkIndex(
+    node,
+    opts.cfg,
+    type,
+    slug,
+    existing,
+    visible,
     opts.verbose,
   );
   // Read-after-write SEARCH parity (#295, CLI half). `verifyRecordVisible`
