@@ -528,6 +528,66 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     },
   );
 
+  test("alternating untyped and --type asks keep separate warm BM25 caches", async () => {
+    // Regression for type-filter cache thrash: the index fingerprint already
+    // includes the active type set, but the old filename was keyed only by
+    // userHash. Alternating plain ask and --type design overwrote the same file
+    // in both directions, so the second occurrence of either shape was a cache
+    // miss and paid the full body fetch again.
+    const cfg = buildTestCfg();
+    const stub = installFetchStub({
+      queries: {
+        [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")],
+        [TEST_HASHES.concept]: [noteRow("c1", "concept", "octopus concept")],
+      },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 }),
+      ],
+    });
+
+    const plainCold = await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: () => {},
+    });
+    expect(plainCold.bm25CacheHit).toBe(false);
+
+    const designCold = await askCmd({
+      cfg,
+      query: "octopus",
+      types: ["design"],
+      noLlm: true,
+      print: () => {},
+    });
+    expect(designCold.bm25CacheHit).toBe(false);
+
+    stub.queryCountsBySchema.clear();
+    stub.bodyQueryCountsBySchema.clear();
+
+    const plainWarm = await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: () => {},
+    });
+    const designWarm = await askCmd({
+      cfg,
+      query: "octopus",
+      types: ["design"],
+      noLlm: true,
+      print: () => {},
+    });
+
+    expect(plainWarm.bm25CacheHit).toBe(true);
+    expect(designWarm.bm25CacheHit).toBe(true);
+    const bodyFetches = Array.from(stub.bodyQueryCountsBySchema.values()).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    expect(bodyFetches).toBe(0);
+  });
+
   test(
     "editing a record between asks busts the cache and rebuilds — the change is findable",
     async () => {

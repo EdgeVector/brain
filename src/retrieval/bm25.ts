@@ -9,19 +9,36 @@
 // Cache: the index is keyed by a fingerprint of (slug, updated_at) for
 // every live record. The fingerprint is stable iff nothing was added,
 // updated, or soft-deleted since the last build. We persist the index to
-// `~/.fbrain/cache/bm25-<userHash>.json` so back-to-back `fbrain ask`
-// invocations on the same corpus skip the rebuild — important because
-// `listRecords` across 3 schemas is the dominant cost.
+// `~/.fbrain/cache/bm25-<userHash>-<typeSetHash>.json` so back-to-back
+// retrieval calls on the same corpus/type shape skip the rebuild — important
+// because `listRecords` across schemas is the dominant cost.
 //
 // Tokenization is intentionally simple: lowercase, split on
 // non-alphanumerics, length >= 2, English stopwords stripped. No
 // stemming. This is a CLI retrieval baseline, not Elastic.
 
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
+import type { NodeClient, Verbose } from "../client.ts";
 import { fbrainHomeBase } from "../config.ts";
+import type { Config } from "../config.ts";
+import {
+  isTombstoned,
+  listRecordKeys,
+  listRecords,
+  schemaHashFor,
+  type FbrainRecord,
+  type RecordKey,
+} from "../record.ts";
 import type { RecordType } from "../schemas.ts";
 
 const STOPWORDS = new Set<string>([
@@ -53,6 +70,14 @@ export type BM25Hit = {
   slug: string;
   score: number;
   rank: number; // 1-based
+};
+
+export type Bm25IndexLoad = {
+  index: BM25Index;
+  liveById: Map<string, FbrainRecord>;
+  corpusSize: number;
+  cacheHit: boolean;
+  fingerprint: string;
 };
 
 type Posting = {
@@ -259,7 +284,9 @@ export class BM25Index {
       for (const p of list) {
         if (!p || typeof p !== "object") return null;
         const d = (p as { d?: unknown }).d;
+        const f = (p as { f?: unknown }).f;
         if (typeof d !== "number" || !Number.isInteger(d)) return null;
+        if (typeof f !== "number" || !Number.isFinite(f) || f <= 0) return null;
         if (d < 0 || d >= N) return null;
       }
     }
@@ -311,25 +338,45 @@ export function computeFingerprint(docs: readonly FingerprintKey[]): string {
   return createHash("sha256").update(pairs.join("\n")).digest("hex");
 }
 
-// Cache layout: `~/.fbrain/cache/bm25-<userHash>.json` — keyed by user so
-// two fbrain configs on the same machine can't collide. The cache survives
-// a corpus change (we just rebuild on fingerprint mismatch). FBRAIN_CACHE_DIR
-// override is for tests.
+// Cache layout: `~/.fbrain/cache/bm25-<userHash>-<typeSetHash>.json` — keyed
+// by user and active type set so two fbrain configs on the same machine cannot
+// collide, and `ask`/`search` calls with different `--type` shapes do not
+// overwrite each other. The cache survives a corpus change (we just rebuild on
+// fingerprint mismatch). FBRAIN_CACHE_DIR override is for tests.
 export function defaultCacheDir(): string {
   const override = process.env.FBRAIN_CACHE_DIR;
   if (override && override.length > 0) return override;
   return join(fbrainHomeBase(), ".fbrain", "cache");
 }
 
-export function bm25CachePath(userHash: string, dir: string = defaultCacheDir()): string {
+function typeSetCacheKey(types: readonly RecordType[]): string {
+  return createHash("sha256")
+    .update([...types].sort().join("\0"))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+export function bm25CachePath(
+  userHash: string,
+  typesOrDir?: readonly RecordType[] | string,
+  dir?: string,
+): string {
   // userHash is hex; safe as a filename. Still, sanitize to alnum + dash just
   // in case a test stubs a weird value.
   const safe = userHash.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-  return join(dir, `bm25-${safe || "anon"}.json`);
+  const types = Array.isArray(typesOrDir) ? typesOrDir : undefined;
+  const cacheDir =
+    typeof typesOrDir === "string" ? typesOrDir : dir ?? defaultCacheDir();
+  const typeSuffix = types ? `-${typeSetCacheKey(types)}` : "";
+  return join(cacheDir, `bm25-${safe || "anon"}${typeSuffix}.json`);
 }
 
-export function loadCachedIndex(userHash: string, cacheDir?: string): BM25Index | null {
-  const path = bm25CachePath(userHash, cacheDir ?? defaultCacheDir());
+export function loadCachedIndex(
+  userHash: string,
+  typesOrDir?: readonly RecordType[] | string,
+  cacheDir?: string,
+): BM25Index | null {
+  const path = bm25CachePath(userHash, typesOrDir, cacheDir);
   if (!existsSync(path)) return null;
   try {
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
@@ -342,9 +389,95 @@ export function loadCachedIndex(userHash: string, cacheDir?: string): BM25Index 
 export function saveCachedIndex(
   userHash: string,
   index: BM25Index,
+  typesOrDir?: readonly RecordType[] | string,
   cacheDir?: string,
 ): void {
-  const path = bm25CachePath(userHash, cacheDir ?? defaultCacheDir());
+  const path = bm25CachePath(userHash, typesOrDir, cacheDir);
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(index.toJSON()) + "\n", "utf8");
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(index.toJSON()) + "\n", "utf8");
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // Best-effort cleanup only; preserve the original write/rename failure.
+    }
+    throw err;
+  }
+}
+
+export async function loadOrBuildBm25Index(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+  opts: { verbose?: Verbose } = {},
+): Promise<Bm25IndexLoad> {
+  const keys = await loadBm25Keys(node, cfg, types);
+  const fingerprint = computeFingerprint(keys);
+  const cached = loadCachedIndex(cfg.userHash, types);
+  if (cached && cached.fingerprint === fingerprint) {
+    opts.verbose?.(
+      `bm25: cache hit (fingerprint ${fingerprint.slice(0, 12)}...) - skipping corpus body fetch`,
+    );
+    return {
+      index: cached,
+      liveById: new Map(),
+      corpusSize: keys.length,
+      cacheHit: true,
+      fingerprint,
+    };
+  }
+
+  const built = await loadBm25Documents(node, cfg, types);
+  const index = BM25Index.build(built.docs);
+  saveCachedIndex(cfg.userHash, index, types);
+  opts.verbose?.(
+    `bm25: rebuilt index (${built.docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}...)`,
+  );
+  return {
+    index,
+    liveById: built.liveById,
+    corpusSize: built.docs.length,
+    cacheHit: false,
+    fingerprint: index.fingerprint,
+  };
+}
+
+async function loadBm25Keys(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+): Promise<RecordKey[]> {
+  const keys: RecordKey[] = [];
+  for (const t of types) {
+    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg));
+    for (const k of typeKeys) keys.push(k);
+  }
+  return keys;
+}
+
+async function loadBm25Documents(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {
+  const docs: BM25Document[] = [];
+  const liveById = new Map<string, FbrainRecord>();
+  for (const t of types) {
+    const records = await listRecords(node, t, schemaHashFor(t, cfg));
+    for (const r of records) {
+      if (isTombstoned(r)) continue;
+      docs.push({
+        type: t,
+        slug: r.slug,
+        title: r.title,
+        body: r.body,
+        updatedAt: r.updated_at,
+      });
+      liveById.set(`${t}::${r.slug}`, r);
+    }
+  }
+  return { docs, liveById };
 }

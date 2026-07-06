@@ -3,7 +3,11 @@
 // responses without standing up a real node.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
+import { askCmd } from "../../src/commands/ask.ts";
 import { dedupeHits, isWeakMatch, searchCmd } from "../../src/commands/search.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
 import { RECORD_TYPES } from "../../src/schemas.ts";
@@ -191,6 +195,8 @@ describe("isWeakMatch (distribution-shape weak-match classifier)", () => {
 });
 
 const realFetch = globalThis.fetch;
+let cacheDir = "";
+let savedCacheEnv: string | undefined;
 
 type MockResponse = { status: number; body?: unknown };
 
@@ -205,8 +211,17 @@ function installSequencedMock(handler: (url: string, init?: RequestInit) => Mock
   }) as unknown as typeof globalThis.fetch;
 }
 
+beforeEach(() => {
+  cacheDir = mkdtempSync(join(tmpdir(), "fbrain-search-test-"));
+  savedCacheEnv = process.env.FBRAIN_CACHE_DIR;
+  process.env.FBRAIN_CACHE_DIR = cacheDir;
+});
+
 afterEach(() => {
   globalThis.fetch = realFetch;
+  if (savedCacheEnv === undefined) delete process.env.FBRAIN_CACHE_DIR;
+  else process.env.FBRAIN_CACHE_DIR = savedCacheEnv;
+  rmSync(cacheDir, { recursive: true, force: true });
 });
 
 // Each result now prints as a table ROW followed by an indented body-snippet
@@ -437,6 +452,77 @@ describe("searchCmd", () => {
     expect(rowsOut[0]).toContain("rare-token-design");
     expect(rowsOut[0]).toContain("—");
     expect(stdout.join("\n")).not.toContain("no matches");
+  });
+
+  test("BM25 fallback reuses a warm ask cache without body fetches", async () => {
+    const row = {
+      fields: {
+        slug: "rare-token-design",
+        title: "Rare token design",
+        body: "Exact fragment zzqx-913 should be findable by keyword fallback",
+        status: "active",
+        tags: [],
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+      key: { hash: "rare-token-design", range: null },
+    };
+    const queryCounts = new Map<string, number>();
+    const bodyQueryCounts = new Map<string, number>();
+    installSequencedMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          schema_name?: string;
+          fields?: unknown;
+        };
+        const schema = body.schema_name ?? "";
+        queryCounts.set(schema, (queryCounts.get(schema) ?? 0) + 1);
+        if (Array.isArray(body.fields) && body.fields.includes("body")) {
+          bodyQueryCounts.set(schema, (bodyQueryCounts.get(schema) ?? 0) + 1);
+        }
+        const results = schema === DESIGN_HASH ? [row] : [];
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results,
+            total_count: results.length,
+            returned_count: results.length,
+          },
+        };
+      }
+      return { status: 404, body: { error: "unknown" } };
+    });
+
+    const warm = await askCmd({
+      cfg,
+      query: "zzqx-913",
+      noLlm: true,
+      print: () => {},
+    });
+    expect(warm.bm25CacheHit).toBe(false);
+
+    queryCounts.clear();
+    bodyQueryCounts.clear();
+
+    const stdout: string[] = [];
+    await searchCmd({
+      cfg,
+      query: "zzqx-913",
+      limit: 1,
+      print: (l) => stdout.push(l),
+    });
+
+    const rowsOut = rowsOf(stdout);
+    expect(rowsOut).toHaveLength(1);
+    expect(rowsOut[0]).toContain("rare-token-design");
+    const bodyFetches = Array.from(bodyQueryCounts.values()).reduce((a, b) => a + b, 0);
+    expect(bodyFetches).toBe(0);
+    const cheapChecks = Array.from(queryCounts.values()).reduce((a, b) => a + b, 0);
+    expect(cheapChecks).toBe(RECORD_TYPES.length);
   });
 
   test("does not replace strong native vector results with BM25 keyword hits", async () => {
