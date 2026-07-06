@@ -278,20 +278,34 @@ describe("searchCmd", () => {
 
     const stdout: string[] = [];
     const stderr: string[] = [];
+    let payload: import("../../src/commands/search.ts").SearchHitJson[] | undefined;
     await searchCmd({
       cfg,
       query: "vector socket",
       limit: 1,
       print: (l) => stdout.push(l),
       printErr: (l) => stderr.push(l),
+      onResult: (p) => {
+        payload = p;
+      },
     });
 
-    expect(stderr).toEqual([]);
+    // The native vector set was weak (lone 0.24 hit), so the BM25 rescue row is
+    // surfaced FIRST and honestly labeled `fallback` — never `strong` — and the
+    // weak-match advisory fires on stderr (this used to silently claim strong).
     const rowsOut = rowsOf(stdout);
     expect(rowsOut).toHaveLength(1);
     expect(rowsOut[0]).toContain("socket-note");
     expect(rowsOut[0]).toContain("—");
     expect(stdout.some((l) => l.includes("query still works over the socket"))).toBe(true);
+    expect(payload).toBeDefined();
+    expect(payload![0]!.slug).toBe("socket-note");
+    expect(payload![0]!.confidence).toBe("fallback");
+    // Advisory (non-strong result set) lands on stderr, not among the rows.
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toMatch(/^note:\s/);
+    expect(stderr[0]).toContain("no strong matches");
+    for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
   });
 
   // Regression: papercut-fbrain-decision-type-hash-missing. A `--type` request
@@ -513,7 +527,7 @@ describe("searchCmd", () => {
       },
       key: { hash: "alpha", range: null },
     };
-    installSequencedMock((url) => {
+    installSequencedMock((url, init) => {
       if (url.includes("/api/native-index/search")) {
         return {
           status: 200,
@@ -527,7 +541,14 @@ describe("searchCmd", () => {
         };
       }
       if (url.includes("/api/query")) {
-        return { status: 200, body: { ok: true, results: [recordRow], total_count: 1, returned_count: 1 } };
+        // Scope to the design schema so the BM25 corpus (loaded per activeType)
+        // holds ONE design::alpha doc, not a phantom copy of alpha under every
+        // type. alpha's lone 0.42 hit is sub-STRONG → the weak classifier fires
+        // → BM25 rescue runs, matches design::alpha on "blueberry", finds it's
+        // already native (type::slug dedupe), adds nothing → still one row.
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        const results = body.schema_name === DESIGN_HASH ? [recordRow] : [];
+        return { status: 200, body: { ok: true, results, total_count: results.length, returned_count: results.length } };
       }
       return { status: 404, body: { error: "unknown" } };
     });
@@ -683,7 +704,10 @@ describe("searchCmd", () => {
       return { status: 404, body: { error: "unknown" } };
     });
     const lines: string[] = [];
-    await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
+    // Pass a limit past the 8 hits so the default page size (SEARCH_DEFAULT_LIMIT
+    // = 5) doesn't slice the output — this test asserts the hydration COUNT and
+    // that all 8 hits resolve, both of which are independent of the display cap.
+    await searchCmd({ cfg, query: "anything", limit: 100, print: (l) => lines.push(l) });
     // Exactly ONE hydrate fetch per distinct schema — the whole point of the fix.
     expect(queryCallsBySchema.get(DESIGN_HASH)).toBe(1);
     expect(queryCallsBySchema.get(TASK_HASH)).toBe(1);
@@ -1803,7 +1827,7 @@ describe("searchCmd", () => {
       },
       key: { hash: "alpha", range: null },
     };
-    installSequencedMock((url) => {
+    installSequencedMock((url, init) => {
       if (url.includes("/api/native-index/search")) {
         return {
           status: 200,
@@ -1817,7 +1841,13 @@ describe("searchCmd", () => {
         };
       }
       if (url.includes("/api/query")) {
-        return { status: 200, body: { ok: true, results: [recordRow], total_count: 1, returned_count: 1 } };
+        // Scope to the design schema so alpha exists once (design::alpha) — not
+        // a phantom copy under every type — and the BM25 rescue for the weak
+        // 0.42 hit finds only design::alpha (already native), keeping the single
+        // real row as the first/only output line.
+        const body = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
+        const results = body.schema_name === DESIGN_HASH ? [recordRow] : [];
+        return { status: 200, body: { ok: true, results, total_count: results.length, returned_count: results.length } };
       }
       return { status: 404, body: { error: "unknown" } };
     });

@@ -63,7 +63,7 @@ import {
 } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
-import { isWeakMatch, type SearchHitJson } from "./search.ts";
+import { isWeakMatch, SEARCH_DEFAULT_LIMIT, type SearchHitJson } from "./search.ts";
 import {
   reciprocalRankFusion,
   RRF_DEFAULT_K,
@@ -78,7 +78,9 @@ import {
   type ExpansionResult,
 } from "../retrieval/expand.ts";
 
-export const DEFAULT_LIMIT = 5;
+// Kept consistent with `search`'s default page size by construction — both
+// derive from the single SEARCH_DEFAULT_LIMIT constant in search.ts.
+export const DEFAULT_LIMIT = SEARCH_DEFAULT_LIMIT;
 // Per-ranker breadth fed into RRF. Wider here gives RRF more material; the
 // final --limit slices the fused top.
 export const RANKER_LIMIT = 25;
