@@ -14,7 +14,12 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { BM25Index, computeFingerprint, type BM25Document } from "../../src/retrieval/bm25.ts";
+import {
+  BM25Index,
+  bm25CachePath,
+  computeFingerprint,
+  type BM25Document,
+} from "../../src/retrieval/bm25.ts";
 
 const docs: BM25Document[] = [
   {
@@ -68,5 +73,14 @@ describe("computeFingerprint vs BM25Index.build().fingerprint", () => {
     // computation paths, otherwise the empty-corpus state would always
     // look like a miss and burn an index build on every invocation.
     expect(computeFingerprint([])).toBe(BM25Index.build([]).fingerprint);
+  });
+
+  test("cache path is keyed by the active type set", () => {
+    const all = bm25CachePath("user-hash", ["design", "task"], "/tmp/cache");
+    const reversed = bm25CachePath("user-hash", ["task", "design"], "/tmp/cache");
+    const designOnly = bm25CachePath("user-hash", ["design"], "/tmp/cache");
+
+    expect(all).toBe(reversed);
+    expect(all).not.toBe(designOnly);
   });
 });

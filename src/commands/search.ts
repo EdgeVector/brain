@@ -26,15 +26,13 @@ import {
 import {
   hasAnyLiveRecord,
   hydrateSchemaBySlug,
-  isTombstoned,
-  listRecords,
   missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
-import { BM25Index, type BM25Document } from "../retrieval/bm25.ts";
+import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { type RecordType } from "../schemas.ts";
@@ -296,50 +294,13 @@ async function bm25FallbackResults(
   types: readonly RecordType[],
   query: string,
   limit: number | undefined,
+  verbose: Verbose | undefined,
 ): Promise<ResolvedHit[]> {
-  return bm25FallbackFromCorpus(await loadBm25Corpus(node, cfg, types), cfg, query, limit);
-}
-
-type Bm25Corpus = {
-  docs: BM25Document[];
-  recordsById: Map<string, FbrainRecord>;
-};
-
-async function loadBm25Corpus(
-  node: NodeClient,
-  cfg: Config,
-  types: readonly RecordType[],
-): Promise<Bm25Corpus> {
-  const docs: BM25Document[] = [];
-  const recordsById = new Map<string, FbrainRecord>();
-  for (const type of types) {
-    const records = await listRecords(node, type, schemaHashFor(type, cfg));
-    for (const record of records) {
-      if (isTombstoned(record)) continue;
-      docs.push({
-        type,
-        slug: record.slug,
-        title: record.title,
-        body: record.body,
-        updatedAt: record.updated_at,
-      });
-      recordsById.set(`${type}::${record.slug}`, record);
-    }
-  }
-  return { docs, recordsById };
-}
-
-function bm25FallbackFromCorpus(
-  corpus: Bm25Corpus,
-  cfg: Config,
-  query: string,
-  limit: number | undefined,
-): ResolvedHit[] {
-  const { docs, recordsById } = corpus;
-  const effectiveLimit = limit && limit > 0 ? limit : docs.length;
-  const index = BM25Index.build(docs);
-  return index.search(query, effectiveLimit).flatMap((hit) => {
-    const record = recordsById.get(`${hit.type}::${hit.slug}`);
+  const loaded = await loadOrBuildBm25Index(node, cfg, types, { verbose });
+  const effectiveLimit = limit && limit > 0 ? limit : loaded.corpusSize;
+  return loaded.index.search(query, effectiveLimit).flatMap((hit) => {
+    const id = `${hit.type}::${hit.slug}`;
+    const record = loaded.liveById.get(id) ?? minimalRecord(hit.slug, loaded.index.recordText(id));
     if (!record) return [];
     return [{
       slug: hit.slug,
@@ -351,6 +312,22 @@ function bm25FallbackFromCorpus(
       record,
     }];
   });
+}
+
+function minimalRecord(
+  slug: string,
+  text: { title: string; body: string } | null,
+): FbrainRecord | null {
+  if (!text) return null;
+  return {
+    slug,
+    title: text.title,
+    body: text.body,
+    status: "",
+    tags: [],
+    created_at: "",
+    updated_at: "",
+  };
 }
 
 export async function searchCmd(opts: SearchOptions): Promise<void> {
@@ -451,6 +428,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       activeTypes,
       opts.query,
       effectiveLimit,
+      opts.verbose,
     );
     // STEP 2: MERGE the rescue rows with the native rows keyed on `type::slug`,
     // rather than wholesale-replacing the native set (which discarded every
