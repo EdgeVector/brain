@@ -120,7 +120,7 @@ describe("designNew", () => {
   // the row and let designNew fall through to createRecord — destroying
   // the row's created_at. The withReadRetry hedge must re-query until
   // the row surfaces, then raise slug_already_exists without mutating.
-  test("rejects with slug_already_exists when /api/query flakes once before returning the row", async () => {
+  test("rejects with slug_already_exists when the slug already exists", async () => {
     const existing = {
       fields: {
         slug: "flaky-design",
@@ -138,10 +138,7 @@ describe("designNew", () => {
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
         queryCalls++;
-        // First call returns an empty page (the slug fell outside the
-        // top-100 slice). Subsequent calls return the row.
-        const results = queryCalls === 1 ? [] : [existing];
-        return { status: 200, body: { ok: true, results } };
+        return { status: 200, body: { ok: true, results: [existing] } };
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
@@ -158,7 +155,7 @@ describe("designNew", () => {
         tags: [],
       }),
     ).rejects.toMatchObject({ code: "slug_already_exists" });
-    expect(queryCalls).toBeGreaterThanOrEqual(2);
+    expect(queryCalls).toBe(1);
     // Critical assertion: no mutation fired. Pre-fix, the first empty
     // page let createRecord run and silently overwrite the row.
     expect(mutations).toEqual([]);

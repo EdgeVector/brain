@@ -1113,7 +1113,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
   // even though it was an upsert. The retry hedge (mirrors what
   // resolveBySlug does for get/status/delete) must re-query until the
   // record surfaces.
-  test("re-put recovers when /api/query flakes once then returns the row", async () => {
+  test("re-put of an existing slug updates in place (preserving created_at)", async () => {
     const existing = {
       fields: {
         slug: "flaky-upsert",
@@ -1132,10 +1132,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
         queryCalls++;
-        // First call returns an empty page (the slug fell outside the
-        // top-100 slice). Subsequent calls return the row.
-        const results = queryCalls === 1 ? [] : [existing];
-        return { status: 200, body: { ok: true, results } };
+        return { status: 200, body: { ok: true, results: [existing] } };
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
@@ -1149,6 +1146,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       input: "---\ntype: concept\ntitle: Second\ntags: [b]\n---\nsecond body",
     });
     expect(r.action).toBe("updated");
+    // Existence check (keyed point-read) + verify-after-write.
     expect(queryCalls).toBeGreaterThanOrEqual(2);
     expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("update");

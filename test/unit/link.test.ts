@@ -95,10 +95,9 @@ describe("linkCmd", () => {
     expect(fields.design_slug).toBe("d1");
   });
 
-  // Regression: /api/query truncation hides the task row on the first call,
-  // then returns it on retry. Without withReadRetry the task lookup rejected
-  // with `not_found` even though the task exists.
-  test("task lookup retries through a flaky page miss", async () => {
+  // The task existence check resolves via a keyed point-read (one query), so an
+  // existing task is found directly.
+  test("task lookup finds the task in one keyed read", async () => {
     let taskQueryCalls = 0;
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
@@ -106,9 +105,7 @@ describe("linkCmd", () => {
         const schema = querySchema(init);
         if (schema === TASK_HASH) {
           taskQueryCalls++;
-          // First task query returns an empty page; retries return the row.
-          const results = taskQueryCalls === 1 ? [] : [taskRow];
-          return { status: 200, body: { ok: true, results } };
+          return { status: 200, body: { ok: true, results: [taskRow] } };
         }
         if (schema === DESIGN_HASH) {
           return { status: 200, body: { ok: true, results: [designRow] } };
@@ -122,17 +119,15 @@ describe("linkCmd", () => {
       return { status: 404 };
     });
     await linkCmd({ cfg, taskSlug: "t1", designSlug: "d1", print: () => {} });
-    expect(taskQueryCalls).toBeGreaterThanOrEqual(2);
+    expect(taskQueryCalls).toBe(1);
     expect(mutations).toHaveLength(1);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("d1");
   });
 
-  // Same flake, different lookup: the parent-design existence check must
-  // also retry. Without it, `fbrain link <task> <real-design>` rejects with
-  // dangling_design_slug whenever the parent is outside the daemon's top-100
-  // page on the first call.
-  test("design lookup retries through a flaky page miss", async () => {
+  // The parent-design existence check also resolves via a keyed point-read, so
+  // `fbrain link <task> <real-design>` finds a valid parent in one query.
+  test("design lookup finds a valid parent in one keyed read", async () => {
     let designQueryCalls = 0;
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
@@ -140,9 +135,7 @@ describe("linkCmd", () => {
         const schema = querySchema(init);
         if (schema === DESIGN_HASH) {
           designQueryCalls++;
-          // First design query returns an empty page; retries return the row.
-          const results = designQueryCalls === 1 ? [] : [designRow];
-          return { status: 200, body: { ok: true, results } };
+          return { status: 200, body: { ok: true, results: [designRow] } };
         }
         if (schema === TASK_HASH) {
           return { status: 200, body: { ok: true, results: [taskRow] } };
@@ -156,7 +149,7 @@ describe("linkCmd", () => {
       return { status: 404 };
     });
     await linkCmd({ cfg, taskSlug: "t1", designSlug: "d1", print: () => {} });
-    expect(designQueryCalls).toBeGreaterThanOrEqual(2);
+    expect(designQueryCalls).toBe(1);
     expect(mutations).toHaveLength(1);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("d1");

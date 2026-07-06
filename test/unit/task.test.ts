@@ -85,7 +85,7 @@ describe("taskNew", () => {
   // first call, then returns it on retry. Without withReadRetry the
   // slug_already_exists guard fails open and createRecord silently
   // overwrites the row's created_at.
-  test("rejects with slug_already_exists when /api/query flakes once before returning the row", async () => {
+  test("rejects with slug_already_exists when the slug already exists", async () => {
     const existing = {
       fields: {
         slug: "flaky-task",
@@ -104,8 +104,7 @@ describe("taskNew", () => {
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
         queryCalls++;
-        const results = queryCalls === 1 ? [] : [existing];
-        return { status: 200, body: { ok: true, results } };
+        return { status: 200, body: { ok: true, results: [existing] } };
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
@@ -122,15 +121,14 @@ describe("taskNew", () => {
         tags: [],
       }),
     ).rejects.toMatchObject({ code: "slug_already_exists" });
-    expect(queryCalls).toBeGreaterThanOrEqual(2);
+    // A single keyed point-read finds the existing row — no create attempted.
+    expect(queryCalls).toBe(1);
     expect(mutations).toEqual([]);
   });
 
-  // Same flake, different lookup: the parent-design existence check
-  // must also retry, otherwise --design <valid-slug> rejects with
-  // dangling_design_slug whenever the parent is outside the daemon's
-  // top-100 page on the first call.
-  test("parent-design lookup retries through a flaky page miss", async () => {
+  // The parent-design existence check for `--design <valid-slug>` resolves via
+  // keyed point-reads (no empty-page retry), so a valid parent is found directly.
+  test("parent-design lookup finds a valid parent via keyed point-reads", async () => {
     const parentDesign = {
       fields: {
         slug: "parent-design",
@@ -150,10 +148,7 @@ describe("taskNew", () => {
         const schema = querySchema(init);
         if (schema === DESIGN_HASH) {
           designQueryCalls++;
-          // First design query returns an empty page (parent fell out
-          // of the top-100 slice); retries return the parent row.
-          const results = designQueryCalls === 1 ? [] : [parentDesign];
-          return { status: 200, body: { ok: true, results } };
+          return { status: 200, body: { ok: true, results: [parentDesign] } };
         }
         // Task slug doesn't exist — every task query returns empty.
         return { status: 200, body: { ok: true, results: [] } };
@@ -173,7 +168,8 @@ describe("taskNew", () => {
       designSlug: "parent-design",
       ...VEC,
     });
-    expect(designQueryCalls).toBeGreaterThanOrEqual(2);
+    // Two keyed point-reads of the parent (validate + link), no empty-page retry.
+    expect(designQueryCalls).toBe(2);
     expect(mutations).toHaveLength(1);
     expect(mutations[0]!.mutation_type).toBe("create");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
