@@ -58,6 +58,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     recoveryVerb: "get",
     ambiguousTypePrecedence:
       opts.type === undefined ? GET_RECORD_TYPE_PRECEDENCE : undefined,
+    normalizedSlugFallback: true,
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on

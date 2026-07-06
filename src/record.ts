@@ -1037,6 +1037,10 @@ export interface ResolveBySlugOpts {
   // Read-only callers can opt into deterministic ambiguity resolution while
   // mutating callers keep the safer default of erroring unless --type is set.
   ambiguousTypePrecedence?: readonly RecordType[];
+  // Read-only callers can opt into a final exact normalized retry before
+  // not_found: lowercase plus '-'/'_' folded variants. Ambiguous normalized
+  // matches intentionally do not resolve.
+  normalizedSlugFallback?: boolean;
   // Forwarded to the per-type lookup loop so tests can mock sleep / shrink
   // the budget without paying the real backoff schedule. Production callers
   // leave it unset and inherit the smoketest-tuned defaults.
@@ -1082,6 +1086,11 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   );
 
   if (matches.length === 0) {
+    if (opts.normalizedSlugFallback === true) {
+      const normalizedMatches = await findNormalizedSlugMatches(opts, types);
+      if (normalizedMatches.length === 1) return normalizedMatches[0]!;
+    }
+
     const fallback = `No record with slug "${opts.slug}".`;
     const message =
       opts.type !== undefined
@@ -1150,6 +1159,44 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   }
 
   return matches[0]!;
+}
+
+async function findNormalizedSlugMatches(
+  opts: ResolveBySlugOpts,
+  types: readonly RecordType[],
+): Promise<ResolvedRecord[]> {
+  const candidateSlugs = normalizedSlugLookupVariants(opts.slug);
+  if (candidateSlugs.length === 0) return [];
+
+  const seen = new Set<string>();
+  const matches: ResolvedRecord[] = [];
+  for (const t of types) {
+    const hash = schemaHashFor(t, opts.cfg);
+    for (const candidateSlug of candidateSlugs) {
+      const row = opts.raw === true
+        ? await findBySlugRaw(opts.node, t, hash, candidateSlug)
+        : await findBySlug(opts.node, t, hash, candidateSlug);
+      if (row === null) continue;
+      if (opts.raw && isTombstoned(row)) continue;
+      if (opts.filter && !opts.filter(row, t)) continue;
+
+      const key = `${t}:${row.slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matches.push({ type: t, record: row });
+    }
+  }
+  return matches;
+}
+
+function normalizedSlugLookupVariants(slug: string): string[] {
+  const trimmed = normalizeSlug(slug);
+  const lower = trimmed.toLowerCase();
+  const variants = new Set<string>();
+  for (const base of [lower, lower.replace(/_/g, "-"), lower.replace(/-/g, "_")]) {
+    if (base.length > 0 && base !== trimmed) variants.add(base);
+  }
+  return Array.from(variants);
 }
 
 function appendHint(base: string, extra?: string): string {
