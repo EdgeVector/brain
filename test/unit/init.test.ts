@@ -19,11 +19,13 @@ import {
   DEFAULT_NODE_URL,
   DEFAULT_RETRY_DELAYS_MS,
   DEFAULT_SCHEMA_SERVICE_URL,
+  formatNodeTarget,
   MAX_RETRY_GAP_MS,
   NONINTERACTIVE_RETRY_DELAYS_MS,
   RETRY_TOTAL_BUDGET_MS,
   RETRY_TOTAL_BUDGET_MS_NONINTERACTIVE,
   hasUsableExistingConfig,
+  localMintIdentityHash,
   printNextSteps,
   probeWithRetry,
   resolveUrls,
@@ -136,6 +138,27 @@ describe("resolveUrls — node-URL default (socket-only loopback)", () => {
     });
     const r = resolveUrls({}, existing);
     expect(r.nodeUrl).toBe("http://192.168.1.5:9001");
+  });
+});
+
+describe("formatNodeTarget", () => {
+  test("loopback node URLs print the Unix socket target, not TCP as transport", () => {
+    const out = formatNodeTarget(DEFAULT_NODE_URL);
+    expect(out).toContain("unix:");
+    expect(out).toContain(DEFAULT_NODE_URL);
+    expect(out.startsWith(DEFAULT_NODE_URL)).toBe(false);
+  });
+
+  test("remote node URLs print unchanged", () => {
+    expect(formatNodeTarget("https://node.example.test")).toBe("https://node.example.test");
+  });
+});
+
+describe("localMintIdentityHash", () => {
+  test("matches the node app-schema mint framing", () => {
+    expect(localMintIdentityHash("kanban", "Task", ["status", "title", "title"])).toBe(
+      "99545766d94eaccf9d3da1d6f98695932a1ed2e656034b5742ec4e60d55b750a",
+    );
   });
 });
 
@@ -370,11 +393,100 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
       expect(body.app_id).toBe(OWNER_APP_ID);
       expect(body.schema?.owner_app_id).toBe(OWNER_APP_ID);
     }
-    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
+    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike", "sop", "decision", "__tagindex__"]) {
       expect(result.config.schemaHashes[t]).toHaveLength(64);
     }
     expect(lines.some((l) => l.includes("local app-schema declarations persisted"))).toBe(true);
     expect(lines.some((l) => l.includes("schema_service load skipped"))).toBe(true);
+    const targetLine = lines.find((l) => l.includes("targeting node at")) ?? "";
+    expect(targetLine).toContain("unix:");
+    expect(targetLine).not.toContain(`targeting node at ${DEFAULT_NODE_URL}`);
+  });
+
+  test("local app-schema declare accepts link only when canonical is the expected local mint", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-local-link-"));
+    const configPath = join(tmpDir, "config.json");
+
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "local-link-userhash-0001" });
+      }
+      if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          app_id?: string;
+          schema?: { name?: string; descriptive_name?: string; fields?: string[] };
+        };
+        const appId = body.app_id ?? OWNER_APP_ID;
+        const schemaName = body.schema?.name ?? "unknown";
+        const fields = body.schema?.fields ?? [];
+        return jsonResponse(200, {
+          app_id: appId,
+          schema: schemaName,
+          canonical: localMintIdentityHash(appId, schemaName, fields),
+          resolution: "link",
+          decision: "link",
+        });
+      }
+      if (url.endsWith("/v1/schemas") || url.endsWith("/api/schemas/load")) {
+        return jsonResponse(500, { error: "schema_service_or_load_should_not_be_called", url });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      consent: { isTty: () => false },
+    });
+
+    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
+      expect(result.config.schemaHashes[t]).toHaveLength(64);
+    }
+    expect(lines.some((l) => l.includes("accepted link; canonical matches local mint"))).toBe(true);
+  });
+
+  test("local app-schema declare still rejects arbitrary links", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-bad-link-"));
+    const configPath = join(tmpDir, "config.json");
+
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "bad-link-userhash-0001" });
+      }
+      if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          app_id?: string;
+          schema?: { name?: string };
+        };
+        return jsonResponse(200, {
+          app_id: body.app_id,
+          schema: body.schema?.name ?? "Design",
+          canonical: "f".repeat(64),
+          resolution: "link",
+          decision: "link",
+        });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+
+    try {
+      await runInit({
+        configPath,
+        print: () => {},
+        consent: { isTty: () => false },
+      });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      expect((err as FbrainError).code).toBe("app_schema_declare_not_local_mint");
+    }
   });
 
   test("cert_required POST → resolves all 8 namespaced hashes from GET /api/schemas, no throw", async () => {

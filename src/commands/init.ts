@@ -19,7 +19,9 @@
 // older configs (v1 → current; v2 → current, with URL auto-heal if the
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, type Verbose } from "../client.ts";
+import { createHash } from "node:crypto";
+
+import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
 import {
   OWNER_APP_ID,
   UNIQUE_SCHEMAS,
@@ -213,7 +215,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   } else {
     nodeUrlSource = "default";
   }
-  print(`[1/${STEPS}] targeting node at ${nodeUrl} (${nodeUrlSource})`);
+  print(`[1/${STEPS}] targeting node at ${formatNodeTarget(nodeUrl)} (${nodeUrlSource})`);
 
   // Step 0/6: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
@@ -373,7 +375,12 @@ async function tryDeclareOwnedSchemasLocally(
   for (const entry of UNIQUE_SCHEMAS) {
     try {
       const declared = await nodeClient.declareAppSchema(OWNER_APP_ID, entry.schema.schema);
-      if (declared.resolution !== "mint") {
+      const expectedMint = localMintIdentityHash(
+        OWNER_APP_ID,
+        entry.schema.schema.name,
+        entry.schema.schema.fields,
+      );
+      if (declared.resolution !== "mint" && declared.canonical !== expectedMint) {
         throw new FbrainError({
           code: "app_schema_declare_not_local_mint",
           message:
@@ -386,9 +393,13 @@ async function tryDeclareOwnedSchemasLocally(
         schemaHashes[key] = declared.canonical;
       }
       const covers = schemaConfigKeys(entry).join(", ");
+      const resolutionLabel =
+        declared.resolution === "mint"
+          ? "local mint"
+          : `accepted ${declared.resolution}; canonical matches local mint`;
       print(
         `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
-          `(local mint; covers ${covers})`,
+          `(${resolutionLabel}; covers ${covers})`,
       );
     } catch (err) {
       if (err instanceof FbrainError && err.code === "node_http_404") {
@@ -400,6 +411,21 @@ async function tryDeclareOwnedSchemasLocally(
   print(`[4/${STEPS}] loading schemas into the node`);
   print(`        local app-schema declarations persisted; schema_service load skipped ✓`);
   return { supported: true };
+}
+
+export function formatNodeTarget(nodeUrl: string): string {
+  if (!isLoopbackNodeUrl(nodeUrl)) return nodeUrl;
+  return `unix:${defaultFolddbSocketPath()} (loopback URL marker ${nodeUrl})`;
+}
+
+export function localMintIdentityHash(
+  appId: string,
+  localSchema: string,
+  fields: readonly string[],
+): string {
+  const uniqueSortedFields = [...new Set(fields)].sort();
+  const hashInput = `app:${appId}:${localSchema}:${uniqueSortedFields.join(",")}`;
+  return createHash("sha256").update(hashInput).digest("hex");
 }
 
 async function registerAndLoadSchemasFromCatalog(opts: {
