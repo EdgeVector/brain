@@ -166,7 +166,12 @@ function transcriptPrompt(path: string | undefined): string | undefined {
   try {
     const lines = readFileSync(path, "utf8").trim().split(/\r?\n/).slice(-50);
     for (let i = lines.length - 1; i >= 0; i--) {
-      const row = JSON.parse(lines[i]!) as unknown;
+      let row: unknown;
+      try {
+        row = JSON.parse(lines[i]!);
+      } catch {
+        continue;
+      }
       if (!row || typeof row !== "object") continue;
       const r = row as Record<string, unknown>;
       if (r.type !== "user") continue;

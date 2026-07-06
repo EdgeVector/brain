@@ -677,7 +677,7 @@ describe("establishConsentInline — nonInteractiveGrant (--grant-consent)", () 
       pollIntervalMs: 1,
     });
 
-    expect(result).toEqual({ state: "skipped", reason: "non_tty" });
+    expect(result).toEqual({ state: "skipped", reason: "no_folddb_bin" });
     // Crucially: never entered the up-to-5-min poll loop.
     expect(transport.requestConsentCalls).toBe(0);
     expect(transport.consentStatusCalls).toBe(0);
