@@ -1,7 +1,68 @@
+import { existsSync, lstatSync, readlinkSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+
 import { stripDoctorTip, type Verbose } from "../../client.ts";
 import { FBRAIN_MCP_TOOL_NAMES } from "../../mcp/server.ts";
 import { getFbrainVersion } from "../../version.ts";
 import type { CheckResult, DoctorOptions } from "../doctor.ts";
+
+export function runCliEntrypointProbe(
+  opts: DoctorOptions,
+  verbose: Verbose | undefined,
+): CheckResult {
+  const which = opts.whichBin ?? ((name: string) => Bun.which(name));
+  const resolved = which("fbrain");
+  if (resolved) {
+    verbose?.(`fbrain-entrypoint: resolved fbrain -> ${resolved}`);
+    return {
+      name: "fbrain-entrypoint",
+      ok: true,
+      detail: `fbrain -> ${resolved}`,
+    };
+  }
+
+  const staleBin = describeCommonBrokenBin("fbrain", opts.homeDir);
+  verbose?.(
+    `fbrain-entrypoint: fbrain not on PATH — emitting WARN${staleBin ? ` (${staleBin})` : ""}`,
+  );
+  return {
+    name: "fbrain-entrypoint",
+    ok: true,
+    tag: "WARN",
+    detail:
+      "CLI entrypoint 'fbrain' is not on PATH — shelling out to bare " +
+      "`fbrain get`/`fbrain put`/`fbrain ask` will fail with command not found" +
+      (staleBin ? `; ${staleBin}` : ""),
+    fix:
+      "Re-run `bun add -g github:EdgeVector/fbrain` (or `bun link` from a stable " +
+      "fbrain checkout), then verify with `zsh -lic 'fbrain --version'`. If " +
+      "`~/.bun/bin/fbrain` is a dangling symlink, remove it before relinking.",
+  };
+}
+
+function describeCommonBrokenBin(
+  name: string,
+  homeDir = process.env.HOME,
+): string | null {
+  if (!homeDir) return null;
+  const binPath = resolve(homeDir, ".bun", "bin", name);
+  let stat;
+  try {
+    stat = lstatSync(binPath);
+  } catch {
+    return null;
+  }
+
+  if (stat.isSymbolicLink()) {
+    const linkTarget = readlinkSync(binPath);
+    const resolvedTarget = resolve(dirname(binPath), linkTarget);
+    if (!existsSync(resolvedTarget)) {
+      return `found dangling ~/.bun/bin/${name} -> ${linkTarget} (missing ${resolvedTarget})`;
+    }
+  }
+
+  return null;
+}
 
 export function runMcpEntrypointProbe(
   opts: DoctorOptions,
