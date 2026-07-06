@@ -251,9 +251,9 @@ const matchSchema = z.object({
       "Short body extract (~120 chars) around the first matching query term — or the body head for a pure-vector hit — so the answer is visible inline without a follow-up fbrain_get. Empty only when the record body is empty.",
     ),
   confidence: z
-    .enum(["strong", "weak"])
+    .enum(["strong", "weak", "fallback"])
     .describe(
-      "Retrieval confidence label. `weak` means the whole result set looks like a noise-floor fallback; treat rows as closest-known candidates, not trusted answers.",
+      "Retrieval confidence label. `strong` = a real vector match. `weak` = the whole vector result set looks like a noise-floor band; treat rows as closest-known candidates, not trusted answers. `fallback` = a BM25 keyword-rescue row surfaced because the vector search found nothing usable (score is null, no semantic confidence). Any non-`strong` row makes the tool's `confident` flag false.",
     ),
 });
 
