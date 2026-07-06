@@ -1073,6 +1073,118 @@ export function newNodeClient(opts: {
     }
   };
 
+  const queryAllGuarded = async ({
+    schemaHash,
+    fields,
+  }: {
+    schemaHash: string;
+    fields: string[];
+  }): Promise<QueryResponse> => {
+    // The node's /api/query handler silently defaults to limit=100
+    // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
+    // does NOT support a body-side tag/status filter — so any caller
+    // that wants to filter by a record field has to fetch everything
+    // and filter in-memory. We paginate up to QUERY_PAGE_SIZE rows per
+    // request and stop once the node reports `has_more: false`.
+    //
+    // CLIENT-SIDE GUARDS — fold_db_node's offset pagination is broken
+    // (handler `fold_db_node/src/handlers/query.rs`: `.skip(offset)
+    // .take(limit)` over an unstably-ordered result set). Verified
+    // 2026-05-30: paging a 177-row schema by 100 returns 177 rows but
+    // only 134 unique — ~43 dups + ~43 silently dropped. fbrain is
+    // safe today only because QUERY_PAGE_SIZE (1000) exceeds every
+    // current schema's row count, so the second page is never
+    // requested. To stay safe once any schema grows past the page
+    // size, we never trust offset-paged results blindly:
+    //   1. Dedupe rows by record key across pages — so a stable-
+    //      ordering future node fix transparently keeps working,
+    //      and an unstable node can never inflate the set with
+    //      duplicates.
+    //   2. If a follow-up page returns ONLY already-seen keys but
+    //      claims has_more=true, throw — pagination is stalled
+    //      mid-table and looping further would either spin to the
+    //      QUERY_PAGE_LIMIT cap or return a silently-truncated set.
+    //   3. After the loop terminates (has_more=false), if the
+    //      node's own total_count is greater than our deduped row
+    //      count, throw — the node dropped rows we cannot recover.
+    // The proper root-cause fix lives in fold_db_node/query.rs
+    // (stable ordering); this guard lets fbrain land independently.
+    const allResults: QueryRow[] = [];
+    const seenKeys = new Set<string>();
+    let offset = 0;
+    let lastTotalCount: number | null = null;
+    for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
+      const body = await callJsonOk("/api/query", "POST", {
+        schema_name: schemaHash,
+        fields,
+        limit: QUERY_PAGE_SIZE,
+        offset,
+      });
+      const b = body as Record<string, unknown>;
+      const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      if (typeof b.total_count === "number") lastTotalCount = b.total_count;
+      let newOnPage = 0;
+      for (const row of pageResults) {
+        const k = recordDedupKey(row);
+        if (seenKeys.has(k)) continue;
+        seenKeys.add(k);
+        allResults.push(row);
+        newOnPage++;
+      }
+      // Stop on explicit `has_more: false`. Absent `has_more` (older
+      // node, or a stub) is treated as "done" — a single non-paginated
+      // response is then equivalent to the pre-pagination contract.
+      const hasMore = b.has_more === true;
+      if (!hasMore) break;
+      if (newOnPage === 0) {
+        throw new FbrainError({
+          code: "query_pagination_stalled",
+          message:
+            `Node /api/query returned page ${page + 1} at offset=${offset} ` +
+            `with only previously-seen record keys but reported has_more=true ` +
+            `(total_count=${lastTotalCount ?? "?"}) — the node is counting ` +
+            `deleted/tombstoned record keys in total_count but omitting them from ` +
+            `the materialized page, so has_more never clears and pagination cannot ` +
+            `progress ${DOCTOR_TIP}.`,
+          hint:
+            "Upgrade the fold_db_node to a build with the tombstone-aware " +
+            "list-query count fix (fold #995). This affects only the record type " +
+            "you deleted from; other record types still work.",
+        });
+      }
+      // Defensive: a node that returns has_more=true with an empty
+      // results array would spin without progress. The stalled-page
+      // guard above already covers this (0 new keys), but keep an
+      // explicit break for clarity and so the throw above can only
+      // ever fire on a real overlap.
+      if (pageResults.length === 0) break;
+      offset += pageResults.length;
+    }
+    if (lastTotalCount !== null && allResults.length < lastTotalCount) {
+      throw new FbrainError({
+        code: "query_pagination_incomplete",
+        message:
+          `Node /api/query finished with has_more=false but only ${allResults.length} ` +
+          `unique records were collected across pages — the node's reported total_count ` +
+          `was ${lastTotalCount}. This means total_count includes record keys the node ` +
+          `never returned in any page: either deleted/tombstoned keys counted in the ` +
+          `total, or rows silently dropped by unstable offset pagination on a schema ` +
+          `larger than QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) ${DOCTOR_TIP}.`,
+        hint:
+          "Upgrade the fold_db_node to a build with the tombstone-aware list-query " +
+          "count fix (fold #995) and stable /api/query ordering. If the gap matches " +
+          "records you recently deleted, only that record type is affected; other " +
+          "types still work.",
+      });
+    }
+    return {
+      ok: true,
+      results: allResults,
+      total_count: lastTotalCount ?? allResults.length,
+      returned_count: allResults.length,
+    };
+  };
+
   return {
     baseUrl: url,
     userHash,
@@ -1299,109 +1411,7 @@ export function newNodeClient(opts: {
       await mutate("delete", schemaHash, {}, keyHash);
     },
     async queryAll({ schemaHash, fields }) {
-      // The node's /api/query handler silently defaults to limit=100
-      // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
-      // does NOT support a body-side tag/status filter — so any caller
-      // that wants to filter by a record field has to fetch everything
-      // and filter in-memory. We paginate up to QUERY_PAGE_SIZE rows per
-      // request and stop once the node reports `has_more: false`.
-      //
-      // CLIENT-SIDE GUARDS — fold_db_node's offset pagination is broken
-      // (handler `fold_db_node/src/handlers/query.rs`: `.skip(offset)
-      // .take(limit)` over an unstably-ordered result set). Verified
-      // 2026-05-30: paging a 177-row schema by 100 returns 177 rows but
-      // only 134 unique — ~43 dups + ~43 silently dropped. fbrain is
-      // safe today only because QUERY_PAGE_SIZE (1000) exceeds every
-      // current schema's row count, so the second page is never
-      // requested. To stay safe once any schema grows past the page
-      // size, we never trust offset-paged results blindly:
-      //   1. Dedupe rows by record key across pages — so a stable-
-      //      ordering future node fix transparently keeps working,
-      //      and an unstable node can never inflate the set with
-      //      duplicates.
-      //   2. If a follow-up page returns ONLY already-seen keys but
-      //      claims has_more=true, throw — pagination is stalled
-      //      mid-table and looping further would either spin to the
-      //      QUERY_PAGE_LIMIT cap or return a silently-truncated set.
-      //   3. After the loop terminates (has_more=false), if the
-      //      node's own total_count is greater than our deduped row
-      //      count, throw — the node dropped rows we cannot recover.
-      // The proper root-cause fix lives in fold_db_node/query.rs
-      // (stable ordering); this guard lets fbrain land independently.
-      const allResults: QueryRow[] = [];
-      const seenKeys = new Set<string>();
-      let offset = 0;
-      let lastTotalCount: number | null = null;
-      for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-        const body = await callJsonOk("/api/query", "POST", {
-          schema_name: schemaHash,
-          fields,
-          limit: QUERY_PAGE_SIZE,
-          offset,
-        });
-        const b = body as Record<string, unknown>;
-        const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
-        if (typeof b.total_count === "number") lastTotalCount = b.total_count;
-        let newOnPage = 0;
-        for (const row of pageResults) {
-          const k = recordDedupKey(row);
-          if (seenKeys.has(k)) continue;
-          seenKeys.add(k);
-          allResults.push(row);
-          newOnPage++;
-        }
-        // Stop on explicit `has_more: false`. Absent `has_more` (older
-        // node, or a stub) is treated as "done" — a single non-paginated
-        // response is then equivalent to the pre-pagination contract.
-        const hasMore = b.has_more === true;
-        if (!hasMore) break;
-        if (newOnPage === 0) {
-          throw new FbrainError({
-            code: "query_pagination_stalled",
-            message:
-              `Node /api/query returned page ${page + 1} at offset=${offset} ` +
-              `with only previously-seen record keys but reported has_more=true ` +
-              `(total_count=${lastTotalCount ?? "?"}) — the node is counting ` +
-              `deleted/tombstoned record keys in total_count but omitting them from ` +
-              `the materialized page, so has_more never clears and pagination cannot ` +
-              `progress ${DOCTOR_TIP}.`,
-            hint:
-              "Upgrade the fold_db_node to a build with the tombstone-aware " +
-              "list-query count fix (fold #995). This affects only the record type " +
-              "you deleted from; other record types still work.",
-          });
-        }
-        // Defensive: a node that returns has_more=true with an empty
-        // results array would spin without progress. The stalled-page
-        // guard above already covers this (0 new keys), but keep an
-        // explicit break for clarity and so the throw above can only
-        // ever fire on a real overlap.
-        if (pageResults.length === 0) break;
-        offset += pageResults.length;
-      }
-      if (lastTotalCount !== null && allResults.length < lastTotalCount) {
-        throw new FbrainError({
-          code: "query_pagination_incomplete",
-          message:
-            `Node /api/query finished with has_more=false but only ${allResults.length} ` +
-            `unique records were collected across pages — the node's reported total_count ` +
-            `was ${lastTotalCount}. This means total_count includes record keys the node ` +
-            `never returned in any page: either deleted/tombstoned keys counted in the ` +
-            `total, or rows silently dropped by unstable offset pagination on a schema ` +
-            `larger than QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) ${DOCTOR_TIP}.`,
-          hint:
-            "Upgrade the fold_db_node to a build with the tombstone-aware list-query " +
-            "count fix (fold #995) and stable /api/query ordering. If the gap matches " +
-            "records you recently deleted, only that record type is affected; other " +
-            "types still work.",
-        });
-      }
-      return {
-        ok: true,
-        results: allResults,
-        total_count: lastTotalCount ?? allResults.length,
-        returned_count: allResults.length,
-      };
+      return queryAllGuarded({ schemaHash, fields });
     },
     async queryPage({ schemaHash, fields, limit }) {
       // One page, first offset, caller-capped limit. Intentionally no
@@ -1428,12 +1438,11 @@ export function newNodeClient(opts: {
       });
       const b = body as Record<string, unknown>;
       const results = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
-      for (const row of results) {
-        if (row.key?.hash === keyHash) return row;
-      }
-      for (const row of results) {
-        const f = (row.fields ?? {}) as Record<string, unknown>;
-        if (f.slug === keyHash) return row;
+      const row = findQueryRowByKey(results, keyHash);
+      if (row) return row;
+      if (queryByKeyFilterLooksIgnored(b, results)) {
+        const fallback = await queryAllGuarded({ schemaHash, fields });
+        return findQueryRowByKey(fallback.results, keyHash);
       }
       return null;
     },
@@ -1605,6 +1614,23 @@ function recordDedupKey(row: QueryRow): string {
     return `__no_key__|${JSON.stringify(row.fields ?? null)}`;
   }
   return `h:${key.hash ?? ""}|r:${key.range ?? ""}`;
+}
+
+function findQueryRowByKey(rows: QueryRow[], keyHash: string): QueryRow | null {
+  for (const row of rows) {
+    if (row.key?.hash === keyHash) return row;
+  }
+  for (const row of rows) {
+    const f = (row.fields ?? {}) as Record<string, unknown>;
+    if (f.slug === keyHash) return row;
+  }
+  return null;
+}
+
+function queryByKeyFilterLooksIgnored(body: Record<string, unknown>, results: QueryRow[]): boolean {
+  if (body.has_more === true) return true;
+  if (results.length > 1) return true;
+  return typeof body.total_count === "number" && body.total_count > results.length;
 }
 
 function numField(obj: Record<string, unknown>, key: string): number {
