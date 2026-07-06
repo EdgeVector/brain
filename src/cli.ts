@@ -28,6 +28,8 @@ import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import { gateAdd, gateClear, gatesOpen, gateVerify } from "./commands/gate.ts";
+import { parseUpdatedSince } from "./time.ts";
+import { formatPutConfirmation, indexPendingNote } from "./write-confirmation.ts";
 import {
   buildAgentInstructionsBlock,
   isRecordType,
@@ -1219,51 +1221,6 @@ function validateNonNegativeIntFlag(
   }
 }
 
-// Parse a `--updated-since` value into epoch-millis. Accepts either an
-// absolute ISO-8601 timestamp (`2026-07-01`, `2026-07-01T12:00:00Z`) or a
-// relative "ago" token — an integer followed by a unit suffix:
-//   s(ec) · m(in) · h(our) · d(ay) · w(eek)
-// e.g. `24h`, `7d`, `2w`, `30m`. Relative tokens resolve against `now`
-// (injected for testability; defaults to Date.now()). Returns epoch-millis
-// on success. Throws a usage FbrainError (`invalid_updated_since`) on an
-// unparseable value so `fbrain list --updated-since garbage` fails loud
-// with exit 2, not a silent empty list.
-const RELATIVE_SINCE_RE = /^(\d+)\s*(s|m|h|d|w)$/i;
-const RELATIVE_UNIT_MS: Record<string, number> = {
-  s: 1_000,
-  m: 60_000,
-  h: 3_600_000,
-  d: 86_400_000,
-  w: 604_800_000,
-};
-export function parseUpdatedSince(raw: string, now: number = Date.now()): number {
-  const trimmed = raw.trim();
-  const rel = RELATIVE_SINCE_RE.exec(trimmed);
-  if (rel) {
-    const magnitude = parseInt(rel[1]!, 10);
-    const unitMs = RELATIVE_UNIT_MS[rel[2]!.toLowerCase()]!;
-    return now - magnitude * unitMs;
-  }
-  // A bare integer is rejected: `Date.parse("7")` reads it as year 2007, so
-  // a fat-fingered `7` (meant as `7d`) would silently mean "since year 7"
-  // and match everything. Relative durations must carry a unit; a lone
-  // number is far likelier a missing-unit typo than a year request.
-  if (/^\d+$/.test(trimmed)) {
-    throw new FbrainError({
-      code: "invalid_updated_since",
-      message: `--updated-since "${raw}" is ambiguous — add a unit for a relative window (e.g. \`${trimmed}d\`) or pass a full ISO-8601 timestamp.`,
-    });
-  }
-  const ms = Date.parse(trimmed);
-  if (!Number.isFinite(ms)) {
-    throw new FbrainError({
-      code: "invalid_updated_since",
-      message: `--updated-since "${raw}" is not a valid ISO-8601 timestamp or relative window (e.g. \`7d\`, \`24h\`, \`2026-07-01\`).`,
-    });
-  }
-  return ms;
-}
-
 // Pull the offending option name (without leading dashes) out of a caught
 // ERR_PARSE_ARGS_UNKNOWN_OPTION. Node's message reads `Unknown option
 // '--tags'. ...`; we prefer the quoted token but fall back to scanning the
@@ -1722,18 +1679,6 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   return 0;
 }
 
-// Honest one-line suffix appended to a CLI write's success output when the
-// record persisted but the bounded vector-index confirmation timed out. Keeps
-// the success line truthful — the write landed — while warning that an
-// IMMEDIATE `fbrain search` may miss it (the native index is still catching
-// up). Empty when the record is confirmed in the index (or the confirmation
-// was skipped on a remote node), so the common case prints the bare line.
-function indexPendingNote(indexPending: boolean): string {
-  return indexPending
-    ? " (semantic index still catching up — an immediate `fbrain search` may miss it; retry in a moment)"
-    : "";
-}
-
 // The value-taking options on `put`, derived from PUT_OPTIONS so the slug
 // recovery below stays correct if another value option is ever added.
 // (`type: "boolean"` options take no value; everything else does.)
@@ -1923,9 +1868,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   // human line moves to stderr (mirrors the read verbs). `created` reuses
   // put's existing created/updated signal.
   if (values.json) {
-    console.error(
-      `${result.action} ${result.type} ${result.slug}${indexPendingNote(result.indexPending)}`,
-    );
+    console.error(formatPutConfirmation(result));
     console.log(
       JSON.stringify({
         ok: true,
@@ -1935,9 +1878,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
       }),
     );
   } else {
-    console.log(
-      `${result.action} ${result.type} ${result.slug}${indexPendingNote(result.indexPending)}`,
-    );
+    console.log(formatPutConfirmation(result));
   }
   return 0;
 }

@@ -3274,6 +3274,8 @@ describe("server starts without a config (lazy config resolution)", () => {
       "fbrain_list",
       "fbrain_backlinks",
       "fbrain_put",
+      "fbrain_status",
+      "fbrain_append",
       "fbrain_delete",
       "fbrain_link",
     ]) {
@@ -3285,6 +3287,10 @@ describe("server starts without a config (lazy config resolution)", () => {
           ? { from_type: "task", from_slug: "t", to_type: "design", to_slug: "d" }
           : name === "fbrain_get" || name === "fbrain_delete" || name === "fbrain_backlinks"
             ? { slug: "x" }
+            : name === "fbrain_status"
+              ? {}
+              : name === "fbrain_append"
+                ? { slug: "x", chunk: "c" }
             : name === "fbrain_put"
               ? { slug: "x", type: "concept", body: "b" }
               : name === "fbrain_list"
@@ -3292,8 +3298,10 @@ describe("server starts without a config (lazy config resolution)", () => {
                 : { query: "q" },
       );
       expect(res.isError).toBe(true);
+      expect(res.structuredContent).toBeUndefined();
       const text = res.content[0]!.text ?? "";
-      expect(text).toBe(CONFIG_MISSING_HINT);
+      expect(text).toBe(`error: config_missing: ${CONFIG_MISSING_HINT}`);
+      expect(text).toContain("config_missing");
       expect(text).toContain("fbrain init");
     }
   });
@@ -3349,7 +3357,7 @@ describe("FBRAIN_MCP_VERSION", () => {
 // capability from the file store. A cold file store makes every write
 // fast-fail with `consent_required_non_interactive`. These tests drive that
 // REAL error (enforcement ON + an empty temp file store) and prove the opt-in
-// self-warm: with FBRAIN_MCP_AUTO_GRANT_CONSENT set, runWriteTool runs the
+// self-warm: with FBRAIN_MCP_AUTO_GRANT_CONSENT set, runTool write mode runs the
 // grant (injected stub) and retries the write once; without it, the write
 // fast-fails cleanly and the grant is never attempted.
 describe("FBRAIN_MCP_AUTO_GRANT_CONSENT opt-in gate", () => {

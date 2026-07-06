@@ -276,6 +276,7 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
       const res = await callTool("fbrain_append", { slug: "c1", chunk_b64: "not base64!!!" });
       expect(res.isError).toBe(true);
       const text = res.content[0]!.text ?? "";
+      expect(text).toContain("chunk_b64_invalid");
       expect(text).toContain("fbrain_append");
       expect(text).toContain("chunk_b64");
       expect(text).toContain("chunk_path");
