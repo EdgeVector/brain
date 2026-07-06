@@ -27,11 +27,14 @@ export type StatusOptions = {
   json?: boolean;
   print?: (line: string) => void;
   // Structured-output sink, mirroring the read/write commands' `onResult`:
-  // fires once on the UPDATE path with the SAME resolved `type`/`slug`/status
-  // transition the printed line uses, so the MCP `fbrain_status` tool's
-  // `structuredContent` can't drift from the human text. Never fires in show
-  // mode (that path is a read — `get --json` is its structured surface).
-  onResult?: (payload: StatusResult) => void;
+  // fires once per successful invocation with the SAME resolved
+  // `type`/`slug`/status the printed line uses, so the MCP `fbrain_status`
+  // tool's `structuredContent` can't drift from the human text. On the UPDATE
+  // path it carries the `status_changed` transition; on the SHOW path (slug,
+  // no new status) it carries a `status` read payload. The MCP tool declares
+  // an outputSchema, so EVERY successful call must produce structured content
+  // — the SDK's validateToolOutput rejects a schema'd result without it.
+  onResult?: (payload: StatusResult | StatusShowResult) => void;
 };
 
 // The structured payload the MCP `fbrain_status` tool returns in
@@ -46,6 +49,16 @@ export type StatusResult = {
   from: string;
   // The record's status AFTER this mutation (the value passed in).
   to: string;
+};
+
+// The structured payload for SHOW mode (`slug` given, no new status): a plain
+// read of the record's current status. `action` is `status` (not
+// `status_changed`) so an agent can distinguish a read from a mutation.
+export type StatusShowResult = {
+  action: "status";
+  type: RecordType;
+  slug: string;
+  status: string;
 };
 
 export async function statusCmd(opts: StatusOptions): Promise<void> {
@@ -67,7 +80,9 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   if (opts.newStatus === undefined) {
     // Show mode. `--json` emits a single object whose field names mirror
     // `get --json` ({slug, type, status}); otherwise the historical bare
-    // status word, so existing human/script callers are unaffected.
+    // status word, so existing human/script callers are unaffected. Either
+    // way the structured sink fires — the MCP tool relies on it (see
+    // StatusOptions.onResult).
     if (opts.json) {
       print(
         JSON.stringify({
@@ -76,9 +91,15 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
           status: only.record.status,
         }),
       );
-      return;
+    } else {
+      print(only.record.status);
     }
-    print(only.record.status);
+    opts.onResult?.({
+      action: "status",
+      type: only.type,
+      slug,
+      status: only.record.status,
+    });
     return;
   }
 

@@ -25,7 +25,7 @@ import { getRecord, formatRecordJsonWindow, type RecordJson } from "../commands/
 import { listCmd, type ListResult } from "../commands/list.ts";
 import { parseUpdatedSince } from "../cli.ts";
 import { putCmd } from "../commands/put.ts";
-import { statusCmd } from "../commands/status.ts";
+import { statusCmd, type StatusShowResult } from "../commands/status.ts";
 import { appendCmd } from "../commands/append.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
@@ -176,6 +176,12 @@ export const GET_SLUG_REQUIRED_HINT =
   "fbrain_get requires a non-empty `slug` string. Example: " +
   '`fbrain_get({"slug":"deployment-rollback-decision","type":"concept"})`. ' +
   "For fuzzy/text lookup, call fbrain_ask first.";
+
+export const BACKLINKS_SLUG_REQUIRED_HINT =
+  "fbrain_backlinks requires a non-empty `slug` string (the TARGET record " +
+  "whose inbound links you want). Example: " +
+  '`fbrain_backlinks({"slug":"deployment-rollback-decision"})`. ' +
+  "To find a record by text instead, call fbrain_ask first.";
 
 // Default char cap on the body a single `fbrain_get` returns. A record body
 // counts toward the agent harness's tool-result token budget twice over (the
@@ -429,9 +435,14 @@ const linkResultSchema = z.object({
 });
 
 // `fbrain_status` returns one of two payloads depending on how it was called:
-//   • per-record patch (a `slug` was given) → `{action:"status_changed", type,
-//     slug, from, to}`, mirroring the CLI's `<type> <slug>: <from> → <to>`
+//   • per-record patch (`slug` AND `status` given) → `{action:"status_changed",
+//     type, slug, from, to}`, mirroring the CLI's `<type> <slug>: <from> → <to>`
 //     transition line (`from`/`to` bracket the change).
+//   • per-record READ (`slug` only, no `status`) → `{action:"status", type,
+//     slug, status}` — the record's current status, no mutation. This mode
+//     MUST emit structured content like every other: the tool declares an
+//     outputSchema, and the SDK's validateToolOutput rejects any successful
+//     result without structuredContent.
 //   • node/overall status (NO `slug`) → `{action:"node_status", reachable,
 //     provisioned, nodeUrl, version?, uptimeSeconds?, detail?}` — the health
 //     check an agent expects from a bare `fbrain_status {}` (a READ; it never
@@ -439,19 +450,27 @@ const linkResultSchema = z.object({
 //
 // MCP builds a single `z.object` from the shape handed to `registerTool`, so
 // the declared `outputSchema` can't be a bare union. Instead this LOOSE shape
-// lets `action` be either literal and marks every mode-specific field optional,
-// so a `status_changed` OR a `node_status` payload both validate.
+// lets `action` be any of the three literals and marks every mode-specific
+// field optional, so a `status_changed`, `status`, or `node_status` payload
+// all validate.
 const statusOutputShape = {
   action: z
-    .enum(["status_changed", "node_status"])
+    .enum(["status_changed", "status", "node_status"])
     .describe(
-      "`status_changed` for a record status patch, `node_status` for a bare node/overall health check.",
+      "`status_changed` for a record status patch, `status` for a slug-only status read, `node_status` for a bare node/overall health check.",
     ),
-  // ── status_changed (per-record patch) fields ──
-  type: z.enum(RECORD_TYPES).optional().describe("Canonical lowercase record type (status_changed mode)."),
-  slug: z.string().optional().describe("Resolved record slug (status_changed mode)."),
+  // ── status_changed (per-record patch) + status (per-record read) fields ──
+  type: z
+    .enum(RECORD_TYPES)
+    .optional()
+    .describe("Canonical lowercase record type (status_changed/status modes)."),
+  slug: z.string().optional().describe("Resolved record slug (status_changed/status modes)."),
   from: z.string().optional().describe("The record's status BEFORE this mutation (status_changed mode)."),
   to: z.string().optional().describe("The record's status AFTER this mutation (status_changed mode)."),
+  status: z
+    .string()
+    .optional()
+    .describe("The record's CURRENT status (status mode — slug-only read)."),
   // ── node_status (bare call) fields ──
   reachable: z.boolean().optional().describe("True when the node answered the status probe (node_status mode)."),
   provisioned: z
@@ -907,7 +926,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "record to exist, so dangling wiki-link intent remains queryable. " +
         "Pass `type` to filter typed explicit edges; body refs are slug-only.",
       inputSchema: {
-        slug: actionableRequiredText("Target slug.", GET_SLUG_REQUIRED_HINT),
+        slug: actionableRequiredText("Target slug.", BACKLINKS_SLUG_REQUIRED_HINT),
         type: typeEnum
           .optional()
           .describe("Optional target type filter for typed explicit edges."),
@@ -1099,11 +1118,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Get or set fbrain status",
       description:
-        "Two modes, keyed on `slug`:\n" +
+        "Three modes, keyed on `slug`/`status`:\n" +
         "• With NO `slug` → NODE/OVERALL STATUS: a cheap health check of the " +
         "configured LastDB node (reachable? provisioned? version/uptime). This " +
         "is a READ — it needs no write capability. A bare `fbrain_status {}` " +
         "returns this instead of erroring on a missing slug.\n" +
+        "• With a `slug` but NO `status` → READ one record's current status " +
+        "(`{action:\"status\", slug, type, status}`). Also a read — no write " +
+        "capability, no mutation.\n" +
         "• With a `slug` and `status` → PATCH one record's status WITHOUT a " +
         "full re-put: reads the live record, swaps in the new `status`, and " +
         "writes back preserving body/title/tags/created_at. Prefer this over " +
@@ -1117,15 +1139,17 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Record slug to patch. OMIT to get the node/overall status " +
-              "(a bare `fbrain_status {}` is a node health check).",
+            "Record slug to read or patch. OMIT to get the node/overall " +
+              "status (a bare `fbrain_status {}` is a node health check). " +
+              "With `slug` but no `status`, reads the record's current status.",
           ),
         status: z
           .string()
           .optional()
           .describe(
-            "New status enum value for the record's type (required with `slug` " +
-              "to patch). Valid values DIFFER per type: " +
+            "New status enum value for the record's type (pass with `slug` " +
+              "to patch; omit to READ the record's current status). Valid " +
+              "values DIFFER per type: " +
               "design = draft|reviewed|approved|implemented|archived; " +
               "task = open|in_progress|blocked|done|cancelled; " +
               "project = planning|in_progress|done|archived; " +
@@ -1143,8 +1167,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "types (errors on an ambiguous slug). Ignored in node-status mode.",
           ),
       },
-      // `structuredContent` is either `{action:"status_changed", …}` (patch) or
-      // `{action:"node_status", …}` (bare call) — the loose shape accepts both.
+      // `structuredContent` is `{action:"status_changed", …}` (patch),
+      // `{action:"status", …}` (slug-only read), or `{action:"node_status", …}`
+      // (bare call) — the loose shape accepts all three.
       outputSchema: statusOutputShape,
     },
     (args) => {
@@ -1163,9 +1188,28 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           (payload) => payload as unknown as Record<string, unknown>,
         );
       }
-      // Slug + status → the original per-record status patch (a write). A slug
-      // without a status is rejected by `statusCmd`'s own resolution with an
-      // actionable error.
+      // Slug WITHOUT a status → per-record status READ (show mode). This must
+      // run on the read runner (no write capability) AND emit structured
+      // content: the tool declares an outputSchema, so the MCP SDK's
+      // validateToolOutput rejects any successful result without
+      // `structuredContent`. (Routing this through the write runner used to
+      // return text-only output — the SDK then threw "has an output schema but
+      // no structured content".)
+      if (args.status === undefined) {
+        return runReadTool<StatusShowResult>(
+          getCfg,
+          (cfg, print, onResult) =>
+            statusCmd({
+              cfg,
+              slug: args.slug!,
+              type: args.type,
+              print,
+              onResult: (r) => onResult(r as StatusShowResult),
+            }),
+          (payload) => payload as unknown as Record<string, unknown>,
+        );
+      }
+      // Slug + status → the original per-record status patch (a write).
       return runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
         statusCmd({
           cfg,
@@ -1462,7 +1506,8 @@ export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: 
   }
   if (sources.length === 0) return rest;
   if (rest.body !== undefined) return rest;
-  if (body_b64 !== undefined) return { ...rest, body: decodeBodyB64(body_b64) };
+  if (body_b64 !== undefined)
+    return { ...rest, body: decodeB64Field(body_b64, "fbrain_put", "body_b64") };
 
   let body: string;
   try {
@@ -1519,7 +1564,8 @@ export function resolveAppendChunk(args: AppendChunkArgs): string {
     });
   }
   if (inlineChunk !== undefined) return inlineChunk;
-  if (args.chunk_b64 !== undefined) return decodeBodyB64(args.chunk_b64);
+  if (args.chunk_b64 !== undefined)
+    return decodeB64Field(args.chunk_b64, "fbrain_append", "chunk_b64");
   let chunk: string;
   try {
     chunk = readFileSync(args.chunk_path!, "utf8");
@@ -1535,17 +1581,26 @@ export function resolveAppendChunk(args: AppendChunkArgs): string {
   return chunk;
 }
 
-function decodeBodyB64(body_b64: string): string {
-  const compact = body_b64.replace(/\s+/g, "");
+// Decode a `*_b64` input into UTF-8 text. Serves BOTH `fbrain_put` (`body_b64`)
+// and `fbrain_append` (`chunk_b64`), so the error strings are parameterized by
+// the calling tool + field — a bad `chunk_b64` must name fbrain_append and
+// `chunk_b64`/`chunk_path`, never fbrain_put's field names.
+function decodeB64Field(
+  b64: string,
+  tool: "fbrain_put" | "fbrain_append",
+  field: "body_b64" | "chunk_b64",
+): string {
+  const pathField = field === "body_b64" ? "body_path" : "chunk_path";
+  const compact = b64.replace(/\s+/g, "");
   if (
     compact.length % 4 === 1 ||
     !/^[A-Za-z0-9+/]*={0,2}$/.test(compact) ||
     /={1,2}[A-Za-z0-9+/]/.test(compact)
   ) {
     throw new FbrainError({
-      code: "body_b64_invalid",
-      message: "fbrain_put: body_b64 is not valid standard base64.",
-      hint: "Pass UTF-8 markdown body bytes encoded as standard base64, or use `body_path`.",
+      code: `${field}_invalid`,
+      message: `${tool}: ${field} is not valid standard base64.`,
+      hint: `Pass UTF-8 text bytes encoded as standard base64, or use \`${pathField}\`.`,
     });
   }
   try {
@@ -1553,11 +1608,11 @@ function decodeBodyB64(body_b64: string): string {
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(padded, "base64"));
   } catch (err) {
     throw new FbrainError({
-      code: "body_b64_invalid_utf8",
+      code: `${field}_invalid_utf8`,
       message:
-        "fbrain_put: body_b64 decoded, but the bytes are not valid UTF-8: " +
+        `${tool}: ${field} decoded, but the bytes are not valid UTF-8: ` +
         (err instanceof Error ? err.message : String(err)),
-      hint: "Encode the markdown body as UTF-8 before base64 encoding, or use `body_path`.",
+      hint: `Encode the text as UTF-8 before base64 encoding, or use \`${pathField}\`.`,
     });
   }
 }
