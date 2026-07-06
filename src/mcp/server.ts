@@ -23,7 +23,8 @@ import { searchCmd, type SearchHitJson } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
 import { getRecord, formatRecordJsonWindow, type RecordJson } from "../commands/get.ts";
 import { listCmd, type ListResult } from "../commands/list.ts";
-import { parseUpdatedSince } from "../cli.ts";
+import { parseUpdatedSince } from "../time.ts";
+import { formatPutConfirmation } from "../write-confirmation.ts";
 import { putCmd } from "../commands/put.ts";
 import { statusCmd, type StatusShowResult } from "../commands/status.ts";
 import { appendCmd } from "../commands/append.ts";
@@ -108,7 +109,7 @@ export function makeIdleReaper(opts: { idleMs: number; onIdle?: () => void }): {
 // internally so every tool handler resolves config through the same lazy path.
 //
 // `autoGrant` is the ONLY non-config option: an injection seam for the cold-
-// capability self-warm path (see runWriteTool / attemptAutoGrant). Production
+// capability self-warm path (see runTool write mode). Production
 // never sets it — the server uses the real `establishConsentInline` — but tests
 // drive the retry deterministically without standing up a node or enabling
 // enforcement (the unit suite runs with FBRAIN_APP_IDENTITY_ENFORCE=false, so
@@ -565,7 +566,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   const getCfg: () => Config = opts.getCfg ?? (() => opts.cfg);
   // The cold-capability self-warm grant. Default = the real inline grant;
   // tests inject a stub. Either way it only runs when the operator opted in
-  // (mcpAutoGrantConsentEnabled) — see runWriteTool.
+  // (mcpAutoGrantConsentEnabled) — see runTool write mode.
   const autoGrant: AutoGrantFn = opts.autoGrant ?? defaultAutoGrant;
   const server = new McpServer({
     name: FBRAIN_MCP_NAME,
@@ -641,9 +642,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runReadTool<SearchHitJson[]>(
+      runTool<SearchHitJson[]>({
+        mode: "read",
         getCfg,
-        (cfg, print, onResult) =>
+        exec: (cfg, print, onResult) =>
           searchCmd({
             cfg,
             query: args.query,
@@ -663,8 +665,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             // the no-MCP-tool `fbrain reindex` / repo doc-path dead-end.
             agent: true,
           }),
-        (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
-      ),
+        wrap: (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
+      }),
   );
 
   server.registerTool(
@@ -720,9 +722,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runReadTool<SearchHitJson[]>(
+      runTool<SearchHitJson[]>({
+        mode: "read",
         getCfg,
-        async (cfg, print, onResult) => {
+        exec: async (cfg, print, onResult) => {
           // Accept `question` as an alias for `query`: map it in when `query`
           // is absent. Neither present (or all-whitespace) → the same
           // actionable hint the old required-`query` schema raised, so a bare
@@ -749,8 +752,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             // follow-up can add an optional `expand` param if wanted.
           });
         },
-        (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
-      ),
+        wrap: (matches) => ({ matches, confident: confidenceFromMatches(matches) }),
+      }),
   );
 
   server.registerTool(
@@ -880,9 +883,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
     },
     (args) =>
-      runReadTool<ListResult>(
+      runTool<ListResult>({
+        mode: "read",
         getCfg,
-        (cfg, print, onResult) => {
+        exec: (cfg, print, onResult) => {
           const listOpts: Parameters<typeof listCmd>[0] = {
             cfg,
             print,
@@ -902,9 +906,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           }
           return listCmd(listOpts);
         },
-        (result) =>
+        wrap: (result) =>
           Array.isArray(result) ? { records: result } : { count: result.count },
-      ),
+      }),
   );
 
   server.registerTool(
@@ -926,9 +930,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: backlinksResultSchema.shape,
     },
     (args) =>
-      runReadTool<BacklinksJson>(
+      runTool<BacklinksJson>({
+        mode: "read",
         getCfg,
-        (cfg, print, onResult) =>
+        exec: (cfg, print, onResult) =>
           backlinksCmd({
             cfg,
             slug: args.slug,
@@ -936,8 +941,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             print,
             onResult,
           }),
-        (result) => result,
-      ),
+        wrap: (result) => result,
+      }),
   );
 
   server.registerTool(
@@ -1054,44 +1059,44 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: putResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, autoGrant, async (cfg, print, onResult) => {
-        // Strip the non-body `allow_shrink` control before body resolution so
-        // it never leaks into synthesized frontmatter; thread it to putCmd's
-        // shrink guard below.
-        const { allow_shrink, ...putArgs } = args;
-        const input = buildPutInput(resolvePutBody(putArgs));
-        // Read-after-write confirmation for the agent loop. `putCmd` already
-        // guarantees the row is record-list-visible (its own verify-read), AND
-        // — as of the CLI search-parity change (#295 CLI half) — confirms the
-        // record landed in the SEMANTIC (vector) index that
-        // `fbrain_search`/`fbrain_ask` read, surfacing `result.indexPending`.
-        // fold_db indexes the embedding asynchronously AFTER the mutation
-        // returns, so in one warm process a follow-up search can fire inside
-        // that sub-second window and miss the just-written record; `putCmd`'s
-        // bounded confirmation closes that window (or, on timeout, reports
-        // `indexPending: true`). It NEVER fails or blocks a persisted write.
-        // We just thread its result through to the agent — the deeper
-        // server-side synchronous-indexing change is a separate fold/native-
-        // index item (docs/phase-7-search-latency-spike.md, G3d/G3e).
-        const result = await putCmd({
-          cfg,
-          slug: args.slug,
-          input,
-          allowShrink: allow_shrink === true,
-        });
-        const indexPending = result.indexPending;
-        print(
-          `${result.action} ${result.type} ${result.slug}` +
-            (indexPending
-              ? " (indexPending: semantic index catching up — an immediate search may miss it; re-query shortly)"
-              : ""),
-        );
-        onResult({
-          action: result.action,
-          type: result.type,
-          slug: result.slug,
-          indexPending,
-        });
+      runTool<Record<string, unknown>>({
+        mode: "write",
+        getCfg,
+        autoGrant,
+        exec: async (cfg, print, onResult) => {
+          // Strip the non-body `allow_shrink` control before body resolution so
+          // it never leaks into synthesized frontmatter; thread it to putCmd's
+          // shrink guard below.
+          const { allow_shrink, ...putArgs } = args;
+          const input = buildPutInput(resolvePutBody(putArgs));
+          // Read-after-write confirmation for the agent loop. `putCmd` already
+          // guarantees the row is record-list-visible (its own verify-read), AND
+          // — as of the CLI search-parity change (#295 CLI half) — confirms the
+          // record landed in the SEMANTIC (vector) index that
+          // `fbrain_search`/`fbrain_ask` read, surfacing `result.indexPending`.
+          // fold_db indexes the embedding asynchronously AFTER the mutation
+          // returns, so in one warm process a follow-up search can fire inside
+          // that sub-second window and miss the just-written record; `putCmd`'s
+          // bounded confirmation closes that window (or, on timeout, reports
+          // `indexPending: true`). It NEVER fails or blocks a persisted write.
+          // We just thread its result through to the agent — the deeper
+          // server-side synchronous-indexing change is a separate fold/native-
+          // index item (docs/phase-7-search-latency-spike.md, G3d/G3e).
+          const result = await putCmd({
+            cfg,
+            slug: args.slug,
+            input,
+            allowShrink: allow_shrink === true,
+          });
+          const indexPending = result.indexPending;
+          print(formatPutConfirmation({ ...result, indexPending }));
+          onResult({
+            action: result.action,
+            type: result.type,
+            slug: result.slug,
+            indexPending,
+          });
+        },
       }),
   );
 
@@ -1152,15 +1157,16 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       // the papercut fix: a bare `fbrain_status {}` health check no longer
       // errors on a missing slug.
       if (args.slug === undefined || args.slug.trim().length === 0) {
-        return runReadTool<NodeStatusPayload>(
+        return runTool<NodeStatusPayload>({
+          mode: "read",
           getCfg,
-          async (cfg, print, onResult) => {
+          exec: async (cfg, print, onResult) => {
             const payload = await probeNodeStatus(cfg);
             print(renderNodeStatus(payload));
             onResult(payload);
           },
-          (payload) => payload as unknown as Record<string, unknown>,
-        );
+          wrap: (payload) => payload as unknown as Record<string, unknown>,
+        });
       }
       // Slug WITHOUT a status → per-record status READ (show mode). This must
       // run on the read runner (no write capability) AND emit structured
@@ -1170,9 +1176,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       // return text-only output — the SDK then threw "has an output schema but
       // no structured content".)
       if (args.status === undefined) {
-        return runReadTool<StatusShowResult>(
+        return runTool<StatusShowResult>({
+          mode: "read",
           getCfg,
-          (cfg, print, onResult) =>
+          exec: (cfg, print, onResult) =>
             statusCmd({
               cfg,
               slug: args.slug!,
@@ -1180,20 +1187,24 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               print,
               onResult: (r) => onResult(r as StatusShowResult),
             }),
-          (payload) => payload as unknown as Record<string, unknown>,
-        );
+          wrap: (payload) => payload as unknown as Record<string, unknown>,
+        });
       }
       // Slug + status → the original per-record status patch (a write).
-      return runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
-        statusCmd({
-          cfg,
-          slug: args.slug!,
-          newStatus: args.status,
-          type: args.type,
-          print,
-          onResult: (r) => onResult(r),
-        }),
-      );
+      return runTool<Record<string, unknown>>({
+        mode: "write",
+        getCfg,
+        autoGrant,
+        exec: (cfg, print, onResult) =>
+          statusCmd({
+            cfg,
+            slug: args.slug!,
+            newStatus: args.status,
+            type: args.type,
+            print,
+            onResult: (r) => onResult(r),
+          }),
+      });
     },
   );
 
@@ -1272,17 +1283,21 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: appendResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
-        appendCmd({
-          cfg,
-          slug: args.slug,
-          chunk: resolveAppendChunk(args),
-          type: args.type,
-          raw: args.raw,
-          print,
-          onResult: (r) => onResult(r),
-        }),
-      ),
+      runTool<Record<string, unknown>>({
+        mode: "write",
+        getCfg,
+        autoGrant,
+        exec: (cfg, print, onResult) =>
+          appendCmd({
+            cfg,
+            slug: args.slug,
+            chunk: resolveAppendChunk(args),
+            type: args.type,
+            raw: args.raw,
+            print,
+            onResult: (r) => onResult(r),
+          }),
+      }),
   );
 
   server.registerTool(
@@ -1318,16 +1333,20 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: deleteResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, autoGrant, (cfg, print, onResult) =>
-        deleteRecord({
-          cfg,
-          slug: args.slug,
-          print,
-          type: args.type,
-          force: args.force,
-          onResult,
-        }),
-      ),
+      runTool<Record<string, unknown>>({
+        mode: "write",
+        getCfg,
+        autoGrant,
+        exec: (cfg, print, onResult) =>
+          deleteRecord({
+            cfg,
+            slug: args.slug,
+            print,
+            type: args.type,
+            force: args.force,
+            onResult,
+          }),
+      }),
   );
 
   server.registerTool(
@@ -1352,18 +1371,23 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       outputSchema: linkResultSchema.shape,
     },
     (args) =>
-      runWriteTool(getCfg, autoGrant, async (cfg, print, onResult) => {
-        await linkCmd({
-          cfg,
-          taskSlug: args.from_slug,
-          designSlug: args.to_slug,
-          fromSlug: args.from_slug,
-          toSlug: args.to_slug,
-          fromType: args.from_type,
-          toType: args.to_type,
-          print,
-          onResult,
-        });
+      runTool<Record<string, unknown>>({
+        mode: "write",
+        getCfg,
+        autoGrant,
+        exec: async (cfg, print, onResult) => {
+          await linkCmd({
+            cfg,
+            taskSlug: args.from_slug,
+            designSlug: args.to_slug,
+            fromSlug: args.from_slug,
+            toSlug: args.to_slug,
+            fromType: args.from_type,
+            toType: args.to_type,
+            print,
+            onResult,
+          });
+        },
       }),
   );
 
@@ -1373,7 +1397,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
 // Resolve `fbrain_ask`'s query, accepting `question` as an alias for `query`
 // (agents naturally guess `question`). `query` wins when both are present.
 // Neither present, or all-whitespace → the same actionable hint the old
-// required-`query` schema raised, surfaced through `runReadTool`'s error
+// required-`query` schema raised, surfaced through `runTool`'s error
 // envelope so a bare call still gets a helpful example.
 export function resolveAskQuery(args: { query?: string; question?: string }): string {
   const raw = args.query ?? args.question;
@@ -1470,31 +1494,21 @@ type PutArgs = {
 // (no `body_path`/`body_b64`) so buildPutInput stays a pure function.
 export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: string }): PutArgs {
   const { body_path, body_b64, ...rest } = args;
-  const sources = [rest.body, body_path, body_b64].filter((v) => v !== undefined);
-  if (sources.length > 1) {
-    throw new FbrainError({
-      code: "multiple_body_sources",
-      message: "fbrain_put: pass only one of `body`, `body_path`, or `body_b64`.",
-      hint: "Use `body_b64` for inline multiline/emoji bodies, or `body_path` for large bodies; do not combine them.",
-    });
-  }
-  if (sources.length === 0) return rest;
-  if (rest.body !== undefined) return rest;
-  if (body_b64 !== undefined)
-    return { ...rest, body: decodeB64Field(body_b64, "fbrain_put", "body_b64") };
-
-  let body: string;
-  try {
-    body = readFileSync(body_path!, "utf8");
-  } catch (err) {
-    throw new FbrainError({
-      code: "body_path_unreadable",
-      message:
-        `fbrain_put: could not read body_path '${body_path!}': ` +
-        (err instanceof Error ? err.message : String(err)),
-      hint: "Pass an absolute path to a readable UTF-8 file.",
-    });
-  }
+  const body = resolveTextSource({
+    inline: rest.body,
+    path: body_path,
+    b64: body_b64,
+    tool: "fbrain_put",
+    field: "body",
+    pathField: "body_path",
+    b64Field: "body_b64",
+    codePrefix: "body",
+    multiSourceMessage: "fbrain_put: pass only one of `body`, `body_path`, or `body_b64`.",
+    multiSourceHint:
+      "Use `body_b64` for inline multiline/emoji bodies, or `body_path` for large bodies; do not combine them.",
+    pathHint: "Pass an absolute path to a readable UTF-8 file.",
+  });
+  if (body === undefined) return rest;
   return { ...rest, body };
 }
 
@@ -1518,41 +1532,80 @@ export function resolveAppendChunk(args: AppendChunkArgs): string {
   // rest of the mutual-exclusion + source-count logic sees a single inline
   // source. `chunk` wins when both are present (mirrors `query`/`question`).
   const inlineChunk = args.chunk ?? args.text;
-  const sources = [inlineChunk, args.chunk_path, args.chunk_b64].filter(
-    (v) => v !== undefined,
-  );
+  return resolveTextSource({
+    inline: inlineChunk,
+    path: args.chunk_path,
+    b64: args.chunk_b64,
+    tool: "fbrain_append",
+    field: "chunk",
+    pathField: "chunk_path",
+    b64Field: "chunk_b64",
+    codePrefix: "chunk",
+    multiSourceMessage:
+      "fbrain_append: pass only one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64`.",
+    multiSourceHint:
+      "Use `chunk_b64` for inline multiline/emoji chunks, or `chunk_path` for large chunks; do not combine them.",
+    missingCode: "missing_chunk",
+    missingMessage:
+      "fbrain_append: one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64` is required.",
+    missingHint:
+      "Pass the text to append as `chunk`/`text` (inline), `chunk_b64` (base64), or `chunk_path` (a staged file).",
+    pathHint: "Pass an absolute path to a readable UTF-8 file.",
+  })!;
+}
+
+type TextSourceOptions = {
+  inline?: string;
+  path?: string;
+  b64?: string;
+  tool: "fbrain_put" | "fbrain_append";
+  field: "body" | "chunk";
+  pathField: "body_path" | "chunk_path";
+  b64Field: "body_b64" | "chunk_b64";
+  codePrefix: "body" | "chunk";
+  multiSourceMessage: string;
+  multiSourceHint: string;
+  missingCode?: string;
+  missingMessage?: string;
+  missingHint?: string;
+  pathHint: string;
+};
+
+// Resolve inline/path/base64 text inputs through one policy. Put and append
+// keep their public field names and error codes, but share source counting,
+// base64 decoding, and path read failure handling.
+export function resolveTextSource(opts: TextSourceOptions): string | undefined {
+  const sources = [opts.inline, opts.path, opts.b64].filter((v) => v !== undefined);
   if (sources.length > 1) {
     throw new FbrainError({
-      code: "multiple_chunk_sources",
-      message:
-        "fbrain_append: pass only one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64`.",
-      hint: "Use `chunk_b64` for inline multiline/emoji chunks, or `chunk_path` for large chunks; do not combine them.",
+      code: `multiple_${opts.codePrefix}_sources`,
+      message: opts.multiSourceMessage,
+      hint: opts.multiSourceHint,
     });
   }
   if (sources.length === 0) {
-    throw new FbrainError({
-      code: "missing_chunk",
-      message:
-        "fbrain_append: one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64` is required.",
-      hint: "Pass the text to append as `chunk`/`text` (inline), `chunk_b64` (base64), or `chunk_path` (a staged file).",
-    });
+    if (opts.missingCode !== undefined) {
+      throw new FbrainError({
+        code: opts.missingCode,
+        message: opts.missingMessage!,
+        hint: opts.missingHint,
+      });
+    }
+    return undefined;
   }
-  if (inlineChunk !== undefined) return inlineChunk;
-  if (args.chunk_b64 !== undefined)
-    return decodeB64Field(args.chunk_b64, "fbrain_append", "chunk_b64");
-  let chunk: string;
+  if (opts.inline !== undefined) return opts.inline;
+  if (opts.b64 !== undefined) return decodeB64Field(opts.b64, opts.tool, opts.b64Field);
   try {
-    chunk = readFileSync(args.chunk_path!, "utf8");
+    return readFileSync(opts.path!, "utf8");
   } catch (err) {
     throw new FbrainError({
-      code: "chunk_path_unreadable",
+      code: `${opts.pathField}_unreadable`,
       message:
-        `fbrain_append: could not read chunk_path '${args.chunk_path!}': ` +
+        `${opts.tool}: could not read ${opts.pathField} '${opts.path!}': ` +
         (err instanceof Error ? err.message : String(err)),
-      hint: "Pass an absolute path to a readable UTF-8 file.",
+      hint: opts.pathHint,
     });
   }
-  return chunk;
 }
 
 // Decode a `*_b64` input into UTF-8 text. Serves BOTH `fbrain_put` (`body_b64`)
@@ -1675,7 +1728,7 @@ function yamlScalar(value: string): string {
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   // Typed JSON mirroring the tool's declared `outputSchema`. Set only by
-  // the read tools (`runReadTool`); the human text block stays the
+  // read-mode tools; the human text block stays the
   // readable fallback for clients that don't consume structuredContent.
   // MCP requires this to be an object, so array results are wrapped under
   // a named key by their handler.
@@ -1695,127 +1748,128 @@ type ToolResult = {
 // config only surfaces when a tool is actually called, as a clean `isError`
 // "run `fbrain init` first" hint rather than a startup crash.
 
-// Read-tool runner: alongside the human text block, capture
-// the command's structured payload (handed back via its `onResult` sink —
-// the SAME value the CLI emits under `--json`, so MCP `structuredContent`
-// can't drift from the CLI JSON shape) and attach it as `structuredContent`,
-// wrapped by `wrap` into the object MCP requires (an array result is nested
-// under a named key). The command still runs in human mode so the text
-// fallback renders for clients that ignore structuredContent. If the
-// command throws (e.g. `fbrain_get` on an unknown slug) before `onResult`
-// fires, the error envelope is returned and no structuredContent is set.
-async function runReadTool<P>(
-  getCfg: () => Config,
-  fn: (
-    cfg: Config,
-    print: (line: string) => void,
-    onResult: (payload: P) => void,
-  ) => Promise<void> | void,
-  wrap: (payload: P) => Record<string, unknown>,
-): Promise<ToolResult> {
-  const lines: string[] = [];
-  let cfg: Config;
+type ToolMode = "read" | "write";
+type ToolExec<P> = (
+  cfg: Config,
+  print: (line: string) => void,
+  onResult: (payload: P) => void,
+) => Promise<void> | void;
+
+type RunToolOptions<P> = {
+  mode: ToolMode;
+  getCfg: () => Config;
+  autoGrant?: AutoGrantFn;
+  exec: ToolExec<P>;
+  wrap?: (payload: P) => Record<string, unknown>;
+  render?: (payload: P | undefined, lines: string[]) => ToolResult;
+  onError?: (err: unknown, cfg: Config) => Promise<unknown> | unknown;
+};
+
+function resolveCfgOrHint(getCfg: () => Config): Config | ToolResult {
   try {
-    cfg = getCfg();
+    return getCfg();
   } catch (err) {
     if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
+      return errorResult(err, CONFIG_MISSING_HINT);
     }
     throw err;
   }
-  let structured: Record<string, unknown> | undefined;
-  try {
-    await fn(
+}
+
+// One runner for MCP tools: resolve config lazily, run the command with print
+// and onResult sinks, attach structuredContent on success, and map failures to
+// the MCP `isError` envelope. Write mode additionally owns the auto-grant
+// self-warm retry.
+async function runTool<P>(opts: RunToolOptions<P>): Promise<ToolResult> {
+  const cfgOrResult = resolveCfgOrHint(opts.getCfg);
+  if ("content" in cfgOrResult) return cfgOrResult;
+  const cfg = cfgOrResult;
+
+  const attempt = async (): Promise<ToolResult> => {
+    const lines: string[] = [];
+    let emitted: P | undefined;
+    await opts.exec(
       cfg,
       (l) => lines.push(l),
       (payload) => {
-        structured = wrap(payload);
+        emitted = payload;
       },
     );
+    if (opts.render !== undefined) return opts.render(emitted, lines);
+    const result = textResult(lines.join("\n"));
+    if (emitted !== undefined) {
+      result.structuredContent =
+        opts.wrap !== undefined ? opts.wrap(emitted) : (emitted as Record<string, unknown>);
+    }
+    return result;
+  };
+
+  try {
+    return await attempt();
   } catch (err) {
-    return errorResult(err);
+    const mappedErr = opts.onError === undefined ? err : await opts.onError(err, cfg);
+    if (opts.mode !== "write") return errorResult(mappedErr);
+    if (isColdCapabilityError(mappedErr) && mcpAutoGrantConsentEnabled()) {
+      const granted = await opts.autoGrant!(cfg);
+      if (granted) {
+        try {
+          return await attempt();
+        } catch (retryErr) {
+          return errorResult(retryErr);
+        }
+      }
+    }
+    return errorResult(mappedErr);
   }
-  const result = textResult(lines.join("\n"));
-  if (structured !== undefined) result.structuredContent = structured;
-  return result;
 }
 
-// `fbrain_get` runner — a body-paginating variant of `runReadTool`. It can't
-// reuse `runReadTool` because the body must be WINDOWED before it reaches both
-// the text content AND the `structuredContent` body (both count toward the
-// agent harness token budget; the live overflow was a 186K-char record). So
-// instead of streaming `getRecord`'s printed text straight through, it captures
-// the structured `RecordJson` via `onResult`, slices the body to the requested
-// window, re-renders the human text from the windowed record, and attaches the
-// windowed structured object plus the pagination metadata. A body that fits in
-// one window (≤ cap, offset 0) yields the SAME shape as before — no window
-// fields, byte-identical text — so the common case is unchanged. `getRecord`
-// itself is untouched (the CLI `fbrain get` has no cap).
 async function runGetTool(
   getCfg: () => Config,
   args: { slug: string; type?: RecordJson["type"]; bodyOffset: number; bodyLimit: number },
 ): Promise<ToolResult> {
-  let cfg: Config;
-  try {
-    cfg = getCfg();
-  } catch (err) {
-    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
-    }
-    throw err;
-  }
-  let record: RecordJson | undefined;
-  try {
-    await getRecord({
-      cfg,
-      slug: args.slug,
-      type: args.type,
-      // Drop `getRecord`'s human text — we re-render it from the windowed
-      // record below so the body shown matches the windowed structuredContent.
-      print: () => {},
-      onResult: (payload) => {
-        record = payload;
-      },
-    });
-  } catch (err) {
-    // Unknown/ambiguous slug throws before onResult: same error envelope as
-    // any read tool, no structuredContent — unchanged from the old path.
-    return errorResult(await enrichGetNotFoundError(cfg, err, args));
-  }
-  // Defensive: a successful resolve always fires onResult, but if it somehow
-  // didn't, fall back to the error envelope rather than emitting a partial.
-  if (record === undefined) {
-    return errorResult(new Error("fbrain_get: no record resolved"));
-  }
+  return runTool<RecordJson>({
+    mode: "read",
+    getCfg,
+    exec: (cfg, _print, onResult) =>
+      getRecord({
+        cfg,
+        slug: args.slug,
+        type: args.type,
+        print: () => {},
+        onResult,
+      }),
+    onError: (err, cfg) => enrichGetNotFoundError(cfg, err, args),
+    render: (record) => {
+      if (record === undefined) return errorResult(new Error("fbrain_get: no record resolved"));
 
-  const fullBody = record.body;
-  const total = fullBody.length;
-  const win = bodyWindow(total, args.bodyOffset, args.bodyLimit);
-  const windowedBody = fullBody.slice(win.start, win.end);
+      const fullBody = record.body;
+      const total = fullBody.length;
+      const win = bodyWindow(total, args.bodyOffset, args.bodyLimit);
+      const windowedBody = fullBody.slice(win.start, win.end);
 
-  // Structured payload: start from the resolved record, swap in the windowed
-  // body, and attach the pagination metadata ONLY when a window was applied.
-  const structured: Record<string, unknown> = {
-    ...record,
-    body: windowedBody,
-  };
-  if (win.windowed) {
-    structured.bodyTotalChars = total;
-    structured.bodyOffset = win.start;
-    structured.bodyTruncated = win.truncated;
-    structured.bodyNextOffset = win.next;
-  }
+      const structured: Record<string, unknown> = {
+        ...record,
+        body: windowedBody,
+      };
+      if (win.windowed) {
+        structured.bodyTotalChars = total;
+        structured.bodyOffset = win.start;
+        structured.bodyTruncated = win.truncated;
+        structured.bodyNextOffset = win.next;
+      }
 
-  const text = formatRecordJsonWindow(record, {
-    body: windowedBody,
-    offset: win.start,
-    total,
-    truncated: win.truncated,
+      const text = formatRecordJsonWindow(record, {
+        body: windowedBody,
+        offset: win.start,
+        total,
+        truncated: win.truncated,
+      });
+
+      const result = textResult(text);
+      result.structuredContent = structured;
+      return result;
+    },
   });
-
-  const result = textResult(text);
-  result.structuredContent = structured;
-  return result;
 }
 
 async function enrichGetNotFoundError(
@@ -1908,94 +1962,23 @@ function levenshtein(a: string, b: string): number {
   return prev[b.length]!;
 }
 
-// Write-tool runner: alongside the human text block, capture
-// the typed payload the handler emits via `onResult` and attach it as
-// `structuredContent`. Symmetric with `runReadTool`, but the write payloads
-// are already objects (`{action,…}`), so there's no array-wrapping step. The
-// payload is derived from the SAME value the handler prints, so the typed
-// output can't drift from the text fallback. On a thrown error the error
-// envelope is returned and no structuredContent is set — the on-error envelope
-// is unchanged (`isError` + text, no structuredContent), exactly as before.
-async function runWriteTool(
-  getCfg: () => Config,
-  autoGrant: AutoGrantFn,
-  fn: (
-    cfg: Config,
-    print: (line: string) => void,
-    onResult: (payload: Record<string, unknown>) => void,
-  ) => Promise<void> | void,
-): Promise<ToolResult> {
-  let cfg: Config;
-  try {
-    cfg = getCfg();
-  } catch (err) {
-    if (err instanceof ConfigMissingError || err instanceof ConfigInvalidError) {
-      return { content: [{ type: "text", text: CONFIG_MISSING_HINT }], isError: true };
-    }
-    throw err;
-  }
-
-  // One write attempt. Returns the ToolResult on success, or RE-THROWS on
-  // error so the caller can decide whether to self-warm + retry. Fresh sinks
-  // per attempt so a failed-then-retried write never double-prints.
-  const attempt = async (): Promise<ToolResult> => {
-    const lines: string[] = [];
-    let structured: Record<string, unknown> | undefined;
-    await fn(
-      cfg,
-      (l) => lines.push(l),
-      (payload) => {
-        structured = payload;
-      },
-    );
-    const result = textResult(lines.join("\n"));
-    if (structured !== undefined) result.structuredContent = structured;
-    return result;
-  };
-
-  try {
-    return await attempt();
-  } catch (err) {
-    // Cold file-store capability self-warm. The server runs with
-    // FBRAIN_FORCE_FILE_KEYCHAIN=1, so `acquireCapability` fast-fails with
-    // `consent_required_non_interactive` when the file store has no cached
-    // capability (it can't request a grant non-interactively). When the
-    // operator opted in (FBRAIN_MCP_AUTO_GRANT_CONSENT), run the same grant
-    // `fbrain init --grant-consent` performs — into the SAME store this server
-    // reads (defaultCapabilityStore honors FBRAIN_FORCE_FILE_KEYCHAIN) — then
-    // retry the write ONCE. Without the opt-in, or if the grant doesn't land
-    // (no owner-local folddb / missing master key / denial), the original
-    // error surfaces unchanged: a clean fast-fail with the existing agentHint.
-    if (isColdCapabilityError(err) && mcpAutoGrantConsentEnabled()) {
-      const granted = await autoGrant(cfg);
-      if (granted) {
-        try {
-          return await attempt();
-        } catch (retryErr) {
-          return errorResult(retryErr);
-        }
-      }
-    }
-    return errorResult(err);
-  }
-}
-
 function textResult(text: string): ToolResult {
   return {
     content: [{ type: "text", text: text.length === 0 ? "(empty)" : text }],
   };
 }
 
-function errorResult(err: unknown): ToolResult {
+function errorResult(err: unknown, overrideMessage?: string): ToolResult {
   let message: string;
   if (err instanceof FbrainError) {
     // This channel is consumed by agents, not a human at a terminal: the CLI
     // `fbrain doctor` tip and brew/daemon remediation in `hint` aren't
     // actionable here. Drop the doctor tip from the message and prefer a
     // channel-neutral `agentHint` over the CLI-flavored `hint` when set.
-    const base = stripDoctorTip(err.message);
+    const base = overrideMessage ?? stripDoctorTip(err.message);
     const hint = err.agentHint ?? err.hint;
-    message = hint ? `${base} (hint: ${hint})` : base;
+    const body = hint && overrideMessage === undefined ? `${base} (hint: ${hint})` : base;
+    message = `${err.code}: ${body}`;
   } else if (err instanceof Error) {
     message = err.message;
   } else {
