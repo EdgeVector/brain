@@ -343,17 +343,14 @@ export async function findBySlug(
 // Unfiltered variant — returns tombstoned records too. Only `fbrain delete`
 // needs this (to verify its own soft-delete landed). All other read paths
 // MUST use `findBySlug` so they treat tombstones as gone.
+// POINT-READ by key: the node resolves `filter:{HashKey:<slug>}` as an indexed
+// key lookup (records are slug-keyed), so this never scans the schema. This
+// replaced a `listRecords` full scan — the full-scan latency + its intermittent
+// empty-page flake were the SOLE reason the read/write paths grew a fast-miss +
+// empty-page-retry loop; a keyed point-read has neither (measured 0/20 flakes,
+// put→read visible in ~32ms), so those workarounds are deleted below. The
+// `queryAll` fallback stays only for an old node build without keyed queries.
 export async function findBySlugRaw(
-  node: NodeClient,
-  type: RecordType,
-  schemaHash: string,
-  slug: string,
-): Promise<FbrainRecord | null> {
-  const list = await listRecords(node, type, schemaHash);
-  return list.find((r) => r.slug === slug) ?? null;
-}
-
-export async function findBySlugPointRead(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
@@ -365,9 +362,18 @@ export async function findBySlugPointRead(
     : (await node.queryAll({ schemaHash, fields })).results.find(
         (r) => r.key?.hash === slug || r.fields?.slug === slug,
       ) ?? null;
-  if (row === null) return null;
-  const record = rowToRecord(row, type);
-  return isTombstoned(record) ? null : record;
+  return row === null ? null : rowToRecord(row, type);
+}
+
+// Tombstone-filtered point-read. Identical to `findBySlug` now that the base
+// lookup is keyed; kept as a named export for the call sites that use it.
+export async function findBySlugPointRead(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  return findBySlug(node, type, schemaHash, slug);
 }
 
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
@@ -461,61 +467,29 @@ export async function withReadRetry<T>(
   return result;
 }
 
-// Shared per-type lookup loop with fast-miss on a populated-but-missing page.
-// Used by both the write existence check (`findExistingForWrite`) and the
-// read sweep (`resolveBySlug`). See `findExistingForWrite` below for the
-// motivating analysis — the same logic applies to `fbrain get` / `status` /
-// `delete` of a typo'd slug, which otherwise burns the full retry budget
-// before surfacing "No record".
-//
-// Behavior: a NON-EMPTY page that lacks the slug is authoritative (server-side
-// pagination is fixed; the only remaining read flake is empty-result on a
-// saturated daemon), so return null immediately without retrying. Only an
-// EMPTY page is ambiguous (flake vs. legitimately-empty schema) and spends
-// a CAPPED retry budget (`EMPTY_PAGE_RETRY_ATTEMPTS`, default 2) — not the
-// full 5×250 ms `READ_RETRY_ATTEMPTS` window. Capping is the fix for the
-// first-write-of-a-type cliff: on a fresh node every type's page starts
-// empty, and `<type> new` / `get` / `delete` would otherwise burn ~1.1 s
-// of pure backoff per type before falling through. The single retry still
-// absorbs a one-off saturated-daemon flake; deeper double-flakes on a row
-// that exists fall through to "not found" (the caller can re-run, and the
-// affected paths — write existence check, dangling-ref validators, untyped
-// slug sweep — recover gracefully). Verify-after-write paths that *expect*
-// the row to exist (list sweep, delete-verify) still use the full retry
-// budget via `withReadRetry` and are unaffected.
-//
-// The `raw` flag mirrors `findBySlug` vs `findBySlugRaw`. When false,
-// tombstoned matches count as ABSENT (same as `findBySlug`) but still
-// populate the page for the authoritative-miss test, so re-creating /
-// re-fetching a soft-deleted slug short-circuits at one query and surfaces
-// not-found fast. When true, a tombstoned match is returned (the caller —
-// only `resolveBySlug` in `delete`'s raw path — applies its own
-// tombstone-handling on top); this preserves the existing contract that
-// `findBySlugRaw` does not strip tombstones at the lookup layer.
+// Shared per-type slug lookup used by both the write existence check
+// (`findExistingForWrite`) and the read sweep (`resolveBySlug`). Now a keyed
+// point-read (see the body) — the former full-scan fast-miss / empty-page-retry
+// loop is gone. The `raw` flag mirrors `findBySlug` (tombstone-filtered) vs
+// `findBySlugRaw` (tombstoned rows returned; only `delete`'s raw path uses it).
 async function findBySlugWithFastMiss(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
   slug: string,
   raw: boolean,
-  options?: ReadRetryOptions,
+  _options?: ReadRetryOptions,
 ): Promise<FbrainRecord | null> {
-  const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
-  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
-  const sleep = options?.sleep ?? defaultSleep;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const wait = computeBackoffMs(attempt, ceilingMs);
-    if (wait > 0) await sleep(wait);
-    const list = await listRecords(node, type, schemaHash);
-    const match = list.find((r) => r.slug === slug);
-    if (match && (raw || !isTombstoned(match))) return match;
-    // Populated page without our (live) slug ⇒ authoritative miss: stop early.
-    if (list.length > 0) return null;
-    // Empty page ⇒ ambiguous; loop up to EMPTY_PAGE_RETRY_ATTEMPTS to ride
-    // out a single saturated-daemon flake without compounding the first-
-    // write-of-a-type latency on a fresh node.
-  }
-  return null;
+  // Keyed point-read — no full scan, so none of the fast-miss / empty-page-retry
+  // machinery this used to carry is needed: a keyed lookup is unambiguous (found
+  // or not) and doesn't hit the full-scan empty-result flake the retry rode out
+  // (measured 0/20 flakes; put→read visible ~32ms). `_options` (the retry
+  // budget) is now vestigial, kept only for signature compatibility. Read-your-
+  // writes safety still lives in `verifyRecordVisible` (put's read-back), which
+  // retries a point-read across the mutation-visibility window.
+  return raw
+    ? findBySlugRaw(node, type, schemaHash, slug)
+    : findBySlug(node, type, schemaHash, slug);
 }
 
 // Existence check for the WRITE path (`fbrain put`, `<type> new`). The write
