@@ -231,7 +231,7 @@ export function stringField(f: Record<string, unknown>, key: string): string {
   return String(v);
 }
 
-function arrayStringField(f: Record<string, unknown>, key: string): string[] {
+export function arrayStringField(f: Record<string, unknown>, key: string): string[] {
   const v = f[key];
   // Mirror put.ts's inline-list parser (`.filter(s => s.length > 0)`): the
   // write path treats empty strings as non-tags, so the read path must too —

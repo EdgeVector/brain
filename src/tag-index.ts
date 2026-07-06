@@ -6,9 +6,11 @@ import type { NodeClient, Verbose } from "./client.ts";
 import type { Config } from "./config.ts";
 import { sha256Hex } from "./hash.ts";
 import {
+  arrayStringField,
   isSchemaNotFoundReadError,
   isTombstoned,
   nowIso,
+  TOMBSTONE_TAG,
   type FbrainRecord,
 } from "./record.ts";
 import {
@@ -20,6 +22,7 @@ import {
 export const TAG_INDEX_SLUG_PREFIX = "__tagidx__";
 
 const TAG_INDEX_FIELDS = ["slug", "tag", "members", "created_at", "updated_at"];
+const TAG_INDEX_WRITE_MAX_ATTEMPTS = 4;
 
 export type TagIndexRecord = {
   slug: string;
@@ -102,13 +105,26 @@ export async function reconcileTagIndex(
   const newSet = new Set(userTags(newTags));
   const added = [...newSet].filter((tag) => !oldSet.has(tag));
   const removed = [...oldSet].filter((tag) => !newSet.has(tag));
-  try {
-    for (const tag of added) await addMember(node, cfg, tag, member);
-    for (const tag of removed) await removeMember(node, cfg, tag, member);
-  } catch (err) {
+  const failures: string[] = [];
+  for (const tag of added) {
+    try {
+      await addMember(node, cfg, tag, member);
+    } catch (err) {
+      failures.push(`add:${tag}:${errorMessage(err)}`);
+    }
+  }
+  for (const tag of removed) {
+    try {
+      await removeMember(node, cfg, tag, member);
+    } catch (err) {
+      failures.push(`remove:${tag}:${errorMessage(err)}`);
+    }
+  }
+  if (failures.length > 0) {
     verbose?.(
-      `tag-index reconcile failed for ${member} (added=${added.join(",")} removed=${removed.join(",")}): ` +
-        `${err instanceof Error ? err.message : String(err)}; run \`fbrain reindex --tags\` to repair`,
+      `tag-index reconcile failed for ${member}: ${failures.length} tag update(s) failed ` +
+        `(added=${added.join(",")} removed=${removed.join(",")} failed=${failures.join("; ")}); ` +
+        "run `fbrain reindex --tags` to repair",
     );
   }
 }
@@ -216,20 +232,19 @@ export async function rebuildTagIndex(
   let membersIndexed = 0;
   for (const [tag, members] of map) {
     const existing = await readTagIndex(node, cfg, tag);
-    await writeTagIndex(node, cfg, tag, [...members], existing);
+    if (!sameMembers(existing?.members ?? [], [...members])) {
+      await writeTagIndex(node, cfg, tag, [...members], existing);
+    }
     membersIndexed += members.size;
   }
   return { tagsIndexed: map.size, membersIndexed };
 }
 
 function rowToTagIndex(fields: Record<string, unknown>): TagIndexRecord {
-  const members = fields.members;
   return {
     slug: typeof fields.slug === "string" ? fields.slug : "",
     tag: typeof fields.tag === "string" ? fields.tag : "",
-    members: Array.isArray(members)
-      ? members.filter((m): m is string => typeof m === "string" && m.length > 0)
-      : [],
+    members: arrayStringField(fields, "members"),
     created_at: typeof fields.created_at === "string" ? fields.created_at : "",
     updated_at: typeof fields.updated_at === "string" ? fields.updated_at : "",
   };
@@ -241,10 +256,10 @@ async function addMember(
   tag: string,
   member: string,
 ): Promise<void> {
-  const existing = await readTagIndex(node, cfg, tag);
-  const members = existing ? existing.members : [];
-  if (members.includes(member)) return;
-  await writeTagIndex(node, cfg, tag, [...members, member], existing);
+  await mutateMember(node, cfg, tag, (members) => {
+    if (members.includes(member)) return members;
+    return [...members, member];
+  }, (members) => members.includes(member));
 }
 
 async function removeMember(
@@ -253,15 +268,35 @@ async function removeMember(
   tag: string,
   member: string,
 ): Promise<void> {
-  const existing = await readTagIndex(node, cfg, tag);
-  if (!existing || !existing.members.includes(member)) return;
-  await writeTagIndex(
-    node,
-    cfg,
-    tag,
-    existing.members.filter((m) => m !== member),
-    existing,
-  );
+  await mutateMember(node, cfg, tag, (members) => {
+    if (!members.includes(member)) return members;
+    return members.filter((m) => m !== member);
+  }, (members) => !members.includes(member));
+}
+
+async function mutateMember(
+  node: NodeClient,
+  cfg: Config,
+  tag: string,
+  apply: (members: string[]) => string[],
+  converged: (members: string[]) => boolean,
+): Promise<void> {
+  for (let attempt = 1; attempt <= TAG_INDEX_WRITE_MAX_ATTEMPTS; attempt++) {
+    const existing = await readTagIndex(node, cfg, tag);
+    const current = existing?.members ?? [];
+    if (converged(current)) return;
+    const next = apply(current);
+    try {
+      await writeTagIndex(node, cfg, tag, next, existing);
+    } catch (err) {
+      if (attempt === TAG_INDEX_WRITE_MAX_ATTEMPTS || !isRetryableTagIndexWriteError(err)) {
+        throw err;
+      }
+      continue;
+    }
+    return;
+  }
+  throw new Error(`tag-index write for "${tag}" did not converge after bounded retry`);
 }
 
 async function writeTagIndex(
@@ -290,5 +325,34 @@ async function writeTagIndex(
 }
 
 function userTags(tags: readonly string[]): string[] {
-  return tags.filter((tag) => tag.length > 0 && tag !== "__fbrain_deleted__");
+  return tags.filter((tag) => tag.length > 0 && tag !== TOMBSTONE_TAG);
+}
+
+function isRetryableTagIndexWriteError(err: unknown): boolean {
+  const code = typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code?: unknown }).code ?? "")
+    : "";
+  const msg = errorMessage(err).toLowerCase();
+  const text = `${code.toLowerCase()} ${msg}`;
+  return (
+    text.includes("409") ||
+    text.includes("412") ||
+    text.includes("already exist") ||
+    text.includes("collision") ||
+    text.includes("conflict") ||
+    text.includes("duplicate") ||
+    text.includes("stale") ||
+    text.includes("version")
+  );
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function sameMembers(a: readonly string[], b: readonly string[]): boolean {
+  const left = [...new Set(a)].sort();
+  const right = [...new Set(b)].sort();
+  if (left.length !== right.length) return false;
+  return left.every((member, idx) => member === right[idx]);
 }

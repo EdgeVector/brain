@@ -35,16 +35,24 @@ type RowFields = Record<string, unknown>;
 type MockState = {
   store: Map<string, Map<string, RowFields>>;
   counters: {
+    createRecordCalls: number;
     queryAllCalls: number;
     queryAllRowsScanned: number;
     queryByKeyCalls: number;
+    updateRecordCalls: number;
   };
 };
 
 function newState(): MockState {
   return {
     store: new Map(),
-    counters: { queryAllCalls: 0, queryAllRowsScanned: 0, queryByKeyCalls: 0 },
+    counters: {
+      createRecordCalls: 0,
+      queryAllCalls: 0,
+      queryAllRowsScanned: 0,
+      queryByKeyCalls: 0,
+      updateRecordCalls: 0,
+    },
   };
 }
 
@@ -96,9 +104,17 @@ function mockNode(state: MockState): NodeClient {
       return [];
     },
     async createRecord({ schemaHash, fields, keyHash }) {
+      state.counters.createRecordCalls++;
+      if (state.store.get(schemaHash)?.has(keyHash)) {
+        throw new FbrainError({
+          code: "node_http_409",
+          message: `Record already exists: ${keyHash}`,
+        });
+      }
       seed(state, schemaHash, keyHash, fields);
     },
     async updateRecord({ schemaHash, fields, keyHash }) {
+      state.counters.updateRecordCalls++;
       seed(state, schemaHash, keyHash, fields);
     },
     async deleteRecord() {},
@@ -158,6 +174,116 @@ describe("tag secondary index", () => {
     await unindexRecordTags(node, cfg, "concept", "c1", ["b", "c"]);
     expect((await readTagIndex(node, cfg, "b"))?.members).toEqual([]);
     expect((await readTagIndex(node, cfg, "c"))?.members).toEqual([]);
+  });
+
+  test("concurrent same-tag creates retry after collision and keep both members", async () => {
+    const state = newState();
+    const base = mockNode(state);
+    const tagSlug = tagIndexSlug("hot");
+    let createAttempts = 0;
+    let createConflicts = 0;
+    const pendingCreates: Array<() => void> = [];
+    const node: NodeClient = {
+      ...base,
+      async createRecord(args) {
+        if (args.keyHash === tagSlug) {
+          createAttempts++;
+          await new Promise<void>((resolve) => {
+            pendingCreates.push(resolve);
+            if (pendingCreates.length === 2) {
+              for (const release of pendingCreates) release();
+            }
+          });
+        }
+        try {
+          await base.createRecord(args);
+        } catch (err) {
+          createConflicts++;
+          throw err;
+        }
+      },
+    };
+
+    await Promise.all([
+      reconcileTagIndex(node, cfg, "concept", "c1", [], ["hot"]),
+      reconcileTagIndex(node, cfg, "concept", "c2", [], ["hot"]),
+    ]);
+
+    expect(createAttempts).toBe(2);
+    expect(createConflicts).toBe(1);
+    expect((await readTagIndex(node, cfg, "hot"))?.members).toEqual([
+      "concept:c1",
+      "concept:c2",
+    ]);
+
+    seed(state, conceptHash, "c1", recordFields("c1", ["hot"]));
+    seed(state, conceptHash, "c2", recordFields("c2", ["hot"]));
+    const writesBeforeRebuild =
+      state.counters.createRecordCalls + state.counters.updateRecordCalls;
+    const rebuilt = await rebuildTagIndex(node, cfg, {
+      listRecords: async (_type, hash) => {
+        const rows = state.store.get(hash);
+        if (!rows) return [];
+        return [...rows.values()] as unknown as FbrainRecord[];
+      },
+      schemaHashFor: (type) => schemaHashFor(type, cfg),
+    });
+
+    expect(rebuilt).toEqual({ tagsIndexed: 1, membersIndexed: 2 });
+    expect(state.counters.createRecordCalls + state.counters.updateRecordCalls).toBe(
+      writesBeforeRebuild,
+    );
+  });
+
+  test("reconcile continues sibling tags after one tag update fails", async () => {
+    const state = newState();
+    const base = mockNode(state);
+    const lines: string[] = [];
+    const node: NodeClient = {
+      ...base,
+      async createRecord(args) {
+        if ((args.fields as { tag?: string }).tag === "bad") {
+          throw new FbrainError({
+            code: "injected_tag_failure",
+            message: "boom",
+          });
+        }
+        await base.createRecord(args);
+      },
+    };
+
+    await reconcileTagIndex(
+      node,
+      cfg,
+      "concept",
+      "c1",
+      [],
+      ["bad", "good"],
+      (line) => lines.push(line),
+    );
+
+    expect(await readTagIndex(node, cfg, "bad")).toBeNull();
+    expect((await readTagIndex(node, cfg, "good"))?.members).toEqual(["concept:c1"]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("1 tag update(s) failed");
+    expect(lines[0]).toContain("add:bad:boom");
+  });
+
+  test("reads string-encoded tag-index members like other string-array fields", async () => {
+    const state = newState();
+    const node = mockNode(state);
+    seed(state, cfg.schemaHashes[TAG_INDEX_SCHEMA_KEY]!, tagIndexSlug("hot"), {
+      slug: tagIndexSlug("hot"),
+      tag: "hot",
+      members: "concept:c2, concept:c1, ,",
+      created_at: "2026-06-01T00:00:00.000Z",
+      updated_at: "2026-06-01T00:00:00.000Z",
+    });
+
+    expect((await readTagIndex(node, cfg, "hot"))?.members).toEqual([
+      "concept:c2",
+      "concept:c1",
+    ]);
   });
 
   test("filters stale index entries through live membership checks", async () => {
