@@ -2593,7 +2593,21 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
       fOpts.print = (line: string) => console.error(line);
       fOpts.onResult = (payload) => console.log(JSON.stringify(payload));
     }
-    await deleteByFilter(fOpts);
+    try {
+      await deleteByFilter(fOpts);
+    } catch (err) {
+      // deleteByFilter emits the structured partial-success payload before
+      // raising batch_delete_failed. In --json mode, do not rethrow into the
+      // top-level JSON error handler or stdout would contain two JSON docs.
+      if (
+        values.json &&
+        err instanceof FbrainError &&
+        err.code === "batch_delete_failed"
+      ) {
+        return 1;
+      }
+      throw err;
+    }
     return 0;
   }
 
