@@ -13,7 +13,13 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { getRecord } from "../../src/commands/get.ts";
+import {
+  getRecord,
+  recordToJson,
+  formatRecord,
+  formatRecordJsonWindow,
+} from "../../src/commands/get.ts";
+import type { FbrainRecord } from "../../src/record.ts";
 import { backlinkIndexTag } from "../../src/backlink-index.ts";
 import { EMPTY_PAGE_RETRY_ATTEMPTS } from "../../src/record.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
@@ -631,4 +637,92 @@ describe("getRecord — slug whitespace trim (parity with put/delete/link/status
     expect((err as FbrainError).code).toBe("not_found");
     expect((err as FbrainError).message).toBe("No task: missing");
   }, 30_000);
+});
+
+describe("decision extra fields on the read surface", () => {
+  // Regression: a `decision` record stores program/gate_slug/decided_by/
+  // decided_on (the whole point of the dedicated shape — queryable columns),
+  // but the read surface (recordToJson / formatRecord / formatRecordJsonWindow)
+  // dropped them, so `fbrain get --json` and the human/MCP output showed
+  // nothing for them even though the node had the values.
+  function decisionRecord(over: Partial<FbrainRecord> = {}): FbrainRecord {
+    return {
+      slug: "d1",
+      title: "A call Tom made",
+      body: "rationale",
+      status: "go",
+      tags: ["decisions"],
+      program: "fbrain",
+      gate_slug: "some-gate",
+      decided_by: "Tom",
+      decided_on: "2026-07-01",
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+      ...over,
+    };
+  }
+
+  test("recordToJson emits extra_fields for a decision", () => {
+    const json = recordToJson(decisionRecord(), "decision");
+    expect(json.extra_fields).toEqual({
+      program: "fbrain",
+      gate_slug: "some-gate",
+      decided_by: "Tom",
+      decided_on: "2026-07-01",
+    });
+  });
+
+  test("recordToJson fills unset extra fields with empty strings", () => {
+    const json = recordToJson(
+      decisionRecord({ program: undefined, gate_slug: "" }),
+      "decision",
+    );
+    expect(json.extra_fields).toEqual({
+      program: "",
+      gate_slug: "",
+      decided_by: "Tom",
+      decided_on: "2026-07-01",
+    });
+  });
+
+  test("recordToJson does not add extra_fields to a non-decision type", () => {
+    const json = recordToJson(
+      {
+        slug: "t1",
+        title: "T",
+        body: "",
+        status: "open",
+        tags: [],
+        created_at: "2026-07-01T00:00:00Z",
+        updated_at: "2026-07-01T00:00:00Z",
+      },
+      "task",
+    );
+    expect(json.extra_fields).toBeUndefined();
+  });
+
+  test("formatRecord renders extra fields as aligned labels", () => {
+    const text = formatRecord(decisionRecord(), "decision");
+    expect(text).toContain("program:    fbrain");
+    expect(text).toContain("gate_slug:  some-gate");
+    expect(text).toContain("decided_by: Tom");
+    expect(text).toContain("decided_on: 2026-07-01");
+  });
+
+  test("formatRecord shows (none) for an empty extra field", () => {
+    const text = formatRecord(decisionRecord({ gate_slug: "" }), "decision");
+    expect(text).toContain("gate_slug:  (none)");
+  });
+
+  test("formatRecordJsonWindow renders extra fields (MCP get parity)", () => {
+    const json = recordToJson(decisionRecord(), "decision");
+    const text = formatRecordJsonWindow(json, {
+      body: json.body,
+      offset: 0,
+      total: json.body.length,
+      truncated: false,
+    });
+    expect(text).toContain("program:    fbrain");
+    expect(text).toContain("decided_on: 2026-07-01");
+  });
 });

@@ -736,6 +736,58 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.updated_at).not.toBe("2026-01-01T00:00:00.000Z");
   });
 
+  test("create honors a frontmatter created_at (historical-date preservation)", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const created = await putCmd({
+      cfg,
+      slug: "hist-decision",
+      input:
+        "---\ntype: decision\ntitle: An old call\nstatus: go\n" +
+        "program: fbrain\ngate_slug: some-gate\ndecided_by: Tom\n" +
+        "decided_on: 2026-06-23\ncreated_at: 2026-06-23T12:00:00Z\n---\nrationale",
+    });
+    expect(created.action).toBe("created");
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    // The real historical created_at is preserved, not overwritten with now.
+    expect(fields.created_at).toBe("2026-06-23T12:00:00Z");
+    // The decision's dedicated columns round-trip through the write.
+    expect(fields.program).toBe("fbrain");
+    expect(fields.gate_slug).toBe("some-gate");
+    expect(fields.decided_by).toBe("Tom");
+    expect(fields.decided_on).toBe("2026-06-23");
+    // updated_at is still "now", not the historical date.
+    expect(fields.updated_at).not.toBe("2026-06-23T12:00:00Z");
+  });
+
+  test("create ignores a malformed frontmatter created_at (falls back to now)", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    await putCmd({
+      cfg,
+      slug: "bad-created-at",
+      input: "---\ntype: concept\ntitle: T\ncreated_at: not-a-date\n---\nbody",
+    });
+    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    expect(fields.created_at).not.toBe("not-a-date");
+    // A real ISO timestamp (now) instead of the garbage value.
+    expect(Number.isNaN(Date.parse(fields.created_at as string))).toBe(false);
+  });
+
   test("no frontmatter + --type design → title from H1", async () => {
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {

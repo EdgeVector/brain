@@ -137,13 +137,24 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   }
   const now = nowIso();
 
+  // On CREATE, honor a frontmatter `created_at:` so a record can preserve a
+  // real historical date (e.g. migrating the decisions-log ledger into
+  // per-decision records keeps each decision's original date). An UPDATE never
+  // rewrites `created_at` — the existing value is kept. A malformed value is
+  // ignored (falls back to now) rather than persisting garbage.
+  const fmCreatedAt =
+    typeof parsed.raw.created_at === "string" &&
+    !Number.isNaN(Date.parse(parsed.raw.created_at))
+      ? parsed.raw.created_at
+      : undefined;
+
   const base: FbrainRecord = existing ?? {
     slug,
     title,
     body,
     status: RECORDS[type].defaultStatus,
     tags: [],
-    created_at: now,
+    created_at: fmCreatedAt ?? now,
     updated_at: now,
   };
   const patch: RecordFieldPatch = {
