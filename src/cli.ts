@@ -636,8 +636,9 @@ re-puts and re-hashes all six together.
                 field. REQUIRED for String (no implicit empty default).
                 Optional for Array:String (defaults to []; pass a JSON
                 array literal to override).
-  --dry-run     register the new schema + write the manifest as
-                "dry_run"; no record writes, no config swap.
+  --dry-run     preview the schema name/field + write the manifest as
+                "dry_run"; no schema registration, node load, record
+                writes, or config swap.
   --status      tabular listing of every manifest under
                 ~/.fbrain/migrations/ (newest first).
   --resume ID   resume a previously-interrupted migration. The
