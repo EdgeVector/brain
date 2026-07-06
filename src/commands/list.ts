@@ -6,7 +6,7 @@ import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
   hasAnyLiveRecord,
-  findBySlugPointRead,
+  findBySlug,
   isSchemaNotFoundReadError,
   isTombstoned,
   listRecords,
@@ -316,7 +316,7 @@ export async function resolveListEntries(
   if (opts.tag) {
     const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
       findBySlug: (type, hash, slug) =>
-        findBySlugPointRead(node, type, hash, slug),
+        findBySlug(node, type, hash, slug),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
     });
     if (indexed !== null) {

@@ -423,17 +423,6 @@ export async function findBySlugRaw(
   return row === null ? null : rowToRecord(row, type);
 }
 
-// Tombstone-filtered point-read. Identical to `findBySlug` now that the base
-// lookup is keyed; kept as a named export for the call sites that use it.
-export async function findBySlugPointRead(
-  node: NodeClient,
-  type: RecordType,
-  schemaHash: string,
-  slug: string,
-): Promise<FbrainRecord | null> {
-  return findBySlug(node, type, schemaHash, slug);
-}
-
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
 // case). The same /api/query intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:
@@ -447,16 +436,14 @@ export async function findBySlugPointRead(
 export const READ_RETRY_ATTEMPTS = 5;
 export const READ_RETRY_BACKOFF_MS = 250;
 
-// Empty-page retry cap for the fast-miss helper (`findBySlugWithFastMiss`).
-// Separate from READ_RETRY_ATTEMPTS because the fast-miss loop ONLY retries
-// on an empty page — every other branch (populated-with-hit, populated-
-// without-hit) returns on the first attempt. On a fresh / sparsely-populated
-// node, every record type's page is empty until its first record lands, so
-// burning the full 5×250 ms budget on every "first-write-of-a-type" turned
-// the new-developer Quick-Start into a ~1.2 s-per-write cliff (measured
-// 2026-06-05). On `fbrain get`/`delete`, the cost compounds across the
-// 8-type resolution sweep + the dangling-ref validators — ~56 queries to
-// fetch one record when 5 of the 8 type pages are empty.
+// Empty-page retry cap for the list-scan helpers (`hydrateSchemaBySlug`,
+// `findChildTasksByDesign`). Separate from READ_RETRY_ATTEMPTS because those
+// loops ONLY retry on an empty page — a populated page is authoritative and
+// returns on the first attempt. On a fresh / sparsely-populated node, every
+// record type's page is empty until its first record lands, so burning the
+// full 5×250 ms budget on every "first-write-of-a-type" turned the
+// new-developer Quick-Start into a ~1.2 s-per-write cliff (measured
+// 2026-06-05).
 //
 // Cap = 2 keeps a single retry for the documented saturated-daemon empty-
 // result flake (the row exists but `/api/query` returns []) while making the
@@ -469,10 +456,10 @@ export type ReadRetryOptions = {
   maxAttempts?: number;
   backoffMs?: number;
   sleep?: (ms: number) => Promise<void>;
-  // Cap on retries when the queried page comes back empty (the only branch
-  // that retries inside `findBySlugWithFastMiss`). Defaults to
-  // `EMPTY_PAGE_RETRY_ATTEMPTS`. Tests override this together with `sleep`
-  // to pin the count without paying real backoff.
+  // Cap on retries when a list-scan page comes back empty (the only branch
+  // the list-scan helpers retry). Defaults to `EMPTY_PAGE_RETRY_ATTEMPTS`.
+  // Tests override this together with `sleep` to pin the count without paying
+  // real backoff.
   emptyPageAttempts?: number;
   // Number of CONSECUTIVE positive probes the vector-index confirmation
   // (`verifyVectorIndexed`) requires before reporting the slug stably visible.
@@ -525,66 +512,6 @@ export async function withReadRetry<T>(
   return result;
 }
 
-// Shared per-type slug lookup used by both the write existence check
-// (`findExistingForWrite`) and the read sweep (`resolveBySlug`). Now a keyed
-// point-read (see the body) — the former full-scan fast-miss / empty-page-retry
-// loop is gone. The `raw` flag mirrors `findBySlug` (tombstone-filtered) vs
-// `findBySlugRaw` (tombstoned rows returned; only `delete`'s raw path uses it).
-async function findBySlugWithFastMiss(
-  node: NodeClient,
-  type: RecordType,
-  schemaHash: string,
-  slug: string,
-  raw: boolean,
-  _options?: ReadRetryOptions,
-): Promise<FbrainRecord | null> {
-  // Keyed point-read — no full scan, so none of the fast-miss / empty-page-retry
-  // machinery this used to carry is needed: a keyed lookup is unambiguous (found
-  // or not) and doesn't hit the full-scan empty-result flake the retry rode out
-  // (measured 0/20 flakes; put→read visible ~32ms). `_options` (the retry
-  // budget) is now vestigial, kept only for signature compatibility. Read-your-
-  // writes safety still lives in `verifyRecordVisible` (put's read-back), which
-  // retries a point-read across the mutation-visibility window.
-  return raw
-    ? findBySlugRaw(node, type, schemaHash, slug)
-    : findBySlug(node, type, schemaHash, slug);
-}
-
-// Existence check for the WRITE path (`fbrain put`, `<type> new`). The write
-// must decide create-vs-update by asking "does this slug already exist?" — but
-// unlike a read (`get`/`status`/`delete`), where the user asserts the row
-// exists and a `withReadRetry(findBySlug, r => r !== null)` rides out the
-// daemon's read flake before surfacing not-found, the write has no such
-// assertion: a brand-new slug is *expected* to be absent. Wrapping the write's
-// existence check in the same retry made the `r !== null` predicate unreachable
-// for every new slug, so each create burned the FULL retry budget (~1.1s of
-// pure backoff sleep) before falling through to `createRecord`. Measured
-// 2026-06-05: create ~1200 ms vs. update ~95 ms, purely from this.
-//
-// Follow-up (2026-06-05): the populated-page fast-miss above closed the
-// "create with EXISTING siblings in the same type" case (~95 ms), but the
-// EMPTY-page branch still burned the full READ_RETRY_ATTEMPTS budget on a
-// fresh node — making the first write of every type ~7× slower than every
-// subsequent write (~1230 ms vs ~170 ms). The empty branch now caps at
-// EMPTY_PAGE_RETRY_ATTEMPTS (default 2) so a fresh-node first-write costs
-// ~one extra query (~250 ms worst case) instead of ~1.1 s of backoff, while
-// still absorbing a single saturated-daemon flake.
-//
-// `resolveBySlug` (read sweep) shares the same fix via the same helper —
-// `fbrain get <typo>` had the symmetric problem (~1.1s before "No record")
-// for the same reason. See `findBySlugWithFastMiss` above for the shared
-// loop's contract. Tombstoned rows count as absent, mirroring `findBySlug`,
-// so re-creating a soft-deleted slug still lands a fresh record.
-export async function findExistingForWrite(
-  node: NodeClient,
-  type: RecordType,
-  schemaHash: string,
-  slug: string,
-  options?: ReadRetryOptions,
-): Promise<FbrainRecord | null> {
-  return findBySlugWithFastMiss(node, type, schemaHash, slug, false, options);
-}
-
 // Verify-after-write helper. Used by `fbrain put` after `createRecord` /
 // `updateRecord` resolves: read the row back with the FULL withReadRetry
 // budget (5×250 ms) before reporting "created"/"updated" to the caller. The
@@ -592,11 +519,10 @@ export async function findExistingForWrite(
 // the write returns before the row is queryable — so a tight put→get loop
 // (especially the MCP-agent path, where get fires in the same warm process
 // with no bun cold-start to mask the visibility window) saw the just-
-// written row as "No record". The capped `findBySlugFast` short-circuits
-// on a populated page that lacks the slug (#174's fix for the typo'd-read
-// latency cliff), which is correct for an unknown read but wrong for a
-// verify after our own write — we *expect* the row to exist, so spending
-// the full budget is the right tradeoff. Self-tuning: on a warm node the
+// written row as "No record". A bare point-read (`findBySlug`) is correct for
+// an unknown read but wrong for a verify after our own write — we *expect* the
+// row to exist, so spending the full retry budget here is the right tradeoff.
+// Self-tuning: on a warm node the
 // first read succeeds with no backoff; only when propagation actually lags
 // do we burn any of the budget. Mirrors `deleteRecord`'s
 // `withReadRetry(findBySlugRaw, ...)` — the existing in-repo precedent for
@@ -747,26 +673,9 @@ export async function confirmVectorIndexed(
   }
 }
 
-// Read-context alias for the same fast-miss helper. The dangling-reference /
-// liveness validators in `new`, `link`, `get`, and `search` previously wrapped
-// `findBySlug` in `withReadRetry(fn, r => r !== null)` to ride out the daemon's
-// empty-result flake — but on a slug that genuinely does not exist (a typo'd
-// `--design`, a stale search hit, a deleted parent), the `r !== null` predicate
-// is unreachable and every miss burns the full 5×250 ms retry budget. The
-// fast-miss loop short-circuits on a populated-but-missing page (authoritative
-// miss) while still spending the budget on an empty page (saturated-daemon
-// flake), so it is strictly better than the old pattern: same flake recovery,
-// no wasted budget on a real miss, identical behavior on a hit. The `*ForWrite`
-// name reads wrong in a validator, so this alias names the read-context
-// callers — semantics are identical, so it's a literal reference to the same
-// function rather than a re-wrap of `findBySlugWithFastMiss` (which used to
-// duplicate the wrapper verbatim and risked the two sides drifting under a
-// future tweak to the args).
-export const findBySlugFast = findExistingForWrite;
-
 // Batch hydrate for the SEARCH resolver. `fbrain search` resolves N deduped
-// hits to their full records; pre-fix it called `findBySlugFast` once per hit,
-// and `findBySlugFast` fetches the WHOLE schema page (`listRecords` →
+// hits to their full records; pre-fix it called `findBySlug` once per hit,
+// and that helper fetches the WHOLE schema page (`listRecords` →
 // `queryAll`) and client-filters for one slug. So a 50-hit search that all
 // lands on one schema (the common case — Design, Task, and the unified MEMO
 // share at most 3 distinct hashes) issued ~50 identical full-schema fetches,
@@ -778,10 +687,10 @@ export const findBySlugFast = findExistingForWrite;
 // resolves every hit on that schema by map lookup. Live (non-tombstoned) rows
 // only — a tombstoned row is omitted from the map, so a hit whose record was
 // soft-deleted since indexing resolves to `undefined` and the caller skips it
-// as stale, exactly as `findBySlugFast` returning null did per hit.
+// as stale, exactly as a per-hit `findBySlug` returning null did.
 //
 // Empty-page flake tolerance is preserved, just hoisted from per-hit to
-// per-schema: the same EMPTY-page retry the fast-miss helper applies (an empty
+// per-schema: the same EMPTY-page retry the list-scan helpers apply (an empty
 // `/api/query` slice on a saturated daemon is ambiguous — flake vs. genuinely
 // empty schema — so retry up to `EMPTY_PAGE_RETRY_ATTEMPTS`; a NON-empty page
 // is authoritative and stops immediately). A non-empty page missing a given
@@ -819,15 +728,13 @@ export async function hydrateSchemaBySlug(
 }
 
 // Reverse-direction lookup: live (non-tombstoned) tasks whose `design_slug`
-// matches the given parent. Mirrors `findBySlugWithFastMiss`'s cost discipline
-// — a populated task page is authoritative (return the filtered slice with no
-// retry, even if zero rows match), only an EMPTY task page retries (capped at
-// `EMPTY_PAGE_RETRY_ATTEMPTS`) to ride out the saturated-daemon empty-result
-// flake. Without that cap, every `fbrain get <design>` on a fresh node — where
-// the task schema page is legitimately empty until its first task lands —
-// would burn the full 5×250 ms read-retry budget just to confirm "no children",
-// re-introducing the first-write-of-a-type latency cliff that
-// `findBySlugWithFastMiss` fixed for the forward direction.
+// matches the given parent. A populated task page is authoritative (return the
+// filtered slice with no retry, even if zero rows match); only an EMPTY task
+// page retries (capped at `EMPTY_PAGE_RETRY_ATTEMPTS`) to ride out the
+// saturated-daemon empty-result flake. Without that cap, every
+// `fbrain get <design>` on a fresh node — where the task schema page is
+// legitimately empty until its first task lands — would burn the full 5×250 ms
+// read-retry budget just to confirm "no children".
 export async function findChildTasksByDesign(
   node: NodeClient,
   taskSchemaHash: string,
@@ -946,7 +853,7 @@ function defaultSleep(ms: number): Promise<void> {
 // leaving them to discover the trap later with no breadcrumb back to its cause.
 //
 // `selfType` is excluded (its own duplicate guard already ran). The remaining
-// types are probed in parallel via `findBySlugFast` (the fast-miss helper), so
+// types are probed in parallel via `findBySlug` (a keyed point-read), so
 // this is ~one round-trip's worth of latency, not 7 serial ones. It is STRICTLY
 // best-effort: any probe failure/timeout is swallowed and the affected type is
 // simply treated as "no collision" — a flaky probe must NEVER block or fail the
@@ -962,7 +869,7 @@ export async function findCrossTypeSlugCollisions(
     others.map(async (t): Promise<RecordType | null> => {
       try {
         const hash = schemaHashFor(t, cfg);
-        const existing = await findBySlugFast(node, t, hash, slug);
+        const existing = await findBySlug(node, t, hash, slug);
         return existing ? t : null;
       } catch {
         // Best-effort: a probe error/timeout on one type just skips that type.
@@ -1077,20 +984,12 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   const perType = await Promise.all(
     types.map(async (t): Promise<ResolvedRecord | null> => {
       const hash = schemaHashFor(t, opts.cfg);
-      // Same fast-miss + empty-page-retry loop as the write existence check.
-      // Pre-fix this was `withReadRetry(findBySlug, r => r !== null)`, which
-      // made the `r !== null` predicate unreachable for a typo'd slug —
-      // every miss burned the full 5×250 ms retry budget. The shared helper
-      // short-circuits on a populated-but-missing page (authoritative) and
-      // only retries on an empty page (saturated-daemon flake).
-      const row = await findBySlugWithFastMiss(
-        opts.node,
-        t,
-        hash,
-        opts.slug,
-        opts.raw === true,
-        opts.retryOptions,
-      );
+      // Keyed point-read (found-or-not, no full scan) — `raw` mirrors
+      // `findBySlugRaw` (tombstoned rows returned; only `delete`'s raw path
+      // uses it) vs the tombstone-filtered `findBySlug`.
+      const row = opts.raw === true
+        ? await findBySlugRaw(opts.node, t, hash, opts.slug)
+        : await findBySlug(opts.node, t, hash, opts.slug);
       if (row === null) return null;
       if (opts.raw && isTombstoned(row)) return null;
       if (opts.filter && !opts.filter(row, t)) return null;

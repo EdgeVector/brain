@@ -24,7 +24,7 @@ import {
   type ConsentTransport,
   type StoredCapability,
 } from "./capability.ts";
-import { FbrainError, type CapabilityProvider, type NodeClient, type Verbose } from "./client.ts";
+import { FbrainError, type CapabilityProvider, type Verbose } from "./client.ts";
 
 export type CapabilitySessionOptions = {
   nodeUrl: string;
@@ -171,14 +171,6 @@ export class CapabilitySession {
       }
     }
   }
-}
-
-/** Build a ConsentTransport from a NodeClient's consent methods. */
-export function consentTransportFromNode(node: NodeClient): ConsentTransport {
-  return {
-    requestConsent: (appId, scope) => node.requestConsent(appId, scope),
-    consentStatus: (requestId) => node.consentStatus(requestId),
-  };
 }
 
 function capabilityReasonOf(err: unknown): ReturnType<typeof reasonOrNull> {

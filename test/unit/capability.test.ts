@@ -15,7 +15,6 @@ import { describe, expect, test } from "bun:test";
 
 import {
   acquireCapability,
-  capabilityHeaders,
   decodeCapabilityBlob,
   reactionFor,
   tokenIntegrityValid,
@@ -141,18 +140,6 @@ describe("capability token decode + JCS integrity", () => {
   test("wrong envelope purpose fails the integrity check", async () => {
     const token = decodeCapabilityBlob(await mintTokenBlob({ wrongPurpose: true }))!;
     expect(await tokenIntegrityValid(token)).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Per-write headers
-// ---------------------------------------------------------------------------
-
-describe("per-write capability headers", () => {
-  test("attaches X-App-Capability verbatim + X-Capability-Ts as unix epoch seconds", () => {
-    const h = capabilityHeaders("the-blob", 1_700_000_000_500);
-    expect(h["X-App-Capability"]).toBe("the-blob");
-    expect(h["X-Capability-Ts"]).toBe("1700000000"); // floor(ms/1000)
   });
 });
 

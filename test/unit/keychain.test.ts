@@ -1,38 +1,24 @@
 // Unit tests for the SDK-backed capability store adapter (keychain.ts).
 //
-// The storage implementation is @folddb/app-sdk's keychain-with-file-fallback
-// store (timeout-bounded `security` calls; the hang-degradation behavior is
-// pinned in the SDK). What fbrain owns — and what these tests pin — is the
-// adapter around it:
+// The storage implementation is @folddb/app-sdk's FileCapabilityStore (a 0600
+// file store under `~/.fbrain/capabilities/`). What fbrain owns — and what
+// these tests pin — is the adapter around it:
 //
 //   - StoredCapability round-trip through the SDK store (entries keyed
 //     `capabilityStoreKey(appId, nodeUrl)`, value = the SDK's {v, capability,
 //     boundNode} envelope under `~/.fbrain/capabilities/`),
-//   - the SDK wrong-node guard (an entry bound to node A is absent for node B),
-//   - the ONE-SHOT LEGACY MIGRATION: pre-SDK entries (keychain account
-//     sha256("<appId> <nodeUrl>") under com.edgevector.fbrain.capability, or
-//     that account key in ~/.fbrain/capabilities.json) keep working — an
-//     existing install must NOT lose its grant or silently re-prompt,
-//   - clear() removing the legacy copies too, so a deliberately-discarded
-//     token cannot resurrect through the migration read.
+//   - the SDK wrong-node guard (an entry bound to node A is absent for node B).
 //
-// Every test runs with FBRAIN_FORCE_FILE_KEYCHAIN=1 (the SDK store uses its
-// file backend under a temp FBRAIN_CAPABILITY_DIR) and, where the legacy
-// KEYCHAIN path is exercised, injects a fake `security` runner via
-// `__setSecuritySpawn` — no test ever touches a real OS keychain.
+// Every test runs with a temp FBRAIN_CAPABILITY_DIR — no test ever touches a
+// real OS keychain.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  __setSecuritySpawn,
-  defaultCapabilityStore,
-  fbrainDir,
-  keychainAvailable,
-} from "../../src/keychain.ts";
+import { defaultCapabilityStore, fbrainDir } from "../../src/keychain.ts";
 import type { CapabilityToken, StoredCapability } from "../../src/capability.ts";
 import { canonicalize, type JsonValue } from "../../src/jcs.ts";
 import { sha256Hex } from "../../src/hash.ts";
@@ -78,11 +64,6 @@ async function makeCap(): Promise<StoredCapability> {
   };
 }
 
-// The pre-SDK account key: sha256("<appId> <nodeUrl>").
-function legacyAccountFor(appId: string, nodeUrl: string): string {
-  return createHash("sha256").update(`${appId} ${nodeUrl}`).digest("hex");
-}
-
 // The SDK store key: <appId>@<sha256(nodeUrl)[:16]>.
 function sdkKeyFor(appId: string, nodeUrl: string): string {
   return `${appId}@${createHash("sha256").update(nodeUrl).digest("hex").slice(0, 16)}`;
@@ -92,26 +73,17 @@ function sdkEntryPath(dir: string, nodeUrl: string): string {
   return join(dir, "capabilities", `${sdkKeyFor("fbrain", nodeUrl)}.cap`);
 }
 
-function legacyFilePath(dir: string): string {
-  return join(dir, "capabilities.json");
-}
-
 let tempDir: string;
 const savedCapDir = process.env.FBRAIN_CAPABILITY_DIR;
-const savedForceFile = process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "fbrain-kc-"));
   process.env.FBRAIN_CAPABILITY_DIR = tempDir;
-  process.env.FBRAIN_FORCE_FILE_KEYCHAIN = "1";
 });
 
 afterEach(() => {
-  __setSecuritySpawn(null);
   if (savedCapDir === undefined) delete process.env.FBRAIN_CAPABILITY_DIR;
   else process.env.FBRAIN_CAPABILITY_DIR = savedCapDir;
-  if (savedForceFile === undefined) delete process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
-  else process.env.FBRAIN_FORCE_FILE_KEYCHAIN = savedForceFile;
   rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -170,195 +142,6 @@ describe("SDK-backed store: round-trip + wrong-node guard", () => {
     expect(loaded!.blob).toBe(cap.blob);
     expect(loaded!.nodePubkey).toBe("");
     expect(loaded!.capabilityId).toBe("");
-  });
-});
-
-describe("legacy migration: pre-SDK entries keep working", () => {
-  test("a legacy ~/.fbrain/capabilities.json entry is returned and migrated to the SDK store", async () => {
-    const cap = await makeCap();
-    const account = legacyAccountFor(cap.appId, cap.nodeUrl);
-    writeFileSync(
-      legacyFilePath(tempDir),
-      JSON.stringify({ [account]: cap }, null, 2),
-      "utf8",
-    );
-
-    const store = defaultCapabilityStore();
-    const loaded = await store.load(NODE_URL);
-    expect(loaded).not.toBeNull();
-    expect(loaded!.blob).toBe(cap.blob);
-    expect(loaded!.capabilityId).toBe(cap.capabilityId);
-
-    // One-shot migration: the entry now ALSO lives under the SDK key, so the
-    // next load succeeds without the legacy file.
-    expect(existsSync(sdkEntryPath(tempDir, NODE_URL))).toBe(true);
-    rmSync(legacyFilePath(tempDir), { force: true });
-    const reloaded = await store.load(NODE_URL);
-    expect(reloaded?.blob).toBe(cap.blob);
-  });
-
-  test("a legacy KEYCHAIN entry (same service, sha256 account) is returned and migrated", async () => {
-    const cap = await makeCap();
-    const account = legacyAccountFor(cap.appId, cap.nodeUrl);
-    const calls: string[][] = [];
-    __setSecuritySpawn((args, _capture) => {
-      calls.push(args);
-      if (
-        args[0] === "find-generic-password" &&
-        args[args.indexOf("-a") + 1] === account
-      ) {
-        return { status: 0, stdout: JSON.stringify(cap), timedOut: false };
-      }
-      return { status: 44, stdout: "", timedOut: false };
-    });
-
-    const store = defaultCapabilityStore();
-    const loaded = await store.load(NODE_URL);
-    expect(loaded).not.toBeNull();
-    expect(loaded!.blob).toBe(cap.blob);
-    // The legacy read targeted fbrain's keychain service.
-    const find = calls.find((c) => c[0] === "find-generic-password");
-    expect(find).toContain("com.edgevector.fbrain.capability");
-    // Migrated: present under the SDK key (file backend), so the next load
-    // does not need the keychain at all.
-    expect(existsSync(sdkEntryPath(tempDir, NODE_URL))).toBe(true);
-  });
-
-  test("a hung legacy keychain read degrades to 'no legacy entry' (never wedges)", async () => {
-    __setSecuritySpawn(() => ({ status: null, stdout: "", timedOut: true }));
-    const store = defaultCapabilityStore();
-    // If the legacy path hung the process, this await would never resolve.
-    expect(await store.load(NODE_URL)).toBeNull();
-  });
-
-  test("an SDK-store entry wins over a stale legacy entry", async () => {
-    const fresh = await makeCap();
-    const stale: StoredCapability = {
-      ...fresh,
-      capabilityId: "cap-stale",
-      blob: await mintBlob("cap-stale"),
-    };
-    const account = legacyAccountFor("fbrain", NODE_URL);
-    writeFileSync(legacyFilePath(tempDir), JSON.stringify({ [account]: stale }), "utf8");
-
-    const store = defaultCapabilityStore();
-    await store.save(fresh);
-    const loaded = await store.load(NODE_URL);
-    expect(loaded?.capabilityId).toBe("cap-123"); // the fresh SDK entry, not cap-stale
-  });
-
-  test("clear() also removes the legacy copies, so a discarded token cannot resurrect", async () => {
-    const cap = await makeCap();
-    const account = legacyAccountFor(cap.appId, cap.nodeUrl);
-    writeFileSync(legacyFilePath(tempDir), JSON.stringify({ [account]: cap }), "utf8");
-    const deleted: string[][] = [];
-    __setSecuritySpawn((args) => {
-      if (args[0] === "delete-generic-password") {
-        deleted.push(args);
-        return { status: 0, stdout: "", timedOut: false };
-      }
-      return { status: 44, stdout: "", timedOut: false };
-    });
-
-    const store = defaultCapabilityStore();
-    await store.clear(NODE_URL);
-
-    // Legacy file entry gone → a later load() cannot migrate it back.
-    expect(await store.load(NODE_URL)).toBeNull();
-    const fileStore = JSON.parse(readFileSync(legacyFilePath(tempDir), "utf8")) as Record<
-      string,
-      unknown
-    >;
-    expect(account in fileStore).toBe(false);
-    // And the legacy keychain delete was issued against fbrain's service.
-    expect(deleted.length).toBe(1);
-    expect(deleted[0]).toContain("com.edgevector.fbrain.capability");
-  });
-});
-
-// The auto-detect store-selection gate: a keychain-less session (SSH / CI /
-// headless / under an AI agent) must route to the file store QUIETLY (no SDK
-// keychain probe → no `[folddb-app-sdk] macOS keychain unavailable…` warning),
-// while a keychain-available session keeps the keychain store (no security
-// downgrade). The bounded `security default-keychain` probe is the SDK's own
-// signal; here it is exercised through the injected `securitySpawn` seam.
-describe("keychainAvailable(): bounded auto-detect of a keychain-less session", () => {
-  test("FBRAIN_FORCE_FILE_KEYCHAIN=1 is unavailable without any probe (explicit override)", () => {
-    // beforeEach sets FBRAIN_FORCE_FILE_KEYCHAIN=1. The probe must not run.
-    let probed = false;
-    __setSecuritySpawn(() => {
-      probed = true;
-      return { status: 0, stdout: "", timedOut: false };
-    });
-    expect(keychainAvailable()).toBe(false);
-    expect(probed).toBe(false);
-  });
-
-  test("a usable default keychain (status 0) is AVAILABLE", () => {
-    delete process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
-    const calls: string[][] = [];
-    __setSecuritySpawn((args) => {
-      calls.push(args);
-      return { status: 0, stdout: '"/Users/x/Library/Keychains/login.keychain-db"', timedOut: false };
-    });
-    expect(keychainAvailable()).toBe(true);
-    // It used the SDK's GUI-less signal, not an interactive find/add call.
-    expect(calls).toEqual([["default-keychain"]]);
-  });
-
-  test("no default keychain (non-zero status) is UNAVAILABLE — the keychain-less session", () => {
-    delete process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
-    __setSecuritySpawn(() => ({ status: 1, stdout: "", timedOut: false }));
-    expect(keychainAvailable()).toBe(false);
-  });
-
-  test("a hung probe is treated as UNAVAILABLE (never wedges)", () => {
-    delete process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
-    __setSecuritySpawn(() => ({ status: null, stdout: "", timedOut: true }));
-    expect(keychainAvailable()).toBe(false);
-  });
-});
-
-describe("defaultCapabilityStore(): store selection follows availability", () => {
-  // A keychain-AVAILABLE session must still pick the keychain-first store; the
-  // proof is behavioral — that store STILL persists to the file backend on
-  // macOS when the real `security` calls fail, but more importantly it must NOT
-  // be reduced to file-only everywhere. We assert selection via the SDK store's
-  // observable type by round-tripping through the file backend (both stores
-  // share it) AND by confirming the available branch was taken without forcing
-  // file mode. Because the SDK keychain store also degrades to the same file
-  // dir, the durable, OS-independent assertion is that the AVAILABLE branch
-  // does NOT short-circuit to file-only and the UNAVAILABLE branch does.
-  test("keychain-available session selects a working store that round-trips", async () => {
-    delete process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
-    // Probe says available; the keychain ops themselves are not exercised here
-    // (the SDK store degrades to the file backend under our temp dir on op
-    // failure), so save/load must still round-trip.
-    __setSecuritySpawn((args) =>
-      args[0] === "default-keychain"
-        ? { status: 0, stdout: '"login.keychain-db"', timedOut: false }
-        : { status: 1, stdout: "", timedOut: false },
-    );
-    expect(keychainAvailable()).toBe(true);
-    const store = defaultCapabilityStore();
-    const cap = await makeCap();
-    await store.save(cap);
-    const loaded = await store.load(NODE_URL);
-    expect(loaded?.blob).toBe(cap.blob);
-  });
-
-  test("keychain-unavailable session routes to the file store (quiet fallback)", async () => {
-    delete process.env.FBRAIN_FORCE_FILE_KEYCHAIN;
-    __setSecuritySpawn(() => ({ status: 1, stdout: "", timedOut: false }));
-    expect(keychainAvailable()).toBe(false);
-    const store = defaultCapabilityStore();
-    const cap = await makeCap();
-    await store.save(cap);
-    // The file backend wrote the SDK envelope under our temp dir — same
-    // destination FBRAIN_FORCE_FILE_KEYCHAIN=1 reaches, but auto-detected.
-    expect(existsSync(sdkEntryPath(tempDir, NODE_URL))).toBe(true);
-    const loaded = await store.load(NODE_URL);
-    expect(loaded?.blob).toBe(cap.blob);
   });
 });
 

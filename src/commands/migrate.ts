@@ -45,7 +45,6 @@ import { newWriteClientFromCfg } from "../write-context.ts";
 import {
   CONFIG_VERSION,
   defaultConfigPath,
-  readConfig,
   type Config,
 } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -647,9 +646,3 @@ async function registerNewSchema(
 // Convenience re-export so the CLI can read a manifest by id without
 // also importing src/migration.ts.
 export { readManifest, listManifests } from "../migration.ts";
-
-// Read the config from the CLI's `configPath` perspective (or
-// homedir). Exposed so the CLI can pass `cfg` to migrateCmd.
-export function loadCfg(configPath?: string): Config {
-  return readConfig(configPath);
-}

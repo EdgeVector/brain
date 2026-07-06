@@ -35,7 +35,6 @@ import {
   isCapabilityDenialReason,
   tokenIntegrityValid,
   verifyCapabilityBlob,
-  CAPABILITY_DENIAL_REASONS,
   type CapabilityDenialReason,
   type CapabilityToken,
   type SignatureEnvelope,
@@ -103,31 +102,11 @@ export interface CapabilityStore {
 }
 
 // ---------------------------------------------------------------------------
-// Per-write headers
-// ---------------------------------------------------------------------------
-
-/**
- * Build the per-write capability headers. `X-Capability-Ts` is recomputed
- * per call as unix epoch seconds so it stays inside the node's ±60s replay
- * window even if a token sits cached for hours.
- */
-export function capabilityHeaders(
-  blob: string,
-  nowMs: number = Date.now(),
-): Record<string, string> {
-  return {
-    [APP_CAPABILITY_HEADER]: blob,
-    [CAPABILITY_TS_HEADER]: String(Math.floor(nowMs / 1000)),
-  };
-}
-
-// ---------------------------------------------------------------------------
 // 403-reason classification (design "403 handling (contract)" table)
 // ---------------------------------------------------------------------------
 
 // The eight-reason list + guard are the SDK's — fbrain keeps its historical
 // names as aliases so call sites and tests read unchanged.
-export const CAPABILITY_403_REASONS = CAPABILITY_DENIAL_REASONS;
 export type Capability403Reason = CapabilityDenialReason;
 
 export function isCapability403Reason(s: string): s is Capability403Reason {

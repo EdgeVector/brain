@@ -8,7 +8,7 @@ import { resolvePrintSink } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
   findBacklinks,
-  findBySlugFast,
+  findBySlug,
   findChildTasksByDesign,
   GET_RECORD_TYPE_PRECEDENCE,
   NOT_FOUND_TYPED,
@@ -72,7 +72,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   const designSlug = found.record.design_slug;
   if (RECORDS[found.type].hasDesignSlug && designSlug && designSlug.length > 0) {
     const designHash = schemaHashFor("design", opts.cfg);
-    const parent = await findBySlugFast(node, "design", designHash, designSlug);
+    const parent = await findBySlug(node, "design", designHash, designSlug);
     designMissing = parent === null;
   }
 

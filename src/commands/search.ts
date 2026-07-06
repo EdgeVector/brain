@@ -199,8 +199,8 @@ async function resolveNativeHits(
   // Resolve every deduped hit to its full record. Two passes so the whole
   // hydration cost is ONE /api/query per DISTINCT schema, not one per hit.
   //
-  // Pre-fix this loop called `findBySlugFast` per hit, and that helper fetches
-  // the WHOLE schema page (`queryAll`) and client-filters for one slug — so a
+  // Pre-fix this loop point-read each hit, and that fetches the WHOLE schema
+  // page (`queryAll`) and client-filters for one slug — so a
   // 50-hit search that all landed on one schema issued ~50 identical
   // full-schema fetches (each ~0.5–2 s) and threw away every row but one. That
   // N+1 read amplification was the entire ~25–29 s `search` latency on the live
@@ -249,7 +249,7 @@ async function resolveNativeHits(
   // schema is declared empty, while a NON-empty page is authoritative — a slug
   // present in the search hits but absent from a non-empty hydrated page is a
   // genuine stale hit (record deleted since indexing). Same observable behavior
-  // as the old per-hit `findBySlugFast`, one fetch per schema instead of one
+  // as the old per-hit point-read, one fetch per schema instead of one
   // per hit on it. Key the cache by schema HASH (not type) so the unified-MEMO
   // types — concept/preference/reference/agent/project/spike all on one hash —
   // share a single hydration.

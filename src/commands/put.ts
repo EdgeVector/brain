@@ -25,8 +25,8 @@ import {
   crossTypeSlugNote,
   ensureNotShrinking,
   ensureStatus,
+  findBySlug,
   findCrossTypeSlugCollisions,
-  findExistingForWrite,
   nowIso,
   type ReadRetryOptions,
   schemaHashFor,
@@ -118,16 +118,11 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
 
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const hash = schemaHashFor(type, opts.cfg);
-  // Decide create-vs-update. A naive single `findBySlug` could miss an
-  // existing slug when the daemon's `/api/query` flakes its schema to an
-  // empty result, falling through to `createRecord` (which re-stamps
-  // `created_at` and prints "created" for what was actually an update).
-  // `findExistingForWrite` rides out that empty-result flake but — unlike a
-  // blanket `withReadRetry(findBySlug, r => r !== null)` — short-circuits on
-  // a populated page that simply lacks the slug, so a genuinely-new slug
-  // doesn't burn the whole retry budget (~1.1s) on every create. See the
-  // helper's comment in record.ts.
-  const existing = await findExistingForWrite(node, type, hash, slug);
+  // Decide create-vs-update via a keyed point-read (`findBySlug`): the node
+  // resolves it as an indexed key lookup, so it is authoritative (found-or-not)
+  // without scanning the schema — a genuinely-new slug returns absent in one
+  // query, and an existing slug is never missed by a flaked empty page.
+  const existing = await findBySlug(node, type, hash, slug);
   // Body-shrink guard — data-loss protection for the get(windowed)→edit→re-put
   // loop and status-only touch-up re-puts. Runs BEFORE the write (like
   // `validateSlug`/`ensureStatus`) so a refused shrink never lands a partial

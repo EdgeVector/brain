@@ -40,11 +40,6 @@
 // and the node resolves short names to the fbrain/* namespace at boot.
 export const OWNER_APP_ID = "fbrain";
 
-/** Prefix a short schema name with the owning app id → canonical `fbrain/<Name>`. */
-export function namespacedSchemaName(shortName: string): string {
-  return `${OWNER_APP_ID}/${shortName}`;
-}
-
 export type FieldType = "String" | { Array: "String" };
 
 export type SchemaDefinition = {
@@ -86,7 +81,6 @@ export const DESIGN_STATUSES = [
   "implemented",
   "archived",
 ] as const;
-export type DesignStatus = (typeof DESIGN_STATUSES)[number];
 
 export const TASK_STATUSES = [
   "open",
@@ -95,28 +89,20 @@ export const TASK_STATUSES = [
   "done",
   "cancelled",
 ] as const;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export const CONCEPT_STATUSES = ["active", "archived"] as const;
-export type ConceptStatus = (typeof CONCEPT_STATUSES)[number];
 
 export const PREFERENCE_STATUSES = ["active", "superseded"] as const;
-export type PreferenceStatus = (typeof PREFERENCE_STATUSES)[number];
 
 export const REFERENCE_STATUSES = ["active", "broken", "archived"] as const;
-export type ReferenceStatus = (typeof REFERENCE_STATUSES)[number];
 
 export const AGENT_STATUSES = ["active", "archived"] as const;
-export type AgentStatus = (typeof AGENT_STATUSES)[number];
 
 export const PROJECT_STATUSES = ["planning", "in_progress", "done", "archived"] as const;
-export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
 export const SPIKE_STATUSES = ["active", "concluded"] as const;
-export type SpikeStatus = (typeof SPIKE_STATUSES)[number];
 
 export const SOP_STATUSES = ["active", "superseded", "archived"] as const;
-export type SopStatus = (typeof SOP_STATUSES)[number];
 
 // A `decision` is one call a human made. Status is the OUTCOME, not a
 // workflow state: `go` (approved/proceed), `hold` (deferred/parked),
@@ -133,7 +119,6 @@ export const DECISION_STATUSES = [
   "moot",
   "superseded",
 ] as const;
-export type DecisionStatus = (typeof DECISION_STATUSES)[number];
 
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 

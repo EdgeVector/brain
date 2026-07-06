@@ -6,9 +6,15 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { taskNew } from "../../src/commands/task.ts";
+import { recordNew, type RecordNewOptions } from "../../src/commands/new.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
+
+// `fbrain task new` is a thin `recordNew({ type: "task" })` call (cli.ts
+// invokes recordNew directly). Task is the one type carrying an optional
+// `--design` parent-link. These tests exercise that path.
+const taskNew = (opts: Omit<RecordNewOptions, "type">) =>
+  recordNew({ ...opts, type: "task" });
 
 const cfg = buildTestCfg({ userHash: "uh" });
 const DESIGN_HASH = TEST_HASHES.design;

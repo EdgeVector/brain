@@ -5,8 +5,7 @@ import {
   EMPTY_PAGE_RETRY_ATTEMPTS,
   ensureStatus,
   fieldsFor,
-  findBySlugFast,
-  findExistingForWrite,
+  findBySlug,
   hydrateSchemaBySlug,
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
@@ -418,12 +417,16 @@ describe("withReadRetry", () => {
   });
 });
 
-// findExistingForWrite is the create-vs-update existence check used by `put`
-// and `<type> new`. Unlike the read-path retry, it short-circuits on a
-// populated-but-missing page so a genuinely-new slug doesn't burn the whole
-// retry budget — while still riding out the daemon's empty-result flake for
-// rows that actually exist.
-describe("findExistingForWrite", () => {
+// findBySlug is the keyed point-read behind the write existence check (`put`,
+// `<type> new`) and the read-context dangling-reference / liveness validators
+// (`task new --design`, `fbrain link`, `fbrain get` of a task with a deleted
+// parent, stale-hit drop inside `fbrain search`). It is authoritative
+// (found-or-not) in ONE query without scanning, so a genuinely-new / dangling
+// slug returns absent immediately — no retry budget burned — while an existing
+// row is still found. These tests pin that contract via a mock node whose
+// `queryAll` fallback is counted (no `queryByKey`, so the keyed path degrades
+// to the scan-and-filter it replaced).
+describe("findBySlug (keyed point-read: existence + dangling-ref checks)", () => {
   // A node whose queryAll returns each entry of `pages` in turn (last entry
   // repeats once exhausted), counting how many times it was called.
   function seqNode(pages: Array<Array<{ slug: string; tags?: string[] }>>) {
@@ -456,154 +459,49 @@ describe("findExistingForWrite", () => {
     } as unknown as NodeClient;
     return { node, calls: () => calls };
   }
-  const noSleep = { sleep: async () => {} };
 
   test("populated page without the slug → null after ONE query (no retry burn)", async () => {
     const { node, calls } = seqNode([[{ slug: "other-a" }, { slug: "other-b" }]]);
-    const r = await findExistingForWrite(node, "concept", "h", "brand-new", noSleep);
+    const r = await findBySlug(node, "concept", "h", "brand-new");
     expect(r).toBeNull();
-    // The whole point: a genuinely-new slug short-circuits instead of looping
-    // READ_RETRY_ATTEMPTS times.
+    // The whole point: a genuinely-new slug resolves in one query.
     expect(calls()).toBe(1);
   });
 
   test("slug present and live → returns the record on first query", async () => {
     const { node, calls } = seqNode([[{ slug: "mine" }, { slug: "other" }]]);
-    const r = await findExistingForWrite(node, "concept", "h", "mine", noSleep);
+    const r = await findBySlug(node, "concept", "h", "mine");
     expect(r?.slug).toBe("mine");
     expect(calls()).toBe(1);
   });
 
-  test("slug present but tombstoned → treated as absent, short-circuits", async () => {
+  test("slug present but tombstoned → treated as absent", async () => {
     const { node, calls } = seqNode([[{ slug: "gone", tags: [TOMBSTONE_TAG] }]]);
-    const r = await findExistingForWrite(node, "concept", "h", "gone", noSleep);
+    const r = await findBySlug(node, "concept", "h", "gone");
     expect(r).toBeNull();
-    // Populated page (one tombstoned row) is still authoritative — no retry.
     expect(calls()).toBe(1);
   });
 
-  test("empty schema → null after ONE query, ZERO backoff (no empty-page retry)", async () => {
-    // The existence check is now a keyed point-read, which is unambiguous:
-    // empty means absent. The old empty-page retry existed ONLY to ride out a
-    // full-SCAN saturated-daemon flake, which a keyed lookup does not hit
-    // (measured 0/180). So a fresh-node first-write (empty schema) costs exactly
-    // ONE query and sleeps zero backoffs — the first-write-of-type cliff is gone
-    // outright, not just capped.
-    const sleeps: number[] = [];
+  test("empty schema → null after ONE query (keyed point-read, no retry)", async () => {
+    // The existence check is a keyed point-read, which is unambiguous: empty
+    // means absent. So a fresh-node first-write (empty schema) costs exactly
+    // ONE query — the first-write-of-type cliff is gone outright.
     const { node, calls } = seqNode([[]]);
-    const r = await findExistingForWrite(node, "concept", "h", "first-ever", {
-      sleep: async (ms) => void sleeps.push(ms),
-    });
+    const r = await findBySlug(node, "concept", "h", "first-ever");
     expect(r).toBeNull();
     expect(calls()).toBe(1);
-    expect(sleeps.length).toBe(0);
   });
-});
 
-// findBySlugFast is the read-context alias for the same fast-miss helper
-// findExistingForWrite uses. It is the dangling-reference / liveness validator
-// behind `task new --design <slug>` (new.ts), `fbrain link` (link.ts ×2),
-// `fbrain get` of a task with a deleted parent (get.ts), and stale-hit drop
-// inside `fbrain search` (search.ts). The validators previously wrapped
-// findBySlug in withReadRetry(fn, r => r !== null), which made the predicate
-// unreachable for a slug that genuinely does not exist — every miss burned the
-// full 5×250 ms retry budget. This block pins the contract: a populated page
-// without the slug ⇒ one queryAll, zero sleeps. Sibling tests of
-// findExistingForWrite above cover the empty-page ride-out and tombstone
-// behaviour; findBySlugFast delegates to the same loop, so we only pin the
-// fast-miss + zero-sleep guarantee here (plus a smoke test of the hit path).
-describe("findBySlugFast (read-context fast-miss for dangling-ref validators)", () => {
-  function countingNode(pages: Array<Array<{ slug: string; tags?: string[] }>>): {
-    node: NodeClient;
-    calls: () => number;
-  } {
-    let calls = 0;
-    const node = {
-      baseUrl: "mock",
-      userHash: "uh",
-      async queryAll(): Promise<QueryResponse> {
-        const page = pages[Math.min(calls, pages.length - 1)] ?? [];
-        calls++;
-        const results = page.map((r) => ({
-          fields: {
-            slug: r.slug,
-            title: "T",
-            body: "B",
-            status: "draft",
-            tags: r.tags ?? [],
-            created_at: "2026-06-05T00:00:00Z",
-            updated_at: "2026-06-05T00:00:00Z",
-          },
-          key: { hash: r.slug, range: null },
-        }));
-        return {
-          ok: true,
-          results,
-          total_count: results.length,
-          returned_count: results.length,
-        };
-      },
-    } as unknown as NodeClient;
-    return { node, calls: () => calls };
-  }
-
-  test("dangling slug on a populated schema → ONE queryAll, ZERO sleeps", async () => {
-    // The regression: pre-fix `withReadRetry(fn, r => r !== null)` slept the
-    // full 5×250 ms budget on a genuinely-missing slug because the predicate
-    // was unreachable. Every `task new --design <typo>`, every `fbrain link
-    // <typo>`, every `fbrain get` of a task whose parent design was deleted,
-    // and every stale `fbrain search` hit paid ~1.1 s of wasted backoff. The
-    // contract is now: populated page without the slug ⇒ one queryAll, no
-    // sleeps. Sleep is asserted on the sleep-callback side rather than wall
-    // clock so a slow CI doesn't flake the test.
-    const sleeps: number[] = [];
-    const { node, calls } = countingNode([
+  test("dangling slug on a populated schema → ONE queryAll (validator path)", async () => {
+    // The dangling-reference validators (`task new --design <typo>`,
+    // `fbrain link <typo>`, `fbrain get` of a task whose parent was deleted,
+    // stale `fbrain search` hit) resolve a missing slug in one query.
+    const { node, calls } = seqNode([
       [{ slug: "other-a" }, { slug: "other-b" }, { slug: "other-c" }],
     ]);
-    const r = await findBySlugFast(node, "design", "designhash", "no-such-design", {
-      sleep: async (ms) => {
-        sleeps.push(ms);
-      },
-    });
-    expect(r).toBeNull();
-    // The two regression assertions — both must hold or the fix has regressed.
-    expect(calls()).toBe(1);
-    expect(sleeps).toEqual([]);
-    // Belt-and-braces: even with the production backoff, the helper must not
-    // burn the budget on this shape. computeBackoffMs(1) is 0 and we should
-    // have stopped before attempt 2, so this is a guard against any future
-    // change that drops the first-attempt skip.
-    expect(sleeps.reduce((a, b) => a + b, 0)).toBe(0);
-  });
-
-  test("hit on the first populated page → returns the record, ONE queryAll", async () => {
-    // Smoke test for the happy path so a future refactor that breaks the hit
-    // branch (e.g. flips the find predicate) is caught here, not only via the
-    // command-level tests.
-    const { node, calls } = countingNode([
-      [{ slug: "other" }, { slug: "real-design" }],
-    ]);
-    const r = await findBySlugFast(node, "design", "designhash", "real-design", {
-      sleep: async () => {},
-    });
-    expect(r?.slug).toBe("real-design");
-    expect(calls()).toBe(1);
-  });
-
-  test("empty schema → null after ONE query, ZERO sleeps (keyed point-read, no retry)", async () => {
-    // The validator lookup is now a keyed point-read: empty is unambiguous
-    // (absent), so there is no empty-page retry. A fresh-node `fbrain get`'s
-    // dangling-ref validators and `task new --design`/`link` no longer pay the
-    // old ~5-queries-×-8-types empty-page cost — each type resolves in one keyed
-    // read (the full-scan flake this rode out doesn't exist for keyed lookups).
-    const sleeps: number[] = [];
-    const { node, calls } = countingNode([[]]);
-    const r = await findBySlugFast(node, "design", "designhash", "anything", {
-      sleep: async (ms) => void sleeps.push(ms),
-    });
+    const r = await findBySlug(node, "design", "designhash", "no-such-design");
     expect(r).toBeNull();
     expect(calls()).toBe(1);
-    expect(sleeps).toEqual([]);
   });
 });
 
@@ -1125,12 +1023,11 @@ describe("resolveBySlug", () => {
     expect(r.record.slug).toBe("solo");
   });
 
-  // Fast-miss tests mirror the findExistingForWrite ones above: a typo'd slug
-  // on a populated schema must surface "No record" in one query, not after
-  // burning the full 5×250 ms retry budget. The per-type retry budget is
-  // still spent on an empty page (saturated-daemon flake) so a real row whose
-  // schema flakes to 0 is still found.
-  describe("fast-miss on populated pages", () => {
+  // Point-read miss tests mirror the findBySlug ones above: a typo'd slug on a
+  // populated schema surfaces "No record" in one query. The per-type retry
+  // budget is still spent on an empty page (saturated-daemon flake) so a real
+  // row whose schema flakes to 0 is still found.
+  describe("point-read miss on populated pages", () => {
     function countingNode(
       perHashPages: Record<string, Array<Array<{ slug: string; tags?: string[] }>>>,
     ): { node: NodeClient; calls: () => Record<string, number> } {
@@ -1285,7 +1182,7 @@ describe("resolveBySlug", () => {
     });
 
     test("raw mode: populated page with a tombstoned matching slug → one query, not_found", async () => {
-      // Symmetric to findExistingForWrite's tombstone test, but routed through
+      // Symmetric to the findBySlug tombstone test, but routed through
       // the raw path that delete.ts takes. resolveBySlug must still drop the
       // tombstone post-hoc and short-circuit (the page is populated → no
       // retry burn).

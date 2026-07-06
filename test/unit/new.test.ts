@@ -216,9 +216,9 @@ describe("recordNew warns on cross-type slug collision", () => {
 
   test("a probe failure never blocks the create (best-effort)", async () => {
     captureStderr();
-    // Every /api/query 500s. The same-type guard rides out empty/error via
-    // findExistingForWrite (returns null on a non-throwing miss); the
-    // cross-type probe swallows the error. The create must still succeed.
+    // Every /api/query 500s. The same-type guard resolves via findBySlug
+    // (returns null on a non-throwing miss); the cross-type probe swallows the
+    // error. The create must still succeed.
     let mutationSeen = false;
     installMock((url) => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
