@@ -214,7 +214,7 @@ export async function attestOwnerSession(
   // This handshake is the FIRST node I/O of every CLI invocation — it runs
   // BEFORE the read/write transports arm their own deadlines — so it carries
   // its own. Each fetch (and its small body read) is bounded by
-  // `defaultTimeoutMs()` via an AbortController, mirroring callNodeRaw
+  // `defaultTimeoutMs()` via the same abort deadline as callNodeRaw
   // (L1137): one controller spans the whole request lifecycle so a stall in
   // either the headers or the body read trips the same deadline. The
   // genuinely-soft outcomes (refused, missing fields, connection error) still
@@ -228,30 +228,33 @@ export async function attestOwnerSession(
   // when the request or body read stalls past the deadline.
   const fetchJsonWithDeadline = async (
     path: string,
-    url: string,
-    init: RequestInit & { unix?: string },
+    routeSocket: NodeSocketSelection,
+    headers: Record<string, string> = {},
+    body?: string,
   ): Promise<Record<string, unknown> | null> => {
-    const controller = new AbortController();
-    let done = false;
-    const timer = setTimeout(() => {
-      if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
-    }, timeoutMs);
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      if (!res.ok) {
+      const res = await boundedNodeFetch({
+        baseUrl: "http://localhost",
+        path,
+        method: "POST",
+        headers,
+        body,
+        service: "node",
+        socketPath,
+        timeoutMs,
+        routeSocket,
+      });
+      if (res.status < 200 || res.status >= 300) {
         verbose(`owner-session ${path} refused (HTTP ${res.status})`);
         return null;
       }
-      return (await res.json()) as Record<string, unknown>;
+      return JSON.parse(res.text) as Record<string, unknown>;
     } catch (err) {
-      if (isTimeoutError(err)) {
+      if (err instanceof BoundedFetchFailure && err.timeout) {
         verbose(`owner-session ${path} timed out after ${timeoutMs}ms`);
-        throw timeoutError(path, "POST", "node", timeoutMs, err);
+        throw timeoutError(path, "POST", "node", timeoutMs, err.cause);
       }
       throw err;
-    } finally {
-      done = true;
-      clearTimeout(timer);
     }
   };
 
@@ -264,8 +267,7 @@ export async function attestOwnerSession(
     // mint, never leaves the host)
     const body = await fetchJsonWithDeadline(
       "/control/browser-pairing-code",
-      "http://localhost/control/browser-pairing-code",
-      { method: "POST", unix: socketPath },
+      { socketPath, kind: "data" },
     );
     if (body === null) return null;
     const code = body.pairing_code;
@@ -295,13 +297,9 @@ export async function attestOwnerSession(
     // pairing-code exchange, never leaves the host)
     const body = await fetchJsonWithDeadline(
       "/api/session/browser-pair",
-      "http://localhost/api/session/browser-pair",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: pairingCode }),
-        unix: fullSocketPath,
-      },
+      { socketPath: fullSocketPath, kind: "full" },
+      { "Content-Type": "application/json" },
+      JSON.stringify({ code: pairingCode }),
     );
     if (body === null) return null;
     const token = body.session_token;
@@ -1695,7 +1693,7 @@ async function callSchemaServiceRaw(
 // returns headers as soon as it accepts the request, then can stall for the
 // whole cold-schema-init window while streaming the body; a plain
 // `await res.text()` after the fetch is NOT covered by the fetch's own abort,
-// so that stall used to hang the CLI unbounded. One AbortController governs
+// so that stall used to hang the CLI unbounded. One abort signal governs
 // both halves, and the timer is cleared the instant the body is fully read.
 type ReadBody = {
   (opts: { asText: true }): Promise<string>;
@@ -1756,6 +1754,7 @@ type ConnectionErrorContext = {
   socketPath?: string;
   routeSocket?: NodeSocketSelection | null;
   socketCause?: unknown;
+  phase?: "fetch" | "body";
 };
 
 // A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
@@ -1795,6 +1794,129 @@ export function localNodeRouteSocket(
   };
 }
 
+type BoundedFetchFailureContext = ConnectionErrorContext;
+
+class BoundedFetchFailure extends Error {
+  override readonly cause: unknown;
+  readonly failureCtx: BoundedFetchFailureContext;
+  readonly timeout: boolean;
+
+  constructor(cause: unknown, failureCtx: BoundedFetchFailureContext) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "BoundedFetchFailure";
+    this.cause = cause;
+    this.failureCtx = failureCtx;
+    this.timeout = isTimeoutError(cause);
+  }
+}
+
+class FbrainTransportError extends TransportError {
+  readonly failureCtx: BoundedFetchFailureContext;
+
+  constructor(message: string, failureCtx: BoundedFetchFailureContext) {
+    super(message);
+    this.failureCtx = failureCtx;
+  }
+}
+
+type BoundedFetchResult = {
+  status: number;
+  headers: Headers;
+  text: string;
+  failureCtx: BoundedFetchFailureContext;
+};
+
+async function boundedNodeFetch(opts: {
+  baseUrl: string;
+  path: string;
+  method: string;
+  body?: string;
+  verbose?: Verbose;
+  service: "node" | "schema";
+  headers: Record<string, string>;
+  socketPath?: string;
+  timeoutMs: number;
+  routeSocket?: NodeSocketSelection | null;
+}): Promise<BoundedFetchResult> {
+  const tcpUrl = `${opts.baseUrl}${opts.path}`;
+  const tag = opts.service === "node" ? "NODE" : "SCHEMA";
+  const headers = { ...opts.headers };
+  const bodyBytes = Buffer.byteLength(opts.body ?? "");
+  const localRouteSocket =
+    opts.routeSocket !== undefined
+      ? opts.routeSocket
+      : localNodeRouteSocket(opts.service, opts.method, opts.path, opts.baseUrl, opts.socketPath);
+  const preflightTarget = localRouteSocket
+    ? `${opts.path} [${localRouteSocket.kind} socket selected]`
+    : tcpUrl;
+  opts.verbose?.(
+    `→ ${tag} ${opts.method} ${preflightTarget}` +
+      (opts.body !== undefined ? ` bodyBytes=${bodyBytes}` : ""),
+  );
+
+  // One controller for the whole request lifecycle (headers + body). This core
+  // reads the body before returning, so the timer is always cleared in this
+  // function even when a wrapper never asks to parse the response.
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
+  }, opts.timeoutMs);
+
+  const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
+    const url = socket ? `http://localhost${opts.path}` : tcpUrl;
+    const transport = socket ? `unix:${socket.socketPath} (${socket.kind})` : "tcp";
+    opts.verbose?.(
+      `→ ${tag} ${opts.method} ${url} [${transport}]` +
+        (opts.body !== undefined ? ` bodyBytes=${bodyBytes}` : ""),
+    );
+    const init: RequestInit & { unix?: string } = {
+      method: opts.method,
+      headers,
+      body: opts.body,
+      signal: controller.signal,
+    };
+    if (socket) init.unix = socket.socketPath;
+    const r = await fetch(url, init);
+    opts.verbose?.(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
+    return r;
+  };
+
+  let res: Response;
+  const failureCtx: BoundedFetchFailureContext = {
+    socketPath: opts.socketPath,
+    routeSocket: localRouteSocket,
+  };
+  try {
+    if (localRouteSocket) {
+      // Loopback node URL: socket-only, never the retired TCP port.
+      try {
+        res = await attempt(localRouteSocket);
+      } catch (socketErr) {
+        failureCtx.socketCause = socketErr;
+        failureCtx.phase = "fetch";
+        throw socketErr;
+      }
+    } else {
+      // Schema service (HTTPS Lambda) and any non-loopback target: plain HTTP.
+      res = await attempt(null);
+    }
+    try {
+      const text = await res.text();
+      return { status: res.status, headers: res.headers, text, failureCtx };
+    } catch (err) {
+      if (localRouteSocket) {
+        failureCtx.socketCause = err;
+        failureCtx.phase = "body";
+      }
+      throw err;
+    }
+  } catch (err) {
+    throw new BoundedFetchFailure(err, failureCtx);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Shared inner fetch for both service clients. Differs only by the verbose
 // log tag (NODE vs SCHEMA), the service-specific headers passed in (the node
 // always sends X-User-Hash), and the connectionError service param. Same
@@ -1810,8 +1932,6 @@ async function verboseFetch(opts: {
   timeoutMs?: number;
   socketPath?: string;
 }): Promise<BoundedResponse> {
-  const tcpUrl = `${opts.baseUrl}${opts.path}`;
-  const tag = opts.service === "node" ? "NODE" : "SCHEMA";
   const headers = { ...opts.headers };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   const bodyStr =
@@ -1825,101 +1945,43 @@ async function verboseFetch(opts: {
   // write body grows the deadline so it isn't capped by the small-record flat
   // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
-  const localRouteSocket = localNodeRouteSocket(
-    opts.service,
-    opts.method,
-    opts.path,
-    opts.baseUrl,
-    opts.socketPath,
-  );
-  const preflightTarget = localRouteSocket
-    ? `${opts.path} [${localRouteSocket.kind} socket selected]`
-    : tcpUrl;
-  opts.verbose(
-    `→ ${tag} ${opts.method} ${preflightTarget}` +
-      (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
-  );
-
-  // One controller for the whole request lifecycle (headers + body). The timer
-  // keeps running after the fetch resolves, so if the body read stalls past the
-  // deadline the abort fires mid-`text()` and we map it to the same timeout
-  // error. `done` guards the timer so a slow *consumer* can never trip it once
-  // the I/O is already complete.
-  const controller = new AbortController();
-  let done = false;
-  const timer = setTimeout(() => {
-    if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
-  }, timeoutMs);
-
-  const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
-    const url = socket ? `http://localhost${opts.path}` : tcpUrl;
-    const transport = socket ? `unix:${socket.socketPath} (${socket.kind})` : "tcp";
-    opts.verbose(
-      `→ ${tag} ${opts.method} ${url} [${transport}]` +
-        (bodyStr !== undefined ? ` body=${bodyStr}` : ""),
-    );
-    const init: RequestInit & { unix?: string } = {
-      method: opts.method,
-      headers,
-      body: bodyStr,
-      signal: controller.signal,
-    };
-    if (socket) init.unix = socket.socketPath;
-    const r = await fetch(url, init);
-    opts.verbose(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
-    return r;
-  };
-
-  let res: Response;
-  let socketFailure: unknown;
+  let result: BoundedFetchResult;
   try {
-    if (localRouteSocket) {
-      // Loopback node URL: socket-only, never the retired TCP port.
-      try {
-        res = await attempt(localRouteSocket);
-      } catch (socketErr) {
-        socketFailure = socketErr;
-        throw socketErr;
-      }
-    } else {
-      // Schema service (HTTPS Lambda) and any non-loopback target: plain HTTP.
-      res = await attempt(null);
-    }
-  } catch (err) {
-    done = true;
-    clearTimeout(timer);
-    if (isTimeoutError(err)) {
-      throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
-    }
-    throw connectionError(opts.baseUrl, opts.service, err, {
+    result = await boundedNodeFetch({
+      baseUrl: opts.baseUrl,
+      path: opts.path,
+      method: opts.method,
+      body: bodyStr,
+      verbose: opts.verbose,
+      service: opts.service,
+      headers,
       socketPath: opts.socketPath,
-      routeSocket: localRouteSocket,
-      socketCause: socketFailure,
+      timeoutMs,
     });
+  } catch (err) {
+    if (err instanceof BoundedFetchFailure) {
+      if (err.timeout) {
+        throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err.cause);
+      }
+      throw connectionError(opts.baseUrl, opts.service, err.cause, err.failureCtx);
+    }
+    throw err;
   }
 
   const readBody = (async (readOpts?: { asText?: boolean }): Promise<unknown> => {
     try {
-      const text = await res.text();
-      done = true;
-      clearTimeout(timer);
-      if (readOpts?.asText) return text;
-      return parseBody(text);
+      if (readOpts?.asText) return result.text;
+      return parseBody(result.text);
     } catch (err) {
-      done = true;
-      clearTimeout(timer);
-      if (isTimeoutError(err)) {
-        throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err);
-      }
-      throw connectionError(opts.baseUrl, opts.service, err, {
-        socketPath: opts.socketPath,
-        routeSocket: localRouteSocket,
-        socketCause: socketFailure,
+      throw new FbrainError({
+        code: "response_parse_failed",
+        message: `Failed to parse ${opts.method} ${opts.path} response body: ${err instanceof Error ? err.message : String(err)}.`,
+        cause: err,
       });
     }
   }) as ReadBody;
 
-  return { res, readBody };
+  return { res: new Response(null, { status: result.status, headers: result.headers }), readBody };
 }
 
 function parseJsonSafe(text: string): unknown {
@@ -2194,6 +2256,20 @@ function connectionError(
   ctx: ConnectionErrorContext = {},
 ): FbrainError {
   const which = service === "node" ? "node" : "schema service";
+  if (
+    service === "node" &&
+    ctx.routeSocket &&
+    ctx.socketCause !== undefined &&
+    (ctx.phase === "body" || existsSync(ctx.routeSocket.socketPath))
+  ) {
+    return new FbrainError({
+      code: "service_unreachable",
+      message: `node socket not reachable at unix:${ctx.routeSocket.socketPath} ${DOCTOR_TIP}.`,
+      hint: socketUnreachableHint(ctx.routeSocket.socketPath),
+      agentHint: socketUnreachableAgentHint(ctx.routeSocket.socketPath),
+      cause: { socket: ctx.socketCause, fallback: cause },
+    });
+  }
   // Any LOCAL (loopback) node is socket-only — no TCP fallback — so an absent
   // socket means the node isn't running, whatever the loopback port.
   if (service === "node" && ctx.socketPath && isLoopbackNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
@@ -2203,20 +2279,6 @@ function connectionError(
       hint: socketMissingHint(ctx.socketPath),
       agentHint: socketMissingAgentHint(ctx.socketPath),
       cause,
-    });
-  }
-  if (
-    service === "node" &&
-    ctx.routeSocket &&
-    ctx.socketCause !== undefined &&
-    existsSync(ctx.routeSocket.socketPath)
-  ) {
-    return new FbrainError({
-      code: "service_unreachable",
-      message: `node socket not reachable at unix:${ctx.routeSocket.socketPath} ${DOCTOR_TIP}.`,
-      hint: socketUnreachableHint(ctx.routeSocket.socketPath),
-      agentHint: socketUnreachableAgentHint(ctx.routeSocket.socketPath),
-      cause: { socket: ctx.socketCause, fallback: cause },
     });
   }
   return new FbrainError({
@@ -2266,74 +2328,39 @@ function fetchTransport(
         options.body === undefined ? undefined : JSON.stringify(options.body);
       if (bodyStr !== undefined) headers["Content-Type"] = "application/json";
 
-      // The mutation (write) path runs through this transport, so it carries
-      // the same joint fetch + body-read deadline as the raw node path: one
-      // AbortController bounds both halves, the timer survives the fetch so a
-      // body-read stall (cold-schema-init) is aborted too, and a deadline hit
-      // surfaces as `service_timeout` with the idempotent-retry hint rather
-      // than a silent unbounded hang. A genuine connect failure stays a
-      // TransportError (→ service_unreachable) as before.
       // Payload-scaled deadline (see writeTimeoutMs): the mutation/write path
       // routes through here, and its node-side cost is O(body) because the node
       // chunk-embeds the whole body. A bodyless GET → 0 bytes → DEFAULT, so
       // reads through this transport keep the fast deadline.
       const timeoutMs = writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
-      const controller = new AbortController();
-      let done = false;
-      const timer = setTimeout(() => {
-        if (!done) controller.abort(new DOMException("deadline exceeded", "TimeoutError"));
-      }, timeoutMs);
 
-      // Mirror `verboseFetch`'s routing so the SDK path is socket-only for a
-      // loopback node and plain HTTP for a remote node.
-      const localRouteSocket = localNodeRouteSocket("node", method, path, baseUrl, socketPath);
-      const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
-        const url = socket ? `http://localhost${path}` : `${baseUrl}${path}`;
-        const init: RequestInit & { unix?: string } = {
+      let res: BoundedFetchResult;
+      try {
+        res = await boundedNodeFetch({
+          baseUrl,
+          path,
           method,
           headers,
           body: bodyStr,
-          signal: controller.signal,
-        };
-        if (socket) init.unix = socket.socketPath;
-        return fetch(url, init);
-      };
-
-      let res: Response;
-      try {
-        if (localRouteSocket) {
-          res = await attempt(localRouteSocket);
-        } else {
-          res = await attempt(null);
+          service: "node",
+          socketPath,
+          timeoutMs,
+        });
+      } catch (err) {
+        if (err instanceof BoundedFetchFailure) {
+          if (err.timeout) throw timeoutError(path, method, "node", timeoutMs, err.cause);
+          throw new FbrainTransportError(
+            `request to ${baseUrl}${path} failed: ${err.message}`,
+            err.failureCtx,
+          );
         }
-      } catch (err) {
-        done = true;
-        clearTimeout(timer);
-        if (isTimeoutError(err)) throw timeoutError(path, method, "node", timeoutMs, err);
-        const transportErr = new TransportError(
-          `request to ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        throw transportErr;
+        throw err;
       }
-
-      let text: string;
-      try {
-        text = await res.text();
-      } catch (err) {
-        done = true;
-        clearTimeout(timer);
-        if (isTimeoutError(err)) throw timeoutError(path, method, "node", timeoutMs, err);
-        throw new TransportError(
-          `reading response from ${baseUrl}${path} failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      done = true;
-      clearTimeout(timer);
 
       let parsed: unknown = null;
-      if (text.length > 0) {
+      if (res.text.length > 0) {
         try {
-          parsed = JSON.parse(text);
+          parsed = JSON.parse(res.text);
         } catch {
           parsed = null;
         }
@@ -2429,6 +2456,9 @@ function mapSdkDataError(
   }
   if (err instanceof UnexpectedResponseError) {
     return mapNodeError(err.status, err.body, path);
+  }
+  if (err instanceof FbrainTransportError) {
+    return connectionError(baseUrl, "node", err, err.failureCtx);
   }
   if (err instanceof TransportError) {
     return connectionError(baseUrl, "node", err, {
