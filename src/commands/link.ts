@@ -9,7 +9,6 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   findBySlug,
-  findBySlugFast,
   genericLinkTag,
   normalizeSlug,
   nowIso,
@@ -56,14 +55,10 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   const fromHash = schemaHashFor(fromType, opts.cfg);
   const toHash = schemaHashFor(toType, opts.cfg);
 
-  // /api/query returns a non-deterministic top-100 slice per schema, so a
-  // single findBySlug can miss an existing slug on a schema with >100 rows.
-  // The fast-miss helper rides out the saturated-daemon empty-page flake
-  // (so a real task on a >100-row schema is still found) but short-circuits
-  // on a populated-but-missing page, so a typo'd <task-slug> errors in ~one
-  // query instead of burning the full 5×250 ms retry budget. Same helper
-  // put.ts / new.ts / resolveBySlug use.
-  const source = await findBySlugFast(node, fromType, fromHash, fromSlug);
+  // A keyed point-read (`findBySlug`) is authoritative (found-or-not) without
+  // scanning, so a real record on a >100-row schema is still found and a typo'd
+  // <task-slug> errors in one query. Same point-read put.ts / new.ts use.
+  const source = await findBySlug(node, fromType, fromHash, fromSlug);
   if (!source) {
     if (fromType !== "task" || toType !== "design") {
       throw new FbrainError({
@@ -89,8 +84,8 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
       // command, and the two-designs case (`link dA dB`) suggests
       // `link dB dA` which still has no task in the task position and
       // re-fails with `No task: dB`. Skip the lookup when both slugs
-      // match — we already know taskSlug isn't a task (it failed
-      // findBySlugFast above). Best-effort: a flaky page miss falls
+      // match — we already know taskSlug isn't a task (it failed the
+      // `findBySlug` above). Best-effort: a flaky page miss falls
       // through to the no-concrete-command variant.
       const asTask =
         toSlug === fromSlug
@@ -109,7 +104,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     });
   }
 
-  const target = await findBySlugFast(node, toType, toHash, toSlug);
+  const target = await findBySlug(node, toType, toHash, toSlug);
   if (!target) {
     // Wrong-type detection: if `designSlug` names a record of another type
     // (concept/reference/project/...), telling the user to "create the

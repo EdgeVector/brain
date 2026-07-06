@@ -18,9 +18,8 @@ import { capitalize } from "../format.ts";
 import {
   confirmVectorIndexed,
   crossTypeSlugNote,
-  findBySlugFast,
+  findBySlug,
   findCrossTypeSlugCollisions,
-  findExistingForWrite,
   nowIso,
   type ReadRetryOptions,
   schemaHashFor,
@@ -73,14 +72,11 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   const hash = schemaHashFor(opts.type, opts.cfg);
 
   if (!opts.force) {
-    // Duplicate guard. `findExistingForWrite` rides out the daemon's
-    // empty-result `/api/query` flake (which would otherwise let the guard
-    // fail open and the createRecord below silently overwrite the row) but
-    // short-circuits on a populated page that lacks the slug — so creating a
-    // genuinely-new record doesn't burn the full retry budget (~1.1s) on
-    // every `<type> new`. Same helper put.ts uses; see its comment in
-    // record.ts (supersedes the per-call withReadRetry hedge from PR #53).
-    const existing = await findExistingForWrite(node, opts.type, hash, opts.slug);
+    // Duplicate guard via a keyed point-read (`findBySlug`): authoritative
+    // (found-or-not) without scanning, so it never fails open on an empty-page
+    // flake and a genuinely-new record returns absent in one query. Same
+    // point-read put.ts uses for its existence check.
+    const existing = await findBySlug(node, opts.type, hash, opts.slug);
     if (existing) {
       throw new FbrainError({
         code: "slug_already_exists",
@@ -94,14 +90,12 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   }
 
   // Validate the design exists, if provided — same dangling-ref rule as link.
-  // Uses the fast-miss helper so a real `dangling_design_slug` errors in ~one
-  // query (populated design schema, slug absent ⇒ authoritative miss) instead
-  // of burning the full 5×250 ms read-retry budget; an empty design page still
-  // rides out the saturated-daemon flake, so a valid parent on a >100-row
-  // schema is still found. Same helper put.ts uses for its existence check.
+  // A keyed point-read (`findBySlug`) resolves a real `dangling_design_slug` in
+  // one query (authoritative found-or-not) and still finds a valid parent on a
+  // >100-row schema. Same point-read put.ts uses for its existence check.
   if (entry.hasDesignSlug && opts.designSlug && opts.designSlug.length > 0) {
     const designHash = schemaHashFor("design", opts.cfg);
-    const parent = await findBySlugFast(node, "design", designHash, opts.designSlug);
+    const parent = await findBySlug(node, "design", designHash, opts.designSlug);
     if (!parent) {
       throw new FbrainError({
         code: "dangling_design_slug",

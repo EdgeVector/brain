@@ -1407,11 +1407,11 @@ describe("putCmd — pre-request validation + dispatch", () => {
   // "created"/"updated". Without this guard, a tight put→get loop (worst
   // case: MCP-agent stdio, same warm process, no cold-start delay) saw
   // "No record" for a row that did, in fact, just land — because
-  // fold_db's `/api/mutation` is not RYW-consistent and the `findBySlugFast`
-  // authoritative-miss on a populated page (capped at 2 by #174 for
-  // typo'd reads) returns null with zero retry. This case is distinct
-  // from the #174 latency tradeoff: the caller of a put→get is NOT
-  // expected to re-run; they conclude the data is gone.
+  // fold_db's `/api/mutation` is not RYW-consistent and a bare point-read
+  // (`findBySlug`) is authoritative found-or-not, returning null with zero
+  // retry. This is why the verify-after-write path wraps the point-read in the
+  // full `withReadRetry` budget: the caller of a put→get is NOT expected to
+  // re-run; they conclude the data is gone.
   describe("verify-after-write — read-your-writes regression (920a3)", () => {
     // No-op sleep so the test doesn't pay the real 250 ms backoff schedule.
     // The verify budget is what we're asserting on; the schedule is pinned
@@ -1483,8 +1483,8 @@ describe("putCmd — pre-request validation + dispatch", () => {
         });
         expect(r.action).toBe("created");
         expect(mutations[0]!.mutation_type).toBe("create");
-        // 2 empty-page misses + 1 hit = at least 3 verify-reads. The
-        // capped `findBySlugFast` (#174) would have given up after 2.
+        // 2 empty-page misses + 1 hit = at least 3 verify-reads. A bare
+        // `findBySlug` (no retry) would have given up after 1.
         expect(queryCallsAfterMutation).toBeGreaterThanOrEqual(3);
       } finally {
         globalThis.fetch = realFetch2;
@@ -1494,7 +1494,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
     test("verify-after-write uses the FULL retry budget, not the capped empty-page budget", async () => {
       // Wire the verify to spend EXACTLY 5 attempts (the documented full
       // `READ_RETRY_ATTEMPTS` budget — see record.ts). If putCmd routed the
-      // verify through the capped `findBySlugFast` budget (2) instead, the
+      // verify through a bare `findBySlug` (no retry) instead, the
       // 4th-attempt success would never be observed.
       let queryCallsAfterMutation = 0;
       let mutationFired = false;

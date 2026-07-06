@@ -6,9 +6,14 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { designNew } from "../../src/commands/design.ts";
+import { recordNew, type RecordNewOptions } from "../../src/commands/new.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { TEST_HASHES, buildTestCfg } from "../util.ts";
+
+// `fbrain design new` is a thin `recordNew({ type: "design" })` call (cli.ts
+// invokes recordNew directly). These tests exercise that path.
+const designNew = (opts: Omit<RecordNewOptions, "type" | "designSlug">) =>
+  recordNew({ ...opts, type: "design" });
 
 const cfg = buildTestCfg({ userHash: "uh" });
 const DESIGN_HASH = TEST_HASHES.design;

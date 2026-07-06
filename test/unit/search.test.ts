@@ -658,7 +658,7 @@ describe("searchCmd", () => {
 
   test("hydrates ONCE per distinct schema, not once per hit (N+1 fix)", async () => {
     // The perf fix this card lands. Pre-fix, search hydrated each deduped hit
-    // with its own `findBySlugFast` — and that helper fetches the WHOLE schema
+    // with its own point-read — and that fetches the WHOLE schema
     // page via /api/query and client-filters for one slug. So N hits on one
     // schema issued N identical full-schema fetches (the ~25–29 s live-brain
     // latency, dogfood run 115). The fix groups hits by schema hash and fetches

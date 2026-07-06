@@ -18,7 +18,7 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { fbrainHomeBase } from "./config.ts";
 import type { AddSchemaRequest, FieldType, RecordType } from "./schemas.ts";
@@ -288,22 +288,10 @@ export function formatStatusTable(manifests: MigrationManifest[]): string {
     .join("\n");
 }
 
-// Look up the manifest dir without requiring an instance — convenient
-// for migrate's verbose lines.
-export function describeManifestLocation(dir: string = defaultMigrationsDir()): string {
-  return dir;
-}
-
 // Resolve the unique base directory shared between writes; useful so
 // the caller can pass a single override to test code (Bun test sets
 // FBRAIN_MIGRATIONS_DIR per-test).
 export function ensureMigrationsDir(dir: string = defaultMigrationsDir()): string {
   mkdirSync(dir, { recursive: true });
   return dir;
-}
-
-// Make sure `dirname(path)` exists — used when writing a manifest with
-// a custom path (e.g. tests passing a sibling temp dir).
-export function ensureParentDir(path: string): void {
-  mkdirSync(dirname(path), { recursive: true });
 }

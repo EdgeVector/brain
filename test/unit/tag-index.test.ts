@@ -7,7 +7,7 @@ import {
   type QueryRow,
 } from "../../src/client.ts";
 import type { Config } from "../../src/config.ts";
-import { findBySlugPointRead, schemaHashFor, TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
+import { findBySlug, schemaHashFor, TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
 import { TAG_INDEX_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
 import {
   indexRecordTags,
@@ -296,7 +296,7 @@ describe("tag secondary index", () => {
     seed(state, conceptHash, "c2", recordFields("c2", [TOMBSTONE_TAG]));
 
     const out = await resolveRecordsByTag(node, cfg, "hot", {
-      findBySlug: (type, hash, slug) => findBySlugPointRead(node, type, hash, slug),
+      findBySlug: (type, hash, slug) => findBySlug(node, type, hash, slug),
       schemaHashFor: (type) => schemaHashFor(type, cfg),
     });
     expect(out).toEqual([]);
@@ -393,7 +393,7 @@ describe("PERF: tag query cost scales with tag cardinality, not corpus size", ()
     let matched = 0;
     if (useIndex) {
       const out = await resolveRecordsByTag(node, activeCfg, "hot", {
-        findBySlug: (type, hash, slug) => findBySlugPointRead(node, type, hash, slug),
+        findBySlug: (type, hash, slug) => findBySlug(node, type, hash, slug),
         schemaHashFor: (type) => schemaHashFor(type, activeCfg),
       });
       matched = out?.length ?? 0;
