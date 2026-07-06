@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import pkg from "../../package.json" with { type: "json" };
 import {
+  BACKLINKS_SLUG_REQUIRED_HINT,
   buildPutInput,
   bodyWindow,
   CONFIG_MISSING_HINT,
@@ -2459,6 +2460,43 @@ describe("fbrain_status tool", () => {
     expect(res.content[0]!.text).toContain("c1: active → archived");
   });
 
+  // Slug WITHOUT a status → show mode: a per-record status READ. Must emit
+  // {action:"status", ...} structuredContent — the tool declares an
+  // outputSchema, so the SDK rejects a successful result without structured
+  // content. (The SDK-layer path itself is pinned in test/unit/mcp-sdk.test.ts;
+  // this direct-handler test additionally proves outputSchema conformance.)
+  test("slug WITHOUT status reads the record's status: {action:'status'} matching its outputSchema, no mutation", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "b", "active")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const server = createFbrainMcpServer({ cfg });
+    const res = await toolsOf(server).fbrain_status!({ slug: "c1", type: "concept" });
+    expect(res.isError).toBeFalsy();
+    // A read — nothing was mutated.
+    expect(mutations).toHaveLength(0);
+    expect(res.structuredContent).toEqual({
+      action: "status",
+      type: "concept",
+      slug: "c1",
+      status: "active",
+    });
+    const schema = outputSchemaOf(server, "fbrain_status")!;
+    expect(() => schema.parse(res.structuredContent)).not.toThrow();
+    expect(res.content[0]!.text).toBe("active");
+  });
+
   test("an invalid status errors (validated against the type enum) with no mutation", async () => {
     const mutations: MutationBody[] = [];
     installMock((url, init) => {
@@ -2713,6 +2751,34 @@ describe("fbrain_append tool", () => {
     expect(() => resolveAppendChunk({ text: "t", chunk_b64: "YQ==" })).toThrow();
     // None of chunk/text/path/b64 → the required-one-of error.
     expect(() => resolveAppendChunk({})).toThrow();
+  });
+
+  // The b64 decoder is shared with fbrain_put and used to hardcode
+  // fbrain_put/body_b64/body_path in its error strings. An append error must
+  // name fbrain_append's own tool + field names.
+  test("resolveAppendChunk: invalid chunk_b64 errors name fbrain_append + chunk_b64/chunk_path (not fbrain_put's)", () => {
+    expect(() => resolveAppendChunk({ chunk_b64: "not base64!!!" })).toThrow(
+      /fbrain_append: chunk_b64 is not valid standard base64/,
+    );
+    try {
+      resolveAppendChunk({ chunk_b64: "not base64!!!" });
+    } catch (err) {
+      const e = err as { code: string; message: string; hint?: string };
+      expect(e.code).toBe("chunk_b64_invalid");
+      expect(e.hint).toContain("chunk_path");
+      expect(e.message).not.toContain("fbrain_put");
+      expect(e.hint).not.toContain("body_path");
+    }
+    // Invalid UTF-8 after a clean b64 decode: same tool/field naming.
+    const badUtf8 = Buffer.from([0xff, 0xfe, 0xfd]).toString("base64");
+    try {
+      resolveAppendChunk({ chunk_b64: badUtf8 });
+      throw new Error("expected chunk_b64_invalid_utf8");
+    } catch (err) {
+      const e = err as { code: string; message: string };
+      expect(e.code).toBe("chunk_b64_invalid_utf8");
+      expect(e.message).toContain("fbrain_append");
+    }
   });
 });
 
@@ -3060,6 +3126,21 @@ describe("empty/dropped tool input guard", () => {
       if (!res.success) {
         expect(res.error.issues[0]!.message).toBe(GET_SLUG_REQUIRED_HINT);
         expect(res.error.issues[0]!.message).toContain('fbrain_get({"slug"');
+      }
+    }
+  });
+
+  // fbrain_backlinks used to reuse fbrain_get's hint verbatim, so an agent
+  // that dropped the slug was told to call fbrain_get — the wrong tool. The
+  // hint must name fbrain_backlinks itself.
+  test("fbrain_backlinks missing or empty slug yields its OWN actionable example (not fbrain_get's)", () => {
+    for (const input of [{}, { slug: "" }, { slug: "   " }]) {
+      const res = z.safeParse(inputSchemaOf("fbrain_backlinks") as never, input);
+      expect(res.success).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]!.message).toBe(BACKLINKS_SLUG_REQUIRED_HINT);
+        expect(res.error.issues[0]!.message).toContain('fbrain_backlinks({"slug"');
+        expect(res.error.issues[0]!.message).not.toContain("fbrain_get requires");
       }
     }
   });
