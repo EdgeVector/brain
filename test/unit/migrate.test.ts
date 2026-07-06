@@ -5,7 +5,7 @@
 //     the new hash and swaps all six schemaHashes entries together.
 //   - --add-field on Design (non-Phase 6) only touches Design records
 //     and only swaps schemaHashes.design.
-//   - --dry-run writes a manifest but no records and does not swap.
+//   - --dry-run writes a manifest but does not register, load, write records, or swap.
 //   - --resume re-enters after a simulated mid-flight failure and
 //     completes the migration (idempotent skip of already-migrated
 //     records).
@@ -511,7 +511,7 @@ describe("migrateCmd --add-field", () => {
     }
   });
 
-  test("--dry-run: registers the schema + writes manifest as dry_run; no record writes, no config swap", async () => {
+  test("--dry-run: writes manifest as dry_run without schema registration, load, record writes, or config swap", async () => {
     const cfg = buildTestCfg();
     writeStartingConfig(cfg);
 
@@ -519,15 +519,19 @@ describe("migrateCmd --add-field", () => {
       queries: { [TEST_HASHES.design]: [designRow("d1"), designRow("d2")] },
     });
     try {
+      const lines: string[] = [];
       await migrateCmd({
         cfg,
         mode: { kind: "add-field", type: "design", fieldName: "priority", fieldSpec: "String", defaultRaw: "P0", dryRun: true },
-        print: () => {},
+        print: (l) => lines.push(l),
         migrationsDir: tmpMigrations,
         configPath,
       });
 
-      // No create mutations fired.
+      // Dry-run stays entirely before schema publish/load and node record paths.
+      expect(stub.schemaRegistrations).toBe(0);
+      expect(stub.schemaLoads).toBe(0);
+      expect(stub.queryCountsBySchema.size).toBe(0);
       const creates = stub.mutations.filter((m) => m.mutation_type === "create");
       expect(creates.length).toBe(0);
 
@@ -539,8 +543,16 @@ describe("migrateCmd --add-field", () => {
       const manifests = listManifests(tmpMigrations);
       expect(manifests.length).toBe(1);
       expect(manifests[0]!.status).toBe("dry_run");
-      expect(manifests[0]!.total_count).toBe(2);
+      expect(manifests[0]!.to_hash).toBe("dry-run:not-registered");
+      expect(manifests[0]!.descriptive_name_to).toBe("Design_v2");
+      expect(manifests[0]!.field_added).toBe("priority");
+      expect(manifests[0]!.total_count).toBe(0);
       expect(manifests[0]!.migrated_count).toBe(0);
+
+      const out = lines.join("\n");
+      expect(out).toContain("[dry-run] would register Design_v2 with schema service");
+      expect(out).toContain("field=priority");
+      expect(out).toContain("new=<not registered>");
     } finally {
       stub.restore();
     }
