@@ -208,7 +208,7 @@ async function writeOpenDecisions(
 export function parseGateEntries(body: string): GateEntry[] {
   const entries: GateEntry[] = [];
   for (const line of body.split("\n")) {
-    const entry = parseGateLine(line);
+    const entry = parseGateLineLenient(line);
     if (entry) entries.push(entry);
   }
   return entries;
@@ -224,7 +224,8 @@ export function parseGateLine(line: string): GateEntry | null {
   const slug = requiredField(fields, "slug");
   const program = requiredField(fields, "program");
   const unblocks = requiredField(fields, "unblocks");
-  const evidence = requiredField(fields, "evidence");
+  const evidence =
+    status === "open" ? requiredField(fields, "evidence") : (fields.get("evidence") ?? "");
   const surfaced = requiredField(fields, "surfaced");
   const entry: GateEntry = { status, slug, program, unblocks, evidence, surfaced };
   const recommendation = fields.get("recommendation");
@@ -234,6 +235,21 @@ export function parseGateLine(line: string): GateEntry | null {
   const resolution = fields.get("resolution");
   if (resolution !== undefined) entry.resolution = resolution;
   return entry;
+}
+
+function parseGateLineLenient(line: string): GateEntry | null {
+  try {
+    return parseGateLine(line);
+  } catch (err) {
+    warnSkippedGateLine(line, err);
+    return null;
+  }
+}
+
+function warnSkippedGateLine(line: string, err: unknown): void {
+  const detail = err instanceof Error ? err.message : String(err);
+  console.warn(`warning: skipping malformed structured gate line: ${detail}`);
+  console.warn(`  ${line.trim()}`);
 }
 
 function requiredField(fields: Map<string, string>, key: string): string {
@@ -314,7 +330,7 @@ export function addGateToBody(body: string, entry: GateEntry): string {
   const lines = body.split("\n");
   let lastGateLine = -1;
   for (let i = 0; i < lines.length; i++) {
-    const gate = parseGateLine(lines[i] ?? "");
+    const gate = parseGateLineLenient(lines[i] ?? "");
     if (!gate) continue;
     if (gate.slug === entry.slug) return body;
     lastGateLine = i;
@@ -345,7 +361,7 @@ export function clearGateInBody(
 ): { body: string; cleared: boolean; entry: GateEntry } {
   const lines = body.split("\n");
   for (let i = 0; i < lines.length; i++) {
-    const gate = parseGateLine(lines[i] ?? "");
+    const gate = parseGateLineLenient(lines[i] ?? "");
     if (!gate || gate.slug !== slug || gate.status !== "open") continue;
     const entry: GateEntry = {
       ...gate,

@@ -14,9 +14,11 @@ import { TEST_HASHES, buildTestCfg } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
 const realFetch = globalThis.fetch;
+const realWarn = console.warn;
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  console.warn = realWarn;
 });
 
 function queryResp(results: unknown[]): Response {
@@ -74,6 +76,65 @@ describe("structured gate lines", () => {
     expect(result.entry.status).toBe("cleared");
     expect(result.entry.resolution).toBe("Tom chose manual prod gate");
     expect(parseGateEntries(result.body).filter((g) => g.status === "open")).toEqual([]);
+  });
+
+  test("cleared lines may omit evidence while open lines still require it", () => {
+    expect(
+      parseGateLine(
+        '- status=cleared slug=needs-tom program="north-star" unblocks="prod cutover" surfaced=2026-06-29 cleared=2026-06-30 resolution="Tom chose manual prod gate"',
+      ),
+    ).toEqual({
+      status: "cleared",
+      slug: "needs-tom",
+      program: "north-star",
+      unblocks: "prod cutover",
+      evidence: "",
+      surfaced: "2026-06-29",
+      cleared: "2026-06-30",
+      resolution: "Tom chose manual prod gate",
+    });
+
+    expect(() =>
+      parseGateLine(
+        '- status=open slug=needs-tom program="north-star" unblocks="prod cutover" surfaced=2026-06-29',
+      ),
+    ).toThrow("missing evidence");
+  });
+
+  test("entry scans keep valid gates and warn for malformed structured lines", () => {
+    const warnings: string[] = [];
+    console.warn = ((line: string) => warnings.push(line)) as typeof console.warn;
+    const clearedWithoutEvidence =
+      '- status=cleared slug=old-gate program="north-star" unblocks="old prod cutover" surfaced=2026-06-20 cleared=2026-06-21 resolution="no longer needed"';
+    const malformed = "- status=open this is not a gate entry";
+    const body = [
+      "# Decisions",
+      "",
+      "## Structured gate ledger",
+      "",
+      formatGateEntry(baseGate),
+      clearedWithoutEvidence,
+      malformed,
+    ].join("\n");
+
+    const entries = parseGateEntries(body);
+
+    expect(entries.map((g) => [g.status, g.slug])).toEqual([
+      ["open", "needs-tom"],
+      ["cleared", "old-gate"],
+    ]);
+    expect(entries[1]?.evidence).toBe("");
+    expect(warnings.join("\n")).toContain("skipping malformed structured gate line");
+    expect(warnings.join("\n")).toContain(malformed);
+
+    const withNewGate = addGateToBody(body, { ...baseGate, slug: "new-gate" });
+    expect(parseGateEntries(withNewGate).map((g) => g.slug)).toEqual([
+      "needs-tom",
+      "old-gate",
+      "new-gate",
+    ]);
+    const cleared = clearGateInBody(body, "needs-tom", "approved", "2026-07-01");
+    expect(cleared.cleared).toBe(true);
   });
 });
 
@@ -145,5 +206,51 @@ describe("gate verify", () => {
 
     expect(result.stale.map((g) => g.slug)).toEqual(["needs-tom"]);
     expect(lines.join("\n")).toContain("⚠️ stale — likely resolved");
+  });
+
+  test("gateVerify skips malformed and cleared entries and checks only open gates", async () => {
+    const warnings: string[] = [];
+    console.warn = ((line: string) => warnings.push(line)) as typeof console.warn;
+    const clearedWithoutEvidence =
+      '- status=cleared slug=old-gate program="north-star" unblocks="old prod cutover" surfaced=2026-06-20 cleared=2026-06-21 resolution="no longer needed"';
+    const malformed = "- status=open this is not a gate entry";
+    const ledgerBody = [
+      "# Decisions",
+      "",
+      "## Structured gate ledger",
+      "",
+      formatGateEntry(baseGate),
+      clearedWithoutEvidence,
+      malformed,
+    ].join("\n");
+    globalThis.fetch = (async (input: unknown) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      return queryResp([
+        asRow("open-decisions", {
+          slug: "open-decisions",
+          title: "Open decisions",
+          body: ledgerBody,
+          status: "active",
+          tags: [],
+          created_at: "2026-06-29T00:00:00Z",
+          updated_at: "2026-06-29T00:00:00Z",
+        }),
+      ]);
+    }) as unknown as typeof fetch;
+
+    const checked: string[] = [];
+    const result = await gateVerify({
+      cfg,
+      print: () => {},
+      checkEvidence: async (evidence) => {
+        checked.push(evidence);
+        return { stale: false, detail: "fresh" };
+      },
+    });
+
+    expect(result.checked.map((g) => g.slug)).toEqual(["needs-tom"]);
+    expect(checked).toEqual(["fbrain:task:needs-tom-card"]);
+    expect(warnings.join("\n")).toContain(malformed);
   });
 });
