@@ -2825,17 +2825,92 @@ describe("fbrain_append tool", () => {
     expect(mutations[0]!.fields_and_values!.body).toBe("head\n\ntail");
   });
 
-  test("resolveAppendChunk: `text` is an alias for `chunk`, mutually exclusive with the others", () => {
-    // The bite: agents pass `text`; the schema only knew `chunk`. `text`
-    // now resolves like `chunk`, and `chunk` wins when both are present.
+  test("accepts put-style `body` as an alias for `chunk` and appends it", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "head")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_append!({
+      slug: "c1",
+      body: "tail",
+      type: "concept",
+    });
+    expect(res.isError).toBeFalsy();
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]!.fields_and_values!.body).toBe("head\n\ntail");
+  });
+
+  test("accepts put-style `body_path` as an alias for `chunk_path` and appends it", async () => {
+    const mutations: MutationBody[] = [];
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-append-body-path-"));
+    const p = join(dir, "chunk.md");
+    writeFileSync(p, "tail from file", "utf8");
+    try {
+      installMock((url, init) => {
+        if (url.endsWith("/api/query")) {
+          const body = parseBody(init);
+          if (body.schema_name === TEST_HASHES.concept) {
+            return { status: 200, body: { ok: true, results: [conceptRow("c1", "head")] } };
+          }
+          return { status: 200, body: { ok: true, results: [] } };
+        }
+        if (url.endsWith("/api/mutation")) {
+          mutations.push(parseBody(init) as MutationBody);
+          return { status: 200, body: { ok: true } };
+        }
+        return { status: 404 };
+      });
+      const res = await toolsOf(createFbrainMcpServer({ cfg })).fbrain_append!({
+        slug: "c1",
+        body_path: p,
+        type: "concept",
+      });
+      expect(res.isError).toBeFalsy();
+      expect(mutations).toHaveLength(1);
+      expect(mutations[0]!.fields_and_values!.body).toBe("head\n\ntail from file");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolveAppendChunk: aliases fold into canonical chunk sources before validation", () => {
+    // Agents may pass append-specific `text` or put-style body* names; all
+    // resolve as canonical chunk sources before mutual-exclusion validation.
     expect(resolveAppendChunk({ chunk: "c" })).toBe("c");
     expect(resolveAppendChunk({ text: "t" })).toBe("t");
+    expect(resolveAppendChunk({ body: "b" })).toBe("b");
     expect(resolveAppendChunk({ chunk: "c", text: "t" })).toBe("c");
-    // `text` is treated as an inline source, so combining it with a path or
-    // b64 is the same multiple-source error as combining `chunk` would be.
+    expect(resolveAppendChunk({ chunk: "c", body: "b" })).toBe("c");
+    const dir = mkdtempSync(join(tmpdir(), "fbrain-append-alias-precedence-"));
+    const canonicalPath = join(dir, "canonical.md");
+    const aliasPath = join(dir, "alias.md");
+    writeFileSync(canonicalPath, "canonical", "utf8");
+    writeFileSync(aliasPath, "alias", "utf8");
+    try {
+      expect(resolveAppendChunk({ chunk_path: canonicalPath, body_path: aliasPath })).toBe(
+        "canonical",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(resolveAppendChunk({ body_b64: "Yg==" })).toBe("b");
+    // Inline aliases are treated as an inline source, so combining them with a
+    // path or b64 is the same multiple-source error as combining `chunk` would be.
     expect(() => resolveAppendChunk({ text: "t", chunk_path: "/x" })).toThrow();
+    expect(() => resolveAppendChunk({ body: "b", body_path: "/x" })).toThrow();
     expect(() => resolveAppendChunk({ text: "t", chunk_b64: "YQ==" })).toThrow();
-    // None of chunk/text/path/b64 → the required-one-of error.
+    // None of chunk/text/body/path/b64 → the required-one-of error.
     expect(() => resolveAppendChunk({})).toThrow();
   });
 
