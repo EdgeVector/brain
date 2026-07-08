@@ -86,6 +86,64 @@ function cfgWithoutSchemaHash(type: keyof typeof TEST_HASHES) {
 const realFetch = globalThis.fetch;
 
 type MockResponse = { status: number; body?: unknown };
+type LegacySearchHit = {
+  schema_name?: string;
+  schema_display_name?: string | null;
+  key_value?: { hash?: string | null; range?: string | null };
+  value?: string;
+  metadata?: { score?: number; match_type?: string };
+};
+
+function appSearchAsLegacyNativeIndex(
+  url: string,
+  init?: RequestInit,
+): { url: string; target?: string } | null {
+  if (!url.includes("/api/app/search")) return null;
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+  const params = new URLSearchParams();
+  if (typeof body.query === "string") params.set("q", body.query);
+  const target = typeof body.target === "string" ? body.target : undefined;
+  if (target) params.set("schemas", target);
+  return { url: `http://localhost/api/native-index/search?${params.toString()}`, target };
+}
+
+function appSearchBodyFromLegacy(body: unknown, target?: string): unknown {
+  if (!body || typeof body !== "object" || !Array.isArray((body as Record<string, unknown>).results)) {
+    return body;
+  }
+  const b = body as Record<string, unknown>;
+  const results = (b.results as unknown[]).filter((raw) => {
+    if (!target || !raw || typeof raw !== "object") return true;
+    return (raw as LegacySearchHit).schema_name === target;
+  });
+  return {
+    ...b,
+    results: results.map((raw) => {
+      if (!raw || typeof raw !== "object") return raw;
+      const hit = raw as LegacySearchHit;
+      const hash = hit.key_value?.hash ?? "";
+      const value = hit.value ?? "";
+      return {
+        schema_name: hit.schema_name ?? "",
+        schema_display_name: hit.schema_display_name ?? null,
+        score: hit.metadata?.score,
+        key: { hash, range: hit.key_value?.range ?? null },
+        fields: { slug: hash, title: value, body: value },
+        metadata: hit.metadata ?? null,
+        author_pub_key: null,
+      };
+    }),
+  };
+}
+
+function legacySearchHitForWrite(w: TrackedWrite): LegacySearchHit {
+  return {
+    schema_name: w.schema,
+    key_value: { hash: w.key, range: null },
+    value: String(w.fields.body ?? ""),
+    metadata: { score: 1 },
+  };
+}
 
 // See test/unit/put.test.ts `installMock` for the rationale: auto-track
 // create/update mutations and splice the row into a subsequent empty-page
@@ -101,7 +159,9 @@ function installMock(handler: (url: string, init?: RequestInit) => MockResponse)
   const writes: TrackedWrite[] = [];
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
-    const next = handler(url, init);
+    const appSearch = appSearchAsLegacyNativeIndex(url, init);
+    const handlerUrl = appSearch?.url ?? url;
+    const next = handler(handlerUrl, init);
     if (url.endsWith("/api/mutation") && typeof init?.body === "string") {
       try {
         const body = JSON.parse(init.body) as Record<string, unknown>;
@@ -127,22 +187,16 @@ function installMock(handler: (url: string, init?: RequestInit) => MockResponse)
     // false) without each put test re-stubbing /api/native-index/search — and
     // without paying the real verify backoff on an unhandled 404.
     if (
-      url.includes("/api/native-index/search") &&
+      handlerUrl.includes("/api/native-index/search") &&
       next.status !== 200 &&
       writes.length > 0
     ) {
-      const u = new URL(url, "http://node");
+      const u = new URL(handlerUrl, "http://node");
       const schemas = (u.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
       const results = writes
         .filter((w) => schemas.length === 0 || schemas.includes(w.schema))
-        .map((w) => ({
-          schema_name: w.schema,
-          field: "body",
-          key_value: { hash: w.key, range: null },
-          value: String(w.fields.body ?? ""),
-          metadata: { score: 1 },
-        }));
-      return new Response(JSON.stringify({ results }), {
+        .map(legacySearchHitForWrite);
+      return new Response(JSON.stringify(appSearch ? appSearchBodyFromLegacy({ results }, appSearch.target) : { results }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -171,7 +225,7 @@ function installMock(handler: (url: string, init?: RequestInit) => MockResponse)
         }
       }
     }
-    return new Response(JSON.stringify(next.body ?? {}), {
+    return new Response(JSON.stringify(appSearch ? appSearchBodyFromLegacy(next.body ?? {}, appSearch.target) : next.body ?? {}), {
       status: next.status,
       headers: { "Content-Type": "application/json" },
     });
@@ -328,8 +382,7 @@ describe("fbrain_search tool", () => {
       min_score: 0.6,
       limit: 5,
     });
-    expect(capturedUrl).toContain("exact=true");
-    expect(capturedUrl).toContain("min_score=0.6");
+    expect(capturedUrl).toContain("q=blue");
     expect(res.content[0]!.text).toContain("no matches");
   });
 
@@ -338,10 +391,10 @@ describe("fbrain_search tool", () => {
     // hashes by setting `schemas=<hash>`. Asserting the URL carries exactly
     // those hashes proves `args.type` was threaded into `sOpts.types` and
     // through to the client.
-    let lastSearchUrl = "";
+    const searchUrls: string[] = [];
     installMock((url) => {
       if (url.includes("/api/native-index/search")) {
-        lastSearchUrl = url;
+        searchUrls.push(url);
         return { status: 200, body: { ok: true, results: [] } };
       }
       return { status: 200, body: { ok: true, results: [] } };
@@ -349,19 +402,22 @@ describe("fbrain_search tool", () => {
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
 
     await tools.fbrain_search!({ query: "q", type: ["design"] });
-    expect(lastSearchUrl).toContain(`schemas=${TEST_HASHES.design}`);
-    expect(lastSearchUrl).not.toContain(TEST_HASHES.task);
+    expect(searchUrls.at(-1)).toContain(`schemas=${TEST_HASHES.design}`);
+    expect(searchUrls.at(-1)).not.toContain(TEST_HASHES.task);
 
+    searchUrls.length = 0;
     await tools.fbrain_search!({ query: "q", type: ["design", "task"] });
-    expect(lastSearchUrl).toContain(TEST_HASHES.design);
-    expect(lastSearchUrl).toContain(TEST_HASHES.task);
-    expect(lastSearchUrl).not.toContain(TEST_HASHES.concept);
+    expect(new Set(searchUrls.map((url) => new URL(url).searchParams.get("schemas")))).toEqual(
+      new Set([TEST_HASHES.design, TEST_HASHES.task]),
+    );
 
     // Sanity check: without `type`, every fbrain schema hash is on the wire.
+    searchUrls.length = 0;
     await tools.fbrain_search!({ query: "q" });
-    expect(lastSearchUrl).toContain(TEST_HASHES.design);
-    expect(lastSearchUrl).toContain(TEST_HASHES.task);
-    expect(lastSearchUrl).toContain(TEST_HASHES.concept);
+    const allTargets = new Set(searchUrls.map((url) => new URL(url).searchParams.get("schemas")));
+    expect(allTargets).toContain(TEST_HASHES.design);
+    expect(allTargets).toContain(TEST_HASHES.task);
+    expect(allTargets).toContain(TEST_HASHES.concept);
   });
 
   test("type filter drops resolved hits whose type isn't requested", async () => {
@@ -1176,7 +1232,7 @@ describe("read tools — structuredContent + outputSchema", () => {
             ok: true,
             results: [
               {
-                schema_name: DESIGN_HASH,
+                schema_name: TEST_HASHES.concept,
                 schema_display_name: "Design",
                 field: "body",
                 key_value: { hash: "alpha", range: null },
@@ -1498,7 +1554,7 @@ describe("write tools — structuredContent + outputSchema", () => {
           body: {
             results: [
               {
-                schema_name: DESIGN_HASH,
+                schema_name: TEST_HASHES.concept,
                 field: "body",
                 key_value: { hash: "mcp-write-probe", range: null },
                 value: "Probe",

@@ -17,7 +17,12 @@ import { listCmd } from "../../src/commands/list.ts";
 import { getRecord } from "../../src/commands/get.ts";
 import { searchCmd } from "../../src/commands/search.ts";
 import { statusCmd } from "../../src/commands/status.ts";
-import { TEST_HASHES, buildTestCfg } from "../util.ts";
+import {
+  appSearchAsLegacyNativeIndex,
+  legacySearchResponseBody,
+  TEST_HASHES,
+  buildTestCfg,
+} from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
 
@@ -367,9 +372,11 @@ function installSequencedMock(
     input: unknown,
     init?: RequestInit,
   ): Promise<Response> => {
-    const url = typeof input === "string" ? input : String(input);
+    const rawUrl = typeof input === "string" ? input : String(input);
+    const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+    const url = appSearch?.url ?? rawUrl;
     const next = handler(url, init);
-    return new Response(JSON.stringify(next.body ?? {}), {
+    return new Response(JSON.stringify(legacySearchResponseBody(next.body ?? {}, appSearch)), {
       status: next.status,
       headers: { "Content-Type": "application/json" },
     });

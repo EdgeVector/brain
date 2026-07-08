@@ -5,15 +5,14 @@
 // every Error Registry row maps to an actionable message in exactly
 // one place.
 //
-// As of the @folddb/app-sdk port, the consent handshake
-// (`/api/apps/request-consent` + `/api/apps/consent-status`) and the mutation
-// path (`/api/mutation`, with the per-write capability headers) ride the
-// SDK's `FoldDbClient` — the same wire client every FoldDB app uses — with
-// the SDK's typed errors translated back into fbrain's FbrainError registry
-// (see `mapSdkDataError`). The rest of the node surface stays hand-rolled
-// because the SDK deliberately does not cover it (native-index search,
-// schemas/load, bootstrap, auto-identity, raw) or cannot express it yet
-// (`queryAll`'s limit/offset pagination loop + per-page dedup guards).
+// As of the @folddb/app-sdk port, the app data path rides the SDK's
+// `FoldDbClient` — the same wire client every FoldDB app uses — with the SDK's
+// typed errors translated back into fbrain's FbrainError registry (see
+// `mapSdkDataError`). That covers consent, query/queryAll, mutation, and
+// app-scoped search. The remaining hand-rolled node surface is deliberately
+// Brain-specific owner/admin glue the SDK contract does not expose:
+// schemas/load, schema declaration/listing, bootstrap, auto-identity, health,
+// raw calls, and owner-session attestation.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -39,6 +38,11 @@ import {
   type CapabilityStore as SdkCapabilityStore,
   type ConsentScope,
   type JsonValue as SdkJsonValue,
+  type KeyValue as SdkKeyValue,
+  type QueryFilter as SdkQueryFilter,
+  type QueryResult as SdkQueryResult,
+  type QueryRow as SdkQueryRow,
+  type SearchHit as SdkSearchHit,
   type Transport as SdkTransport,
 } from "@folddb/app-sdk";
 
@@ -1071,6 +1075,17 @@ export function newNodeClient(opts: {
     }
   };
 
+  const queryPageSdk = async (
+    schemaHash: string,
+    filter: SdkQueryFilter,
+  ): Promise<SdkQueryResult> => {
+    try {
+      return await withSessionRepair(() => sdkClient(null).query(schemaHash, filter));
+    } catch (err) {
+      throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
+    }
+  };
+
   const queryAllGuarded = async ({
     schemaHash,
     fields,
@@ -1112,15 +1127,13 @@ export function newNodeClient(opts: {
     let offset = 0;
     let lastTotalCount: number | null = null;
     for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-      const body = await callJsonOk("/api/query", "POST", {
-        schema_name: schemaHash,
+      const pageResult = await queryPageSdk(schemaHash, {
         fields,
         limit: QUERY_PAGE_SIZE,
         offset,
       });
-      const b = body as Record<string, unknown>;
-      const pageResults = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
-      if (typeof b.total_count === "number") lastTotalCount = b.total_count;
+      const pageResults = fromSdkRows(pageResult.rows);
+      if (pageResult.page !== null) lastTotalCount = pageResult.page.totalCount;
       let newOnPage = 0;
       for (const row of pageResults) {
         const k = recordDedupKey(row);
@@ -1132,7 +1145,7 @@ export function newNodeClient(opts: {
       // Stop on explicit `has_more: false`. Absent `has_more` (older
       // node, or a stub) is treated as "done" — a single non-paginated
       // response is then equivalent to the pre-pagination contract.
-      const hasMore = b.has_more === true;
+      const hasMore = pageResult.page?.hasMore === true;
       if (!hasMore) break;
       if (newOnPage === 0) {
         throw new FbrainError({
@@ -1417,55 +1430,66 @@ export function newNodeClient(opts: {
       // contract is "a small sample, one round trip", and the two callers
       // (empty-brain probe, nearest-slug hint scan) are explicitly
       // best-effort over whatever the first page holds.
-      const body = await callJsonOk("/api/query", "POST", {
-        schema_name: schemaHash,
+      const page = await queryPageSdk(schemaHash, {
         fields,
         limit,
         offset: 0,
       });
-      const b = body as Record<string, unknown>;
-      return Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      return fromSdkRows(page.rows);
     },
     async queryByKey({ schemaHash, fields, keyHash }) {
-      const body = await callJsonOk("/api/query", "POST", {
-        schema_name: schemaHash,
+      const page = await queryPageSdk(schemaHash, {
         fields,
         filter: { HashKey: keyHash },
         limit: QUERY_PAGE_SIZE,
         offset: 0,
       });
-      const b = body as Record<string, unknown>;
-      const results = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
+      const results = fromSdkRows(page.rows);
       const row = findQueryRowByKey(results, keyHash);
       if (row) return row;
-      if (queryByKeyFilterLooksIgnored(b, results)) {
+      if (queryByKeyFilterLooksIgnored(page, results)) {
         const fallback = await queryAllGuarded({ schemaHash, fields });
         return findQueryRowByKey(fallback.results, keyHash);
       }
       return null;
     },
     async search(query, searchOpts) {
-      const params = new URLSearchParams();
-      params.set("q", query);
-      if (searchOpts?.exact) params.set("exact", "true");
-      if (typeof searchOpts?.minScore === "number") {
-        params.set("min_score", String(searchOpts.minScore));
-      }
-      if (searchOpts?.schemas && searchOpts.schemas.length > 0) {
-        params.set("schemas", searchOpts.schemas.join(","));
-      }
-      const path = `/api/native-index/search?${params.toString()}`;
-      const { status, body } = await callJson(path, "GET");
-      if (status === 404 && searchOpts?.localFallback !== false) {
-        verbose(
-          "native-index search endpoint missing; falling back to local keyword search over /api/query",
+      const schemaTargets = uniqueStrings(searchOpts?.schemas ?? []);
+      try {
+        const client = sdkClient(capability?.() ?? null);
+        const targetResults =
+          schemaTargets.length === 0
+            ? [await withSessionRepair(() => client.search(query, { k: 50 }))]
+            : await Promise.all(
+                schemaTargets.map((target) =>
+                  withSessionRepair(() => client.search(query, { k: 50, target })),
+                ),
+              );
+        return sdkSearchHitsToNative(
+          targetResults.flatMap((result) => result.hits),
+          searchOpts,
+          query,
+          schemaTargets,
         );
-        return localSearchFallback(query, searchOpts, callJsonOk, verbose);
+      } catch (err) {
+        if (
+          err instanceof UnexpectedResponseError &&
+          err.status === 404 &&
+          searchOpts?.localFallback !== false
+        ) {
+          verbose(
+            "app search endpoint missing; falling back to local keyword search over SDK query",
+          );
+          return localSearchFallback(query, searchOpts, queryPageSdk, verbose);
+        }
+        if (searchOpts?.localFallback !== false && isSdkMissingAppSearch(err)) {
+          verbose(
+            "app search endpoint missing; falling back to local keyword search over SDK query",
+          );
+          return localSearchFallback(query, searchOpts, queryPageSdk, verbose);
+        }
+        throw mapSdkDataError(err, url, "POST", "/api/app/search", socketPath);
       }
-      if (status !== 200) throw mapNodeError(status, body, "/api/native-index/search");
-      const b = body as Record<string, unknown>;
-      const hits = Array.isArray(b.results) ? (b.results as NativeIndexHit[]) : [];
-      return hits;
     },
     async rawCall(method, path, body) {
       const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader(), socketPath);
@@ -1476,15 +1500,73 @@ export function newNodeClient(opts: {
   };
 }
 
+function sdkSearchHitsToNative(
+  hits: SdkSearchHit[],
+  searchOpts: SearchOptions | undefined,
+  query: string,
+  schemaTargets: string[],
+): NativeIndexHit[] {
+  const targetSet = schemaTargets.length > 0 ? new Set(schemaTargets) : null;
+  const minScore = searchOpts?.minScore;
+  const exactNeedle = searchOpts?.exact ? query.toLowerCase() : null;
+  return hits.flatMap((hit): NativeIndexHit[] => {
+    if (targetSet && !targetSet.has(hit.schemaName)) return [];
+    const text = searchHitText(hit);
+    if (exactNeedle && !text.toLowerCase().includes(exactNeedle)) return [];
+    const score = hit.score ?? undefined;
+    if (typeof minScore === "number" && (score === undefined || score < minScore)) {
+      return [];
+    }
+    return [{
+      schema_name: hit.schemaName,
+      schema_display_name: hit.schemaDisplayName,
+      field: "body",
+      key_value: sdkKeyToFbrainKey(hit.keyValue, hit.key),
+      value: text,
+      metadata: {
+        score,
+        match_type: "app_scoped_search",
+      },
+    }];
+  });
+}
+
+function searchHitText(hit: SdkSearchHit): string {
+  const title = typeof hit.fields.title === "string" ? hit.fields.title : "";
+  const body = typeof hit.fields.body === "string" ? hit.fields.body : "";
+  const value = [title, body].filter((s) => s.length > 0).join("\n").trim();
+  return value.length > 0 ? value : JSON.stringify(hit.fields);
+}
+
+function isSdkMissingAppSearch(err: unknown): boolean {
+  return err instanceof FbrainError && err.code === "node_http_404";
+}
+
+function fromSdkRows(rows: readonly SdkQueryRow[]): QueryRow[] {
+  return rows.map((row) => ({
+    fields: row.fields as Record<string, unknown>,
+    key: sdkKeyToFbrainKey(row.keyValue, row.key),
+    author_pub_key: row.authorPubKey ?? undefined,
+  }));
+}
+
+function sdkKeyToFbrainKey(
+  keyValue: SdkKeyValue | null,
+  renderedKey: string,
+): { hash: string | null; range: string | null } {
+  if (keyValue !== null) {
+    return { hash: keyValue.hash, range: keyValue.range };
+  }
+  return { hash: renderedKey.length > 0 ? renderedKey : null, range: null };
+}
+
 async function localSearchFallback(
   query: string,
   searchOpts: SearchOptions | undefined,
-  callJsonOk: (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ) => Promise<unknown>,
+  queryPage: (
+    schemaHash: string,
+    filter: SdkQueryFilter,
+  ) => Promise<SdkQueryResult>,
   verbose: Verbose,
 ): Promise<NativeIndexHit[]> {
   const schemas = uniqueStrings(searchOpts?.schemas ?? []);
@@ -1495,15 +1577,12 @@ async function localSearchFallback(
 
   const docs: LocalSearchDoc[] = [];
   for (const schemaName of schemas) {
-    const body = await callJsonOk("/api/query", "POST", {
-      schema_name: schemaName,
+    const page = await queryPage(schemaName, {
       fields: LOCAL_SEARCH_FIELDS,
       limit: QUERY_PAGE_SIZE,
       offset: 0,
     });
-    const b = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-    const rows = Array.isArray(b.results) ? (b.results as QueryRow[]) : [];
-    for (const row of rows) {
+    for (const row of fromSdkRows(page.rows)) {
       const fields = row.fields ?? {};
       const title = stringValue(fields.title);
       const bodyText = stringValue(fields.body);
@@ -1625,10 +1704,10 @@ function findQueryRowByKey(rows: QueryRow[], keyHash: string): QueryRow | null {
   return null;
 }
 
-function queryByKeyFilterLooksIgnored(body: Record<string, unknown>, results: QueryRow[]): boolean {
-  if (body.has_more === true) return true;
+function queryByKeyFilterLooksIgnored(body: SdkQueryResult, results: QueryRow[]): boolean {
+  if (body.page?.hasMore === true) return true;
   if (results.length > 1) return true;
-  return typeof body.total_count === "number" && body.total_count > results.length;
+  return body.page !== null && body.page.totalCount > results.length;
 }
 
 function numField(obj: Record<string, unknown>, key: string): number {
@@ -2365,6 +2444,33 @@ function fetchTransport(
           parsed = null;
         }
       }
+      if (
+        method === "POST" &&
+        path === "/api/query" &&
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        options.body &&
+        typeof options.body === "object" &&
+        !Array.isArray(options.body)
+      ) {
+        const responseBody = parsed as Record<string, unknown>;
+        const requestBody = options.body as Record<string, unknown>;
+        if (responseBody.limit === undefined && typeof requestBody.limit === "number") {
+          responseBody.limit = requestBody.limit;
+        }
+        if (responseBody.offset === undefined && typeof requestBody.offset === "number") {
+          responseBody.offset = requestBody.offset;
+        }
+        if (responseBody.returned_count === undefined) {
+          const rows = Array.isArray(responseBody.results)
+            ? responseBody.results
+            : Array.isArray(responseBody.rows)
+              ? responseBody.rows
+              : null;
+          if (rows !== null) responseBody.returned_count = rows.length;
+        }
+      }
       return { status: res.status, body: parsed };
     },
   };
@@ -2452,7 +2558,7 @@ function mapSdkDataError(
     return mapNodeError(403, { kind: "permission_denied", error: err.reason }, path);
   }
   if (err instanceof RequestRejectedError) {
-    return mapNodeError(400, { kind: err.kind, error: err.message }, path);
+    return mapNodeError(400, err.body ?? { kind: err.kind, error: err.message }, path);
   }
   if (err instanceof UnexpectedResponseError) {
     return mapNodeError(err.status, err.body, path);
