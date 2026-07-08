@@ -17,7 +17,12 @@ import { join } from "node:path";
 
 import { askCmd, docId, parseDocId } from "../../src/commands/ask.ts";
 import { RECORD_TYPES } from "../../src/schemas.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  appSearchAsLegacyNativeIndex,
+  legacySearchResponseBody,
+  buildTestCfg,
+  TEST_HASHES,
+} from "../util.ts";
 
 const realFetch = globalThis.fetch;
 let cacheDir = "";
@@ -128,7 +133,9 @@ function installFetchStub(opts: {
     searchCalls: 0,
   };
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : String(input);
+    const rawUrl = typeof input === "string" ? input : String(input);
+    const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+    const url = appSearch?.url ?? rawUrl;
     const body = init?.body ? JSON.parse(init.body as string) : undefined;
     if (url.includes("/api/query")) {
       const schema = (body as { schema_name: string }).schema_name;
@@ -157,7 +164,7 @@ function installFetchStub(opts: {
     if (url.includes("/api/native-index/search")) {
       stub.searchCalls++;
       return new Response(
-        JSON.stringify({ ok: true, results: opts.vectorHits }),
+        JSON.stringify(legacySearchResponseBody({ ok: true, results: opts.vectorHits }, appSearch)),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
@@ -602,7 +609,9 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       const queryCounts = new Map<string, number>();
       const bodyQueryCounts = new Map<string, number>();
       globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
-        const url = typeof input === "string" ? input : String(input);
+        const rawUrl = typeof input === "string" ? input : String(input);
+        const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+        const url = appSearch?.url ?? rawUrl;
         const body = init?.body ? JSON.parse(init.body as string) : undefined;
         if (url.includes("/api/query")) {
           const schema = (body as { schema_name: string }).schema_name;
@@ -627,10 +636,10 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         }
         if (url.includes("/api/native-index/search")) {
           return new Response(
-            JSON.stringify({
+            JSON.stringify(legacySearchResponseBody({
               ok: true,
               results: [vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 })],
-            }),
+            }, appSearch)),
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
@@ -715,7 +724,9 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     let lastSearchUrl = "";
     const queryCounts = new Map<string, number>();
     globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === "string" ? input : String(input);
+      const rawUrl = typeof input === "string" ? input : String(input);
+      const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+      const url = appSearch?.url ?? rawUrl;
       if (url.includes("/api/query")) {
         const body = init?.body ? JSON.parse(init.body as string) : undefined;
         const schema = (body as { schema_name: string }).schema_name;
@@ -739,7 +750,7 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       if (url.includes("/api/native-index/search")) {
         lastSearchUrl = url;
         return new Response(
-          JSON.stringify({
+          JSON.stringify(legacySearchResponseBody({
             ok: true,
             results: [
               vectorHit({ schemaName: TEST_HASHES.design, slug: "the-readiness-gate", score: 0.9 }),
@@ -750,7 +761,7 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
                 score: 0.95,
               }),
             ],
-          }),
+          }, appSearch)),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
@@ -791,10 +802,12 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     // Multi-type form: the BM25 walk and the vector wire both carry exactly
     // the requested types.
     const cfg = buildTestCfg();
-    let lastSearchUrl = "";
+    const searchUrls: string[] = [];
     const queryCounts = new Map<string, number>();
     globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
-      const url = typeof input === "string" ? input : String(input);
+      const rawUrl = typeof input === "string" ? input : String(input);
+      const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+      const url = appSearch?.url ?? rawUrl;
       if (url.includes("/api/query")) {
         const body = init?.body ? JSON.parse(init.body as string) : undefined;
         const schema = (body as { schema_name: string }).schema_name;
@@ -824,9 +837,9 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         );
       }
       if (url.includes("/api/native-index/search")) {
-        lastSearchUrl = url;
+        searchUrls.push(url);
         return new Response(
-          JSON.stringify({ ok: true, results: [] }),
+          JSON.stringify(legacySearchResponseBody({ ok: true, results: [] }, appSearch)),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
@@ -841,8 +854,9 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       print: () => {},
     });
 
-    const parsed = new URL(lastSearchUrl, "http://example/");
-    const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    const sent = searchUrls
+      .map((url) => new URL(url, "http://example/").searchParams.get("schemas"))
+      .filter((s): s is string => Boolean(s));
     expect(new Set(sent)).toEqual(new Set([TEST_HASHES.design, TEST_HASHES.task]));
 
     // Cold call: cheap listing + full body fetch (2) per requested type.
@@ -1349,8 +1363,13 @@ describe("askCmd query deduplication", () => {
     // → 2/61 ≈ 0.0328.
     expect(result.hits[0]!.fusedScore).toBeCloseTo(2 / 61, 5);
     // And no wasted HTTP: the duplicate expansion does NOT trigger a
-    // second vector call. Pre-fix this was 2.
-    expect(stub.searchCalls).toBe(1);
+    // second vector-search fanout. Under SDK app-search, one logical vector
+    // search fans out to one call per target schema; pre-fix the duplicate
+    // expansion would double this count.
+    const targetFanout = new Set(
+      RECORD_TYPES.map((type) => cfg.schemaHashes[type]).filter(Boolean),
+    ).size;
+    expect(stub.searchCalls).toBe(targetFanout);
   });
 });
 

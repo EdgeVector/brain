@@ -27,7 +27,12 @@ import {
 } from "../../src/commands/search.ts";
 import { DEFAULT_LIMIT } from "../../src/commands/ask.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  appSearchAsLegacyNativeIndex,
+  legacySearchResponseBody,
+  buildTestCfg,
+  TEST_HASHES,
+} from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 const TASK_HASH = TEST_HASHES.task;
@@ -66,10 +71,12 @@ afterEach(() => {
 // schema_name (so the BM25 corpus is loaded per-type, realistically scoped).
 function installMock(nativeHits: NativeIndexHit[], corpus: Row[]): void {
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : String(input);
+    const rawUrl = typeof input === "string" ? input : String(input);
+    const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+    const url = appSearch?.url ?? rawUrl;
     let body: unknown = {};
     if (url.includes("/api/native-index/search")) {
-      body = { ok: true, results: nativeHits, user_hash: cfg.userHash };
+      body = legacySearchResponseBody({ ok: true, results: nativeHits, user_hash: cfg.userHash }, appSearch);
     } else if (url.includes("/api/query")) {
       const req = JSON.parse(String(init?.body ?? "{}")) as { schema_name?: string };
       const results = corpus

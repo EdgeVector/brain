@@ -1837,14 +1837,16 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
           headers: { "Content-Type": "application/json" },
         });
       }
-      if (url.includes("/api/native-index/search")) {
+      if (url.includes("/api/native-index/search") || url.includes("/api/app/search")) {
         opts.onSearch?.();
+        const schemaHash = localCfg.schemaHashes[opts.type] ?? "s";
         const results = opts.searchHits().map((slug) => ({
-          schema_name: "s",
-          field: "body",
-          key_value: { hash: slug, range: null },
-          value: "b",
+          schema_name: schemaHash,
+          score: 1,
+          key: { hash: slug, range: null },
+          fields: { slug, title: "T", body: "b" },
           metadata: { score: 1 },
+          author_pub_key: null,
         }));
         return new Response(JSON.stringify({ results }), {
           status: 200,

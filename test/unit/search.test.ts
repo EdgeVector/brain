@@ -203,12 +203,59 @@ type MockResponse = { status: number; body?: unknown };
 function installSequencedMock(handler: (url: string, init?: RequestInit) => MockResponse): void {
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
-    const next = handler(url, init);
+    const appSearch = appSearchAsLegacyNativeIndex(url, init);
+    const next = appSearch
+      ? adaptLegacyNativeIndexResponse(handler(appSearch.url, init))
+      : handler(url, init);
     return new Response(JSON.stringify(next.body ?? {}), {
       status: next.status,
       headers: { "Content-Type": "application/json" },
     });
   }) as unknown as typeof globalThis.fetch;
+}
+
+function appSearchAsLegacyNativeIndex(
+  url: string,
+  init?: RequestInit,
+): { url: string } | null {
+  if (!url.includes("/api/app/search")) return null;
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+  const params = new URLSearchParams();
+  if (typeof body.query === "string") params.set("q", body.query);
+  if (typeof body.target === "string") params.set("schemas", body.target);
+  return { url: `http://localhost/api/native-index/search?${params.toString()}` };
+}
+
+function adaptLegacyNativeIndexResponse(response: MockResponse): MockResponse {
+  if (response.status !== 200 || !response.body || typeof response.body !== "object") {
+    return response;
+  }
+  const body = response.body as Record<string, unknown>;
+  if (!Array.isArray(body.results)) return response;
+  return {
+    ...response,
+    body: {
+      ...body,
+      results: body.results.map((raw) => {
+        if (!raw || typeof raw !== "object") return raw;
+        const hit = raw as NativeIndexHit;
+        const score = typeof hit.metadata?.score === "number" ? hit.metadata.score : undefined;
+        return {
+          schema_name: hit.schema_name,
+          schema_display_name: hit.schema_display_name ?? null,
+          score,
+          key: hit.key_value,
+          fields: {
+            slug: hit.key_value.hash ?? "",
+            title: hit.value,
+            body: hit.value,
+          },
+          metadata: hit.metadata ?? null,
+          author_pub_key: null,
+        };
+      }),
+    },
+  };
 }
 
 beforeEach(() => {
@@ -1160,49 +1207,129 @@ describe("searchCmd", () => {
     expect(printedRows[1]).toContain("b");
   });
 
-  test("--exact passes ?exact=true on the wire", async () => {
-    let capturedUrl = "";
+  test("--exact filters SDK app-search hits locally", async () => {
+    const rows = [
+      {
+        fields: {
+          slug: "blue-hit",
+          title: "Blue hit",
+          body: "blue body",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "blue-hit", range: null },
+      },
+      {
+        fields: {
+          slug: "red-hit",
+          title: "Red hit",
+          body: "red body",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "red-hit", range: null },
+      },
+    ];
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
-        capturedUrl = url;
-        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({ slug: "blue-hit", schemaName: DESIGN_HASH, value: "blue body", metadata: { score: 0.8 } }),
+              hit({ slug: "red-hit", schemaName: DESIGN_HASH, value: "red body", metadata: { score: 0.9 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
       }
-      return { status: 200, body: { ok: true, results: [] } };
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
     });
-    await searchCmd({ cfg, query: "blue", exact: true, print: () => {} });
-    expect(capturedUrl).toContain("exact=true");
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "blue", exact: true, print: (l) => lines.push(l) });
+    const out = rowsOf(lines).join("\n");
+    expect(out).toContain("blue-hit");
+    expect(out).not.toContain("red-hit");
   });
 
-  test("--min-score passes ?min_score on the wire", async () => {
-    let capturedUrl = "";
+  test("--min-score filters SDK app-search hits locally", async () => {
+    const rows = [
+      {
+        fields: {
+          slug: "strong-hit",
+          title: "Strong hit",
+          body: "blue body",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "strong-hit", range: null },
+      },
+      {
+        fields: {
+          slug: "weak-hit",
+          title: "Weak hit",
+          body: "blue body",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "weak-hit", range: null },
+      },
+    ];
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
-        capturedUrl = url;
-        return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              hit({ slug: "strong-hit", schemaName: DESIGN_HASH, metadata: { score: 0.7 } }),
+              hit({ slug: "weak-hit", schemaName: DESIGN_HASH, metadata: { score: 0.5 } }),
+            ],
+            user_hash: cfg.userHash,
+          },
+        };
       }
-      return { status: 200, body: { ok: true, results: [] } };
+      if (url.includes("/api/query")) {
+        return { status: 200, body: { ok: true, results: rows } };
+      }
+      return { status: 404 };
     });
-    await searchCmd({ cfg, query: "blue", minScore: 0.6, print: () => {} });
-    expect(capturedUrl).toContain("min_score=0.6");
+    const lines: string[] = [];
+    await searchCmd({ cfg, query: "blue", minScore: 0.6, print: (l) => lines.push(l) });
+    const out = rowsOf(lines).join("\n");
+    expect(out).toContain("strong-hit");
+    expect(out).not.toContain("weak-hit");
   });
 
   test("scopes the search to fbrain's registered schema hashes (G3d)", async () => {
     // Regression guard for phase-7-search-latency-spike.md (H2b): the
-    // search command must always send `schemas=...` so a shared homebrew
-    // daemon's other schemas can't drown out fbrain hits in the top-50.
-    let capturedUrl = "";
+    // search command must narrow SDK app-search by each fbrain schema so a
+    // shared homebrew daemon's other schemas can't drown out fbrain hits.
+    const capturedUrls: string[] = [];
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
-        capturedUrl = url;
+        capturedUrls.push(url);
         return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
       }
       return { status: 200, body: { ok: true, results: [] } };
     });
     await searchCmd({ cfg, query: "x", print: () => {} });
-    const parsed = new URL(capturedUrl, "http://example/");
-    const schemas = parsed.searchParams.get("schemas");
-    expect(schemas).not.toBeNull();
-    const sent = (schemas ?? "").split(",").filter((s) => s.length > 0);
+    const sent = capturedUrls.flatMap((url) => {
+      const parsed = new URL(url, "http://example/");
+      return (parsed.searchParams.get("schemas") ?? "").split(",").filter((s) => s.length > 0);
+    });
     // Every user-facing record schema hash must be present on the wire; the
     // internal TagIndex schema is not semantically searched.
     for (const type of RECORD_TYPES) {
@@ -1277,10 +1404,10 @@ describe("searchCmd", () => {
   });
 
   test("--type design --type task sends both hashes on the wire (dedup'd)", async () => {
-    let capturedUrl = "";
+    const capturedUrls: string[] = [];
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
-        capturedUrl = url;
+        capturedUrls.push(url);
         return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
       }
       return { status: 200, body: { ok: true, results: [] } };
@@ -1291,8 +1418,10 @@ describe("searchCmd", () => {
       types: ["design", "task", "design"],
       print: () => {},
     });
-    const parsed = new URL(capturedUrl, "http://example/");
-    const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    const sent = capturedUrls.flatMap((url) => {
+      const parsed = new URL(url, "http://example/");
+      return (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
+    });
     // Order follows the cfg.schemaHashes iteration; assert membership +
     // dedup rather than pinning order.
     expect(new Set(sent)).toEqual(new Set([DESIGN_HASH, TASK_HASH]));
@@ -1778,16 +1907,13 @@ describe("searchCmd", () => {
     }
   });
 
-  test("explicit --min-score still filters server-side and the empty-state path is intact", async () => {
+  test("explicit --min-score still keeps the empty-state path intact", async () => {
     // Sanity check that the weak-note path doesn't displace the existing
-    // explicit `--min-score` contract: the value still rides the wire on
-    // `?min_score=...`, and when the server returns zero rows the user still
-    // sees "no matches" + a hint. The brain here is empty (every /api/query
-    // page is empty), so the hint is the empty-brain "no records yet" form.
-    let capturedUrl = "";
+    // explicit `--min-score` contract: when app-search yields zero rows the
+    // user still sees "no matches" + a hint. The brain here is empty (every
+    // /api/query page is empty), so the hint is the empty-brain form.
     installSequencedMock((url) => {
       if (url.includes("/api/native-index/search")) {
-        capturedUrl = url;
         return { status: 200, body: { ok: true, results: [], user_hash: cfg.userHash } };
       }
       return { status: 200, body: { ok: true, results: [] } };
@@ -1799,7 +1925,6 @@ describe("searchCmd", () => {
       minScore: 0.4,
       print: (l) => lines.push(l),
     });
-    expect(capturedUrl).toContain("min_score=0.4");
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("no matches");
     expect(lines[1]).toMatch(/^hint:\s/);

@@ -66,4 +66,58 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
   return merged;
 }
 
+type LegacySearchHit = {
+  schema_name?: string;
+  schema_display_name?: string | null;
+  key_value?: { hash?: string | null; range?: string | null };
+  value?: string;
+  metadata?: { score?: number; match_type?: string };
+};
+
+export function appSearchAsLegacyNativeIndex(
+  url: string,
+  init?: RequestInit,
+): { url: string; target?: string } | null {
+  if (!url.includes("/api/app/search")) return null;
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : {};
+  const params = new URLSearchParams();
+  if (typeof body.query === "string") params.set("q", body.query);
+  const target = typeof body.target === "string" ? body.target : undefined;
+  if (target) params.set("schemas", target);
+  return { url: `http://localhost/api/native-index/search?${params.toString()}`, target };
+}
+
+export function appSearchBodyFromLegacy(body: unknown, target?: string): unknown {
+  if (!body || typeof body !== "object" || !Array.isArray((body as Record<string, unknown>).results)) {
+    return body;
+  }
+  const b = body as Record<string, unknown>;
+  const results = (b.results as unknown[]).filter((raw) => {
+    if (!target || !raw || typeof raw !== "object") return true;
+    return (raw as LegacySearchHit).schema_name === target;
+  });
+  return {
+    ...b,
+    results: results.map((raw) => {
+      if (!raw || typeof raw !== "object") return raw;
+      const hit = raw as LegacySearchHit;
+      const hash = hit.key_value?.hash ?? "";
+      const value = hit.value ?? "";
+      return {
+        schema_name: hit.schema_name ?? "",
+        schema_display_name: hit.schema_display_name ?? null,
+        score: hit.metadata?.score,
+        key: { hash, range: hit.key_value?.range ?? null },
+        fields: { slug: hash, title: value, body: value },
+        metadata: hit.metadata ?? null,
+        author_pub_key: null,
+      };
+    }),
+  };
+}
+
+export function legacySearchResponseBody(body: unknown, appSearch: { target?: string } | null): unknown {
+  return appSearch ? appSearchBodyFromLegacy(body, appSearch.target) : body;
+}
+
 export { RECORD_TYPES };

@@ -24,7 +24,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { askCmd } from "../../src/commands/ask.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  appSearchAsLegacyNativeIndex,
+  legacySearchResponseBody,
+  buildTestCfg,
+  TEST_HASHES,
+} from "../util.ts";
 
 const realFetch = globalThis.fetch;
 let cacheDir = "";
@@ -77,7 +82,9 @@ function installStub(opts: {
   vectorHits: Record<string, unknown>[];
 }): void {
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : String(input);
+    const rawUrl = typeof input === "string" ? input : String(input);
+    const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
+    const url = appSearch?.url ?? rawUrl;
     if (url.includes("/api/query")) {
       const body = init?.body ? JSON.parse(init.body as string) : undefined;
       const schema = (body as { schema_name: string }).schema_name;
@@ -94,7 +101,7 @@ function installStub(opts: {
     }
     if (url.includes("/api/native-index/search")) {
       return new Response(
-        JSON.stringify({ ok: true, results: opts.vectorHits }),
+        JSON.stringify(legacySearchResponseBody({ ok: true, results: opts.vectorHits }, appSearch)),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
