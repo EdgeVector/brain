@@ -1402,7 +1402,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "`chunk_b64` (multiline/emoji — standard base64 of the UTF-8 bytes), " +
         "or `chunk_path` (a large chunk staged to a file); exactly one is " +
         "required (`text` is accepted as an alias for `chunk` — the natural " +
-        "param name agents reach for). A single blank line separates the " +
+        "param name agents reach for; `body`/`body_path`/`body_b64` are also " +
+        "accepted as put-style aliases). A single blank line separates the " +
         "chunk from a non-empty body unless `raw:true`. Without `type`, " +
         "resolves across every type and errors on an ambiguous slug. Returns " +
         "one line: `appended <n> chars to <type> <slug> (<old> → <new>)`.",
@@ -1426,12 +1427,27 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "to `chunk` when `chunk` is absent. Mutually exclusive with " +
               "`chunk`/`chunk_path`/`chunk_b64`.",
           ),
+        body: z
+          .string()
+          .optional()
+          .describe(
+            "Alias for `chunk`, matching `fbrain_put`'s inline body field. " +
+              "Mapped to `chunk` when `chunk`/`text` are absent. Mutually " +
+              "exclusive with path/base64 chunk sources.",
+          ),
         chunk_path: z
           .string()
           .optional()
           .describe(
             "Absolute path to a UTF-8 file whose contents are appended. Use for " +
               "a large chunk. Mutually exclusive with `chunk`/`chunk_b64`.",
+          ),
+        body_path: z
+          .string()
+          .optional()
+          .describe(
+            "Alias for `chunk_path`, matching `fbrain_put`'s staged body file " +
+              "field. Mapped to `chunk_path` when `chunk_path` is absent.",
           ),
         chunk_b64: z
           .string()
@@ -1440,6 +1456,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             "Standard base64 of the UTF-8 chunk bytes. Use for multiline/emoji " +
               "chunks to avoid JSON escaping issues. Whitespace ignored. " +
               "Mutually exclusive with `chunk`/`chunk_path`.",
+          ),
+        body_b64: z
+          .string()
+          .optional()
+          .describe(
+            "Alias for `chunk_b64`, matching `fbrain_put`'s base64 body field. " +
+              "Mapped to `chunk_b64` when `chunk_b64` is absent.",
           ),
         type: typeEnum
           .optional()
@@ -1692,41 +1715,45 @@ export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: 
 type AppendChunkArgs = {
   chunk?: string;
   // `text` is an alias for `chunk` — the natural param name agents guess.
-  // Both are plain inline strings; `chunk` wins when both are present.
+  // `body` is also accepted to mirror `fbrain_put`'s body/body_path/body_b64
+  // transport names. Canonical chunk* fields win when both are present.
   text?: string;
+  body?: string;
   chunk_path?: string;
+  body_path?: string;
   chunk_b64?: string;
+  body_b64?: string;
 };
 
-// Resolve the append chunk from exactly one of `chunk` (alias: `text`) /
-// `chunk_path` / `chunk_b64`, mirroring `resolvePutBody`'s three-source
-// contract (a path or base64 survives the input-dropping that truncates a
-// long inline value). `text` is folded into `chunk` first (agents naturally
-// reach for `text`); `chunk` wins when both are present. All unset errors —
-// appendCmd separately rejects an empty resolved chunk.
+// Resolve the append chunk from exactly one of `chunk` (aliases: `text`,
+// `body`) / `chunk_path` (alias: `body_path`) / `chunk_b64` (alias:
+// `body_b64`), mirroring `resolvePutBody`'s three-source contract (a path or
+// base64 survives the input-dropping that truncates a long inline value).
+// Aliases are folded into canonical chunk* fields first; canonical names win
+// when both are present. All unset errors — appendCmd separately rejects an
+// empty resolved chunk.
 export function resolveAppendChunk(args: AppendChunkArgs): string {
-  // `text` is an alias for `chunk`: fold it in when `chunk` is absent so the
-  // rest of the mutual-exclusion + source-count logic sees a single inline
-  // source. `chunk` wins when both are present (mirrors `query`/`question`).
-  const inlineChunk = args.chunk ?? args.text;
+  const inlineChunk = args.chunk ?? args.text ?? args.body;
+  const chunkPath = args.chunk_path ?? args.body_path;
+  const chunkB64 = args.chunk_b64 ?? args.body_b64;
   return resolveTextSource({
     inline: inlineChunk,
-    path: args.chunk_path,
-    b64: args.chunk_b64,
+    path: chunkPath,
+    b64: chunkB64,
     tool: "fbrain_append",
     field: "chunk",
     pathField: "chunk_path",
     b64Field: "chunk_b64",
     codePrefix: "chunk",
     multiSourceMessage:
-      "fbrain_append: pass only one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64`.",
+      "fbrain_append: pass only one of `chunk` (aliases `text`/`body`), `chunk_path` (alias `body_path`), or `chunk_b64` (alias `body_b64`).",
     multiSourceHint:
-      "Use `chunk_b64` for inline multiline/emoji chunks, or `chunk_path` for large chunks; do not combine them.",
+      "Use `chunk_b64`/`body_b64` for inline multiline/emoji chunks, or `chunk_path`/`body_path` for large chunks; do not combine source kinds.",
     missingCode: "missing_chunk",
     missingMessage:
-      "fbrain_append: one of `chunk` (alias `text`), `chunk_path`, or `chunk_b64` is required.",
+      "fbrain_append: one of `chunk` (aliases `text`/`body`), `chunk_path` (alias `body_path`), or `chunk_b64` (alias `body_b64`) is required.",
     missingHint:
-      "Pass the text to append as `chunk`/`text` (inline), `chunk_b64` (base64), or `chunk_path` (a staged file).",
+      "Pass the text to append as `chunk`/`text`/`body` (inline), `chunk_b64`/`body_b64` (base64), or `chunk_path`/`body_path` (a staged file).",
     pathHint: "Pass an absolute path to a readable UTF-8 file.",
   })!;
 }
