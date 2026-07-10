@@ -171,6 +171,107 @@ export class CapabilitySession {
       }
     }
   }
+
+  /**
+   * Run a SEARCH closure under the capability contract. As of LastDB 0.22.4 the
+   * node gates `/api/app/search` on a held app capability (unlike other reads,
+   * which still bypass enforcement), so search must replay the cached
+   * capability exactly like a write does — otherwise the header-less request is
+   * rejected `403 {reason:"capability_required"}`.
+   *
+   * It differs from {@link runWrite} in two deliberate ways:
+   *
+   *   1. It attaches a cached capability BEST-EFFORT (load-only) and never
+   *      forces a consent handshake up front. An older node that does not gate
+   *      search returns 200 (or a 404 the caller locally falls back on), and
+   *      dragging that path through an `acquire` it cannot answer would break
+   *      search on pre-0.22.4 nodes. The handshake fires only in reaction to an
+   *      actual capability rejection — which a pre-0.22.4 node never emits for
+   *      a read.
+   *   2. It also handles the header-less rejection reason `capability_required`
+   *      (returned when the node gates search but no capability header was
+   *      sent). That reason is NOT one of the SDK's eight discriminated
+   *      per-write denial reasons, so `runWrite`'s classifier ignores it; here
+   *      it is treated like `consent_required` — acquire once, then retry. A
+   *      cache hit means this branch is never reached.
+   *
+   * Re-acquire and retry-once each happen AT MOST once.
+   */
+  async runSearch<T>(fn: () => Promise<T>): Promise<T> {
+    await this.loadCachedIfPresent();
+    let reacquired = false;
+    let retried = false;
+    for (;;) {
+      try {
+        return await fn();
+      } catch (err) {
+        // Header-less "the node gates search but you sent no capability" — the
+        // only recovery is to acquire a grant and retry (consent handshake).
+        if (isCapabilityRequired(err)) {
+          if (!reacquired) {
+            reacquired = true;
+            this.blob = null;
+            await this.acquire();
+            continue;
+          }
+          throw err;
+        }
+
+        // A discriminated denial reason means the capability we DID attach was
+        // rejected (stale/expired/wrong-node/replay): apply the write contract.
+        const reason = capabilityReasonOf(err);
+        if (reason === null) throw err; // not a capability 403 — propagate
+        const reaction = reactionFor(
+          reason,
+          err instanceof FbrainError ? toReactionDetail(err.capabilityDetail) : undefined,
+        );
+
+        if (reaction.discardToken) {
+          this.blob = null;
+          await this.opts.store.clear(this.opts.nodeUrl);
+        }
+        if (reaction.reacquire && !reacquired) {
+          reacquired = true;
+          await this.acquire();
+          continue;
+        }
+        if (reaction.retryOnce && !retried) {
+          retried = true;
+          continue;
+        }
+
+        throw new FbrainError({
+          code: `capability_${reason}`,
+          message: reaction.surface ?? `fbrain search rejected: ${reason}.`,
+          capabilityReason: reason,
+          ...(err instanceof FbrainError && err.capabilityDetail
+            ? { capabilityDetail: err.capabilityDetail }
+            : {}),
+        });
+      }
+    }
+  }
+
+  // Load a cached, JCS-integrity-valid capability into the session WITHOUT
+  // acquiring one — the search path's best-effort attach. A cache miss leaves
+  // `blob` null so the first request goes out header-less (correct for a node
+  // that doesn't gate reads; the `capability_required` reaction handles a node
+  // that does).
+  private async loadCachedIfPresent(): Promise<void> {
+    if (this.blob !== null) return;
+    const cached = await this.loadValidCached();
+    if (cached !== null) this.blob = cached.blob;
+  }
+}
+
+/**
+ * True when `err` is the node's header-less search rejection
+ * (`403 {reason:"capability_required"}`). This reason is intentionally NOT in
+ * the SDK's eight discriminated per-write denial reasons, so it needs its own
+ * predicate; it means "this node gates search but no capability was presented".
+ */
+function isCapabilityRequired(err: unknown): boolean {
+  return err instanceof FbrainError && err.capabilityReason === "capability_required";
 }
 
 function capabilityReasonOf(err: unknown): ReturnType<typeof reasonOrNull> {

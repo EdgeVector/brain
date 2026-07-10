@@ -1,4 +1,4 @@
-// Capability-aware NodeClient factory for write commands.
+// Capability-aware NodeClient factories for write commands AND for search.
 //
 // `newWriteNodeClient` returns a NodeClient that behaves exactly like
 // `newNodeClient` for reads, but transparently:
@@ -12,10 +12,18 @@
 // / reindex / migrate) use this instead of `newNodeClient` and need no other
 // change — the capability lifecycle lives entirely here.
 //
-// Reads stay on the plain `newNodeClient` (capability provider wired in, but
-// reads never call it). Enforcement is per the node's APP_IDENTITY_ENFORCE
-// flag; when off, the node ignores the headers and writes land as NodeOwner —
-// so attaching them unconditionally is safe.
+// `newSearchNodeClient` is the read counterpart for `/api/app/search`, which
+// LastDB 0.22.4 moved BEHIND capability enforcement (a header-less search now
+// gets `403 {reason:"capability_required"}` where older nodes bypassed reads).
+// It wraps `search` under the capability contract — best-effort replay of the
+// cached grant, then acquire+retry on a genuine rejection — so `fbrain ask` /
+// `fbrain search` and the MCP `fbrain_ask` / `fbrain_search` tools keep working
+// on an enforcing node. All OTHER reads (get / list / query / raw) still bypass
+// enforcement on the node, so they stay on the plain `newReadClientFromCfg`.
+//
+// Enforcement is per the node's APP_IDENTITY_ENFORCE flag; when off, the node
+// ignores the headers and both writes and searches land as NodeOwner — so
+// attaching them unconditionally is safe.
 
 import {
   newNodeClient,
@@ -127,6 +135,52 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
   return { node, session };
 }
 
+/**
+ * The search counterpart of {@link newWriteNodeClient}. Returns a NodeClient
+ * whose `search` runs under the capability contract (see
+ * `CapabilitySession.runSearch`): a cached grant is replayed best-effort, and a
+ * genuine capability rejection triggers acquire+retry. Every OTHER method
+ * delegates straight through to the plain client — get/list/query/raw are not
+ * capability-gated on the node, so they stay header-less.
+ *
+ * Enforcement off (or `FBRAIN_APP_IDENTITY_ENFORCE` unset-to-off) → a plain
+ * client with no capability headers, exactly like the write factory.
+ */
+export function newSearchNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
+  const store = opts.store ?? defaultCapabilityStore();
+
+  if (!appIdentityEnforceEnabled()) {
+    const plainOpts: Parameters<typeof newNodeClient>[0] = {
+      baseUrl: opts.baseUrl,
+      userHash: opts.userHash,
+    };
+    if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
+    if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
+    const plain = newNodeClient(plainOpts);
+    const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
+    return { node: plain, session: idleSession };
+  }
+
+  const session: CapabilitySession = new CapabilitySession(buildSessionOpts(opts, store, () => base));
+  const baseOpts: Parameters<typeof newNodeClient>[0] = {
+    baseUrl: opts.baseUrl,
+    userHash: opts.userHash,
+    capability: session.provider(),
+  };
+  if (opts.verbose !== undefined) baseOpts.verbose = opts.verbose;
+  if (opts.socketPath !== undefined) baseOpts.socketPath = opts.socketPath;
+  const base = newNodeClient(baseOpts);
+
+  const node: NodeClient = {
+    ...base,
+    async search(query, searchOpts) {
+      return session.runSearch(() => base.search(query, searchOpts));
+    },
+  };
+
+  return { node, session };
+}
+
 // CapabilitySession needs a ConsentTransport, which is built from the base
 // node client — but the base client is constructed AFTER the session (so the
 // provider can close over the session). `getBase` defers that resolution: the
@@ -174,4 +228,21 @@ export function newWriteClientFromCfg(
   if (verbose !== undefined) opts.verbose = verbose;
   if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;
   return newWriteNodeClient(opts);
+}
+
+// The search analogue of `newWriteClientFromCfg`: `fbrain ask` / `fbrain search`
+// and the post-write vector-index confirmation open a capability-aware search
+// client from config in one line. Returns the same `{ node, session }` shape;
+// callers use `.node`.
+export function newSearchClientFromCfg(
+  cfg: Config,
+  verbose?: Verbose,
+): WriteNodeClient {
+  const opts: WriteNodeClientOptions = {
+    baseUrl: cfg.nodeUrl,
+    userHash: cfg.userHash,
+  };
+  if (verbose !== undefined) opts.verbose = verbose;
+  if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;
+  return newSearchNodeClient(opts);
 }

@@ -1,7 +1,8 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
 import type { NodeClient, QueryRow } from "./client.ts";
-import { FbrainError, isLoopbackNodeUrl, newReadClientFromCfg } from "./client.ts";
+import { FbrainError, isLoopbackNodeUrl } from "./client.ts";
+import { newSearchClientFromCfg } from "./write-context.ts";
 import type { Config } from "./config.ts";
 import {
   RECORDS,
@@ -741,7 +742,11 @@ export async function confirmVectorIndexed(
   // tight local create→search; keep remote writes cheap (no extra round-trips).
   if (!isLoopbackNodeUrl(cfg.nodeUrl)) return { indexPending: false };
   try {
-    const node = newReadClientFromCfg(cfg);
+    // Capability-aware: the confirmation probe calls `/api/app/search`, which
+    // LastDB 0.22.4 gates on a held capability. The write that just ran already
+    // cached the grant, so this replays it best-effort (a miss degrades to
+    // indexPending, never throws — same swallow as before).
+    const node = newSearchClientFromCfg(cfg).node;
     const schemaHash = schemaHashFor(type, cfg);
     const probe = title.trim() || slug;
     const visible = await verifyVectorIndexed(node, schemaHash, slug, probe, options);
