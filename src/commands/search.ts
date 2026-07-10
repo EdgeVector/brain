@@ -8,13 +8,13 @@
 // and silently skip stale hits (record deleted since indexing).
 
 import {
-  newReadClientFromCfg,
   type NativeIndexHit,
   type NodeClient,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
   recordTypeForHash,
 } from "../client.ts";
+import { newSearchClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   capitalize,
@@ -336,7 +336,10 @@ function minimalRecord(
 
 export async function searchCmd(opts: SearchOptions): Promise<void> {
   const { print, printErr } = resolvePrintSinks(opts);
-  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+  // Capability-aware client: `/api/app/search` is capability-gated on LastDB
+  // 0.22.4. Hit hydration (resolveNativeHits) rides the same client and its
+  // non-search reads delegate through header-less.
+  const node = newSearchClientFromCfg(opts.cfg, opts.verbose).node;
 
   const clientOpts: ClientSearchOptions = {};
   if (opts.exact) clientOpts.exact = true;

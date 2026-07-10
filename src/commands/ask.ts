@@ -26,11 +26,11 @@
 // notice).
 
 import {
-  newReadClientFromCfg,
   recordTypeForHash,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
 } from "../client.ts";
+import { newSearchClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
   capitalize,
@@ -226,7 +226,10 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const queries = [opts.query, ...expansions];
 
   // ── Stage 1: BM25 corpus build (cached, cache-aware FETCH) ───────────
-  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+  // Capability-aware client: `ask` calls `/api/app/search` (the vector stage),
+  // which LastDB 0.22.4 gates on a held app capability. The non-search reads
+  // (the BM25 corpus `queryAll`) delegate straight through and stay header-less.
+  const node = newSearchClientFromCfg(opts.cfg, opts.verbose).node;
 
   const bm25 = await loadOrBuildBm25Index(node, opts.cfg, activeTypes, {
     verbose: opts.verbose,
