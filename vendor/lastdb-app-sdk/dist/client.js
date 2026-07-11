@@ -1,5 +1,5 @@
 /**
- * The FoldDB runtime app client.
+ * The LastDB runtime app client.
  *
  * Wraps the node's production `/api/*` dialect: connect → request-consent →
  * poll → query/mutation-with-capability. Every method maps the node's
@@ -7,7 +7,7 @@
  *
  * Surface verified against `origin/main`:
  * - consent flow handlers: `fold_db_node/src/server/routes/apps.rs`
- * - data path handlers: `fold_dev_node` `app_endpoints.rs` (the dev mirror of
+ * - data path handlers: `fold_db_node::dev_mode` `app_endpoints.rs` (the dev mirror of
  *   production `fold_db_node`'s control-socket route table)
  * - capability header: `fold_db_node/src/handlers/caller.rs`
  *   (`X-App-Capability` = base64 JSON CapabilityToken, `X-Capability-Ts` =
@@ -16,7 +16,7 @@
 import { capabilityStoreKey, defaultCapabilityStore, } from './capabilityStore.js';
 import { verifyCapabilityBlob } from './capabilityToken.js';
 import { AppInSandboxError, CapabilityDeniedError, CapabilityRevokedError, CapabilityVerificationError, ConsentDeniedError, ConsentExpiredError, ConsentRequestNotFoundError, ConsentTimeoutError, InvalidScopeError, PermissionDeniedError, RequestRejectedError, UnexpectedResponseError, UnknownAppError, } from './errors.js';
-import { httpTransport, udsTransport } from './transport.js';
+import { discoverTransport, httpTransport, udsTransport, } from './transport.js';
 /** The HTTP header carrying `base64(JSON CapabilityToken)`. */
 const CAPABILITY_HEADER = 'X-App-Capability';
 /** The HTTP header carrying the per-request capability timestamp (epoch secs). */
@@ -35,10 +35,23 @@ function nowEpochSecs() {
     return String(Math.floor(Date.now() / 1000));
 }
 /**
- * Connect to a FoldDB node. Provide exactly one of `baseUrl` (HTTP) or
+ * Connect to a LastDB node. Provide exactly one of `baseUrl` (HTTP) or
  * `socketPath` (Unix-domain socket) — the transport is chosen by which is
  * present. Attempts to auto-load a stored capability for `appId` unless one
  * is supplied inline.
+ *
+ * **Socket-first discovery.** When you pass `baseUrl` (the local-node case),
+ * the SDK PREFERS the node's Unix-domain data-plane socket and falls back to
+ * the `baseUrl` TCP listener only when no socket file is present. This follows
+ * the discovery order the Rust client uses, with the brand-forward
+ * `LASTDB_SOCKET_PATH` preferred ahead of the Rust client's
+ * `FOLDDB_SOCKET_PATH` (`LASTDB_SOCKET_PATH` → `FOLDDB_SOCKET_PATH` legacy
+ * alias → `FOLDDB_SOCK` legacy alias → `<data_dir>/folddb.sock` → TCP),
+ * making the
+ * socket the normal app path while keeping TCP working mid-migration. Opt out
+ * with `connect({ baseUrl, discoverSocket: false })` to force the TCP listener
+ * (e.g. against a remote/non-local node, or a browser-style HTTP path). An
+ * explicit `socketPath` always uses that socket verbatim with no discovery.
  */
 export async function connect(options) {
     const { appId, baseUrl, socketPath } = options;
@@ -46,9 +59,23 @@ export async function connect(options) {
         throw new Error('connect requires exactly one of { baseUrl } or { socketPath }');
     }
     const defaultHeaders = options.defaultHeaders ?? {};
-    const transport = baseUrl
-        ? httpTransport(baseUrl, defaultHeaders)
-        : udsTransport(socketPath, defaultHeaders);
+    const discoverSocket = options.discoverSocket ?? true;
+    let transport;
+    if (socketPath) {
+        // An explicit socket: use it verbatim, no discovery.
+        transport = udsTransport(socketPath, defaultHeaders);
+    }
+    else if (discoverSocket) {
+        // Local-node case: prefer the data-plane socket, fall back to the
+        // supplied TCP base URL when no socket file exists.
+        transport = discoverTransport({
+            fallbackBaseUrl: baseUrl,
+            defaultHeaders,
+        });
+    }
+    else {
+        transport = httpTransport(baseUrl, defaultHeaders);
+    }
     // The capability store keys by (appId, nodeTarget) so a capability minted
     // by one node is never replayed against another (gap #2). The transport's
     // `target` is the canonical node string (`http://…` for TCP, `unix:…` for
@@ -83,10 +110,10 @@ export async function connect(options) {
             capability = null;
         }
     }
-    return new FoldDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability });
+    return new LastDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability });
 }
-/** A connected FoldDB app client. Construct via {@link connect}. */
-export class FoldDbClient {
+/** A connected LastDB app client. Construct via {@link connect}. */
+export class LastDbClient {
     appId;
     transport;
     store;
@@ -252,7 +279,7 @@ export class FoldDbClient {
      * check `result.page?.hasMore` or use {@link queryAll} to drain it.
      * `filter.limit`/`filter.offset` are forwarded verbatim as the request's
      * top-level pagination fields, and only when set. Both the production node
-     * and the dev node (`fold_dev_node`) honor them with production-parity
+     * and the dev node (`fold_db_node::dev_mode`) honor them with production-parity
      * semantics (default 100, clamp 1000, `total_count`/`has_more` metadata).
      */
     async query(schemaName, filter = {}) {
@@ -268,6 +295,9 @@ export class FoldDbClient {
         }
         if (filter.offset !== undefined) {
             body.offset = filter.offset;
+        }
+        if (filter.cursor !== undefined) {
+            body.cursor = filter.cursor;
         }
         const res = await this.transport.send('POST', '/api/query', {
             headers: this.capabilityHeaders(),
@@ -290,7 +320,7 @@ export class FoldDbClient {
      * truncation stays visible.
      *
      * Works against both node kinds: production `fold_db_node` and the dev node
-     * (`fold_dev_node`) both paginate `/api/query` with the same default/clamp
+     * (`fold_db_node::dev_mode`) both paginate `/api/query` with the same default/clamp
      * and `page` metadata, so the drain follows `page.hasMore` identically on
      * either.
      */
@@ -306,12 +336,13 @@ export class FoldDbClient {
         let schema = '';
         let lastPage = null;
         let offset = 0;
+        let cursor = null;
         let truncatedByMaxRows = false;
         for (;;) {
             const page = await this.query(schemaName, {
                 ...filter,
                 limit: pageSize,
-                offset,
+                ...(cursor === null ? { offset } : { cursor }),
             });
             schema = page.schema || schema;
             lastPage = page.page;
@@ -326,7 +357,10 @@ export class FoldDbClient {
                 truncatedByMaxRows = true;
                 break;
             }
-            offset += page.rows.length;
+            cursor = page.page?.nextCursor ?? null;
+            if (cursor === null) {
+                offset += page.rows.length;
+            }
             if (page.rows.length === 0) {
                 // Defensive: a node claiming hasMore while returning an empty page
                 // would otherwise loop forever.
@@ -345,6 +379,7 @@ export class FoldDbClient {
                     limit: pageSize,
                     offset: 0,
                     hasMore: truncatedByMaxRows,
+                    nextCursor: truncatedByMaxRows ? lastPage.nextCursor : null,
                 },
         };
     }
@@ -458,11 +493,18 @@ export class FoldDbClient {
     }
 }
 /**
+ * @deprecated Renamed to {@link LastDbClient}. Kept as an exported value + type
+ * alias so mid-port consumers keep compiling (`new FoldDbClient(...)` and
+ * `: FoldDbClient` both resolve to `LastDbClient`); removed at the adoption
+ * capstone.
+ */
+export const FoldDbClient = LastDbClient;
+/**
  * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
  * full per-row envelope (gap #3).
  *
  * The node returns its rows under `results` (production `fold_db_node`) or
- * `rows` (the `fold_dev_node` mirror); both carry per-key objects shaped
+ * `rows` (the `fold_db_node::dev_mode` mirror); both carry per-key objects shaped
  * `{ key, fields, metadata, author_pub_key }`. Each row is normalized to a
  * {@link QueryRow}. A bare field-map row (a node that pre-dates the envelope)
  * is still accepted: its `key`/`metadata`/`authorPubKey` come back empty/null
@@ -496,6 +538,7 @@ function parseQueryPage(body, returnedRows) {
     const limit = body['limit'];
     const offset = body['offset'];
     const hasMore = body['has_more'];
+    const nextCursor = parseKeyValue(body['next_cursor']);
     if (typeof totalCount !== 'number' ||
         typeof limit !== 'number' ||
         typeof offset !== 'number' ||
@@ -509,6 +552,7 @@ function parseQueryPage(body, returnedRows) {
         limit,
         offset,
         hasMore,
+        nextCursor,
     };
 }
 /** Whether a value is a non-array JSON object. */
@@ -560,19 +604,25 @@ function parseQueryRow(raw) {
  * null, unrecognized) yields the empty key.
  */
 function parseRowKey(rawKey) {
+    const keyValue = parseKeyValue(rawKey);
+    if (keyValue !== null) {
+        const key = keyValue.hash !== null && keyValue.range !== null
+            ? `${keyValue.hash}:${keyValue.range}`
+            : (keyValue.hash ?? keyValue.range ?? '');
+        return { key, keyValue };
+    }
     if (typeof rawKey === 'string') {
         return { key: rawKey, keyValue: null };
     }
-    if (isObject(rawKey)) {
-        const hash = typeof rawKey['hash'] === 'string' ? rawKey['hash'] : null;
-        const range = typeof rawKey['range'] === 'string' ? rawKey['range'] : null;
-        if (hash !== null || range !== null) {
-            const keyValue = { hash, range };
-            const key = hash !== null && range !== null ? `${hash}:${range}` : (hash ?? range ?? '');
-            return { key, keyValue };
-        }
-    }
     return { key: '', keyValue: null };
+}
+function parseKeyValue(rawKey) {
+    if (!isObject(rawKey)) {
+        return null;
+    }
+    const hash = typeof rawKey['hash'] === 'string' ? rawKey['hash'] : null;
+    const range = typeof rawKey['range'] === 'string' ? rawKey['range'] : null;
+    return hash !== null || range !== null ? { hash, range } : null;
 }
 /**
  * Parse a `200` `/api/app/search` body into a {@link SearchResult}.

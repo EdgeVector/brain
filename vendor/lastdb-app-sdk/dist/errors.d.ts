@@ -1,5 +1,5 @@
 /**
- * Typed error taxonomy for the FoldDB app SDK.
+ * Typed error taxonomy for the LastDB app SDK.
  *
  * Every class here maps 1:1 to a discriminated response the node actually
  * returns — there is no catch-all "request failed". The mapping is verified
@@ -14,7 +14,7 @@
  *                          `403 {status: "denied"}` / `403 {status: "revoked"}`,
  *                          `408 {status: "expired"}`,
  *                          `404 {status: "unknown"}`.
- * - Data path (`fold_dev_node` `app_endpoints.rs`, production
+ * - Data path (`fold_db_node::dev_mode` `app_endpoints.rs`, production
  *   `fold_db_node` operation layer): `403 {kind: "permission_denied",
  *   error: "<discriminated reason>"}` where the reason text distinguishes
  *   namespace-denied / unverified-identity / write-denied / revoked, and

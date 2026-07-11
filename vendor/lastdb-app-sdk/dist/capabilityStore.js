@@ -10,7 +10,7 @@
  * - macOS: the `security` binary (`add-generic-password` / `find-generic-password`).
  * - Other platforms / headless: a `0o600` file under `$FOLDDB_APP_SDK_HOME`
  *   (default `~/.folddb-app-sdk/capabilities/`), the same SSH-like model the
- *   node uses when its `os-keychain` feature is off.
+ *   node uses when its `removed-keychain-feature` feature is off.
  *
  * ## Per-node keying (gap #2)
  *

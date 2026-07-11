@@ -1,5 +1,5 @@
 /**
- * The FoldDB runtime app client.
+ * The LastDB runtime app client.
  *
  * Wraps the node's production `/api/*` dialect: connect → request-consent →
  * poll → query/mutation-with-capability. Every method maps the node's
@@ -7,7 +7,7 @@
  *
  * Surface verified against `origin/main`:
  * - consent flow handlers: `fold_db_node/src/server/routes/apps.rs`
- * - data path handlers: `fold_dev_node` `app_endpoints.rs` (the dev mirror of
+ * - data path handlers: `fold_db_node::dev_mode` `app_endpoints.rs` (the dev mirror of
  *   production `fold_db_node`'s control-socket route table)
  * - capability header: `fold_db_node/src/handlers/caller.rs`
  *   (`X-App-Capability` = base64 JSON CapabilityToken, `X-Capability-Ts` =
@@ -16,7 +16,7 @@
 import { type CapabilityStore } from './capabilityStore.js';
 import { type Transport } from './transport.js';
 import type { ConnectOptions, ConsentScope, MutationOp, MutationResult, QueryAllOptions, QueryFilter, QueryResult, RequestConsentResult, SearchOptions, SearchResult } from './types.js';
-/** Options for {@link FoldDbClient.awaitConsent}. */
+/** Options for {@link LastDbClient.awaitConsent}. */
 export interface AwaitConsentOptions {
     /** Hard client-side ceiling. Throws {@link ConsentTimeoutError} past it. */
     timeoutMs?: number;
@@ -24,19 +24,37 @@ export interface AwaitConsentOptions {
     pollIntervalMs?: number;
 }
 /**
- * Connect to a FoldDB node. Provide exactly one of `baseUrl` (HTTP) or
+ * Connect to a LastDB node. Provide exactly one of `baseUrl` (HTTP) or
  * `socketPath` (Unix-domain socket) — the transport is chosen by which is
  * present. Attempts to auto-load a stored capability for `appId` unless one
  * is supplied inline.
+ *
+ * **Socket-first discovery.** When you pass `baseUrl` (the local-node case),
+ * the SDK PREFERS the node's Unix-domain data-plane socket and falls back to
+ * the `baseUrl` TCP listener only when no socket file is present. This follows
+ * the discovery order the Rust client uses, with the brand-forward
+ * `LASTDB_SOCKET_PATH` preferred ahead of the Rust client's
+ * `FOLDDB_SOCKET_PATH` (`LASTDB_SOCKET_PATH` → `FOLDDB_SOCKET_PATH` legacy
+ * alias → `FOLDDB_SOCK` legacy alias → `<data_dir>/folddb.sock` → TCP),
+ * making the
+ * socket the normal app path while keeping TCP working mid-migration. Opt out
+ * with `connect({ baseUrl, discoverSocket: false })` to force the TCP listener
+ * (e.g. against a remote/non-local node, or a browser-style HTTP path). An
+ * explicit `socketPath` always uses that socket verbatim with no discovery.
  */
-export declare function connect(options: ConnectOptions): Promise<FoldDbClient>;
-/** Behavior switches for {@link FoldDbClient} (set via {@link ConnectOptions}). */
-export interface FoldDbClientOptions {
+export declare function connect(options: ConnectOptions): Promise<LastDbClient>;
+/** Behavior switches for {@link LastDbClient} (set via {@link ConnectOptions}). */
+export interface LastDbClientOptions {
     /** See `ConnectOptions.verifyCapability`. Default `false`. */
     verifyCapability?: boolean;
 }
-/** A connected FoldDB app client. Construct via {@link connect}. */
-export declare class FoldDbClient {
+/**
+ * @deprecated Renamed to {@link LastDbClientOptions}. Kept as an alias so
+ * mid-port consumers keep compiling; removed at the adoption capstone.
+ */
+export type FoldDbClientOptions = LastDbClientOptions;
+/** A connected LastDB app client. Construct via {@link connect}. */
+export declare class LastDbClient {
     readonly appId: string;
     private readonly transport;
     private readonly store;
@@ -50,7 +68,7 @@ export declare class FoldDbClient {
     /** The node-scoped capability-store key: `capabilityStoreKey(appId, node)`. */
     storeKey: string, 
     /** The canonical node target this client is bound to (transport `target`). */
-    nodeTarget: string, options?: FoldDbClientOptions);
+    nodeTarget: string, options?: LastDbClientOptions);
     /** Where this client is pointed (for diagnostics). */
     get target(): string;
     /** Whether a capability is currently loaded. */
@@ -96,7 +114,7 @@ export declare class FoldDbClient {
      * check `result.page?.hasMore` or use {@link queryAll} to drain it.
      * `filter.limit`/`filter.offset` are forwarded verbatim as the request's
      * top-level pagination fields, and only when set. Both the production node
-     * and the dev node (`fold_dev_node`) honor them with production-parity
+     * and the dev node (`fold_db_node::dev_mode`) honor them with production-parity
      * semantics (default 100, clamp 1000, `total_count`/`has_more` metadata).
      */
     query(schemaName: string, filter?: QueryFilter): Promise<QueryResult>;
@@ -112,11 +130,11 @@ export declare class FoldDbClient {
      * truncation stays visible.
      *
      * Works against both node kinds: production `fold_db_node` and the dev node
-     * (`fold_dev_node`) both paginate `/api/query` with the same default/clamp
+     * (`fold_db_node::dev_mode`) both paginate `/api/query` with the same default/clamp
      * and `page` metadata, so the drain follows `page.hasMore` identically on
      * either.
      */
-    queryAll(schemaName: string, filter?: Omit<QueryFilter, 'limit' | 'offset'>, opts?: QueryAllOptions): Promise<QueryResult>;
+    queryAll(schemaName: string, filter?: Omit<QueryFilter, 'limit' | 'offset' | 'cursor'>, opts?: QueryAllOptions): Promise<QueryResult>;
     /**
      * `POST /api/mutation`. Writes one row into `schemaName`. Auto-attaches the
      * capability headers when one is loaded.
@@ -153,11 +171,23 @@ export declare class FoldDbClient {
     private errorText;
 }
 /**
+ * @deprecated Renamed to {@link LastDbClient}. Kept as an exported value + type
+ * alias so mid-port consumers keep compiling (`new FoldDbClient(...)` and
+ * `: FoldDbClient` both resolve to `LastDbClient`); removed at the adoption
+ * capstone.
+ */
+export declare const FoldDbClient: typeof LastDbClient;
+/**
+ * @deprecated Renamed to {@link LastDbClient}. Alias kept for mid-port
+ * consumers; removed at the adoption capstone.
+ */
+export type FoldDbClient = LastDbClient;
+/**
  * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
  * full per-row envelope (gap #3).
  *
  * The node returns its rows under `results` (production `fold_db_node`) or
- * `rows` (the `fold_dev_node` mirror); both carry per-key objects shaped
+ * `rows` (the `fold_db_node::dev_mode` mirror); both carry per-key objects shaped
  * `{ key, fields, metadata, author_pub_key }`. Each row is normalized to a
  * {@link QueryRow}. A bare field-map row (a node that pre-dates the envelope)
  * is still accepted: its `key`/`metadata`/`authorPubKey` come back empty/null

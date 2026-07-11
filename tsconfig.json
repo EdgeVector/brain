@@ -28,21 +28,21 @@
 
     "allowImportingTsExtensions": true,
 
-    // The @folddb/app-sdk is vendored as a committed prebuilt directory under
+    // The @lastdb/app-sdk is vendored as a committed prebuilt directory under
     // vendor/ rather than installed as a package. A relative `file:` dependency
     // does NOT survive a `bun add github:EdgeVector/fbrain` install — bun extracts
     // the repo tarball but never runs a nested install for fbrain's own file:
-    // deps, so no node_modules/@folddb/app-sdk symlink is created and the bare
-    // specifier fails to resolve at runtime. Resolving `@folddb/app-sdk` via a
+    // deps, so no node_modules/@lastdb/app-sdk symlink is created and the bare
+    // specifier fails to resolve at runtime. Resolving `@lastdb/app-sdk` via a
     // tsconfig path alias instead removes the install-time dependency entirely:
     // bun honors these paths relative to the ENTRYPOINT's directory (verified for
     // a globally-installed bin run from any cwd), so it resolves whether fbrain is
     // a local clone or installed under node_modules/fbrain/ from a github:
-    // specifier. To refresh the SDK, replace vendor/folddb-app-sdk/ with a freshly
-    // unpacked @folddb/app-sdk tarball (tar xzf … --strip-components=1).
+    // specifier. To refresh the SDK, replace vendor/lastdb-app-sdk/ with a freshly
+    // unpacked @lastdb/app-sdk tarball (tar xzf … --strip-components=1).
     "baseUrl": ".",
     "paths": {
-      "@folddb/app-sdk": ["./vendor/folddb-app-sdk"]
+      "@lastdb/app-sdk": ["./vendor/lastdb-app-sdk"]
     }
   },
   "include": ["src/**/*", "test/**/*"],

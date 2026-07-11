@@ -5,8 +5,8 @@
 // every Error Registry row maps to an actionable message in exactly
 // one place.
 //
-// As of the @folddb/app-sdk port, the app data path rides the SDK's
-// `FoldDbClient` — the same wire client every FoldDB app uses — with the SDK's
+// As of the @lastdb/app-sdk port, the app data path rides the SDK's
+// `LastDbClient` — the same wire client every LastDB app uses — with the SDK's
 // typed errors translated back into fbrain's FbrainError registry (see
 // `mapSdkDataError`). That covers consent, query/queryAll, mutation, and
 // app-scoped search. The remaining hand-rolled node surface is deliberately
@@ -22,7 +22,7 @@ import { dirname, isAbsolute, join } from "node:path";
 
 import {
   CapabilityDeniedError,
-  FoldDbClient,
+  LastDbClient,
   PermissionDeniedError,
   RequestRejectedError,
   TransportError,
@@ -44,7 +44,7 @@ import {
   type QueryRow as SdkQueryRow,
   type SearchHit as SdkSearchHit,
   type Transport as SdkTransport,
-} from "@folddb/app-sdk";
+} from "@lastdb/app-sdk";
 
 import type { Config } from "./config.ts";
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
@@ -972,8 +972,8 @@ export function newNodeClient(opts: {
   // A fresh, cheap SDK client per call: construction is pure object wiring
   // (no IO), and per-call construction is how the per-write capability blob
   // (re-acquired mid-session by CapabilitySession) stays current.
-  const sdkClient = (blob: string | null, forAppId: string = appId): FoldDbClient =>
-    new FoldDbClient(
+  const sdkClient = (blob: string | null, forAppId: string = appId): LastDbClient =>
+    new LastDbClient(
       forAppId,
       sdkTransport,
       sdkStore,
@@ -2369,7 +2369,7 @@ function connectionError(
 }
 
 // ---------------------------------------------------------------------------
-// @folddb/app-sdk glue
+// @lastdb/app-sdk glue
 // ---------------------------------------------------------------------------
 
 /**
@@ -2502,7 +2502,7 @@ function parseScope(scope: string): ConsentScope {
 }
 
 /**
- * Translate an @folddb/app-sdk typed error back into fbrain's FbrainError
+ * Translate an @lastdb/app-sdk typed error back into fbrain's FbrainError
  * registry. The SDK discriminates exactly what `mapNodeError`'s dispatch
  * table reads off the raw response, so each arm reconstructs the body shape
  * the node sent and funnels through `mapNodeError` — keeping the registry the
@@ -2518,7 +2518,7 @@ function parseScope(scope: string): ConsentScope {
  * - `TransportError` → fbrain's `service_unreachable` with the start-the-node
  *   hint.
  */
-// True when an @folddb/app-sdk error represents the node's
+// True when an @lastdb/app-sdk error represents the node's
 // `transport_not_attested` 403 — the signal that this transport's owner session
 // is stale (a restarted node dropped its in-memory token). The node may carry
 // the discriminator in either `reason` (→ PermissionDeniedError) or `error` (→

@@ -1,5 +1,5 @@
 /**
- * Wire types for the FoldDB runtime `/api/*` surface.
+ * Wire types for the LastDB runtime `/api/*` surface.
  *
  * These mirror the JSON the node accepts and returns — confirmed against the
  * handlers on `origin/main`. We do NOT invent fields the node would reject;

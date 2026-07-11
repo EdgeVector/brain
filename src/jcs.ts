@@ -1,6 +1,6 @@
 // RFC 8785 JSON Canonicalization Scheme (JCS).
 //
-// As of the @folddb/app-sdk port, the implementation lives in the SDK
+// As of the @lastdb/app-sdk port, the implementation lives in the SDK
 // (`fold_dev_node/sdk/typescript/src/jcs.ts`) — the same canonicalizer every
 // FoldDB app uses, pinned byte-for-byte against the Rust
 // `app_identity_crypto::canonicalize` golden vectors
@@ -13,5 +13,5 @@
 // This module is a re-export shim so fbrain call sites keep one import
 // surface (`src/jcs.ts`) for canonicalization.
 
-export { canonicalize, canonicalizeBytes, JcsError } from "@folddb/app-sdk";
-export type { JsonValue } from "@folddb/app-sdk";
+export { canonicalize, canonicalizeBytes, JcsError } from "@lastdb/app-sdk";
+export type { JsonValue } from "@lastdb/app-sdk";

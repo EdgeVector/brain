@@ -1,5 +1,5 @@
 /**
- * Wire types for the FoldDB runtime `/api/*` surface.
+ * Wire types for the LastDB runtime `/api/*` surface.
  *
  * These mirror the JSON the node accepts and returns — confirmed against the
  * handlers on `origin/main`. We do NOT invent fields the node would reject;
@@ -33,7 +33,7 @@ export interface KeyValue {
  * `results` array carries one object per result key shaped
  * `{ key, fields, metadata, author_pub_key }` — see
  * `fold_db_node` `execute_query_json_internal` (the production
- * `/api/query` row builder) and `fold_dev_node` `app_endpoints::api_query`.
+ * `/api/query` row builder) and `fold_db_node::dev_mode` `app_endpoints::api_query`.
  *
  * A real app needs `key` to update/delete a specific row, and typically
  * `authorPubKey` + `metadata` for provenance — flattening to bare `fields`
@@ -44,7 +44,7 @@ export interface QueryRow {
      * The row's storage key rendered to a string. Production `fold_db_node`
      * returns `key` as a structured `{hash, range}` object; the SDK renders it
      * the same way fold_db's `KeyValue::Display` does (`"hash:range"`,
-     * `"hash"`, or `"range"`). A dev node (`fold_dev_node`) already sends the
+     * `"hash"`, or `"range"`). A dev node (`fold_db_node::dev_mode`) already sends the
      * rendered string, which is kept verbatim. NOTE the rendered form is
      * ambiguous for range values containing `:` — for row addressing prefer
      * the structured {@link QueryRow.keyValue}.
@@ -86,13 +86,25 @@ export interface ConnectOptions {
     /** Path to the node's Unix-domain control socket. */
     socketPath?: string;
     /**
+     * Socket-first discovery for the `baseUrl` (local-node) case. Default
+     * `true`: `connect` prefers the node's Unix-domain data-plane socket and
+     * falls back to `baseUrl`'s TCP listener only when no socket file is found —
+     * the discovery order the Rust client uses, with the brand-forward
+     * `LASTDB_SOCKET_PATH` preferred (`LASTDB_SOCKET_PATH` → `FOLDDB_SOCKET_PATH`
+     * legacy alias → `FOLDDB_SOCK` legacy alias → `<data_dir>/folddb.sock` →
+     * TCP). Set `false`
+     * to force the TCP listener (e.g. a remote/non-local node). Ignored when
+     * `socketPath` is given (an explicit socket is always used verbatim).
+     */
+    discoverSocket?: boolean;
+    /**
      * Headers attached to EVERY request this client sends (consent flow + data
      * path), under a per-call header of the same name (which wins). The
      * production `fold_db_node` HTTP server is stateless — it resolves the
      * calling user from an `X-User-Hash` header on every request, returning
      * `401 MISSING_USER_CONTEXT` when it is absent — so an app talking to a
      * production node passes `{ 'X-User-Hash': '<hash>' }` here. A dev node
-     * (`fold_dev_node`) ignores it (TCP callers run as the node owner), so it is
+     * (`fold_db_node::dev_mode`) ignores it (TCP callers run as the node owner), so it is
      * safe to set unconditionally.
      */
     defaultHeaders?: Record<string, string>;
@@ -155,15 +167,17 @@ export interface RequestConsentResult {
 /**
  * Optional query filter. The node's `/api/query` accepts a `fold_db` `Query`
  * — `{schema_name, fields}` plus an optional range filter — alongside
- * top-level `limit`/`offset` pagination fields.
+ * top-level `limit`/`offset` pagination fields. Newer production nodes also
+ * accept a top-level `cursor` (`KeyValue`) returned as `page.nextCursor`; this
+ * keyset path is what `queryAll` uses when available.
  *
  * Pagination: production `fold_db_node` applies `limit` (default 100 —
  * `DEFAULT_QUERY_LIMIT` — clamped to `MAX_QUERY_LIMIT` 1000) and `offset`
  * after fold_db returns, and reports `total_count`/`has_more` so truncation
  * is detectable (surfaced as {@link QueryResult.page}). Even when you pass NO
  * limit the node still caps the page at its default — use
- * `FoldDbClient.queryAll` to drain a >100-row schema. The dev node
- * (`fold_dev_node`) implements the SAME pagination (default 100, clamp 1000,
+ * `LastDbClient.queryAll` to drain a >100-row schema. The dev node
+ * (`fold_db_node::dev_mode`) implements the SAME pagination (default 100, clamp 1000,
  * `total_count`/`has_more` metadata), so `limit`/`offset` and the page
  * metadata behave identically against both.
  */
@@ -193,13 +207,19 @@ export interface QueryFilter {
      * both node kinds when omitted.
      */
     offset?: number;
+    /**
+     * Keyset cursor returned by a prior page's `page.nextCursor`. Forwarded
+     * verbatim as top-level `cursor`; when present, production nodes page after
+     * that key instead of using offset arithmetic.
+     */
+    cursor?: KeyValue;
 }
 /**
  * Pagination metadata the node's `/api/query` returns alongside its
  * `results`/`rows` page, surfaced verbatim (snake_case → camelCase). Both
- * production `fold_db_node` and the dev node (`fold_dev_node`) return it. See
+ * production `fold_db_node` and the dev node (`fold_db_node::dev_mode`) return it. See
  * `fold_db_node/src/handlers/query.rs::QueryResponse` and
- * `fold_dev_node` `app_endpoints::QueryResponse`.
+ * `fold_db_node::dev_mode` `app_endpoints::QueryResponse`.
  */
 export interface QueryPage {
     /**
@@ -217,6 +237,8 @@ export interface QueryPage {
     offset: number;
     /** True when more records exist beyond the returned page. */
     hasMore: boolean;
+    /** Cursor to pass as `QueryFilter.cursor` for the next page, when available. */
+    nextCursor: KeyValue | null;
 }
 /** `POST /api/query` success body. */
 export interface QueryResult {
@@ -230,14 +252,14 @@ export interface QueryResult {
     rows: QueryRow[];
     /**
      * Pagination metadata, when the node reported it (production `fold_db_node`
-     * and the dev node `fold_dev_node` both always do; only an older
+     * and the dev node `fold_db_node::dev_mode` both always do; only an older
      * pre-pagination node omits it — then `null`). When present, `page.hasMore`
      * is the truncation signal: a plain `query()` against a >100-row schema
      * returns only the node's default page.
      */
     page: QueryPage | null;
 }
-/** Options for `FoldDbClient.queryAll` — the auto-paginating query helper. */
+/** Options for `LastDbClient.queryAll` — the auto-paginating query helper. */
 export interface QueryAllOptions {
     /**
      * Page size per request (the `limit` sent on each page). Defaults to 100,
@@ -254,7 +276,7 @@ export interface QueryAllOptions {
     maxRows?: number;
 }
 /**
- * Options for {@link FoldDbClient.search} — the node-authoritative scoped
+ * Options for {@link LastDbClient.search} — the node-authoritative scoped
  * search (`POST /api/app/search`, `folddb_app_api.md` operation 5).
  *
  * Deliberately MINIMAL. The app does NOT pass a schema allowlist and cannot
@@ -282,7 +304,7 @@ export interface SearchOptions {
     target?: string;
 }
 /**
- * One ranked hit from {@link FoldDbClient.search}. It is a full
+ * One ranked hit from {@link LastDbClient.search}. It is a full
  * {@link QueryRow} envelope (`key`, `fields`, `metadata`, `authorPubKey` — the
  * same shape `query()` returns) plus the search-only attribution fields the
  * node adds to each hit:

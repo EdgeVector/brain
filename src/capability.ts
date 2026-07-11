@@ -20,7 +20,7 @@
 // 1) so a corrupt / tampered cache is discarded rather than replayed into a
 // guaranteed `capability_bad_sig`.
 //
-// As of the @folddb/app-sdk port, the capability PRIMITIVES live in the SDK
+// As of the @lastdb/app-sdk port, the capability PRIMITIVES live in the SDK
 // and are re-exported here: token decode (`decodeCapabilityBlob`), the JCS
 // integrity binding (`tokenIntegrityValid` / `verifyCapabilityBlob`), the
 // eight-reason discriminated-403 list + guard, and the contract reaction
@@ -38,7 +38,7 @@ import {
   type CapabilityDenialReason,
   type CapabilityToken,
   type SignatureEnvelope,
-} from "@folddb/app-sdk";
+} from "@lastdb/app-sdk";
 
 import {
   APP_CAPABILITY_HEADER,
@@ -91,7 +91,7 @@ export type StoredCapability = {
 /**
  * Where a capability is stored. The design mandates the OS keychain with a
  * file fallback only on headless Linux. The implementation behind this
- * interface is the @folddb/app-sdk capability store (macOS `security` CLI
+ * interface is the @lastdb/app-sdk capability store (macOS `security` CLI
  * with a 0600-file fallback, every call timeout-bounded), adapted in
  * `keychain.ts` — which also performs the one-shot migration of pre-SDK
  * entries so an existing install keeps its grant.
