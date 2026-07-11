@@ -1,6 +1,6 @@
 // File-backed capability store (0600) for app-side capability storage.
 //
-// Storage is @folddb/app-sdk's `FileCapabilityStore`: a 0600 file store under
+// Storage is @lastdb/app-sdk's `FileCapabilityStore`: a 0600 file store under
 // `~/.fbrain/capabilities/`, keyed `capabilityStoreKey(appId, nodeUrl)` =
 // `fbrain@<sha256(nodeUrl)[:16]>` with a `boundNode` envelope, so a capability
 // minted by one node is never replayed against another (the SDK's wrong-node
@@ -17,7 +17,7 @@ import {
   decodeCapabilityBlob,
   FileCapabilityStore,
   type CapabilityStore as SdkCapabilityStore,
-} from "@folddb/app-sdk";
+} from "@lastdb/app-sdk";
 
 import type { CapabilityStore, StoredCapability } from "./capability.ts";
 import { fbrainHomeBase } from "./config.ts";

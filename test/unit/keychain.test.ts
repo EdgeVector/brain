@@ -1,6 +1,6 @@
 // Unit tests for the SDK-backed capability store adapter (keychain.ts).
 //
-// The storage implementation is @folddb/app-sdk's FileCapabilityStore (a 0600
+// The storage implementation is @lastdb/app-sdk's FileCapabilityStore (a 0600
 // file store under `~/.fbrain/capabilities/`). What fbrain owns — and what
 // these tests pin — is the adapter around it:
 //

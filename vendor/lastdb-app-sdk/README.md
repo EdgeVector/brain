@@ -1,36 +1,45 @@
-# @folddb/app-sdk
+# @lastdb/app-sdk
 
-The runtime SDK for FoldDB apps. A thin, dependency-free TypeScript client over
+The runtime SDK for LastDB apps. A thin, dependency-free TypeScript client over
 a node's production `/api/*` surface: **connect → request consent → await the
 grant → query / mutate with the granted capability.**
 
-This is the runtime data path. It is *not* the schema-authoring client
-(`schema_service_client` / `folddb-dev`) — that publishes schemas; this reads
-and writes a user's data on their node, scoped to what they consented to.
+This is the runtime data path. It is *not* the app-authoring client — that is
+the **`folddb`** CLI (`folddb login` → `folddb init` → `folddb push`), which
+publishes your app + its schemas to the shared registry. `folddb dev` only
+runs a local dev/test node. This SDK reads and writes a user's data on their
+node, scoped to what they consented to.
+
+> **The firm app contract.** The small, stable surface a zero-UI app depends on
+> — the app-facing primitives, the machine-actionable error taxonomy, and the
+> compatibility fixtures that make a LastDB route change break in ONE place —
+> is documented in **[CONTRACT.md](CONTRACT.md)**. This README is the full API
+> reference; CONTRACT.md is the boundary guarantee.
 
 > **⚠️ Local dev-node version requirement.** To exercise this SDK against a
-> local `fold_dev_node`, the node must be **built from `main`** (or a release
-> **after `v0.1.0`**). The shipped **`v0.1.0`** `folddb-dev` binary serves the
+> local `folddb dev` node, the node must be **built from `main`** (or a release
+> **after `v0.1.0`**). The shipped **`v0.1.0`** `folddb dev` binary serves the
 > dev-loop `/dev/*` surface only — it has **no `/api/*` data path, no `app
 > trust` verb, and no `/api/app/search`**, so this SDK's `query` / `mutate` /
-> `search` calls will not reach it. Build from source with `cargo build
-> --release -p fold_dev_node_bin --bin folddb-dev` and confirm `folddb-dev app
-> trust --list` is a recognized command. (A production `fold_db_node` already
+> `search` calls will not reach it. Build from source with
+> `cargo build --release -p fold_db_node --bin lastdb --bin folddb --features dev-mode`
+> and confirm `folddb dev app trust --list` is a recognized command.
+> (A production `fold_db_node` already
 > serves `/api/*`; this caveat is only about the *dev* node.)
 
 ## Install
 
 ```bash
-npm install @folddb/app-sdk
+npm install @lastdb/app-sdk
 ```
 
 ## Quickstart
 
 ```ts
-import { connect } from '@folddb/app-sdk';
+import { connect } from '@lastdb/app-sdk';
 
 // Transport: a production node's TCP HTTP surface (`baseUrl`) OR a node's
-// UDS control socket (`socketPath`). Against a `fold_dev_node` the app data
+// UDS control socket (`socketPath`). Against a `fold_db_node::dev_mode` the app data
 // surface is UDS-only — use `socketPath` (see "What the dev node supports").
 const fold = await connect({ baseUrl: 'http://127.0.0.1:9101', appId: 'fbrain' });
 
@@ -57,9 +66,55 @@ Pass exactly one of `baseUrl` (HTTP) or `socketPath` (the node's Unix-domain
 control socket); the transport is chosen by which is present.
 
 ```ts
-await connect({ baseUrl: 'http://127.0.0.1:9101', appId: 'fbrain' });          // HTTP
-await connect({ socketPath: '/path/to/<session>.sock', appId: 'fbrain' });     // UDS
+await connect({ baseUrl: 'http://127.0.0.1:9101', appId: 'fbrain' });          // socket-first (see below)
+await connect({ socketPath: '/path/to/<session>.sock', appId: 'fbrain' });     // explicit UDS, no discovery
 ```
+
+### Socket-first discovery (the default app path)
+
+When you pass `baseUrl` — the local-node case — the SDK **prefers the node's
+Unix-domain data-plane socket** and falls back to the `baseUrl` TCP listener
+only when no socket file is present. The socket is the normal app path
+(`folddb.sock`, peer-credential authenticated); TCP is the legacy fallback that
+keeps working during the migration. This mirrors the discovery order the Rust
+client (`FoldDbHttpClient`, used by the CLI + MCP) follows — with the
+brand-forward `LASTDB_SOCKET_PATH` preferred ahead of the Rust client's
+`FOLDDB_SOCKET_PATH` — so a TypeScript app and the Rust client agree on where
+the socket lives (both explicit overrides point at the same socket when only
+one is set):
+
+1. **`LASTDB_SOCKET_PATH`** — canonical explicit socket-path override
+   (brand-forward; SDK-preferred). Used when the file exists; a missing path
+   falls through.
+2. **`FOLDDB_SOCKET_PATH`** — legacy socket-path alias (the current Rust
+   client's canonical override), still honored when `LASTDB_SOCKET_PATH` is
+   unset.
+3. **`FOLDDB_SOCK`** — deprecated socket-path alias, still honored for older
+   callers when neither `LASTDB_SOCKET_PATH` nor `FOLDDB_SOCKET_PATH` is set.
+   Prefer `LASTDB_SOCKET_PATH` for new scripts.
+4. **`<data_dir>/folddb.sock`** — the default the node binds, resolved the same
+   way the Rust client resolves it: `<folddb_home>/data/folddb.sock` where
+   `folddb_home` honors `LASTDB_HOME` → `FOLDDB_HOME` → an existing `~/.lastdb`
+   → an existing `~/.folddb` → `~/.lastdb`. Used only when the file exists.
+5. **Loopback TCP at `baseUrl`** — the fallback when no socket file exists (a
+   pre-data-plane node, or one whose socket bind failed).
+
+```ts
+// Prefer the socket; fall back to TCP if no node serves one. Discovery is
+// silent — `fold.target` reports where it landed (`unix:…` or `http://…`).
+const fold = await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain' });
+
+// Force the TCP listener (e.g. a remote node, or a browser-style HTTP path):
+await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain', discoverSocket: false });
+
+// An explicit socket is always used verbatim — no discovery, no fallback:
+await connect({ socketPath: '/path/to/<session>.sock', appId: 'fbrain' });
+```
+
+`discoverTransport({ fallbackBaseUrl, defaultHeaders?, env? })` is also exported
+directly for callers that build their own transport (it returns a `Transport`
+pointed at the discovered socket or the TCP fallback). On non-Unix platforms
+there is no UDS transport, so discovery always yields TCP.
 
 ## Default headers (production-node identity)
 
@@ -77,7 +132,7 @@ await connect({
 ```
 
 A per-call header of the same name wins. This applies to a **production
-node's TCP HTTP surface**. A `fold_dev_node`'s app data surface is the
+node's TCP HTTP surface**. A `fold_db_node::dev_mode`'s app data surface is the
 **UDS control socket** (a TCP `/api/*` caller is refused — see
 [below](#what-the-dev-node-supports-vs-production)) and ignores
 `X-User-Hash`, so setting it is always safe.
@@ -155,7 +210,7 @@ exposes the node's pagination params and metadata:
 
 - `query(schema, { limit, offset })` — forwarded verbatim as the request's
   top-level pagination fields, **only when set**. Both production
-  `fold_db_node` and the dev node (`fold_dev_node`) honor them with the same
+  `fold_db_node` and the dev node (`fold_db_node::dev_mode`) honor them with the same
   default/clamp and page metadata.
 - `QueryResult.page` — the node's pagination metadata (`totalCount`,
   `returnedCount`, `limit`, `offset`, `hasMore`), or `null` when the node
@@ -247,10 +302,12 @@ Every node failure maps to a specific error class — there is no catch-all.
 ## Public API
 
 ```ts
-connect(options: ConnectOptions): Promise<FoldDbClient>
+connect(options: ConnectOptions): Promise<LastDbClient>
 capabilityStoreKey(appId: string, nodeTarget: string): string
 
-class FoldDbClient {
+// `FoldDbClient` is exported as a `@deprecated` alias of `LastDbClient`
+// (removed at the adoption capstone) so mid-port consumers keep compiling.
+class LastDbClient {
   readonly appId: string
   get target(): string
   get hasCapability(): boolean
@@ -322,17 +379,17 @@ verifyCapabilityBlob(blob: string, expectedAppId: string): CapabilityBlobVerific
 The consent + capability-enforcement endpoints
 (`/api/apps/request-consent`, `/api/apps/consent-status/{id}`, and the
 `X-App-Capability` write gate) are served by a **production `fold_db_node`**.
-`fold_dev_node` serves the same data dialect (`/api/query`, `/api/mutation`,
-`/api/schemas`) but gates app isolation via pid-based dev-trust
-(`folddb-dev app trust`) rather than the capability header, and does **not**
+`fold_db_node::dev_mode` serves the same data dialect (`/api/query`,
+`/api/mutation`, `/api/schemas`) but gates app isolation via pid-based dev-trust
+(`folddb app trust`) rather than the capability header, and does **not**
 serve the consent endpoints. **The app data surface is UDS-only on the dev
 node:** `/api/query`, `/api/mutation`, and `/api/app/search` over the TCP
 port are refused with `403 tcp_app_surface_closed` — the TCP surface runs as
 the node owner, so serving the app routes there would bypass isolation.
 Connect with `socketPath`, not `baseUrl`. So:
 
-- Against `fold_dev_node`: `connect` (via `socketPath`) + `query` + `mutate`
-  work end to end once you've `folddb-dev app trust`ed your binary (the
+- Against `folddb dev`: `connect` (via `socketPath`) + `query` + `mutate`
+  work end to end once you've `folddb app trust`ed your binary (the
   capability header is accepted-but-ignored; the connecting pid's app
   identity is what's enforced). This is what `e2e/roundtrip.mjs` exercises —
   over the control socket, including the full query-row envelope (`key` +
@@ -346,19 +403,19 @@ Connect with `socketPath`, not `baseUrl`. So:
   exact request/poll JSON + the full error taxonomy).
 
 > **CLI vs SDK mutation shape.** This SDK's `mutate(schema, op)` and the
-> dev-loop CLI's `folddb-dev mutate --file` take **different** mutation JSON.
+> dev-loop CLI's `folddb mutate --file` take **different** mutation JSON.
 > The SDK submits one row at the `/api/*` boundary —
 > `{ mutationType, fields, key: { hash, range } }` (camelCase, schema as the
 > 1st arg). The CLI's `POST /dev/mutations` wraps a *batch* with snake_case
 > keys — `{ "mutations": [ { schema, mutation_type, key: { range }, fields } ] }`.
 > Both paths name the schema `fbrain/Note`: the SDK uses the **canonical
 > published** name, and the CLI uses the **namespaced registered** name
-> `folddb-dev schema register --app fbrain` produces (it prefixes `<app>/`
+> `folddb dev post dev/schemas --app fbrain` produces (it prefixes `<app>/`
 > to the file's bare `name`). They agree by construction. See the onboarding
 > doc's "CLI vs SDK mutation shape" table:
 > [`docs/developer-onboarding.md`](../../docs/developer-onboarding.md#cli-vs-sdk-mutation-shape).
 - `search()` targets the node-authoritative `POST /api/app/search` (fold #693).
-  `fold_dev_node`'s `/api/*` mirror **routes it** (#130): the dev mirror serves
+  `fold_db_node::dev_mode`'s `/api/*` mirror **routes it** (#130): the dev mirror serves
   `POST /api/app/search` with node-authoritative scope (it resolves `S(A)` from
   the caller's verified posture against the active namespace ACL — the app never
   names its own scope). `e2e/search.mjs` drives the SDK against an ephemeral dev
@@ -377,7 +434,7 @@ rendered as `403 {status: 403, reason: "<reason>", ...detail}`:
 fields, and ships the design's contract reaction table as pure data:
 
 ```ts
-import { CapabilityDeniedError, capabilityDenialReaction } from '@folddb/app-sdk';
+import { CapabilityDeniedError, capabilityDenialReaction } from '@lastdb/app-sdk';
 
 try {
   await client.mutate('appa/Notes', op);
@@ -423,6 +480,6 @@ npm install
 npm run build        # tsc → dist/
 npm test             # vitest (mock-transport error mapping + capability store)
 npm run lint
-node e2e/roundtrip.mjs   # connect → mutate → query, against an ephemeral fold_dev_node
+node e2e/roundtrip.mjs   # connect → mutate → query, against an ephemeral folddb dev node
 node e2e/search.mjs      # scoped search() contract + node-authoritative scope (see e2e/)
 ```
