@@ -45,7 +45,7 @@ describe("fbrain global shim", () => {
     });
 
     expect(res.status).toBe(0);
-    expect(res.stdout.trim()).toStartWith(`fbrain ${pkg.version}`);
+    expect(res.stdout.trim()).toStartWith(`brain ${pkg.version}`);
     expect(res.stderr).toBe("");
   });
 });
