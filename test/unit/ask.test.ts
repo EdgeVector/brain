@@ -1082,6 +1082,34 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
 });
 
 describe("askCmd --json", () => {
+  test("--field projects ask hits as TSV without JSON or human rows", async () => {
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: {
+        [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")],
+        [TEST_HASHES.task]: [],
+      },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 }),
+      ],
+    });
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      fields: ["slug", "type", "title"],
+      print: (line) => stdout.push(line),
+      printErr: (line) => stderr.push(line),
+    });
+
+    expect(stdout).toEqual(["d1\tdesign\tT-d1"]);
+    expect(stdout[0]).not.toContain("{");
+    expect(stderr).toEqual([]);
+  });
+
   test("emits a single JSON array of {slug, score, type, title, snippet} on stdout", async () => {
     // Mirrors the `searchCmd --json` regression in cli-json-read.test.ts —
     // ask is the retrieval sibling of search with the same default column

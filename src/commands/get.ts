@@ -5,6 +5,7 @@
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import { findBacklinks } from "../backlink-index.ts";
 import type { Config } from "../config.ts";
+import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
@@ -28,6 +29,7 @@ export type GetOptions = {
   // call) covering the same fields the human surface shows plus the
   // body.
   json?: boolean;
+  fields?: readonly string[];
   verbose?: Verbose;
   print?: (line: string) => void;
   // Structured-result sink. When set, receives the SAME single
@@ -113,6 +115,11 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     linkedFrom,
   );
   opts.onResult?.(json);
+
+  if (opts.fields !== undefined && opts.fields.length > 0) {
+    printFieldProjection([json], opts.fields, print);
+    return;
+  }
 
   if (opts.json) {
     print(JSON.stringify(json));

@@ -10,6 +10,7 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
 import { readConfig } from "./config.ts";
+import { parseFieldProjection } from "./field-projection.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
@@ -75,6 +76,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_offset",
   "invalid_updated_since",
   "invalid_body_limit",
+  "invalid_field",
   "invalid_usage_window",
   "doctor_mode_conflict",
   "doctor_flag_requires_usage",
@@ -299,19 +301,22 @@ server-side, not through a windowed get).
 Examples:
   echo "- new bullet" | fbrain append my-tracker --type project
   fbrain append design-notes --type design < addendum.md`,
-  get: `fbrain get <slug> [--type T] [--body-limit N] [--json]
+  get: `fbrain get <slug> [--type T] [--body-limit N] [--field PATH]... [--json]
 
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
   --type        ${RECORD_TYPE_LIST}
   --body-limit  truncate body output to N chars (default: full body)
+  --field       project one field path as plain output; repeat or comma-separate
+                for TSV rows (e.g. --field status, or --field slug,status).
+                Supports dot paths and array indexes (tags[0]).
   --json        emit the resolved record as a single JSON object on stdout
                 (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
                 is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
                 print to stderr) so \`--json\` stdout is always parseable.`,
   list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
-             [--offset N] [-n N | --limit N] [--count] [--json]
+             [--offset N] [-n N | --limit N] [--count] [--field PATH]... [--json]
 
   --type          ${RECORD_TYPE_LIST}
                   (omit to list across all types)
@@ -326,6 +331,9 @@ exists in multiple types (specify --type to disambiguate).
   -n, --limit     max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
   --count         print only how many records match the filters (no bodies);
                   ignores --offset/--limit (a count is of the whole match set)
+  --field         project one field path as plain output; repeat or comma-separate
+                  for TSV rows (e.g. --field slug, or --field type,slug,status).
+                  Supports dot paths and array indexes.
   --json          emit a JSON array of record summaries on stdout
                   ({type, slug, title, status, tags, design_slug?, created_at,
                   updated_at}); truncation hint routes to stderr. With --count,
@@ -387,7 +395,7 @@ human outputs no longer invite a misleading score comparison.
                 route to stderr. On failure, a \`{error, hint}\` JSON object
                 is emitted to stdout too, so \`--json\` stdout is always
                 parseable.`,
-  ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--type T]... [--json]
+  ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--type T]... [--field PATH]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
 fused via Reciprocal Rank Fusion. By DEFAULT it runs BM25 + vector on the
@@ -419,6 +427,9 @@ shows it as a debug column too).
                 (e.g. \`--type design --type task\`). Narrows both the BM25
                 corpus and the vector schemas filter.
                 One of: ${RECORD_TYPE_LIST}. Omit to search across all ${RECORD_TYPE_COUNT} types.
+  --field       project one field path as plain output; repeat or comma-separate
+                for TSV rows (e.g. --field slug, or --field slug,type,title).
+                Supports dot paths and array indexes over the result payload.
   --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
                 on stdout (parseable by \`jq\`); \`snippet\` is the same
                 matching body extract shown under each human row. Empty
@@ -780,6 +791,7 @@ const APPEND_OPTIONS = {
 const GET_OPTIONS = {
   type: { type: "string" },
   "body-limit": { type: "string" },
+  field: { type: "string", multiple: true },
   // Machine-readable mode: emit the resolved record as a single JSON
   // object on stdout. Mirrors LIST_OPTIONS / SEARCH_OPTIONS.
   json: { type: "boolean", default: false },
@@ -803,6 +815,7 @@ const LIST_OPTIONS = {
   // filters (no bodies, no per-row summaries). Keeps wire cost flat for
   // "how many …" queries.
   count: { type: "boolean", default: false },
+  field: { type: "string", multiple: true },
   // Machine-readable mode: emit a JSON array of record summaries on
   // stdout. Truncation hint moves to stderr so `jq` pipelines stay clean.
   json: { type: "boolean", default: false },
@@ -839,6 +852,7 @@ const ASK_OPTIONS = {
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
   type: { type: "string", multiple: true },
+  field: { type: "string", multiple: true },
   // Machine-readable mode: emit a JSON array of `{slug, score, type, title}`
   // on stdout; advisory notes and --explain expansions route to stderr.
   json: { type: "boolean", default: false },
@@ -2041,6 +2055,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     });
   }
   const type = parseRecordType(values.type);
+  const fields = parseFieldProjection(values.field);
   const bodyLimit = strictInt(values["body-limit"], {
     flag: lastIntFlagSpelling(args, BODY_LIMIT_INT_FLAGS),
     min: 1,
@@ -2050,6 +2065,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
   if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
+  if (fields.length > 0) getOpts.fields = fields;
   if (values.json) getOpts.json = true;
   await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
   return 0;
@@ -2094,6 +2110,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   }
   const { values } = parsed;
   const type = parseRecordType(values.type);
+  const fields = parseFieldProjection(values.field);
   const limit = strictInt(values.limit, {
     flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
     min: 1,
@@ -2115,6 +2132,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     lOpts.updatedSinceMs = parseUpdatedSince(values["updated-since"]);
   }
   if (values.count) lOpts.count = true;
+  if (fields.length > 0) lOpts.fields = fields;
   if (values.json) lOpts.json = true;
   await listCmd(lOpts);
   return 0;
@@ -2358,6 +2376,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   // Validate --type before readConfig so an unknown type surfaces even on
   // an un-init'd machine.
   const askTypes = parseRecordTypeList(values.type);
+  const fields = parseFieldProjection(values.field);
   const limit = strictInt(values.limit, {
     flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
     min: 1,
@@ -2369,6 +2388,7 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   if (expand) aOpts.expand = true;
   if (values.explain) aOpts.explain = true;
   if (askTypes) aOpts.types = askTypes;
+  if (fields.length > 0) aOpts.fields = fields;
   if (values.json) aOpts.json = true;
   await askCmd(aOpts);
   return 0;
