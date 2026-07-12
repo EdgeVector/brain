@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# brain-mcp global shim. Keep the MCP entrypoint runnable when launched from
+# GUI apps that do not inherit the user's shell PATH.
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+dir="$(cd -P "$(dirname "$src")" && pwd)"
+
+resolve_bun() {
+  if [ -n "${BUN:-}" ] && [ -x "$BUN" ]; then
+    printf '%s\n' "$BUN"
+    return 0
+  fi
+  if command -v bun >/dev/null 2>&1; then
+    command -v bun
+    return 0
+  fi
+  if [ -n "${HOME:-}" ] && [ -x "$HOME/.bun/bin/bun" ]; then
+    printf '%s\n' "$HOME/.bun/bin/bun"
+    return 0
+  fi
+  for candidate in /opt/homebrew/bin/bun /usr/local/bin/bun; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! bun_path="$(resolve_bun)"; then
+  echo "brain-mcp: bun not found; install Bun or set BUN=/absolute/path/to/bun" >&2
+  exit 127
+fi
+
+export PATH="$(dirname "$bun_path"):${PATH:-}"
+exec "$bun_path" run "$dir/../src/mcp/main.ts" "$@"

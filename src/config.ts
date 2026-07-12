@@ -1,4 +1,5 @@
-// Persistent CLI config — `~/.fbrain/config.json` by default.
+// Persistent CLI config — `~/.brain/config.json` by default, with
+// `~/.fbrain/config.json` retained as a compatibility fallback.
 // Holds the canonical schema hashes (NOT the descriptive_names), per the
 // Phase 0 spike finding.
 //
@@ -60,13 +61,28 @@ export type Config = {
   nodeSocketPath?: string;
 };
 
+export function resolveDefaultBrainDataDir(
+  homeBase: string,
+  exists: (p: string) => boolean,
+): string {
+  const primary = join(homeBase, ".brain");
+  const legacy = join(homeBase, ".fbrain");
+  if (exists(primary)) return primary;
+  if (exists(legacy)) return legacy;
+  return primary;
+}
+
+export function brainDataDir(): string {
+  return resolveDefaultBrainDataDir(fbrainHomeBase(), existsSync);
+}
+
 export function defaultConfigPath(): string {
-  const override = process.env.FBRAIN_CONFIG;
+  const override = process.env.BRAIN_CONFIG || process.env.FBRAIN_CONFIG;
   if (override && override.length > 0) return override;
-  // FBRAIN_CONFIG override (above) wins even with a broken HOME, so a pinned
+  // BRAIN_CONFIG / FBRAIN_CONFIG overrides (above) win even with a broken HOME, so a pinned
   // config path still works. Otherwise derive from the guarded home base, which
-  // fails loud rather than writing a relative `undefined/.fbrain/config.json`.
-  return join(fbrainHomeBase(), ".fbrain", "config.json");
+  // fails loud rather than writing a relative `undefined/.brain/config.json`.
+  return join(brainDataDir(), "config.json");
 }
 
 // The two first-touch config errors a brand-new developer hits when running

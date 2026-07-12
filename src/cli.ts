@@ -155,10 +155,10 @@ const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.map((t) => {
   return `  ${label} ${RECORD_PURPOSES[t]}`;
 }).join("\n");
 
-export const TOP_HELP = `fbrain — CLI brain over fold_db
+export const TOP_HELP = `brain — CLI brain over fold_db
 
 Usage:
-  fbrain <command> [options]
+  brain <command> [options]
 
 Commands:
   init           bootstrap a node + register schemas + write config
@@ -191,7 +191,7 @@ Global flags:
   --help, -h     print this help
   --version, -V  print the fbrain version and exit
 
-Run \`fbrain help <command>\` for per-command usage.`;
+Run \`brain help <command>\` for per-command usage. The old \`fbrain\` binary remains an alias.`;
 
 // Shared help shape for the record types that take the common
 // (--title/--tag/--body/--force) flag set. Task is the one type with an extra
@@ -209,10 +209,10 @@ function simpleNewHelp(type: RecordType): string {
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
-  init: `fbrain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
+  init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
-persist ~/.fbrain/config.json with canonical hashes, then prompt once to
+persist ~/.brain/config.json with canonical hashes, then prompt once to
 grant fbrain consent against this node so the first write doesn't stall.
 Idempotent — re-running skips bootstrap and the consent prompt when a
 live capability is already on disk.
@@ -998,7 +998,7 @@ export async function main(argv: Argv): Promise<number> {
   const stripped = argv.slice();
   const verbose = consumeFlag(stripped, "--verbose");
   if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-V")) {
-    console.log(`fbrain ${getFbrainVersion()}`);
+    console.log(`brain ${getFbrainVersion()}`);
     return 0;
   }
   // Bare `fbrain version` is muscle memory from `git/docker/go version`. It
@@ -1006,7 +1006,7 @@ export async function main(argv: Argv): Promise<number> {
   // `version` verb), so without this it would fall through to the unknown-command
   // path and dump the entire help wall. Alias it to the `--version`/`-V` output.
   if (stripped[0] === "version" && stripped.length === 1) {
-    console.log(`fbrain ${getFbrainVersion()}`);
+    console.log(`brain ${getFbrainVersion()}`);
     return 0;
   }
   if (consumeFlag(stripped, "--help") || consumeFlag(stripped, "-h")) {

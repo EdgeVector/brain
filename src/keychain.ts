@@ -1,17 +1,15 @@
 // File-backed capability store (0600) for app-side capability storage.
 //
 // Storage is @lastdb/app-sdk's `FileCapabilityStore`: a 0600 file store under
-// `~/.fbrain/capabilities/`, keyed `capabilityStoreKey(appId, nodeUrl)` =
+// `~/.brain/capabilities/` (or legacy `~/.fbrain/capabilities/`), keyed `capabilityStoreKey(appId, nodeUrl)` =
 // `fbrain@<sha256(nodeUrl)[:16]>` with a `boundNode` envelope, so a capability
 // minted by one node is never replayed against another (the SDK's wrong-node
 // guard). This module adapts that store to fbrain's `CapabilityStore`
 // interface (StoredCapability keyed by node URL) and keeps fbrain's on-disk
-// identity: the file fallback lives under `~/.fbrain/` (FBRAIN_CAPABILITY_DIR
+// identity: the file fallback lives under the brain data dir (FBRAIN_CAPABILITY_DIR
 // honored), at `capabilities/<key>.cap`.
 
 import { createHash } from "node:crypto";
-import { join } from "node:path";
-
 import {
   capabilityStoreKey,
   decodeCapabilityBlob,
@@ -20,13 +18,13 @@ import {
 } from "@lastdb/app-sdk";
 
 import type { CapabilityStore, StoredCapability } from "./capability.ts";
-import { fbrainHomeBase } from "./config.ts";
+import { brainDataDir } from "./config.ts";
 
 /** Directory holding the file store (and the existing config). */
 export function fbrainDir(): string {
   const override = process.env.FBRAIN_CAPABILITY_DIR;
   if (override && override.length > 0) return override;
-  return join(fbrainHomeBase(), ".fbrain");
+  return brainDataDir();
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +84,7 @@ export function sdkBackedCapabilityStore(
 
 /**
  * Build the default capability store: the SDK's 0600 file store under
- * fbrain's `~/.fbrain/` directory, adapted to fbrain's interface.
+ * brain's data directory, adapted to fbrain's interface.
  */
 export function defaultCapabilityStore(): CapabilityStore {
   return sdkBackedCapabilityStore(new FileCapabilityStore(fbrainDir()));

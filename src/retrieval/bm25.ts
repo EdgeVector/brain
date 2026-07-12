@@ -9,7 +9,7 @@
 // Cache: the index is keyed by a fingerprint of (slug, updated_at) for
 // every live record. The fingerprint is stable iff nothing was added,
 // updated, or soft-deleted since the last build. We persist the index to
-// `~/.fbrain/cache/bm25-<userHash>-<typeSetHash>.json` so back-to-back
+// `~/.brain/cache/bm25-<userHash>-<typeSetHash>.json` so back-to-back
 // retrieval calls on the same corpus/type shape skip the rebuild — important
 // because `listRecords` across schemas is the dominant cost.
 //
@@ -29,8 +29,7 @@ import {
 import { dirname, join } from "node:path";
 
 import type { NodeClient, Verbose } from "../client.ts";
-import { fbrainHomeBase } from "../config.ts";
-import type { Config } from "../config.ts";
+import { brainDataDir, type Config } from "../config.ts";
 import {
   isTombstoned,
   listRecordKeys,
@@ -338,7 +337,7 @@ export function computeFingerprint(docs: readonly FingerprintKey[]): string {
   return createHash("sha256").update(pairs.join("\n")).digest("hex");
 }
 
-// Cache layout: `~/.fbrain/cache/bm25-<userHash>-<typeSetHash>.json` — keyed
+// Cache layout: `~/.brain/cache/bm25-<userHash>-<typeSetHash>.json` — keyed
 // by user and active type set so two fbrain configs on the same machine cannot
 // collide, and `ask`/`search` calls with different `--type` shapes do not
 // overwrite each other. The cache survives a corpus change (we just rebuild on
@@ -346,7 +345,7 @@ export function computeFingerprint(docs: readonly FingerprintKey[]): string {
 export function defaultCacheDir(): string {
   const override = process.env.FBRAIN_CACHE_DIR;
   if (override && override.length > 0) return override;
-  return join(fbrainHomeBase(), ".fbrain", "cache");
+  return join(brainDataDir(), "cache");
 }
 
 function typeSetCacheKey(types: readonly RecordType[]): string {
