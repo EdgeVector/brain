@@ -7,7 +7,7 @@
 // prefix of each userHash so the report is shareable without leaking
 // identifiers.
 //
-// Also persists today's per-user counts to ~/.fbrain/usage.jsonl as
+// Also persists today's per-user counts to ~/.brain/usage.jsonl as
 // one line per UTC date so we can plot adoption trends over time.
 // Re-running on the same UTC day replaces that day's line in-place.
 //
@@ -24,7 +24,7 @@ import {
   type QueryRow,
   type Verbose,
 } from "../client.ts";
-import { fbrainHomeBase, type Config } from "../config.ts";
+import { brainDataDir, type Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import { fieldsFor, stringField } from "../record.ts";
 import {
@@ -168,7 +168,7 @@ export type DailySummaryLine = {
 };
 
 export function defaultUsagePath(): string {
-  return join(fbrainHomeBase(), ".fbrain", "usage.jsonl");
+  return join(brainDataDir(), "usage.jsonl");
 }
 
 function persistDailySummary(args: {

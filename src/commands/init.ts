@@ -535,21 +535,21 @@ export function printNextSteps(
   if (ctx.reinitialized) {
     print(``);
     print(
-      `Already initialized on ${ctx.nodeUrl} (config: ${ctx.configPath}) — try \`fbrain list\` to see your records, or \`fbrain doctor\` to re-check health.`,
+      `Already initialized on ${ctx.nodeUrl} (config: ${ctx.configPath}) — try \`brain list\` to see your records, or \`brain doctor\` to re-check health.`,
     );
     return;
   }
 
   print(``);
   print(`You're ready. Next steps:`);
-  print(`  1. Create your first record:  fbrain design new my-first-idea --title "My first idea" --body "what this idea is"`);
-  print(`        (also: concept/preference/reference/agent/project/spike/sop new, or pipe markdown to \`fbrain put <slug>\`)`);
-  print(`  2. See what you've got:        fbrain list`);
-  print(`  3. Find it again:              fbrain search "<term>"   ·   fbrain ask "<question>"`);
-  print(`  4. Re-check health anytime:    fbrain doctor`);
-  print(`  5. Connect it to your AI agent: fbrain mcp install`);
+  print(`  1. Create your first record:  brain design new my-first-idea --title "My first idea" --body "what this idea is"`);
+  print(`        (also: concept/preference/reference/agent/project/spike/sop new, or pipe markdown to \`brain put <slug>\`)`);
+  print(`  2. See what you've got:        brain list`);
+  print(`  3. Find it again:              brain search "<term>"   ·   brain ask "<question>"`);
+  print(`  4. Re-check health anytime:    brain doctor`);
+  print(`  5. Connect it to your AI agent: brain mcp install`);
   print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; \`fbrain-mcp\` is already on your PATH from the global \`bun add -g\` install — from a contributor source checkout, run \`bun link\` first)`);
-  print(`        → then \`fbrain doctor --mcp\` to confirm the agent surface boots and serves all 10 tools. (Doing it by hand instead? \`claude mcp add fbrain fbrain-mcp\` then \`fbrain mcp instructions >> CLAUDE.md\`.)`);
+  print(`        → then \`brain doctor --mcp\` to confirm the agent surface boots and serves all 10 tools. (Doing it by hand instead? \`claude mcp add fbrain fbrain-mcp\` then \`brain mcp instructions >> CLAUDE.md\`.)`);
   print(`  Data lives on the node at ${ctx.nodeUrl} (config: ${ctx.configPath}).`);
 
   // When consent wasn't established (non-TTY scripted/CI run without

@@ -7,7 +7,9 @@ import {
   CONFIG_VERSION,
   ConfigInvalidError,
   ConfigMissingError,
+  defaultConfigPath,
   readConfig,
+  resolveDefaultBrainDataDir,
   tryReadConfig,
   writeConfig,
   type Config,
@@ -63,6 +65,43 @@ describe("config", () => {
     expect(err.hint).toContain("fbrain init");
     expect(err.message).toContain("invalid: not valid JSON.");
     expect(err.message).not.toContain("fbrain init");
+  });
+
+  test("default brain data dir prefers ~/.brain and falls back to existing ~/.fbrain", () => {
+    const home = "/Users/dev";
+    const exists = new Set<string>();
+
+    expect(resolveDefaultBrainDataDir(home, (p) => exists.has(p))).toBe(
+      "/Users/dev/.brain",
+    );
+
+    exists.add("/Users/dev/.fbrain");
+    expect(resolveDefaultBrainDataDir(home, (p) => exists.has(p))).toBe(
+      "/Users/dev/.fbrain",
+    );
+
+    exists.add("/Users/dev/.brain");
+    expect(resolveDefaultBrainDataDir(home, (p) => exists.has(p))).toBe(
+      "/Users/dev/.brain",
+    );
+  });
+
+  test("BRAIN_CONFIG override wins before FBRAIN_CONFIG", () => {
+    const oldBrain = process.env.BRAIN_CONFIG;
+    const oldFbrain = process.env.FBRAIN_CONFIG;
+    try {
+      process.env.BRAIN_CONFIG = "/tmp/brain-config.json";
+      process.env.FBRAIN_CONFIG = "/tmp/fbrain-config.json";
+      expect(defaultConfigPath()).toBe("/tmp/brain-config.json");
+
+      delete process.env.BRAIN_CONFIG;
+      expect(defaultConfigPath()).toBe("/tmp/fbrain-config.json");
+    } finally {
+      if (oldBrain === undefined) delete process.env.BRAIN_CONFIG;
+      else process.env.BRAIN_CONFIG = oldBrain;
+      if (oldFbrain === undefined) delete process.env.FBRAIN_CONFIG;
+      else process.env.FBRAIN_CONFIG = oldFbrain;
+    }
   });
 
   test("tryReadConfig returns null when missing", () => {

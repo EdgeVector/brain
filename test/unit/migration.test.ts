@@ -363,10 +363,10 @@ describe("defaultMigrationsDir env override", () => {
     expect(defaultMigrationsDir()).toBe(tmpDir);
   });
 
-  test("empty env falls back to ~/.fbrain/migrations", () => {
+  test("empty env falls back to the brain data dir migrations path", () => {
     delete process.env[MIGRATION_DIR_ENV];
     const dir = defaultMigrationsDir();
-    expect(dir.endsWith("/.fbrain/migrations")).toBe(true);
+    expect(dir.endsWith("/.brain/migrations") || dir.endsWith("/.fbrain/migrations")).toBe(true);
     // Restore for afterEach.
     process.env[MIGRATION_DIR_ENV] = tmpDir;
   });

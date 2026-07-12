@@ -620,10 +620,10 @@ describe("runInit — recovers from a corrupt existing config", () => {
     // consumers that key off `[init] ok` see it before the guidance.
     const after = lines.slice(okIdx + 1).join("\n");
     expect(after).toContain("Next steps");
-    expect(after).toContain("fbrain design new");
-    expect(after).toContain("fbrain list");
-    expect(after).toContain("fbrain search");
-    expect(after).toContain("fbrain doctor");
+    expect(after).toContain("brain design new");
+    expect(after).toContain("brain list");
+    expect(after).toContain("brain search");
+    expect(after).toContain("brain doctor");
     // Tells the user where their data lives.
     expect(after).toContain(DEFAULT_NODE_URL);
   });
@@ -674,18 +674,18 @@ describe("printNextSteps", () => {
     });
     const out = lines.join("\n");
     expect(out).toContain("Next steps");
-    expect(out).toContain("fbrain design new my-first-idea");
-    expect(out).toContain("fbrain list");
-    expect(out).toContain("fbrain search");
-    expect(out).toContain("fbrain ask");
-    expect(out).toContain("fbrain doctor");
+    expect(out).toContain("brain design new my-first-idea");
+    expect(out).toContain("brain list");
+    expect(out).toContain("brain search");
+    expect(out).toContain("brain ask");
+    expect(out).toContain("brain doctor");
     // The headline agent-integration step: a brain meant to be used BY an
     // agent must tell the new dev how to connect it. The next-steps now LEAD
-    // with the one-shot `fbrain mcp install` (registers + appends instructions
+    // with the one-shot `brain mcp install` (registers + appends instructions
     // in one command), with the manual `claude mcp add` form kept as the
     // by-hand fallback. Pin both plus the `bun link` PATH caveat so this can't
     // silently regress.
-    expect(out).toContain("fbrain mcp install");
+    expect(out).toContain("brain mcp install");
     expect(out).toContain("claude mcp add fbrain fbrain-mcp");
     expect(out).toContain("bun link");
     expect(out).toContain("fbrain_* tools");
@@ -703,7 +703,7 @@ describe("printNextSteps", () => {
     });
     const out = lines.join("\n");
     expect(out).toContain("Already initialized");
-    expect(out).toContain("fbrain list");
+    expect(out).toContain("brain list");
     // A dev re-running `init` to confirm "which node am I pointed at?" must get
     // the answer even on the terse already-initialized path — echo both the
     // resolved node URL and the config path.
@@ -711,7 +711,7 @@ describe("printNextSteps", () => {
     expect(out).toContain("/home/dev/.fbrain/config.json");
     // The full first-record walkthrough is suppressed on a re-run.
     expect(out).not.toContain("Next steps");
-    expect(out).not.toContain("fbrain design new");
+    expect(out).not.toContain("brain design new");
   });
 
   test("non-interactive (non_tty skip) → points at --grant-consent", () => {

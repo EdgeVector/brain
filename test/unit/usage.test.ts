@@ -280,9 +280,9 @@ describe("daily-summary persistence", () => {
     expect(parsed.total).toBe(1);
   });
 
-  test("defaultUsagePath points at ~/.fbrain/usage.jsonl", () => {
+  test("defaultUsagePath points at the brain data dir usage log", () => {
     const p = defaultUsagePath();
-    expect(p.endsWith("/.fbrain/usage.jsonl")).toBe(true);
+    expect(p.endsWith("/.brain/usage.jsonl") || p.endsWith("/.fbrain/usage.jsonl")).toBe(true);
   });
 });
 

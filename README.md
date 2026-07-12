@@ -1,21 +1,21 @@
-# fbrain
+# brain
 
-A CLI named `fbrain` that uses fold_db as the storage engine for a personal brain. Ten record types — **design**, **task**, **concept**, **preference**, **reference**, **agent**, **project**, **spike**, **sop**, **decision** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe.
+A CLI named `brain` that uses fold_db as the storage engine for a personal brain. Ten record types — **design**, **task**, **concept**, **preference**, **reference**, **agent**, **project**, **spike**, **sop**, **decision** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe. The old `fbrain` binary remains as a compatibility alias during the migration.
 
 ## Prerequisites
 
-You only need two things to **download and use** fbrain — Bun and a running
+You only need two things to **download and use** brain — Bun and a running
 `fold_db_node`. No Rust toolchain, no building from source.
 
-- **Bun** ≥ 1.3.10 — `bun --version`. fbrain ships as a Bun-runtime CLI, so Bun is the only thing you install to *run* it — `bun add -g github:EdgeVector/fbrain` puts the `fbrain` bin on your PATH and runs it under Bun, in one command, straight from the public repo (no clone, no Rust, no compile). (A registry one-liner — `npm i -g fbrain` — is the future steady-state once the package is published to npm; it's not required to install today. See Quick start step 1.)
+- **Bun** ≥ 1.3.10 — `bun --version`. brain ships as a Bun-runtime CLI, so Bun is the only thing you install to *run* it — `bun add -g github:EdgeVector/brain` puts the `brain` and `fbrain` bins on your PATH and runs them under Bun, in one command, straight from the public repo (no clone, no Rust, no compile). (A registry one-liner is the future steady-state once the package is published to npm; it's not required to install today. See Quick start step 1.)
 - **A running `fold_db_node`** — install the prebuilt daemon from the [`edgevector/lastdb` Homebrew tap](https://github.com/EdgeVector/homebrew-lastdb) (no Rust toolchain, no compile step):
   ```bash
   brew install edgevector/lastdb/lastdb   # taps + installs `lastdb` and `lastdb_server`
   brew services start lastdb              # launchd: runs `lastdb_server --port 9001` with keep_alive
   curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
   ```
-  fbrain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade lastdb`, run `brew services restart lastdb` so the new binary takes over the port. (Prefer a foreground daemon for a quick try? `lastdb daemon start` also works — `brew services` is just the keep-alive launchd path that survives crashes and reboots.)
-- **Network access to the schema service** — fbrain registers its schemas with the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com`. There is **no local schema_service to run**. (Iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`.)
+  brain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade lastdb`, run `brew services restart lastdb` so the new binary takes over the port. (Prefer a foreground daemon for a quick try? `lastdb daemon start` also works — `brew services` is just the keep-alive launchd path that survives crashes and reboots.)
+- **Network access to the schema service** — brain registers its schemas with the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com`. There is **no local schema_service to run**. (Iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`.)
 
 > **Contributing to fold_db itself?** Instead of the Homebrew binary you can run a worktree-local node from source with `./run.sh` — that path *does* need a Rust toolchain and a multi-minute cold build the first time (cargo `target/` is shared once warmed). Point fbrain at the auto-slotted port with `fbrain init --node-url http://127.0.0.1:<slot>`; `fbrain init` prints a "compiling Rust — give it a few minutes" hint and retries while the node comes up. Override either endpoint with `--node-url` / `--schema-service-url` on `fbrain init`.
 
@@ -30,29 +30,29 @@ brew install edgevector/lastdb/lastdb
 brew services start lastdb            # launchd: serves :9001, restarts on crash
 curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
 
-# 1. install the fbrain CLI (one-time) — ONE command, straight from GitHub.
-#    No clone, no Rust, no compile; exposes the `fbrain` + `fbrain-mcp` bins.
-bun add -g github:EdgeVector/fbrain
-fbrain --version                      # verify it's on PATH
+# 1. install the brain CLI (one-time) — ONE command, straight from GitHub.
+#    No clone, no Rust, no compile; exposes the `brain` + `fbrain` bins.
+bun add -g github:EdgeVector/brain
+brain --version                       # verify it's on PATH
 
 # 2. bootstrap
-fbrain init                           # 6 steps; writes ~/.fbrain/config.json
+brain init                            # 6 steps; writes ~/.brain/config.json
                                       # (auto-heals a stale local-schema config
                                       #  to the new cloud-Lambda default)
 ```
 
 > **One command, no npm publish.** `bun add -g github:EdgeVector/fbrain` installs
 > the CLI directly from the already-public GitHub repo — no registry, no clone, no
-> `bun link`. `bunx github:EdgeVector/fbrain <cmd>` works too for a one-off run.
-> (A future `npm i -g fbrain` is the intended steady-state once the package is on
-> npm — the bare name `fbrain` is currently an unrelated security-holding stub;
-> tracking: Tom's `npm publish` follow-up under a scoped name. It's not required to
-> install today.)
+> `bun link`. `bunx github:EdgeVector/brain <cmd>` works too for a one-off run.
+> (A future registry install is the intended steady-state once the package is on
+> npm; tracking: Tom's `npm publish` follow-up. It's not required to install
+> today.)
 >
-> **Contributing to fbrain itself?** Clone + `bun link` instead, so your edits run
-> live: `git clone https://github.com/EdgeVector/fbrain && cd fbrain && bun install
-> && bun link` puts the `fbrain` (+ `fbrain-mcp`) bins on your PATH, pointed at your
-> checkout. Everything below works the same whichever install you used.
+> **Contributing to brain itself?** Clone + `bun link` instead, so your edits run
+> live: `git clone https://github.com/EdgeVector/brain && cd brain && bun install
+> && bun link` puts the `brain` (+ compatibility `fbrain`) bins on your PATH,
+> pointed at your checkout. Everything below works the same whichever install
+> you used.
 
 ### One-time consent grant (handled by `init`)
 
@@ -146,10 +146,10 @@ tags: [via-stdin, dogfood]
 the body becomes the indexed body
 NOTE
 
-fbrain list
-fbrain ask "body that gets embedded"     # hybrid (BM25 + vector) — catches the write you just made, immediately
-fbrain search "body that gets embedded"  # pure-vector; a brand-new write may take ~1s to land — use `ask` for immediate retrieval
-fbrain doctor                         # confirms everything is wired
+brain list
+brain ask "body that gets embedded"      # hybrid (BM25 + vector) — catches the write you just made, immediately
+brain search "body that gets embedded"   # pure-vector; a brand-new write may take ~1s to land — use `ask` for immediate retrieval
+brain doctor                             # confirms everything is wired
 ```
 
 A global `--verbose` flag echoes every HTTP request and response — including the canonical schema hash being targeted, per the Phase 0 spike's debugging guidance.
@@ -160,26 +160,26 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 
 | Command | What it does |
 |---|---|
-| `fbrain init` | Bootstraps the node + registers schemas + writes `~/.fbrain/config.json` with canonical hashes |
-| `fbrain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 10 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, `decision`. Status defaults to the type's first enum value |
-| `fbrain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
-| `fbrain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
-| `fbrain get <slug> [--type T] [--field PATH]…` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it picks a deterministic read precedence (reference before project) so common agent reads do not need a retry. `--field` projects plain values without JSON parsing |
-| `fbrain list [--type T] [--status S] [--tag T] [-n N] [--field PATH]…` | Lists records, newest-first. `--field` projects one TSV row per record |
-| `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
-| `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T]` | Links records. Defaults to legacy Task → Design (`task.design_slug`); non-legacy pairs store a generic explicit link tag on the source |
-| `fbrain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; reads the backlink secondary index instead of scanning every schema |
-| `fbrain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
-| `fbrain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
-| `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
-| `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
-| `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
-| `fbrain delete <slug> [--type T]`<br>`fbrain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every fbrain read path treats the record as gone (see [Delete](#delete)) |
-| `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks]` | Re-puts every live record so fold_db refreshes its embedding entry, or rebuilds secondary indexes with `--tags` / `--backlinks` (see [Recovery](#recovery)) |
-| `fbrain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.fbrain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
-| `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
+| `brain init` | Bootstraps the node + registers schemas + writes `~/.brain/config.json` with canonical hashes |
+| `brain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 10 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, `decision`. Status defaults to the type's first enum value |
+| `brain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
+| `brain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
+| `brain get <slug> [--type T] [--field PATH]…` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it picks a deterministic read precedence (reference before project) so common agent reads do not need a retry. `--field` projects plain values without JSON parsing |
+| `brain list [--type T] [--status S] [--tag T] [-n N] [--field PATH]…` | Lists records, newest-first. `--field` projects one TSV row per record |
+| `brain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
+| `brain link <from-slug> <to-slug> [--from-type T] [--to-type T]` | Links records. Defaults to legacy Task → Design (`task.design_slug`); non-legacy pairs store a generic explicit link tag on the source |
+| `brain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; reads the backlink secondary index instead of scanning every schema |
+| `brain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
+| `brain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
+| `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
+| `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
+| `brain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
+| `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every brain read path treats the record as gone (see [Delete](#delete)) |
+| `brain reindex [--type T] [--dry-run] [--tags] [--backlinks]` | Re-puts every live record so fold_db refreshes its embedding entry, or rebuilds secondary indexes with `--tags` / `--backlinks` (see [Recovery](#recovery)) |
+| `brain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.brain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
+| `brain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate the brain in-process (see [MCP](#mcp)) |
 
-Run `fbrain help <command>` for per-command usage.
+Run `brain help <command>` for per-command usage. `fbrain` remains an alias.
 
 ### Field projection
 
