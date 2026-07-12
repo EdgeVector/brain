@@ -2,6 +2,7 @@
 
 import { newReadClientFromCfg, type NodeClient, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
+import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
@@ -53,6 +54,7 @@ export type ListOptions = {
   // of the whole matching set); the truncation/paging window only shapes
   // the row output. Keeps token/wire cost flat for "how many …" queries.
   count?: boolean;
+  fields?: readonly string[];
   // Machine-readable mode. Emits a single JSON array document via
   // `print` (one call) and routes any advisory "K more" hint to
   // `printErr` so stdout remains pure JSON parseable by `jq`.
@@ -162,6 +164,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // effect. (Iron: the cap is a UX guard against floods, not a signal.)
   if (filtered.length === 0) {
     opts.onResult?.([]);
+    if (opts.fields !== undefined && opts.fields.length > 0) return;
     // Context-aware no-result hint, completing the empty-node-hint trilogy
     // (list/search/ask). `list` is step 2 of init's own Next-steps — the
     // FIRST content command a brand-new dev runs — so a bare `no records`
@@ -230,6 +233,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   const truncated = paged.length - trimmed.length;
   if (trimmed.length === 0) {
     opts.onResult?.([]);
+    if (opts.fields !== undefined && opts.fields.length > 0) return;
     const note = `offset ${offset} is past the ${filtered.length} matching record(s)`;
     if (opts.json) {
       print("[]");
@@ -251,6 +255,11 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
   const payload = trimmed.map(({ type, record }) => recordSummary(type, record));
   opts.onResult?.(payload);
+
+  if (opts.fields !== undefined && opts.fields.length > 0) {
+    printFieldProjection(payload, opts.fields, print);
+    return;
+  }
 
   if (opts.json) {
     print(JSON.stringify(payload));

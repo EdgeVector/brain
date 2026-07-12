@@ -97,6 +97,34 @@ function stubFetch(
 }
 
 describe("listCmd — read-flake retry", () => {
+  test("--field projects record summaries as TSV without the human table", async () => {
+    const newer = spikeRow("newer", {
+      status: "concluded",
+      updated_at: "2026-05-27T00:00:00Z",
+    });
+    const older = spikeRow("older", {
+      status: "exploring",
+      updated_at: "2026-05-26T00:00:00Z",
+    });
+    const responses = new Map<string, Array<Fields[]>>([
+      [TEST_HASHES.spike, [[older, newer]]],
+    ]);
+    const { restore } = stubFetch(responses);
+    const lines: string[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        fields: ["slug", "status"],
+        print: (l) => lines.push(l),
+      });
+    } finally {
+      restore();
+    }
+
+    expect(lines).toEqual(["newer\tconcluded", "older\texploring"]);
+  });
+
   test("with --status filter: empty sweep then hit prints the row", async () => {
     // First sweep on the spike schema returns nothing; second returns the
     // row with the updated status. Mirrors the 2026-05-26 dogfood repro

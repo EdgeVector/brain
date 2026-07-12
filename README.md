@@ -164,13 +164,13 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 10 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, `decision`. Status defaults to the type's first enum value |
 | `fbrain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
 | `fbrain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
-| `fbrain get <slug> [--type T]` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it picks a deterministic read precedence (reference before project) so common agent reads do not need a retry |
-| `fbrain list [--type T] [--status S] [--tag T] [-n N]` | Lists records, newest-first |
+| `fbrain get <slug> [--type T] [--field PATH]…` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it picks a deterministic read precedence (reference before project) so common agent reads do not need a retry. `--field` projects plain values without JSON parsing |
+| `fbrain list [--type T] [--status S] [--tag T] [-n N] [--field PATH]…` | Lists records, newest-first. `--field` projects one TSV row per record |
 | `fbrain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T]` | Links records. Defaults to legacy Task → Design (`task.design_slug`); non-legacy pairs store a generic explicit link tag on the source |
 | `fbrain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; reads the backlink secondary index instead of scanning every schema |
 | `fbrain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
-| `fbrain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
+| `fbrain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
 | `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `fbrain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `fbrain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
@@ -180,6 +180,23 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `fbrain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate fbrain in-process (see [MCP](#mcp)) |
 
 Run `fbrain help <command>` for per-command usage.
+
+### Field projection
+
+The read commands `get`, `list`, and `ask` accept `--field PATH` when a script
+or agent needs one or a few values and should not parse `--json` inline. Repeat
+the flag or pass comma-separated paths for TSV rows:
+
+```bash
+fbrain get my-note --field status
+fbrain get my-note --field slug,status
+fbrain list --type task --field slug,status
+fbrain ask "release gate" --field slug,type,title
+```
+
+Paths use the command's existing JSON payload shape, with dot paths and array
+indexes such as `tags[0]`, `extra_fields.program`, or `linked_from[0].slug`.
+Scalar arrays print as comma-joined values; missing paths print as empty cells.
 
 ## Record types
 

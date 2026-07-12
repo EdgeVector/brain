@@ -84,6 +84,56 @@ function backlinkIndexRow(targetSlug: string, members: string[]) {
 }
 
 describe("getRecord — bodyLimit", () => {
+  test("--field status prints the bare status string", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow("field-target", taskFields("field-target", { status: "review" })),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const lines: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "field-target",
+      type: "task",
+      fields: ["status"],
+      print: (l) => lines.push(l),
+    });
+
+    expect(lines).toEqual(["review"]);
+  });
+
+  test("--field accepts multiple paths and emits one TSV row", async () => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (!url.endsWith("/api/query")) return queryResp([]);
+      const body = JSON.parse((init?.body as string) ?? "{}");
+      if (body.schema_name === TEST_HASHES.task) {
+        return queryResp([
+          asRow("field-task", taskFields("field-task", { tags: ["a", "b"] })),
+        ]);
+      }
+      return queryResp([]);
+    }) as unknown as typeof fetch;
+
+    const lines: string[] = [];
+    await getRecord({
+      cfg,
+      slug: "field-task",
+      type: "task",
+      fields: ["slug", "tags[0]"],
+      print: (l) => lines.push(l),
+    });
+
+    expect(lines).toEqual(["field-task\ta"]);
+  });
+
   test("truncates the human body when bodyLimit is set", async () => {
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;

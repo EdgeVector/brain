@@ -32,6 +32,7 @@ import {
 } from "../client.ts";
 import { newSearchClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
+import { printFieldProjection } from "../field-projection.ts";
 import {
   capitalize,
   formatTable,
@@ -94,6 +95,7 @@ export type AskOptions = {
   // BM25 corpus is built only over the requested types and the vector call
   // is server-side schema-scoped, so both rankers see the narrowed slice.
   types?: readonly RecordType[];
+  fields?: readonly string[];
   // Machine-readable mode. Emits a single JSON array document via `print`
   // (one call); empty-result sentinel becomes `[]`, the `--explain`
   // expansions block and every advisory `note:` line route to `printErr`
@@ -522,6 +524,20 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     confidence: weakMatch ? "weak" : "strong",
   }));
   opts.onResult?.(payload);
+
+  if (opts.fields !== undefined && opts.fields.length > 0) {
+    printFieldProjection(payload, opts.fields, print);
+    if (weakMatch) printErr(weakMatchNote);
+    return {
+      query: opts.query,
+      expansions,
+      expansion,
+      expansionStatus,
+      hits: resolved,
+      bm25CorpusSize: corpusSize,
+      bm25CacheHit,
+    };
+  }
 
   if (resolved.length === 0) {
     // Context-aware no-match hint, mirroring `fbrain search` (#276). `ask` is a
