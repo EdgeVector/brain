@@ -266,6 +266,52 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
     }
   });
 
+  // Write-tool shape through the SDK: fbrain_tag must preserve non-tag fields
+  // and attach the {action:"tags_changed", ...} payload on the wire.
+  test("fbrain_tag returns structured {action:'tags_changed'} through the SDK", async () => {
+    const mutations: MutationBody[] = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        const body = parseBody(init);
+        if (body.schema_name === TEST_HASHES.concept) {
+          return { status: 200, body: { ok: true, results: [conceptRow("c1", "body bytes")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(parseBody(init) as MutationBody);
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const { callTool, close } = await connectClient();
+    try {
+      const res = await callTool("fbrain_tag", {
+        slug: "c1",
+        type: "concept",
+        add: ["owner:fbrain,area:search"],
+        rm: ["k"],
+      });
+      expect(res.isError).toBeFalsy();
+      expect(mutations).toHaveLength(1);
+      expect(mutations[0]!.fields_and_values!.body).toBe("body bytes");
+      expect(mutations[0]!.fields_and_values!.tags).toEqual([
+        "owner:fbrain",
+        "area:search",
+      ]);
+      expect(res.structuredContent).toEqual({
+        action: "tags_changed",
+        type: "concept",
+        slug: "c1",
+        added: ["owner:fbrain", "area:search"],
+        removed: ["k"],
+        tags: ["owner:fbrain", "area:search"],
+      });
+    } finally {
+      await close();
+    }
+  });
+
   // Error-path naming through the SDK: a bad `chunk_b64` must name
   // fbrain_append and chunk_b64/chunk_path — NOT fbrain_put/body_b64/body_path
   // (the decoder is shared with fbrain_put and used to hardcode put's names).

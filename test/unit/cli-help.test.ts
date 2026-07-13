@@ -90,7 +90,7 @@ describe("COMMAND_HELP <-> CLI_SPEC alignment", () => {
 
   test("type-list help surfaces render from RECORD_TYPES", () => {
     const list = recordTypeList();
-    for (const cmd of ["put", "append", "get", "list", "status", "delete", "reindex"] as const) {
+    for (const cmd of ["put", "append", "get", "list", "status", "tag", "delete", "reindex"] as const) {
       expect(COMMAND_HELP[cmd]).toContain(list);
     }
     expect(COMMAND_HELP.search).toContain(`One of: ${list}. Omit to search across all ${recordTypeCount()} types.`);
