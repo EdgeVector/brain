@@ -1,11 +1,11 @@
 // MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_ask`,
 // `fbrain_get`, `fbrain_list`, `fbrain_backlinks`) and write (`fbrain_put`, `fbrain_status`,
-// `fbrain_append`, `fbrain_delete`, `fbrain_link`) tools to MCP clients
-// (Claude Code, Codex, etc.) over stdio. 10 tools total. `fbrain_status`
-// (status-only patch) and `fbrain_append` (grow a body without a full
-// rewrite) close the read/write asymmetry: without them the only write was
-// `fbrain_put`, a FULL replace whose body defaults to empty, so the natural
-// get(windowed)→edit→re-put loop silently truncated large records.
+// `fbrain_append`, `fbrain_tag`, `fbrain_delete`, `fbrain_link`) tools to MCP
+// clients (Claude Code, Codex, etc.) over stdio. `fbrain_status` (status-only
+// patch), `fbrain_append` (grow a body without a full rewrite), and
+// `fbrain_tag` (tag-only patch) close the read/write asymmetry: without them
+// the only write was `fbrain_put`, a FULL replace whose body defaults to empty,
+// so the natural get(windowed)→edit→re-put loop silently truncated records.
 //
 // Each handler wraps the existing CLI command function and captures its
 // printed output as a single text content block. No shell-out — the
@@ -30,6 +30,7 @@ import { formatPutConfirmation } from "../write-confirmation.ts";
 import { putCmd } from "../commands/put.ts";
 import { statusCmd, type StatusShowResult } from "../commands/status.ts";
 import { appendCmd } from "../commands/append.ts";
+import { tagCmd, parseTagList } from "../commands/tag.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { backlinksCmd, type BacklinksJson } from "../commands/backlinks.ts";
@@ -644,6 +645,18 @@ const appendResultSchema = z.object({
     .number()
     .int()
     .describe("Characters added (chunk length plus any auto-inserted separator)."),
+});
+
+// `fbrain_tag` → `{action:"tags_changed", type, slug, added, removed, tags}`.
+// `added`/`removed` are EFFECTIVE changes; idempotent no-ops return empty
+// arrays and the current tag set.
+const tagResultSchema = z.object({
+  action: z.literal("tags_changed").describe("Always `tags_changed`."),
+  type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
+  slug: z.string().describe("Resolved record slug."),
+  added: z.array(z.string()).describe("Tags effectively added by this call."),
+  removed: z.array(z.string()).describe("Tags effectively removed by this call."),
+  tags: z.array(z.string()).describe("Full tag list after the mutation."),
 });
 
 // ── Cold-capability self-warm (opt-in) ───────────────────────────────────
@@ -1540,6 +1553,58 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
+    "fbrain_tag",
+    {
+      title: "Add or remove fbrain tags",
+      description:
+        "Add/remove tags on an existing record WITHOUT a full re-put. This is " +
+        "the tag-side sibling of fbrain_status: it reads the live record, " +
+        "applies set-add/remove to `tags`, and writes back preserving " +
+        "body/title/status/created_at. Re-adding an existing tag or removing " +
+        "an absent one is a no-op success. Pass at least one of `add` or `rm`; " +
+        "each accepts a JSON array of strings, and comma-separated entries " +
+        "inside an array item are split for CLI parity. Without `type`, " +
+        "resolves across every type and errors on an ambiguous slug. Returns " +
+        "`{action:\"tags_changed\", type, slug, added, removed, tags}` where " +
+        "`added`/`removed` are effective changes.",
+      inputSchema: {
+        slug: requiredText("Record slug."),
+        add: z
+          .preprocess((v) => normalizeTagMutationArg(v), z.array(z.string()))
+          .optional()
+          .describe("Tags to add. Use a JSON array, e.g. `[\"owner:fbrain\"]`."),
+        rm: z
+          .preprocess((v) => normalizeTagMutationArg(v), z.array(z.string()))
+          .optional()
+          .describe("Tags to remove. Use a JSON array, e.g. `[\"stale\"]`."),
+        type: typeEnum
+          .optional()
+          .describe(
+            "Restrict lookup to one record type. Omit to resolve across all " +
+              "types (errors on an ambiguous slug).",
+          ),
+      },
+      outputSchema: tagResultSchema.shape,
+    },
+    (args) =>
+      runTool<Record<string, unknown>>({
+        mode: "write",
+        getCfg,
+        autoGrant,
+        exec: (cfg, print, onResult) =>
+          tagCmd({
+            cfg,
+            slug: args.slug,
+            add: args.add,
+            rm: args.rm,
+            type: args.type,
+            print,
+            onResult: (r) => onResult(r),
+          }),
+      }),
+  );
+
+  server.registerTool(
     "fbrain_delete",
     {
       title: "Delete fbrain record",
@@ -1943,6 +2008,15 @@ export function normalizeTagsArg(tags: unknown): string[] | undefined {
       .filter((s) => s.length > 0);
   }
   if (Array.isArray(tags)) return tags;
+  return tags as string[];
+}
+
+function normalizeTagMutationArg(tags: unknown): string[] | undefined {
+  if (tags === undefined) return undefined;
+  if (typeof tags === "string") return parseTagList([tags]);
+  if (Array.isArray(tags)) {
+    return parseTagList(tags.filter((tag): tag is string => typeof tag === "string"));
+  }
   return tags as string[];
 }
 

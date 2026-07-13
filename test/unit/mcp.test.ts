@@ -31,6 +31,7 @@ import {
 } from "../../src/mcp/server.ts";
 import { ConfigMissingError } from "../../src/config.ts";
 import { COMMAND_HELP } from "../../src/cli.ts";
+import { FBRAIN_MCP_TOOL_NAMES } from "../../src/mcp/tools.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { recordStatusLines, recordTypeCount, recordTypeList } from "../../src/schemas.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
@@ -1635,18 +1636,11 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });
 
-  test("all 10 tools — read AND write — declare an outputSchema", () => {
+  test("all tools — read AND write — declare an outputSchema", () => {
     const server = createFbrainMcpServer({ cfg });
-    // Read tools (typed since #262).
-    expect(outputSchemaOf(server, "fbrain_search")).toBeDefined();
-    expect(outputSchemaOf(server, "fbrain_ask")).toBeDefined();
-    expect(outputSchemaOf(server, "fbrain_get")).toBeDefined();
-    expect(outputSchemaOf(server, "fbrain_list")).toBeDefined();
-    expect(outputSchemaOf(server, "fbrain_backlinks")).toBeDefined();
-    // Write tools (this card closes the gap #262 opened for the read tools).
-    expect(outputSchemaOf(server, "fbrain_put")).toBeDefined();
-    expect(outputSchemaOf(server, "fbrain_delete")).toBeDefined();
-    expect(outputSchemaOf(server, "fbrain_link")).toBeDefined();
+    for (const name of FBRAIN_MCP_TOOL_NAMES) {
+      expect(outputSchemaOf(server, name)).toBeDefined();
+    }
   });
 });
 
@@ -3480,20 +3474,9 @@ describe("empty/dropped tool input guard", () => {
 });
 
 describe("createFbrainMcpServer", () => {
-  test("registers the 10 read+write tools", () => {
+  test("registers the expected read+write tools", () => {
     const tools = toolsOf(createFbrainMcpServer({ cfg }));
-    expect(Object.keys(tools).sort()).toEqual([
-      "fbrain_append",
-      "fbrain_ask",
-      "fbrain_backlinks",
-      "fbrain_delete",
-      "fbrain_get",
-      "fbrain_link",
-      "fbrain_list",
-      "fbrain_put",
-      "fbrain_search",
-      "fbrain_status",
-    ]);
+    expect(Object.keys(tools).sort()).toEqual([...FBRAIN_MCP_TOOL_NAMES].sort());
   });
 
   // Pins `fbrain help mcp` text to the actually-registered MCP tool set so the
@@ -3503,8 +3486,7 @@ describe("createFbrainMcpServer", () => {
   test("COMMAND_HELP.mcp names every registered tool and says the registered count", () => {
     const help = COMMAND_HELP.mcp;
     const registered = Object.keys(toolsOf(createFbrainMcpServer({ cfg })));
-    // 10 is the contract — the help must not undercount the server.
-    expect(registered).toHaveLength(10);
+    expect(registered).toHaveLength(FBRAIN_MCP_TOOL_NAMES.length);
     for (const name of registered) {
       expect(help).toContain(name);
     }
@@ -3552,7 +3534,7 @@ describe("server starts without a config (lazy config resolution)", () => {
     };
   }
 
-  test("constructs and lists all 10 tools with no config (handshake survives)", () => {
+  test("constructs and lists all tools with no config (handshake survives)", () => {
     let loaderCalls = 0;
     const getCfg = () => {
       loaderCalls += 1;
@@ -3561,18 +3543,7 @@ describe("server starts without a config (lazy config resolution)", () => {
     const tools = toolsOf(createFbrainMcpServer({ getCfg }));
     // tools/list never resolves config — the loader must not have run yet.
     expect(loaderCalls).toBe(0);
-    expect(Object.keys(tools).sort()).toEqual([
-      "fbrain_append",
-      "fbrain_ask",
-      "fbrain_backlinks",
-      "fbrain_delete",
-      "fbrain_get",
-      "fbrain_link",
-      "fbrain_list",
-      "fbrain_put",
-      "fbrain_search",
-      "fbrain_status",
-    ]);
+    expect(Object.keys(tools).sort()).toEqual([...FBRAIN_MCP_TOOL_NAMES].sort());
   });
 
   test("a tool call with no config returns an isError result naming `fbrain init` (not a crash)", async () => {

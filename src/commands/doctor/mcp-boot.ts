@@ -98,8 +98,8 @@ export function runMcpEntrypointProbe(
 // PATH; this BOOTS it. We spawn the resolved `fbrain-mcp` entrypoint, write a
 // JSON-RPC `initialize` then `tools/list` to its stdin over stdio, read the
 // responses, and assert the server returns a valid initialize result AND
-// reports EXACTLY the 7 expected tool names (the set, so a missing/renamed
-// tool fails). Bounded by a deadline + child kill (mirrors #270's
+// reports EXACTLY the expected tool names (the set, so a missing/renamed tool
+// fails). Bounded by a deadline + child kill (mirrors #270's
 // attestOwnerSession discipline): a wedged server surfaces a clean FAIL, never
 // a hung doctor. FAIL (not WARN) on any boot/handshake/tool-set failure, with
 // an actionable re-link `fix`. Skipped (not FAIL) by the caller when

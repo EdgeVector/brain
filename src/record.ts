@@ -958,7 +958,7 @@ export interface ResolveBySlugOpts {
   // user actually ran (`fbrain status …`/`fbrain delete …`, not always `get`).
   // Three callers share this sweep; each passes its own verb. Defaults to
   // "get" so the throw stays well-formed for any future caller that omits it.
-  recoveryVerb?: "get" | "status" | "delete";
+  recoveryVerb?: "get" | "status" | "tag" | "delete";
   // Read-only callers can opt into deterministic ambiguity resolution while
   // mutating callers keep the safer default of erroring unless --type is set.
   ambiguousTypePrecedence?: readonly RecordType[];

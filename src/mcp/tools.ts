@@ -10,6 +10,7 @@ export const FBRAIN_MCP_WRITE_TOOL_NAMES = [
   "fbrain_put",
   "fbrain_status",
   "fbrain_append",
+  "fbrain_tag",
   "fbrain_delete",
   "fbrain_link",
 ] as const;

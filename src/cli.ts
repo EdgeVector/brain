@@ -16,6 +16,7 @@ import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
 import { listCmd } from "./commands/list.ts";
 import { statusCmd } from "./commands/status.ts";
+import { tagCmd } from "./commands/tag.ts";
 import { linkCmd } from "./commands/link.ts";
 import { backlinksCmd } from "./commands/backlinks.ts";
 import { searchCmd } from "./commands/search.ts";
@@ -104,6 +105,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   // `status:` in put frontmatter) is a caller-supplied malformed value, same
   // class as invalid_slug — usage error, exit 2.
   "invalid_status",
+  "missing_tag_mutation",
   "invalid_raw_method",
   "invalid_raw_path",
 ]);
@@ -125,6 +127,7 @@ export const COMMANDS = [
   "get",
   "list",
   "status",
+  "tag",
   "link",
   "backlinks",
   "search",
@@ -168,6 +171,7 @@ ${RECORD_NEW_HELP_LINES}
   get            print a record by slug
   list           list records, newest-first
   status         show or update a record's status
+  tag            add/remove tags without a full re-put
   link           link records (legacy default: task to parent design)
   backlinks      list records linking to a slug
   search         semantic search over indexed records
@@ -351,6 +355,20 @@ type's status enum, updates updated_at, and writes back.
             with a new-status; the update form keeps its human transition
             line. On failure, a \`{error, hint}\` JSON object is emitted to
             stdout too (human \`error:\`/\`hint:\` lines still go to stderr).`,
+  tag: `fbrain tag <slug> [--type T] [--add T[,T]]... [--rm T[,T]]... [--json]
+
+Add/remove tags on an existing record WITHOUT a full re-put. The command
+resolves the live record, applies set-add/remove to \`tags\`, and writes back
+preserving body/title/status/created_at. Re-adding an existing tag or removing
+an absent one is a no-op success.
+
+  --type    ${RECORD_TYPE_LIST}
+            (omit to resolve across all types; errors on an ambiguous slug)
+  --add     tag(s) to add; repeat the flag or use a comma-separated list
+  --rm      tag(s) to remove; repeat the flag or use a comma-separated list
+  --json    emit \`{ok, slug, added, removed, tags}\` on stdout; the human
+            line moves to stderr so \`--json\` stdout is parseable. On failure
+            a \`{error, hint}\` JSON object is emitted to stdout too.`,
   link: `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T] [--json]
 
 Rejects a non-existent explicit target. With no type flags, preserves the
@@ -521,7 +539,7 @@ PATH-only mcp-entrypoint check):
   - mcp-boot: spawn \`fbrain-mcp\`, drive a JSON-RPC initialize +
     tools/list handshake over stdio under a bounded deadline, and PASS
     only when the server returns a valid handshake AND reports exactly
-    the 7 expected tools. FAIL (not WARN) on a boot/handshake/tool-set
+    the ${FBRAIN_MCP_TOOL_NAMES.length} expected tools. FAIL (not WARN) on a boot/handshake/tool-set
     mismatch. Skipped when \`fbrain-mcp\` isn't on PATH. OFF by default
     so plain \`fbrain doctor\` never spawns the server.
 
@@ -830,6 +848,12 @@ const STATUS_OPTIONS = {
   // human transition line.
   json: { type: "boolean", default: false },
 } as const;
+const TAG_OPTIONS = {
+  type: { type: "string" },
+  add: { type: "string", multiple: true },
+  rm: { type: "string", multiple: true },
+  json: { type: "boolean", default: false },
+} as const;
 const SEARCH_OPTIONS = {
   limit: { type: "string", short: "n" },
   exact: { type: "boolean", default: false },
@@ -961,6 +985,7 @@ export const CLI_SPEC = {
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
   status: STATUS_OPTIONS,
+  tag: TAG_OPTIONS,
   link: LINK_OPTIONS,
   backlinks: BACKLINKS_OPTIONS,
   search: SEARCH_OPTIONS,
@@ -1482,6 +1507,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runList(args, verboseFn);
     case "status":
       return runStatus(args, verboseFn);
+    case "tag":
+      return runTag(args, verboseFn);
     case "link":
       return runLink(args, verboseFn);
     case "backlinks":
@@ -2188,6 +2215,55 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
   if (type) sOpts.type = type;
   if (values.json) sOpts.json = true;
   await withTypeAsPositionalHint(slug, () => statusCmd(sOpts));
+  return 0;
+}
+
+async function runTag(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: TAG_OPTIONS,
+    },
+    "tag",
+  );
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.tag);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `tag takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain tag <slug> --add T` once per record; repeat `--add`/`--rm` for multiple tags.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  const tOpts: Parameters<typeof tagCmd>[0] = {
+    cfg,
+    slug,
+    add: values.add,
+    rm: values.rm,
+    verbose,
+  };
+  if (type) tOpts.type = type;
+  if (values.json) {
+    tOpts.print = (line: string) => console.error(line);
+    tOpts.onResult = (payload) =>
+      console.log(
+        JSON.stringify({
+          ok: true,
+          slug: payload.slug,
+          added: payload.added,
+          removed: payload.removed,
+          tags: payload.tags,
+        }),
+      );
+  }
+  await withTypeAsPositionalHint(slug, () => tagCmd(tOpts));
   return 0;
 }
 
