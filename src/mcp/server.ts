@@ -292,9 +292,11 @@ export const ASK_QUERY_REQUIRED_HINT =
   '`fbrain_ask({"query":"deployment rollback decision","limit":5})`.';
 
 export const GET_SLUG_REQUIRED_HINT =
-  "fbrain_get requires a non-empty `slug` string. Example: " +
-  '`fbrain_get({"slug":"deployment-rollback-decision","type":"concept"})`. ' +
-  "For fuzzy/text lookup, call fbrain_ask first.";
+  "fbrain_get requires a non-empty `slug` OR `query` string. Pass `slug` for " +
+  "an exact-key get (example: " +
+  '`fbrain_get({"slug":"deployment-rollback-decision","type":"concept"})`), ' +
+  "or `query` for a fuzzy/text lookup when you don't have the exact slug " +
+  '(example: `fbrain_get({"query":"deployment rollback decision"})`).';
 
 export const BACKLINKS_SLUG_REQUIRED_HINT =
   "fbrain_backlinks requires a non-empty `slug` string (the TARGET record " +
@@ -490,6 +492,18 @@ const recordSchema = z.object({
     .optional()
     .describe(
       "The `body_offset` to pass on the next fbrain_get call to read the following window; `null` when this window reaches the end of the body. Present only when the body was windowed.",
+    ),
+  // Present ONLY when `fbrain_get` was called with `query` (not `slug`) and no
+  // exact-slug match was found, so it fell back to the same fuzzy resolver
+  // `fbrain_ask` uses. Carries the original query text; the returned record is
+  // the TOP fuzzy hit — a best match, NOT a verified exact-slug get. Absent on
+  // every exact-slug get (whether `slug` was passed directly or `query` matched
+  // a slug exactly), so the common path is byte-for-byte the pre-change shape.
+  matched_query: z
+    .string()
+    .optional()
+    .describe(
+      "Present only when a `query` argument resolved via fuzzy fallback (no exact slug). The original query text; the returned record is the best fuzzy hit, not an exact-slug match.",
     ),
 });
 
@@ -916,9 +930,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Get fbrain record",
       description:
-        "Print a single fbrain record by slug. The ONLY lookup key is `slug` " +
-        "(plus optional `type`) — there is no `query`/`key`/`id` argument; for " +
-        "text or fuzzy lookup use `fbrain_search` instead. Without `type`, " +
+        "Print a single fbrain record. Pass `slug` for an exact-key get, or " +
+        "`query` (fuzzy/text) when you don't have the exact slug — a `query` " +
+        "first tries an exact slug match and, on a miss, falls back to the same " +
+        "hybrid resolver `fbrain_ask` uses and returns the top hit (the result " +
+        "then carries `matched_query` to flag that it was a best match, not an " +
+        "exact get). Provide `slug` OR `query`; passing neither is the only " +
+        "input error. `type` filters both paths. Without `type`, an exact get " +
         "queries every registered schema and errors if the slug exists in " +
         "multiple types. Large bodies are PAGINATED: the body is capped at " +
         `~${FBRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")} chars per ` +
@@ -930,7 +948,27 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "until `bodyNextOffset` is null). `body_limit` overrides the per-call cap. " +
         "A record that fits in one window returns unchanged (no window fields).",
       inputSchema: {
-        slug: actionableRequiredText("Record slug.", GET_SLUG_REQUIRED_HINT),
+        // `slug` is OPTIONAL at the schema layer because `query` is an
+        // alternative lookup key — the cross-field "one of slug/query is
+        // required" rule can't live on a single field's schema, so (like
+        // fbrain_ask's query/question) the handler enforces it. A bare `{}`
+        // therefore passes schema validation and the actionable hint is raised
+        // by runGetTool.
+        slug: z
+          .string()
+          .optional()
+          .describe(
+            "Exact record slug (the lookup key). Provide this OR `query`.",
+          ),
+        query: z
+          .string()
+          .optional()
+          .describe(
+            "Fuzzy/text lookup for when you don't have the exact slug. Tries an " +
+              "exact slug match first, then falls back to the same hybrid " +
+              "resolver `fbrain_ask` uses and returns the top hit. Provide this " +
+              "OR `slug`; `slug` wins when both are given.",
+          ),
         type: typeEnum
           .optional()
           .describe(
@@ -963,6 +1001,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     (args) =>
       runGetTool(getCfg, {
         slug: args.slug,
+        query: args.query,
         type: args.type,
         bodyOffset: args.body_offset ?? 0,
         bodyLimit: args.body_limit ?? FBRAIN_GET_BODY_LIMIT_DEFAULT,
@@ -2029,20 +2068,84 @@ async function runTool<P>(opts: RunToolOptions<P>): Promise<ToolResult> {
 
 async function runGetTool(
   getCfg: () => Config,
-  args: { slug: string; type?: RecordJson["type"]; bodyOffset: number; bodyLimit: number },
+  args: {
+    slug?: string;
+    query?: string;
+    type?: RecordJson["type"];
+    bodyOffset: number;
+    bodyLimit: number;
+  },
 ): Promise<ToolResult> {
+  const slug = args.slug?.trim();
+  const query = args.query?.trim();
+  const hasSlug = slug !== undefined && slug.length > 0;
+  const hasQuery = query !== undefined && query.length > 0;
+
+  // Cross-field guard: exactly the fbrain_ask pattern. Neither key present →
+  // the actionable hint through the error envelope, so a bare `fbrain_get({})`
+  // still gets a helpful example instead of an opaque arg error. This is the
+  // ONLY input-validation error the tool raises now.
+  if (!hasSlug && !hasQuery) {
+    return errorResult(
+      new FbrainError({
+        code: "missing_slug",
+        message: GET_SLUG_REQUIRED_HINT,
+        agentHint: GET_SLUG_REQUIRED_HINT,
+      }),
+    );
+  }
+
+  // Set only when a `query` resolved via the fuzzy fallback (no exact slug),
+  // so render can flag the result as a best match rather than an exact get.
+  let matchedQuery: string | undefined;
+  // The slug/query text we tried, for the not-found candidate-hint enrichment.
+  const lookupText = hasSlug ? slug! : query!;
+
   return runTool<RecordJson>({
     mode: "read",
     getCfg,
-    exec: (cfg, _print, onResult) =>
-      getRecord({
+    exec: async (cfg, _print, onResult) => {
+      // `slug` wins when both are present — an exact-key get is the current
+      // behavior and never routes through the fuzzy resolver.
+      if (hasSlug) {
+        await getRecord({ cfg, slug: slug!, type: args.type, print: () => {}, onResult });
+        return;
+      }
+
+      // `query` path: try an exact slug match first (the query often IS a
+      // slug), then fall back to the same hybrid resolver fbrain_ask uses.
+      try {
+        await getRecord({ cfg, slug: query!, type: args.type, print: () => {}, onResult });
+        return;
+      } catch (err) {
+        // Only a genuine miss triggers the fuzzy fallback; any other failure
+        // (node down, ambiguous type, etc.) surfaces unchanged.
+        if (!(err instanceof FbrainError) || err.code !== "not_found") throw err;
+      }
+
+      const resolved = await resolveQueryToSlug(cfg, query!, args.type);
+      if (resolved === undefined) {
+        throw new FbrainError({
+          code: "not_found",
+          message: `No record matched query: ${query!}`,
+          hint:
+            `fbrain_get found no exact slug for "${query!}" and the fuzzy ` +
+            "resolver returned no candidate.",
+          agentHint:
+            `fbrain_get found no exact slug for "${query!}" and fbrain_ask ` +
+            `returned no match. Try fbrain_ask({"query":"${query!}"}) to browse candidates.`,
+        });
+      }
+      matchedQuery = query!;
+      await getRecord({
         cfg,
-        slug: args.slug,
-        type: args.type,
+        slug: resolved.slug,
+        type: resolved.type,
         print: () => {},
         onResult,
-      }),
-    onError: (err, cfg) => enrichGetNotFoundError(cfg, err, args),
+      });
+    },
+    onError: (err, cfg) => enrichGetNotFoundError(cfg, err, { slug: lookupText, type: args.type }),
     render: (record) => {
       if (record === undefined) return errorResult(new Error("fbrain_get: no record resolved"));
 
@@ -2061,19 +2164,53 @@ async function runGetTool(
         structured.bodyTruncated = win.truncated;
         structured.bodyNextOffset = win.next;
       }
+      if (matchedQuery !== undefined) structured.matched_query = matchedQuery;
 
-      const text = formatRecordJsonWindow(record, {
+      const body = formatRecordJsonWindow(record, {
         body: windowedBody,
         offset: win.start,
         total,
         truncated: win.truncated,
       });
+      // Prepend a one-line note naming what the fuzzy query matched, so an
+      // agent reading the text surface sees it resolved a best match (not an
+      // exact slug) and how to pin it next time.
+      const text =
+        matchedQuery !== undefined
+          ? `note: no exact slug for query "${matchedQuery}" — resolved via fuzzy ` +
+            `match to ${record.slug} (${record.type}). For an exact get: ` +
+            `fbrain_get({"slug":"${record.slug}"}).\n${body}`
+          : body;
 
       const result = textResult(text);
       result.structuredContent = structured;
       return result;
     },
   });
+}
+
+// Route a `query` (no exact slug matched) through the SAME hybrid BM25+vector
+// resolver fbrain_ask uses and return the single top hit's slug+type, or
+// undefined when there is no candidate. `limit: 1` — we only need the best
+// match. `type` is preserved as a single-type filter. LLM query expansion
+// stays off (askCmd default), so no API key is ever required.
+async function resolveQueryToSlug(
+  cfg: Config,
+  query: string,
+  type?: RecordJson["type"],
+): Promise<{ slug: string; type: RecordType } | undefined> {
+  const result = await askCmd({
+    cfg,
+    query,
+    print: () => {},
+    printErr: () => {},
+    limit: 1,
+    types: type ? [type] : undefined,
+    agent: true,
+  });
+  const top = result.hits[0];
+  if (top === undefined) return undefined;
+  return { slug: top.record.slug, type: top.type };
 }
 
 async function enrichGetNotFoundError(

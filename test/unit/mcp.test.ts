@@ -792,6 +792,120 @@ describe("fbrain_get tool", () => {
     expect(text).not.toContain("Project");
   });
 
+  // ── query / fuzzy-alias fallback ───────────────────────────────────────
+  // Agents frequently call `fbrain_get({query:"..."})` because the sibling
+  // tool is `fbrain_ask` (free text) and they don't have the exact slug. The
+  // tool used to hard-reject that with an input-validation error; it now
+  // accepts `query`, tries an exact slug match, and on a miss falls back to
+  // the same hybrid resolver `fbrain_ask` uses.
+
+  // Neither `slug` nor `query` present → the actionable hint (cross-field, so
+  // enforced by the handler now that `slug` is optional at the schema layer).
+  test("with neither slug nor query, returns the actionable hint", async () => {
+    installMock(() => ({ status: 200, body: { ok: true, results: [] } }));
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    for (const input of [{}, { slug: "" }, { query: "   " }]) {
+      const res = await tools.fbrain_get!(input);
+      expect(res.isError).toBe(true);
+      expect(res.content[0]!.text ?? "").toContain(GET_SLUG_REQUIRED_HINT);
+    }
+  });
+
+  // The canonical papercut repro from the card: a text `query` with no exact
+  // slug resolves to the best fuzzy hit (here `sop-routine-shared-contract`),
+  // and the result flags that it was a fuzzy match (not an exact get).
+  test("query with no exact slug falls back to the fuzzy resolver and flags the match", async () => {
+    const RESOLVED = "sop-routine-shared-contract";
+    installMock((url, init) => {
+      if (url.includes("/api/native-index/search")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.includes("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        const key = body.filter?.HashKey;
+        if (body.schema_name === TEST_HASHES.sop) {
+          // The record lives under the sop schema. Return it for the corpus
+          // walk (unkeyed) AND the final exact get on the resolved slug
+          // (keyed by that slug); the keyed miss on the raw query is empty.
+          if (key === undefined || key === RESOLVED) {
+            return {
+              status: 200,
+              body: {
+                ok: true,
+                results: [
+                  recordRow(
+                    RESOLVED,
+                    "Routine shared contract SOP",
+                    "the routine shared contract every scheduled routine follows",
+                  ),
+                ],
+              },
+            };
+          }
+          return { status: 200, body: { ok: true, results: [] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_get!({ query: "routine shared contract" });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.slug).toBe(RESOLVED);
+    expect(sc.matched_query).toBe("routine shared contract");
+    const text = res.content[0]!.text ?? "";
+    expect(text).toContain("resolved via fuzzy match");
+    expect(text).toContain(RESOLVED);
+    expect(text).toContain(`[sop] ${RESOLVED}`);
+  }, 30_000);
+
+  // A `query` that IS an exact slug resolves directly — no fuzzy fallback, and
+  // NO `matched_query` flag (the common path stays an exact get).
+  test("query that exactly matches a slug is an exact get (no matched_query flag)", async () => {
+    let queryCount = 0;
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        queryCount += 1;
+        // First registered type (design) carries the record; everything else
+        // empty — same shape as the slug-path exact-get test above.
+        if (queryCount === 1) {
+          return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_get!({ query: "alpha", type: "design" });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.slug).toBe("alpha");
+    expect("matched_query" in sc).toBe(false);
+    expect(res.content[0]!.text ?? "").not.toContain("resolved via fuzzy match");
+  });
+
+  // `slug` wins when both are present — an exact-key get, never the resolver.
+  test("slug takes precedence over query when both are supplied", async () => {
+    let queryCount = 0;
+    installMock((url) => {
+      if (url.includes("/api/query")) {
+        queryCount += 1;
+        if (queryCount === 1) {
+          return { status: 200, body: { ok: true, results: [recordRow("alpha", "Alpha")] } };
+        }
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      return { status: 404 };
+    });
+    const tools = toolsOf(createFbrainMcpServer({ cfg }));
+    const res = await tools.fbrain_get!({ slug: "alpha", query: "unused text", type: "design" });
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.slug).toBe("alpha");
+    expect("matched_query" in sc).toBe(false);
+  });
+
   // ── Body pagination (large-record token-budget guard) ──────────────────
   // A record whose body exceeds the harness token budget used to fail
   // `fbrain_get` outright ("result (N characters) exceeds maximum allowed
@@ -3336,14 +3450,16 @@ describe("empty/dropped tool input guard", () => {
     expect(z.safeParse(inputSchemaOf("fbrain_ask") as never, { question: "q" }).success).toBe(true);
   });
 
-  test("fbrain_get missing or empty slug yields an actionable example", () => {
-    for (const input of [{}, { slug: "" }, { slug: "   " }]) {
+  // `slug` is now OPTIONAL at the schema layer because `query` is an
+  // alternative lookup key — the cross-field "one of slug/query" rule can't
+  // live on a single field's schema, so (mirroring fbrain_ask's query/question)
+  // a bare `{}` / empty slug PASSES schema validation and the actionable hint
+  // is enforced by the handler — see the "fbrain_get tool" describe
+  // ("with neither slug nor query, returns the actionable hint").
+  test("fbrain_get accepts a bare {} / query-only at the schema layer (handler enforces the hint)", () => {
+    for (const input of [{}, { slug: "" }, { slug: "   " }, { query: "some text" }]) {
       const res = z.safeParse(inputSchemaOf("fbrain_get") as never, input);
-      expect(res.success).toBe(false);
-      if (!res.success) {
-        expect(res.error.issues[0]!.message).toBe(GET_SLUG_REQUIRED_HINT);
-        expect(res.error.issues[0]!.message).toContain('fbrain_get({"slug"');
-      }
+      expect(res.success).toBe(true);
     }
   });
 
