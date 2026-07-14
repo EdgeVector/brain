@@ -32,6 +32,7 @@ import {
 } from "./client.ts";
 import { CapabilitySession } from "./capability-session.ts";
 import type { Config } from "./config.ts";
+import { tryReadConfig } from "./config.ts";
 import {
   defaultCapabilityStore,
 } from "./keychain.ts";
@@ -81,9 +82,20 @@ export type WriteNodeClient = {
  */
 export function appIdentityEnforceEnabled(): boolean {
   const raw = process.env.FBRAIN_APP_IDENTITY_ENFORCE;
-  if (raw === undefined) return true;
-  const v = raw.trim().toLowerCase();
-  return !(v === "false" || v === "0" || v === "no" || v === "off");
+  if (raw !== undefined) {
+    const v = raw.trim().toLowerCase();
+    return !(v === "false" || v === "0" || v === "no" || v === "off");
+  }
+  // Mini first-run: `brain init` may pin appIdentityEnforce:false when schemas
+  // were declared locally and schema_service consent cannot run. Config flag
+  // applies only when env is unset.
+  try {
+    const cfg = tryReadConfig();
+    if (cfg && cfg.appIdentityEnforce === false) return false;
+  } catch {
+    // Config missing / unreadable → default enforce-on.
+  }
+  return true;
 }
 
 export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {

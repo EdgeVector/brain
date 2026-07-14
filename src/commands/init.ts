@@ -332,6 +332,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (socketOverride && socketOverride.length > 0) {
     config.nodeSocketPath = socketOverride;
   }
+  // Mini first-run: local declare means schemas never went through
+  // schema_service, so consent-request against the cloud app registry will
+  // 404 "app not registered". Pin client enforce-off so NodeOwner writes work
+  // on the owner socket without a capability (Mini Unverified → owner).
+  if (localDeclare.supported) {
+    config.appIdentityEnforce = false;
+  }
   writeConfig(config, configPath);
   print(`        wrote config v${CONFIG_VERSION}`);
 
@@ -340,14 +347,23 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // disk); non-TTY safe (skips with a one-line note for CI/scripts); falls
   // back to the manual instruction when `folddb` is not on PATH.
   print(`[6/${STEPS}] establishing consent (one-time grant for fbrain's namespace)`);
-  const consentBase: EstablishConsentOptions = {
-    nodeUrl,
-    userHash,
-    print,
-  };
-  if (verbose !== undefined) consentBase.verbose = verbose;
-  if (opts.grantConsent) consentBase.nonInteractiveGrant = true;
-  const consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
+  let consent: Awaited<ReturnType<typeof establishConsentInline>>;
+  if (localDeclare.supported) {
+    print(
+      `        local app-schema declare path — schema_service consent skipped ` +
+        `(appIdentityEnforce=false; writes land as NodeOwner on Mini)`,
+    );
+    consent = { state: "skipped", reason: "enforce_off" };
+  } else {
+    const consentBase: EstablishConsentOptions = {
+      nodeUrl,
+      userHash,
+      print,
+    };
+    if (verbose !== undefined) consentBase.verbose = verbose;
+    if (opts.grantConsent) consentBase.nonInteractiveGrant = true;
+    consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
+  }
 
   print(`[init] ok`);
 
