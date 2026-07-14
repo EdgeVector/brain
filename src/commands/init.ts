@@ -74,12 +74,12 @@ export type InitOptions = {
   >;
 };
 
-// New default targets — the loopback node URL is the canonical local-node
-// marker (fbrain reaches a loopback node ONLY over its Unix socket; the `:9001`
-// TCP listener is retired). The schema service moved off `:9102` to the prod
-// cloud Lambda. The dev Lambda is reserved for the test harness so iteration
-// doesn't pollute prod.
-export const DEFAULT_NODE_URL = "http://127.0.0.1:9001";
+// Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback *marker*
+// (hostname only) so clients select socket transport via isLoopbackNodeUrl —
+// it is NOT a TCP endpoint. The retired :9001 control plane must never appear
+// in new configs or user-facing first-run copy. Schema service is the prod
+// cloud Lambda; the dev Lambda is reserved for the test harness.
+export const DEFAULT_NODE_URL = "http://127.0.0.1";
 export const DEFAULT_SCHEMA_SERVICE_URL =
   "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
 
@@ -90,6 +90,9 @@ export const DEFAULT_SCHEMA_SERVICE_URL =
 const STALE_NODE_URLS: ReadonlySet<string> = new Set([
   "http://127.0.0.1:9101",
   "http://localhost:9101",
+  // Retired Mini/full-node TCP control plane — heal to socket-only marker.
+  "http://127.0.0.1:9001",
+  "http://localhost:9001",
 ]);
 const STALE_SCHEMA_URLS: ReadonlySet<string> = new Set([
   "http://127.0.0.1:9102",
@@ -431,7 +434,8 @@ async function tryDeclareOwnedSchemasLocally(
 
 export function formatNodeTarget(nodeUrl: string): string {
   if (!isLoopbackNodeUrl(nodeUrl)) return nodeUrl;
-  return `unix:${defaultFolddbSocketPath()} (loopback URL marker ${nodeUrl})`;
+  // Socket-first: never advertise the retired TCP control plane to users.
+  return `unix:${defaultFolddbSocketPath()}`;
 }
 
 export function localMintIdentityHash(
@@ -551,7 +555,7 @@ export function printNextSteps(
   if (ctx.reinitialized) {
     print(``);
     print(
-      `Already initialized on ${ctx.nodeUrl} (config: ${ctx.configPath}) — try \`brain list\` to see your records, or \`brain doctor\` to re-check health.`,
+      `Already initialized on ${formatNodeTarget(ctx.nodeUrl)} (config: ${ctx.configPath}) — try \`brain list\` to see your records, or \`brain doctor\` to re-check health.`,
     );
     return;
   }
@@ -566,7 +570,7 @@ export function printNextSteps(
   print(`  5. Connect it to your AI agent: brain mcp install`);
   print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; \`fbrain-mcp\` is already on your PATH from the global \`bun add -g\` install — from a contributor source checkout, run \`bun link\` first)`);
   print(`        → then \`brain doctor --mcp\` to confirm the agent surface boots and serves the fbrain_* tools. (Doing it by hand instead? \`claude mcp add fbrain fbrain-mcp\` then \`brain mcp instructions >> CLAUDE.md\`.)`);
-  print(`  Data lives on the node at ${ctx.nodeUrl} (config: ${ctx.configPath}).`);
+  print(`  Data lives on the node at ${formatNodeTarget(ctx.nodeUrl)} (config: ${ctx.configPath}).`);
 
   // When consent wasn't established (non-TTY scripted/CI run without
   // --grant-consent), the first write will need a grant — point at the
@@ -662,9 +666,8 @@ export function resolveUrls(
   const healed: string[] = [];
 
   // When no explicit --node-url is given and there's no existing config URL to
-  // reuse, default to the loopback node URL. fbrain reaches a loopback node
-  // ONLY over its Unix socket (the retired :9001 TCP listener is gone); the URL
-  // is just the loopback marker that selects socket transport.
+  // reuse, default to the loopback marker. fbrain reaches a local node ONLY
+  // over its Unix socket; the URL is not dialed as TCP.
   let nodeUrl: string;
   if (opts.nodeUrl) {
     nodeUrl = opts.nodeUrl;

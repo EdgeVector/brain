@@ -117,6 +117,18 @@ describe("resolveUrls", () => {
     expect(r.schemaServiceUrl).toBe(DEFAULT_SCHEMA_SERVICE_URL);
     expect(r.healed).toEqual([]);
   });
+
+  test("retired TCP :9001 loopback marker heals to socket-only default", () => {
+    const existing = buildTestCfg({
+      nodeUrl: "http://127.0.0.1:9001",
+      schemaServiceUrl: DEFAULT_SCHEMA_SERVICE_URL,
+    });
+    const r = resolveUrls({}, existing);
+    expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
+    expect(r.nodeUrl).not.toContain("9001");
+    expect(r.healed).toHaveLength(1);
+    expect(r.healed[0]).toContain("nodeUrl");
+  });
 });
 
 describe("resolveUrls — node-URL default (socket-only loopback)", () => {
@@ -145,8 +157,10 @@ describe("formatNodeTarget", () => {
   test("loopback node URLs print the Unix socket target, not TCP as transport", () => {
     const out = formatNodeTarget(DEFAULT_NODE_URL);
     expect(out).toContain("unix:");
-    expect(out).toContain(DEFAULT_NODE_URL);
-    expect(out.startsWith(DEFAULT_NODE_URL)).toBe(false);
+    // Socket-first: never echo the loopback marker / retired :9001 as transport.
+    expect(out).not.toContain("9001");
+    expect(out).not.toContain("http://");
+    expect(out.startsWith("unix:")).toBe(true);
   });
 
   test("remote node URLs print unchanged", () => {
@@ -624,8 +638,9 @@ describe("runInit — recovers from a corrupt existing config", () => {
     expect(after).toContain("brain list");
     expect(after).toContain("brain search");
     expect(after).toContain("brain doctor");
-    // Tells the user where their data lives.
-    expect(after).toContain(DEFAULT_NODE_URL);
+    // Tells the user where their data lives (socket path, not TCP).
+    expect(after).toContain("unix:");
+    expect(after).not.toContain(":9001");
   });
 
   test("config from a future fbrain (unknown configVersion) → init recovers fresh", async () => {
@@ -689,7 +704,9 @@ describe("printNextSteps", () => {
     expect(out).toContain("claude mcp add fbrain fbrain-mcp");
     expect(out).toContain("bun link");
     expect(out).toContain("fbrain_* tools");
-    expect(out).toContain("http://127.0.0.1:9001");
+    // Socket-first target (never advertise retired TCP :9001).
+    expect(out).toContain("unix:");
+    expect(out).not.toContain(":9001");
     expect(out).toContain("/home/dev/.fbrain/config.json");
   });
 
@@ -705,9 +722,9 @@ describe("printNextSteps", () => {
     expect(out).toContain("Already initialized");
     expect(out).toContain("brain list");
     // A dev re-running `init` to confirm "which node am I pointed at?" must get
-    // the answer even on the terse already-initialized path — echo both the
-    // resolved node URL and the config path.
-    expect(out).toContain(DEFAULT_NODE_URL);
+    // the answer even on the terse already-initialized path — socket-first.
+    expect(out).toContain("unix:");
+    expect(out).not.toContain(":9001");
     expect(out).toContain("/home/dev/.fbrain/config.json");
     // The full first-record walkthrough is suppressed on a re-run.
     expect(out).not.toContain("Next steps");

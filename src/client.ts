@@ -2153,18 +2153,26 @@ export function defaultIsTargetPortListening(url: string): boolean {
   return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
 }
 
-// True when a node URL is the legacy/default CLI install target
-// (`127.0.0.1:9001` / `localhost:9001`). Used ONLY by `nodeDownHint` to decide
-// whether to include a conditional CLI/Homebrew note after the socket-first
-// recovery path. This is install guidance, NOT a transport notion — fbrain
-// reaches a loopback node over its Unix socket; the `:9001` TCP listener is
-// retired and is never dialed.
+// True when a node URL is the default local CLI install marker. Used ONLY by
+// `nodeDownHint` for install guidance — fbrain reaches a loopback node over
+// its Unix socket and never dials TCP. Matches the current portless default
+// (`http://127.0.0.1` / `http://localhost`) and the historical retired
+// `:9001` marker so existing configs still get the right recovery text.
+// Custom loopback ports (9050, 9101, …) are NOT default-install — those are
+// contributor/ephemeral nodes and get from-source framing when no prebuilt
+// binary is on PATH.
 function isDefaultInstallNodeUrl(url: string): boolean {
   try {
     const u = new URL(url);
-    return (
-      (u.hostname === "127.0.0.1" || u.hostname === "localhost") && u.port === "9001"
-    );
+    const hostOk =
+      u.hostname === "127.0.0.1" ||
+      u.hostname === "localhost" ||
+      u.hostname === "::1" ||
+      u.hostname === "[::1]";
+    if (!hostOk) return false;
+    // Empty / default port (http → 80, but URL.port is "" when omitted) OR
+    // the historical Mini/full-node TCP marker.
+    return u.port === "" || u.port === "9001";
   } catch {
     return false;
   }
