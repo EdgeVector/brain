@@ -59,6 +59,13 @@ export type Config = {
   // is elsewhere (an ephemeral test node). Omitted from disk when unset —
   // backward-compatible with every existing config.
   nodeSocketPath?: string;
+  /**
+   * When false, the client skips capability acquisition (same effect as
+   * `FBRAIN_APP_IDENTITY_ENFORCE=off`). Set by `brain init` on Mini first-run
+   * when schemas were declared locally and schema_service consent cannot run
+   * (app not registered). Omitted when unset → default enforce-on.
+   */
+  appIdentityEnforce?: boolean;
 };
 
 export function resolveDefaultBrainDataDir(
@@ -230,6 +237,9 @@ function assertConfigShape(path: string, raw: unknown): Config {
   // unchanged.
   if (typeof r.nodeSocketPath === "string" && r.nodeSocketPath.length > 0) {
     config.nodeSocketPath = r.nodeSocketPath;
+  }
+  if (typeof r.appIdentityEnforce === "boolean") {
+    config.appIdentityEnforce = r.appIdentityEnforce;
   }
   return config;
 }
