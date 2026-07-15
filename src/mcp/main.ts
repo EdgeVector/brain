@@ -19,8 +19,26 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
+import pkg from "../../package.json" with { type: "json" };
 import { readConfig } from "../config.ts";
 import { createFbrainMcpServer, makeIdleReaper, mcpIdleTimeoutMs, withIdleReaper } from "./server.ts";
+
+type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+
+async function initMcpSentry(): Promise<CaptureSentryException> {
+  if (!process.env.OBS_SENTRY_DSN?.trim()) {
+    return async () => {};
+  }
+  const sentry = await import("../observability/sentry.ts");
+  await sentry.initSentry({
+    service: "fbrain-mcp",
+    env: {
+      ...process.env,
+      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
+    },
+  });
+  return sentry.captureSentryException;
+}
 
 export async function runMcp(): Promise<number> {
   // Pass a config *loader* rather than an eager config: `readConfig()` runs
@@ -39,14 +57,17 @@ export async function runMcp(): Promise<number> {
 }
 
 if (import.meta.main) {
-  runMcp().then(
-    (code) => {
+  void (async () => {
+    let captureTopLevel: CaptureSentryException = async () => {};
+    try {
+      captureTopLevel = await initMcpSentry();
+      const code = await runMcp();
       if (code !== 0) process.exit(code);
       // Otherwise: stay alive serving stdio.
-    },
-    (err) => {
+    } catch (err) {
+      await captureTopLevel(err, { entrypoint: "mcp", top_level: "true" });
       console.error(err);
       process.exit(1);
-    },
-  );
+    }
+  })();
 }

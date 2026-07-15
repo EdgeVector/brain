@@ -7,6 +7,7 @@
 
 import { parseArgs, type ParseArgsConfig } from "node:util";
 
+import pkg from "../package.json" with { type: "json" };
 import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
 import { readConfig } from "./config.ts";
@@ -3083,12 +3084,34 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   }
 }
 
+type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+
+async function initCliSentry(): Promise<CaptureSentryException> {
+  if (!process.env.OBS_SENTRY_DSN?.trim()) {
+    return async () => {};
+  }
+  const sentry = await import("./observability/sentry.ts");
+  await sentry.initSentry({
+    service: "fbrain-cli",
+    env: {
+      ...process.env,
+      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
+    },
+  });
+  return sentry.captureSentryException;
+}
+
 if (import.meta.main) {
-  main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
-    (err) => {
+  void (async () => {
+    let captureTopLevel: CaptureSentryException = async () => {};
+    try {
+      captureTopLevel = await initCliSentry();
+      const code = await main(process.argv.slice(2));
+      process.exit(code);
+    } catch (err) {
+      await captureTopLevel(err, { entrypoint: "cli", top_level: "true" });
       console.error(err);
       process.exit(1);
-    },
-  );
+    }
+  })();
 }
