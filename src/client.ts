@@ -955,7 +955,12 @@ export function newNodeClient(opts: {
   // owner-session token attaches to the SDK's consent/mutation calls too, and
   // an invalidation-after-403 re-pair is reflected without rebuilding the
   // transport.
-  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash }, sessionHeader, socketPath);
+  const sdkTransport = fetchTransport(
+    url,
+    { "X-User-Hash": userHash, "X-LastDB-Client": "brain" },
+    sessionHeader,
+    socketPath,
+  );
 
   // SDK clients constructed here never use the SDK's capability store —
   // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
@@ -1752,7 +1757,13 @@ async function callNodeRaw(
     body,
     verbose,
     service: "node",
-    headers: { "X-User-Hash": userHash, ...(extraHeaders ?? {}) },
+    // X-LastDB-Client is a best-effort ops label for Mini request telemetry
+    // (not a security boundary).
+    headers: {
+      "X-User-Hash": userHash,
+      "X-LastDB-Client": "brain",
+      ...(extraHeaders ?? {}),
+    },
     socketPath,
   });
 }
