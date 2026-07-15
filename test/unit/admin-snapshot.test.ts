@@ -1,12 +1,20 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ADMIN_SNAPSHOT_SLUG,
+  SNAPSHOT_FIELDS,
   buildBrainAdminSnapshot,
+  buildDeliveryStageRequest,
+  deliverAdminSnapshot,
   parseHeartbeatLine,
+  parseOpenDecisionLine,
+  publishAdminSnapshot,
   snapshotToFields,
+  type LastDbDeliveryClient,
 } from "../../src/commands/admin-snapshot.ts";
 import type { NativeIndexHit, NodeClient, QueryResponse, QueryRow } from "../../src/client.ts";
 import type { RecordType } from "../../src/schemas.ts";
+import { ADMIN_SNAPSHOT_SCHEMA_KEY } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const NOW = new Date("2026-07-15T16:00:00.000Z");
@@ -142,5 +150,104 @@ describe("brain admin snapshot", () => {
       ok: "ok",
     });
     expect(parseHeartbeatLine("not enough")).toBeNull();
+  });
+
+  test("parseOpenDecisionLine keeps only status=open gates", () => {
+    expect(
+      parseOpenDecisionLine(
+        "NEEDS-DECISION gate-a | program=x | status=open | actionable=yes — Decide something — blocks: y",
+      ),
+    ).toEqual({
+      slug: "gate-a",
+      title: "Decide something",
+      status: "open",
+    });
+    expect(
+      parseOpenDecisionLine(
+        "NEEDS-DECISION gate-b | program=x | status=resolved | resolved=2026-07-01 — Done — unblocked: z",
+      ),
+    ).toBeNull();
+  });
+
+  test("buildDeliveryStageRequest targets the single BrainAdminSnapshot hash key", () => {
+    const req = buildDeliveryStageRequest({
+      schemaHash: "hash-BrainAdminSnapshot",
+      slug: ADMIN_SNAPSHOT_SLUG,
+      recipient: {
+        recipientPubkey: "recipient-ed25519",
+        messagingPublicKey: "messaging-x25519",
+        messagingPseudonym: "00000000-0000-0000-0000-000000000001",
+        recipientDisplayName: "admin",
+      },
+      maxRecords: 3,
+    });
+    expect(req).toMatchObject({
+      recipient_pubkey: "recipient-ed25519",
+      mode: "snapshot",
+      max_records: 3,
+    });
+    expect(req.legs).toHaveLength(1);
+    expect(req.legs[0]).toMatchObject({
+      schema_name: "hash-BrainAdminSnapshot",
+      hash_keys: [ADMIN_SNAPSHOT_SLUG],
+    });
+    expect(req.legs[0]!.fields).toEqual([...SNAPSHOT_FIELDS]);
+  });
+
+  test("publish + deliver stage/approve with injected clients", async () => {
+    const node = mockNode({});
+    const mutations: Array<"create" | "update"> = [];
+    node.createRecord = async () => {
+      mutations.push("create");
+    };
+    node.updateRecord = async () => {
+      mutations.push("update");
+    };
+    node.queryByKey = async () => null;
+
+    const cfg = buildTestCfg();
+    cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY] = "hash-BrainAdminSnapshot";
+
+    const published = await publishAdminSnapshot({
+      cfg,
+      node,
+      dryRun: true,
+      now: NOW,
+    });
+    expect(published.written).toBe(false);
+    expect(published.delivery_stage.legs[0]!.hash_keys).toEqual([ADMIN_SNAPSHOT_SLUG]);
+    expect(mutations).toEqual([]);
+
+    const delivery: LastDbDeliveryClient = {
+      async stageDelivery(request) {
+        expect(request.legs[0]!.hash_keys).toEqual([ADMIN_SNAPSHOT_SLUG]);
+        return {
+          deliveryId: "delivery-1",
+          recordCount: 1,
+          fields: [...SNAPSHOT_FIELDS],
+          note: "staged only",
+        };
+      },
+      async approveDelivery(deliveryId) {
+        return { deliveryId, shared: 1, messageType: "delivery_slice" };
+      },
+    };
+
+    const delivered = await deliverAdminSnapshot({
+      cfg,
+      node,
+      deliveryClient: delivery,
+      approve: true,
+      maxRecords: 2,
+      recipient: {
+        recipientPubkey: "pk",
+        messagingPublicKey: "mk",
+        messagingPseudonym: "pseudo",
+      },
+      now: NOW,
+    });
+    expect(delivered.staged?.deliveryId).toBe("delivery-1");
+    expect(delivered.approved?.messageType).toBe("delivery_slice");
+    expect(delivered.delivery_request.max_records).toBe(2);
   });
 });
