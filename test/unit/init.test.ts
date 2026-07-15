@@ -407,7 +407,20 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
       expect(body.app_id).toBe(OWNER_APP_ID);
       expect(body.schema?.owner_app_id).toBe(OWNER_APP_ID);
     }
-    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike", "sop", "decision", "__tagindex__"]) {
+    for (const t of [
+      "design",
+      "task",
+      "concept",
+      "preference",
+      "reference",
+      "agent",
+      "project",
+      "spike",
+      "sop",
+      "decision",
+      "__tagindex__",
+      "__admin_snapshot__",
+    ]) {
       expect(result.config.schemaHashes[t]).toHaveLength(64);
     }
     expect(lines.some((l) => l.includes("local app-schema declarations persisted"))).toBe(true);

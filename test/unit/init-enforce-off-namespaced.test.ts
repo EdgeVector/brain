@@ -124,7 +124,7 @@ describe("runInit — FBRAIN_APP_IDENTITY_ENFORCE off vs on use the same namespa
 
     // EVERY POST carries owner_app_id="fbrain". The bug was the opposite —
     // stripping owner_app_id and hitting 400 owner_app_id_required.
-    expect(posts.length).toBe(11);
+    expect(posts.length).toBe(12);
     for (const p of posts) {
       const body = p.body as { schema?: Record<string, unknown> } | null;
       expect(body?.schema?.owner_app_id).toBe(OWNER_APP_ID);
@@ -162,7 +162,7 @@ describe("runInit — FBRAIN_APP_IDENTITY_ENFORCE off vs on use the same namespa
       consent: { isTty: () => false },
     });
 
-    expect(posts.length).toBe(11);
+    expect(posts.length).toBe(12);
     for (const p of posts) {
       const body = p.body as { schema?: Record<string, unknown> } | null;
       expect(body?.schema?.owner_app_id).toBe(OWNER_APP_ID);

@@ -391,6 +391,7 @@ export function recordTypeCount(): number {
 // registered and stored in config like other fbrain schemas, but never appears
 // on user-facing list/get/search surfaces.
 export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
+export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
@@ -422,6 +423,59 @@ export const tagIndexSchema: AddSchemaRequest = {
       members: GENERAL,
       created_at: GENERAL,
       updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+export const adminSnapshotSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainAdminSnapshot",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainAdminSnapshot",
+    purpose_statement:
+      "Privacy-safe fbrain admin dashboard rollup for delivery as a LastDB slice; stores counts and short summaries only, never full brain bodies or secrets",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [
+      "slug",
+      "source_app",
+      "schema_version",
+      "captured_at",
+      "type_counts_json",
+      "open_decisions_json",
+      "active_programs_head_json",
+      "recent_heartbeats_json",
+    ],
+    field_types: {
+      slug: "String",
+      source_app: "String",
+      schema_version: "String",
+      captured_at: "String",
+      type_counts_json: "String",
+      open_decisions_json: "String",
+      active_programs_head_json: "String",
+      recent_heartbeats_json: "String",
+    },
+    field_descriptions: {
+      slug: "stable snapshot record id, normally admin-brain-snapshot",
+      source_app: "producer app id",
+      schema_version: "snapshot payload schema version",
+      captured_at: "RFC 3339 capture timestamp",
+      type_counts_json: "JSON object of live record counts by fbrain type",
+      open_decisions_json: "JSON array of open decision slugs and titles only",
+      active_programs_head_json: "JSON array containing a short active-programs rollup head",
+      recent_heartbeats_json: "JSON array of recent heartbeat ids, timestamps, and outcomes",
+    },
+    field_data_classifications: {
+      slug: GENERAL,
+      source_app: GENERAL,
+      schema_version: GENERAL,
+      captured_at: GENERAL,
+      type_counts_json: GENERAL,
+      open_decisions_json: GENERAL,
+      active_programs_head_json: GENERAL,
+      recent_heartbeats_json: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -539,6 +593,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: tagIndexSchema,
     types: [],
     extraKeys: [TAG_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: ADMIN_SNAPSHOT_SCHEMA_KEY,
+    schema: adminSnapshotSchema,
+    types: [],
+    extraKeys: [ADMIN_SNAPSHOT_SCHEMA_KEY],
   },
 ];
 
