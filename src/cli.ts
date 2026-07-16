@@ -20,6 +20,7 @@ import { statusCmd } from "./commands/status.ts";
 import { tagCmd } from "./commands/tag.ts";
 import { linkCmd } from "./commands/link.ts";
 import { backlinksCmd } from "./commands/backlinks.ts";
+import { buildWhichResult, formatWhich } from "./commands/which.ts";
 import { searchCmd } from "./commands/search.ts";
 import { askCmd } from "./commands/ask.ts";
 import { doctor } from "./commands/doctor.ts";
@@ -132,6 +133,7 @@ export const COMMANDS = [
   "append",
   "get",
   "list",
+  "which",
   "status",
   "tag",
   "link",
@@ -177,6 +179,7 @@ ${RECORD_NEW_HELP_LINES}
   append         append a chunk to a record's body without a full rewrite (grows only)
   get            print a record by slug
   list           list records, newest-first
+  which          show which brain install this shell is using
   status         show or update a record's status
   tag            add/remove tags without a full re-put
   link           link records (legacy default: task to parent design)
@@ -352,6 +355,15 @@ exists in multiple types (specify --type to disambiguate).
                   emits \`{"count": N}\` instead. On failure, a \`{error, hint}\`
                   JSON object is emitted to stdout too, so \`--json\` stdout is
                   always parseable.`,
+  which: `fbrain which [--json] [--check]
+
+Print the brain executable selected by this shell, the resolved source root,
+and whether the running install is under ~/.host-track. This is a local install
+hygiene check only: it does not contact the LastDB node, read records, or mutate
+configuration.
+
+  --json   emit a single structured object on stdout
+  --check  exit non-zero when brain is not host-track managed`,
   status: `fbrain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
@@ -873,6 +885,10 @@ const LIST_OPTIONS = {
   // stdout. Truncation hint moves to stderr so `jq` pipelines stay clean.
   json: { type: "boolean", default: false },
 } as const;
+const WHICH_OPTIONS = {
+  json: { type: "boolean", default: false },
+  check: { type: "boolean", default: false },
+} as const;
 const STATUS_OPTIONS = {
   type: { type: "string" },
   // Machine-readable mode for show form (`fbrain status <slug> --json`):
@@ -1030,6 +1046,7 @@ export const CLI_SPEC = {
   append: APPEND_OPTIONS,
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
+  which: WHICH_OPTIONS,
   status: STATUS_OPTIONS,
   tag: TAG_OPTIONS,
   link: LINK_OPTIONS,
@@ -1552,6 +1569,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runGet(args, verboseFn);
     case "list":
       return runList(args, verboseFn);
+    case "which":
+      return runWhich(args);
     case "status":
       return runStatus(args, verboseFn);
     case "tag":
@@ -2211,6 +2230,37 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   if (fields.length > 0) lOpts.fields = fields;
   if (values.json) lOpts.json = true;
   await listCmd(lOpts);
+  return 0;
+}
+
+async function runWhich(args: Argv): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: WHICH_OPTIONS,
+    },
+    "which",
+  );
+  if (positionals.length > 0) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `which takes no positional arguments (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain which --json` for machine-readable install details.",
+    });
+  }
+
+  const result = buildWhichResult();
+  if (values.json) {
+    console.log(JSON.stringify(result));
+  } else {
+    console.log(formatWhich(result));
+  }
+  if (values.check && !result.hostTrack) {
+    console.error(result.issues.join("\n"));
+    return 1;
+  }
   return 0;
 }
 
