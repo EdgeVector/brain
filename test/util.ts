@@ -6,6 +6,7 @@ import {
   type RecordType,
 } from "../src/schemas.ts";
 import { CONFIG_VERSION, type Config } from "../src/config.ts";
+import { DEFAULT_NODE_URL } from "../src/commands/init.ts";
 
 // Synthetic 64-hex hashes for unit tests — distinct first byte per type so
 // recordTypeForHash() and schemaHashFor() lookups behave like real configs
@@ -25,11 +26,11 @@ export const TEST_HASHES: Record<RecordType, string> = {
 
 export const TEST_TAG_INDEX_HASH = "7".repeat(64);
 
-// Test URL defaults: homebrew `fold_db_node` daemon + the dev cloud Lambda.
+// Test URL defaults: current local Mini default + the dev cloud Lambda.
 // Dev (us-west-2) — not prod — so iteration-test runs don't pollute the
 // production schema registry. CI / per-env overrides via env vars.
 export const TEST_NODE_URL =
-  process.env.FBRAIN_TEST_NODE_URL ?? "http://127.0.0.1:9001";
+  process.env.FBRAIN_TEST_NODE_URL ?? DEFAULT_NODE_URL;
 export const TEST_SCHEMA_SERVICE_URL =
   process.env.FBRAIN_TEST_SCHEMA_URL ??
   "https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com";
