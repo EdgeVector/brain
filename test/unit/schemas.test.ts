@@ -180,11 +180,13 @@ describe("schemas", () => {
     ]);
   });
 
-  test("UNIQUE_SCHEMAS has 12 entries: user record schemas plus internal tag index and admin snapshot", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(12);
+  test("UNIQUE_SCHEMAS has 14 entries: user record schemas plus internal tag index, admin snapshot, and attachment schemas", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(14);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "__admin_snapshot__",
+      "__attachmentblob__",
+      "__attachmentindex__",
       "__tagindex__",
       "agent",
       "concept",
@@ -199,8 +201,14 @@ describe("schemas", () => {
     ]);
     // User-facing entries cover exactly one RecordType; internal schemas write
     // only their extra config key.
+    const internalKeys = [
+      "__tagindex__",
+      "__admin_snapshot__",
+      "__attachmentindex__",
+      "__attachmentblob__",
+    ];
     for (const entry of UNIQUE_SCHEMAS) {
-      if (entry.key === "__tagindex__" || entry.key === "__admin_snapshot__") {
+      if (internalKeys.includes(entry.key)) {
         expect(entry.types).toEqual([]);
         expect(entry.extraKeys).toEqual([entry.key]);
       } else {
@@ -211,9 +219,7 @@ describe("schemas", () => {
   });
 
   test("UNIQUE_SCHEMAS user entries are derived from RECORD_TYPES/RECORDS order", () => {
-    const userEntries = UNIQUE_SCHEMAS.filter(
-      (entry) => entry.key !== "__tagindex__" && entry.key !== "__admin_snapshot__",
-    );
+    const userEntries = UNIQUE_SCHEMAS.filter((entry) => !entry.key.startsWith("__"));
     expect(userEntries.map((entry) => entry.key)).toEqual([...RECORD_TYPES]);
     for (const entry of userEntries) {
       const type = entry.key as RecordType;
