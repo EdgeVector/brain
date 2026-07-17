@@ -22,6 +22,7 @@ import {
   attachCmd,
   attachmentGetCmd,
   attachmentsCmd,
+  attachmentsMigrateCmd,
   detachCmd,
 } from "./commands/attach.ts";
 import { linkCmd } from "./commands/link.ts";
@@ -415,10 +416,11 @@ an absent one is a no-op success.
   attach: `fbrain attach <slug> <file> [--type T] [--name N] [--force] [--json]
 
 Attach a file to an existing record. Bytes are stored content-addressed
-(SHA-256) in an internal blob record whose payload is classified
-no_index/binary — attachment CONTENT never enters search indexes; only the
-filename is searchable metadata. Re-attaching identical content is a no-op
-(deduplicated). Same name + different content errors unless --force.
+(SHA-256) through the node's file-blob plane: an encrypted CAS blob in cloud
+file storage plus a \$lastdb_file pointer record — attachment CONTENT never
+enters search indexes; only the filename is searchable metadata. Re-attaching
+identical content is a no-op (deduplicated). Same name + different content
+errors unless --force.
 
   --type    ${RECORD_TYPE_LIST}
             (omit to resolve across all types; errors on an ambiguous slug)
@@ -426,11 +428,18 @@ filename is searchable metadata. Re-attaching identical content is a no-op
   --force   replace an existing attachment with the same name
   --json    emit \`{ok, slug, type, entry, deduplicated, replaced}\` on stdout`,
   attachments: `fbrain attachments <slug> [--type T] [--json]
+fbrain attachments migrate [<slug>] [--type T] [--json]
 
 List a record's attachments (name, size, media type, blob ref, added_at).
 
+\`attachments migrate\` moves v1 record-stored attachment bytes into the
+node's file-blob plane (encrypted cloud CAS + \$lastdb_file pointer) and
+deletes the legacy stand-in blob records. Scoped to one record when a slug is
+given, otherwise sweeps every attachment index. Idempotent.
+
   --type    ${RECORD_TYPE_LIST}
-  --json    emit \`{ok, slug, type, attachments}\` on stdout`,
+  --json    emit \`{ok, slug, type, attachments}\` (list) or \`{ok, report}\`
+            (migrate) on stdout`,
   detach: `fbrain detach <slug> <name-or-ref> [--type T] [--json]
 
 Remove one attachment by filename or sha256:<hex> blob ref. The
@@ -2511,6 +2520,31 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     { args, strict: true, allowPositionals: true, options: ATTACHMENTS_OPTIONS },
     "attachments",
   );
+  // `fbrain attachments migrate [slug]` — v1→v2 storage migration subcommand.
+  // "migrate" is a reserved word here; a record cannot shadow it because
+  // record slugs are resolved only in the list form.
+  if (positionals[0] === "migrate") {
+    if (positionals.length > 2) {
+      throw new FbrainError({
+        code: "extra_positional_args",
+        message: `attachments migrate takes at most one slug (got ${positionals.length - 1}).`,
+        hint: "Run `fbrain attachments migrate [<slug>]`.",
+      });
+    }
+    const cfg = readConfig();
+    const type = parseRecordType(values.type);
+    const mOpts: Parameters<typeof attachmentsMigrateCmd>[0] = { cfg, verbose };
+    const migrateSlug = positionals[1];
+    if (migrateSlug !== undefined) mOpts.slug = migrateSlug;
+    if (type) mOpts.type = type;
+    if (values.json) {
+      mOpts.print = (line: string) => console.error(line);
+      mOpts.onResult = (payload) =>
+        console.log(JSON.stringify({ ok: true, report: payload.report }));
+    }
+    await attachmentsMigrateCmd(mOpts);
+    return 0;
+  }
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.attachments);
@@ -2520,7 +2554,7 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     throw new FbrainError({
       code: "extra_positional_args",
       message: `attachments takes exactly one slug (got ${positionals.length}).`,
-      hint: "Run `fbrain attachments <slug>`.",
+      hint: "Run `fbrain attachments <slug>` (or `fbrain attachments migrate [<slug>]`).",
     });
   }
   const cfg = readConfig();

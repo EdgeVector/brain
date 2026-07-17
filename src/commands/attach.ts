@@ -16,8 +16,10 @@ import {
   ensureAttachmentSchemas,
   findEntry,
   getAttachmentBlob,
+  migrateAttachmentsToFilePlane,
   readAttachmentIndex,
   type AttachmentEntry,
+  type AttachmentMigrationReport,
 } from "../attachments.ts";
 import { FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
@@ -136,6 +138,65 @@ export async function attachmentsCmd(
     slug,
     attachments: entries,
   });
+}
+
+export type AttachmentsMigrateCmdResult = {
+  action: "attachments_migrated";
+  report: AttachmentMigrationReport;
+};
+
+// `fbrain attachments migrate [slug]` — move v1 record-stored attachment
+// blobs into the node's file plane (encrypted B2 CAS + $lastdb_file pointer)
+// and delete the legacy stand-in records. Scoped to one record when a slug is
+// given, otherwise sweeps every attachment index. Idempotent.
+export async function attachmentsMigrateCmd(
+  opts: Omit<CommonOpts, "slug"> & {
+    slug?: string;
+    onResult?: (payload: AttachmentsMigrateCmdResult) => void;
+  },
+): Promise<void> {
+  const print = resolvePrintSink(opts);
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const scope: { type?: RecordType; slug?: string } = {};
+  if (opts.slug !== undefined) {
+    const slug = normalizeSlug(opts.slug);
+    const resolved = await resolveBySlug({
+      node,
+      cfg: opts.cfg,
+      slug,
+      ...(opts.type !== undefined ? { type: opts.type } : {}),
+      recoveryVerb: "attachments migrate",
+    });
+    scope.type = resolved.type;
+    scope.slug = slug;
+  }
+  await ensureAttachmentSchemas(node, opts.cfg, { persist: true });
+  const report = await migrateAttachmentsToFilePlane({
+    node,
+    cfg: opts.cfg,
+    ...scope,
+    ...(opts.verbose !== undefined ? { verbose: opts.verbose } : {}),
+  });
+  if (report.items.length === 0) {
+    print(
+      scope.slug !== undefined
+        ? `no attachment blobs to migrate on ${scope.type} ${scope.slug}`
+        : "no attachment blobs to migrate",
+    );
+  } else {
+    for (const item of report.items) {
+      const legacy = item.legacyDeleted ? "legacy record deleted" : "no legacy record";
+      print(`${item.action}: ${item.blob_ref} (${item.names.join(", ")}) — ${legacy}`);
+    }
+    const migrated = report.items.filter((i) => i.action === "migrated").length;
+    const already = report.items.filter((i) => i.action === "already-file-plane").length;
+    const missing = report.items.filter((i) => i.action === "missing").length;
+    print(
+      `${report.items.length} blob(s) across ${report.indexes} index(es): ` +
+        `${migrated} migrated, ${already} already in the file plane, ${missing} missing`,
+    );
+  }
+  opts.onResult?.({ action: "attachments_migrated", report });
 }
 
 export type DetachCmdResult = {

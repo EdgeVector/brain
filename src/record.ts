@@ -965,6 +965,7 @@ export interface ResolveBySlugOpts {
     | "delete"
     | "attach"
     | "attachments"
+    | "attachments migrate"
     | "detach"
     | "attachment get";
   // Read-only callers can opt into deterministic ambiguity resolution while
