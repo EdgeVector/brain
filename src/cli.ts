@@ -18,6 +18,12 @@ import { getRecord } from "./commands/get.ts";
 import { listCmd } from "./commands/list.ts";
 import { statusCmd } from "./commands/status.ts";
 import { tagCmd } from "./commands/tag.ts";
+import {
+  attachCmd,
+  attachmentGetCmd,
+  attachmentsCmd,
+  detachCmd,
+} from "./commands/attach.ts";
 import { linkCmd } from "./commands/link.ts";
 import { backlinksCmd } from "./commands/backlinks.ts";
 import { buildWhichResult, formatWhich } from "./commands/which.ts";
@@ -115,6 +121,11 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "missing_tag_mutation",
   "invalid_raw_method",
   "invalid_raw_path",
+  // Attachment invocation errors: a missing local file path or an empty
+  // attachment name are "you invoked it wrong". Node-side attachment
+  // failures (missing blob, integrity error, name conflict) stay exit 1.
+  "attachment_file_missing",
+  "attachment_bad_name",
 ]);
 
 export const COMMANDS = [
@@ -140,6 +151,14 @@ export const COMMANDS = [
   "backlinks",
   "search",
   "ask",
+  // Attachment verbs sit AFTER "search" on purpose: suggestCommand takes the
+  // FIRST candidate at the best Levenshtein distance, and common typos like
+  // "serach" tie at distance 2 between "search" and "detach" — earlier
+  // position keeps "search" winning that tie.
+  "attach",
+  "attachments",
+  "detach",
+  "attachment",
   "gates",
   "gate",
   "doctor",
@@ -182,6 +201,10 @@ ${RECORD_NEW_HELP_LINES}
   which          show which brain install this shell is using
   status         show or update a record's status
   tag            add/remove tags without a full re-put
+  attach         attach a file to a record (content-addressed; content never search-indexed)
+  attachments    list a record's attachments
+  detach         remove an attachment by name or blob ref
+  attachment get materialize an attachment's bytes (sha256-verified) to disk
   link           link records (legacy default: task to parent design)
   backlinks      list records linking to a slug
   search         semantic search over indexed records
@@ -389,6 +412,44 @@ an absent one is a no-op success.
   --json    emit \`{ok, slug, added, removed, tags}\` on stdout; the human
             line moves to stderr so \`--json\` stdout is parseable. On failure
             a \`{error, hint}\` JSON object is emitted to stdout too.`,
+  attach: `fbrain attach <slug> <file> [--type T] [--name N] [--force] [--json]
+
+Attach a file to an existing record. Bytes are stored content-addressed
+(SHA-256) in an internal blob record whose payload is classified
+no_index/binary — attachment CONTENT never enters search indexes; only the
+filename is searchable metadata. Re-attaching identical content is a no-op
+(deduplicated). Same name + different content errors unless --force.
+
+  --type    ${RECORD_TYPE_LIST}
+            (omit to resolve across all types; errors on an ambiguous slug)
+  --name    attachment name (default: the file's basename)
+  --force   replace an existing attachment with the same name
+  --json    emit \`{ok, slug, type, entry, deduplicated, replaced}\` on stdout`,
+  attachments: `fbrain attachments <slug> [--type T] [--json]
+
+List a record's attachments (name, size, media type, blob ref, added_at).
+
+  --type    ${RECORD_TYPE_LIST}
+  --json    emit \`{ok, slug, type, attachments}\` on stdout`,
+  detach: `fbrain detach <slug> <name-or-ref> [--type T] [--json]
+
+Remove one attachment by filename or sha256:<hex> blob ref. The
+content-addressed blob record remains (fold_db is append-only, and identical
+content may back other records' attachments).
+
+  --type    ${RECORD_TYPE_LIST}
+  --json    emit \`{ok, slug, type, removed}\` on stdout`,
+  attachment: `fbrain attachment get <slug> <name-or-ref> [-o PATH] [--type T] [--force] [--json]
+
+Materialize one attachment's bytes to disk (or stdout with \`-o -\`). The
+decoded bytes are verified against the sha256 blob ref before writing —
+a hash mismatch is a hard error, never silent corruption. Refuses to
+overwrite an existing file unless --force.
+
+  -o, --output  destination path (default: the attachment name in CWD; \`-\` = stdout)
+  --type        ${RECORD_TYPE_LIST}
+  --force       overwrite an existing destination file
+  --json        emit \`{ok, slug, type, entry, output, bytes}\` on stdout`,
   link: `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T] [--json]
 
 Rejects a non-existent explicit target. With no type flags, preserves the
@@ -905,6 +966,26 @@ const TAG_OPTIONS = {
   rm: { type: "string", multiple: true },
   json: { type: "boolean", default: false },
 } as const;
+const ATTACH_OPTIONS = {
+  type: { type: "string" },
+  name: { type: "string" },
+  force: { type: "boolean", default: false },
+  json: { type: "boolean", default: false },
+} as const;
+const ATTACHMENTS_OPTIONS = {
+  type: { type: "string" },
+  json: { type: "boolean", default: false },
+} as const;
+const DETACH_OPTIONS = {
+  type: { type: "string" },
+  json: { type: "boolean", default: false },
+} as const;
+const ATTACHMENT_OPTIONS = {
+  type: { type: "string" },
+  output: { type: "string", short: "o" },
+  force: { type: "boolean", default: false },
+  json: { type: "boolean", default: false },
+} as const;
 const SEARCH_OPTIONS = {
   limit: { type: "string", short: "n" },
   exact: { type: "boolean", default: false },
@@ -1049,6 +1130,10 @@ export const CLI_SPEC = {
   which: WHICH_OPTIONS,
   status: STATUS_OPTIONS,
   tag: TAG_OPTIONS,
+  attach: ATTACH_OPTIONS,
+  attachments: ATTACHMENTS_OPTIONS,
+  detach: DETACH_OPTIONS,
+  attachment: ATTACHMENT_OPTIONS,
   link: LINK_OPTIONS,
   backlinks: BACKLINKS_OPTIONS,
   search: SEARCH_OPTIONS,
@@ -1575,6 +1660,14 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runStatus(args, verboseFn);
     case "tag":
       return runTag(args, verboseFn);
+    case "attach":
+      return runAttach(args, verboseFn);
+    case "attachments":
+      return runAttachments(args, verboseFn);
+    case "detach":
+      return runDetach(args, verboseFn);
+    case "attachment":
+      return runAttachmentGet(args, verboseFn);
     case "link":
       return runLink(args, verboseFn);
     case "backlinks":
@@ -2363,6 +2456,187 @@ async function runTag(args: Argv, verbose: Verbose): Promise<number> {
       );
   }
   await withTypeAsPositionalHint(slug, () => tagCmd(tOpts));
+  return 0;
+}
+
+async function runAttach(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    { args, strict: true, allowPositionals: true, options: ATTACH_OPTIONS },
+    "attach",
+  );
+  const slug = positionals[0];
+  const file = positionals[1];
+  if (!slug || !file) {
+    console.error(COMMAND_HELP.attach);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 2) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `attach takes a slug and a file path (got ${positionals.length} positionals).`,
+      hint: "Run `fbrain attach <slug> <file>`; use --name to override the attachment name.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  const aOpts: Parameters<typeof attachCmd>[0] = {
+    cfg,
+    slug,
+    file,
+    force: values.force,
+    verbose,
+  };
+  if (type) aOpts.type = type;
+  if (values.name !== undefined) aOpts.name = values.name;
+  if (values.json) {
+    aOpts.print = (line: string) => console.error(line);
+    aOpts.onResult = (payload) =>
+      console.log(
+        JSON.stringify({
+          ok: true,
+          slug: payload.slug,
+          type: payload.type,
+          entry: payload.entry,
+          deduplicated: payload.deduplicated,
+          replaced: payload.replaced,
+        }),
+      );
+  }
+  await withTypeAsPositionalHint(slug, () => attachCmd(aOpts));
+  return 0;
+}
+
+async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    { args, strict: true, allowPositionals: true, options: ATTACHMENTS_OPTIONS },
+    "attachments",
+  );
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.attachments);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `attachments takes exactly one slug (got ${positionals.length}).`,
+      hint: "Run `fbrain attachments <slug>`.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  const lOpts: Parameters<typeof attachmentsCmd>[0] = { cfg, slug, verbose };
+  if (type) lOpts.type = type;
+  if (values.json) {
+    lOpts.print = (line: string) => console.error(line);
+    lOpts.onResult = (payload) =>
+      console.log(
+        JSON.stringify({
+          ok: true,
+          slug: payload.slug,
+          type: payload.type,
+          attachments: payload.attachments,
+        }),
+      );
+  }
+  await withTypeAsPositionalHint(slug, () => attachmentsCmd(lOpts));
+  return 0;
+}
+
+async function runDetach(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    { args, strict: true, allowPositionals: true, options: DETACH_OPTIONS },
+    "detach",
+  );
+  const slug = positionals[0];
+  const nameOrRef = positionals[1];
+  if (!slug || !nameOrRef) {
+    console.error(COMMAND_HELP.detach);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 2) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `detach takes a slug and a name-or-ref (got ${positionals.length} positionals).`,
+      hint: "Run `fbrain detach <slug> <name-or-ref>` once per attachment.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  const dOpts: Parameters<typeof detachCmd>[0] = { cfg, slug, nameOrRef, verbose };
+  if (type) dOpts.type = type;
+  if (values.json) {
+    dOpts.print = (line: string) => console.error(line);
+    dOpts.onResult = (payload) =>
+      console.log(
+        JSON.stringify({
+          ok: true,
+          slug: payload.slug,
+          type: payload.type,
+          removed: payload.removed,
+        }),
+      );
+  }
+  await withTypeAsPositionalHint(slug, () => detachCmd(dOpts));
+  return 0;
+}
+
+// `fbrain attachment get <slug> <name-or-ref>` — `get` is the only
+// subcommand today; the two-token shape leaves room for future verbs
+// (e.g. `attachment open`) without breaking invocations.
+async function runAttachmentGet(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    { args, strict: true, allowPositionals: true, options: ATTACHMENT_OPTIONS },
+    "attachment",
+  );
+  const sub = positionals[0];
+  if (sub !== "get") {
+    console.error(
+      sub === undefined
+        ? COMMAND_HELP.attachment
+        : `Unknown attachment subcommand: ${sub}\n${COMMAND_HELP.attachment}`,
+    );
+    return USAGE_ERROR;
+  }
+  const slug = positionals[1];
+  const nameOrRef = positionals[2];
+  if (!slug || !nameOrRef) {
+    console.error(COMMAND_HELP.attachment);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 3) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `attachment get takes a slug and a name-or-ref (got ${positionals.length - 1} positionals).`,
+      hint: "Run `fbrain attachment get <slug> <name-or-ref> [-o PATH]`.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  const gOpts: Parameters<typeof attachmentGetCmd>[0] = {
+    cfg,
+    slug,
+    nameOrRef,
+    force: values.force,
+    verbose,
+  };
+  if (type) gOpts.type = type;
+  if (values.output !== undefined) gOpts.output = values.output;
+  if (values.json) {
+    gOpts.print = (line: string) => console.error(line);
+    gOpts.onResult = (payload) =>
+      console.log(
+        JSON.stringify({
+          ok: true,
+          slug: payload.slug,
+          type: payload.type,
+          entry: payload.entry,
+          output: payload.output,
+          bytes: payload.bytes,
+        }),
+      );
+  }
+  await withTypeAsPositionalHint(slug, () => attachmentGetCmd(gOpts));
   return 0;
 }
 
