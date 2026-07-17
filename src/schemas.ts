@@ -40,7 +40,10 @@
 // and the node resolves short names to the fbrain/* namespace at boot.
 export const OWNER_APP_ID = "fbrain";
 
-export type FieldType = "String" | { Array: "String" };
+// "Any" is fold_db's escape-hatch value type — used only for the attachment
+// `file` field, whose value is the node-written `$lastdb_file` pointer JSON
+// object (not a string).
+export type FieldType = "String" | "Any" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
@@ -391,6 +394,15 @@ export function recordTypeCount(): number {
 // registered and stored in config like other fbrain schemas, but never appears
 // on user-facing list/get/search surfaces.
 export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
+// File attachments (`fbrain attach` / `attachments` / `detach` /
+// `attachment get`). Two internal support schemas, NOT RecordTypes.
+// Attachments stay ADDITIVE by design: registering these schemas changes no
+// existing schema's identity hash and migrates no existing record — a
+// deliberate contrast to `migrate --add-field`, which re-puts every record
+// under a new hash. See docs/attachments.md.
+export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
+export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
+export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";
 
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
@@ -422,6 +434,175 @@ export const tagIndexSchema: AddSchemaRequest = {
       members: GENERAL,
       created_at: GENERAL,
       updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+// One BrainAttachmentIndex record per (record_type, record_slug) that has
+// attachments — the same shape of internal secondary index as TagIndex.
+// `filenames` is the ONLY searchable surface (classified ["word"]); the
+// `attachments_json` entries carry blob refs + metadata and are explicitly
+// no_index, so nothing about attachment content leaks into BM25/vector search.
+export const attachmentIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainAttachmentIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainAttachmentIndex",
+    purpose_statement:
+      "Per-record list of file attachments on an fbrain knowledge record; filename metadata is searchable, attachment content is not",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [
+      "slug",
+      "record_type",
+      "record_slug",
+      "filenames",
+      "attachments_json",
+      "created_at",
+      "updated_at",
+    ],
+    field_types: {
+      slug: "String",
+      record_type: "String",
+      record_slug: "String",
+      filenames: { Array: "String" },
+      attachments_json: "String",
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      slug: "reserved __attidx__<sha256(type:slug)> key",
+      record_type: "fbrain record type the attachments belong to",
+      record_slug: "fbrain record slug the attachments belong to",
+      filenames: "attachment filenames — the only word-indexed surface",
+      attachments_json:
+        "JSON array of {name, blob_ref, size, media_type, added_at} entries",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    // Explicit classifications for EVERY field: when field_classifications is
+    // non-empty the node indexes ONLY fields classified "word" (and never
+    // secret/no_index ones) — fold_db mutation_manager
+    // `searchable_native_index_fields`. Filenames in, everything else out.
+    field_classifications: {
+      slug: ["no_index", "metadata"],
+      record_type: ["no_index", "metadata"],
+      record_slug: ["no_index", "metadata"],
+      filenames: ["word"],
+      attachments_json: ["no_index", "metadata"],
+      created_at: ["no_index", "metadata"],
+      updated_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      slug: GENERAL,
+      record_type: GENERAL,
+      record_slug: GENERAL,
+      filenames: GENERAL,
+      attachments_json: GENERAL,
+      created_at: GENERAL,
+      updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+// LEGACY (v1) — content-addressed attachment bytes stored base64 in a record,
+// keyed by SHA-256 of the raw file. Superseded by `attachmentFileSchema`
+// (BrainAttachmentFile, below): v2 stores bytes through the node's file-blob
+// plane (`POST /api/db/file-blob` → encrypted CAS blob in B2, metered as
+// file bytes) and keeps only a `$lastdb_file` pointer in the DB. This schema
+// stays declared so `fbrain attachments migrate` can still READ v1 blob
+// records and move them into the file plane; nothing writes it anymore.
+export const attachmentBlobSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainAttachmentBlob",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainAttachmentBlob",
+    purpose_statement:
+      "Content-addressed file bytes backing fbrain attachments; binary payload intentionally excluded from all search indexes",
+    schema_type: "Hash",
+    key: { hash_field: "content_hash" },
+    fields: ["content_hash", "size", "media_type", "data", "created_at"],
+    field_types: {
+      content_hash: "String",
+      size: "String",
+      media_type: "String",
+      data: "String",
+      created_at: "String",
+    },
+    field_descriptions: {
+      content_hash: "SHA-256 hex of the raw file bytes (CAS key)",
+      size: "raw file byte length",
+      media_type: "MIME type inferred at attach time",
+      data: "base64 file bytes; never indexed, never embedded",
+      created_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {
+      content_hash: ["no_index", "metadata"],
+      size: ["no_index", "metadata"],
+      media_type: ["no_index", "metadata"],
+      data: ["no_index", "binary"],
+      created_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      content_hash: GENERAL,
+      size: GENERAL,
+      media_type: GENERAL,
+      data: { sensitivity_level: 0, data_domain: "binary" },
+      created_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+// v2 attachment storage: one BrainAttachmentFile record per unique content
+// hash. The raw bytes do NOT live in this record — `POST /api/db/file-blob`
+// uploads them as an encrypted CAS blob to B2 (`{scope}/cas/sha256/…`,
+// metered as file_reference_bytes; fold
+// docs/designs/cloud-file-blobs-on-demand-sync.md) and persists the returned
+// `$lastdb_file` pointer into the `file` field here. The pointer is a JSON
+// object (blob_ref, file_hash, cipher_suite, dek, …), hence field type `Any`.
+// Reads go through `POST /api/db/fetch-file-blob` with that pointer and are
+// sha256-verified against `content_hash`. Every field is no_index, so nothing
+// about attachment content enters BM25/vector search.
+export const attachmentFileSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainAttachmentFile",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainAttachmentFile",
+    purpose_statement:
+      "Content-addressed $lastdb_file pointer backing an fbrain attachment; bytes live in the encrypted B2 CAS file plane, never in this record",
+    schema_type: "Hash",
+    key: { hash_field: "content_hash" },
+    fields: ["content_hash", "size", "media_type", "file", "created_at"],
+    field_types: {
+      content_hash: "String",
+      size: "String",
+      media_type: "String",
+      file: "Any",
+      created_at: "String",
+    },
+    field_descriptions: {
+      content_hash: "SHA-256 hex of the raw file bytes (CAS key)",
+      size: "raw file byte length",
+      media_type: "MIME type inferred at attach time",
+      file: "$lastdb_file pointer written by the node's file-blob plane; never indexed",
+      created_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {
+      content_hash: ["no_index", "metadata"],
+      size: ["no_index", "metadata"],
+      media_type: ["no_index", "metadata"],
+      file: ["no_index", "metadata"],
+      created_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      content_hash: GENERAL,
+      size: GENERAL,
+      media_type: GENERAL,
+      file: GENERAL,
+      created_at: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -539,6 +720,24 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: tagIndexSchema,
     types: [],
     extraKeys: [TAG_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: ATTACHMENT_INDEX_SCHEMA_KEY,
+    schema: attachmentIndexSchema,
+    types: [],
+    extraKeys: [ATTACHMENT_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: ATTACHMENT_BLOB_SCHEMA_KEY,
+    schema: attachmentBlobSchema,
+    types: [],
+    extraKeys: [ATTACHMENT_BLOB_SCHEMA_KEY],
+  },
+  {
+    key: ATTACHMENT_FILE_SCHEMA_KEY,
+    schema: attachmentFileSchema,
+    types: [],
+    extraKeys: [ATTACHMENT_FILE_SCHEMA_KEY],
   },
 ];
 

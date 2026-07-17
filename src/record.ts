@@ -956,9 +956,18 @@ export interface ResolveBySlugOpts {
   // The CLI verb the caller is implementing. The ambiguous-slug `hint` echoes
   // it so the suggested recovery command is runnable as-is for the command the
   // user actually ran (`fbrain status …`/`fbrain delete …`, not always `get`).
-  // Three callers share this sweep; each passes its own verb. Defaults to
+  // Callers share this sweep; each passes its own verb. Defaults to
   // "get" so the throw stays well-formed for any future caller that omits it.
-  recoveryVerb?: "get" | "status" | "tag" | "delete";
+  recoveryVerb?:
+    | "get"
+    | "status"
+    | "tag"
+    | "delete"
+    | "attach"
+    | "attachments"
+    | "attachments migrate"
+    | "detach"
+    | "attachment get";
   // Read-only callers can opt into deterministic ambiguity resolution while
   // mutating callers keep the safer default of erroring unless --type is set.
   ambiguousTypePrecedence?: readonly RecordType[];
