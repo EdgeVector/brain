@@ -1,5 +1,11 @@
 // Schema definitions for fbrain's record types.
 //
+// Pattern status: fbrain's per-kind, purpose-split schemas are
+// grandfathered historical catalog identities. Do not copy this as the
+// default pattern for new apps; decision-2026-07-16-schema-identity-system-treatment
+// says new apps use starter templates plus an explicit `kind` field for
+// app-level meaning.
+//
 // fbrain registers one schema per record type, plus internal support schemas:
 //
 //   - **Design**, **Task** — Phase 1, unchanged.
@@ -253,8 +259,10 @@ export const taskSchema: AddSchemaRequest = {
 };
 
 // Per-kind schemas, structurally identical (7 fields) and distinguished
-// solely by descriptive_name + purpose_statement. The purpose-statement
-// language is the same family used in the design doc.
+// solely by descriptive_name + purpose_statement. This is retained for
+// fbrain's existing catalog identities; new apps should use schema starter
+// templates plus a `kind` discriminator per
+// decision-2026-07-16-schema-identity-system-treatment.
 export const conceptSchema: AddSchemaRequest = phase6Schema(
   "Concept",
   "Reusable framework, pattern, or protocol recorded for cross-session reuse",

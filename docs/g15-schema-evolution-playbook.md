@@ -19,6 +19,12 @@ The command is implemented; the doc is the model. Both are paired so
 the playbook isn't theoretical and the spike has a place to land its
 weight.
 
+**Pattern status:** this playbook documents fbrain's historical,
+grandfathered per-kind schema lineage. For new apps, do not create
+purpose-split schemas only to encode app-level kind; use schema starter
+templates plus an explicit `kind` field per
+`decision-2026-07-16-schema-identity-system-treatment`.
+
 ## The hard fact
 
 fold_db identity-hashes a schema by `SHA256(descriptive_name +
