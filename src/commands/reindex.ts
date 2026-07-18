@@ -35,6 +35,7 @@ import { resolvePrintSink } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
+  listRecordsAdminScan,
   missingSchemaHashReadNote,
   nowIso,
   schemaHashFor,
@@ -147,7 +148,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
 
   for (const type of types) {
     const schemaHash = schemaHashFor(type, opts.cfg);
-    const records = await listRecords(node, type, schemaHash, opts.cfg);
+    const records = await listRecordsAdminScan(node, type, schemaHash, { includeTombstones: true });
     const counts = { reindexed: 0, skippedTombstone: 0 };
     result.byType[type] = counts;
 

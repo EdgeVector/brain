@@ -121,6 +121,10 @@ function emptyPage() {
 
 const ALL_HASHES = RECORD_TYPES.map((t) => TEST_HASHES[t]);
 
+function isSlugTagsProbe(c: QueryCall): boolean {
+  return !c.keyed && c.fields.length === 2 && c.fields.includes("slug") && c.fields.includes("tags");
+}
+
 describe("hasAnyLiveRecord — single small page per schema", () => {
   test("live row on the first schema: ONE slug+tags query total, no second page", async () => {
     const { calls } = installQueryMock(() => pageWithMore([row("alive")]));
@@ -187,7 +191,7 @@ describe("list --status no-match — probe cost + unchanged hint", () => {
     ]);
 
     const sweepCalls = calls.filter((c) => c.fields.includes("body"));
-    const probeCalls = calls.filter((c) => !c.fields.includes("body"));
+    const probeCalls = calls.filter(isSlugTagsProbe);
     // One sweep query per type (the retry stops on the first attempt because
     // live rows are visible), then ONE probe query total.
     expect(sweepCalls).toHaveLength(RECORD_TYPES.length);
@@ -213,7 +217,7 @@ describe("list --status no-match — probe cost + unchanged hint", () => {
     // Filtered sweep retries its budget on a genuinely-empty brain (existing
     // behavior, unchanged); the probe itself is bounded to one small page per
     // schema hash.
-    const probeCalls = calls.filter((c) => !c.fields.includes("body"));
+    const probeCalls = calls.filter(isSlugTagsProbe);
     expect(probeCalls).toHaveLength(ALL_HASHES.length);
     for (const c of probeCalls) {
       expect(c.limit).toBe(NO_MATCH_PROBE_PAGE_LIMIT);

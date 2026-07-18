@@ -78,6 +78,10 @@ const DESIGN_HASH = TEST_HASHES.design;
 
 const cfg = buildTestCfg({ userHash: "test-hash" });
 
+function userMutations<T extends Record<string, unknown>>(mutations: T[]): T[] {
+  return mutations.filter((m) => m.schema !== cfg.schemaHashes.__recordlistindex__);
+}
+
 function cfgWithoutSchemaHash(type: keyof typeof TEST_HASHES) {
   const schemaHashes = { ...cfg.schemaHashes };
   delete schemaHashes[type];
@@ -2172,9 +2176,10 @@ describe("fbrain_put tool", () => {
     });
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text).toBe("created concept ask-test");
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(1);
+    expect(user[0]!.mutation_type).toBe("create");
+    const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.slug).toBe("ask-test");
     expect(fields.body).toBe("hello world from MCP");
     // Post-Phase-E concept lives in its own dedicated schema; the legacy
@@ -2250,8 +2255,9 @@ describe("fbrain_put tool", () => {
     });
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text).toBe("created concept body-b64-test");
-    expect(mutations).toHaveLength(1);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(1);
+    const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.body).toBe(body);
   });
 
@@ -2283,8 +2289,9 @@ describe("fbrain_put tool", () => {
 
       expect(res.isError, name).toBeFalsy();
       expect(res.content[0]!.text, name).toBe(`created concept inline-${name}`);
-      expect(mutations, name).toHaveLength(1);
-      const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+      const user = userMutations(mutations);
+      expect(user, name).toHaveLength(1);
+      const fields = user[0]!.fields_and_values as Record<string, unknown>;
       expect(fields.body, name).toBe(body);
     }
   });
@@ -2306,11 +2313,12 @@ describe("fbrain_put tool", () => {
       frontmatter: "type: preference\ntitle: From Raw\ntags: [from-raw]",
       body: "raw body",
     });
-    expect(mutations).toHaveLength(2);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(2);
+    const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.title).toBe("From Raw");
     expect(fields.tags).toEqual(["from-raw"]);
-    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    const indexFields = user[1]!.fields_and_values as Record<string, unknown>;
     expect(indexFields.slug).toBe(tagIndexSlug("from-raw"));
     expect(indexFields.members).toEqual(["preference:raw-fm"]);
     // Per-kind preference schema has no `kind` field.
@@ -2345,9 +2353,10 @@ describe("fbrain_put tool", () => {
     });
     expect(res.isError).toBeFalsy();
     // Exactly one mutation — the put — with the requested status applied.
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(1);
+    expect(user[0]!.mutation_type).toBe("create");
+    const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe("reviewed");
     // One-line output, matching the tool's documented contract.
     expect(res.content[0]!.text).toBe("created design with-status");
@@ -2437,7 +2446,7 @@ describe("fbrain_put tool", () => {
     });
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text).toBe("created concept fm-typed");
-    expect(mutations).toHaveLength(1);
+    expect(userMutations(mutations)).toHaveLength(1);
   });
 
   // Read-your-writes regression — task 920a3. The MCP path is the bite-y
@@ -2631,7 +2640,7 @@ describe("fbrain_delete tool", () => {
     expect(res.isError).toBeFalsy();
     expect(res.content[0]!.text ?? "").toContain("deleted design doomed");
     // update + delete mutations.
-    expect(mutations.map((m) => m.mutation_type)).toEqual(["update", "delete"]);
+    expect(userMutations(mutations).map((m) => m.mutation_type)).toEqual(["update", "delete"]);
   });
 
   test("missing slug surfaces not_found via isError", async () => {

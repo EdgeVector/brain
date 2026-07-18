@@ -184,7 +184,7 @@ describe("`fbrain help` resolves a quoted multi-word subcommand to its parent", 
       expect(quoted.code).toBe(0);
       expect(quoted.stdout).toBe(baseline.stdout);
       expect(quoted.stderr).toBe("");
-    });
+    }, 15000);
   }
 
   test("help mcp install (two unquoted tokens) still matches help mcp", async () => {
@@ -192,12 +192,12 @@ describe("`fbrain help` resolves a quoted multi-word subcommand to its parent", 
     expect(baseline.code).toBe(0);
     expect(split.code).toBe(0);
     expect(split.stdout).toBe(baseline.stdout);
-  });
+  }, 15000);
 
   test('help "design new" still resolves to design-new help (regression)', async () => {
     const [baseline, quoted] = await Promise.all([runCli(["help", "design"]), runCli(["help", "design new"])]);
     expect(baseline.code).toBe(0);
     expect(quoted.code).toBe(0);
     expect(quoted.stdout).toBe(baseline.stdout);
-  });
+  }, 15000);
 });

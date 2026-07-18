@@ -23,6 +23,7 @@ import {
 } from "../../src/commands/delete.ts";
 import { FbrainError, type NodeClient } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
+import { RECORD_LIST_INDEX_SCHEMA_KEY } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const cfg = buildTestCfg({
@@ -274,7 +275,10 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       await expect(deleteRecord({ cfg, slug: "dual" })).rejects.toMatchObject({
         code: "ambiguous_slug",
       });
-      expect(mutationsFired.length).toBe(0);
+      const userMutations = mutationsFired
+        .map((body) => JSON.parse(String(body)) as { schema?: string })
+        .filter((body) => body.schema !== cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY]);
+      expect(userMutations.length).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -670,7 +674,10 @@ describe("deleteRecord — design linked-task guard", () => {
         code: "design_has_linked_tasks",
         message: 'Cannot delete design "parent" — 1 task still links to it: child.',
       });
-      expect(mutationsFired.length).toBe(0);
+      const userMutations = mutationsFired
+        .map((body) => JSON.parse(String(body)) as { schema?: string })
+        .filter((body) => body.schema !== cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY]);
+      expect(userMutations.length).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }

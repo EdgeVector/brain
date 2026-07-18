@@ -374,14 +374,17 @@ export async function listRecordsAdminScan(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
-  opts?: { seedIndex?: (records: FbrainRecord[]) => Promise<void> },
+  opts?: { seedIndex?: (records: FbrainRecord[]) => Promise<void>; includeTombstones?: boolean },
 ): Promise<FbrainRecord[]> {
   const res = await node.queryAll({
     schemaHash,
     fields: fieldsFor(type),
     allowFullScan: true,
   });
-  const records = res.results.map((row) => rowToRecord(row, type)).filter((r) => !isTombstoned(r));
+  const allRecords = res.results.map((row) => rowToRecord(row, type));
+  const records = opts?.includeTombstones === true
+    ? allRecords
+    : allRecords.filter((r) => !isTombstoned(r));
   if (opts?.seedIndex) await opts.seedIndex(records);
   return records;
 }

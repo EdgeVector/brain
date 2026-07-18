@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   ADMIN_SNAPSHOT_SLUG,
@@ -69,6 +72,17 @@ function mockNode(records: Partial<Record<RecordType, QueryRow[]>>): NodeClient 
 
 describe("brain admin snapshot", () => {
   test("builds a privacy-pruned admin payload", async () => {
+    const oldHeartbeatPath = process.env.LAST_STACK_HEARTBEATS_FILE;
+    const tmp = mkdtempSync(join(tmpdir(), "fbrain-admin-snapshot-"));
+    process.env.LAST_STACK_HEARTBEATS_FILE = join(tmp, "routine-heartbeats.log");
+    writeFileSync(
+      process.env.LAST_STACK_HEARTBEATS_FILE,
+      [
+        "kanban-pickup 2026-07-15T15:00:00Z ok cards=1",
+        "noise without timestamp",
+        "sentry-triage 2026-07-15T15:30:00Z noop nothing",
+      ].join("\n"),
+    );
     const node = mockNode({
       design: [row(base("design-one"))],
       decision: [
@@ -115,32 +129,38 @@ describe("brain admin snapshot", () => {
       ],
     });
 
-    const snapshot = await buildBrainAdminSnapshot(node, buildTestCfg(), { now: NOW });
-    const fields = snapshotToFields(snapshot);
-    const serialized = JSON.stringify({ snapshot, fields });
+    try {
+      const snapshot = await buildBrainAdminSnapshot(node, buildTestCfg(), { now: NOW });
+      const fields = snapshotToFields(snapshot);
+      const serialized = JSON.stringify({ snapshot, fields });
 
-    expect(snapshot.captured_at).toBe(NOW.toISOString());
-    expect(snapshot.type_counts.design).toBe(1);
-    expect(snapshot.type_counts.decision).toBe(2);
-    expect(snapshot.open_decisions).toContainEqual({
-      slug: "decide-open",
-      title: "Pick dashboard transport",
-      status: "open",
-    });
-    expect(snapshot.open_decisions.some((d) => d.slug === "decide-done")).toBe(false);
-    expect(snapshot.active_programs_head[0]?.lines).toEqual([
-      "# Active Programs",
-      "North Star: deliver data slices",
-      "This line is safe summary text.",
-    ]);
-    expect(snapshot.recent_heartbeats).toEqual([
-      { slug: "sentry-triage", ts: "2026-07-15T15:30:00Z", ok: "noop" },
-      { slug: "kanban-pickup", ts: "2026-07-15T15:00:00Z", ok: "ok" },
-    ]);
+      expect(snapshot.captured_at).toBe(NOW.toISOString());
+      expect(snapshot.type_counts.design).toBe(1);
+      expect(snapshot.type_counts.decision).toBe(2);
+      expect(snapshot.open_decisions).toContainEqual({
+        slug: "decide-open",
+        title: "Pick dashboard transport",
+        status: "open",
+      });
+      expect(snapshot.open_decisions.some((d) => d.slug === "decide-done")).toBe(false);
+      expect(snapshot.active_programs_head[0]?.lines).toEqual([
+        "# Active Programs",
+        "North Star: deliver data slices",
+        "This line is safe summary text.",
+      ]);
+      expect(snapshot.recent_heartbeats).toEqual([
+        { slug: "sentry-triage", ts: "2026-07-15T15:30:00Z", ok: "noop" },
+        { slug: "kanban-pickup", ts: "2026-07-15T15:00:00Z", ok: "ok" },
+      ]);
 
-    expect(serialized).not.toContain("SECRET_DECISION_BODY");
-    expect(serialized).not.toContain("DONE_BODY_SHOULD_NOT_APPEAR");
-    expect(serialized).not.toContain("SECRET_REFERENCE_BODY");
+      expect(serialized).not.toContain("SECRET_DECISION_BODY");
+      expect(serialized).not.toContain("DONE_BODY_SHOULD_NOT_APPEAR");
+      expect(serialized).not.toContain("SECRET_REFERENCE_BODY");
+    } finally {
+      if (oldHeartbeatPath === undefined) delete process.env.LAST_STACK_HEARTBEATS_FILE;
+      else process.env.LAST_STACK_HEARTBEATS_FILE = oldHeartbeatPath;
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   test("parses heartbeat identity, timestamp, and outcome only", () => {
@@ -196,12 +216,12 @@ describe("brain admin snapshot", () => {
 
   test("publish + deliver stage/approve with injected clients", async () => {
     const node = mockNode({});
-    const mutations: Array<"create" | "update"> = [];
-    node.createRecord = async () => {
-      mutations.push("create");
+    const mutations: Array<{ kind: "create" | "update"; schemaHash: string }> = [];
+    node.createRecord = async ({ schemaHash }) => {
+      mutations.push({ kind: "create", schemaHash });
     };
-    node.updateRecord = async () => {
-      mutations.push("update");
+    node.updateRecord = async ({ schemaHash }) => {
+      mutations.push({ kind: "update", schemaHash });
     };
     node.queryByKey = async () => null;
 
@@ -216,7 +236,7 @@ describe("brain admin snapshot", () => {
     });
     expect(published.written).toBe(false);
     expect(published.delivery_stage.legs[0]!.hash_keys).toEqual([ADMIN_SNAPSHOT_SLUG]);
-    expect(mutations).toEqual([]);
+    expect(mutations.filter((m) => m.schemaHash === cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY])).toEqual([]);
 
     const delivery: LastDbDeliveryClient = {
       async stageDelivery(request) {

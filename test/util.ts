@@ -1,6 +1,7 @@
 // Test helpers shared across unit and integration suites.
 
 import {
+  RECORD_LIST_INDEX_SCHEMA_KEY,
   RECORD_TYPES,
   TAG_INDEX_SCHEMA_KEY,
   type RecordType,
@@ -25,6 +26,7 @@ export const TEST_HASHES: Record<RecordType, string> = {
 };
 
 export const TEST_TAG_INDEX_HASH = "7".repeat(64);
+export const TEST_RECORD_LIST_INDEX_HASH = "8".repeat(64);
 
 // Test URL defaults: current local Mini default + the dev cloud Lambda.
 // Dev (us-west-2) — not prod — so iteration-test runs don't pollute the
@@ -41,7 +43,11 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
     nodeUrl: TEST_NODE_URL,
     schemaServiceUrl: TEST_SCHEMA_SERVICE_URL,
     userHash: "uh-test",
-    schemaHashes: { ...TEST_HASHES, [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH },
+    schemaHashes: {
+      ...TEST_HASHES,
+      [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH,
+      [RECORD_LIST_INDEX_SCHEMA_KEY]: TEST_RECORD_LIST_INDEX_HASH,
+    },
     designSchemaHash: TEST_HASHES.design,
     taskSchemaHash: TEST_HASHES.task,
   };
@@ -50,11 +56,13 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
     "schemaHashes" in over &&
     over.schemaHashes !== undefined &&
     Object.keys(over.schemaHashes).length > 0 &&
-    !(TAG_INDEX_SCHEMA_KEY in over.schemaHashes)
+    (!(TAG_INDEX_SCHEMA_KEY in over.schemaHashes) ||
+      !(RECORD_LIST_INDEX_SCHEMA_KEY in over.schemaHashes))
   ) {
     merged.schemaHashes = {
       ...over.schemaHashes,
       [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH,
+      [RECORD_LIST_INDEX_SCHEMA_KEY]: TEST_RECORD_LIST_INDEX_HASH,
     };
   }
   // Keep mirrors in sync unless caller explicitly overrode them.

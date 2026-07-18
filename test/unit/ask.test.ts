@@ -132,6 +132,7 @@ function installFetchStub(opts: {
     bodyQueryCountsBySchema: new Map(),
     searchCalls: 0,
   };
+  const persistedRows = new Map<string, Map<string, Record<string, unknown>>>();
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const rawUrl = typeof input === "string" ? input : String(input);
     const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
@@ -150,16 +151,40 @@ function installFetchStub(opts: {
           (stub.bodyQueryCountsBySchema.get(schema) ?? 0) + 1,
         );
       }
-      const rows = opts.queries[schema] ?? [];
+      const filter = (body as { filter?: { HashKey?: unknown } }).filter;
+      const keyHash = typeof filter?.HashKey === "string" ? filter.HashKey : "";
+      const persisted = keyHash ? persistedRows.get(schema)?.get(keyHash) : undefined;
+      const rows = persisted ? [persisted] : (opts.queries[schema] ?? []);
       return new Response(
         JSON.stringify({
           ok: true,
-          results: rows.map((f) => ({ fields: f, key: { hash: f.slug, range: null } })),
+          results: rows.map((f) => ({
+            fields: f,
+            key: { hash: f.slug ?? f.key, range: null },
+          })),
           total_count: rows.length,
           returned_count: rows.length,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
+    }
+    if (url.includes("/api/mutation")) {
+      const mutation = body as {
+        schema?: string;
+        fields_and_values?: Record<string, unknown>;
+        key_value?: { hash?: unknown };
+      };
+      const schema = typeof mutation.schema === "string" ? mutation.schema : "";
+      const keyHash = typeof mutation.key_value?.hash === "string" ? mutation.key_value.hash : "";
+      if (schema && keyHash && mutation.fields_and_values) {
+        const byKey = persistedRows.get(schema) ?? new Map<string, Record<string, unknown>>();
+        byKey.set(keyHash, mutation.fields_and_values);
+        persistedRows.set(schema, byKey);
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     if (url.includes("/api/native-index/search")) {
       stub.searchCalls++;
@@ -452,14 +477,15 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.design)).toBe(1);
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.task)).toBe(1);
 
-      // The cheap body-less listing also runs once per type (the cache-decision
-      // pass). On this COLD call (empty cache) that's listing + body fetch per
-      // type — the warm-call test below proves the body half drops to zero.
+      // Cold RecordListIndex seed cost is bounded per type: read index miss,
+      // body-bearing seed scan, write-existence point read, then read index hit
+      // for the rebuild. The critical invariant is still above: only one of
+      // those carries `body`, and Stage 4 adds no per-hit body fetches.
       const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
       );
-      expect(totalQueries).toBe(2 * RECORD_TYPES.length);
+      expect(totalQueries).toBe(4 * RECORD_TYPES.length);
     },
   );
 
@@ -898,13 +924,14 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     expect(result.hits.length).toBe(0);
     // The ghost vector hit triggers NO extra fetch: on the cold path it's a
     // `liveById` Map miss (the in-memory corpus map), silently skipped. So the
-    // only /api/query traffic is the corpus load itself — one cheap listing +
-    // one full body fetch per RECORD_TYPE — and zero body fetches for ghost.
+    // only /api/query traffic is the corpus load itself: bounded cold
+    // RecordListIndex seed/read traffic per type, and zero body fetches for
+    // the ghost beyond the single per-type body-bearing seed scan.
     const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
       (a, b) => a + b,
       0,
     );
-    expect(totalQueries).toBe(2 * RECORD_TYPES.length);
+    expect(totalQueries).toBe(4 * RECORD_TYPES.length);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);

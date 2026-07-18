@@ -1339,7 +1339,7 @@ describe("doctor --freshness probes", () => {
     expect(lines.some((l) => l.includes("5/5 trials passed"))).toBe(true);
     expect(lines.some((l) => l.startsWith("[PASS] pollution-probe"))).toBe(true);
     // Each trial: 1 create + 1 update (cleanup tombstone). 5 trials = 10 mutations.
-    const creates = mutations.filter((m) => m.kind === "create");
+    const creates = mutations.filter((m) => m.kind === "create" && m.schemaHash === conceptHash);
     const cleanupUpdates = mutations.filter(
       (m) => m.kind === "update" && Array.isArray(m.fields["tags"]) && (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
     );

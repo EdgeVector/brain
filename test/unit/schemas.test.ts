@@ -180,7 +180,7 @@ describe("schemas", () => {
     ]);
   });
 
-  test("UNIQUE_SCHEMAS has 15 entries: user record schemas plus internal index, snapshot, and attachment schemas", () => {
+  test("UNIQUE_SCHEMAS has 15 entries: user record schemas plus internal indexes, admin snapshot, and attachment schemas", () => {
     expect(UNIQUE_SCHEMAS.length).toBe(15);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
