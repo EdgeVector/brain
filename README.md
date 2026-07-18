@@ -169,6 +169,10 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `brain link <from-slug> <to-slug> [--from-type T] [--to-type T]` | Links records. Defaults to legacy Task → Design (`task.design_slug`); non-legacy pairs store a generic explicit link tag on the source |
 | `brain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; reads the backlink secondary index instead of scanning every schema |
+| `brain attach <slug> <file> [--type T] [--name N] [--force]` | Attaches a file to a record. Bytes are stored content-addressed (SHA-256) in an internal blob record whose payload is classified `no_index`/`binary` — attachment **content never enters search indexes**; only the filename is searchable metadata. Identical content dedupes (see [Attachments](#attachments)) |
+| `brain attachments <slug> [--type T]` | Lists a record's attachments (name, size, media type, blob ref, added_at) |
+| `brain detach <slug> <name-or-ref> [--type T]` | Removes one attachment by filename or `sha256:<hex>` ref. The content-addressed blob remains (fold_db is append-only) |
+| `brain attachment get <slug> <name-or-ref> [-o PATH] [--force]` | Materializes an attachment's bytes to disk (or stdout with `-o -`), verifying the SHA-256 before writing — a hash mismatch is a hard error, never silent corruption |
 | `brain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
 | `brain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
 | `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
@@ -351,6 +355,47 @@ In short: the sharing **metadata** (ShareRule, ShareInvite, ShareSubscription) i
 `fbrain share` is currently a placeholder: it prints a pointer to the memo and exits non-zero. A real implementation drives `POST /api/sharing/rules` + `POST /api/sharing/invite` + `POST /api/sharing/accept`, gated on `exemem-status.connected == true`.
 
 Read [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) for the full evidence: every endpoint with its captured request/response JSON, what worked, what didn't, and exactly what a real two-device test would require.
+
+## Attachments
+
+Records can point at things three ways, in increasing order of weight:
+
+1. **`[[slug]]` wiki links** in the body — cheap, brain-internal, indexed by
+   `backlinks`.
+2. **Cross-app URIs** in the body (e.g. `lastsecrets://<slug>`,
+   `lastdb:///<repo>`) — pointers into sibling apps that own the data.
+3. **Real attachments** — the file's bytes live in the brain, content-addressed
+   and cloud-synced with the rest of the node's data.
+
+`brain attach <slug> <file>` stores the file under SHA-256 in an internal
+`BrainAttachmentBlob` record and appends a `{name, blob_ref, size, media_type,
+added_at}` entry to the record's `BrainAttachmentIndex`. Design properties:
+
+- **Additive by construction.** Attachments live in two dedicated internal
+  schemas (the TagIndex pattern), so enabling them changes no existing schema's
+  identity hash and migrates zero existing records — deliberately NOT
+  `migrate --add-field`, which re-puts every record under a new hash.
+- **Content is never searchable.** The blob's `data` field is classified
+  `no_index`/`binary` (the LastSecrets `no_index` policy); the node's mutation
+  manager excludes such fields from BM25/vector indexes at write time, and the
+  brain's own local BM25 corpus only ever reads knowledge-record titles/bodies.
+  The ONLY word-indexed attachment surface is the `filenames` field.
+- **Content-addressed.** Identical bytes are stored once no matter how many
+  records or names reference them; re-attaching the same file is a no-op.
+  `attachment get` re-verifies the SHA-256 before writing bytes to disk.
+- **Detach removes the reference, not the blob.** fold_db is append-only and
+  the same content may back other attachments.
+- 32 MiB per-file cap (the UDS transport caps request bodies at 64 MiB).
+
+```bash
+brain attach projects-edge-vector-labs-structure ./operating-agreement.pdf
+brain attachments projects-edge-vector-labs-structure
+brain attachment get projects-edge-vector-labs-structure operating-agreement.pdf -o /tmp/oa.pdf
+brain detach projects-edge-vector-labs-structure operating-agreement.pdf
+```
+
+See [docs/attachments.md](docs/attachments.md) for the storage model and the
+planned migration to the node's native CAS blob plane.
 
 ## Delete
 
