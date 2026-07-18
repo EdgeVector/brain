@@ -3,7 +3,7 @@
 // Admin-only drains use listRecordsAdminScan explicitly.
 
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC = join(import.meta.dir, "../../src");
@@ -19,19 +19,9 @@ const PRODUCT_GLOBS = [
   "record.ts",
 ];
 
-function walkTs(rel: string): string[] {
-  const abs = join(SRC, rel);
-  try {
-    return [rel];
-  } catch {
-    return [];
-  }
-}
-
 describe("no product listRecords omit-cfg / bare allowFullScan", () => {
   test("product modules never call listRecords with only 3 args (cfg required)", () => {
     // listRecords(node, type, hash) without cfg was the silent full-scan trap.
-    const threeArg = /listRecords\s*\(\s*[^,]+,\s*[^,]+,\s*[^,)\s]+\s*\)/;
     const violations: string[] = [];
     for (const rel of PRODUCT_GLOBS) {
       const path = join(SRC, rel);

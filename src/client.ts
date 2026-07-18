@@ -1755,12 +1755,6 @@ function findQueryRowByKey(rows: QueryRow[], keyHash: string): QueryRow | null {
   return null;
 }
 
-function queryByKeyFilterLooksIgnored(body: SdkQueryResult, results: QueryRow[]): boolean {
-  if (body.page?.hasMore === true) return true;
-  if (results.length > 1) return true;
-  return body.page !== null && body.page.totalCount > results.length;
-}
-
 function numField(obj: Record<string, unknown>, key: string): number {
   const v = obj[key];
   return typeof v === "number" ? v : 0;

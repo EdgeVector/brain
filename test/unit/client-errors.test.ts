@@ -318,7 +318,7 @@ describe("client error mapping", () => {
     ]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
     try {
-      await c.queryAll({ schemaHash: "Design", fields: ["slug"] });
+      await c.queryAll({ schemaHash: "Design", fields: ["slug"], allowFullScan: true });
       throw new Error("did not throw");
     } catch (err) {
       expect(err).toBeInstanceOf(FbrainError);
@@ -332,7 +332,7 @@ describe("client error mapping", () => {
     installMock([{ status: 400, body: { error: "unknown_fields", message: "no field foo" } }]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9101", userHash: "u" });
     try {
-      await c.queryAll({ schemaHash: "h", fields: ["foo"] });
+      await c.queryAll({ schemaHash: "h", fields: ["foo"], allowFullScan: true });
       throw new Error("did not throw");
     } catch (err) {
       expect((err as FbrainError).code).toBe("unknown_fields");
