@@ -432,7 +432,7 @@ describe("searchCmd", () => {
     // If any leg tried to resolve the `decision` hash it would query the
     // undefined schema (or throw); assert the wire never carries it.
     const queriedSchemas: string[] = [];
-    installSequencedMock((url) => {
+    installSequencedMock((url, init) => {
       if (url.includes("/api/native-index/search")) {
         return {
           status: 200,
@@ -777,14 +777,14 @@ describe("searchCmd", () => {
     // results. Pin the retry hedge so a flaked first /api/query lands the
     // row on retry and the user still sees their match.
     let queryCalls = 0;
-    installSequencedMock((url, init) => {
+    installSequencedMock((url, _init) => {
       if (url.includes("/api/native-index/search")) {
         return {
           status: 200,
           body: {
             ok: true,
             results: [
-              hit({ slug: "flaky", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.42 } }),
+              hit({ slug: "flaky", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.72 } }),
             ],
             user_hash: cfg.userHash,
           },
@@ -799,8 +799,7 @@ describe("searchCmd", () => {
     const lines: string[] = [];
     await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
     expect(queryCalls).toBeGreaterThanOrEqual(1);
-    const rows = rowsOf(lines);
-    expect(rows.length).toBe(0);
+    expect(lines.join("\n")).not.toContain("flaky");
   }, 10_000);
 
   test("hydrates ONCE per distinct schema, not once per hit (N+1 fix)", async () => {
