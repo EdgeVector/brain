@@ -1083,14 +1083,22 @@ export function newNodeClient(opts: {
   const queryPageSdk = async (
     schemaHash: string,
     filter: SdkQueryFilter,
+    opts?: { allowFullScan?: boolean },
   ): Promise<SdkQueryResult> => {
     try {
-      return await withSessionRepair(() => sdkClient(null).query(schemaHash, filter));
+      return await withSessionRepair(() =>
+        sdkClient(null).query(schemaHash, filter, {
+          ...(opts?.allowFullScan === true ? { allowFullScan: true } : {}),
+        }),
+      );
     } catch (err) {
       throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
     }
   };
 
+  // Unfiltered corpus drains (list / BM25 warm) are admin bulk: Mini hard-refuses
+  // product full-schema scans unless X-LastDB-Allow-Full-Scan is set. Point reads
+  // stay on queryByKey (no header).
   const queryAllGuarded = async ({
     schemaHash,
     fields,
@@ -1132,11 +1140,15 @@ export function newNodeClient(opts: {
     let offset = 0;
     let lastTotalCount: number | null = null;
     for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-      const pageResult = await queryPageSdk(schemaHash, {
-        fields,
-        limit: QUERY_PAGE_SIZE,
-        offset,
-      });
+      const pageResult = await queryPageSdk(
+        schemaHash,
+        {
+          fields,
+          limit: QUERY_PAGE_SIZE,
+          offset,
+        },
+        { allowFullScan: true },
+      );
       const pageResults = fromSdkRows(pageResult.rows);
       if (pageResult.page !== null) lastTotalCount = pageResult.page.totalCount;
       let newOnPage = 0;
@@ -1434,15 +1446,22 @@ export function newNodeClient(opts: {
       // has_more follow-up and none of queryAll's pagination guards — the
       // contract is "a small sample, one round trip", and the two callers
       // (empty-brain probe, nearest-slug hint scan) are explicitly
-      // best-effort over whatever the first page holds.
-      const page = await queryPageSdk(schemaHash, {
-        fields,
-        limit,
-        offset: 0,
-      });
+      // best-effort over whatever the first page holds. Still unfiltered →
+      // admin full-scan header (Mini refuse otherwise).
+      const page = await queryPageSdk(
+        schemaHash,
+        {
+          fields,
+          limit,
+          offset: 0,
+        },
+        { allowFullScan: true },
+      );
       return fromSdkRows(page.rows);
     },
     async queryByKey({ schemaHash, fields, keyHash }) {
+      // Pure HashKey point-read — never fall back to a full schema drain.
+      // Mini refuses unfiltered product scans; a missing row is null, not a scan.
       const page = await queryPageSdk(schemaHash, {
         fields,
         filter: { HashKey: keyHash },
@@ -1450,13 +1469,7 @@ export function newNodeClient(opts: {
         offset: 0,
       });
       const results = fromSdkRows(page.rows);
-      const row = findQueryRowByKey(results, keyHash);
-      if (row) return row;
-      if (queryByKeyFilterLooksIgnored(page, results)) {
-        const fallback = await queryAllGuarded({ schemaHash, fields });
-        return findQueryRowByKey(fallback.results, keyHash);
-      }
-      return null;
+      return findQueryRowByKey(results, keyHash);
     },
     async search(query, searchOpts) {
       const schemaTargets = uniqueStrings(searchOpts?.schemas ?? []);
@@ -1571,6 +1584,7 @@ async function localSearchFallback(
   queryPage: (
     schemaHash: string,
     filter: SdkQueryFilter,
+    opts?: { allowFullScan?: boolean },
   ) => Promise<SdkQueryResult>,
   verbose: Verbose,
 ): Promise<NativeIndexHit[]> {
@@ -1582,11 +1596,17 @@ async function localSearchFallback(
 
   const docs: LocalSearchDoc[] = [];
   for (const schemaName of schemas) {
-    const page = await queryPage(schemaName, {
-      fields: LOCAL_SEARCH_FIELDS,
-      limit: QUERY_PAGE_SIZE,
-      offset: 0,
-    });
+    // Unfiltered page sample for local keyword fallback — admin full-scan header
+    // required (Mini refuses bare product scans; /api/app/search is preferred).
+    const page = await queryPage(
+      schemaName,
+      {
+        fields: LOCAL_SEARCH_FIELDS,
+        limit: QUERY_PAGE_SIZE,
+        offset: 0,
+      },
+      { allowFullScan: true },
+    );
     for (const row of fromSdkRows(page.rows)) {
       const fields = row.fields ?? {};
       const title = stringValue(fields.title);

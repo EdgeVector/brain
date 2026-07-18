@@ -5,6 +5,10 @@
 // then stage (and optionally approve) a delivery_slice to the existing admin
 // kanban-consumer recipient.
 
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import { FbrainError, newReadClientFromCfg, type NodeClient, type QueryRow, type Verbose } from "../client.ts";
 import { writeConfig, type Config } from "../config.ts";
 import { findBySlug, isTombstoned, listRecords, schemaHashFor, type FbrainRecord } from "../record.ts";
@@ -483,12 +487,23 @@ async function buildActiveProgramsHead(
 }
 
 async function buildRecentHeartbeats(
-  node: NodeClient,
-  cfg: Config,
+  _node: NodeClient,
+  _cfg: Config,
 ): Promise<BrainAdminSnapshot["recent_heartbeats"]> {
-  const record = await safeFindBySlug(node, cfg, "reference", "routine-heartbeats");
-  if (!record) return [];
-  return record.body
+  // Heartbeats live on the filesystem (not LastDB). Prefer env override, then
+  // ~/.last-stack/logs/routine-heartbeats.log.
+  const path =
+    process.env.LAST_STACK_HEARTBEATS_FILE ||
+    process.env.ROUTINES_HEARTBEATS_FILE ||
+    join(homedir(), ".last-stack", "logs", "routine-heartbeats.log");
+  if (!existsSync(path)) return [];
+  let body = "";
+  try {
+    body = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  return body
     .split(/\r?\n/)
     .map(parseHeartbeatLine)
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
