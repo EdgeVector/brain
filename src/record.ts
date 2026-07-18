@@ -339,9 +339,36 @@ export async function listRecords(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
+  cfg?: { schemaHashes: Record<string, string> },
 ): Promise<FbrainRecord[]> {
-  const res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
-  return res.results.map((row) => rowToRecord(row, type));
+  // Product path: per-type RecordListIndex point-read (no full-schema drain).
+  if (cfg) {
+    const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
+    const indexed = await readTypeListIndex(node, cfg, type);
+    if (indexed !== null) {
+      return indexed.filter((r) => !isTombstoned(r));
+    }
+    // Cold seed once with admin full scan, then product reads stay keyed.
+    const res = await node.queryAll({
+      schemaHash,
+      fields: fieldsFor(type),
+      allowFullScan: true,
+    });
+    const records = res.results.map((row) => rowToRecord(row, type)).filter((r) => !isTombstoned(r));
+    try {
+      await writeTypeListIndex(node, cfg, type, records);
+    } catch {
+      /* best-effort */
+    }
+    return records;
+  }
+  // Legacy callers without cfg: still require explicit admin opt-in.
+  const res = await node.queryAll({
+    schemaHash,
+    fields: fieldsFor(type),
+    allowFullScan: true,
+  });
+  return res.results.map((row) => rowToRecord(row, type)).filter((r) => !isTombstoned(r));
 }
 
 // The body-less identity of a live record — slug, when it last changed, and
@@ -370,23 +397,17 @@ export async function listRecordKeys(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
+  cfg?: { schemaHashes: Record<string, string> },
 ): Promise<RecordKey[]> {
-  const res = await node.queryAll({
-    schemaHash,
-    fields: ["slug", "tags", "updated_at"],
-  });
+  // Prefer RecordListIndex (same product no-scan path as listRecords).
+  const records = await listRecords(node, type, schemaHash, cfg);
   const keys: RecordKey[] = [];
-  for (const row of res.results) {
-    const f = (row.fields ?? {}) as Record<string, unknown>;
-    // Reuse the same tombstone test the full path uses: build the tag list
-    // through the shared array parser so a phantom empty tag / string-encoded
-    // list can't make the two paths disagree on what's live.
-    const tags = arrayStringField(f, "tags");
-    if (tags.includes(TOMBSTONE_TAG)) continue;
+  for (const r of records) {
+    if (isTombstoned(r)) continue;
     keys.push({
       type,
-      slug: stringField(f, "slug"),
-      updatedAt: stringField(f, "updated_at"),
+      slug: r.slug,
+      updatedAt: r.updated_at,
     });
   }
   return keys;

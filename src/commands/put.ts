@@ -210,6 +210,14 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
     });
   }
+  // Keep RecordListIndex rollup current so list/BM25 never rescan product tables.
+  try {
+    const { patchTypeListIndex } = await import("../record-list-index.ts");
+    const { isTombstoned } = await import("../record.ts");
+    await patchTypeListIndex(node, opts.cfg, type, visible, slug, isTombstoned);
+  } catch {
+    /* best-effort index patch */
+  }
   await reconcileTagIndex(
     node,
     opts.cfg,

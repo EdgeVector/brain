@@ -345,7 +345,7 @@ export async function resolveListEntries(
   for (const t of types) {
     let rs: FbrainRecord[];
     try {
-      rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
+      rs = await listRecords(node, t, schemaHashFor(t, opts.cfg), opts.cfg);
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) {
         opts.onSkippedTypes?.([t]);

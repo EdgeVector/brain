@@ -763,7 +763,13 @@ export type NodeClient = {
     keyHash: string;
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
-  queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
+  queryAll(opts: {
+    schemaHash: string;
+    fields: string[];
+    /** Admin/offline unfiltered drain only — product paths must use keys/indexes. */
+    allowFullScan?: boolean;
+    filter?: { HashKey?: string; [k: string]: unknown };
+  }): Promise<QueryResponse>;
   // Single bounded page — ONE /api/query round trip, no pagination loop, no
   // dedup/total_count guards. For probes and best-effort hint decoration that
   // only need a small sample of rows (projected fields, capped limit) and must
@@ -1102,10 +1108,29 @@ export function newNodeClient(opts: {
   const queryAllGuarded = async ({
     schemaHash,
     fields,
+    allowFullScan,
+    filter,
   }: {
     schemaHash: string;
     fields: string[];
+    allowFullScan?: boolean;
+    filter?: { HashKey?: string; [k: string]: unknown };
   }): Promise<QueryResponse> => {
+    // Keyed filters never need the admin full-scan header.
+    const keyed =
+      filter !== undefined &&
+      typeof filter === "object" &&
+      filter !== null &&
+      ("HashKey" in filter || "HashRangeKey" in filter);
+    if (!keyed && allowFullScan !== true) {
+      throw new FbrainError({
+        code: "full_scan_not_allowed",
+        message:
+          `queryAll on schema ${schemaHash.slice(0, 12)}… has no key filter and allowFullScan is not set — ` +
+          `product paths must use HashKey/index; pass allowFullScan only for admin seed/offline bulk.`,
+        hint: "Use queryByKey / RecordListIndex / TagIndex, or allowFullScan: true for deliberate admin drains.",
+      });
+    }
     // The node's /api/query handler silently defaults to limit=100
     // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
     // does NOT support a body-side tag/status filter — so any caller
@@ -1146,8 +1171,9 @@ export function newNodeClient(opts: {
           fields,
           limit: QUERY_PAGE_SIZE,
           offset,
+          ...(filter ? { filter: filter as SdkQueryFilter["filter"] } : {}),
         },
-        { allowFullScan: true },
+        keyed ? undefined : { allowFullScan: true },
       );
       const pageResults = fromSdkRows(pageResult.rows);
       if (pageResult.page !== null) lastTotalCount = pageResult.page.totalCount;
@@ -1438,8 +1464,8 @@ export function newNodeClient(opts: {
       // writing a no-op atom rewriting the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash);
     },
-    async queryAll({ schemaHash, fields }) {
-      return queryAllGuarded({ schemaHash, fields });
+    async queryAll({ schemaHash, fields, allowFullScan, filter }) {
+      return queryAllGuarded({ schemaHash, fields, allowFullScan, filter });
     },
     async queryPage({ schemaHash, fields, limit }) {
       // One page, first offset, caller-capped limit. Intentionally no

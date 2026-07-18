@@ -451,7 +451,7 @@ async function loadBm25Keys(
 ): Promise<RecordKey[]> {
   const keys: RecordKey[] = [];
   for (const t of types) {
-    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg));
+    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg), cfg);
     for (const k of typeKeys) keys.push(k);
   }
   return keys;
@@ -465,7 +465,7 @@ async function loadBm25Documents(
   const docs: BM25Document[] = [];
   const liveById = new Map<string, FbrainRecord>();
   for (const t of types) {
-    const records = await listRecords(node, t, schemaHashFor(t, cfg));
+    const records = await listRecords(node, t, schemaHashFor(t, cfg), cfg);
     for (const r of records) {
       if (isTombstoned(r)) continue;
       docs.push({

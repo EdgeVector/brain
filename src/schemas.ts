@@ -408,6 +408,9 @@ export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 // under a new hash. See docs/attachments.md.
 export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
+// Per-type rollup so list/ask BM25 never full-schema-scans product record
+// tables (design-lastdb-scan-deprecation-path). Key = record type name.
+export const RECORD_LIST_INDEX_SCHEMA_KEY = "__recordlistindex__";
 
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
@@ -616,6 +619,48 @@ export const attachmentBlobSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/** Fixed key prefix: each product RecordType has one rollup row keyed by type name. */
+export const RECORD_LIST_INDEX_FIELDS = ["key", "payload_json", "updated_at"] as const;
+
+/**
+ * Thin per-type rollup of fbrain records so `list` / BM25 corpus load never
+ * full-schema-scans product tables. Patched on put/delete; cold-seeded once
+ * with an admin full scan when the index row is missing.
+ */
+export const recordListIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "RecordListIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "RecordListIndex",
+    purpose_statement:
+      "Per-type rollup of fbrain records so list and BM25 never full-schema-scan product record tables",
+    schema_type: "Hash",
+    key: { hash_field: "key" },
+    fields: ["key", "payload_json", "updated_at"],
+    field_types: {
+      key: "String",
+      payload_json: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      key: "record type name (design|task|concept|...)",
+      payload_json: "JSON array of full FbrainRecord objects for that type",
+      updated_at: "RFC 3339 timestamp of the last index patch",
+    },
+    field_classifications: {
+      key: ["no_index", "metadata"],
+      payload_json: ["no_index", "metadata"],
+      updated_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      key: GENERAL,
+      payload_json: GENERAL,
+      updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
@@ -746,6 +791,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: attachmentBlobSchema,
     types: [],
     extraKeys: [ATTACHMENT_BLOB_SCHEMA_KEY],
+  },
+  {
+    key: RECORD_LIST_INDEX_SCHEMA_KEY,
+    schema: recordListIndexSchema,
+    types: [],
+    extraKeys: [RECORD_LIST_INDEX_SCHEMA_KEY],
   },
 ];
 
