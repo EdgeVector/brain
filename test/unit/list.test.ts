@@ -846,6 +846,52 @@ describe("listCmd — updated_since, offset, count, and tag index", () => {
     expect(counted).toEqual(["2"]);
   });
 
+  test("--count fetches keys only — never requests title/body fields", async () => {
+    // `--count` never renders a row, so it must not pay for a full-field
+    // corpus drain: the request `/api/query` sends for the count sweep
+    // should carry `listRecordKeys`' skinny projection (slug/tags/updated_at),
+    // not `listRecords`' full field set (title, body, ...).
+    const rows: Fields[] = [spikeRow("a"), spikeRow("b")];
+    const requestedFields: string[][] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        requestedFields.push(body.fields ?? []);
+        const results = rows.map((fields) => ({
+          fields,
+          key: { hash: String(fields.slug ?? "k"), range: null },
+        }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results,
+            total_count: results.length,
+            returned_count: results.length,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const lines: string[] = [];
+    try {
+      await listCmd({ cfg, type: "spike", count: true, print: (l) => lines.push(l) });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(lines).toEqual(["2"]);
+    expect(requestedFields.length).toBeGreaterThan(0);
+    for (const fields of requestedFields) {
+      expect(fields).not.toContain("title");
+      expect(fields).not.toContain("body");
+    }
+  });
+
   test("--tag can resolve from the per-tag index with only member point reads", async () => {
     const indexRow = {
       slug: tagIndexSlug("indexed"),

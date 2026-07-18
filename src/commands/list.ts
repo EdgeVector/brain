@@ -10,12 +10,14 @@ import {
   findBySlug,
   isSchemaNotFoundReadError,
   isTombstoned,
+  listRecordKeys,
   listRecords,
   missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
   withReadRetry,
   type FbrainRecord,
+  type RecordKey,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 import { resolveRecordsByTag } from "../tag-index.ts";
@@ -95,6 +97,27 @@ export type ListEntry = { type: RecordType; record: FbrainRecord };
 export async function listCmd(opts: ListOptions): Promise<void> {
   const { print, printErr } = resolvePrintSinks(opts);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+
+  // `--count` fast path: a count never renders a row, so it never needs
+  // title/body — only slug + tombstone + updated_at to filter, exactly what
+  // `listRecordKeys` projects (vs. `listRecords`' full-field fetch). Kept to
+  // `--status`/`--tag`-less counts: `--status` needs a field the key
+  // projection doesn't carry, and `--tag` already has its own index-first
+  // path in `resolveListEntries`. This is what stops `fbrain list --count`
+  // from paying for a full-corpus body drain just to answer "how many".
+  if (opts.count && opts.status === undefined && !opts.tag) {
+    const keyEntries = await resolveListKeyEntries(node, opts);
+    const count = keyEntries.filter(({ key }) =>
+      matchesListKeyFilters(key, opts),
+    ).length;
+    opts.onResult?.({ count });
+    if (opts.json) {
+      print(JSON.stringify({ count }));
+    } else {
+      print(String(count));
+    }
+    return;
+  }
 
   const sweep = () => resolveListEntries(node, opts);
   // The dogfood read-flake repro (2026-05-26): a status write lands, but
@@ -369,6 +392,60 @@ export function matchesListFilters(
   if (
     opts.updatedSinceMs !== undefined &&
     !(Date.parse(record.updated_at) >= opts.updatedSinceMs)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+// Key-only counterpart to `resolveListEntries`, for the `--count` fast path
+// in `listCmd`. Fetches slug + tombstone + updated_at per candidate
+// type via `listRecordKeys` (a skinny `/api/query` projection, no
+// title/body) instead of `listRecords`' full-field fetch — the fix for the
+// default `fbrain list` full-corpus body drain. Tombstones are already
+// dropped by `listRecordKeys`, mirroring `resolveListEntries`'s reliance on
+// `matchesListFilters`' `isTombstoned` check.
+export async function resolveListKeyEntries(
+  node: NodeClient,
+  opts: Pick<ListOptions, "cfg" | "type" | "printErr" | "onSkippedTypes">,
+): Promise<Array<{ type: RecordType; key: RecordKey }>> {
+  const { activeTypes: types } = resolveTypeFilter(
+    opts.type ? [opts.type] : undefined,
+    opts.cfg,
+    (skipped) => {
+      opts.onSkippedTypes?.(skipped);
+      opts.printErr?.(missingSchemaHashReadNote(skipped, "listing the rest"));
+    },
+  );
+
+  const acc: Array<{ type: RecordType; key: RecordKey }> = [];
+  for (const t of types) {
+    let keys: RecordKey[];
+    try {
+      keys = await listRecordKeys(node, t, schemaHashFor(t, opts.cfg));
+    } catch (err) {
+      if (isSchemaNotFoundReadError(err)) {
+        opts.onSkippedTypes?.([t]);
+        opts.printErr?.(missingSchemaHashReadNote([t], "listing the rest"));
+        continue;
+      }
+      throw err;
+    }
+    for (const k of keys) acc.push({ type: t, key: k });
+  }
+  return acc;
+}
+
+// `--status`/`--tag` are excluded from the `--count` fast path in `listCmd`,
+// so this only ever needs the `updatedSinceMs` edge of `matchesListFilters` —
+// tombstones are already dropped by `listRecordKeys`.
+export function matchesListKeyFilters(
+  key: RecordKey,
+  opts: Pick<ListOptions, "updatedSinceMs">,
+): boolean {
+  if (
+    opts.updatedSinceMs !== undefined &&
+    !(Date.parse(key.updatedAt) >= opts.updatedSinceMs)
   ) {
     return false;
   }
