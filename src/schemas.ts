@@ -608,6 +608,61 @@ export const attachmentFileSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__adminsnapshot__";
+
+export const adminSnapshotSchema: AddSchemaRequest = {
+  schema: {
+    name: "AdminBrainSnapshot",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "AdminBrainSnapshot",
+    purpose_statement:
+      "Privacy-safe fbrain admin snapshot: counts and short summaries only (never full record bodies), delivered to the admin kanban-consumer recipient for fleet visibility",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [
+      "slug",
+      "source_app",
+      "schema_version",
+      "captured_at",
+      "type_counts_json",
+      "open_decisions_json",
+      "active_programs_head_json",
+      "recent_heartbeats_json",
+    ],
+    field_types: {
+      slug: "String",
+      source_app: "String",
+      schema_version: "String",
+      captured_at: "String",
+      type_counts_json: "String",
+      open_decisions_json: "String",
+      active_programs_head_json: "String",
+      recent_heartbeats_json: "String",
+    },
+    field_descriptions: {
+      slug: "reserved admin-brain-snapshot record slug",
+      source_app: "publishing app id, always fbrain",
+      schema_version: "snapshot schema version marker",
+      captured_at: "RFC 3339 timestamp the snapshot was captured",
+      type_counts_json: "JSON: record count per RecordType",
+      open_decisions_json: "JSON: open decision slug + title + status lines",
+      active_programs_head_json: "JSON: active-programs head lines (slug/title/status)",
+      recent_heartbeats_json: "JSON: recent routine heartbeat slug/ts/ok tuples",
+    },
+    field_data_classifications: {
+      slug: GENERAL,
+      source_app: GENERAL,
+      schema_version: GENERAL,
+      captured_at: GENERAL,
+      type_counts_json: GENERAL,
+      open_decisions_json: GENERAL,
+      active_programs_head_json: GENERAL,
+      recent_heartbeats_json: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
