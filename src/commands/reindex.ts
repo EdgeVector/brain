@@ -93,7 +93,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     const rebuilt = await rebuildTagIndex(node, opts.cfg, {
-      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash),
+      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash, opts.cfg),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
       onSkipUnavailableType: (type) =>
         print(missingSchemaHashReadNote([type], "rebuilding the tag index from the rest")),
@@ -125,7 +125,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     const rebuilt = await rebuildBacklinkIndex(node, opts.cfg, {
-      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash),
+      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash, opts.cfg),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
       onSkipUnavailableType: (type) =>
         print(missingSchemaHashReadNote([type], "rebuilding the backlink index from the rest")),
@@ -147,7 +147,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
 
   for (const type of types) {
     const schemaHash = schemaHashFor(type, opts.cfg);
-    const records = await listRecords(node, type, schemaHash);
+    const records = await listRecords(node, type, schemaHash, opts.cfg);
     const counts = { reindexed: 0, skippedTombstone: 0 };
     result.byType[type] = counts;
 

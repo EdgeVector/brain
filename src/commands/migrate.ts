@@ -49,7 +49,7 @@ import {
 } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
-  listRecords,
+  listRecordsAdminScan,
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
@@ -379,7 +379,8 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
   const presentAtTarget = new Map<RecordType, Set<string>>();
   if (!inPlaceEvolve) {
     for (const t of new Set(records.map((r) => r.type))) {
-      const list = await listRecords(node, t, manifest.to_hash);
+      // Admin migrate resume: drain to_hash explicitly (may not match product index).
+      const list = await listRecordsAdminScan(node, t, manifest.to_hash);
       presentAtTarget.set(t, new Set(list.map((r) => r.slug)));
     }
   }
@@ -511,7 +512,8 @@ async function enumerateAllRecords(
   // is a single iteration.
   const out: Array<{ type: RecordType; record: FbrainRecord }> = [];
   for (const t of scope.affectedTypes) {
-    const list = await listRecords(node, t, fromHash);
+    // Admin migrate source walk: explicit full drain of from_hash.
+    const list = await listRecordsAdminScan(node, t, fromHash);
     for (const r of list) out.push({ type: t, record: r });
   }
   return out;

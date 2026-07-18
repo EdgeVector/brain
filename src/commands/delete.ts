@@ -99,7 +99,7 @@ async function findLinkedTaskSlugs(
   const isLinked = (r: FbrainRecord): boolean =>
     !isTombstoned(r) && r.design_slug === designSlug;
   const tasks = await withReadRetry(
-    () => listRecords(node, "task", taskHash),
+    () => listRecords(node, "task", taskHash, cfg),
     (rows) => rows.some(isLinked),
   );
   return tasks

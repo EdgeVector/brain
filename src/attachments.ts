@@ -192,7 +192,7 @@ export async function readAttachmentIndex(
   const key = attachmentIndexSlug(type, slug);
   const row = node.queryByKey
     ? await node.queryByKey({ schemaHash, fields: INDEX_FIELDS, keyHash: key })
-    : ((await node.queryAll({ schemaHash, fields: INDEX_FIELDS })).results.find(
+    : ((await node.queryAll({ schemaHash, fields: INDEX_FIELDS, allowFullScan: true })).results.find(
         (r) => r.key?.hash === key || r.fields?.slug === key,
       ) ?? null);
   if (row === null) return null;
@@ -267,7 +267,7 @@ export async function putAttachmentBlob(
   const hash = sha256HexOf(bytes);
   const existing = node.queryByKey
     ? await node.queryByKey({ schemaHash, fields: ["content_hash", "size"], keyHash: hash })
-    : ((await node.queryAll({ schemaHash, fields: ["content_hash", "size"] })).results.find(
+    : ((await node.queryAll({ schemaHash, fields: ["content_hash", "size"], allowFullScan: true })).results.find(
         (r) => r.key?.hash === hash,
       ) ?? null);
   if (existing !== null) {
@@ -305,7 +305,7 @@ export async function getAttachmentBlob(
   const hash = blobRef.startsWith("sha256:") ? blobRef.slice("sha256:".length) : blobRef;
   const row = node.queryByKey
     ? await node.queryByKey({ schemaHash, fields: BLOB_FIELDS, keyHash: hash })
-    : ((await node.queryAll({ schemaHash, fields: BLOB_FIELDS })).results.find(
+    : ((await node.queryAll({ schemaHash, fields: BLOB_FIELDS, allowFullScan: true })).results.find(
         (r) => r.key?.hash === hash,
       ) ?? null);
   if (row === null) {

@@ -274,7 +274,7 @@ export async function runPollutionProbe(
   for (const type of typesToLoad) {
     const schemaHash = cfg.schemaHashes[type]!;
     try {
-      const records = await listRecords(node, type, schemaHash);
+      const records = await listRecords(node, type, schemaHash, cfg);
       liveSlugsByType.set(
         type,
         new Set(records.filter((r) => !r.tags.includes(TOMBSTONE_TAG)).map((r) => r.slug)),

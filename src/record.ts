@@ -335,40 +335,55 @@ export function arrayStringField(f: Record<string, unknown>, key: string): strin
   return [];
 }
 
+/** Config shape required for product listRecords (index-first, no silent scan). */
+export type ListRecordsCfg = { schemaHashes: Record<string, string> };
+
+/**
+ * Product list of one record type: RecordListIndex HashKey point-read first.
+ * Cold seed (index miss) is the only allowFullScan path — then product reads
+ * stay keyed. `cfg` is REQUIRED so omit-cfg callers cannot silently full-scan.
+ */
 export async function listRecords(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
-  cfg?: { schemaHashes: Record<string, string> },
+  cfg: ListRecordsCfg,
 ): Promise<FbrainRecord[]> {
-  // Product path: per-type RecordListIndex point-read (no full-schema drain).
-  if (cfg) {
-    const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
-    const indexed = await readTypeListIndex(node, cfg, type);
-    if (indexed !== null) {
-      return indexed.filter((r) => !isTombstoned(r));
-    }
-    // Cold seed once with admin full scan, then product reads stay keyed.
-    const res = await node.queryAll({
-      schemaHash,
-      fields: fieldsFor(type),
-      allowFullScan: true,
-    });
-    const records = res.results.map((row) => rowToRecord(row, type)).filter((r) => !isTombstoned(r));
-    try {
-      await writeTypeListIndex(node, cfg, type, records);
-    } catch {
-      /* best-effort */
-    }
-    return records;
+  const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
+  const indexed = await readTypeListIndex(node, cfg, type);
+  if (indexed !== null) {
+    return indexed.filter((r) => !isTombstoned(r));
   }
-  // Legacy callers without cfg: still require explicit admin opt-in.
+  // Cold seed once with admin full scan, then product reads stay keyed.
+  return listRecordsAdminScan(node, type, schemaHash, {
+    seedIndex: async (records) => {
+      try {
+        await writeTypeListIndex(node, cfg, type, records);
+      } catch {
+        /* best-effort */
+      }
+    },
+  });
+}
+
+/**
+ * Explicit admin/offline full-schema drain. For migrate, reindex, doctor, and
+ * index cold-seed only — never for product CLI/MCP hot paths.
+ */
+export async function listRecordsAdminScan(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  opts?: { seedIndex?: (records: FbrainRecord[]) => Promise<void> },
+): Promise<FbrainRecord[]> {
   const res = await node.queryAll({
     schemaHash,
     fields: fieldsFor(type),
     allowFullScan: true,
   });
-  return res.results.map((row) => rowToRecord(row, type)).filter((r) => !isTombstoned(r));
+  const records = res.results.map((row) => rowToRecord(row, type)).filter((r) => !isTombstoned(r));
+  if (opts?.seedIndex) await opts.seedIndex(records);
+  return records;
 }
 
 // The body-less identity of a live record — slug, when it last changed, and
@@ -397,9 +412,9 @@ export async function listRecordKeys(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
-  cfg?: { schemaHashes: Record<string, string> },
+  cfg: ListRecordsCfg,
 ): Promise<RecordKey[]> {
-  // Prefer RecordListIndex (same product no-scan path as listRecords).
+  // Same product no-scan path as listRecords (cfg required).
   const records = await listRecords(node, type, schemaHash, cfg);
   const keys: RecordKey[] = [];
   for (const r of records) {
@@ -808,6 +823,7 @@ export async function hydrateSchemaBySlug(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
+  cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
@@ -816,7 +832,8 @@ export async function hydrateSchemaBySlug(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    const list = await listRecords(node, type, schemaHash);
+    // Product path: listRecords requires cfg → RecordListIndex, never silent scan.
+    const list = await listRecords(node, type, schemaHash, cfg);
     if (list.length > 0) {
       const bySlug = new Map<string, FbrainRecord>();
       for (const r of list) {
@@ -846,6 +863,7 @@ export async function findChildTasksByDesign(
   node: NodeClient,
   taskSchemaHash: string,
   designSlug: string,
+  cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<FbrainRecord[]> {
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
@@ -854,7 +872,8 @@ export async function findChildTasksByDesign(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    const list = await listRecords(node, "task", taskSchemaHash);
+    // Product path (brain get design): index-first via listRecords+cfg.
+    const list = await listRecords(node, "task", taskSchemaHash, cfg);
     if (list.length > 0) {
       return list.filter(
         (r) => !isTombstoned(r) && r.design_slug === designSlug,

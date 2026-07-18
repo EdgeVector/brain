@@ -92,6 +92,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
       node,
       taskHash,
       found.record.slug,
+      opts.cfg,
     );
   }
 
