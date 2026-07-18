@@ -235,6 +235,19 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
 
   const bm25 = await loadOrBuildBm25Index(node, opts.cfg, activeTypes, {
     verbose: opts.verbose,
+    // Explicit, non-silent bulk-tag (kill-scan-brain follow-up, option b):
+    // a cache miss here means this LIVE `ask` call is about to pay for a
+    // full-corpus body fetch (`listRecords` per active type) — the same
+    // read this card's `list` fix removes from the default listing path.
+    // Surface it unconditionally (stderr, not gated behind --verbose) so
+    // the cost is visible rather than a hidden request-path drain, and
+    // point at the offline pre-warm path (`fbrain reindex --bm25`).
+    onRebuild: (notice) => {
+      printErr(
+        `note: search index cache was cold/stale — rebuilding from ${notice.keyCount} record(s) ` +
+          "on this request; run `fbrain reindex --bm25` offline to pre-warm it and avoid this on the next query.",
+      );
+    },
   });
   const index = bm25.index;
   const liveById = bm25.liveById;

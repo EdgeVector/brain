@@ -165,13 +165,13 @@ describe("hasAnyLiveRecord — single small page per schema", () => {
 describe("list --status no-match — probe cost + unchanged hint", () => {
   test("populated brain: probe adds one small body-less query; hint text identical", async () => {
     // Every type holds one live row whose status doesn't match the filter.
-    // The sweep (full-field listRecords per type) is the data fetch a
-    // client-side filter inherently needs; the EXTRA cost of the no-match
-    // hint must be at most one small slug+tags page (and here, exactly one:
-    // the probe short-circuits on the first schema's live row).
+    // The sweep is now key-only: it carries slug/tags/updated_at/status, not
+    // title/body. The EXTRA cost of the no-match hint must be at most one
+    // small slug+tags page (and here, exactly one: the probe short-circuits
+    // on the first schema's live row).
     const { calls } = installQueryMock((call) => {
-      if (call.fields.includes("body")) {
-        // The sweep: one full page per type, no further pages.
+      if (call.limit !== NO_MATCH_PROBE_PAGE_LIMIT) {
+        // The sweep: one key-only page per type, no further pages.
         return { ok: true, results: [row("r1", { status: "open" })], total_count: 1, returned_count: 1 };
       }
       // The probe: a live row, with has_more bait.
@@ -190,11 +190,19 @@ describe("list --status no-match — probe cost + unchanged hint", () => {
       "hint:  no records match that filter — try `fbrain list` with no --type/--status/--tag",
     ]);
 
-    const sweepCalls = calls.filter((c) => c.fields.includes("body"));
-    const probeCalls = calls.filter(isSlugTagsProbe);
-    // One sweep query per type (the retry stops on the first attempt because
-    // live rows are visible), then ONE probe query total.
+    const sweepCalls = calls.filter(
+      (c) => !c.keyed && c.limit !== NO_MATCH_PROBE_PAGE_LIMIT,
+    );
+    const probeCalls = calls.filter((c) => c.limit === NO_MATCH_PROBE_PAGE_LIMIT);
+    // One unkeyed sweep query per type (the retry stops on the first attempt
+    // because live rows are visible), then ONE probe query total. The
+    // index-first path may also perform keyed RecordListIndex misses; those
+    // are not corpus scans and are intentionally excluded here.
     expect(sweepCalls).toHaveLength(RECORD_TYPES.length);
+    for (const c of sweepCalls) {
+      expect(c.fields).not.toContain("title");
+      expect(c.fields).not.toContain("body");
+    }
     expect(probeCalls).toHaveLength(1);
     expect(probeCalls[0]!.fields.sort()).toEqual(["slug", "tags"]);
     expect(probeCalls[0]!.limit).toBe(NO_MATCH_PROBE_PAGE_LIMIT);

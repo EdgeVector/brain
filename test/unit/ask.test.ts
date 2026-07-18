@@ -561,6 +561,51 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     },
   );
 
+  test("cold cache surfaces the rebuild note; a subsequent warm cache does not", async () => {
+    // kill-scan-brain follow-up (option b, design-lastdb-scan-deprecation-
+    // path): a live `ask` that pays for the full-corpus rebuild must say so
+    // — explicitly, unconditionally, not gated behind --verbose — so the
+    // cost is never a silent request-path drain. A warm cache hit does no
+    // rebuild at all, so it must stay quiet.
+    const cfg = buildTestCfg();
+    installFetchStub({
+      queries: {
+        [TEST_HASHES.design]: [designRow("d1", "octopus blueberry")],
+        [TEST_HASHES.task]: [],
+      },
+      vectorHits: [
+        vectorHit({ schemaName: TEST_HASHES.design, slug: "d1", score: 0.9 }),
+      ],
+    });
+
+    const coldStderr: string[] = [];
+    const cold = await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: () => {},
+      printErr: (l) => coldStderr.push(l),
+    });
+    expect(cold.bm25CacheHit).toBe(false);
+    expect(
+      coldStderr.some((l) => l.includes("search index cache was cold/stale")),
+    ).toBe(true);
+    expect(coldStderr.some((l) => l.includes("fbrain reindex --bm25"))).toBe(true);
+
+    const warmStderr: string[] = [];
+    const warm = await askCmd({
+      cfg,
+      query: "octopus",
+      noLlm: true,
+      print: () => {},
+      printErr: (l) => warmStderr.push(l),
+    });
+    expect(warm.bm25CacheHit).toBe(true);
+    expect(
+      warmStderr.some((l) => l.includes("search index cache was cold/stale")),
+    ).toBe(false);
+  });
+
   test("alternating untyped and --type asks keep separate warm BM25 caches", async () => {
     // Regression for type-filter cache thrash: the index fingerprint already
     // includes the active type set, but the old filename was keyed only by
@@ -1101,10 +1146,13 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
     expect(rows[0]).toContain("d1");
 
-    // Stderr: the no-key advisory.
-    expect(stderr).toHaveLength(1);
-    expect(stderr[0]).toMatch(/^note:\s/);
-    expect(stderr[0]).toContain("ANTHROPIC_API_KEY not set");
+    // Stderr: the no-key advisory, plus the (kill-scan-brain follow-up)
+    // cold-cache BM25 rebuild note — this test's cache dir is always fresh,
+    // so every call rebuilds. Both are advisories, and both stay off stdout.
+    expect(stderr).toHaveLength(2);
+    for (const line of stderr) expect(line).toMatch(/^note:\s/);
+    expect(stderr.some((l) => l.includes("ANTHROPIC_API_KEY not set"))).toBe(true);
+    expect(stderr.some((l) => l.includes("search index cache was cold/stale"))).toBe(true);
   });
 });
 
@@ -1134,7 +1182,11 @@ describe("askCmd --json", () => {
 
     expect(stdout).toEqual(["d1\tdesign\tT-d1"]);
     expect(stdout[0]).not.toContain("{");
-    expect(stderr).toEqual([]);
+    // The (kill-scan-brain follow-up) cold-cache BM25 rebuild note is an
+    // advisory on stderr, not stdout — this test's cache dir is always
+    // fresh, so the call rebuilds.
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain("search index cache was cold/stale");
   });
 
   test("emits a single JSON array of {slug, score, type, title, snippet} on stdout", async () => {

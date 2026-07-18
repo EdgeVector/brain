@@ -397,6 +397,8 @@ export type RecordKey = {
   type: RecordType;
   slug: string;
   updatedAt: string;
+  status: string;
+  tags: string[];
 };
 
 // The minimal `/api/query` projection that still answers "did the corpus
@@ -416,16 +418,55 @@ export async function listRecordKeys(
   type: RecordType,
   schemaHash: string,
   cfg: ListRecordsCfg,
+  opts: { seedOnMiss?: boolean } = {},
 ): Promise<RecordKey[]> {
-  // Same product no-scan path as listRecords (cfg required).
-  const records = await listRecords(node, type, schemaHash, cfg);
-  const keys: RecordKey[] = [];
-  for (const r of records) {
-    if (isTombstoned(r)) continue;
-    keys.push({
+  const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
+  const records = await readTypeListIndex(node, cfg, type);
+  if (records !== null) {
+    return records
+      .filter((r) => !isTombstoned(r))
+      .map((r) => ({
+        type,
+        slug: r.slug,
+        updatedAt: r.updated_at,
+        status: r.status,
+        tags: r.tags,
+      }));
+  }
+  if (opts.seedOnMiss) {
+    const seeded = await listRecordsAdminScan(node, type, schemaHash, {
+      seedIndex: async (recordsToSeed) => {
+        try {
+          await writeTypeListIndex(node, cfg, type, recordsToSeed);
+        } catch {
+          /* best-effort */
+        }
+      },
+    });
+    return seeded.map((r) => ({
       type,
       slug: r.slug,
       updatedAt: r.updated_at,
+      status: r.status,
+      tags: r.tags,
+    }));
+  }
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["slug", "tags", "updated_at", "status"],
+    allowFullScan: true,
+  });
+  const keys: RecordKey[] = [];
+  for (const row of res.results) {
+    const f = (row.fields ?? {}) as Record<string, unknown>;
+    const tags = arrayStringField(f, "tags");
+    if (tags.includes(TOMBSTONE_TAG)) continue;
+    keys.push({
+      type,
+      slug: stringField(f, "slug"),
+      updatedAt: stringField(f, "updated_at"),
+      status: stringField(f, "status"),
+      tags,
     });
   }
   return keys;
@@ -1008,6 +1049,7 @@ export interface ResolveBySlugOpts {
     | "delete"
     | "attach"
     | "attachments"
+    | "attachments migrate"
     | "detach"
     | "attachment get";
   // Read-only callers can opt into deterministic ambiguity resolution while

@@ -46,7 +46,7 @@
 // and the node resolves short names to the fbrain/* namespace at boot.
 export const OWNER_APP_ID = "fbrain";
 
-export type FieldType = "String" | { Array: "String" };
+export type FieldType = "String" | "Any" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
@@ -408,6 +408,7 @@ export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 // under a new hash. See docs/attachments.md.
 export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
+export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";
 // Per-type rollup so list/ask BM25 never full-schema-scans product record
 // tables (design-lastdb-scan-deprecation-path). Key = record type name.
 export const RECORD_LIST_INDEX_SCHEMA_KEY = "__recordlistindex__";
@@ -619,6 +620,51 @@ export const attachmentBlobSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// v2 attachment storage: one BrainAttachmentFile record per unique content
+// hash. The raw bytes do not live in this record; the node's file-blob plane
+// stores the encrypted CAS blob and returns a $lastdb_file pointer in `file`.
+export const attachmentFileSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainAttachmentFile",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainAttachmentFile",
+    purpose_statement:
+      "Content-addressed $lastdb_file pointer backing an fbrain attachment; bytes live in the encrypted B2 CAS file plane, never in this record",
+    schema_type: "Hash",
+    key: { hash_field: "content_hash" },
+    fields: ["content_hash", "size", "media_type", "file", "created_at"],
+    field_types: {
+      content_hash: "String",
+      size: "String",
+      media_type: "String",
+      file: "Any",
+      created_at: "String",
+    },
+    field_descriptions: {
+      content_hash: "SHA-256 hex of the raw file bytes (CAS key)",
+      size: "raw file byte length",
+      media_type: "MIME type inferred at attach time",
+      file: "$lastdb_file pointer written by the node's file-blob plane; never indexed",
+      created_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {
+      content_hash: ["no_index", "metadata"],
+      size: ["no_index", "metadata"],
+      media_type: ["no_index", "metadata"],
+      file: ["no_index", "metadata"],
+      created_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      content_hash: GENERAL,
+      size: GENERAL,
+      media_type: GENERAL,
+      file: { sensitivity_level: 0, data_domain: "file-reference" },
+      created_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 /** Fixed key prefix: each product RecordType has one rollup row keyed by type name. */
 export const RECORD_LIST_INDEX_FIELDS = ["key", "payload_json", "updated_at"] as const;
 
@@ -791,6 +837,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: attachmentBlobSchema,
     types: [],
     extraKeys: [ATTACHMENT_BLOB_SCHEMA_KEY],
+  },
+  {
+    key: ATTACHMENT_FILE_SCHEMA_KEY,
+    schema: attachmentFileSchema,
+    types: [],
+    extraKeys: [ATTACHMENT_FILE_SCHEMA_KEY],
   },
   {
     key: RECORD_LIST_INDEX_SCHEMA_KEY,

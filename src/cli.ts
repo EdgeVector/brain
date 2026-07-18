@@ -22,6 +22,7 @@ import {
   attachCmd,
   attachmentGetCmd,
   attachmentsCmd,
+  attachmentsMigrateCmd,
   detachCmd,
 } from "./commands/attach.ts";
 import { linkCmd } from "./commands/link.ts";
@@ -415,10 +416,11 @@ an absent one is a no-op success.
   attach: `fbrain attach <slug> <file> [--type T] [--name N] [--force] [--json]
 
 Attach a file to an existing record. Bytes are stored content-addressed
-(SHA-256) in an internal blob record whose payload is classified
-no_index/binary — attachment CONTENT never enters search indexes; only the
-filename is searchable metadata. Re-attaching identical content is a no-op
-(deduplicated). Same name + different content errors unless --force.
+(SHA-256) through the node's file-blob plane: an encrypted CAS blob in cloud
+file storage plus a \$lastdb_file pointer record — attachment CONTENT never
+enters search indexes; only the filename is searchable metadata. Re-attaching
+identical content is a no-op (deduplicated). Same name + different content
+errors unless --force.
 
   --type    ${RECORD_TYPE_LIST}
             (omit to resolve across all types; errors on an ambiguous slug)
@@ -426,11 +428,18 @@ filename is searchable metadata. Re-attaching identical content is a no-op
   --force   replace an existing attachment with the same name
   --json    emit \`{ok, slug, type, entry, deduplicated, replaced}\` on stdout`,
   attachments: `fbrain attachments <slug> [--type T] [--json]
+fbrain attachments migrate [<slug>] [--type T] [--json]
 
 List a record's attachments (name, size, media type, blob ref, added_at).
 
+\`attachments migrate\` moves v1 record-stored attachment bytes into the
+node's file-blob plane (encrypted cloud CAS + \$lastdb_file pointer) and
+deletes the legacy stand-in blob records. Scoped to one record when a slug is
+given, otherwise sweeps every attachment index. Idempotent.
+
   --type    ${RECORD_TYPE_LIST}
-  --json    emit \`{ok, slug, type, attachments}\` on stdout`,
+  --json    emit \`{ok, slug, type, attachments}\` (list) or \`{ok, report}\`
+            (migrate) on stdout`,
   detach: `fbrain detach <slug> <name-or-ref> [--type T] [--json]
 
 Remove one attachment by filename or sha256:<hex> blob ref. The
@@ -722,7 +731,7 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -746,6 +755,13 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     Repairs records written before the index existed or after
                     a best-effort backlink update failed. Standalone mode:
                     skips the embedding refresh.
+  --bm25            pre-warm the client-side BM25 search cache \`ask\`/\`search\`
+                    read on every call, from a full corpus scan. Read-only
+                    (no mutation, no --type narrowing — the cache is keyed by
+                    the same type set ask/search request). Run this after a
+                    bulk edit so the next \`ask\` hits a warm cache instead of
+                    paying for (and visibly noting) a live rebuild.
+                    Standalone mode: skips the embedding refresh.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
@@ -1086,6 +1102,7 @@ const REINDEX_OPTIONS = {
   "dry-run": { type: "boolean", default: false },
   tags: { type: "boolean", default: false },
   backlinks: { type: "boolean", default: false },
+  bm25: { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -2511,6 +2528,31 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     { args, strict: true, allowPositionals: true, options: ATTACHMENTS_OPTIONS },
     "attachments",
   );
+  // `fbrain attachments migrate [slug]` — v1→v2 storage migration subcommand.
+  // "migrate" is a reserved word here; a record cannot shadow it because
+  // record slugs are resolved only in the list form.
+  if (positionals[0] === "migrate") {
+    if (positionals.length > 2) {
+      throw new FbrainError({
+        code: "extra_positional_args",
+        message: `attachments migrate takes at most one slug (got ${positionals.length - 1}).`,
+        hint: "Run `fbrain attachments migrate [<slug>]`.",
+      });
+    }
+    const cfg = readConfig();
+    const type = parseRecordType(values.type);
+    const mOpts: Parameters<typeof attachmentsMigrateCmd>[0] = { cfg, verbose };
+    const migrateSlug = positionals[1];
+    if (migrateSlug !== undefined) mOpts.slug = migrateSlug;
+    if (type) mOpts.type = type;
+    if (values.json) {
+      mOpts.print = (line: string) => console.error(line);
+      mOpts.onResult = (payload) =>
+        console.log(JSON.stringify({ ok: true, report: payload.report }));
+    }
+    await attachmentsMigrateCmd(mOpts);
+    return 0;
+  }
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.attachments);
@@ -2520,7 +2562,7 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     throw new FbrainError({
       code: "extra_positional_args",
       message: `attachments takes exactly one slug (got ${positionals.length}).`,
-      hint: "Run `fbrain attachments <slug>`.",
+      hint: "Run `fbrain attachments <slug>` (or `fbrain attachments migrate [<slug>]`).",
     });
   }
   const cfg = readConfig();
@@ -3362,6 +3404,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values["dry-run"]) rOpts.dryRun = true;
   if (values.tags) rOpts.tags = true;
   if (values.backlinks) rOpts.backlinks = true;
+  if (values.bm25) rOpts.bm25 = true;
   await reindexCmd(rOpts);
   return 0;
 }
