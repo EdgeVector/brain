@@ -121,6 +121,10 @@ function emptyPage() {
 
 const ALL_HASHES = RECORD_TYPES.map((t) => TEST_HASHES[t]);
 
+function isSlugTagsProbe(c: QueryCall): boolean {
+  return !c.keyed && c.fields.length === 2 && c.fields.includes("slug") && c.fields.includes("tags");
+}
+
 describe("hasAnyLiveRecord — single small page per schema", () => {
   test("live row on the first schema: ONE slug+tags query total, no second page", async () => {
     const { calls } = installQueryMock(() => pageWithMore([row("alive")]));
@@ -161,22 +165,17 @@ describe("hasAnyLiveRecord — single small page per schema", () => {
 describe("list --status no-match — probe cost + unchanged hint", () => {
   test("populated brain: probe adds one small body-less query; hint text identical", async () => {
     // Every type holds one live row whose status doesn't match the filter.
-    // Post-keys-first-fix (this card), the SWEEP itself is now also
-    // body-less — a --status list no longer needs `listRecords`' full-field
-    // fetch either, only `listRecordKeys`' skinny projection. So the sweep
-    // and the empty-brain probe are distinguished by `limit`
-    // (QUERY_PAGE_SIZE=1000 for the sweep vs NO_MATCH_PROBE_PAGE_LIMIT=100
-    // for the probe), not by a `body` field neither call ever requests
-    // anymore.
+    // The sweep is now key-only: it carries slug/tags/updated_at/status, not
+    // title/body. The EXTRA cost of the no-match hint must be at most one
+    // small slug+tags page (and here, exactly one: the probe short-circuits
+    // on the first schema's live row).
     const { calls } = installQueryMock((call) => {
-      if (call.limit === NO_MATCH_PROBE_PAGE_LIMIT) {
-        // The probe: a live row, with has_more bait — a cost-bounded probe
-        // must never chase it.
-        return pageWithMore([row("r1", { status: "open" })]);
+      if (call.limit !== NO_MATCH_PROBE_PAGE_LIMIT) {
+        // The sweep: one key-only page per type, no further pages.
+        return { ok: true, results: [row("r1", { status: "open" })], total_count: 1, returned_count: 1 };
       }
-      // The keys-first sweep: one full page per type, no further pages —
-      // unlike the probe, a real sweep must actually finish.
-      return { ok: true, results: [row("r1", { status: "open" })], total_count: 1, returned_count: 1 };
+      // The probe: a live row, with has_more bait.
+      return pageWithMore([row("r1", { status: "open" })]);
     });
     const lines: string[] = [];
     await listCmd({
@@ -191,16 +190,18 @@ describe("list --status no-match — probe cost + unchanged hint", () => {
       "hint:  no records match that filter — try `fbrain list` with no --type/--status/--tag",
     ]);
 
-    const sweepCalls = calls.filter((c) => c.limit !== NO_MATCH_PROBE_PAGE_LIMIT);
+    const sweepCalls = calls.filter(
+      (c) => !c.keyed && c.limit !== NO_MATCH_PROBE_PAGE_LIMIT,
+    );
     const probeCalls = calls.filter((c) => c.limit === NO_MATCH_PROBE_PAGE_LIMIT);
-    // One sweep query per type (the retry stops on the first attempt because
-    // live rows are visible), then ONE probe query total.
+    // One unkeyed sweep query per type (the retry stops on the first attempt
+    // because live rows are visible), then ONE probe query total. The
+    // index-first path may also perform keyed RecordListIndex misses; those
+    // are not corpus scans and are intentionally excluded here.
     expect(sweepCalls).toHaveLength(RECORD_TYPES.length);
     for (const c of sweepCalls) {
-      // The keys-first fix: never a title/body fetch for a bounded/filtered
-      // list, only the skinny slug/tags/updated_at/status projection.
-      expect(c.fields).not.toContain("body");
       expect(c.fields).not.toContain("title");
+      expect(c.fields).not.toContain("body");
     }
     expect(probeCalls).toHaveLength(1);
     expect(probeCalls[0]!.fields.sort()).toEqual(["slug", "tags"]);
@@ -221,20 +222,13 @@ describe("list --status no-match — probe cost + unchanged hint", () => {
       "no records",
       "hint:  no records yet — create your first with the `fbrain_put` tool, then try again",
     ]);
-    // Filtered (keys-only) sweep retries its budget on a genuinely-empty
-    // brain (existing behavior, unchanged); the probe itself is bounded to
-    // one small page per schema hash. Distinguish sweep vs. probe by
-    // `limit` — this card's fix means the sweep is body-less too, so a
-    // `body`-field check can no longer tell them apart.
-    const probeCalls = calls.filter((c) => c.limit === NO_MATCH_PROBE_PAGE_LIMIT);
+    // Filtered sweep retries its budget on a genuinely-empty brain (existing
+    // behavior, unchanged); the probe itself is bounded to one small page per
+    // schema hash.
+    const probeCalls = calls.filter(isSlugTagsProbe);
     expect(probeCalls).toHaveLength(ALL_HASHES.length);
     for (const c of probeCalls) {
       expect(c.limit).toBe(NO_MATCH_PROBE_PAGE_LIMIT);
-      expect(c.fields).not.toContain("body");
-    }
-    const sweepCalls = calls.filter((c) => c.limit !== NO_MATCH_PROBE_PAGE_LIMIT);
-    expect(sweepCalls.length).toBeGreaterThan(0);
-    for (const c of sweepCalls) {
       expect(c.fields).not.toContain("body");
     }
   });

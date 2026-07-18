@@ -11,7 +11,7 @@ import {
   splitFrontmatter,
 } from "../../src/commands/put.ts";
 import { FbrainError } from "../../src/client.ts";
-import { RECORDS, type RecordType } from "../../src/schemas.ts";
+import { RECORDS, RECORD_LIST_INDEX_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -25,6 +25,10 @@ const DESIGN_HASH = TEST_HASHES.design;
 // round-trip + backoff. The dedicated search-parity tests below use a loopback
 // cfg + an injected no-op sleep to exercise the confirmation explicitly.
 const cfg = buildTestCfg({ userHash: "uh", nodeUrl: "http://10.0.0.1:9001" });
+
+function userMutations<T extends Record<string, unknown>>(mutations: T[]): T[] {
+  return mutations.filter((m) => m.schema !== cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY]);
+}
 
 describe("splitFrontmatter", () => {
   test("no frontmatter at all returns null + the body verbatim", () => {
@@ -670,9 +674,10 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.type).toBe("design");
     expect(r.action).toBe("created");
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    expect(mutations[0]!.schema).toBe(DESIGN_HASH);
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(1);
+    expect(user[0]!.mutation_type).toBe("create");
+    expect(user[0]!.schema).toBe(DESIGN_HASH);
   });
 
   test("creates on first put, updates on second, preserves created_at", async () => {
@@ -1126,14 +1131,15 @@ describe("putCmd — pre-request validation + dispatch", () => {
     });
     expect(r.type).toBe(type as RecordType);
     expect(r.action).toBe("created");
-    expect(mutations).toHaveLength(2);
-    expect(mutations[0]!.mutation_type).toBe("create");
-    expect(mutations[0]!.schema).toBe(TEST_HASHES[type as RecordType]);
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(2);
+    expect(user[0]!.mutation_type).toBe("create");
+    expect(user[0]!.schema).toBe(TEST_HASHES[type as RecordType]);
+    const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe(RECORDS[type as RecordType].defaultStatus);
     expect(fields.title).toBe("Smoke");
     expect(fields.tags).toEqual(["phase6"]);
-    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    const indexFields = user[1]!.fields_and_values as Record<string, unknown>;
     expect(indexFields.slug).toBe(tagIndexSlug("phase6"));
     expect(indexFields.members).toEqual([`${type}:${type}-smoke`]);
     // Non-task types should NOT have design_slug.
@@ -1254,9 +1260,10 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(r.action).toBe("updated");
     // Existence check (keyed point-read) + verify-after-write.
     expect(queryCalls).toBeGreaterThanOrEqual(2);
-    expect(mutations).toHaveLength(1);
-    expect(mutations[0]!.mutation_type).toBe("update");
-    const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
+    const user = userMutations(mutations);
+    expect(user).toHaveLength(1);
+    expect(user[0]!.mutation_type).toBe("update");
+    const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.created_at).toBe("2026-03-03T00:00:00.000Z");
     expect(fields.updated_at).not.toBe("2026-03-03T00:00:00.000Z");
     expect(typeof fields.updated_at).toBe("string");

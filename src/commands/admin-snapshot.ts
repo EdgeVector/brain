@@ -448,7 +448,7 @@ async function safeListLiveRecords(
   type: RecordType,
 ): Promise<FbrainRecord[]> {
   try {
-    const records = await listRecords(node, type, schemaHashFor(type, cfg));
+    const records = await listRecords(node, type, schemaHashFor(type, cfg), cfg);
     return records.filter((record) => !isTombstoned(record));
   } catch {
     return [];

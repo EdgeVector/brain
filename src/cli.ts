@@ -7,6 +7,7 @@
 
 import { parseArgs, type ParseArgsConfig } from "node:util";
 
+import pkg from "../package.json" with { type: "json" };
 import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
 import { readConfig } from "./config.ts";
@@ -26,6 +27,7 @@ import {
 } from "./commands/attach.ts";
 import { linkCmd } from "./commands/link.ts";
 import { backlinksCmd } from "./commands/backlinks.ts";
+import { buildWhichResult, formatWhich } from "./commands/which.ts";
 import { searchCmd } from "./commands/search.ts";
 import { askCmd } from "./commands/ask.ts";
 import { doctor } from "./commands/doctor.ts";
@@ -37,6 +39,11 @@ import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import { gateAdd, gateClear, gatesOpen, gateVerify } from "./commands/gate.ts";
+import {
+  deliverAdminSnapshot,
+  publishAdminSnapshot,
+  type DeliveryRecipient,
+} from "./commands/admin-snapshot.ts";
 import { parseUpdatedSince } from "./time.ts";
 import { formatPutConfirmation, indexPendingNote } from "./write-confirmation.ts";
 import {
@@ -138,6 +145,7 @@ export const COMMANDS = [
   "append",
   "get",
   "list",
+  "which",
   "status",
   "tag",
   "link",
@@ -158,6 +166,7 @@ export const COMMANDS = [
   "raw",
   "share",
   "delete",
+  "admin-snapshot",
   "reindex",
   "migrate",
   "mcp",
@@ -190,6 +199,7 @@ ${RECORD_NEW_HELP_LINES}
   append         append a chunk to a record's body without a full rewrite (grows only)
   get            print a record by slug
   list           list records, newest-first
+  which          show which brain install this shell is using
   status         show or update a record's status
   tag            add/remove tags without a full re-put
   attach         attach a file to a record (content-addressed; content never search-indexed)
@@ -206,6 +216,7 @@ ${RECORD_NEW_HELP_LINES}
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — team sync is not wired up yet
   delete         soft-delete a record (fold_db is append-only)
+  admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
@@ -368,6 +379,15 @@ exists in multiple types (specify --type to disambiguate).
                   emits \`{"count": N}\` instead. On failure, a \`{error, hint}\`
                   JSON object is emitted to stdout too, so \`--json\` stdout is
                   always parseable.`,
+  which: `fbrain which [--json] [--check]
+
+Print the brain executable selected by this shell, the resolved source root,
+and whether the running install is under ~/.host-track. This is a local install
+hygiene check only: it does not contact the LastDB node, read records, or mutate
+configuration.
+
+  --json   emit a single structured object on stdout
+  --check  exit non-zero when brain is not host-track managed`,
   status: `fbrain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
@@ -684,6 +704,33 @@ delete anyway — the tasks' design references are then left dangling.
 
 After delete, a slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
+  "admin-snapshot": `fbrain admin-snapshot publish [--slug SLUG] [--dry-run] [--json]
+fbrain admin-snapshot deliver [--slug SLUG] [--dry-run] [--json] [--approve]
+                              [--max-records N]
+                              [--recipient-pubkey K] [--messaging-public-key K]
+                              [--messaging-pseudonym P] [--recipient-name N]
+
+Publish a privacy-safe Brain admin snapshot into the internal
+BrainAdminSnapshot schema, or stage/approve a LastDB deliver of that slice to
+the existing admin kanban-consumer. Payload is counts and short summaries only:
+type counts, open-decisions live lines (slug/title), active-programs rollup
+head, recent heartbeats (slug/ts/ok), and captured_at. NEVER full brain bodies.
+
+  --slug                   record key to upsert (default: admin-brain-snapshot)
+  --dry-run                build/print without writing or staging
+  --json                   emit structured result (schema hash, snapshot, delivery)
+  --approve                after stage, approve-send the delivery (deliver only)
+  --max-records            deliver leg max records (default: 5)
+  --recipient-pubkey       admin kanban-consumer ed25519 public key
+  --messaging-public-key   admin kanban-consumer x25519 messaging public key
+  --messaging-pseudonym    admin kanban-consumer messaging pseudonym
+  --recipient-name         optional display name for the staged delivery
+
+Recipient flags may also be supplied via FBRAIN_ADMIN_RECIPIENT_PUBKEY,
+FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
+FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
+deliver-status). Reuses the existing kanban-consumer identity — no second
+consumer enroll is required.`,
   reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
@@ -915,6 +962,10 @@ const LIST_OPTIONS = {
   // stdout. Truncation hint moves to stderr so `jq` pipelines stay clean.
   json: { type: "boolean", default: false },
 } as const;
+const WHICH_OPTIONS = {
+  json: { type: "boolean", default: false },
+  check: { type: "boolean", default: false },
+} as const;
 const STATUS_OPTIONS = {
   type: { type: "string" },
   // Machine-readable mode for show form (`fbrain status <slug> --json`):
@@ -1023,6 +1074,17 @@ const DELETE_OPTIONS = {
   // DESIGN_OPTIONS.json.
   json: { type: "boolean", default: false },
 } as const;
+const ADMIN_SNAPSHOT_OPTIONS = {
+  slug: { type: "string" },
+  "dry-run": { type: "boolean", default: false },
+  json: { type: "boolean", default: false },
+  approve: { type: "boolean", default: false },
+  "max-records": { type: "string" },
+  "recipient-pubkey": { type: "string" },
+  "messaging-public-key": { type: "string" },
+  "messaging-pseudonym": { type: "string" },
+  "recipient-name": { type: "string" },
+} as const;
 const LINK_OPTIONS = {
   "from-type": { type: "string" },
   "to-type": { type: "string" },
@@ -1082,6 +1144,7 @@ export const CLI_SPEC = {
   append: APPEND_OPTIONS,
   get: GET_OPTIONS,
   list: LIST_OPTIONS,
+  which: WHICH_OPTIONS,
   status: STATUS_OPTIONS,
   tag: TAG_OPTIONS,
   attach: ATTACH_OPTIONS,
@@ -1098,6 +1161,7 @@ export const CLI_SPEC = {
   raw: EMPTY_OPTIONS,
   share: EMPTY_OPTIONS,
   delete: DELETE_OPTIONS,
+  "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
   mcp: MCP_OPTIONS,
@@ -1607,6 +1671,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runGet(args, verboseFn);
     case "list":
       return runList(args, verboseFn);
+    case "which":
+      return runWhich(args);
     case "status":
       return runStatus(args, verboseFn);
     case "tag":
@@ -1639,6 +1705,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runShare(args);
     case "delete":
       return runDelete(args, verboseFn);
+    case "admin-snapshot":
+      return runAdminSnapshot(args, verboseFn);
     case "reindex":
       return runReindex(args, verboseFn);
     case "migrate":
@@ -2272,6 +2340,37 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   if (fields.length > 0) lOpts.fields = fields;
   if (values.json) lOpts.json = true;
   await listCmd(lOpts);
+  return 0;
+}
+
+async function runWhich(args: Argv): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: WHICH_OPTIONS,
+    },
+    "which",
+  );
+  if (positionals.length > 0) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `which takes no positional arguments (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `fbrain which --json` for machine-readable install details.",
+    });
+  }
+
+  const result = buildWhichResult();
+  if (values.json) {
+    console.log(JSON.stringify(result));
+  } else {
+    console.log(formatWhich(result));
+  }
+  if (values.check && !result.hostTrack) {
+    console.error(result.issues.join("\n"));
+    return 1;
+  }
   return 0;
 }
 
@@ -2959,6 +3058,112 @@ async function runShare(args: Argv): Promise<number> {
   return shareCmd();
 }
 
+async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
+  const sub = args[0]?.startsWith("-") ? undefined : args[0];
+  if (sub !== "publish" && sub !== "deliver") {
+    console.error(COMMAND_HELP["admin-snapshot"]);
+    return USAGE_ERROR;
+  }
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: ADMIN_SNAPSHOT_OPTIONS,
+    },
+    "admin-snapshot",
+  );
+  // First positional is the subcommand; anything further is a typo.
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `admin-snapshot ${sub} takes no extra positional arguments (got: ${positionals.slice(1).join(", ")}).`,
+    });
+  }
+
+  const cfg = readConfig();
+  const print = (line: string) => console.log(line);
+  const common = {
+    cfg,
+    verbose,
+    print,
+    dryRun: values["dry-run"] === true,
+    json: values.json === true,
+    ...(values.slug !== undefined ? { slug: values.slug } : {}),
+  };
+
+  if (sub === "publish") {
+    await publishAdminSnapshot(common);
+    return 0;
+  }
+
+  const maxRecordsRaw = values["max-records"];
+  let maxRecords: number | undefined;
+  if (maxRecordsRaw !== undefined) {
+    const parsed = Number(maxRecordsRaw);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      throw new FbrainError({
+        code: "invalid_limit",
+        message: `invalid --max-records ${maxRecordsRaw}`,
+      });
+    }
+    maxRecords = parsed;
+  }
+
+  const recipient: DeliveryRecipient = {
+    recipientPubkey: firstNonEmpty(
+      values["recipient-pubkey"],
+      process.env.FBRAIN_ADMIN_RECIPIENT_PUBKEY,
+      process.env.ROUTINES_ADMIN_RECIPIENT_PUBKEY,
+    ),
+    messagingPublicKey: firstNonEmpty(
+      values["messaging-public-key"],
+      process.env.FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY,
+      process.env.ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY,
+    ),
+    messagingPseudonym: firstNonEmpty(
+      values["messaging-pseudonym"],
+      process.env.FBRAIN_ADMIN_MESSAGING_PSEUDONYM,
+      process.env.ROUTINES_ADMIN_MESSAGING_PSEUDONYM,
+    ),
+    recipientDisplayName: firstNonEmpty(
+      values["recipient-name"],
+      process.env.FBRAIN_ADMIN_RECIPIENT_NAME,
+      process.env.ROUTINES_ADMIN_RECIPIENT_NAME,
+    ) || undefined,
+  };
+  const missing = [
+    ["--recipient-pubkey", recipient.recipientPubkey],
+    ["--messaging-public-key", recipient.messagingPublicKey],
+    ["--messaging-pseudonym", recipient.messagingPseudonym],
+  ].filter(([, value]) => !value);
+  if (missing.length > 0) {
+    throw new FbrainError({
+      code: "missing_slug",
+      message:
+        `missing ${missing.map(([flag]) => flag).join(", ")} ` +
+        `(or FBRAIN_ADMIN_RECIPIENT_PUBKEY / FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY / FBRAIN_ADMIN_MESSAGING_PSEUDONYM; ` +
+        `ROUTINES_ADMIN_* aliases also accepted)`,
+      hint: "Use the public keys from the enrolled admin kanban-consumer bundle — same recipient as kanban/routines deliver.",
+    });
+  }
+
+  await deliverAdminSnapshot({
+    ...common,
+    recipient,
+    approve: values.approve === true,
+    ...(maxRecords !== undefined ? { maxRecords } : {}),
+  });
+  return 0;
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return "";
+}
+
 async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   const { values, positionals } = parseCommandArgs(
     {
@@ -3400,12 +3605,34 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   }
 }
 
+type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+
+async function initCliSentry(): Promise<CaptureSentryException> {
+  if (!process.env.OBS_SENTRY_DSN?.trim()) {
+    return async () => {};
+  }
+  const sentry = await import("./observability/sentry.ts");
+  await sentry.initSentry({
+    service: "fbrain-cli",
+    env: {
+      ...process.env,
+      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
+    },
+  });
+  return sentry.captureSentryException;
+}
+
 if (import.meta.main) {
-  main(process.argv.slice(2)).then(
-    (code) => process.exit(code),
-    (err) => {
+  void (async () => {
+    let captureTopLevel: CaptureSentryException = async () => {};
+    try {
+      captureTopLevel = await initCliSentry();
+      const code = await main(process.argv.slice(2));
+      process.exit(code);
+    } catch (err) {
+      await captureTopLevel(err, { entrypoint: "cli", top_level: "true" });
       console.error(err);
       process.exit(1);
-    },
-  );
+    }
+  })();
 }

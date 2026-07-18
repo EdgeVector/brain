@@ -135,7 +135,7 @@ describe("newSearchNodeClient — enforcement ON", () => {
     captureFetch(captured, 200);
 
     const { node } = newSearchNodeClient({ baseUrl: NODE_URL, userHash: "u", store, print: () => {} });
-    await node.queryAll({ schemaHash: "h", fields: ["slug"] });
+    await node.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
 
     const query = captured.find((c) => c.url.includes("/api/query"));
     expect(query).toBeDefined();

@@ -36,9 +36,14 @@ import type { EstablishConsentResult } from "../../src/commands/init-consent.ts"
 import { CONFIG_VERSION, type Config } from "../../src/config.ts";
 import { FbrainError } from "../../src/client.ts";
 import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../../src/schemas.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { buildTestCfg, TEST_HASHES, TEST_NODE_URL } from "../util.ts";
 
 describe("resolveUrls", () => {
+  test("shared test config default tracks the current init node default", () => {
+    expect(TEST_NODE_URL).toBe(DEFAULT_NODE_URL);
+    expect(buildTestCfg().nodeUrl).toBe(DEFAULT_NODE_URL);
+  });
+
   test("fresh init (no existing config) → new defaults, no heal notice", () => {
     const r = resolveUrls({}, null);
     expect(r.nodeUrl).toBe(DEFAULT_NODE_URL);
@@ -407,7 +412,20 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
       expect(body.app_id).toBe(OWNER_APP_ID);
       expect(body.schema?.owner_app_id).toBe(OWNER_APP_ID);
     }
-    for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike", "sop", "decision", "__tagindex__"]) {
+    for (const t of [
+      "design",
+      "task",
+      "concept",
+      "preference",
+      "reference",
+      "agent",
+      "project",
+      "spike",
+      "sop",
+      "decision",
+      "__tagindex__",
+      "__admin_snapshot__",
+    ]) {
       expect(result.config.schemaHashes[t]).toHaveLength(64);
     }
     expect(lines.some((l) => l.includes("local app-schema declarations persisted"))).toBe(true);

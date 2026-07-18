@@ -14,8 +14,9 @@
  *   unix epoch seconds)
  */
 import { capabilityStoreKey, defaultCapabilityStore, } from './capabilityStore.js';
+import { LASTDB_API_ROUTES } from './apiRoutes.js';
 import { verifyCapabilityBlob } from './capabilityToken.js';
-import { AppInSandboxError, CapabilityDeniedError, CapabilityRevokedError, CapabilityVerificationError, ConsentDeniedError, ConsentExpiredError, ConsentRequestNotFoundError, ConsentTimeoutError, InvalidScopeError, PermissionDeniedError, RequestRejectedError, UnexpectedResponseError, UnknownAppError, } from './errors.js';
+import { AppInSandboxError, AuthenticationRequiredError, CapabilityDeniedError, CapabilityRevokedError, CapabilityVerificationError, CasConflictError, ConsentDeniedError, ConsentExpiredError, ConsentRequestNotFoundError, ConsentTimeoutError, FullScanNotAllowedError, InvalidScopeError, PermissionDeniedError, QueryPaginationError, RequestRejectedError, UnexpectedResponseError, UnknownAppError, } from './errors.js';
 import { discoverTransport, httpTransport, udsTransport, } from './transport.js';
 /** The HTTP header carrying `base64(JSON CapabilityToken)`. */
 const CAPABILITY_HEADER = 'X-App-Capability';
@@ -23,6 +24,12 @@ const CAPABILITY_HEADER = 'X-App-Capability';
 const CAPABILITY_TS_HEADER = 'X-Capability-Ts';
 /** Design-mandated poll cadence for `consent-status` (~2s). */
 const DEFAULT_POLL_INTERVAL_MS = 2000;
+function queryRowDedupKey(row) {
+    if (row.keyValue !== null) {
+        return `kv:${row.keyValue.hash ?? ''}\u0000${row.keyValue.range ?? ''}`;
+    }
+    return `rendered:${row.key}`;
+}
 /** Serialize a {@link ConsentScope} to the node's `scope` string. */
 function scopeToString(scope) {
     if (scope === 'wildcard') {
@@ -58,12 +65,24 @@ export async function connect(options) {
     if ((baseUrl && socketPath) || (!baseUrl && !socketPath)) {
         throw new Error('connect requires exactly one of { baseUrl } or { socketPath }');
     }
-    const defaultHeaders = options.defaultHeaders ?? {};
+    // Self-reported client label for Mini op telemetry. Prefer explicit
+    // clientId; otherwise use appId. Never clobber a caller-supplied header.
+    const defaultHeaders = {
+        ...(options.defaultHeaders ?? {}),
+    };
+    if (!Object.keys(defaultHeaders).some((k) => k.toLowerCase() === 'x-lastdb-client')) {
+        const clientLabel = (options.clientId ?? appId).trim();
+        if (clientLabel.length > 0) {
+            defaultHeaders['X-LastDB-Client'] = clientLabel;
+        }
+    }
     const discoverSocket = options.discoverSocket ?? true;
     let transport;
     if (socketPath) {
         // An explicit socket: use it verbatim, no discovery.
-        transport = udsTransport(socketPath, defaultHeaders);
+        transport = udsTransport(socketPath, defaultHeaders, {
+            timeoutMs: options.timeoutMs,
+        });
     }
     else if (discoverSocket) {
         // Local-node case: prefer the data-plane socket, fall back to the
@@ -71,10 +90,13 @@ export async function connect(options) {
         transport = discoverTransport({
             fallbackBaseUrl: baseUrl,
             defaultHeaders,
+            timeoutMs: options.timeoutMs,
         });
     }
     else {
-        transport = httpTransport(baseUrl, defaultHeaders);
+        transport = httpTransport(baseUrl, defaultHeaders, {
+            timeoutMs: options.timeoutMs,
+        });
     }
     // The capability store keys by (appId, nodeTarget) so a capability minted
     // by one node is never replayed against another (gap #2). The transport's
@@ -110,7 +132,7 @@ export async function connect(options) {
             capability = null;
         }
     }
-    return new LastDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability });
+    return new LastDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability, schemaResolver: options.schemaResolver });
 }
 /** A connected LastDB app client. Construct via {@link connect}. */
 export class LastDbClient {
@@ -121,6 +143,7 @@ export class LastDbClient {
     storeKey;
     nodeTarget;
     verifyCapability;
+    schemaResolver;
     constructor(appId, transport, store, capability, 
     /** The node-scoped capability-store key: `capabilityStoreKey(appId, node)`. */
     storeKey, 
@@ -133,6 +156,7 @@ export class LastDbClient {
         this.storeKey = storeKey;
         this.nodeTarget = nodeTarget;
         this.verifyCapability = options.verifyCapability ?? false;
+        this.schemaResolver = options.schemaResolver ?? null;
     }
     /** Where this client is pointed (for diagnostics). */
     get target() {
@@ -150,7 +174,7 @@ export class LastDbClient {
      * {@link awaitConsent}. The owner grants via `folddb consent grant <appId>`.
      */
     async requestConsent(scope = 'wildcard') {
-        const res = await this.transport.send('POST', '/api/apps/request-consent', {
+        const res = await this.transport.send('POST', LASTDB_API_ROUTES.requestConsent, {
             body: { app_id: this.appId, scope: scopeToString(scope) },
         });
         if (res.status === 202) {
@@ -209,7 +233,7 @@ export class LastDbClient {
      * otherwise. Exposed for callers that want to drive their own poll loop.
      */
     async pollConsentOnce(requestId) {
-        const res = await this.transport.send('GET', `/api/apps/consent-status/${encodeURIComponent(requestId)}`);
+        const res = await this.transport.send('GET', LASTDB_API_ROUTES.consentStatus(requestId));
         switch (res.status) {
             case 202:
                 return null; // pending
@@ -282,10 +306,11 @@ export class LastDbClient {
      * and the dev node (`fold_db_node::dev_mode`) honor them with production-parity
      * semantics (default 100, clamp 1000, `total_count`/`has_more` metadata).
      */
-    async query(schemaName, filter = {}) {
-        const body = { schema_name: schemaName };
+    async query(schemaName, filter = {}, opts = {}) {
+        const resolved = await this.resolveDataPathSchema(schemaName);
+        const body = { schema_name: resolved.nodeSchemaName };
         if (filter.fields !== undefined) {
-            body.fields = filter.fields;
+            body.fields = filter.fields.map((field) => mapFieldName(field, resolved.appToNodeFields));
         }
         if (filter.filter !== undefined) {
             body.filter = filter.filter;
@@ -299,19 +324,24 @@ export class LastDbClient {
         if (filter.cursor !== undefined) {
             body.cursor = filter.cursor;
         }
-        const res = await this.transport.send('POST', '/api/query', {
-            headers: this.capabilityHeaders(),
+        const headers = { ...this.capabilityHeaders() };
+        if (opts.allowFullScan === true) {
+            // Mini hard-refuses unfiltered product scans without this admin opt-in.
+            headers['X-LastDB-Allow-Full-Scan'] = '1';
+        }
+        const res = await this.transport.send('POST', LASTDB_API_ROUTES.query, {
+            headers,
             body,
         });
         if (res.status === 200) {
-            return parseQueryResponse(res.body);
+            return mapQueryResult(parseQueryResponse(res.body), resolved);
         }
         throw this.mapDataError('query', res.status, res.body);
     }
     /**
      * Drain a query past the node's page cap: issues `query()` repeatedly with
      * `limit`/`offset` until the node reports no more rows, and returns every
-     * row as one {@link QueryResult}.
+     * unique row as one {@link QueryResult}.
      *
      * Termination is two-signal: the node's own `page.hasMore` when it reports
      * pagination metadata (production), else a short page
@@ -319,12 +349,19 @@ export class LastDbClient {
      * ceiling — when hit, the result's `page.hasMore` is `true` so the
      * truncation stays visible.
      *
-     * Works against both node kinds: production `fold_db_node` and the dev node
-     * (`fold_db_node::dev_mode`) both paginate `/api/query` with the same default/clamp
-     * and `page` metadata, so the drain follows `page.hasMore` identically on
-     * either.
+     * Production offset pagination has historically been unstable, so `queryAll`
+     * dedupes by row key across pages and throws {@link QueryPaginationError}
+     * when a follow-up page makes no unique progress or when a completed drain
+     * cannot match the node's `totalCount`.
      */
     async queryAll(schemaName, filter = {}, opts = {}) {
+        if (filter.filter === undefined && opts.allowFullScan !== true) {
+            // Unfiltered queryAll is a full schema drain — deprecated for product
+            // apps (`brain design-lastdb-scan-deprecation-path`). Point reads
+            // (`filter: { HashKey: id }`) and partition reads (HashRange) never hit
+            // this gate; only a genuinely unfiltered drain does.
+            throw new FullScanNotAllowedError(schemaName);
+        }
         const pageSize = opts.pageSize ?? 100;
         if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
             // Production clamps limit to MAX_QUERY_LIMIT (1000); a clamped page
@@ -333,6 +370,7 @@ export class LastDbClient {
         }
         const maxRows = opts.maxRows ?? 100_000;
         const rows = [];
+        const seenKeys = new Set();
         let schema = '';
         let lastPage = null;
         let offset = 0;
@@ -343,10 +381,19 @@ export class LastDbClient {
                 ...filter,
                 limit: pageSize,
                 ...(cursor === null ? { offset } : { cursor }),
-            });
+            }, { allowFullScan: opts.allowFullScan === true });
             schema = page.schema || schema;
             lastPage = page.page;
-            rows.push(...page.rows);
+            let newRows = 0;
+            for (const row of page.rows) {
+                const key = queryRowDedupKey(row);
+                if (seenKeys.has(key)) {
+                    continue;
+                }
+                seenKeys.add(key);
+                rows.push(row);
+                newRows += 1;
+            }
             const hasMore = page.page !== null
                 ? page.page.hasMore
                 : page.rows.length >= pageSize; // no metadata: stop on a short page
@@ -357,15 +404,30 @@ export class LastDbClient {
                 truncatedByMaxRows = true;
                 break;
             }
+            if (newRows === 0) {
+                throw new QueryPaginationError('stalled_page', {
+                    totalCount: page.page?.totalCount,
+                    collectedCount: rows.length,
+                    returnedCount: page.rows.length,
+                    pageSize,
+                    offset,
+                });
+            }
             cursor = page.page?.nextCursor ?? null;
             if (cursor === null) {
                 offset += page.rows.length;
             }
-            if (page.rows.length === 0) {
-                // Defensive: a node claiming hasMore while returning an empty page
-                // would otherwise loop forever.
-                break;
-            }
+        }
+        if (!truncatedByMaxRows &&
+            lastPage !== null &&
+            lastPage.totalCount !== rows.length) {
+            throw new QueryPaginationError('total_count_mismatch', {
+                totalCount: lastPage.totalCount,
+                collectedCount: rows.length,
+                returnedCount: lastPage.returnedCount,
+                pageSize,
+                offset,
+            });
         }
         return {
             schema,
@@ -388,14 +450,22 @@ export class LastDbClient {
      * capability headers when one is loaded.
      */
     async mutate(schemaName, op) {
+        const resolved = await this.resolveDataPathSchema(schemaName);
         const body = {
             type: 'mutation',
-            schema: schemaName,
-            fields_and_values: op.fields,
+            schema: resolved.nodeSchemaName,
+            fields_and_values: mapFieldRecord(op.fields, resolved.appToNodeFields),
             key_value: op.key,
             mutation_type: op.mutationType,
         };
-        const res = await this.transport.send('POST', '/api/mutation', {
+        // CAS precondition: forward it under the node's `expected` key only when
+        // the caller set it (an unconditional write omits it). Its `field` names a
+        // schema field, so it is mapped app→node the same way `fields_and_values`
+        // keys are — a CAS guard on a renamed field must reference the node name.
+        if (op.expected !== undefined) {
+            body.expected = mapCasExpectation(op.expected, resolved.appToNodeFields);
+        }
+        const res = await this.transport.send('POST', LASTDB_API_ROUTES.mutation, {
             headers: this.capabilityHeaders(),
             body,
         });
@@ -440,7 +510,7 @@ export class LastDbClient {
         if (opts.target !== undefined) {
             body.target = opts.target;
         }
-        const res = await this.transport.send('POST', '/api/app/search', {
+        const res = await this.transport.send('POST', LASTDB_API_ROUTES.appSearch, {
             headers: this.capabilityHeaders(),
             body,
         });
@@ -448,6 +518,52 @@ export class LastDbClient {
             return parseSearchResponse(res.body);
         }
         throw this.mapDataError('search', res.status, res.body);
+    }
+    // -------------------------------------------------------------------------
+    // Owner / host node helpers
+    // -------------------------------------------------------------------------
+    /**
+     * `GET /api/system/auto-identity`. Resolves the local owner identity a
+     * host-context app uses for `X-User-Hash`. A not-yet-provisioned node returns
+     * `{ provisioned: false }` for the node's canonical 503, so callers can pivot
+     * to bootstrap without treating it as a transport failure.
+     */
+    async autoIdentity() {
+        const res = await this.transport.send('GET', LASTDB_API_ROUTES.autoIdentity);
+        if (res.status === 200) {
+            return parseAutoIdentityResponse(res.body);
+        }
+        if (res.status === 503) {
+            const body = isObject(res.body) ? res.body : {};
+            return {
+                provisioned: false,
+                reason: typeof body['error'] === 'string'
+                    ? body['error']
+                    : 'node_not_provisioned',
+                next: typeof body['next'] === 'string' ? body['next'] : null,
+            };
+        }
+        throw new UnexpectedResponseError(`auto-identity returned ${res.status}`, res.status, res.body);
+    }
+    /**
+     * `GET /api/schemas`. Lists schemas loaded in the owner node and normalizes
+     * the fields host-context apps use to resolve their own canonical schema hash
+     * without hand-parsing raw route JSON.
+     */
+    async listSchemas() {
+        const res = await this.transport.send('GET', LASTDB_API_ROUTES.schemas);
+        if (res.status === 200) {
+            return parseSchemaListResponse(res.body);
+        }
+        throw new UnexpectedResponseError(`schemas list returned ${res.status}`, res.status, res.body);
+    }
+    /**
+     * Resolve an app-owned schema descriptor to the loaded canonical schema entry.
+     * Matching uses `owner_app_id` + `descriptive_name`, and when `fields` is
+     * supplied requires the exact same field set regardless of order.
+     */
+    async resolveSchema(descriptor) {
+        return resolveLoadedSchema(await this.listSchemas(), descriptor);
     }
     // -------------------------------------------------------------------------
     // Internals
@@ -462,9 +578,32 @@ export class LastDbClient {
             [CAPABILITY_TS_HEADER]: nowEpochSecs(),
         };
     }
+    /**
+     * Resolve an app schema name to the node-facing schema + field maps (the
+     * data-path schema mapping used by `query`/`mutate`). Distinct from the
+     * public {@link resolveSchema} owner-host helper, which resolves a
+     * {@link SchemaDescriptor} to a {@link LoadedSchema}; they were merged from
+     * two concurrent PRs that both chose the name `resolveSchema`, so the private
+     * data-path one is named `resolveDataPathSchema` to avoid the collision.
+     */
+    async resolveDataPathSchema(appSchemaName) {
+        const result = await this.schemaResolver?.(appSchemaName);
+        return normalizeSchemaResolution(appSchemaName, result);
+    }
     /** Map a non-200 data-path response to a typed error. */
     mapDataError(verb, status, body) {
         const b = (body ?? {});
+        if (status === 401) {
+            return new AuthenticationRequiredError(authenticationRequiredReason(b), b.error ?? b.message ?? `${verb} requires authentication`, body ?? null);
+        }
+        if (status === 409 && b.error === 'cas_conflict') {
+            // A CAS precondition (`MutationOp.expected`) did not hold: the node
+            // returns `409 {error:"cas_conflict", schema?, field?, key?, expected?,
+            // actual?, message?}`. Surface it as the typed CasConflictError so an app
+            // can re-read + retry instead of hand-detecting the conflict off a
+            // generic error body.
+            return new CasConflictError(casConflictDetailOf(body), body ?? null);
+        }
         if (status === 403) {
             // Discriminated capability 403 (app_identity v3.1, gap #4): the
             // verifier's body is `{status: 403, reason: "<reason>", ...detail}` —
@@ -492,13 +631,101 @@ export class LastDbClient {
         return b.error ?? fallback;
     }
 }
+function authenticationRequiredReason(body) {
+    const text = `${body.code ?? ''} ${body.error ?? ''} ${body.message ?? ''}`.toLowerCase();
+    if (text.includes('session') && text.includes('expired')) {
+        return 'session_expired';
+    }
+    if (text.includes('token') && text.includes('expired')) {
+        return 'session_expired';
+    }
+    return 'auth_failed';
+}
+function normalizeSchemaResolution(appSchemaName, result) {
+    if (typeof result === 'string') {
+        return {
+            appSchemaName,
+            identity: result,
+            nodeSchemaName: result,
+            appToNodeFields: {},
+            nodeToAppFields: {},
+            outcome: null,
+        };
+    }
+    if (isResolveResult(result)) {
+        const appToNodeFields = result.adapter?.appToCatalog ?? {};
+        return {
+            appSchemaName,
+            identity: result.identity,
+            nodeSchemaName: result.schema ?? result.identity,
+            appToNodeFields,
+            nodeToAppFields: result.adapter?.catalogToApp ?? reverseFieldMap(appToNodeFields),
+            outcome: result.outcome ?? null,
+        };
+    }
+    const appToNodeFields = result?.fields ?? {};
+    return {
+        appSchemaName,
+        identity: result?.nodeSchemaName ?? appSchemaName,
+        nodeSchemaName: result?.nodeSchemaName ?? appSchemaName,
+        appToNodeFields,
+        nodeToAppFields: reverseFieldMap(appToNodeFields),
+        outcome: null,
+    };
+}
+function isResolveResult(result) {
+    return (typeof result === 'object' &&
+        result !== null &&
+        'identity' in result &&
+        typeof result.identity === 'string');
+}
+function reverseFieldMap(fields) {
+    const reversed = {};
+    for (const [appField, nodeField] of Object.entries(fields)) {
+        if (reversed[nodeField] === undefined) {
+            reversed[nodeField] = appField;
+        }
+    }
+    return reversed;
+}
+function mapFieldName(field, fields) {
+    return fields[field] ?? field;
+}
+function mapFieldRecord(row, fields) {
+    const mapped = {};
+    for (const [field, value] of Object.entries(row)) {
+        mapped[mapFieldName(field, fields)] = value;
+    }
+    return mapped;
+}
 /**
- * @deprecated Renamed to {@link LastDbClient}. Kept as an exported value + type
- * alias so mid-port consumers keep compiling (`new FoldDbClient(...)` and
- * `: FoldDbClient` both resolve to `LastDbClient`); removed at the adoption
- * capstone.
+ * Map a CAS {@link CasExpectation}'s `field` app→node (its value, when present,
+ * is passed through unchanged — only the field name is a schema field). Used so
+ * a `mutate` precondition guards the correct node-side field under a schema map.
  */
-export const FoldDbClient = LastDbClient;
+function mapCasExpectation(expected, fields) {
+    return { ...expected, field: mapFieldName(expected.field, fields) };
+}
+function mapQueryResult(result, resolved) {
+    return {
+        ...result,
+        schema: resolved.appSchemaName,
+        rows: result.rows.map((row) => mapQueryRow(row, resolved.nodeToAppFields)),
+    };
+}
+function mapQueryRow(row, nodeToAppFields) {
+    return {
+        ...row,
+        fields: mapFieldRecord(row.fields, nodeToAppFields),
+        metadata: mapFieldKeyedJson(row.metadata, nodeToAppFields),
+    };
+}
+function mapFieldKeyedJson(value, fields) {
+    if (!isObject(value)) {
+        return value;
+    }
+    return mapFieldRecord(value, fields);
+}
 /**
  * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
  * full per-row envelope (gap #3).
@@ -643,6 +870,79 @@ export function parseSearchResponse(body) {
     const hits = rawHits.map(parseSearchHit);
     return { hits };
 }
+/** Parse `GET /api/system/auto-identity` success JSON. */
+export function parseAutoIdentityResponse(body) {
+    const b = isObject(body) ? body : {};
+    const userHash = b['user_hash'];
+    const publicKey = b['public_key'];
+    const userId = b['user_id'];
+    if (typeof userHash !== 'string' || userHash.length === 0) {
+        throw new UnexpectedResponseError('auto-identity returned a provisioned body without user_hash', 200, body);
+    }
+    return {
+        provisioned: true,
+        userHash,
+        publicKey: typeof publicKey === 'string' ? publicKey : null,
+        userId: typeof userId === 'string' ? userId : null,
+    };
+}
+/** Parse `GET /api/schemas` JSON into normalized loaded-schema entries. */
+export function parseSchemaListResponse(body) {
+    const b = isObject(body) ? body : {};
+    const rawSchemas = Array.isArray(b['schemas']) ? b['schemas'] : [];
+    return rawSchemas
+        .filter((schema) => isObject(schema))
+        .map(parseLoadedSchema);
+}
+/** Resolve a schema descriptor against an already-fetched schema list. */
+export function resolveLoadedSchema(schemas, descriptor) {
+    const matches = schemas.filter((schema) => {
+        if (schema.ownerAppId !== descriptor.ownerAppId) {
+            return false;
+        }
+        if (schema.descriptiveName !== descriptor.descriptiveName) {
+            return false;
+        }
+        if (descriptor.fields !== undefined) {
+            return sameFieldSet(schema.fields, descriptor.fields);
+        }
+        return true;
+    });
+    if (matches.length === 0) {
+        return null;
+    }
+    if (matches.length > 1) {
+        throw new UnexpectedResponseError(`schema descriptor matched ${matches.length} loaded schemas`, 200, matches);
+    }
+    return matches[0];
+}
+function parseLoadedSchema(schema) {
+    const name = stringOrNull(schema['name']) ?? '';
+    const identityHash = stringOrNull(schema['identity_hash']) ?? name;
+    return {
+        name,
+        identityHash,
+        descriptiveName: stringOrNull(schema['descriptive_name']),
+        ownerAppId: stringOrNull(schema['owner_app_id']),
+        fields: stringArray(schema['fields']),
+    };
+}
+function sameFieldSet(actual, expected) {
+    if (actual.length !== expected.length) {
+        return false;
+    }
+    const actualSorted = [...actual].sort();
+    const expectedSorted = [...expected].sort();
+    return actualSorted.every((field, i) => field === expectedSorted[i]);
+}
+function stringArray(value) {
+    return Array.isArray(value)
+        ? value.filter((field) => typeof field === 'string')
+        : [];
+}
+function stringOrNull(value) {
+    return typeof value === 'string' ? value : null;
+}
 /**
  * Normalize one raw search hit. The row envelope (`key`/`fields`/`metadata`/
  * `authorPubKey`) is parsed by {@link parseQueryRow}; the search-only
@@ -681,6 +981,38 @@ function capabilityDetailOf(body) {
     }
     if (typeof body['timestamp_skew_secs'] === 'number') {
         detail.timestampSkewSecs = body['timestamp_skew_secs'];
+    }
+    return detail;
+}
+/**
+ * Read the modeled detail fields off a `409 {error:"cas_conflict"}` body
+ * (`schema` / `field` / `key` / `expected` / `actual` / `message`, per the
+ * node's CAS-conflict contract). Unknown fields are ignored; absent ones stay
+ * absent. `actual` is passed through as-is (the node may send an explicit
+ * `null` when the field had no current value).
+ */
+function casConflictDetailOf(body) {
+    const detail = {};
+    if (!isObject(body)) {
+        return detail;
+    }
+    if (typeof body['schema'] === 'string') {
+        detail.schema = body['schema'];
+    }
+    if (typeof body['field'] === 'string') {
+        detail.field = body['field'];
+    }
+    if (typeof body['key'] === 'string') {
+        detail.key = body['key'];
+    }
+    if (typeof body['expected'] === 'string') {
+        detail.expected = body['expected'];
+    }
+    if (typeof body['actual'] === 'string' || body['actual'] === null) {
+        detail.actual = body['actual'];
+    }
+    if (typeof body['message'] === 'string') {
+        detail.message = body['message'];
     }
     return detail;
 }

@@ -763,7 +763,13 @@ export type NodeClient = {
     keyHash: string;
   }): Promise<void>;
   deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
-  queryAll(opts: { schemaHash: string; fields: string[] }): Promise<QueryResponse>;
+  queryAll(opts: {
+    schemaHash: string;
+    fields: string[];
+    /** Admin/offline unfiltered drain only — product paths must use keys/indexes. */
+    allowFullScan?: boolean;
+    filter?: { HashKey?: string; [k: string]: unknown };
+  }): Promise<QueryResponse>;
   // Single bounded page — ONE /api/query round trip, no pagination loop, no
   // dedup/total_count guards. For probes and best-effort hint decoration that
   // only need a small sample of rows (projected fields, capped limit) and must
@@ -955,7 +961,12 @@ export function newNodeClient(opts: {
   // owner-session token attaches to the SDK's consent/mutation calls too, and
   // an invalidation-after-403 re-pair is reflected without rebuilding the
   // transport.
-  const sdkTransport = fetchTransport(url, { "X-User-Hash": userHash }, sessionHeader, socketPath);
+  const sdkTransport = fetchTransport(
+    url,
+    { "X-User-Hash": userHash, "X-LastDB-Client": "brain" },
+    sessionHeader,
+    socketPath,
+  );
 
   // SDK clients constructed here never use the SDK's capability store —
   // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
@@ -1078,21 +1089,48 @@ export function newNodeClient(opts: {
   const queryPageSdk = async (
     schemaHash: string,
     filter: SdkQueryFilter,
+    opts?: { allowFullScan?: boolean },
   ): Promise<SdkQueryResult> => {
     try {
-      return await withSessionRepair(() => sdkClient(null).query(schemaHash, filter));
+      return await withSessionRepair(() =>
+        sdkClient(null).query(schemaHash, filter, {
+          ...(opts?.allowFullScan === true ? { allowFullScan: true } : {}),
+        }),
+      );
     } catch (err) {
       throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
     }
   };
 
+  // Unfiltered corpus drains (list / BM25 warm) are admin bulk: Mini hard-refuses
+  // product full-schema scans unless X-LastDB-Allow-Full-Scan is set. Point reads
+  // stay on queryByKey (no header).
   const queryAllGuarded = async ({
     schemaHash,
     fields,
+    allowFullScan,
+    filter,
   }: {
     schemaHash: string;
     fields: string[];
+    allowFullScan?: boolean;
+    filter?: { HashKey?: string; [k: string]: unknown };
   }): Promise<QueryResponse> => {
+    // Keyed filters never need the admin full-scan header.
+    const keyed =
+      filter !== undefined &&
+      typeof filter === "object" &&
+      filter !== null &&
+      ("HashKey" in filter || "HashRangeKey" in filter);
+    if (!keyed && allowFullScan !== true) {
+      throw new FbrainError({
+        code: "full_scan_not_allowed",
+        message:
+          `queryAll on schema ${schemaHash.slice(0, 12)}… has no key filter and allowFullScan is not set — ` +
+          `product paths must use HashKey/index; pass allowFullScan only for admin seed/offline bulk.`,
+        hint: "Use queryByKey / RecordListIndex / TagIndex, or allowFullScan: true for deliberate admin drains.",
+      });
+    }
     // The node's /api/query handler silently defaults to limit=100
     // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
     // does NOT support a body-side tag/status filter — so any caller
@@ -1127,11 +1165,16 @@ export function newNodeClient(opts: {
     let offset = 0;
     let lastTotalCount: number | null = null;
     for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-      const pageResult = await queryPageSdk(schemaHash, {
-        fields,
-        limit: QUERY_PAGE_SIZE,
-        offset,
-      });
+      const pageResult = await queryPageSdk(
+        schemaHash,
+        {
+          fields,
+          limit: QUERY_PAGE_SIZE,
+          offset,
+          ...(filter ? { filter: filter as SdkQueryFilter["filter"] } : {}),
+        },
+        keyed ? undefined : { allowFullScan: true },
+      );
       const pageResults = fromSdkRows(pageResult.rows);
       if (pageResult.page !== null) lastTotalCount = pageResult.page.totalCount;
       let newOnPage = 0;
@@ -1421,23 +1464,30 @@ export function newNodeClient(opts: {
       // writing a no-op atom rewriting the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash);
     },
-    async queryAll({ schemaHash, fields }) {
-      return queryAllGuarded({ schemaHash, fields });
+    async queryAll({ schemaHash, fields, allowFullScan, filter }) {
+      return queryAllGuarded({ schemaHash, fields, allowFullScan, filter });
     },
     async queryPage({ schemaHash, fields, limit }) {
       // One page, first offset, caller-capped limit. Intentionally no
       // has_more follow-up and none of queryAll's pagination guards — the
       // contract is "a small sample, one round trip", and the two callers
       // (empty-brain probe, nearest-slug hint scan) are explicitly
-      // best-effort over whatever the first page holds.
-      const page = await queryPageSdk(schemaHash, {
-        fields,
-        limit,
-        offset: 0,
-      });
+      // best-effort over whatever the first page holds. Still unfiltered →
+      // admin full-scan header (Mini refuse otherwise).
+      const page = await queryPageSdk(
+        schemaHash,
+        {
+          fields,
+          limit,
+          offset: 0,
+        },
+        { allowFullScan: true },
+      );
       return fromSdkRows(page.rows);
     },
     async queryByKey({ schemaHash, fields, keyHash }) {
+      // Pure HashKey point-read — never fall back to a full schema drain.
+      // Mini refuses unfiltered product scans; a missing row is null, not a scan.
       const page = await queryPageSdk(schemaHash, {
         fields,
         filter: { HashKey: keyHash },
@@ -1445,13 +1495,7 @@ export function newNodeClient(opts: {
         offset: 0,
       });
       const results = fromSdkRows(page.rows);
-      const row = findQueryRowByKey(results, keyHash);
-      if (row) return row;
-      if (queryByKeyFilterLooksIgnored(page, results)) {
-        const fallback = await queryAllGuarded({ schemaHash, fields });
-        return findQueryRowByKey(fallback.results, keyHash);
-      }
-      return null;
+      return findQueryRowByKey(results, keyHash);
     },
     async search(query, searchOpts) {
       const schemaTargets = uniqueStrings(searchOpts?.schemas ?? []);
@@ -1566,6 +1610,7 @@ async function localSearchFallback(
   queryPage: (
     schemaHash: string,
     filter: SdkQueryFilter,
+    opts?: { allowFullScan?: boolean },
   ) => Promise<SdkQueryResult>,
   verbose: Verbose,
 ): Promise<NativeIndexHit[]> {
@@ -1577,11 +1622,17 @@ async function localSearchFallback(
 
   const docs: LocalSearchDoc[] = [];
   for (const schemaName of schemas) {
-    const page = await queryPage(schemaName, {
-      fields: LOCAL_SEARCH_FIELDS,
-      limit: QUERY_PAGE_SIZE,
-      offset: 0,
-    });
+    // Unfiltered page sample for local keyword fallback — admin full-scan header
+    // required (Mini refuses bare product scans; /api/app/search is preferred).
+    const page = await queryPage(
+      schemaName,
+      {
+        fields: LOCAL_SEARCH_FIELDS,
+        limit: QUERY_PAGE_SIZE,
+        offset: 0,
+      },
+      { allowFullScan: true },
+    );
     for (const row of fromSdkRows(page.rows)) {
       const fields = row.fields ?? {};
       const title = stringValue(fields.title);
@@ -1704,12 +1755,6 @@ function findQueryRowByKey(rows: QueryRow[], keyHash: string): QueryRow | null {
   return null;
 }
 
-function queryByKeyFilterLooksIgnored(body: SdkQueryResult, results: QueryRow[]): boolean {
-  if (body.page?.hasMore === true) return true;
-  if (results.length > 1) return true;
-  return body.page !== null && body.page.totalCount > results.length;
-}
-
 function numField(obj: Record<string, unknown>, key: string): number {
   const v = obj[key];
   return typeof v === "number" ? v : 0;
@@ -1752,7 +1797,13 @@ async function callNodeRaw(
     body,
     verbose,
     service: "node",
-    headers: { "X-User-Hash": userHash, ...(extraHeaders ?? {}) },
+    // X-LastDB-Client is a best-effort ops label for Mini request telemetry
+    // (not a security boundary).
+    headers: {
+      "X-User-Hash": userHash,
+      "X-LastDB-Client": "brain",
+      ...(extraHeaders ?? {}),
+    },
     socketPath,
   });
 }

@@ -82,7 +82,8 @@ export async function runUsageReport(
     const fields = fieldsFor(type);
     let rows: QueryRow[];
     try {
-      const res = await node.queryAll({ schemaHash, fields });
+      // Admin diagnostics only — not a product hot path.
+      const res = await node.queryAll({ schemaHash, fields, allowFullScan: true });
       rows = res.results;
     } catch (err) {
       verbose?.(

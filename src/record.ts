@@ -335,21 +335,64 @@ export function arrayStringField(f: Record<string, unknown>, key: string): strin
   return [];
 }
 
+/** Config shape required for product listRecords (index-first, no silent scan). */
+export type ListRecordsCfg = { schemaHashes: Record<string, string> };
+
+/**
+ * Product list of one record type: RecordListIndex HashKey point-read first.
+ * Cold seed (index miss) is the only allowFullScan path — then product reads
+ * stay keyed. `cfg` is REQUIRED so omit-cfg callers cannot silently full-scan.
+ */
 export async function listRecords(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
+  cfg: ListRecordsCfg,
 ): Promise<FbrainRecord[]> {
-  const res = await node.queryAll({ schemaHash, fields: fieldsFor(type) });
-  return res.results.map((row) => rowToRecord(row, type));
+  const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
+  const indexed = await readTypeListIndex(node, cfg, type);
+  if (indexed !== null) {
+    return indexed.filter((r) => !isTombstoned(r));
+  }
+  // Cold seed once with admin full scan, then product reads stay keyed.
+  return listRecordsAdminScan(node, type, schemaHash, {
+    seedIndex: async (records) => {
+      try {
+        await writeTypeListIndex(node, cfg, type, records);
+      } catch {
+        /* best-effort */
+      }
+    },
+  });
 }
 
-// The body-less identity of a live record — slug, when it last changed, its
-// tags, and its status. This is the SHAPE the BM25 cache fingerprint is
-// computed over (see `computeFingerprint`, which only hashes type/slug/
-// updatedAt), so a record listed this way produces the same fingerprint as
-// one fetched in full. `tags`/`status` ride along so `fbrain list` can filter
-// (--status, --tag) and sort a corpus without ever fetching title/body.
+/**
+ * Explicit admin/offline full-schema drain. For migrate, reindex, doctor, and
+ * index cold-seed only — never for product CLI/MCP hot paths.
+ */
+export async function listRecordsAdminScan(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  opts?: { seedIndex?: (records: FbrainRecord[]) => Promise<void>; includeTombstones?: boolean },
+): Promise<FbrainRecord[]> {
+  const res = await node.queryAll({
+    schemaHash,
+    fields: fieldsFor(type),
+    allowFullScan: true,
+  });
+  const allRecords = res.results.map((row) => rowToRecord(row, type));
+  const records = opts?.includeTombstones === true
+    ? allRecords
+    : allRecords.filter((r) => !isTombstoned(r));
+  if (opts?.seedIndex) await opts.seedIndex(records);
+  return records;
+}
+
+// The body-less identity of a live record — slug, when it last changed, and
+// its tags (needed only to drop tombstones). This is the SHAPE the BM25 cache
+// fingerprint is computed over (see `computeFingerprint`), so a record listed
+// this way produces the same fingerprint as one fetched in full.
 export type RecordKey = {
   type: RecordType;
   slug: string;
@@ -359,35 +402,63 @@ export type RecordKey = {
 };
 
 // The minimal `/api/query` projection that still answers "did the corpus
-// change?" AND lets `fbrain list` filter/sort without a body fetch. `ask`
-// runs this BEFORE deciding whether to do a full body fetch: on a warm cache
-// hit the body fetch is skipped entirely, turning the corpus load from
-// O(all records, full bodies) into O(this cheap listing). We pull slug +
-// updated_at for the fingerprint, tags to drop tombstones AND to answer
-// `--tag`, and status to answer `--status` — all cheap scalar/array fields.
-// Critically NO `body` / `title` — those are the heavy fields whose repeated
-// fetch this card removes.
+// change?". `ask` runs this BEFORE deciding whether to do a full body fetch:
+// on a warm cache hit the body fetch is skipped entirely, turning the corpus
+// load from O(all records, full bodies) into O(this cheap listing). We pull
+// slug + updated_at for the fingerprint, and tags only to drop tombstones (a
+// soft-deleted record must not contribute to the fingerprint, exactly as the
+// full corpus build excludes it). Critically NO `body` / `title` / `status` —
+// those are the heavy fields whose repeated fetch this card removes.
 //
 // `computeFingerprint` over the returned keys MUST equal the fingerprint a
 // full `loadBm25Documents` + `BM25Index.build` stamps for the same corpus, so
 // the two paths share `tombstone` semantics: both drop `TOMBSTONE_TAG` rows.
-// (`computeFingerprint` only reads type/slug/updatedAt off each key, so the
-// extra status/tags fields here don't perturb it.)
 export async function listRecordKeys(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
+  cfg: ListRecordsCfg,
+  opts: { seedOnMiss?: boolean } = {},
 ): Promise<RecordKey[]> {
+  const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
+  const records = await readTypeListIndex(node, cfg, type);
+  if (records !== null) {
+    return records
+      .filter((r) => !isTombstoned(r))
+      .map((r) => ({
+        type,
+        slug: r.slug,
+        updatedAt: r.updated_at,
+        status: r.status,
+        tags: r.tags,
+      }));
+  }
+  if (opts.seedOnMiss) {
+    const seeded = await listRecordsAdminScan(node, type, schemaHash, {
+      seedIndex: async (recordsToSeed) => {
+        try {
+          await writeTypeListIndex(node, cfg, type, recordsToSeed);
+        } catch {
+          /* best-effort */
+        }
+      },
+    });
+    return seeded.map((r) => ({
+      type,
+      slug: r.slug,
+      updatedAt: r.updated_at,
+      status: r.status,
+      tags: r.tags,
+    }));
+  }
   const res = await node.queryAll({
     schemaHash,
     fields: ["slug", "tags", "updated_at", "status"],
+    allowFullScan: true,
   });
   const keys: RecordKey[] = [];
   for (const row of res.results) {
     const f = (row.fields ?? {}) as Record<string, unknown>;
-    // Reuse the same tombstone test the full path uses: build the tag list
-    // through the shared array parser so a phantom empty tag / string-encoded
-    // list can't make the two paths disagree on what's live.
     const tags = arrayStringField(f, "tags");
     if (tags.includes(TOMBSTONE_TAG)) continue;
     keys.push({
@@ -796,6 +867,7 @@ export async function hydrateSchemaBySlug(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
+  cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
@@ -804,7 +876,8 @@ export async function hydrateSchemaBySlug(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    const list = await listRecords(node, type, schemaHash);
+    // Product path: listRecords requires cfg → RecordListIndex, never silent scan.
+    const list = await listRecords(node, type, schemaHash, cfg);
     if (list.length > 0) {
       const bySlug = new Map<string, FbrainRecord>();
       for (const r of list) {
@@ -834,6 +907,7 @@ export async function findChildTasksByDesign(
   node: NodeClient,
   taskSchemaHash: string,
   designSlug: string,
+  cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<FbrainRecord[]> {
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
@@ -842,7 +916,8 @@ export async function findChildTasksByDesign(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    const list = await listRecords(node, "task", taskSchemaHash);
+    // Product path (brain get design): index-first via listRecords+cfg.
+    const list = await listRecords(node, "task", taskSchemaHash, cfg);
     if (list.length > 0) {
       return list.filter(
         (r) => !isTombstoned(r) && r.design_slug === designSlug,

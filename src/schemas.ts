@@ -1,5 +1,11 @@
 // Schema definitions for fbrain's record types.
 //
+// Pattern status: fbrain's per-kind, purpose-split schemas are
+// grandfathered historical catalog identities. Do not copy this as the
+// default pattern for new apps; decision-2026-07-16-schema-identity-system-treatment
+// says new apps use starter templates plus an explicit `kind` field for
+// app-level meaning.
+//
 // fbrain registers one schema per record type, plus internal support schemas:
 //
 //   - **Design**, **Task** — Phase 1, unchanged.
@@ -40,9 +46,6 @@
 // and the node resolves short names to the fbrain/* namespace at boot.
 export const OWNER_APP_ID = "fbrain";
 
-// "Any" is fold_db's escape-hatch value type — used only for the attachment
-// `file` field, whose value is the node-written `$lastdb_file` pointer JSON
-// object (not a string).
 export type FieldType = "String" | "Any" | { Array: "String" };
 
 export type SchemaDefinition = {
@@ -256,8 +259,10 @@ export const taskSchema: AddSchemaRequest = {
 };
 
 // Per-kind schemas, structurally identical (7 fields) and distinguished
-// solely by descriptive_name + purpose_statement. The purpose-statement
-// language is the same family used in the design doc.
+// solely by descriptive_name + purpose_statement. This is retained for
+// fbrain's existing catalog identities; new apps should use schema starter
+// templates plus a `kind` discriminator per
+// decision-2026-07-16-schema-identity-system-treatment.
 export const conceptSchema: AddSchemaRequest = phase6Schema(
   "Concept",
   "Reusable framework, pattern, or protocol recorded for cross-session reuse",
@@ -394,6 +399,7 @@ export function recordTypeCount(): number {
 // registered and stored in config like other fbrain schemas, but never appears
 // on user-facing list/get/search surfaces.
 export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
+export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 // File attachments (`fbrain attach` / `attachments` / `detach` /
 // `attachment get`). Two internal support schemas, NOT RecordTypes.
 // Attachments stay ADDITIVE by design: registering these schemas changes no
@@ -403,6 +409,9 @@ export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
 export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
 export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";
+// Per-type rollup so list/ask BM25 never full-schema-scans product record
+// tables (design-lastdb-scan-deprecation-path). Key = record type name.
+export const RECORD_LIST_INDEX_SCHEMA_KEY = "__recordlistindex__";
 
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
@@ -434,6 +443,59 @@ export const tagIndexSchema: AddSchemaRequest = {
       members: GENERAL,
       created_at: GENERAL,
       updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+export const adminSnapshotSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainAdminSnapshot",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainAdminSnapshot",
+    purpose_statement:
+      "Privacy-safe fbrain admin dashboard rollup for delivery as a LastDB slice; stores counts and short summaries only, never full brain bodies or secrets",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [
+      "slug",
+      "source_app",
+      "schema_version",
+      "captured_at",
+      "type_counts_json",
+      "open_decisions_json",
+      "active_programs_head_json",
+      "recent_heartbeats_json",
+    ],
+    field_types: {
+      slug: "String",
+      source_app: "String",
+      schema_version: "String",
+      captured_at: "String",
+      type_counts_json: "String",
+      open_decisions_json: "String",
+      active_programs_head_json: "String",
+      recent_heartbeats_json: "String",
+    },
+    field_descriptions: {
+      slug: "stable snapshot record id, normally admin-brain-snapshot",
+      source_app: "producer app id",
+      schema_version: "snapshot payload schema version",
+      captured_at: "RFC 3339 capture timestamp",
+      type_counts_json: "JSON object of live record counts by fbrain type",
+      open_decisions_json: "JSON array of open decision slugs and titles only",
+      active_programs_head_json: "JSON array containing a short active-programs rollup head",
+      recent_heartbeats_json: "JSON array of recent heartbeat ids, timestamps, and outcomes",
+    },
+    field_data_classifications: {
+      slug: GENERAL,
+      source_app: GENERAL,
+      schema_version: GENERAL,
+      captured_at: GENERAL,
+      type_counts_json: GENERAL,
+      open_decisions_json: GENERAL,
+      active_programs_head_json: GENERAL,
+      recent_heartbeats_json: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -507,13 +569,15 @@ export const attachmentIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
-// LEGACY (v1) — content-addressed attachment bytes stored base64 in a record,
-// keyed by SHA-256 of the raw file. Superseded by `attachmentFileSchema`
-// (BrainAttachmentFile, below): v2 stores bytes through the node's file-blob
-// plane (`POST /api/db/file-blob` → encrypted CAS blob in B2, metered as
-// file bytes) and keeps only a `$lastdb_file` pointer in the DB. This schema
-// stays declared so `fbrain attachments migrate` can still READ v1 blob
-// records and move them into the file plane; nothing writes it anymore.
+// Content-addressed attachment bytes, keyed by SHA-256 of the raw file. This
+// is the same "dev-node stand-in for the app-scoped CAS blob plane" pattern
+// lastgit uses (LastgitPackBlob): Mini/lastdbd's `/api/app/blob/cas/sha256/*`
+// routes are structurally absent (content-free 404), so v1 stores base64
+// bytes in a no_index record field. The blob plane is a storage detail hidden
+// behind src/attachments.ts — when the node grows real CAS routes (fold
+// docs/designs/cloud-file-blobs-on-demand-sync.md P1/P2), only that module
+// changes. `embedding: "never"` + no_index/binary keep the bytes out of every
+// search index by construction.
 export const attachmentBlobSchema: AddSchemaRequest = {
   schema: {
     name: "BrainAttachmentBlob",
@@ -557,15 +621,8 @@ export const attachmentBlobSchema: AddSchemaRequest = {
 };
 
 // v2 attachment storage: one BrainAttachmentFile record per unique content
-// hash. The raw bytes do NOT live in this record — `POST /api/db/file-blob`
-// uploads them as an encrypted CAS blob to B2 (`{scope}/cas/sha256/…`,
-// metered as file_reference_bytes; fold
-// docs/designs/cloud-file-blobs-on-demand-sync.md) and persists the returned
-// `$lastdb_file` pointer into the `file` field here. The pointer is a JSON
-// object (blob_ref, file_hash, cipher_suite, dek, …), hence field type `Any`.
-// Reads go through `POST /api/db/fetch-file-blob` with that pointer and are
-// sha256-verified against `content_hash`. Every field is no_index, so nothing
-// about attachment content enters BM25/vector search.
+// hash. The raw bytes do not live in this record; the node's file-blob plane
+// stores the encrypted CAS blob and returns a $lastdb_file pointer in `file`.
 export const attachmentFileSchema: AddSchemaRequest = {
   schema: {
     name: "BrainAttachmentFile",
@@ -601,63 +658,50 @@ export const attachmentFileSchema: AddSchemaRequest = {
       content_hash: GENERAL,
       size: GENERAL,
       media_type: GENERAL,
-      file: GENERAL,
+      file: { sensitivity_level: 0, data_domain: "file-reference" },
       created_at: GENERAL,
     },
   },
   mutation_mappers: {},
 };
 
-export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__adminsnapshot__";
+/** Fixed key prefix: each product RecordType has one rollup row keyed by type name. */
+export const RECORD_LIST_INDEX_FIELDS = ["key", "payload_json", "updated_at"] as const;
 
-export const adminSnapshotSchema: AddSchemaRequest = {
+/**
+ * Thin per-type rollup of fbrain records so `list` / BM25 corpus load never
+ * full-schema-scans product tables. Patched on put/delete; cold-seeded once
+ * with an admin full scan when the index row is missing.
+ */
+export const recordListIndexSchema: AddSchemaRequest = {
   schema: {
-    name: "AdminBrainSnapshot",
+    name: "RecordListIndex",
     owner_app_id: OWNER_APP_ID,
-    descriptive_name: "AdminBrainSnapshot",
+    descriptive_name: "RecordListIndex",
     purpose_statement:
-      "Privacy-safe fbrain admin snapshot: counts and short summaries only (never full record bodies), delivered to the admin kanban-consumer recipient for fleet visibility",
+      "Per-type rollup of fbrain records so list and BM25 never full-schema-scan product record tables",
     schema_type: "Hash",
-    key: { hash_field: "slug" },
-    fields: [
-      "slug",
-      "source_app",
-      "schema_version",
-      "captured_at",
-      "type_counts_json",
-      "open_decisions_json",
-      "active_programs_head_json",
-      "recent_heartbeats_json",
-    ],
+    key: { hash_field: "key" },
+    fields: ["key", "payload_json", "updated_at"],
     field_types: {
-      slug: "String",
-      source_app: "String",
-      schema_version: "String",
-      captured_at: "String",
-      type_counts_json: "String",
-      open_decisions_json: "String",
-      active_programs_head_json: "String",
-      recent_heartbeats_json: "String",
+      key: "String",
+      payload_json: "String",
+      updated_at: "String",
     },
     field_descriptions: {
-      slug: "reserved admin-brain-snapshot record slug",
-      source_app: "publishing app id, always fbrain",
-      schema_version: "snapshot schema version marker",
-      captured_at: "RFC 3339 timestamp the snapshot was captured",
-      type_counts_json: "JSON: record count per RecordType",
-      open_decisions_json: "JSON: open decision slug + title + status lines",
-      active_programs_head_json: "JSON: active-programs head lines (slug/title/status)",
-      recent_heartbeats_json: "JSON: recent routine heartbeat slug/ts/ok tuples",
+      key: "record type name (design|task|concept|...)",
+      payload_json: "JSON array of full FbrainRecord objects for that type",
+      updated_at: "RFC 3339 timestamp of the last index patch",
+    },
+    field_classifications: {
+      key: ["no_index", "metadata"],
+      payload_json: ["no_index", "metadata"],
+      updated_at: ["no_index", "metadata"],
     },
     field_data_classifications: {
-      slug: GENERAL,
-      source_app: GENERAL,
-      schema_version: GENERAL,
-      captured_at: GENERAL,
-      type_counts_json: GENERAL,
-      open_decisions_json: GENERAL,
-      active_programs_head_json: GENERAL,
-      recent_heartbeats_json: GENERAL,
+      key: GENERAL,
+      payload_json: GENERAL,
+      updated_at: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -777,6 +821,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     extraKeys: [TAG_INDEX_SCHEMA_KEY],
   },
   {
+    key: ADMIN_SNAPSHOT_SCHEMA_KEY,
+    schema: adminSnapshotSchema,
+    types: [],
+    extraKeys: [ADMIN_SNAPSHOT_SCHEMA_KEY],
+  },
+  {
     key: ATTACHMENT_INDEX_SCHEMA_KEY,
     schema: attachmentIndexSchema,
     types: [],
@@ -793,6 +843,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: attachmentFileSchema,
     types: [],
     extraKeys: [ATTACHMENT_FILE_SCHEMA_KEY],
+  },
+  {
+    key: RECORD_LIST_INDEX_SCHEMA_KEY,
+    schema: recordListIndexSchema,
+    types: [],
+    extraKeys: [RECORD_LIST_INDEX_SCHEMA_KEY],
   },
 ];
 

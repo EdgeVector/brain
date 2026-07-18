@@ -178,6 +178,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `fbrain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `brain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
+| `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
 | `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every brain read path treats the record as gone (see [Delete](#delete)) |
 | `brain reindex [--type T] [--dry-run] [--tags] [--backlinks]` | Re-puts every live record so fold_db refreshes its embedding entry, or rebuilds secondary indexes with `--tags` / `--backlinks` (see [Recovery](#recovery)) |
 | `brain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.brain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
@@ -343,6 +344,44 @@ Re-running on the same day updates that date's line in-place (the report is a sn
   - `--usage-path PATH` — override the daily-summary file
 
 This is the signal that backs the G0 definition-of-shipped: "2+ daily users with userHash-distinguishable writes for 7 consecutive days." Read writes are not counted — only new records (filtered by `created_at`) — because adoption is about people capturing knowledge, not querying it.
+
+## Admin snapshot deliver
+
+`brain admin-snapshot` dogfoods the same Mini → Exemem → admin path as kanban /
+routines deliver. It publishes a **privacy-safe** rollup (never full brain
+bodies or secrets) into the internal `BrainAdminSnapshot` schema, then stages
+and optionally approve-sends a `delivery_slice` to the **existing admin
+kanban-consumer** identity (no second consumer enroll).
+
+Payload fields:
+
+- `type_counts_json` — live record counts by type
+- `open_decisions_json` — live open-decisions ledger lines (slug + short title only)
+- `active_programs_head_json` — short head of the active-programs rollup
+- `recent_heartbeats_json` — recent routine heartbeats as `{slug, ts, ok}`
+- `captured_at`, `source_app`, `schema_version`
+
+```sh
+# 1. Publish the slim snapshot on Mini (declares schema on first run)
+brain admin-snapshot publish --json
+brain admin-snapshot publish --dry-run --json
+
+# 2. Stage a delivery to the admin kanban-consumer (public keys only)
+export FBRAIN_ADMIN_RECIPIENT_PUBKEY=...          # ed25519 from kanban-consumer bundle
+export FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY=...      # x25519
+export FBRAIN_ADMIN_MESSAGING_PSEUDONYM=...
+
+brain admin-snapshot deliver --dry-run --json
+brain admin-snapshot deliver --max-records 5
+brain admin-snapshot deliver --approve --max-records 5
+```
+
+Recipient flags may also use the `ROUTINES_ADMIN_*` aliases shared with
+`routines deliver-status`. Without `--approve`, the command stages only and
+prints the pending `delivery_id`. With `--approve`, Mini seals and sends a
+`delivery_slice`; evidence is non-secret (`delivery_id`, shared count,
+message type, schema hash). Mailbox poll + `openDelivery` stay on the admin
+SPA / consumer tooling (same as kanban).
 
 ## Sharing
 

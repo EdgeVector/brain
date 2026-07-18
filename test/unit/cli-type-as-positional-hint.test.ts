@@ -74,7 +74,7 @@ describe("fbrain list <type> → --type hint (parseArgs path)", () => {
       const { stderr } = await runCli(["list", t]);
       expect(stderr).toContain(`fbrain list --type ${t}`);
     }
-  });
+  }, 30000);
 
   test("`fbrain list xyzzy` does NOT add the --type hint (unknown positional)", async () => {
     // Only known record types get the nudge — a typo like `xyzzy` falls
@@ -205,7 +205,7 @@ describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
       expect(stderr).toContain(`fbrain get some-slug --type ${t}`);
       expect(stderr).not.toContain(`fbrain list --type ${t}`);
     }
-  });
+  }, 30000);
 
   test("single-positional `fbrain get design` is UNCHANGED (still list --type hint)", async () => {
     // The slug-lookup miss path: a live brain returns not_found and

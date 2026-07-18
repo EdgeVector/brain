@@ -409,7 +409,7 @@ export async function resolveListEntries(
   for (const t of types) {
     let rs: FbrainRecord[];
     try {
-      rs = await listRecords(node, t, schemaHashFor(t, opts.cfg));
+      rs = await listRecords(node, t, schemaHashFor(t, opts.cfg), opts.cfg);
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) {
         opts.onSkippedTypes?.([t]);
@@ -463,7 +463,7 @@ export async function resolveListKeyEntries(
   for (const t of types) {
     let keys: RecordKey[];
     try {
-      keys = await listRecordKeys(node, t, schemaHashFor(t, opts.cfg));
+      keys = await listRecordKeys(node, t, schemaHashFor(t, opts.cfg), opts.cfg);
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) {
         opts.onSkippedTypes?.([t]);

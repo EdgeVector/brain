@@ -34,6 +34,7 @@ import {
   isTombstoned,
   listRecordKeys,
   listRecords,
+  listRecordsAdminScan,
   schemaHashFor,
   type FbrainRecord,
   type RecordKey,
@@ -426,9 +427,14 @@ export async function loadOrBuildBm25Index(
   node: NodeClient,
   cfg: Config,
   types: readonly RecordType[],
-  opts: { verbose?: Verbose; onRebuild?: (notice: Bm25RebuildNotice) => void } = {},
+  opts: {
+    verbose?: Verbose;
+    onRebuild?: (notice: Bm25RebuildNotice) => void;
+    seedListIndex?: boolean;
+  } = {},
 ): Promise<Bm25IndexLoad> {
-  const keys = await loadBm25Keys(node, cfg, types);
+  const seedListIndex = opts.seedListIndex ?? true;
+  const keys = await loadBm25Keys(node, cfg, types, { seedListIndex });
   const fingerprint = computeFingerprint(keys);
   const cached = loadCachedIndex(cfg.userHash, types);
   if (cached && cached.fingerprint === fingerprint) {
@@ -445,7 +451,7 @@ export async function loadOrBuildBm25Index(
   }
 
   opts.onRebuild?.({ types, keyCount: keys.length });
-  const built = await loadBm25Documents(node, cfg, types);
+  const built = await loadBm25Documents(node, cfg, types, { seedListIndex });
   const index = BM25Index.build(built.docs);
   saveCachedIndex(cfg.userHash, index, types);
   opts.verbose?.(
@@ -464,10 +470,13 @@ async function loadBm25Keys(
   node: NodeClient,
   cfg: Config,
   types: readonly RecordType[],
+  opts: { seedListIndex: boolean },
 ): Promise<RecordKey[]> {
   const keys: RecordKey[] = [];
   for (const t of types) {
-    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg));
+    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg), cfg, {
+      seedOnMiss: opts.seedListIndex,
+    });
     for (const k of typeKeys) keys.push(k);
   }
   return keys;
@@ -477,11 +486,14 @@ async function loadBm25Documents(
   node: NodeClient,
   cfg: Config,
   types: readonly RecordType[],
+  opts: { seedListIndex: boolean },
 ): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {
   const docs: BM25Document[] = [];
   const liveById = new Map<string, FbrainRecord>();
   for (const t of types) {
-    const records = await listRecords(node, t, schemaHashFor(t, cfg));
+    const records = opts.seedListIndex
+      ? await listRecords(node, t, schemaHashFor(t, cfg), cfg)
+      : await listRecordsAdminScan(node, t, schemaHashFor(t, cfg));
     for (const r of records) {
       if (isTombstoned(r)) continue;
       docs.push({

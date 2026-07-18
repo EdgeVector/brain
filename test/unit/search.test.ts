@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { askCmd } from "../../src/commands/ask.ts";
 import { dedupeHits, isWeakMatch, searchCmd } from "../../src/commands/search.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
-import { RECORD_TYPES } from "../../src/schemas.ts";
+import { RECORD_LIST_INDEX_SCHEMA_KEY, RECORD_TYPES } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
@@ -201,8 +201,43 @@ let savedCacheEnv: string | undefined;
 type MockResponse = { status: number; body?: unknown };
 
 function installSequencedMock(handler: (url: string, init?: RequestInit) => MockResponse): void {
+  const persistedRows = new Map<string, Map<string, Record<string, unknown>>>();
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
+    const rawBody = typeof init?.body === "string" ? init.body : "";
+    const parsedBody = rawBody.length > 0 ? JSON.parse(rawBody) as Record<string, unknown> : {};
+    if (url.includes("/api/query")) {
+      const schema = typeof parsedBody.schema_name === "string" ? parsedBody.schema_name : "";
+      const filter = parsedBody.filter as { HashKey?: unknown } | undefined;
+      const keyHash = typeof filter?.HashKey === "string" ? filter.HashKey : "";
+      const persisted = keyHash ? persistedRows.get(schema)?.get(keyHash) : undefined;
+      if (schema === cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY] && keyHash) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: persisted ? [{ fields: persisted, key: { hash: keyHash, range: null } }] : [],
+            total_count: persisted ? 1 : 0,
+            returned_count: persisted ? 1 : 0,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
+    if (url.includes("/api/mutation")) {
+      const schema = typeof parsedBody.schema === "string" ? parsedBody.schema : "";
+      const key = parsedBody.key_value as { hash?: unknown } | undefined;
+      const keyHash = typeof key?.hash === "string" ? key.hash : "";
+      const fields = parsedBody.fields_and_values as Record<string, unknown> | undefined;
+      if (schema && keyHash && fields) {
+        const byKey = persistedRows.get(schema) ?? new Map<string, Record<string, unknown>>();
+        byKey.set(keyHash, fields);
+        persistedRows.set(schema, byKey);
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const appSearch = appSearchAsLegacyNativeIndex(url, init);
     const next = appSearch
       ? adaptLegacyNativeIndexResponse(handler(appSearch.url, init))
@@ -569,7 +604,7 @@ describe("searchCmd", () => {
     const bodyFetches = Array.from(bodyQueryCounts.values()).reduce((a, b) => a + b, 0);
     expect(bodyFetches).toBe(0);
     const cheapChecks = Array.from(queryCounts.values()).reduce((a, b) => a + b, 0);
-    expect(cheapChecks).toBe(RECORD_TYPES.length);
+    expect(cheapChecks).toBe(0);
   });
 
   test("does not replace strong native vector results with BM25 keyword hits", async () => {
@@ -734,34 +769,22 @@ describe("searchCmd", () => {
     expect(rows[0]).toContain("Dogfood native index fallback");
   });
 
-  test("retries findBySlug past a transient empty /api/query slice and surfaces the hit", async () => {
+  test("skips a native hit when the keyed record read misses", async () => {
     // /api/query's top-100 slice is non-deterministic on a saturated daemon
     // (docs/phase-7-search-latency-spike.md H2 + PR #98). A bare findBySlug
     // can return null for a real row, which the pre-fix search command
     // misclassified as "stale" and silently dropped from the printed
     // results. Pin the retry hedge so a flaked first /api/query lands the
     // row on retry and the user still sees their match.
-    const recordRow = {
-      fields: {
-        slug: "flaky",
-        title: "Flaky design",
-        body: "...",
-        status: "draft",
-        tags: [],
-        created_at: "2026-01-01T00:00:00Z",
-        updated_at: "2026-01-01T00:00:00Z",
-      },
-      key: { hash: "flaky", range: null },
-    };
     let queryCalls = 0;
-    installSequencedMock((url) => {
+    installSequencedMock((url, _init) => {
       if (url.includes("/api/native-index/search")) {
         return {
           status: 200,
           body: {
             ok: true,
             results: [
-              hit({ slug: "flaky", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.42 } }),
+              hit({ slug: "flaky", schemaName: DESIGN_HASH, schema_display_name: "Design", metadata: { score: 0.72 } }),
             ],
             user_hash: cfg.userHash,
           },
@@ -769,24 +792,14 @@ describe("searchCmd", () => {
       }
       if (url.includes("/api/query")) {
         queryCalls++;
-        // First attempt models the top-100 slice flake — empty result for a
-        // row that is genuinely in the schema. Subsequent attempts surface
-        // it. Without the retry hedge in search.ts, the empty first slice
-        // would drop the hit as "stale".
-        if (queryCalls === 1) {
-          return { status: 200, body: { ok: true, results: [], total_count: 0, returned_count: 0 } };
-        }
-        return { status: 200, body: { ok: true, results: [recordRow], total_count: 1, returned_count: 1 } };
+        return { status: 200, body: { ok: true, results: [], total_count: 0, returned_count: 0 } };
       }
       return { status: 404, body: { error: "unknown" } };
     });
     const lines: string[] = [];
     await searchCmd({ cfg, query: "anything", print: (l) => lines.push(l) });
-    expect(queryCalls).toBeGreaterThanOrEqual(2);
-    const rows = rowsOf(lines);
-    expect(rows.length).toBe(1);
-    expect(rows[0]).toContain("flaky");
-    expect(rows[0]).toContain("Flaky design");
+    expect(queryCalls).toBeGreaterThanOrEqual(1);
+    expect(lines.join("\n")).not.toContain("flaky");
   }, 10_000);
 
   test("hydrates ONCE per distinct schema, not once per hit (N+1 fix)", async () => {

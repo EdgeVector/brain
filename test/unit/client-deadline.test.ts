@@ -53,7 +53,7 @@ describe("request + response-body deadline", () => {
       const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
       const start = Date.now();
       const err = await c
-        .queryAll({ schemaHash: "h", fields: ["slug"] })
+        .queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true })
         .then(() => null)
         .catch((e: unknown) => e);
       // Must abort at the deadline, not hang on the unbounded body read.
@@ -73,7 +73,7 @@ describe("request + response-body deadline", () => {
       const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
       const start = Date.now();
       await c
-        .queryAll({ schemaHash: "h", fields: ["slug"] })
+        .queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true })
         .catch(() => {});
       const elapsed = Date.now() - start;
       // It waited at least roughly the override before aborting (the default is

@@ -55,7 +55,7 @@ import { inMemoryCapabilityStore } from "../../src/keychain.ts";
 import { canonicalize, type JsonValue } from "../../src/jcs.ts";
 import { sha256Hex } from "../../src/hash.ts";
 import type { WriteNodeClient, WriteNodeClientOptions } from "../../src/write-context.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { buildTestCfg, TEST_HASHES, TEST_NODE_URL } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -697,7 +697,7 @@ describe("doctor verdict logic", () => {
     const unreachable = new FbrainError({
       code: "service_unreachable",
       message:
-        "node not reachable at http://127.0.0.1:9001 — run `fbrain doctor` for a full diagnosis.",
+        `node not reachable at ${TEST_NODE_URL} — run \`fbrain doctor\` for a full diagnosis.`,
     });
     const code = await doctor({
       configPath,
@@ -709,7 +709,7 @@ describe("doctor verdict logic", () => {
     const failLine = lines.find((l) => l.includes("[FAIL] node-reachable"));
     expect(failLine).toBeDefined();
     expect(failLine).not.toContain("fbrain doctor");
-    expect(failLine).toContain("node not reachable at http://127.0.0.1:9001");
+    expect(failLine).toContain(`node not reachable at ${TEST_NODE_URL}`);
   });
 
   // DX regression (29ced): a node that is REACHABLE but returns an HTTP 500
@@ -983,7 +983,7 @@ describe("doctor verdict logic", () => {
     const unreachable = new FbrainError({
       code: "service_unreachable",
       message:
-        "node not reachable at http://127.0.0.1:9001 — run `fbrain doctor` for a full diagnosis.",
+        `node not reachable at ${TEST_NODE_URL} — run \`fbrain doctor\` for a full diagnosis.`,
     });
     const baseNode = mockNodeClient({});
     const node: NodeClient = {
@@ -1003,7 +1003,7 @@ describe("doctor verdict logic", () => {
     const usageLine = lines.find((l) => l.startsWith("usage report failed:"));
     expect(usageLine).toBeDefined();
     expect(usageLine).not.toContain("fbrain doctor");
-    expect(usageLine).toContain("node not reachable at http://127.0.0.1:9001");
+    expect(usageLine).toContain(`node not reachable at ${TEST_NODE_URL}`);
   });
 
   // Regression: PR #40 added doctorReachabilityDetail() and used it in the
@@ -1339,7 +1339,7 @@ describe("doctor --freshness probes", () => {
     expect(lines.some((l) => l.includes("5/5 trials passed"))).toBe(true);
     expect(lines.some((l) => l.startsWith("[PASS] pollution-probe"))).toBe(true);
     // Each trial: 1 create + 1 update (cleanup tombstone). 5 trials = 10 mutations.
-    const creates = mutations.filter((m) => m.kind === "create");
+    const creates = mutations.filter((m) => m.kind === "create" && m.schemaHash === conceptHash);
     const cleanupUpdates = mutations.filter(
       (m) => m.kind === "update" && Array.isArray(m.fields["tags"]) && (m.fields["tags"] as string[]).includes(TOMBSTONE_TAG),
     );

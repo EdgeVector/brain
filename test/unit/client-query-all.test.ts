@@ -60,7 +60,7 @@ describe("newNodeClient.queryAll pagination guard", () => {
       },
     ]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
-    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"] });
+    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
     expect(r.results.map((x) => (x.fields as { slug: string }).slug)).toEqual(["a", "b", "c"]);
     expect(r.total_count).toBe(3);
     expect(r.returned_count).toBe(3);
@@ -92,7 +92,7 @@ describe("newNodeClient.queryAll pagination guard", () => {
       },
     ]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
-    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"] });
+    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
     expect(r.results.map((x) => (x.fields as { slug: string }).slug)).toEqual([
       "a",
       "b",
@@ -132,7 +132,7 @@ describe("newNodeClient.queryAll pagination guard", () => {
     ]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
     try {
-      await c.queryAll({ schemaHash: "h", fields: ["slug"] });
+      await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
       throw new Error("did not throw");
     } catch (err) {
       expect(err).toBeInstanceOf(FbrainError);
@@ -176,7 +176,7 @@ describe("newNodeClient.queryAll pagination guard", () => {
     ]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
     try {
-      await c.queryAll({ schemaHash: "h", fields: ["slug"] });
+      await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
       throw new Error("did not throw");
     } catch (err) {
       expect(err).toBeInstanceOf(FbrainError);
@@ -221,7 +221,7 @@ describe("newNodeClient.queryAll pagination guard", () => {
       },
     ]);
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
-    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"] });
+    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
     const slugs = r.results.map((x) => (x.fields as { slug: string }).slug);
     expect(new Set(slugs)).toEqual(new Set(["a", "b", "c", "d", "e"]));
     expect(slugs.length).toBe(5); // no duplicates in the returned list
@@ -257,7 +257,7 @@ describe("newNodeClient.queryByKey ignored-filter guard", () => {
     });
   });
 
-  test("falls back to guarded scan when node ignores HashKey filter past first page", async () => {
+  test("returns null rather than falling back to a scan when the keyed page misses", async () => {
     const rows = Array.from({ length: 1500 }, (_, i) => row(`r${i}`));
     rows[1200] = row("target");
     const { calls } = installMockSequence([
@@ -292,16 +292,12 @@ describe("newNodeClient.queryByKey ignored-filter guard", () => {
     const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
     const hit = await c.queryByKey?.({ schemaHash: "h", fields: ["slug"], keyHash: "target" });
 
-    expect(hit?.key?.hash).toBe("target");
-    expect(calls).toHaveLength(3);
+    expect(hit).toBeNull();
+    expect(calls).toHaveLength(1);
     expect(calls[0]?.body).toMatchObject({
       filter: { HashKey: "target" },
       limit: 1000,
       offset: 0,
     });
-    expect(calls[1]?.body).toMatchObject({ limit: 1000, offset: 0 });
-    expect(calls[1]?.body).not.toHaveProperty("filter");
-    expect(calls[2]?.body).toMatchObject({ limit: 1000, offset: 1000 });
-    expect(calls[2]?.body).not.toHaveProperty("filter");
   });
 });

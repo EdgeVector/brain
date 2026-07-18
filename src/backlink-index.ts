@@ -148,7 +148,7 @@ export async function rebuildBacklinkIndex(
   if (!tagIndexAvailable(cfg)) return { targetsIndexed: 0, membersIndexed: 0 };
 
   const byTarget = new Map<string, Set<string>>();
-  const list = opts.listRecords ?? ((type, hash) => listRecords(node, type, hash));
+  const list = opts.listRecords ?? ((type, hash) => listRecords(node, type, hash, cfg));
   const hashFor = opts.schemaHashFor ?? ((type) => schemaHashFor(type, cfg));
 
   for (const type of RECORD_TYPES) {
