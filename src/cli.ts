@@ -684,7 +684,7 @@ delete anyway — the tasks' design references are then left dangling.
 
 After delete, a slug is reusable: \`fbrain design new <same-slug>\` (no
 --force) will recreate it.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -708,6 +708,13 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     Repairs records written before the index existed or after
                     a best-effort backlink update failed. Standalone mode:
                     skips the embedding refresh.
+  --bm25            pre-warm the client-side BM25 search cache \`ask\`/\`search\`
+                    read on every call, from a full corpus scan. Read-only
+                    (no mutation, no --type narrowing — the cache is keyed by
+                    the same type set ask/search request). Run this after a
+                    bulk edit so the next \`ask\` hits a warm cache instead of
+                    paying for (and visibly noting) a live rebuild.
+                    Standalone mode: skips the embedding refresh.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
@@ -1033,6 +1040,7 @@ const REINDEX_OPTIONS = {
   "dry-run": { type: "boolean", default: false },
   tags: { type: "boolean", default: false },
   backlinks: { type: "boolean", default: false },
+  bm25: { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -3191,6 +3199,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values["dry-run"]) rOpts.dryRun = true;
   if (values.tags) rOpts.tags = true;
   if (values.backlinks) rOpts.backlinks = true;
+  if (values.bm25) rOpts.bm25 = true;
   await reindexCmd(rOpts);
   return 0;
 }

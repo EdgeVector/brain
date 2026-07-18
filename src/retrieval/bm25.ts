@@ -407,11 +407,26 @@ export function saveCachedIndex(
   }
 }
 
+// Fired exactly once, right before a cache MISS pays for the full-corpus
+// body fetch (`loadBm25Documents`) — never on a cache hit. This is the
+// contract chosen for the `kill-scan-brain` follow-up (option b in
+// design-lastdb-scan-deprecation-path): rather than a silent full-type
+// `listRecords` drain on every `ask`/`search` call that happens to hit a
+// cold/stale cache, the rebuild is made EXPLICIT and observable — callers
+// (ask.ts) surface it unconditionally (not gated behind --verbose) so a live
+// request-path bulk read is never invisible, and `fbrain reindex --bm25` (see
+// reindex.ts) gives an offline path to pre-warm the cache and avoid paying
+// this on the next query.
+export type Bm25RebuildNotice = {
+  types: readonly RecordType[];
+  keyCount: number;
+};
+
 export async function loadOrBuildBm25Index(
   node: NodeClient,
   cfg: Config,
   types: readonly RecordType[],
-  opts: { verbose?: Verbose } = {},
+  opts: { verbose?: Verbose; onRebuild?: (notice: Bm25RebuildNotice) => void } = {},
 ): Promise<Bm25IndexLoad> {
   const keys = await loadBm25Keys(node, cfg, types);
   const fingerprint = computeFingerprint(keys);
@@ -429,6 +444,7 @@ export async function loadOrBuildBm25Index(
     };
   }
 
+  opts.onRebuild?.({ types, keyCount: keys.length });
   const built = await loadBm25Documents(node, cfg, types);
   const index = BM25Index.build(built.docs);
   saveCachedIndex(cfg.userHash, index, types);

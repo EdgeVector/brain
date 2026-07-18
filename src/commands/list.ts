@@ -5,7 +5,6 @@ import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
-  compareByUpdatedThenSlug,
   hasAnyLiveRecord,
   findBySlug,
   isSchemaNotFoundReadError,
@@ -119,24 +118,57 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     return;
   }
 
-  const sweep = () => resolveListEntries(node, opts);
-  // The dogfood read-flake repro (2026-05-26): a status write lands, but
-  // the immediately-following filtered list returns empty for ~1s. Retry
-  // the sweep only when --status/--tag are present — without them, empty
-  // is a legitimate signal and burning the budget every invocation slows
-  // down genuinely-empty lists. The isHit predicate fires when the sweep
-  // sees any non-tombstoned row; the user filter is applied after, so a
-  // sweep that surfaces a row but the row doesn't match the filter still
-  // stops retrying (we're riding out the empty-sweep flake, not searching
-  // for a matching row). See withReadRetry in ../record.ts.
-  const wantsRetry = opts.status !== undefined || opts.tag !== undefined;
-  const all = wantsRetry
-    ? await withReadRetry(sweep, (acc) =>
-        acc.some(({ record }) => !isTombstoned(record)),
-      )
-    : await sweep();
+  // Body-less sweep: for the common --tag-less path this is a KEYS-ONLY
+  // listing (title/body are never fetched for the whole type — the fix this
+  // card lands); for --tag it's the tag-index sweep, already point-get-
+  // bounded by tag cardinality rather than corpus size, so a hydrated
+  // record is available immediately and is cached in `hydratedByKey` for
+  // reuse at hydrate time below (no re-fetch of a body we already have).
+  const hydratedByKey = new Map<string, FbrainRecord>();
+  let light: RecordKey[];
 
-  const filtered = all.filter(({ record }) => matchesListFilters(record, opts));
+  if (opts.tag) {
+    const sweep = () => resolveListEntries(node, opts);
+    // The dogfood read-flake repro (2026-05-26): a status write lands, but
+    // the immediately-following filtered list returns empty for ~1s. Retry
+    // the sweep — --tag always retries (mirrors the pre-existing contract).
+    // See withReadRetry in ../record.ts.
+    const all = await withReadRetry(sweep, (acc) =>
+      acc.some(({ record }) => !isTombstoned(record)),
+    );
+    light = all.map(({ type, record }) => {
+      hydratedByKey.set(recordKeyId(type, record.slug), record);
+      return {
+        type,
+        slug: record.slug,
+        status: record.status,
+        tags: record.tags,
+        updatedAt: record.updated_at,
+      };
+    });
+  } else {
+    const sweep = () => resolveListKeyEntries(node, opts);
+    // Retry only when --status is present — without it, empty is a
+    // legitimate signal and burning the budget every invocation slows down
+    // genuinely-empty lists. The isHit predicate fires when the sweep sees
+    // any (already tombstone-filtered) key; the user filter is applied
+    // after, so a sweep that surfaces a key that doesn't match the filter
+    // still stops retrying (we're riding out the empty-sweep flake, not
+    // searching for a matching row).
+    const wantsRetry = opts.status !== undefined;
+    const keyEntries = wantsRetry
+      ? await withReadRetry(sweep, (acc) => acc.length > 0)
+      : await sweep();
+    light = keyEntries.map(({ type, key }) => ({
+      type,
+      slug: key.slug,
+      status: key.status,
+      tags: key.tags,
+      updatedAt: key.updatedAt,
+    }));
+  }
+
+  const filtered = light.filter((key) => matchesListKeyFilters(key, opts));
 
   // Primary: newest updated_at first. Tie-breakers: type then slug, both
   // ascending — needed because the node's `/api/query` row order is
@@ -148,20 +180,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // millisecond-resolution so any two `put` / `status` / `link` calls in
   // the same ms collide. (type, slug) is globally unique — slugs aren't
   // unique across types but type+slug is — so the order is fully pinned.
-  //
-  // The (updated_at desc, slug asc) edges are shared with `fbrain get`'s
-  // child-task sort and live in `compareByUpdatedThenSlug`; the type
-  // tie-break is unique to `list` (get only ever sorts a single type) so
-  // it's injected between the date and slug edges here.
-  filtered.sort((a, b) => {
-    if (a.type !== b.type) {
-      const d =
-        Date.parse(b.record.updated_at) - Date.parse(a.record.updated_at);
-      if (d !== 0) return d;
-      return a.type < b.type ? -1 : 1;
-    }
-    return compareByUpdatedThenSlug(a.record, b.record);
-  });
+  filtered.sort(compareRecordKeysByUpdatedThenSlug);
 
   // `--count` short-circuit: emit only how many records match the
   // filters, before the row-shaping (offset/limit) and the empty-node
@@ -268,6 +287,28 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     return;
   }
 
+  // Hydrate ONLY the final page — a point-get per entry not already fetched
+  // by the --tag sweep. This is the crux of the fix: no matter how large the
+  // corpus, a bounded `-n N` (or the default cap) pays for at most N body
+  // fetches, never one full-type body fetch regardless of page size. A null
+  // point-get means the record was deleted between the sweep and this fetch
+  // (a stale race, not an error) — skip it, same as any other stale hit.
+  const hydrated: ListEntry[] = (
+    await Promise.all(
+      trimmed.map(async (e): Promise<ListEntry | null> => {
+        const cached = hydratedByKey.get(recordKeyId(e.type, e.slug));
+        if (cached) return { type: e.type, record: cached };
+        const record = await findBySlug(
+          node,
+          e.type,
+          schemaHashFor(e.type, opts.cfg),
+          e.slug,
+        );
+        return record ? { type: e.type, record } : null;
+      }),
+    )
+  ).filter((e): e is ListEntry => e !== null);
+
   // One JSON document — exact same field set the human table surfaces,
   // plus created_at/updated_at and the optional design_slug parent link.
   // Body intentionally omitted to keep list payloads compact; consumers
@@ -276,7 +317,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
-  const payload = trimmed.map(({ type, record }) => recordSummary(type, record));
+  const payload = hydrated.map(({ type, record }) => recordSummary(type, record));
   opts.onResult?.(payload);
 
   if (opts.fields !== undefined && opts.fields.length > 0) {
@@ -298,7 +339,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   }
 
   const lines = formatTable(
-    trimmed.map(({ type, record }) => {
+    hydrated.map(({ type, record }) => {
       const tags = record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
       return [type, record.slug, record.status, `${record.title}${tags}`];
     }),
@@ -436,13 +477,18 @@ export async function resolveListKeyEntries(
   return acc;
 }
 
-// `--status`/`--tag` are excluded from the `--count` fast path in `listCmd`,
-// so this only ever needs the `updatedSinceMs` edge of `matchesListFilters` —
-// tombstones are already dropped by `listRecordKeys`.
+// Key-based counterpart to `matchesListFilters` — same status/tag/
+// updatedSinceMs semantics, minus the `isTombstoned` check (tombstones are
+// already dropped by `listRecordKeys`). Used by both the `--count` fast path
+// (status/tag always undefined there) and the default row-listing sweep
+// (any combination), now that `RecordKey` carries status/tags alongside
+// updatedAt — no body fetch is needed to answer either filter.
 export function matchesListKeyFilters(
   key: RecordKey,
-  opts: Pick<ListOptions, "updatedSinceMs">,
+  opts: Pick<ListOptions, "status" | "tag" | "updatedSinceMs">,
 ): boolean {
+  if (opts.status && key.status !== opts.status) return false;
+  if (opts.tag && !key.tags.includes(opts.tag)) return false;
   if (
     opts.updatedSinceMs !== undefined &&
     !(Date.parse(key.updatedAt) >= opts.updatedSinceMs)
@@ -450,4 +496,28 @@ export function matchesListKeyFilters(
     return false;
   }
   return true;
+}
+
+// Stable identity for the hydration cache (`hydratedByKey` in `listCmd`) —
+// (type, slug) is globally unique, matching the sort tie-break below.
+function recordKeyId(type: RecordType, slug: string): string {
+  return `${type}::${slug}`;
+}
+
+// Same (updated_at desc, then type asc, then slug asc) ordering the old
+// record-based sort used, now over `RecordKey` so `listCmd` can sort before
+// ever fetching a body. Shares its (updated_at desc, slug asc) edges with
+// `compareByUpdatedThenSlug`; the type tie-break is unique to `list` (a
+// global sweep across types) so it's injected first here.
+export function compareRecordKeysByUpdatedThenSlug(
+  a: RecordKey,
+  b: RecordKey,
+): number {
+  if (a.type !== b.type) {
+    const d = Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+    if (d !== 0) return d;
+    return a.type < b.type ? -1 : 1;
+  }
+  const ts = Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+  return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
 }
