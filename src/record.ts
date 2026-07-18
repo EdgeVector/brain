@@ -344,28 +344,35 @@ export async function listRecords(
   return res.results.map((row) => rowToRecord(row, type));
 }
 
-// The body-less identity of a live record — slug, when it last changed, and
-// its tags (needed only to drop tombstones). This is the SHAPE the BM25 cache
-// fingerprint is computed over (see `computeFingerprint`), so a record listed
-// this way produces the same fingerprint as one fetched in full.
+// The body-less identity of a live record — slug, when it last changed, its
+// tags, and its status. This is the SHAPE the BM25 cache fingerprint is
+// computed over (see `computeFingerprint`, which only hashes type/slug/
+// updatedAt), so a record listed this way produces the same fingerprint as
+// one fetched in full. `tags`/`status` ride along so `fbrain list` can filter
+// (--status, --tag) and sort a corpus without ever fetching title/body.
 export type RecordKey = {
   type: RecordType;
   slug: string;
   updatedAt: string;
+  status: string;
+  tags: string[];
 };
 
 // The minimal `/api/query` projection that still answers "did the corpus
-// change?". `ask` runs this BEFORE deciding whether to do a full body fetch:
-// on a warm cache hit the body fetch is skipped entirely, turning the corpus
-// load from O(all records, full bodies) into O(this cheap listing). We pull
-// slug + updated_at for the fingerprint, and tags only to drop tombstones (a
-// soft-deleted record must not contribute to the fingerprint, exactly as the
-// full corpus build excludes it). Critically NO `body` / `title` / `status` —
-// those are the heavy fields whose repeated fetch this card removes.
+// change?" AND lets `fbrain list` filter/sort without a body fetch. `ask`
+// runs this BEFORE deciding whether to do a full body fetch: on a warm cache
+// hit the body fetch is skipped entirely, turning the corpus load from
+// O(all records, full bodies) into O(this cheap listing). We pull slug +
+// updated_at for the fingerprint, tags to drop tombstones AND to answer
+// `--tag`, and status to answer `--status` — all cheap scalar/array fields.
+// Critically NO `body` / `title` — those are the heavy fields whose repeated
+// fetch this card removes.
 //
 // `computeFingerprint` over the returned keys MUST equal the fingerprint a
 // full `loadBm25Documents` + `BM25Index.build` stamps for the same corpus, so
 // the two paths share `tombstone` semantics: both drop `TOMBSTONE_TAG` rows.
+// (`computeFingerprint` only reads type/slug/updatedAt off each key, so the
+// extra status/tags fields here don't perturb it.)
 export async function listRecordKeys(
   node: NodeClient,
   type: RecordType,
@@ -373,7 +380,7 @@ export async function listRecordKeys(
 ): Promise<RecordKey[]> {
   const res = await node.queryAll({
     schemaHash,
-    fields: ["slug", "tags", "updated_at"],
+    fields: ["slug", "tags", "updated_at", "status"],
   });
   const keys: RecordKey[] = [];
   for (const row of res.results) {
@@ -387,6 +394,8 @@ export async function listRecordKeys(
       type,
       slug: stringField(f, "slug"),
       updatedAt: stringField(f, "updated_at"),
+      status: stringField(f, "status"),
+      tags,
     });
   }
   return keys;

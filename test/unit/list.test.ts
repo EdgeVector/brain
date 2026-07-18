@@ -49,6 +49,18 @@ function spikeRow(slug: string, over: Partial<Fields> = {}): Fields {
 // returned for successive /api/query calls against that schema. Anything
 // not enqueued returns []. Non-query endpoints (autoIdentity, bootstrap)
 // get harmless OKs.
+//
+// Replay-last semantics: once the queue is down to its LAST entry, further
+// calls keep re-serving that same entry rather than falling off the end to
+// `[]`. This matters since the keys-first list path (this card) issues MORE
+// `/api/query` calls per schema than the old full-body sweep did — one for
+// the key-only listing, then one bounded point-get per row in the final
+// page (`findBySlug` → `queryByKey`, which ALSO posts to `/api/query`, just
+// with a `filter: {HashKey}` the stub ignores). Every point-get after the
+// first call re-reads the same underlying row set the key sweep saw, and
+// the SDK's own `findQueryRowByKey` picks the exact match out of it — so a
+// test only needs to enqueue the full row set once (as before); it does not
+// need to know how many extra point-get round trips the fix now makes.
 function stubFetch(
   responsesBySchema: Map<string, Array<Fields[]>>,
   opts: { missingSchemas?: ReadonlySet<string> } = {},
@@ -71,8 +83,13 @@ function stubFetch(
           { status: 404, headers: { "content-type": "application/json" } },
         );
       }
-      const queue = responsesBySchema.get(schema) ?? [];
-      const rows = queue.shift() ?? [];
+      const queue = responsesBySchema.get(schema);
+      const rows =
+        queue && queue.length > 0
+          ? queue.length > 1
+            ? queue.shift()!
+            : queue[0]!
+          : [];
       const results = rows.map((fields) => ({
         fields,
         key: { hash: String(fields.slug ?? "k"), range: null },
@@ -145,7 +162,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // 2 key-only sweeps (empty, then hit) + 1 point-get to hydrate the one
+    // matched row's body for the page (the keys-first fix this card lands).
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(3);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("retry-target");
     expect(lines[0]).toContain("concluded");
@@ -168,7 +187,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
+    // 1 key-only sweep (first try hits, no retry) + 1 point-get to hydrate
+    // the matched row's body for the page.
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("first-try");
   });
@@ -465,7 +486,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // 2 key-only sweeps (tombstone-only, then tombstone+live) + 1 point-get
+    // to hydrate "alive"'s body for the page.
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(3);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("alive");
   });
@@ -669,11 +692,17 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     expect(lines[0]).toContain("concluded");
   });
 
-  test("a 1000-record bucket resolves in a single page request (QUERY_PAGE_SIZE)", async () => {
-    // 1000 rows fits in one client page (QUERY_PAGE_SIZE), so the stub
-    // sees exactly one /api/query when we set defaultLimit to the same
+  test("a 1000-record bucket's KEY sweep resolves in a single page request (QUERY_PAGE_SIZE)", async () => {
+    // 1000 rows fits in one client page (QUERY_PAGE_SIZE), so the key-only
+    // sweep (this card's fix: list keys first, filter/sort/offset/limit,
+    // THEN hydrate) sees exactly one /api/query when we set defaultLimit to
+    // the same size — the sweep itself never fragments regardless of corpus
     // size. Pre-fix the client sent no `limit` at all and inherited the
-    // server's 100-row default — 10x more round trips at this scale.
+    // server's 100-row default — 10x more round trips at this scale for the
+    // sweep alone. On top of that one sweep call, the default-capped page
+    // (DEFAULT_LIST_LIMIT=20) costs exactly 20 more point-get calls to
+    // hydrate those 20 rows' bodies — bounded by the PAGE size, never by the
+    // 1000-row corpus size. 1 (sweep) + 20 (hydrate) = 21 total.
     const rows: Fields[] = Array.from({ length: 1000 }, (_, i) =>
       spikeRowAt(
         `slug-${String(i).padStart(4, "0")}`,
@@ -693,7 +722,7 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     } finally {
       restore();
     }
-    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(1);
+    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(21);
   });
 });
 

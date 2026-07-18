@@ -15,7 +15,10 @@
 // These tests pin the behavior against a stubbed fetch that mimics
 // fold_db's query/mutation surface.
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { buildReindexFields, reindexCmd } from "../../src/commands/reindex.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
@@ -396,6 +399,81 @@ describe("reindexCmd", () => {
       });
       expect(mutations.length).toBe(0);
       expect(lines.join("\n")).toContain("reindexed 0 record(s)");
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("reindexCmd --bm25", () => {
+  // kill-scan-brain follow-up: this is the explicit OFFLINE pre-warm path
+  // for the client-side BM25 cache `ask`/`search` read on every call — the
+  // counterpart to the inline (now visibly-noted) rebuild `ask` does on a
+  // cold/stale cache. Isolate FBRAIN_CACHE_DIR per test so this suite never
+  // touches a real cache directory left on disk.
+  let cacheDir: string;
+  let savedCacheEnv: string | undefined;
+
+  beforeEach(() => {
+    cacheDir = mkdtempSync(join(tmpdir(), "fbrain-reindex-bm25-test-"));
+    savedCacheEnv = process.env.FBRAIN_CACHE_DIR;
+    process.env.FBRAIN_CACHE_DIR = cacheDir;
+  });
+
+  afterEach(() => {
+    if (savedCacheEnv === undefined) delete process.env.FBRAIN_CACHE_DIR;
+    else process.env.FBRAIN_CACHE_DIR = savedCacheEnv;
+    rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  test("--dry-run reports the intent and issues no query/mutation", async () => {
+    const { restore, mutations } = stubFetch({
+      queries: { [TEST_HASHES.design]: [designRow("d1")] },
+    });
+    try {
+      const lines: string[] = [];
+      const result = await reindexCmd({
+        cfg,
+        bm25: true,
+        dryRun: true,
+        print: (l) => lines.push(l),
+      });
+      expect(lines.join("\n")).toContain("dry-run: --bm25 would rebuild");
+      expect(mutations.length).toBe(0);
+      expect(result.scanned).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  test("cold cache: rebuilds and reports the record count; a second run is already-warm", async () => {
+    const { restore, mutations } = stubFetch({
+      queries: {
+        [TEST_HASHES.design]: [designRow("d1"), designRow("d2")],
+        [TEST_HASHES.task]: [taskRow("t1")],
+      },
+    });
+    try {
+      const coldLines: string[] = [];
+      const cold = await reindexCmd({
+        cfg,
+        bm25: true,
+        print: (l) => coldLines.push(l),
+      });
+      expect(coldLines.join("\n")).toContain("rebuilt bm25 cache (3 record(s))");
+      expect(cold.scanned).toBe(3);
+      expect(cold.reindexed).toBe(3);
+      // Read-only: no mutation fired, unlike the embedding-refresh mode.
+      expect(mutations.length).toBe(0);
+
+      const warmLines: string[] = [];
+      const warm = await reindexCmd({
+        cfg,
+        bm25: true,
+        print: (l) => warmLines.push(l),
+      });
+      expect(warmLines.join("\n")).toContain("bm25 cache already warm (3 record(s))");
+      expect(warm.scanned).toBe(3);
     } finally {
       restore();
     }

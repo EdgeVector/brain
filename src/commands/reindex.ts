@@ -24,7 +24,7 @@
 // G3a (`fbrain doctor freshness`). This command reports the count of
 // records reindexed.
 
-import { type Verbose } from "../client.ts";
+import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import {
   rebuildBacklinkIndex,
   type BacklinkIndexRebuildResult,
@@ -41,6 +41,7 @@ import {
   updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
+import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
   rebuildTagIndex,
@@ -54,6 +55,12 @@ export type ReindexOptions = {
   dryRun?: boolean;
   tags?: boolean;
   backlinks?: boolean;
+  // Offline pre-warm for the client-side BM25 search cache `ask`/`search`
+  // read on every call (see ../retrieval/bm25.ts). This is the explicit,
+  // off-the-request-path counterpart to the inline rebuild `ask` does on a
+  // cold/stale cache — running this after a bulk edit means the next `ask`
+  // hits warm instead of paying for (and now visibly noting) a live rebuild.
+  bm25?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -69,6 +76,36 @@ export type ReindexResult = {
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   const print = resolvePrintSink(opts);
+
+  if (opts.bm25) {
+    const result: ReindexResult = {
+      scanned: 0,
+      reindexed: 0,
+      skippedTombstone: 0,
+      byType: {},
+    };
+    if (opts.dryRun) {
+      print(
+        "dry-run: --bm25 would rebuild the client-side BM25 search cache (read by `ask`/`search`) from a full corpus scan",
+      );
+      return result;
+    }
+    // Read-only: no mutation, so no capability/consent flow — same client
+    // `ask`/`search` already use for this cache.
+    const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+    const loaded = await loadOrBuildBm25Index(node, opts.cfg, RECORD_TYPES, {
+      verbose: opts.verbose,
+    });
+    result.scanned = loaded.corpusSize;
+    result.reindexed = loaded.corpusSize;
+    print(
+      loaded.cacheHit
+        ? `bm25 cache already warm (${loaded.corpusSize} record(s)) — nothing to rebuild`
+        : `rebuilt bm25 cache (${loaded.corpusSize} record(s)) — the next \`ask\`/\`search\` call hits it warm`,
+    );
+    return result;
+  }
+
   // --dry-run issues no writes, so it never invokes the capability provider
   // and never triggers consent; a real reindex acquires on its first update.
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
