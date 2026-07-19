@@ -9,7 +9,7 @@ echo "== shell syntax =="
 for f in .lastgit/*.sh bin/* scripts/*.sh; do
   [ -f "$f" ] || continue
   case "$f" in
-    *.sh|bin/brain|bin/fbrain|bin/brain-mcp|bin/fbrain-mcp)
+    *.sh|bin/brain|bin/brain-mcp)
       echo "bash -n $f"
       bash -n "$f"
       ;;

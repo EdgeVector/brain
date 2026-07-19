@@ -719,7 +719,7 @@ describe("printNextSteps", () => {
     // by-hand fallback. Pin both plus the `bun link` PATH caveat so this can't
     // silently regress.
     expect(out).toContain("brain mcp install");
-    expect(out).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(out).toContain("claude mcp add brain brain-mcp");
     expect(out).toContain("bun link");
     expect(out).toContain("fbrain_* tools");
     // Socket-first target (never advertise retired TCP :9001).

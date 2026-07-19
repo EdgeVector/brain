@@ -1985,7 +1985,7 @@ describe("doctor write-readiness probe", () => {
     const fail = lines.find((l) => l.startsWith("[FAIL] write-blocked"));
     expect(fail).toBeDefined();
     expect(fail!).toContain("does not recognise app");
-    expect(fail!).toContain("fbrain");
+    expect(fail!).toContain("brain");
     // The fix line names BOTH the symptom every write hits AND a real
     // next step (restart / publish), not a circular "run init" loop.
     const fix = lines[lines.indexOf(fail!) + 1] ?? "";
@@ -2368,18 +2368,18 @@ describe("schemaServiceFixHint", () => {
   });
 });
 
-// fbrain-entrypoint probe — catches a broken global CLI install before
+// brain-entrypoint probe — catches a broken global CLI install before
 // scripts/routines that shell out to bare `fbrain` hit command-not-found.
 describe("runCliEntrypointProbe", () => {
   test("resolved → PASS, detail names the resolved path", () => {
     const check = runCliEntrypointProbe(
-      { whichBin: () => "/Users/x/.bun/bin/fbrain" },
+      { whichBin: () => "/Users/x/.bun/bin/brain" },
       undefined,
     );
-    expect(check.name).toBe("fbrain-entrypoint");
+    expect(check.name).toBe("brain-entrypoint");
     expect(check.ok).toBe(true);
     expect(check.tag).toBeUndefined();
-    expect(check.detail).toContain("fbrain -> /Users/x/.bun/bin/fbrain");
+    expect(check.detail).toContain("brain -> /Users/x/.bun/bin/brain");
   });
 
   test("unresolved → WARN (ok:true) with the relink hint, never FAIL", () => {
@@ -2390,29 +2390,29 @@ describe("runCliEntrypointProbe", () => {
       },
       undefined,
     );
-    expect(check.name).toBe("fbrain-entrypoint");
+    expect(check.name).toBe("brain-entrypoint");
     expect(check.ok).toBe(true);
     expect(check.tag).toBe("WARN");
     expect(check.detail).toContain("command not found");
-    expect(check.fix).toContain("bun add -g github:EdgeVector/fbrain");
-    expect(check.fix).toContain("fbrain --version");
+    expect(check.fix).toContain("bun add -g github:EdgeVector/brain");
+    expect(check.fix).toContain("brain --version");
   });
 
-  test("unresolved with dangling ~/.bun/bin/fbrain → WARN names the broken symlink", () => {
+  test("unresolved with dangling ~/.bun/bin/brain → WARN names the broken symlink", () => {
     const home = mkdtempSync(join(tmpdir(), "fbrain-dangling-bin-"));
     const bunBin = join(home, ".bun", "bin");
     mkdirSync(bunBin, { recursive: true });
-    symlinkSync("../install/global/node_modules/fbrain/bin/fbrain", join(bunBin, "fbrain"));
+    symlinkSync("../install/global/node_modules/brain/bin/brain", join(bunBin, "brain"));
 
     const check = runCliEntrypointProbe(
       { whichBin: () => null, homeDir: home },
       undefined,
     );
-    expect(check.name).toBe("fbrain-entrypoint");
+    expect(check.name).toBe("brain-entrypoint");
     expect(check.ok).toBe(true);
     expect(check.tag).toBe("WARN");
-    expect(check.detail).toContain("dangling ~/.bun/bin/fbrain");
-    expect(check.detail).toContain("../install/global/node_modules/fbrain/bin/fbrain");
+    expect(check.detail).toContain("dangling ~/.bun/bin/brain");
+    expect(check.detail).toContain("../install/global/node_modules/brain/bin/brain");
     expect(check.fix).toContain("remove it before relinking");
   });
 
@@ -2428,25 +2428,25 @@ describe("runCliEntrypointProbe", () => {
       },
       undefined,
     );
-    expect(asked).toEqual(["fbrain"]);
+    expect(asked).toEqual(["brain"]);
   });
 });
 
 // mcp-entrypoint probe — the headline agent-integration path. PASS when the
-// `fbrain-mcp` bin resolves on PATH (message carries the resolved path); WARN
+// `brain-mcp` bin resolves on PATH (message carries the resolved path); WARN
 // (never FAIL — must not flip the verdict) with a re-link hint when it
 // doesn't. Resolution is injected via `whichBin` so the test never depends on
 // the host's real PATH.
 describe("runMcpEntrypointProbe", () => {
   test("resolved → PASS, detail names the resolved path", () => {
     const check = runMcpEntrypointProbe(
-      { whichBin: () => "/Users/x/.bun/bin/fbrain-mcp" },
+      { whichBin: () => "/Users/x/.bun/bin/brain-mcp" },
       undefined,
     );
     expect(check.name).toBe("mcp-entrypoint");
     expect(check.ok).toBe(true);
     expect(check.tag).toBeUndefined(); // plain PASS
-    expect(check.detail).toContain("fbrain-mcp -> /Users/x/.bun/bin/fbrain-mcp");
+    expect(check.detail).toContain("brain-mcp -> /Users/x/.bun/bin/brain-mcp");
   });
 
   test("unresolved → WARN (ok:true) with the re-link hint, never FAIL", () => {
@@ -2455,11 +2455,11 @@ describe("runMcpEntrypointProbe", () => {
     expect(check.ok).toBe(true); // WARN must not flip the verdict
     expect(check.tag).toBe("WARN");
     expect(check.fix).toContain("bun link");
-    expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(check.fix).toContain("claude mcp add brain brain-mcp");
     expect(check.fix).toContain('realpath src/mcp/main.ts');
   });
 
-  test("probes the fbrain-mcp bin name", () => {
+  test("probes the brain-mcp bin name", () => {
     const asked: string[] = [];
     runMcpEntrypointProbe(
       {
@@ -2470,7 +2470,7 @@ describe("runMcpEntrypointProbe", () => {
       },
       undefined,
     );
-    expect(asked).toEqual(["fbrain-mcp"]);
+    expect(asked).toEqual(["brain-mcp"]);
   });
 });
 
@@ -2573,7 +2573,7 @@ describe("doctor runtime integration", () => {
 });
 
 describe("doctor mcp-entrypoint integration", () => {
-  test("resolvable fbrain-mcp → [PASS] mcp-entrypoint with path, exit 0", async () => {
+  test("resolvable brain-mcp → [PASS] mcp-entrypoint with path, exit 0", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -2581,16 +2581,16 @@ describe("doctor mcp-entrypoint integration", () => {
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
-      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      whichBin: () => "/Users/x/.bun/bin/brain-mcp",
     });
     expect(code).toBe(0);
     const line = lines.find((l) => l.includes("mcp-entrypoint"));
     expect(line).toBeDefined();
     expect(line!.startsWith("[PASS]")).toBe(true);
-    expect(line!).toContain("/Users/x/.bun/bin/fbrain-mcp");
+    expect(line!).toContain("/Users/x/.bun/bin/brain-mcp");
   });
 
-  test("unresolvable fbrain-mcp → [WARN] mcp-entrypoint + hint, overall exit STILL 0", async () => {
+  test("unresolvable brain-mcp → [WARN] mcp-entrypoint + hint, overall exit STILL 0", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -2608,7 +2608,7 @@ describe("doctor mcp-entrypoint integration", () => {
     // The actionable re-link hint follows on the next `fix:` line.
     const fixLine = lines[lines.indexOf(warnLine!) + 1] ?? "";
     expect(fixLine).toContain("bun link");
-    expect(fixLine).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(fixLine).toContain("claude mcp add brain brain-mcp");
   });
 
   test("--json output includes the mcp-entrypoint check entry", async () => {
@@ -2620,7 +2620,7 @@ describe("doctor mcp-entrypoint integration", () => {
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
-      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      whichBin: () => "/Users/x/.bun/bin/brain-mcp",
     });
     expect(code).toBe(0);
     // --json emits exactly one JSON object — the human lines are suppressed.
@@ -2636,10 +2636,10 @@ describe("doctor mcp-entrypoint integration", () => {
     expect(mcp).toBeDefined();
     expect(mcp!.tag).toBe("PASS");
     expect(mcp!.ok).toBe(true);
-    expect(mcp!.detail).toContain("fbrain-mcp -> /Users/x/.bun/bin/fbrain-mcp");
+    expect(mcp!.detail).toContain("brain-mcp -> /Users/x/.bun/bin/brain-mcp");
   });
 
-  test("--json with unresolvable fbrain-mcp → WARN entry, overall ok:true (exit 0)", async () => {
+  test("--json with unresolvable brain-mcp → WARN entry, overall ok:true (exit 0)", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -2664,7 +2664,7 @@ describe("doctor mcp-entrypoint integration", () => {
   });
 });
 
-// --mcp boot probe — the opt-in deep probe that BOOTS fbrain-mcp and asserts
+// --mcp boot probe — the opt-in deep probe that BOOTS brain-mcp and asserts
 // the complete agent surface (vs. mcp-entrypoint, which is PATH-resolution
 // only). The child-process handshake is injected via `mcpBootRunner` so the
 // tests never spawn a real server: a runner that returns a valid handshake +
@@ -2680,7 +2680,7 @@ function bootRunnerReturning(result: McpBootResult) {
 describe("runMcpBootProbe", () => {
   test("valid handshake + all tools, version MATCHES CLI → PASS with count + serverInfo", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         // Pin the CLI version to the agent's so the build-skew check passes
         // and we exercise the plain-PASS path deterministically.
@@ -2702,7 +2702,7 @@ describe("runMcpBootProbe", () => {
 
   test("valid handshake but agent build DIFFERS from CLI → WARN naming both versions + re-link fix", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         // CLI is one build; the booted (stale `bun link`ed) agent is another.
         cliVersion: "0.8.0 (1aef3ea)",
@@ -2722,12 +2722,12 @@ describe("runMcpBootProbe", () => {
     expect(check.detail).toContain("CLI 0.8.0 (1aef3ea)");
     expect(check.detail).toContain("agent 0.8.0 (eac2d81)");
     expect(check.fix).toContain("bun link");
-    expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(check.fix).toContain("claude mcp add brain brain-mcp");
   });
 
   test("serverInfo absent → stays PASS (no version to compare)", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         cliVersion: "0.8.0 (1aef3ea)",
         mcpBootRunner: bootRunnerReturning({
@@ -2744,7 +2744,7 @@ describe("runMcpBootProbe", () => {
 
   test("handshake reports one missing tool → FAIL naming the missing tool", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         mcpBootRunner: bootRunnerReturning({
           ok: true,
@@ -2759,12 +2759,12 @@ describe("runMcpBootProbe", () => {
     expect(check.detail).toContain("missing: fbrain_link");
     expect(check.detail).toContain(`expected exactly ${FULL_TOOLS.length}`);
     expect(check.fix).toContain("bun link");
-    expect(check.fix).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(check.fix).toContain("claude mcp add brain brain-mcp");
   });
 
   test("handshake reports an unexpected/renamed tool → FAIL", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         mcpBootRunner: bootRunnerReturning({
           ok: true,
@@ -2782,7 +2782,7 @@ describe("runMcpBootProbe", () => {
     // timeout outcome the real child-kill path would produce, and the probe
     // resolves to a FAIL rather than hanging.
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         mcpBootRunner: bootRunnerReturning({
           ok: false,
@@ -2799,7 +2799,7 @@ describe("runMcpBootProbe", () => {
 
   test("boot crash → FAIL carrying the crash reason", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         mcpBootRunner: bootRunnerReturning({
           ok: false,
@@ -2814,7 +2814,7 @@ describe("runMcpBootProbe", () => {
 
   test("runner that THROWS becomes a clean FAIL, not an uncaught rejection", async () => {
     const check = await runMcpBootProbe(
-      "/Users/x/.bun/bin/fbrain-mcp",
+      "/Users/x/.bun/bin/brain-mcp",
       {
         mcpBootRunner: async () => {
           throw new Error("spawn ENOENT");
@@ -2833,8 +2833,8 @@ describe("runMcpBootProbe", () => {
   // proc.kill() to unblock a pending read. A short FBRAIN_HTTP_TIMEOUT_MS
   // keeps the test fast.
   test("DEFAULT runner: a hung SIGTERM-deaf child → bounded timeout FAIL (no hang)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "fbrain-mcp-hang-"));
-    const fake = join(dir, "fbrain-mcp");
+    const dir = mkdtempSync(join(tmpdir(), "brain-mcp-hang-"));
+    const fake = join(dir, "brain-mcp");
     // Bash: ignore TERM, block forever reading stdin. Only SIGKILL stops it.
     writeFileSync(fake, "#!/bin/bash\ntrap '' TERM\nwhile true; do read -r _l || sleep 1; done\n");
     chmodSync(fake, 0o755);
@@ -2867,7 +2867,7 @@ describe("doctor --mcp integration", () => {
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
-      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      whichBin: () => "/Users/x/.bun/bin/brain-mcp",
       mcpBootRunner: async () => {
         invoked = true;
         return { ok: true, tools: FULL_TOOLS };
@@ -2887,7 +2887,7 @@ describe("doctor --mcp integration", () => {
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
-      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      whichBin: () => "/Users/x/.bun/bin/brain-mcp",
       // Agent build matches the CLI → plain PASS (not the version-skew WARN).
       cliVersion: "0.8.0",
       mcpBootRunner: bootRunnerReturning({
@@ -2912,7 +2912,7 @@ describe("doctor --mcp integration", () => {
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
-      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      whichBin: () => "/Users/x/.bun/bin/brain-mcp",
       mcpBootRunner: bootRunnerReturning({
         ok: true,
         tools: FULL_TOOLS.slice(0, 6),
@@ -2924,7 +2924,7 @@ describe("doctor --mcp integration", () => {
     expect(line!.startsWith("[FAIL]")).toBe(true);
   });
 
-  test("--mcp but fbrain-mcp unresolved → [WARN] mcp-boot skipped, exit STILL 0", async () => {
+  test("--mcp but brain-mcp unresolved → [WARN] mcp-boot skipped, exit STILL 0", async () => {
     const configPath = writeCfg(makeCfg());
     let invoked = false;
     const lines: string[] = [];
@@ -2958,7 +2958,7 @@ describe("doctor --mcp integration", () => {
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
       nodeClientFactory: () => mockNodeClient({}),
-      whichBin: () => "/Users/x/.bun/bin/fbrain-mcp",
+      whichBin: () => "/Users/x/.bun/bin/brain-mcp",
       mcpBootRunner: bootRunnerReturning({ ok: true, tools: FULL_TOOLS.slice(0, 6) }),
     });
     expect(code).toBe(1);
@@ -2971,6 +2971,6 @@ describe("doctor --mcp integration", () => {
     expect(boot).toBeDefined();
     expect(boot!.tag).toBe("FAIL");
     expect(boot!.ok).toBe(false);
-    expect(boot!.fix).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(boot!.fix).toContain("claude mcp add brain brain-mcp");
   });
 });

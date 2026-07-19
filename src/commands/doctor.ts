@@ -127,19 +127,19 @@ export type DoctorOptions = {
   // drive both the too-old FAIL branch and the supported PASS branch
   // deterministically without depending on the host's installed Bun.
   bunVersion?: string;
-  // --mcp boot probe: actually SPAWN the resolved `fbrain-mcp` entrypoint,
+  // --mcp boot probe: actually SPAWN the resolved `brain-mcp` entrypoint,
   // drive a JSON-RPC initialize + tools/list handshake over stdio, and assert
   // the 10-tool agent surface. OFF by default so plain `fbrain doctor` never
   // spawns the server (stays cheap + offline, like --write / --freshness).
   mcp?: boolean;
   // Override for tests: spawn the MCP boot probe against a fake transport
-  // instead of the real `fbrain-mcp` child process. Receives the resolved
+  // instead of the real `brain-mcp` child process. Receives the resolved
   // entrypoint + a deadline; returns the handshake outcome the PASS/FAIL
   // logic classifies. Defaults to a real child-process stdio handshake.
   mcpBootRunner?: (input: McpBootInput) => Promise<McpBootResult>;
   // Override for tests: the running CLI's version string the mcp-boot probe
   // compares against the booted agent surface's `serverInfo.version` to detect
-  // a build skew (a stale `bun link`ed fbrain-mcp from a different checkout).
+  // a build skew (a stale `bun link`ed brain-mcp from a different checkout).
   // Defaults to `getFbrainVersion()` — the same single-sourced string the MCP
   // server reports — so a real run compares like-for-like.
   cliVersion?: string;
@@ -489,10 +489,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   checks.push(cliEntrypointCheck);
 
   // MCP-entrypoint probe — the headline agent-integration path. The README
-  // front-loads `claude mcp add fbrain fbrain-mcp`, which only works if the
-  // `fbrain-mcp` bin (declared in package.json `bin` alongside `fbrain`) is
+  // front-loads `claude mcp add brain brain-mcp`, which only works if the
+  // `brain-mcp` bin (declared in package.json `bin` alongside `fbrain`) is
   // on PATH. On a real machine a stale hand-installed `fbrain` shim that
-  // predates the `fbrain-mcp` bin leaves `fbrain` resolvable but `fbrain-mcp`
+  // predates the `brain-mcp` bin leaves `fbrain` resolvable but `brain-mcp`
   // missing — and pre-this-check doctor was all-PASS, so a broken agent
   // integration failed silently. Cheap + offline (PATH resolution only; we
   // do NOT spawn the MCP server). WARN, never FAIL: MCP is optional for
@@ -501,7 +501,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   const mcpCheck = runMcpEntrypointProbe(opts, verbose);
   checks.push(mcpCheck);
 
-  // --mcp boot probe — actually BOOT the resolved `fbrain-mcp` entrypoint and
+  // --mcp boot probe — actually BOOT the resolved `brain-mcp` entrypoint and
   // assert the live agent-integration surface, not just that the bin is on
   // PATH. `mcp-entrypoint` above is PATH-resolution only (cheap + offline), so
   // a resolved-but-broken server (crashes on boot, hangs, wrong/zero tools,
@@ -515,7 +515,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // verdict stays coherent: there is nothing to boot yet.
   if (opts.mcp) {
     const resolved = (opts.whichBin ?? ((name: string) => Bun.which(name)))(
-      "fbrain-mcp",
+      "brain-mcp",
     );
     if (resolved) {
       const bootProbe = await runMcpBootProbe(resolved, opts, verbose);

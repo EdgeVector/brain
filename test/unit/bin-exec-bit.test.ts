@@ -2,7 +2,7 @@
 //
 // bun link symlinks ~/.bun/bin/<name> directly at the bin target. macOS exec
 // then needs the target itself to be +x. If these files ship at 100644, a fresh
-// clone or any `git pull` that touches them reverts the mode and `fbrain
+// clone or any `git pull` that touches them reverts the mode and `brain
 // --version` fails with `permission denied` until the user manually chmods.
 // Easy to miss because git tracks mode separately from content.
 
@@ -28,14 +28,14 @@ describe("package.json bin entrypoints are committed +x", () => {
   }
 });
 
-describe("fbrain global shim", () => {
+describe("brain global shim", () => {
   test("finds ~/.bun/bin/bun when launched with a GUI-style minimal PATH", () => {
-    const home = mkdtempSync(join(tmpdir(), "fbrain-shim-home-"));
+    const home = mkdtempSync(join(tmpdir(), "brain-shim-home-"));
     const bunDir = join(home, ".bun", "bin");
     mkdirSync(bunDir, { recursive: true });
     symlinkSync(process.execPath, join(bunDir, "bun"));
 
-    const res = spawnSync(join(REPO_ROOT, "bin", "fbrain"), ["--version"], {
+    const res = spawnSync(join(REPO_ROOT, "bin", "brain"), ["--version"], {
       encoding: "utf8",
       env: {
         HOME: home,

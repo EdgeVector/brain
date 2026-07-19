@@ -594,8 +594,8 @@ Live health checks:
     the node's app registry knows fbrain (a consent dry-run returns 202
     rather than 404). FAIL is reported as "write-blocked" with a
     next-step hint — distinguishes a missing grant from a cold registry.
-  - mcp-entrypoint: the \`fbrain-mcp\` bin (the agent-integration path
-    \`claude mcp add fbrain fbrain-mcp\`) resolves on PATH. WARN, never
+  - mcp-entrypoint: the \`brain-mcp\` bin (the agent-integration path
+    \`claude mcp add brain brain-mcp\`) resolves on PATH. WARN, never
     FAIL, when it's missing — MCP is optional and source checkouts use
     the path-based registration form.
 
@@ -623,14 +623,14 @@ round-trip under a reserved \`doctor-write-roundtrip-<nonce>\` slug to
 prove writes actually land. OFF by default so plain \`fbrain doctor\`
 never mutates.
 
-With --mcp, additionally BOOTS the \`fbrain-mcp\` entrypoint and asserts
+With --mcp, additionally BOOTS the \`brain-mcp\` entrypoint and asserts
 the agent-integration surface end-to-end (the opt-in companion to the
 PATH-only mcp-entrypoint check):
-  - mcp-boot: spawn \`fbrain-mcp\`, drive a JSON-RPC initialize +
+  - mcp-boot: spawn \`brain-mcp\`, drive a JSON-RPC initialize +
     tools/list handshake over stdio under a bounded deadline, and PASS
     only when the server returns a valid handshake AND reports exactly
     the ${FBRAIN_MCP_TOOL_NAMES.length} expected tools. FAIL (not WARN) on a boot/handshake/tool-set
-    mismatch. Skipped when \`fbrain-mcp\` isn't on PATH. OFF by default
+    mismatch. Skipped when \`brain-mcp\` isn't on PATH. OFF by default
     so plain \`fbrain doctor\` never spawns the server.
 
 With --usage, skips the health checks and prints a team-adoption
@@ -809,16 +809,16 @@ Example:
 
 fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
   One-shot agent wiring: do the whole "connect fbrain to my agent" ritual in
-  a single command. It (1) verifies the \`fbrain-mcp\` entrypoint is on PATH,
-  (2) registers the MCP server with Claude Code (\`claude mcp add fbrain
-  fbrain-mcp\`; prints the command if \`claude\` isn't on PATH), and (3) appends
+  a single command. It (1) verifies the \`brain-mcp\` entrypoint is on PATH,
+  (2) registers the MCP server with Claude Code (\`claude mcp add brain
+  brain-mcp\`; prints the command if \`claude\` isn't on PATH), and (3) appends
   the agent-instructions block to ./CLAUDE.md, and (4) installs the Claude Code
   SessionStart hook into ./.claude/settings.json. Re-running it is a safe no-op
   (idempotent — won't double-register or duplicate the block/hook).
   --yes        skip the [Y/n] confirmation before the side effects
   --claude-md  append the instructions block to PATH instead of ./CLAUDE.md
   --claude-settings  add the SessionStart hook to PATH instead of ./.claude/settings.json
-  If \`fbrain-mcp\` isn't on PATH yet, it exits non-zero and tells you to
+  If \`brain-mcp\` isn't on PATH yet, it exits non-zero and tells you to
   (re)install fbrain (\`bun add -g github:EdgeVector/fbrain\`, or \`bun link\`
   from a contributor checkout) first. Verify the result with \`fbrain doctor --mcp\`.
 
@@ -843,14 +843,14 @@ fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
 vector (RRF hybrid) for better recall than pure-vector fbrain_search.
 
 Register with Claude Code (the global \`bun add -g github:EdgeVector/fbrain\`
-install already put \`fbrain-mcp\` on your PATH):
-  claude mcp add fbrain fbrain-mcp
+install already put \`brain-mcp\` on your PATH):
+  claude mcp add brain brain-mcp
 
-The \`fbrain-mcp\` bin is global, so the command works from any directory.
+The \`brain-mcp\` bin is global, so the command works from any directory.
 Contributing to fbrain itself? \`bun link\` from your source checkout puts
 the same bin on PATH. From a source checkout you don't want to link, use
 the path-based form from the repo root:
-  claude mcp add fbrain bun $(realpath src/mcp/main.ts)
+  claude mcp add brain bun $(realpath src/mcp/main.ts)
 
 The server reads ~/.fbrain/config.json (same as the CLI). Exits non-zero
 if config is missing — run \`fbrain init\` first.`,
@@ -1045,7 +1045,7 @@ const DOCTOR_OPTIONS = {
   "usage-window": { type: "string" },
   "usage-path": { type: "string" },
   write: { type: "boolean", default: false },
-  // --mcp: boot the resolved `fbrain-mcp` entrypoint and assert the 10-tool
+  // --mcp: boot the resolved `brain-mcp` entrypoint and assert the 10-tool
   // agent surface end-to-end (the opt-in companion to the PATH-only
   // mcp-entrypoint check). OFF by default so plain doctor never spawns it.
   mcp: { type: "boolean", default: false },
@@ -3268,7 +3268,7 @@ export async function runMcpCmd(args: Argv): Promise<number> {
   const sub = args[0]?.startsWith("-") ? undefined : args[0];
 
   // `fbrain mcp install` (alias `setup`) — the one-shot agent-wiring command:
-  // verify the `fbrain-mcp` entrypoint, register the MCP server with Claude
+  // verify the `brain-mcp` entrypoint, register the MCP server with Claude
   // Code, and append the instructions block to ./CLAUDE.md. Gated by [Y/n]
   // unless `--yes` (mirrors `init --grant-consent`). See commands/mcp-install.ts.
   if (sub === "install" || sub === "setup") {
