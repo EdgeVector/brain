@@ -131,6 +131,6 @@ describe("CLI argument taxonomy sweep", () => {
     const { code, stderr } = await runCli(["mcp", "--claude-md", "install"]);
     expect(code).toBe(2);
     expect(stderr).toContain("Unknown option `--claude-md`");
-    expect(stderr).not.toContain("fbrain-mcp");
+    expect(stderr).not.toContain("brain-mcp");
   });
 });

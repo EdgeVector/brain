@@ -1,6 +1,6 @@
 // `fbrain mcp install` (alias `setup`) is the one-shot agent-wiring command:
 // it collapses the three-step "connect fbrain to my agent" ritual (verify the
-// `fbrain-mcp` entrypoint → `claude mcp add fbrain fbrain-mcp` → append the
+// `brain-mcp` entrypoint → `claude mcp add brain brain-mcp` → append the
 // instructions block to ./CLAUDE.md) into a single command, gated by [Y/n]
 // unless `--yes` (mirroring `init --grant-consent`).
 //
@@ -31,7 +31,7 @@ import {
 import { buildAgentInstructionsBlock } from "../../src/schemas.ts";
 
 function tmpClaudeMd(): string {
-  return join(mkdtempSync(join(tmpdir(), "fbrain-mcp-install-")), "CLAUDE.md");
+  return join(mkdtempSync(join(tmpdir(), "brain-mcp-install-")), "CLAUDE.md");
 }
 
 function settingsFor(claudeMd: string): string {
@@ -44,7 +44,7 @@ function which(present: Record<string, string>) {
 }
 
 describe("fbrain mcp install — entrypoint resolution", () => {
-  test("fbrain-mcp absent → prints the bun link fix, exits non-zero, NO side effects", async () => {
+  test("brain-mcp absent → prints the bun link fix, exits non-zero, NO side effects", async () => {
     const lines: string[] = [];
     const claudeMd = tmpClaudeMd();
     let claudeAddCalled = false;
@@ -52,7 +52,7 @@ describe("fbrain mcp install — entrypoint resolution", () => {
       yes: true,
       claudeMd,
       print: (l) => lines.push(l),
-      whichBin: which({ claude: "/usr/bin/claude" }), // claude present, fbrain-mcp NOT
+      whichBin: which({ claude: "/usr/bin/claude" }), // claude present, brain-mcp NOT
       runClaudeAdd: () => {
         claudeAddCalled = true;
         return { status: 0 };
@@ -78,7 +78,7 @@ describe("fbrain mcp install — claude registration", () => {
       yes: true,
       claudeMd,
       print: (l) => lines.push(l),
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       runClaudeAdd: (): ClaudeAddResult => {
         claudeAddCalled = true;
         return { status: 0 };
@@ -100,13 +100,13 @@ describe("fbrain mcp install — claude registration", () => {
       yes: true,
       claudeMd,
       print: (l) => lines.push(l),
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp" }), // claude NOT present
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp" }), // claude NOT present
       // runClaudeAdd intentionally omitted — it must never be reached.
     });
     expect(result.code).toBe(0);
     const out = lines.join("\n");
     // The exact command a user can copy-paste.
-    expect(out).toContain("claude mcp add fbrain fbrain-mcp");
+    expect(out).toContain("claude mcp add brain brain-mcp");
     // The path-based form for a source checkout without `bun link`.
     expect(out).toContain("realpath src/mcp/main.ts");
     // The CLAUDE.md append still runs even when claude is absent.
@@ -122,7 +122,7 @@ describe("fbrain mcp install — claude registration", () => {
       yes: true,
       claudeMd: tmpClaudeMd(),
       print: (l) => lines.push(l),
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       runClaudeAdd: (): ClaudeAddResult => ({
         status: 1,
         stderr: "Error: MCP server fbrain already exists in this scope",
@@ -140,7 +140,7 @@ describe("fbrain mcp install — CLAUDE.md append idempotency", () => {
       yes: true,
       claudeMd,
       print: () => {},
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       runClaudeAdd: (): ClaudeAddResult => ({ status: 0 }),
     };
     await runMcpInstall(opts);
@@ -160,7 +160,7 @@ describe("fbrain mcp install — CLAUDE.md append idempotency", () => {
       yes: true,
       claudeMd,
       print: () => {},
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       runClaudeAdd: (): ClaudeAddResult => ({ status: 0 }),
     });
     const body = readFileSync(claudeMd, "utf8");
@@ -175,7 +175,7 @@ describe("fbrain mcp install — CLAUDE.md append idempotency", () => {
       yes: true,
       claudeMd,
       print: () => {},
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       runClaudeAdd: (): ClaudeAddResult => ({ status: 0 }),
     });
     expect(readFileSync(claudeMd, "utf8")).toContain(INSTRUCTIONS_MARKER);
@@ -225,7 +225,7 @@ describe("fbrain mcp install — gating", () => {
       yes: true,
       claudeMd: tmpClaudeMd(),
       print: () => {},
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       runClaudeAdd: (): ClaudeAddResult => ({ status: 0 }),
       ask: async () => {
         asked = true;
@@ -242,7 +242,7 @@ describe("fbrain mcp install — gating", () => {
     const result = await runMcpInstall({
       claudeMd,
       print: () => {},
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       isTty: () => true,
       ask: async () => "n",
       runClaudeAdd: () => {
@@ -262,7 +262,7 @@ describe("fbrain mcp install — gating", () => {
     const result = await runMcpInstall({
       claudeMd,
       print: () => {},
-      whichBin: which({ "fbrain-mcp": "/usr/bin/fbrain-mcp", claude: "/usr/bin/claude" }),
+      whichBin: which({ "brain-mcp": "/usr/bin/brain-mcp", claude: "/usr/bin/claude" }),
       isTty: () => false,
       runClaudeAdd: () => {
         claudeAddCalled = true;

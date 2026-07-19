@@ -11,32 +11,32 @@ export function runCliEntrypointProbe(
   verbose: Verbose | undefined,
 ): CheckResult {
   const which = opts.whichBin ?? ((name: string) => Bun.which(name));
-  const resolved = which("fbrain");
+  const resolved = which("brain");
   if (resolved) {
-    verbose?.(`fbrain-entrypoint: resolved fbrain -> ${resolved}`);
+    verbose?.(`brain-entrypoint: resolved brain -> ${resolved}`);
     return {
-      name: "fbrain-entrypoint",
+      name: "brain-entrypoint",
       ok: true,
-      detail: `fbrain -> ${resolved}`,
+      detail: `brain -> ${resolved}`,
     };
   }
 
-  const staleBin = describeCommonBrokenBin("fbrain", opts.homeDir);
+  const staleBin = describeCommonBrokenBin("brain", opts.homeDir);
   verbose?.(
-    `fbrain-entrypoint: fbrain not on PATH — emitting WARN${staleBin ? ` (${staleBin})` : ""}`,
+    `brain-entrypoint: brain not on PATH — emitting WARN${staleBin ? ` (${staleBin})` : ""}`,
   );
   return {
-    name: "fbrain-entrypoint",
+    name: "brain-entrypoint",
     ok: true,
     tag: "WARN",
     detail:
-      "CLI entrypoint 'fbrain' is not on PATH — shelling out to bare " +
-      "`fbrain get`/`fbrain put`/`fbrain ask` will fail with command not found" +
+      "CLI entrypoint 'brain' is not on PATH — shelling out to bare " +
+      "`brain get`/`brain put`/`brain ask` will fail with command not found" +
       (staleBin ? `; ${staleBin}` : ""),
     fix:
-      "Re-run `bun add -g github:EdgeVector/fbrain` (or `bun link` from a stable " +
-      "fbrain checkout), then verify with `zsh -lic 'fbrain --version'`. If " +
-      "`~/.bun/bin/fbrain` is a dangling symlink, remove it before relinking.",
+      "Re-run `bun add -g github:EdgeVector/brain` (or `bun link` from a stable " +
+      "brain checkout), then verify with `zsh -lic 'brain --version'`. If " +
+      "`~/.bun/bin/brain` is a dangling symlink, remove it before relinking.",
   };
 }
 
@@ -69,33 +69,33 @@ export function runMcpEntrypointProbe(
   verbose: Verbose | undefined,
 ): CheckResult {
   const which = opts.whichBin ?? ((name: string) => Bun.which(name));
-  const resolved = which("fbrain-mcp");
+  const resolved = which("brain-mcp");
   if (resolved) {
-    verbose?.(`mcp-entrypoint: resolved fbrain-mcp -> ${resolved}`);
+    verbose?.(`mcp-entrypoint: resolved brain-mcp -> ${resolved}`);
     return {
       name: "mcp-entrypoint",
       ok: true,
-      detail: `fbrain-mcp -> ${resolved}`,
+      detail: `brain-mcp -> ${resolved}`,
     };
   }
-  verbose?.(`mcp-entrypoint: fbrain-mcp not on PATH — emitting WARN`);
+  verbose?.(`mcp-entrypoint: brain-mcp not on PATH — emitting WARN`);
   return {
     name: "mcp-entrypoint",
     ok: true,
     tag: "WARN",
     detail:
-      "MCP entrypoint 'fbrain-mcp' is not on PATH — agent integration " +
-      "(`claude mcp add fbrain fbrain-mcp`) won't work",
+      "MCP entrypoint 'brain-mcp' is not on PATH — agent integration " +
+      "(`claude mcp add brain brain-mcp`) won't work",
     fix:
-      "MCP entrypoint 'fbrain-mcp' not on PATH — agent integration won't work. " +
-      "Re-run 'bun link' in the fbrain repo, then 'claude mcp add fbrain fbrain-mcp'. " +
-      'From a source checkout: claude mcp add fbrain bun "$(realpath src/mcp/main.ts)".',
+      "MCP entrypoint 'brain-mcp' not on PATH — agent integration won't work. " +
+      "Re-run 'bun link' in the brain repo, then 'claude mcp add brain brain-mcp'. " +
+      'From a source checkout: claude mcp add brain bun "$(realpath src/mcp/main.ts)".',
   };
 }
 
 // --mcp boot probe — the active proof the headline agent-integration surface
 // actually works. `mcp-entrypoint` (above) only confirms the bin resolves on
-// PATH; this BOOTS it. We spawn the resolved `fbrain-mcp` entrypoint, write a
+// PATH; this BOOTS it. We spawn the resolved `brain-mcp` entrypoint, write a
 // JSON-RPC `initialize` then `tools/list` to its stdin over stdio, read the
 // responses, and assert the server returns a valid initialize result AND
 // reports EXACTLY the expected tool names (the set, so a missing/renamed tool
@@ -108,7 +108,7 @@ export function runMcpEntrypointProbe(
 // Inputs handed to the boot runner so a test can stub the transport without
 // re-resolving PATH or re-deriving the deadline.
 export type McpBootInput = {
-  // Absolute path the `mcp-entrypoint` probe resolved for `fbrain-mcp`.
+  // Absolute path the `mcp-entrypoint` probe resolved for `brain-mcp`.
   entrypoint: string;
   // Hard deadline for the whole spawn → handshake → tools/list round-trip.
   deadlineMs: number;
@@ -159,15 +159,15 @@ export async function runMcpBootProbe(
   }
 
   const relinkFix =
-    "boot fbrain-mcp by hand to see why: `printf '{}' | fbrain-mcp` should not crash. " +
-    "Re-run `bun link` in the fbrain repo, then re-add via `claude mcp add fbrain fbrain-mcp`. " +
-    'From a source checkout: claude mcp add fbrain bun "$(realpath src/mcp/main.ts)".';
+    "boot brain-mcp by hand to see why: `printf '{}' | brain-mcp` should not crash. " +
+    "Re-run `bun link` in the brain repo, then re-add via `claude mcp add brain brain-mcp`. " +
+    'From a source checkout: claude mcp add brain bun "$(realpath src/mcp/main.ts)".';
 
   if (!result.ok) {
     return {
       name: "mcp-boot",
       ok: false,
-      detail: `fbrain-mcp boot/handshake failed: ${result.reason ?? "unknown error"}`,
+      detail: `brain-mcp boot/handshake failed: ${result.reason ?? "unknown error"}`,
       fix: relinkFix,
     };
   }
@@ -186,7 +186,7 @@ export async function runMcpBootProbe(
     return {
       name: "mcp-boot",
       ok: false,
-      detail: `fbrain-mcp tool surface mismatch — ${parts.join("; ")} (expected exactly ${expected.length})`,
+      detail: `brain-mcp tool surface mismatch — ${parts.join("; ")} (expected exactly ${expected.length})`,
       fix: relinkFix,
     };
   }
@@ -197,7 +197,7 @@ export async function runMcpBootProbe(
   // Version-skew WARN: the agent surface is the same fbrain *codebase* but a
   // DIFFERENT *build* than the CLI we're running. `serverInfo.version` and the
   // CLI's `getFbrainVersion()` are single-sourced (mcp/server.ts +
-  // version.ts), so they can't drift WITHIN one checkout — but `fbrain-mcp` on
+  // version.ts), so they can't drift WITHIN one checkout — but `brain-mcp` on
   // PATH can resolve to a stale `bun link`ed checkout / second worktree at a
   // different commit. When the version strings differ, the AI agent may be
   // serving stale `fbrain_*` tool behavior while the human CLI is current — a
@@ -210,7 +210,7 @@ export async function runMcpBootProbe(
       ok: true,
       tag: "WARN",
       detail:
-        `fbrain-mcp booted + served the full agent surface (tools=${got.length}), ` +
+        `brain-mcp booted + served the full agent surface (tools=${got.length}), ` +
         `but it's a DIFFERENT fbrain build than this CLI (CLI ${cliVersion}, agent ${info.version}) — ` +
         "your AI agent may be serving stale fbrain_* tools.",
       fix: relinkFix,
@@ -220,11 +220,11 @@ export async function runMcpBootProbe(
   return {
     name: "mcp-boot",
     ok: true,
-    detail: `fbrain-mcp booted + served the full agent surface — tools=${got.length}, ${infoStr}`,
+    detail: `brain-mcp booted + served the full agent surface — tools=${got.length}, ${infoStr}`,
   };
 }
 
-// Default boot runner: spawn the resolved `fbrain-mcp` entrypoint, drive a
+// Default boot runner: spawn the resolved `brain-mcp` entrypoint, drive a
 // line-delimited JSON-RPC initialize + tools/list handshake over its stdio,
 // and tear the child down in a finally. Bounded by `input.deadlineMs` via a
 // timer that kills the child — a wedged/hung server surfaces a clean timeout
@@ -409,7 +409,7 @@ function readToolNames(result: Record<string, unknown>): string[] {
 // skippedByPrereqs (config/schemas) because the boot probe's only prereq is
 // that `mcp-entrypoint` resolved the bin. Keeping it a coherent skip (ok:true,
 // WARN) rather than a FAIL means `--mcp` on a CLI-only / source-checkout user
-// who hasn't put `fbrain-mcp` on PATH doesn't flip the verdict — the
+// who hasn't put `brain-mcp` on PATH doesn't flip the verdict — the
 // mcp-entrypoint WARN above already carries the re-link fix.
 export function skippedByMcpUnresolved(): CheckResult {
   return {
@@ -417,7 +417,7 @@ export function skippedByMcpUnresolved(): CheckResult {
     ok: true,
     tag: "WARN",
     detail:
-      "skipped — `fbrain-mcp` did not resolve on PATH, so there is nothing to boot " +
+      "skipped — `brain-mcp` did not resolve on PATH, so there is nothing to boot " +
       "(see the mcp-entrypoint check above for the re-link fix)",
   };
 }

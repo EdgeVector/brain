@@ -1,5 +1,5 @@
 // `fbrain mcp instructions` is the one-step agent on-ramp: after
-// `claude mcp add fbrain fbrain-mcp`, a new dev runs
+// `claude mcp add brain brain-mcp`, a new dev runs
 // `fbrain mcp instructions >> CLAUDE.md` (or `| pbcopy`) to wire the brain into
 // their agent — instead of opening docs/agent-instructions.md and hand-selecting
 // the fenced block.

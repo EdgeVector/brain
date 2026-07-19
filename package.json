@@ -1,7 +1,7 @@
 {
   "name": "brain",
   "version": "0.8.0",
-  "description": "brain — a CLI brain over fold_db (design, task, concept, preference, reference, agent, project, spike, sop, decision) with semantic search and an MCP agent surface",
+  "description": "brain \u2014 a CLI brain over fold_db (design, task, concept, preference, reference, agent, project, spike, sop, decision) with semantic search and an MCP agent surface",
   "license": "MIT",
   "type": "module",
   "homepage": "https://github.com/EdgeVector/brain#readme",
@@ -13,7 +13,6 @@
     "url": "https://github.com/EdgeVector/brain/issues"
   },
   "keywords": [
-    "fbrain",
     "fold_db",
     "folddb",
     "brain",
@@ -27,9 +26,7 @@
   },
   "bin": {
     "brain": "bin/brain",
-    "fbrain": "bin/fbrain",
-    "brain-mcp": "bin/brain-mcp",
-    "fbrain-mcp": "bin/fbrain-mcp"
+    "brain-mcp": "bin/brain-mcp"
   },
   "files": [
     "bin",
@@ -42,7 +39,6 @@
   ],
   "scripts": {
     "brain": "bun src/cli.ts",
-    "fbrain": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build:mcp": "scripts/build-mcp-binary.sh"

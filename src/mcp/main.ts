@@ -2,16 +2,16 @@
 // fbrain MCP server entrypoint — speaks the Model Context Protocol over
 // stdio. Register with Claude Code (the global `bun add -g
 // github:EdgeVector/fbrain` install from the README Quick start already put
-// `fbrain-mcp` on PATH):
-//   claude mcp add fbrain fbrain-mcp
+// `brain-mcp` on PATH):
+//   claude mcp add brain brain-mcp
 // Contributing from a source checkout? `bun link` puts the same bin on PATH.
 // Don't want to link? Path-based fallback:
-//   claude mcp add fbrain bun /path/to/fbrain/src/mcp/main.ts
+//   claude mcp add brain bun /path/to/fbrain/src/mcp/main.ts
 //
 // Reads ~/.fbrain/config.json (same as the CLI), but LAZILY: the server
 // always starts and completes the MCP handshake (`initialize` + `tools/list`)
 // even when no config exists yet — the common new-developer case where
-// `claude mcp add fbrain fbrain-mcp` is run before `fbrain init`. Config is
+// `claude mcp add brain brain-mcp` is run before `fbrain init`. Config is
 // loaded on demand the first time a tool is CALLED; a missing/invalid config
 // then surfaces as a clean per-tool "run `fbrain init` first" `isError` result
 // in the client, instead of a server that dies on startup with only a buried
@@ -31,7 +31,7 @@ async function initMcpSentry(): Promise<CaptureSentryException> {
   }
   const sentry = await import("../observability/sentry.ts");
   await sentry.initSentry({
-    service: "fbrain-mcp",
+    service: "brain-mcp",
     env: {
       ...process.env,
       OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
