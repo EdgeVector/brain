@@ -332,13 +332,11 @@ export type NativeIndexHit = {
 export type SearchOptions = {
   exact?: boolean;
   minScore?: number;
-  // Schema names to restrict the search to (matched against IndexResult.schema_name).
-  // When set + non-empty, fold_db filters EmbeddingIndex entries to this set
-  // BEFORE the top-50 cosine cut — so unrelated schemas on a shared daemon
-  // (Persona, User Accounts, Contacts, CalendarEvent, …) cannot drown fbrain
-  // hits out of the top-K. Empty / omitted ⇒ no filter (unfiltered). Needs
-  // fold_db `feat(native-index): schema-scoped search filter` (PR #264); older
-  // daemons silently ignore the param so this is safe to send unconditionally.
+  // Schema names to restrict Search app results to (matched against
+  // SearchHit.schemaName). Brain's semantic path depends on the node-mediated
+  // Search app (`POST /api/app/search`); scoped targets keep unrelated schemas
+  // on the same daemon (Persona, User Accounts, Contacts, CalendarEvent, ...)
+  // from drowning fbrain hits out of the top-K. Empty / omitted => no filter.
   //
   // Under app_identity v3.1 this filter is largely REDUNDANT: fbrain's schemas
   // are namespaced under `fbrain/*` (owner_app_id folds into the identity hash),
@@ -348,10 +346,10 @@ export type SearchOptions = {
   // the app-namespaced hash) and harmless, and it protects search quality
   // during the migration window before every node carries namespaced data.
   schemas?: string[];
-  // Internal escape hatch for write-path semantic-index confirmation: that
-  // probe must verify the native/vector index itself, not satisfy itself from
-  // the local `/api/query` fallback used by user-facing reads on nodes that no
-  // longer expose `/api/native-index/search`.
+  // Internal escape hatch for dependency probes / write-path semantic-index
+  // confirmation: those callers must verify the Search app route itself, not
+  // satisfy themselves from the local `/api/query` fallback used by
+  // user-facing reads on nodes that do not serve `/api/app/search`.
   localFallback?: boolean;
 };
 
@@ -1837,7 +1835,7 @@ type BoundedResponse = {
 
 // The node's data Unix-domain socket serves a small data-plane allowlist: read
 // query, write mutation, schema listing, `/api/health`, the node-identity probe,
-// and the native-index semantic search. Current nodes also expose
+// and the Search app semantic route. Current nodes also expose
 // `folddb-full.sock` beside it, and that socket serves the whole HTTP surface
 // (owner/control routes included). Route selection mirrors the node client's
 // socket_for(method, path): data-plane routes use `folddb.sock`; every other
@@ -1855,7 +1853,7 @@ const NODE_DATA_PLANE_ROUTES = {
     "/api/system/auto-identity",
     "/api/native-index/search",
   ],
-  POST: ["/api/query", "/api/mutation"],
+  POST: ["/api/query", "/api/mutation", "/api/app/search"],
 } as const;
 
 // Compare the request path WITHOUT its `?query`/`#fragment` against the

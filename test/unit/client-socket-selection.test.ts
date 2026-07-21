@@ -45,6 +45,7 @@ describe("localNodeRouteSocket", () => {
       ["GET", "/api/native-index/search"],
       ["POST", "/api/query"],
       ["POST", "/api/mutation"],
+      ["POST", "/api/app/search"],
     ];
     for (const [method, path] of routeCases) {
       expect(localNodeRouteSocket("node", method, path, LOOPBACK, dataPath)).toEqual({
