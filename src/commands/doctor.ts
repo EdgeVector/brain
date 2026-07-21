@@ -429,12 +429,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
-  // Embedding-runtime probe — issue one trivial search query so the node
+  // Embedding-runtime probe — issue one trivial Search app query so the node
   // is forced to load its ONNX model. Surfaces the
   // `embedding_model_unavailable` failure as a structured FAIL, separate
   // from schema-drift, so `fbrain doctor` is the one source of truth for
   // "is search end-to-end usable?" — not just "are the schemas right?".
-  // Cheap when it passes (one GET); the heavy freshness probe stays
+  // Cheap when it passes (one app-search request); the heavy freshness probe stays
   // gated behind --freshness.
   if (provisioned && schemasLoadedOk) {
     const embed = await runEmbeddingProbe(nodeClient, verbose);

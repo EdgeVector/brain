@@ -36,16 +36,16 @@ export async function runEmbeddingProbe(
         name: "embedding-runtime",
         ok: true,
         tag: "WARN",
-        detail: "native semantic-search endpoint is unavailable; fbrain search will use local query fallback",
+        detail: "Search app endpoint is unavailable; fbrain search will use local query fallback",
         fix:
-          "upgrade the LastDB node to a build that serves native semantic search, or continue with local keyword fallback for Brain dedupe/search",
+          "upgrade the LastDB node to a build that serves the Search app route, or continue with local keyword fallback for Brain dedupe/search",
       };
     }
     return {
       name: "embedding-runtime",
       ok: false,
       detail: stripDoctorTip(errMsg(err)),
-      fix: "check the node log; the native-index search endpoint is rejecting our probe query",
+      fix: "check the node log; the Search app route is rejecting the probe query",
     };
   }
 }

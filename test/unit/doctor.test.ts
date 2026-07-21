@@ -177,6 +177,7 @@ function mockNodeClient(opts: {
   // When set, every `search()` call rejects with this error. Used to
   // exercise the embedding-runtime probe's failure path.
   searchThrows?: Error;
+  searchCalls?: Array<{ query: string; opts: Parameters<NodeClient["search"]>[1] }>;
   // Version the mock `health()` reports — drives the node-reachable version
   // line. `undefined` (the default) simulates an older node that omits version;
   // an explicit string surfaces `lastdb <version> @ <url>`.
@@ -261,7 +262,8 @@ function mockNodeClient(opts: {
       }));
       return { ok: true, results: rows, total_count: rows.length, returned_count: rows.length };
     },
-    async search(query: string): Promise<NativeIndexHit[]> {
+    async search(query: string, searchOpts?: Parameters<NodeClient["search"]>[1]): Promise<NativeIndexHit[]> {
+      opts.searchCalls?.push({ query, opts: searchOpts });
       if (opts.searchThrows) throw opts.searchThrows;
       // Freshness probe uses marker words starting with "freshprobe". The
       // probe always searches immediately after a create, so the
@@ -1135,14 +1137,19 @@ describe("doctor verdict logic", () => {
   test("embedding-runtime probe → PASS when the one-token search succeeds", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
+    const searchCalls: Array<{ query: string; opts: Parameters<NodeClient["search"]>[1] }> = [];
     const code = await doctor({
       configPath,
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
-      nodeClientFactory: () => mockNodeClient({}),
+      nodeClientFactory: () => mockNodeClient({ searchCalls }),
     });
     expect(code).toBe(0);
     expect(lines.some((l) => l.startsWith("[PASS] embedding-runtime"))).toBe(true);
+    expect(searchCalls).toContainEqual({
+      query: "fbrain",
+      opts: { localFallback: false },
+    });
   });
 
   test("embedding-runtime probe → FAIL surfaces daemon-restart fix when search rejects with embedding_model_unavailable", async () => {
@@ -1175,7 +1182,7 @@ describe("doctor verdict logic", () => {
     expect(fixLine).toContain("lastdb daemon stop && lastdb daemon start");
   });
 
-  test("embedding-runtime probe → WARN when the native search endpoint is missing", async () => {
+  test("embedding-runtime probe → WARN when the Search app endpoint is missing", async () => {
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
@@ -1186,16 +1193,17 @@ describe("doctor verdict logic", () => {
         mockNodeClient({
           searchThrows: new FbrainError({
             code: "node_http_404",
-            message: "Node /api/native-index/search returned HTTP 404.",
+            message: "Node /api/app/search returned HTTP 404.",
           }),
         }),
     });
     expect(code).toBe(0);
     const warnLine = lines.find((l) => l.startsWith("[WARN] embedding-runtime"));
     expect(warnLine).toBeDefined();
+    expect(warnLine!).toContain("Search app endpoint");
     expect(warnLine!).toContain("local query fallback");
     const fixLine = lines[lines.indexOf(warnLine!) + 1] ?? "";
-    expect(fixLine).toContain("upgrade the LastDB node");
+    expect(fixLine).toContain("Search app route");
   });
 
   test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {
