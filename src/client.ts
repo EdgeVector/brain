@@ -741,7 +741,8 @@ export type NodeClient = {
     schemas_loaded_to_db: number;
     failed_schemas: string[];
   }>;
-  // POST /api/apps/declare-schema — declare an app-owned local schema directly
+  // POST /api/apps/declare-schema — ask Mini to resolve/register an app-owned
+  // schema and return its Schema Service catalog identity
   // with the node. Newer local-first nodes persist an app-schema mapping and
   // return the canonical local-mint hash without consulting schema_service.
   declareAppSchema?(appId: string, schema: AddSchemaRequest["schema"]): Promise<AppSchemaDeclaration>;
