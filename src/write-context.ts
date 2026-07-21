@@ -86,9 +86,9 @@ export function appIdentityEnforceEnabled(): boolean {
     const v = raw.trim().toLowerCase();
     return !(v === "false" || v === "0" || v === "no" || v === "off");
   }
-  // Mini first-run: `brain init` may pin appIdentityEnforce:false when schemas
-  // were declared locally and schema_service consent cannot run. Config flag
-  // applies only when env is unset.
+  // Legacy Mini first-run configs may pin appIdentityEnforce:false from the
+  // retired unregistered-schema bootstrap. This is compatibility state, not a
+  // local-schema option. Config flag applies only when env is unset.
   try {
     const cfg = tryReadConfig();
     if (cfg && cfg.appIdentityEnforce === false) return false;

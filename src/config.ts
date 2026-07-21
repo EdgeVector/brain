@@ -61,9 +61,10 @@ export type Config = {
   nodeSocketPath?: string;
   /**
    * When false, the client skips capability acquisition (same effect as
-   * `FBRAIN_APP_IDENTITY_ENFORCE=off`). Set by `brain init` on Mini first-run
-   * when schemas were declared locally and schema_service consent cannot run
-   * (app not registered). Omitted when unset → default enforce-on.
+   * `FBRAIN_APP_IDENTITY_ENFORCE=off`). Legacy configs may contain false from
+   * the retired unregistered-schema bootstrap. New initialization must use
+   * Schema Service-registered identities and must not treat this flag as a
+   * local-schema option. Omitted when unset → default enforce-on.
    */
   appIdentityEnforce?: boolean;
 };
