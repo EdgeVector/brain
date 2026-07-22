@@ -1,0 +1,20 @@
+{
+  "artifacts": [
+    {
+      "app": "brain",
+      "paths": [
+        "LICENSE",
+        "README.md",
+        "bin",
+        "bun.lock",
+        "bunfig.toml",
+        "fbrain.app.json",
+        "folddb.toml",
+        "package.json",
+        "src",
+        "tsconfig.json",
+        "vendor"
+      ]
+    }
+  ]
+}
