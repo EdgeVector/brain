@@ -309,7 +309,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
       verbose: opts.verbose,
     });
-    if (plane !== null) {
+    if (plane !== null && plane.length > 0) {
       raw = plane.map((h) => ({
         schema_name: h.schema_name,
         field: "body",
@@ -320,7 +320,9 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       opts.verbose?.(`search-plane:${tag} → ${raw.length} hit(s)`);
     } else {
       opts.verbose?.(
-        `search-plane unavailable for ${tag}; node /api/app/search fallback`,
+        plane !== null
+          ? `search-plane empty for ${tag}; node /api/app/search fallback`
+          : `search-plane unavailable for ${tag}; node /api/app/search fallback`,
       );
       raw = await node.search(q, clientOpts);
     }

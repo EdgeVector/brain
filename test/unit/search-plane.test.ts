@@ -1,32 +1,43 @@
 /**
- * Search plane cutover: shipped querySearchPlane + Search engine fixture
- * must retrieve distinctive text after applyChangeBatch (real engine path).
+ * Search plane cutover: uses vendored @edgevector/search engine (committed under
+ * vendor/edgevector-search) so CI isolated checkouts pass without sibling worktrees.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { querySearchPlane } from "../../src/search-plane.ts";
+import {
+  querySearchPlane,
+  resolveSearchModulePath,
+} from "../../src/search-plane.ts";
 
-const SEARCH_ENGINE = resolve(
+const VENDOR_ENGINE = resolve(
   import.meta.dirname,
-  "../../../search-kanban-search-as-app-implement/src/engine.ts",
+  "../../vendor/edgevector-search/src/engine.ts",
 );
 
 describe("brain search-plane cutover", () => {
+  test("resolveSearchModulePath finds vendored engine without env", () => {
+    delete process.env.LASTDB_SEARCH_MODULE;
+    expect(existsSync(VENDOR_ENGINE)).toBe(true);
+    const p = resolveSearchModulePath();
+    expect(p).not.toBeNull();
+    expect(p!.endsWith("vendor/edgevector-search/src/engine.ts")).toBe(true);
+  });
+
   test("after SearchEngine ingest, querySearchPlane finds the fixture", async () => {
     const home = mkdtempSync(join(tmpdir(), "brain-sp-"));
     const indexDir = join(home, "index");
-    const inbox = join(home, "inbox");
     mkdirSync(indexDir, { recursive: true });
-    mkdirSync(inbox, { recursive: true });
+    mkdirSync(join(home, "inbox"), { recursive: true });
 
     const unique = `brain-plane-fixture-${Date.now()}-m7k2`;
-    process.env.LASTDB_SEARCH_MODULE = SEARCH_ENGINE;
+    // Prefer vendor path (no LASTDB_SEARCH_MODULE required).
+    delete process.env.LASTDB_SEARCH_MODULE;
     process.env.SEARCH_HOME = home;
 
-    const engMod = await import(pathToFileURL(SEARCH_ENGINE).href) as {
+    const engMod = (await import(pathToFileURL(VENDOR_ENGINE).href)) as {
       openSearchEngine: (d: string) => {
         applyChangeBatch: (b: unknown) => number;
         persist: () => void;

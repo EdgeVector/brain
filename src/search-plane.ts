@@ -1,20 +1,21 @@
 /**
- * Search plane client — primary path for brain ask/search vector-ish retrieval.
+ * Search plane client — primary path for brain ask/search plane retrieval.
  *
- * Uses the first-party Search app (`@edgevector/search` / `search` CLI):
- *   - LASTDB_SEARCH_MODULE: path to engine.ts for in-process openSearchEngine
- *   - LASTDB_SEARCH_BIN: path to search CLI (default: "search" on PATH)
- *   - SEARCH_HOME / LASTDB_HOME: index + inbox roots
+ * Resolution order for the engine module:
+ *   1. LASTDB_SEARCH_MODULE — explicit path to engine.ts
+ *   2. Vendor package at vendor/edgevector-search/src/engine.ts (shipped with brain)
+ *   3. LASTDB_SEARCH_BIN CLI (`search query --json`)
  *
  * Does not call FastEmbed. Keyword plane only until Search adds optional
  * embeddings. When the plane is unavailable, returns null so callers keep
- * BM25 / degraded notes instead of inventing capability failures.
+ * BM25 / node fallback instead of inventing capability failures.
  */
 
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -43,37 +44,39 @@ export type SearchPlaneStatus = {
   home?: string;
 };
 
-type EngineModule = {
-  openSearchEngine: (indexDir: string) => {
-    search: (
-      q: string,
-      opts?: { k?: number; schemas?: string[] },
-    ) => SearchPlaneHit[];
-    size: number;
-    persist: () => void;
-    applyChangeBatch: (b: unknown) => number;
-  };
+type EngineHandle = {
+  search: (
+    q: string,
+    opts?: { k?: number; schemas?: string[] },
+  ) => SearchPlaneHit[];
+  size: number;
+  persist: () => void;
+  applyChangeBatch: (b: unknown) => number;
 };
 
-function resolveSearchModulePath(): string | null {
+type EngineModule = {
+  openSearchEngine: (indexDir: string) => EngineHandle;
+};
+
+function packageRoot(): string {
+  // src/search-plane.ts → package root
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+/** Resolve engine.ts for in-process Search plane (no worktree-name hardcoding). */
+export function resolveSearchModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
-  // Sibling worktree / install layout when running from a brain checkout.
-  const candidates = [
-    resolve(
-      import.meta.dirname,
-      "../../search-kanban-search-as-app-implement/src/engine.ts",
-    ),
-    resolve(
-      import.meta.dirname,
-      "../../../search-kanban-search-as-app-implement/src/engine.ts",
-    ),
-    resolve(import.meta.dirname, "../../../../search/src/engine.ts"),
-    resolve(process.cwd(), "../search/src/engine.ts"),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
+
+  const vendorEngine = join(
+    packageRoot(),
+    "vendor",
+    "edgevector-search",
+    "src",
+    "engine.ts",
+  );
+  if (existsSync(vendorEngine)) return vendorEngine;
+
   return null;
 }
 
@@ -124,6 +127,8 @@ function resolveInboxDir(opts: SearchPlaneQueryOpts): string {
 /**
  * Query the Search plane. Returns null when Search is not installed / cannot
  * open — callers must not treat that as "zero hits".
+ * Empty arrays mean the plane is up but found nothing (callers may still
+ * choose to fall back to node search).
  */
 export async function querySearchPlane(
   opts: SearchPlaneQueryOpts,
@@ -132,28 +137,15 @@ export async function querySearchPlane(
   const engMod = await loadEngine();
   if (engMod) {
     try {
-      // Drain inbox via dynamic import of inbox module next to engine.
       const engPath = resolveSearchModulePath()!;
       const inboxPath = engPath.replace(/engine\.ts$/, "inbox.ts");
+      const eng = engMod.openSearchEngine(resolveIndexDir(opts));
       if (opts.drain !== false && existsSync(inboxPath)) {
         const inboxMod = (await import(pathToFileURL(inboxPath).href)) as {
-          drainInbox: (
-            eng: ReturnType<EngineModule["openSearchEngine"]>,
-            dir: string,
-          ) => unknown;
+          drainInbox: (eng: EngineHandle, dir: string) => unknown;
         };
-        const eng = engMod.openSearchEngine(resolveIndexDir(opts));
         inboxMod.drainInbox(eng, resolveInboxDir(opts));
-        const hits = eng.search(opts.query, {
-          k: opts.k ?? 50,
-          schemas: opts.schemas,
-        });
-        verbose(
-          `search-plane: in-process query hits=${hits.length} docs=${eng.size}`,
-        );
-        return hits;
       }
-      const eng = engMod.openSearchEngine(resolveIndexDir(opts));
       const hits = eng.search(opts.query, {
         k: opts.k ?? 50,
         schemas: opts.schemas,
@@ -207,7 +199,8 @@ export async function searchPlaneStatus(
   if (!engMod) {
     return {
       available: false,
-      reason: "Search engine module not found (set LASTDB_SEARCH_MODULE)",
+      reason:
+        "Search engine not found (vendor/edgevector-search or LASTDB_SEARCH_MODULE)",
     };
   }
   try {
