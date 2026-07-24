@@ -15,6 +15,7 @@ import {
   recordTypeForHash,
 } from "../client.ts";
 import { newSearchClientFromCfg } from "../write-context.ts";
+import { querySearchPlane } from "../search-plane.ts";
 import type { Config } from "../config.ts";
 import {
   capitalize,
@@ -373,13 +374,44 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   if (fbrainSchemas.length > 0) {
     clientOpts.schemas = fbrainSchemas;
     opts.verbose?.(
-      `scope: native-index search restricted to ${fbrainSchemas.length} fbrain schema hash(es)` +
+      `scope: search restricted to ${fbrainSchemas.length} fbrain schema hash(es)` +
         (typeFilter ? ` (types: ${[...typeFilter].join(",")})` : ""),
     );
   }
 
-  const hits = await node.search(opts.query, clientOpts);
-  opts.verbose?.(`search returned ${hits.length} fragment hit(s)`);
+  // Primary: first-party Search app plane (keyword regenerable index; no
+  // FastEmbed in default Mini). Fall back to node /api/app/search when the
+  // plane is unavailable OR returns empty (index not yet drained / cold).
+  // Never invent a capability identity failure here.
+  let hits: NativeIndexHit[] = [];
+  const plane = await querySearchPlane({
+    query: opts.query,
+    k: 50,
+    schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
+    verbose: opts.verbose,
+  });
+  if (plane !== null && plane.length > 0) {
+    hits = plane.map((h) => ({
+      schema_name: h.schema_name,
+      field: "body",
+      key_value: { hash: h.key_hash, range: h.key_range },
+      value: h.text,
+      metadata: { score: h.score, match_type: "search-plane" },
+    }));
+    opts.verbose?.(`search-plane returned ${hits.length} hit(s)`);
+  } else {
+    if (plane !== null && plane.length === 0) {
+      opts.verbose?.(
+        "search-plane empty — falling back to node /api/app/search (degraded/legacy)",
+      );
+    } else {
+      opts.verbose?.(
+        "search-plane unavailable — falling back to node /api/app/search (degraded/legacy)",
+      );
+    }
+    hits = await node.search(opts.query, clientOpts);
+    opts.verbose?.(`node search returned ${hits.length} fragment hit(s)`);
+  }
   let resolved = await resolveNativeHits(node, opts, hits, typeFilter);
 
   // Sort by score DESC, ties broken by (type::slug) ASC (code-unit order). Without

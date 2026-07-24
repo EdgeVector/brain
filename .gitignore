@@ -43,3 +43,5 @@ config.json
 .vscode/
 .idea/
 *.swp
+!/vendor/edgevector-search/
+!/vendor/edgevector-search/**
