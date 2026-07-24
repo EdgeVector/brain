@@ -31,6 +31,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import { newSearchClientFromCfg } from "../write-context.ts";
+import { querySearchPlane } from "../search-plane.ts";
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import {
@@ -298,10 +299,31 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     perQueryBm25TopId.set(qi, rankMap(bm25Ranked));
     opts.verbose?.(`bm25:${tag} → ${bm25Hits.length} hit(s)`);
 
-    // Vector over this query.
+    // Search plane (primary) or node /api/app/search (legacy/degraded).
     const clientOpts: ClientSearchOptions = {};
     if (fbrainSchemas.length > 0) clientOpts.schemas = fbrainSchemas;
-    const raw = await node.search(q, clientOpts);
+    let raw: Awaited<ReturnType<typeof node.search>> = [];
+    const plane = await querySearchPlane({
+      query: q,
+      k: RANKER_LIMIT,
+      schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
+      verbose: opts.verbose,
+    });
+    if (plane !== null) {
+      raw = plane.map((h) => ({
+        schema_name: h.schema_name,
+        field: "body",
+        key_value: { hash: h.key_hash, range: h.key_range },
+        value: h.text,
+        metadata: { score: h.score, match_type: "search-plane" },
+      }));
+      opts.verbose?.(`search-plane:${tag} → ${raw.length} hit(s)`);
+    } else {
+      opts.verbose?.(
+        `search-plane unavailable for ${tag}; node /api/app/search fallback`,
+      );
+      raw = await node.search(q, clientOpts);
+    }
     const collapsed = dedupeHits(raw);
     const vectorHits = collapsed
       .map((h) => {
