@@ -266,10 +266,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Step 2/6: obtain canonical hashes for every per-kind schema. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   //
-  // New local-first nodes expose `/api/apps/declare-schema`: fbrain declares
-  // its owned schema definitions directly with the node, receives deterministic
-  // local-mint hashes, and skips the shared schema_service load path entirely.
-  // That removes fresh-schema Lambda cache consistency from fbrain's hot path.
+  // Nodes expose `/api/apps/declare-schema`: fbrain declares its owned schema
+  // definitions; the node returns catalog/schema-service resolutions
+  // (reuse / expand / compose / …) with authoritative canonical identity hashes.
+  // Novel schemas that are not yet published fall through to the schema_service
+  // register+load path below. Local mint is retired.
   //
   // Compatibility fallback: the fbrain/* schemas are pre-published org-wide on
   // the canonical schema
@@ -387,38 +388,41 @@ async function tryDeclareOwnedSchemasLocally(
   schemaHashes: Record<string, string>,
   print: (line: string) => void,
 ): Promise<{ supported: true } | { supported: false; reason: string }> {
-  print(`[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} fbrain-owned schemas locally`);
+  print(`[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} fbrain-owned schemas via node`);
   if (!nodeClient.declareAppSchema) {
     return { supported: false, reason: "client does not support /api/apps/declare-schema" };
   }
   for (const entry of UNIQUE_SCHEMAS) {
     try {
       const declared = await nodeClient.declareAppSchema(OWNER_APP_ID, entry.schema.schema);
-      const expectedMint = localMintIdentityHash(
-        OWNER_APP_ID,
-        entry.schema.schema.name,
-        entry.schema.schema.fields,
-      );
-      if (declared.resolution !== "mint" && declared.canonical !== expectedMint) {
+      // Local mint is retired. Mini declare-schema returns catalog resolutions
+      // (reuse / expand / compose / mint) whose `canonical` is the schema-service
+      // identity hash. Accept any successful declare; only reject missing canonical.
+      if (!declared.canonical || typeof declared.canonical !== "string") {
         throw new FbrainError({
-          code: "app_schema_declare_not_local_mint",
+          code: "app_schema_declare_missing_canonical",
           message:
-            `Node declared ${entry.schema.schema.descriptive_name} as ${declared.resolution} ` +
-            `(${declared.canonical}), but fbrain-owned schemas must be local mints.`,
-          hint: "Disable schema-link matching for fbrain-owned schemas or declare this schema as a local mint, then re-run `fbrain init`.",
+            `Node declared ${entry.schema.schema.descriptive_name} without a canonical ` +
+            `identity hash (resolution=${declared.resolution ?? "unknown"}).`,
+          hint: "Register the schema with schema service (or fix declare-schema), then re-run `brain init`.",
         });
+      }
+      // Novel shapes that still need schema-service registration: surface a
+      // clear handoff so init can fall back to the catalog publish path.
+      const resolution = String(declared.resolution ?? "");
+      if (resolution.toLowerCase() === "novel") {
+        return {
+          supported: false,
+          reason: `${entry.schema.schema.descriptive_name} declared novel — needs schema service registration`,
+        };
       }
       for (const key of schemaConfigKeys(entry)) {
         schemaHashes[key] = declared.canonical;
       }
       const covers = schemaConfigKeys(entry).join(", ");
-      const resolutionLabel =
-        declared.resolution === "mint"
-          ? "local mint"
-          : `accepted ${declared.resolution}; canonical matches local mint`;
       print(
         `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
-          `(${resolutionLabel}; covers ${covers})`,
+          `(${resolution || "accepted"}; covers ${covers})`,
       );
     } catch (err) {
       if (err instanceof FbrainError && err.code === "node_http_404") {
@@ -428,7 +432,7 @@ async function tryDeclareOwnedSchemasLocally(
     }
   }
   print(`[4/${STEPS}] loading schemas into the node`);
-  print(`        local app-schema declarations persisted; schema_service load skipped ✓`);
+  print(`        app-schema declarations persisted (catalog/schema-service canonicals) ✓`);
   return { supported: true };
 }
 

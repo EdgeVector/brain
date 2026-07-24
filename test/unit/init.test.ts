@@ -428,38 +428,39 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
     ]) {
       expect(result.config.schemaHashes[t]).toHaveLength(64);
     }
-    expect(lines.some((l) => l.includes("local app-schema declarations persisted"))).toBe(true);
-    expect(lines.some((l) => l.includes("schema_service load skipped"))).toBe(true);
+    expect(lines.some((l) => l.includes("app-schema declarations persisted"))).toBe(true);
+    expect(lines.some((l) => l.includes("catalog/schema-service canonicals"))).toBe(true);
     const targetLine = lines.find((l) => l.includes("targeting node at")) ?? "";
     expect(targetLine).toContain("unix:");
     expect(targetLine).not.toContain(`targeting node at ${DEFAULT_NODE_URL}`);
   });
 
-  test("local app-schema declare accepts link only when canonical is the expected local mint", async () => {
+  test("app-schema declare accepts catalog expand/link with schema-service canonical", async () => {
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
-    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-local-link-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-catalog-expand-"));
     const configPath = join(tmpDir, "config.json");
+    // Catalog/schema-service identity (not a local mint) — must be accepted.
+    const catalogCanonical = "d8a863a225fd6a6a45ff309f74fad4337e39435fce41eaa113f0e55c6517e9e1";
 
     globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : String(input);
       const method = (init?.method ?? "GET").toUpperCase();
       if (url.endsWith("/api/system/auto-identity")) {
-        return jsonResponse(200, { user_hash: "local-link-userhash-0001" });
+        return jsonResponse(200, { user_hash: "catalog-expand-userhash-0001" });
       }
       if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
         const body = JSON.parse(String(init?.body ?? "{}")) as {
           app_id?: string;
-          schema?: { name?: string; descriptive_name?: string; fields?: string[] };
+          schema?: { name?: string };
         };
-        const appId = body.app_id ?? OWNER_APP_ID;
-        const schemaName = body.schema?.name ?? "unknown";
-        const fields = body.schema?.fields ?? [];
         return jsonResponse(200, {
-          app_id: appId,
-          schema: schemaName,
-          canonical: localMintIdentityHash(appId, schemaName, fields),
-          resolution: "link",
-          decision: "link",
+          app_id: body.app_id,
+          schema: body.schema?.name ?? "unknown",
+          // Same canonical for every schema is fine for this unit: we only
+          // assert init accepts expand and records the node's canonical.
+          canonical: catalogCanonical,
+          resolution: "expand",
+          decision: "expand",
         });
       }
       if (url.endsWith("/v1/schemas") || url.endsWith("/api/schemas/load")) {
@@ -476,49 +477,59 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
     });
 
     for (const t of ["design", "task", "concept", "preference", "reference", "agent", "project", "spike"]) {
-      expect(result.config.schemaHashes[t]).toHaveLength(64);
+      expect(result.config.schemaHashes[t]).toBe(catalogCanonical);
     }
-    expect(lines.some((l) => l.includes("accepted link; canonical matches local mint"))).toBe(true);
+    expect(lines.some((l) => l.includes("(expand;"))).toBe(true);
+    expect(lines.some((l) => l.includes("catalog/schema-service canonicals"))).toBe(true);
   });
 
-  test("local app-schema declare still rejects arbitrary links", async () => {
+  test("app-schema declare falls back to schema service when node reports novel", async () => {
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
-    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-bad-link-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-novel-fallback-"));
     const configPath = join(tmpDir, "config.json");
+    const published = "a".repeat(64);
 
     globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
       const url = typeof input === "string" ? input : String(input);
       const method = (init?.method ?? "GET").toUpperCase();
       if (url.endsWith("/api/system/auto-identity")) {
-        return jsonResponse(200, { user_hash: "bad-link-userhash-0001" });
+        return jsonResponse(200, { user_hash: "novel-fallback-userhash-0001" });
       }
       if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
-        const body = JSON.parse(String(init?.body ?? "{}")) as {
-          app_id?: string;
-          schema?: { name?: string };
-        };
         return jsonResponse(200, {
-          app_id: body.app_id,
-          schema: body.schema?.name ?? "Design",
-          canonical: "f".repeat(64),
-          resolution: "link",
-          decision: "link",
+          app_id: OWNER_APP_ID,
+          schema: "Design",
+          canonical: published,
+          resolution: "novel",
+          decision: "novel",
         });
+      }
+      // Schema service register + node load path.
+      if (url.includes("/v1/schemas") && method === "POST") {
+        // client.ts reads schema.name as the identity/canonical hash.
+        return jsonResponse(200, { schema: { name: published } });
+      }
+      if (url.endsWith("/api/schemas/load") && method === "POST") {
+        return jsonResponse(200, {
+          schemas_loaded_to_db: 16,
+          failed_schemas: [],
+        });
+      }
+      if (url.endsWith("/api/schemas") && method === "GET") {
+        return jsonResponse(200, { schemas: [] });
       }
       return jsonResponse(404, { error: "unexpected_url", url });
     }) as unknown as typeof globalThis.fetch;
 
-    try {
-      await runInit({
-        configPath,
-        print: () => {},
-        consent: { isTty: () => false },
-      });
-      throw new Error("did not throw");
-    } catch (err) {
-      expect(err).toBeInstanceOf(FbrainError);
-      expect((err as FbrainError).code).toBe("app_schema_declare_not_local_mint");
-    }
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      consent: { isTty: () => false },
+    });
+    expect(lines.some((l) => l.includes("needs schema service registration"))).toBe(true);
+    // After fallback, config should still be written with hashes from register path.
+    expect(result.config.schemaHashes.design).toBeDefined();
   });
 
   test("cert_required POST → resolves all 8 namespaced hashes from GET /api/schemas, no throw", async () => {
