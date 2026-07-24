@@ -16,7 +16,6 @@ import {
 } from "../client.ts";
 import { newSearchClientFromCfg } from "../write-context.ts";
 import { querySearchPlane } from "../search-plane.ts";
-import type { NativeIndexHit } from "../client.ts";
 import type { Config } from "../config.ts";
 import {
   capitalize,

@@ -92,7 +92,12 @@ async function loadEngine(): Promise<EngineModule | null> {
   }
 }
 
-function resolveIndexDir(opts: SearchPlaneQueryOpts): string {
+type SearchPlaneHomeOpts = {
+  lastDbHome?: string;
+  searchHome?: string;
+};
+
+function resolveIndexDir(opts: SearchPlaneHomeOpts = {}): string {
   if (process.env.SEARCH_INDEX_DIR?.trim()) {
     return process.env.SEARCH_INDEX_DIR.trim();
   }
@@ -110,7 +115,7 @@ function resolveIndexDir(opts: SearchPlaneQueryOpts): string {
   return resolve(home, "apps/search/index");
 }
 
-function resolveInboxDir(opts: SearchPlaneQueryOpts): string {
+function resolveInboxDir(opts: SearchPlaneHomeOpts = {}): string {
   if (process.env.SEARCH_INBOX?.trim()) return process.env.SEARCH_INBOX.trim();
   if (opts.searchHome) return resolve(opts.searchHome, "inbox");
   if (process.env.SEARCH_HOME?.trim()) {
