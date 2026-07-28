@@ -2012,3 +2012,98 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
     expect(r.indexPending).toBe(false);
   });
 });
+
+// A record-list index patch that fails must NOT be silent. The index is
+// maintained read-modify-write and has no self-heal on a present-but-stale
+// row, so a swallowed failure removes the record from `brain list` and from
+// the BM25 corpus behind `brain ask` permanently. Measured consequence on the
+// primary (2026-07-28): the rollup had fallen 760 live records behind the
+// product tables — project 48 of 416 — with no symptom anywhere.
+describe("putCmd — record-list index patch failure is surfaced, not swallowed", () => {
+  function installIndexFailingMock(indexHash: string) {
+    const writes: Array<{ schema: string; key: string; fields: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (
+      input: Parameters<typeof globalThis.fetch>[0],
+      init?: Parameters<typeof globalThis.fetch>[1],
+    ) => {
+      const url = String(input);
+      if (url.endsWith("/api/mutation") && typeof init?.body === "string") {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        if (String(body.schema ?? "") === indexHash) {
+          // What an over-ceiling atom write actually returns.
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: "atom_content_too_large",
+              size: 600000,
+              limit: 524288,
+            }),
+            { status: 413, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        const keyVal = body.key as { hash?: string } | undefined;
+        writes.push({
+          schema: String(body.schema ?? ""),
+          key: String(keyVal?.hash ?? ""),
+          fields: (body.fields_and_values as Record<string, unknown>) ?? {},
+        });
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.endsWith("/api/query") && typeof init?.body === "string") {
+        const qBody = JSON.parse(init.body) as Record<string, unknown>;
+        const schema = String(qBody.schema_name ?? "");
+        const matches = writes
+          .filter((w) => w.schema === schema)
+          .map((w) => ({ fields: w.fields, key: { hash: w.key, range: null } }));
+        return new Response(JSON.stringify({ ok: true, results: matches }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({}), { status: 404 });
+    }) as unknown as typeof globalThis.fetch;
+  }
+
+  test("the record still persists, but listIndexFailed is set and a warning is emitted", async () => {
+    const indexHash = cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY]!;
+    installIndexFailingMock(indexHash);
+    const warnings: string[] = [];
+    const r = await putCmd({
+      cfg,
+      slug: "half-commit-probe",
+      input: "---\ntype: design\ntitle: T\n---\nbody",
+      verbose: (m) => warnings.push(m),
+    });
+    // The write itself is honest — the record DID land, so this must not throw
+    // and must not report a failure of the record write.
+    expect(r.action).toBe("created");
+    expect(r.slug).toBe("half-commit-probe");
+    // ...but the half-commit is reported rather than swallowed.
+    expect(r.listIndexFailed).toBe(true);
+    const warned = warnings.find((w) => w.includes("record-list index patch FAILED"));
+    expect(warned).toBeDefined();
+    expect(warned).toContain("half-commit-probe");
+    expect(warned).toContain("does not self-heal");
+  });
+
+  test("a healthy put reports listIndexFailed false", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+    const r = await putCmd({
+      cfg,
+      slug: "healthy-put",
+      input: "---\ntype: design\ntitle: T\n---\nbody",
+    });
+    expect(r.listIndexFailed).toBe(false);
+  });
+});
