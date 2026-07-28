@@ -63,8 +63,12 @@ export type SchemaDefinition = {
   // schemas set it explicitly to distinguish themselves from each other
   // (they all share the same field shape).
   purpose_statement?: string;
-  schema_type: "Hash";
-  key: { hash_field: string };
+  // Every PRODUCT record schema is "Hash" (one row per slug). "HashRange"
+  // exists for the index plane — see `recordListEntrySchema`, where the row is
+  // addressed (hash_field, range_field) so a put patches one row instead of
+  // rewriting a whole-type rollup atom.
+  schema_type: "Hash" | "HashRange";
+  key: { hash_field: string; range_field?: string };
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
@@ -707,6 +711,92 @@ export const recordListIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * One fbrain record as a single HashRange row: (rle_h = record type) ×
+ * (rle_r = slug). This is the PRODUCT shape; `RecordListIndex` above is the
+ * legacy per-type rollup it replaces.
+ *
+ * Why: the legacy rollup holds every record of a type — bodies included — in
+ * ONE atom, read-modify-written in full on every put. Measured on the primary
+ * 2026-07-28 at 446,262 B (6.8× the 64 KiB product default, 85% of the raised
+ * ceiling). Crossing the ceiling does not fail the oversized write cleanly —
+ * it half-commits: the record lands and the index patch is rejected, which is
+ * how `situations notices` silently staled for hours on 2026-07-27. One row
+ * per record makes a put O(1) bytes and bounds each atom by ONE record.
+ *
+ * Field names MUST stay opaque (`rle_*`). Schema Service field-unifies
+ * semantic names (slug/title/body/status/…) into an existing record identity;
+ * opaque keys plus one payload string mint a novel HashRange identity. Proved
+ * for `LastgitPackInventory` 2026-07-25 — see
+ * `reference-lastgit-pack-inventory-hashrange-cutover`. The
+ * `_hashrange_v2` descriptive-name suffix and the `layout` marker are part of
+ * that novelty; do not "tidy" them away.
+ */
+export const RECORD_LIST_ENTRY_SCHEMA_KEY = "__recordlistentry__";
+export const RECORD_LIST_ENTRY_MARKER = "fbrain_record_list_entry_v1";
+export const RECORD_LIST_ENTRY_LAYOUT = "RecordListEntry novel hashrange rle_h x rle_r";
+/**
+ * Reserved range key marking "this type's partition holds every record of the
+ * type" — i.e. legacy has been drained into it. A slug can never collide with
+ * it: record slugs are kebab-case and never contain `__`.
+ *
+ * Without this marker a non-empty partition is AMBIGUOUS — fully migrated, or
+ * one freshly-put row while the other 300 records still sit in legacy. Reading
+ * "HashRange wins whenever non-empty" resolves that ambiguity the wrong way and
+ * silently truncates the type to the records written since the cutover, which
+ * hits `brain list` AND the BM25 corpus behind `brain ask`.
+ */
+export const RECORD_LIST_ENTRY_MIGRATED_RANGE = "__rle_migrated__";
+export const RECORD_LIST_ENTRY_FIELDS = [
+  "rle_h",
+  "rle_r",
+  "rle_payload",
+  "rle_marker",
+  "layout",
+] as const;
+
+export const recordListEntrySchema: AddSchemaRequest = {
+  schema: {
+    name: "RecordListEntry",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "RecordListEntry_hashrange_v2",
+    purpose_statement:
+      "One fbrain record per HashRange row (type partition x slug) so list and BM25 read a keyed partition instead of a single full-corpus rollup atom that is rewritten on every put",
+    schema_type: "HashRange",
+    key: { hash_field: "rle_h", range_field: "rle_r" },
+    fields: [...RECORD_LIST_ENTRY_FIELDS],
+    field_types: {
+      rle_h: "String",
+      rle_r: "String",
+      rle_payload: "String",
+      rle_marker: "String",
+      layout: "String",
+    },
+    field_descriptions: {
+      rle_h: "opaque list partition token (record type name value)",
+      rle_r: "opaque list range token (record slug value)",
+      rle_payload: "json object of ONE fbrain record (not an array of records)",
+      rle_marker: "constant token fbrain_record_list_entry_v1",
+      layout: RECORD_LIST_ENTRY_LAYOUT,
+    },
+    field_classifications: {
+      rle_h: ["no_index", "metadata"],
+      rle_r: ["no_index", "metadata"],
+      rle_payload: ["no_index", "metadata"],
+      rle_marker: ["no_index", "metadata"],
+      layout: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      rle_h: GENERAL,
+      rle_r: GENERAL,
+      rle_payload: GENERAL,
+      rle_marker: GENERAL,
+      layout: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
@@ -849,6 +939,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: recordListIndexSchema,
     types: [],
     extraKeys: [RECORD_LIST_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: RECORD_LIST_ENTRY_SCHEMA_KEY,
+    schema: recordListEntrySchema,
+    types: [],
+    extraKeys: [RECORD_LIST_ENTRY_SCHEMA_KEY],
   },
 ];
 
