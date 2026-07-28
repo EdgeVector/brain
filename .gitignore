@@ -45,3 +45,6 @@ config.json
 *.swp
 !/vendor/edgevector-search/
 !/vendor/edgevector-search/**
+
+# Local marker written by `last-stack-portal-wt` into every portal worktree.
+.portal-worktree

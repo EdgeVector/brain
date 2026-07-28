@@ -751,17 +751,25 @@ export type NodeClient = {
   // by `fbrain init` to RESOLVE an already-published `fbrain/*` schema's
   // canonical hash without a cert-gated re-POST (the fresh-consumer path).
   listLoadedSchemas(): Promise<LoadedSchema[]>;
+  // `keyRange` addresses one row of a HashRange schema (RecordListEntry).
+  // Omit it for Hash schemas — every product record schema is Hash-keyed.
   createRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
     keyHash: string;
+    keyRange?: string;
   }): Promise<void>;
   updateRecord(opts: {
     schemaHash: string;
     fields: Record<string, unknown>;
     keyHash: string;
+    keyRange?: string;
   }): Promise<void>;
-  deleteRecord(opts: { schemaHash: string; keyHash: string }): Promise<void>;
+  deleteRecord(opts: {
+    schemaHash: string;
+    keyHash: string;
+    keyRange?: string;
+  }): Promise<void>;
   queryAll(opts: {
     schemaHash: string;
     fields: string[];
@@ -1068,6 +1076,7 @@ export function newNodeClient(opts: {
     schemaHash: string,
     fields: Record<string, unknown>,
     keyHash: string,
+    keyRange?: string,
   ): Promise<void> => {
     const blob = capability?.() ?? null;
     verbose(`→ NODE POST /api/mutation (sdk) schema=${schemaHash} type=${kind}`);
@@ -1076,7 +1085,10 @@ export function newNodeClient(opts: {
         sdkClient(blob).mutate(schemaHash, {
           mutationType: kind,
           fields: fields as Record<string, SdkJsonValue>,
-          key: { hash: keyHash, range: null },
+          // `range: null` is the Hash-schema key. A HashRange schema
+          // (RecordListEntry) addresses ONE row as (hash, range), which is what
+          // lets a put patch a single record instead of rewriting a whole type.
+          key: { hash: keyHash, range: keyRange ?? null },
         }),
       );
       verbose(`← NODE POST /api/mutation status=200`);
@@ -1450,18 +1462,18 @@ export function newNodeClient(opts: {
           identity_hash: typeof s.identity_hash === "string" ? s.identity_hash : undefined,
         }));
     },
-    async createRecord({ schemaHash, fields, keyHash }) {
-      await mutate("create", schemaHash, fields, keyHash);
+    async createRecord({ schemaHash, fields, keyHash, keyRange }) {
+      await mutate("create", schemaHash, fields, keyHash, keyRange);
     },
-    async updateRecord({ schemaHash, fields, keyHash }) {
-      await mutate("update", schemaHash, fields, keyHash);
+    async updateRecord({ schemaHash, fields, keyHash, keyRange }) {
+      await mutate("update", schemaHash, fields, keyHash, keyRange);
     },
-    async deleteRecord({ schemaHash, keyHash }) {
+    async deleteRecord({ schemaHash, keyHash, keyRange }) {
       // Empty fields_and_values is the minimal body — see
       // docs/phase-5-delete-spike.md, Probe B. The orchestrator's earlier
       // smoketest passed `{slug: keyHash}` which has the side-effect of
       // writing a no-op atom rewriting the slug field with itself.
-      await mutate("delete", schemaHash, {}, keyHash);
+      await mutate("delete", schemaHash, {}, keyHash, keyRange);
     },
     async queryAll({ schemaHash, fields, allowFullScan, filter }) {
       return queryAllGuarded({ schemaHash, fields, allowFullScan, filter });
