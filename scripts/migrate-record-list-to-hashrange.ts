@@ -13,10 +13,24 @@
 // Shape follows the proven LastgitPackInventory cutover (lastgit PR #96) —
 // see brain `reference-lastgit-pack-inventory-hashrange-cutover`.
 //
+// SOURCE OF TRUTH IS THE PRODUCT RECORD TABLE, NOT THE LEGACY ROLLUP.
+// Seeding from the rollup looks natural and is wrong: the rollup is itself a
+// lossy cache that has already drifted badly on the primary. Measured
+// 2026-07-28, live records vs rollup entries: project 416 vs 48, reference 603
+// vs 247, design 102 vs 59 — 760 live records the rollup never listed. The
+// rollup only ever self-heals on a COLD MISS (row absent); every other write is
+// a read-modify-write of whatever it already held, so once an entry is dropped
+// it is dropped forever, and `patchTypeListIndex` failures are swallowed
+// best-effort by `putCmd`, which is why nobody saw it happen. Seeding the
+// partition from that rollup would copy the hole, report 100% coverage, and let
+// --clear-legacy cement it. So the migration drains the product record schema
+// (`listRecordsAdminScan`, the sanctioned admin path) and treats the rollup as
+// context only. That makes this script a REPAIR as well as a migration.
+//
 // SAFETY: this script is RESUME-SAFE and ADDITIVE. It only ever writes
 // RecordListEntry rows; it does not touch product record schemas, and it does
 // NOT clear the legacy rollup unless you pass --clear-legacy, which refuses
-// unless every legacy entry is already covered.
+// unless every LIVE PRODUCT RECORD is already covered.
 //
 // CLI:
 //   bun scripts/migrate-record-list-to-hashrange.ts --dry-run   # report only
@@ -43,6 +57,7 @@ import {
   recordListIndexHash,
   upsertTypeListEntry,
 } from "../src/record-list-index.ts";
+import { listRecordsAdminScan, schemaHashFor } from "../src/record.ts";
 
 type Args = {
   dryRun: boolean;
@@ -120,26 +135,42 @@ async function main(): Promise<number> {
   console.log("");
 
   let totalLegacy = 0;
+  let totalProduct = 0;
   let totalExisting = 0;
   let totalWritten = 0;
   let totalUncovered = 0;
 
+  console.log(
+    `${"type".padEnd(11)} ${"live".padStart(5)}  ${"legacy".padStart(6)}  ` +
+      `${"drift".padStart(5)}  ${"rows".padStart(5)}  ${"missing".padStart(7)}`,
+  );
+
   for (const type of args.types) {
+    // Context only — how much the rollup had already lost. Never a seed source.
     const legacy = legacyHash
       ? await readTypeListIndexLegacyForMigration(node, cfg, type)
       : null;
-    const existing = await existingEntrySlugs(node, entryHash, type);
     const legacyCount = legacy?.length ?? 0;
     totalLegacy += legacyCount;
+
+    // Authoritative: the live product rows for this type, tombstones dropped
+    // (the same filter `listRecords` applies, so the partition inherits exactly
+    // the set `brain list` is supposed to show).
+    const product = await listRecordsAdminScan(node, type, schemaHashFor(type, cfg));
+    totalProduct += product.length;
+
+    const existing = await existingEntrySlugs(node, entryHash, type);
     totalExisting += existing.size;
 
-    const missing = (legacy ?? []).filter((r) => !existing.has(r.slug));
+    const missing = product.filter((r) => !existing.has(r.slug));
+    const drift = product.length - legacyCount;
 
     if (args.verifyOnly || args.dryRun) {
       totalUncovered += missing.length;
       console.log(
-        `${type.padEnd(11)} legacy=${String(legacyCount).padStart(5)}  ` +
-          `rows=${String(existing.size).padStart(5)}  missing=${String(missing.length).padStart(5)}`,
+        `${type.padEnd(11)} ${String(product.length).padStart(5)}  ` +
+          `${String(legacyCount).padStart(6)}  ${String(drift).padStart(5)}  ` +
+          `${String(existing.size).padStart(5)}  ${String(missing.length).padStart(7)}`,
       );
       continue;
     }
@@ -156,23 +187,33 @@ async function main(): Promise<number> {
     }
     totalWritten += wrote;
     const after = await existingEntrySlugs(node, entryHash, type);
-    const stillMissing = (legacy ?? []).filter((r) => !after.has(r.slug)).length;
+    const stillMissing = product.filter((r) => !after.has(r.slug)).length;
     totalUncovered += stillMissing;
-    // Only once every legacy entry for this type has a row: the marker is what
-    // flips reads off the union and onto the partition alone.
+    // Only once every LIVE PRODUCT RECORD for this type has a row: the marker is
+    // what flips reads off the legacy union and onto the partition alone, so it
+    // must not be stamped while the partition is still short of the real table.
     if (stillMissing === 0) await markTypePartitionMigrated(node, cfg, type);
     console.log(
-      `${type.padEnd(11)} legacy=${String(legacyCount).padStart(5)}  ` +
-        `wrote=${String(wrote).padStart(5)}  rows=${String(after.size).padStart(5)}  ` +
-        `missing=${String(stillMissing).padStart(5)}`,
+      `${type.padEnd(11)} ${String(product.length).padStart(5)}  ` +
+        `${String(legacyCount).padStart(6)}  ${String(drift).padStart(5)}  ` +
+        `${String(after.size).padStart(5)}  ${String(stillMissing).padStart(7)}  ` +
+        `wrote=${wrote}`,
     );
   }
 
   console.log("");
   console.log(
-    `TOTAL legacy=${totalLegacy}  rows_before=${totalExisting}  ` +
+    `TOTAL live=${totalProduct}  legacy=${totalLegacy}  ` +
+      `drift=${totalProduct - totalLegacy}  rows_before=${totalExisting}  ` +
       `wrote=${totalWritten}  uncovered=${totalUncovered}`,
   );
+  if (totalProduct > totalLegacy) {
+    console.log(
+      `\nNOTE: the legacy rollup was short ${totalProduct - totalLegacy} live record(s).\n` +
+        "Those were invisible to `brain list` and to the BM25 corpus behind `brain ask`.\n" +
+        "Seeding from the product table repairs them; seeding from the rollup would not have.",
+    );
+  }
 
   if (args.dryRun || args.verifyOnly) {
     console.log(args.dryRun ? "\n(dry run — nothing written)" : "");
@@ -182,8 +223,19 @@ async function main(): Promise<number> {
   if (args.clearLegacy) {
     if (totalUncovered !== 0) {
       console.error(
-        `\nREFUSING --clear-legacy: ${totalUncovered} legacy entries are not yet covered by ` +
-          "HashRange rows. Clearing now would lose them. Re-run the migration first.",
+        `\nREFUSING --clear-legacy: ${totalUncovered} live product record(s) are not yet ` +
+          "covered by HashRange rows. Clearing now would drop them from `brain list`. " +
+          "Re-run the migration first.",
+      );
+      return 1;
+    }
+    // A scan that returns nothing while the rollup still holds entries means the
+    // read failed, not that the brain is empty. Coverage would then be
+    // vacuously "complete" and this would clear the only surviving list.
+    if (totalProduct === 0 && totalLegacy > 0) {
+      console.error(
+        `\nREFUSING --clear-legacy: the product scan returned 0 records while the legacy ` +
+          `rollup still holds ${totalLegacy}. That is a failed read, not an empty brain.`,
       );
       return 1;
     }

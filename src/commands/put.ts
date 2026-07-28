@@ -93,6 +93,11 @@ export type PutResult = {
   // is confirmed in the vector index, or when the confirmation was skipped (a
   // non-loopback / remote node — the lag only matters for a tight local write).
   indexPending: boolean;
+  // The record persisted but its record-list index entry did not. Distinct from
+  // `indexPending`, which is a timing signal that resolves itself — this one is
+  // permanent until the index is rebuilt, because the list index is maintained
+  // by read-modify-write and has no self-heal on a present-but-stale row.
+  listIndexFailed: boolean;
 };
 
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
@@ -210,13 +215,28 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
     });
   }
-  // Keep RecordListIndex rollup current so list/BM25 never rescan product tables.
+  // Keep the record-list index current so list/BM25 never rescan product tables.
+  //
+  // Non-fatal by design — the record itself has already persisted, and throwing
+  // here would report a lost write that is not lost. But NOT silent: this index
+  // is patched read-modify-write, so a dropped entry never comes back on its
+  // own, and swallowing the error is exactly how the primary's rollup drifted
+  // 760 live records behind `brain list` for days with no symptom (2026-07-28).
+  // `listIndexFailed` rides out on the result so the operator finds out at the
+  // write instead of during an audit months later.
+  let listIndexFailed = false;
   try {
     const { patchTypeListIndex } = await import("../record-list-index.ts");
     const { isTombstoned } = await import("../record.ts");
     await patchTypeListIndex(node, opts.cfg, type, visible, slug, isTombstoned);
-  } catch {
-    /* best-effort index patch */
+  } catch (err) {
+    listIndexFailed = true;
+    opts.verbose?.(
+      `record-list index patch FAILED for ${type}/${slug}: ` +
+        `${err instanceof Error ? err.message : String(err)} — the record persisted but will ` +
+        "not appear in `brain list` or the BM25 corpus behind `brain ask` until the index is " +
+        "rebuilt (scripts/migrate-record-list-to-hashrange.ts). This does not self-heal.",
+    );
   }
   await reconcileTagIndex(
     node,
@@ -253,7 +273,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     title,
     opts.vectorVerifyOptions,
   );
-  return { type, slug, action, title, indexPending };
+  return { type, slug, action, title, indexPending, listIndexFailed };
 }
 
 // Two optional sources, must agree if both set, at least one required —
