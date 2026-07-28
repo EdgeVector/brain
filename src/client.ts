@@ -2607,6 +2607,74 @@ function isTransportNotAttested(err: unknown): boolean {
   return false;
 }
 
+// The SDK's request timeout message: `request to <target><path> timed out
+// after <N>ms` (lastdb_app_sdk `src/transport.ts`, `req.on("timeout")`,
+// DEFAULT_REQUEST_TIMEOUT_MS = 30_000). The node ACCEPTED the connection and
+// then did not answer in time.
+const SDK_TIMEOUT_RE = /\btimed out after (\d+)\s*ms\b/;
+
+// The SDK's non-JSON-body message: `non-JSON response (<status>) from
+// <target><path>: <first 200 chars>`. The node answered with headers AND a
+// body — it is unambiguously up. Only the status is captured: `target` is the
+// base URL (`http://127.0.0.1:9001`), so it contains colons of its own and
+// cannot be split out of the tail reliably — the full SDK message is carried
+// through as the detail instead.
+const SDK_NON_JSON_RE = /^non-JSON response \((\d+)\)/;
+
+/**
+ * Reclassify a bare SDK `TransportError` that is NOT actually a reachability
+ * failure, or return null to let the caller fall through to `connectionError`.
+ *
+ * Only the connect-level errno case (`request to … failed: ECONNREFUSED` /
+ * `ENOENT` / …) is genuinely "not reachable". A TIMEOUT and a NON-JSON RESPONSE
+ * both prove the opposite — the socket accepted the connection, and in the
+ * non-JSON case the node even sent a status line. Reporting either as
+ * `service_unreachable` renders `socketUnreachableHint`, whose text ends
+ * "if the node is wedged, stop it before starting it again" — advice that, on
+ * a merely busy primary, is both wrong and destructive (the standing rule is
+ * that `service_timeout` / "did not respond within 30000ms" mean BUSY, retry,
+ * restart NOTHING). Measured on the primary 2026-07-28: an 18/18 burst failure
+ * reported "socket not reachable" while the node's own log showed it serving
+ * those exact queries and `/api/status` answered `ok:true` throughout.
+ *
+ * Both returned codes are non-`service_unreachable`, so
+ * `isNodeReachableButErroring` already reports them as reachable and callers
+ * drop the "start the node" remedy.
+ */
+export function sdkTransportReachableError(
+  err: TransportError,
+  method: string,
+  path: string,
+): FbrainError | null {
+  const msg = typeof err.message === "string" ? err.message : "";
+
+  const timedOut = SDK_TIMEOUT_RE.exec(msg);
+  if (timedOut) {
+    // Reuse the canonical timeout error the hand-rolled bounded-fetch path
+    // already raises, so both transports render one `service_timeout` shape
+    // with the same load-aware, retry-oriented hint.
+    return timeoutError(path, method, "node", Number(timedOut[1]), err);
+  }
+
+  const nonJson = SDK_NON_JSON_RE.exec(msg);
+  if (nonJson) {
+    const status = Number(nonJson[1]);
+    return new FbrainError({
+      code: "node_non_json_response",
+      message:
+        `node answered ${method} ${path} with HTTP ${status} but a non-JSON body ` +
+        `${DOCTOR_TIP}. Transport detail: ${msg}`,
+      hint:
+        "The node is UP — it returned a status line and a body — so this is a protocol/response " +
+        "fault, not a connectivity one. Do NOT restart the node. Check the node log for what " +
+        "produced this response (a proxy, an error page, or a route that isn't the JSON API).",
+      cause: err,
+    });
+  }
+
+  return null;
+}
+
 function mapSdkDataError(
   err: unknown,
   baseUrl: string,
@@ -2637,6 +2705,15 @@ function mapSdkDataError(
     return connectionError(baseUrl, "node", err, err.failureCtx);
   }
   if (err instanceof TransportError) {
+    // The SDK collapses three DIFFERENT situations into one bare
+    // `TransportError` (no discriminator field — see lastdb_app_sdk
+    // `src/errors.ts`), so the class alone cannot tell them apart. Two of the
+    // three are cases where the node demonstrably ANSWERED or accepted the
+    // connection; mapping those to `service_unreachable` would print the
+    // "stop it before starting it again" hint at a node that is merely busy.
+    // Classify on the message the SDK's transport actually emits.
+    const reachable = sdkTransportReachableError(err, method, path);
+    if (reachable) return reachable;
     return connectionError(baseUrl, "node", err, {
       socketPath,
       routeSocket: localNodeRouteSocket("node", method, path, baseUrl, socketPath),

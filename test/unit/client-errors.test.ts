@@ -6,6 +6,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { TransportError } from "@lastdb/app-sdk";
+
 import {
   FbrainError,
   isNodeReachableButErroring,
@@ -16,6 +18,7 @@ import {
   nodeHttpErrorHint,
   nodePortOf,
   schemaDownHint,
+  sdkTransportReachableError,
 } from "../../src/client.ts";
 
 type MockResponse = { status: number; body?: unknown };
@@ -1063,5 +1066,85 @@ describe("client error mapping", () => {
     } catch (err) {
       expect((err as FbrainError).code).toBe("schema_register_no_hash");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SDK TransportError classification
+//
+// lastdb_app_sdk's transport throws a BARE `TransportError` (no discriminator
+// field) for three different situations, and `mapSdkDataError` used to funnel
+// all three into `service_unreachable` — whose hint ends "if the node is
+// wedged, stop it before starting it again".
+//
+// Two of the three PROVE the node is up: a request timeout means the socket
+// accepted the connection, and a non-JSON body means the node sent a status
+// line. Telling an operator to stop a merely-busy primary is both wrong and
+// destructive, so those two must never render as unreachable.
+//
+// Reproduced on the primary 2026-07-28: 18/18 `brain list` invocations printed
+// "node socket not reachable" while the node's own log showed it serving those
+// exact queries and /api/status answered ok:true throughout.
+// ---------------------------------------------------------------------------
+describe("SDK TransportError classification", () => {
+  // Message shapes are pinned against vendor/lastdb-app-sdk/dist/transport.js
+  // (the copy brain actually runs), not against a guess.
+  const timeoutMsg = "request to http://127.0.0.1:9001/api/query timed out after 30000ms";
+  const nonJsonMsg =
+    "non-JSON response (502) from http://127.0.0.1:9001/api/query: <html>bad gateway</html>";
+  const refusedMsg =
+    "request to http://127.0.0.1:9001/api/query failed: connect ECONNREFUSED";
+
+  test("a request TIMEOUT becomes service_timeout, never 'socket not reachable'", () => {
+    const mapped = sdkTransportReachableError(
+      new TransportError(timeoutMsg),
+      "POST",
+      "/api/query",
+    );
+    expect(mapped).not.toBeNull();
+    const fe = mapped as FbrainError;
+    expect(fe.code).toBe("service_timeout");
+    expect(fe.message).toContain("did not respond within 30000ms");
+    expect(fe.message).not.toContain("socket not reachable");
+    // The whole point: no error path may tell the operator to stop the node.
+    expect(fe.hint ?? "").not.toContain("stop it before starting it again");
+    expect(fe.code).not.toBe("service_unreachable");
+    expect(isNodeReachableButErroring(fe)).toBe(true);
+  });
+
+  test("a NON-JSON body is reported as the node answering, not as unreachable", () => {
+    const mapped = sdkTransportReachableError(
+      new TransportError(nonJsonMsg),
+      "POST",
+      "/api/query",
+    );
+    expect(mapped).not.toBeNull();
+    const fe = mapped as FbrainError;
+    expect(fe.code).toBe("node_non_json_response");
+    expect(fe.message).toContain("HTTP 502");
+    expect(fe.message).not.toContain("socket not reachable");
+    // The original SDK detail survives for debugging.
+    expect(fe.message).toContain("bad gateway");
+    expect(fe.hint ?? "").toContain("Do NOT restart the node");
+    expect(isNodeReachableButErroring(fe)).toBe(true);
+  });
+
+  test("a genuine CONNECT failure is left alone for the unreachable mapping", () => {
+    expect(
+      sdkTransportReachableError(new TransportError(refusedMsg), "POST", "/api/query"),
+    ).toBeNull();
+  });
+
+  // Guards the regex against the errno spelling ETIMEDOUT, which is a
+  // connect-level failure and must NOT be softened into "busy, retry".
+  test("ETIMEDOUT errno is a connect failure, not a request timeout", () => {
+    const mapped = sdkTransportReachableError(
+      new TransportError(
+        "request to http://127.0.0.1:9001/api/query failed: connect ETIMEDOUT 127.0.0.1:9001",
+      ),
+      "POST",
+      "/api/query",
+    );
+    expect(mapped).toBeNull();
   });
 });
