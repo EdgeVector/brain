@@ -1,5 +1,5 @@
 /**
- * Search plane is semantic-only (keyword LastStore product path removed 2026-07-30).
+ * Search plane is semantic-only (host-track Search or explicit module path).
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
@@ -28,61 +28,31 @@ describe("brain search-plane semantic-only", () => {
     if (p) expect(p.endsWith("semantic.ts")).toBe(true);
   });
 
-  test("querySearchPlane does not return keyword-engine hits without semantic", async () => {
-    // Populate a keyword engine home, but do not provide semantic module.
-    const home = mkdtempSync(join(tmpdir(), "brain-sp-kw-"));
-    const indexDir = join(home, "index");
-    mkdirSync(indexDir, { recursive: true });
+  test("querySearchPlane returns null when semantic module and CLI are unavailable", async () => {
+    const home = mkdtempSync(join(tmpdir(), "brain-sp-nosem-"));
     mkdirSync(join(home, "inbox"), { recursive: true });
+    // Isolate from this machine's host-track Search install.
+    const fakeHome = mkdtempSync(join(tmpdir(), "brain-sp-home-"));
 
-    const unique = `brain-kw-should-not-hit-${Date.now()}`;
     const prevSem = process.env.LASTDB_SEARCH_SEMANTIC_MODULE;
     const prevBin = process.env.LASTDB_SEARCH_BIN;
+    const prevSearchHome = process.env.SEARCH_HOME;
+    const prevHome = process.env.HOME;
     delete process.env.LASTDB_SEARCH_SEMANTIC_MODULE;
-    // Point CLI at missing bin so semantic CLI fails too.
     process.env.LASTDB_SEARCH_BIN = "/nonexistent/search-bin-xyz";
     process.env.SEARCH_HOME = home;
-
-    const vendorEngine = resolve(
-      import.meta.dirname,
-      "../../vendor/edgevector-search/src/engine.ts",
-    );
-    if (existsSync(vendorEngine)) {
-      const engMod = (await import(pathToFileURL(vendorEngine).href)) as {
-        openSearchEngine: (d: string) => {
-          applyChangeBatch: (b: unknown) => number;
-          persist: () => void;
-        };
-      };
-      const eng = engMod.openSearchEngine(indexDir);
-      eng.applyChangeBatch({
-        schema_name: "schema-x",
-        searchable_fields: ["body"],
-        changes: [
-          {
-            mutation_id: "m1",
-            kind: "upsert",
-            key_value: { hash: "k1", range: null },
-            fields_and_values: { body: unique },
-          },
-        ],
-      });
-      eng.persist();
-    }
+    process.env.HOME = fakeHome;
 
     const hits = await querySearchPlane({
-      query: unique,
+      query: "anything-unique-marker-xyz",
       k: 10,
       searchHome: home,
       drain: false,
     });
-    // No semantic corpus for this home → null (CLI missing) or empty (CLI live).
-    // Must not return keyword-engine hits containing the unique marker.
-    if (hits !== null) {
-      expect(hits.every((h) => !h.text.includes(unique))).toBe(true);
-    }
+    expect(hits).toBeNull();
 
-    process.env.SEARCH_HOME = undefined;
+    process.env.HOME = prevHome;
+    process.env.SEARCH_HOME = prevSearchHome;
     process.env.LASTDB_SEARCH_BIN = prevBin;
     process.env.LASTDB_SEARCH_SEMANTIC_MODULE = prevSem;
   });
