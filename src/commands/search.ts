@@ -379,10 +379,9 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
     );
   }
 
-  // Primary: first-party Search app plane (keyword regenerable index; no
-  // FastEmbed in default Mini). Fall back to node /api/app/search when the
-  // plane is unavailable OR returns empty (index not yet drained / cold).
-  // Never invent a capability identity failure here.
+  // Primary: first-party Search app semantic plane. Fall back to node
+  // /api/app/search when the plane is unavailable OR returns empty.
+  // Never invent a capability identity failure here. Keyword LastStore is gone.
   let hits: NativeIndexHit[] = [];
   const plane = await querySearchPlane({
     query: opts.query,

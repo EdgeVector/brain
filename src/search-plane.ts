@@ -1,16 +1,15 @@
 /**
  * Search plane client — primary path for brain ask/search.
  *
- * Prefers the first-party Search app **semantic** plane (MiniLM vectors,
- * schema-scoped k-NN). Falls back to keyword vendor engine, then `search`
- * CLI. Does not treat Mini native empty-success as a good plane result —
- * callers may still fall back to node.search and BM25.
+ * Uses the first-party Search app **semantic** plane only (MiniLM vectors,
+ * schema-scoped k-NN). Keyword LastStore was removed from the product path
+ * (2026-07-30). When the plane is unavailable, returns null so callers keep
+ * node.search / BM25 rescue instead of inventing capability failures.
  *
  * Resolution order:
- *   1. LASTDB_SEARCH_SEMANTIC_MODULE — path to search package semantic.ts / vector plane
- *   2. LASTDB_SEARCH_MODULE — engine.ts (keyword)
- *   3. vendor/edgevector-search keyword engine
- *   4. LASTDB_SEARCH_BIN / `search semantic-query --json`
+ *   1. LASTDB_SEARCH_SEMANTIC_MODULE — path to search package semantic.ts
+ *   2. host-track search semantic.ts
+ *   3. LASTDB_SEARCH_BIN / `search semantic-query --json` (or `search query`)
  */
 
 import { existsSync } from "node:fs";
@@ -49,20 +48,6 @@ export type SearchPlaneStatus = {
   vector_state?: string;
 };
 
-type EngineHandle = {
-  search: (
-    q: string,
-    opts?: { k?: number; schemas?: string[] },
-  ) => SearchPlaneHit[];
-  size: number;
-  persist: () => void;
-  applyChangeBatch: (b: unknown) => number;
-};
-
-type EngineModule = {
-  openSearchEngine: (indexDir: string) => EngineHandle;
-};
-
 function packageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), "..");
 }
@@ -81,7 +66,7 @@ export function resolveSearchModulePath(): string | null {
   return null;
 }
 
-function resolveSemanticModulePath(): string | null {
+export function resolveSemanticModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_SEMANTIC_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
   // Host-track / worktree search package
@@ -100,22 +85,6 @@ type SearchPlaneHomeOpts = {
   searchHome?: string;
 };
 
-function resolveIndexDir(opts: SearchPlaneHomeOpts = {}): string {
-  if (process.env.SEARCH_INDEX_DIR?.trim()) {
-    return process.env.SEARCH_INDEX_DIR.trim();
-  }
-  if (opts.searchHome) return resolve(opts.searchHome, "index");
-  if (process.env.SEARCH_HOME?.trim()) {
-    return resolve(process.env.SEARCH_HOME.trim(), "index");
-  }
-  const home =
-    opts.lastDbHome ||
-    process.env.LASTDB_HOME?.trim() ||
-    process.env.FOLDDB_HOME?.trim() ||
-    `${process.env.HOME ?? ""}/.lastdb`;
-  return resolve(home, "apps/search/index");
-}
-
 function resolveSearchHome(opts: SearchPlaneHomeOpts = {}): string {
   if (opts.searchHome) return opts.searchHome;
   if (process.env.SEARCH_HOME?.trim()) return process.env.SEARCH_HOME.trim();
@@ -125,20 +94,6 @@ function resolveSearchHome(opts: SearchPlaneHomeOpts = {}): string {
     process.env.FOLDDB_HOME?.trim() ||
     `${process.env.HOME ?? ""}/.lastdb`;
   return resolve(home, "apps/search");
-}
-
-function resolveInboxDir(opts: SearchPlaneHomeOpts = {}): string {
-  if (process.env.SEARCH_INBOX?.trim()) return process.env.SEARCH_INBOX.trim();
-  if (opts.searchHome) return resolve(opts.searchHome, "inbox");
-  if (process.env.SEARCH_HOME?.trim()) {
-    return resolve(process.env.SEARCH_HOME.trim(), "inbox");
-  }
-  const home =
-    opts.lastDbHome ||
-    process.env.LASTDB_HOME?.trim() ||
-    process.env.FOLDDB_HOME?.trim() ||
-    `${process.env.HOME ?? ""}/.lastdb`;
-  return resolve(home, "apps/search/inbox");
 }
 
 async function querySemanticInProcess(
@@ -274,8 +229,8 @@ function querySemanticCli(opts: SearchPlaneQueryOpts): SearchPlaneHit[] | null {
 }
 
 /**
- * Query the Search plane (semantic preferred). Returns null when Search is
- * completely unavailable. Empty arrays mean plane up, no matches.
+ * Query the Search semantic plane. Returns null when Search is completely
+ * unavailable. Empty arrays mean plane up, no matches.
  */
 export async function querySearchPlane(
   opts: SearchPlaneQueryOpts,
@@ -290,35 +245,7 @@ export async function querySearchPlane(
   const cli = querySemanticCli(opts);
   if (cli !== null) return cli;
 
-  // 3) Keyword vendor / module fallback
-  const modPath = resolveSearchModulePath();
-  if (modPath) {
-    try {
-      const engMod = (await import(pathToFileURL(modPath).href)) as EngineModule;
-      if (typeof engMod.openSearchEngine === "function") {
-        const eng = engMod.openSearchEngine(resolveIndexDir(opts));
-        const inboxPath = modPath.replace(/engine\.ts$/, "inbox.ts");
-        if (opts.drain !== false && existsSync(inboxPath)) {
-          const inboxMod = (await import(pathToFileURL(inboxPath).href)) as {
-            drainInbox: (e: EngineHandle, d: string) => unknown;
-          };
-          inboxMod.drainInbox(eng, resolveInboxDir(opts));
-        }
-        const hits = eng.search(opts.query, {
-          k: opts.k ?? 50,
-          schemas: opts.schemas,
-        });
-        verbose(`search-plane: keyword fallback hits=${hits.length}`);
-        return hits;
-      }
-    } catch (e) {
-      verbose(
-        `search-plane: keyword fallback failed: ${e instanceof Error ? e.message : e}`,
-      );
-    }
-  }
-
-  verbose("search-plane: unavailable");
+  verbose("search-plane: unavailable (semantic only; keyword plane removed)");
   return null;
 }
 
@@ -350,21 +277,8 @@ export async function searchPlaneStatus(
       /* fall through */
     }
   }
-  const modPath = resolveSearchModulePath();
-  if (!modPath) {
-    return {
-      available: false,
-      reason: "Search plane not found (semantic CLI or LASTDB_SEARCH_MODULE)",
-    };
-  }
-  try {
-    const engMod = (await import(pathToFileURL(modPath).href)) as EngineModule;
-    const eng = engMod.openSearchEngine(resolveIndexDir(opts));
-    return { available: true, docs: eng.size, home: resolveIndexDir(opts) };
-  } catch (e) {
-    return {
-      available: false,
-      reason: e instanceof Error ? e.message : String(e),
-    };
-  }
+  return {
+    available: false,
+    reason: "Search semantic plane not found (search vector-status / semantic CLI)",
+  };
 }
