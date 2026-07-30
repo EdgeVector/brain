@@ -2,9 +2,8 @@
  * Search plane client — primary path for brain ask/search.
  *
  * Uses the first-party Search app **semantic** plane only (MiniLM vectors,
- * schema-scoped k-NN). Keyword LastStore was removed from the product path
- * (2026-07-30). When the plane is unavailable, returns null so callers keep
- * node.search / BM25 rescue instead of inventing capability failures.
+ * schema-scoped k-NN). When the plane is unavailable, returns null so callers
+ * keep node.search / BM25 rescue instead of inventing capability failures.
  *
  * Resolution order:
  *   1. LASTDB_SEARCH_SEMANTIC_MODULE — path to search package semantic.ts
@@ -15,8 +14,7 @@
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -33,7 +31,7 @@ export type SearchPlaneQueryOpts = {
   schemas?: string[];
   exact?: boolean;
   min_score?: number;
-  /** Drain inbox before query (default true for keyword path). */
+  /** Drain Search inbox before query when supported by the semantic session. */
   drain?: boolean;
   lastDbHome?: string;
   searchHome?: string;
@@ -48,35 +46,11 @@ export type SearchPlaneStatus = {
   vector_state?: string;
 };
 
-function packageRoot(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
-}
-
-export function resolveSearchModulePath(): string | null {
-  const env = process.env.LASTDB_SEARCH_MODULE?.trim();
-  if (env && existsSync(env)) return resolve(env);
-  const vendorEngine = join(
-    packageRoot(),
-    "vendor",
-    "edgevector-search",
-    "src",
-    "engine.ts",
-  );
-  if (existsSync(vendorEngine)) return vendorEngine;
-  return null;
-}
-
 export function resolveSemanticModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_SEMANTIC_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
-  // Host-track / worktree search package
-  const candidates = [
-    join(packageRoot(), "vendor", "edgevector-search", "src", "semantic.ts"),
-    `${process.env.HOME ?? ""}/.host-track/apps/search/current/src/semantic.ts`,
-  ];
-  for (const c of candidates) {
-    if (c && existsSync(c)) return c;
-  }
+  const hostTrack = `${process.env.HOME ?? ""}/.host-track/apps/search/current/src/semantic.ts`;
+  if (hostTrack && existsSync(hostTrack)) return hostTrack;
   return null;
 }
 
@@ -245,7 +219,7 @@ export async function querySearchPlane(
   const cli = querySemanticCli(opts);
   if (cli !== null) return cli;
 
-  verbose("search-plane: unavailable (semantic only; keyword plane removed)");
+  verbose("search-plane: unavailable (semantic plane not found)");
   return null;
 }
 
