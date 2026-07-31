@@ -26,6 +26,7 @@ import { FbrainError } from "../../src/client.ts";
 import { RECORD_TYPES } from "../../src/schemas.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
+const CLI_SPAWN_TIMEOUT_MS = 30000;
 
 async function runCli(
   args: string[],
@@ -59,22 +60,25 @@ describe("fbrain list <type> → --type hint (parseArgs path)", () => {
     expect(stderr).toContain("fbrain list --type task");
     // Hint fires before readConfig.
     expect(stderr).not.toContain("config");
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("`fbrain list design` hints at `--type design`", async () => {
     const { stderr } = await runCli(["list", "design"]);
     expect(stderr).toContain("fbrain list --type design");
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("every record type triggers the hint when typed as a positional", async () => {
     // Belt-and-braces: pins the suggestion against every known record
     // type so a new type added to RECORD_TYPES without updating the hint
     // path is caught.
-    for (const t of RECORD_TYPES) {
-      const { stderr } = await runCli(["list", t]);
-      expect(stderr).toContain(`fbrain list --type ${t}`);
+    const results = await Promise.all(
+      RECORD_TYPES.map(async (t) => ({ type: t, result: await runCli(["list", t]) })),
+    );
+    for (const { type, result } of results) {
+      const { stderr } = result;
+      expect(stderr).toContain(`fbrain list --type ${type}`);
     }
-  }, 30000);
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("`fbrain list xyzzy` does NOT add the --type hint (unknown positional)", async () => {
     // Only known record types get the nudge — a typo like `xyzzy` falls
@@ -84,7 +88,7 @@ describe("fbrain list <type> → --type hint (parseArgs path)", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("Unexpected argument 'xyzzy'");
     expect(stderr).not.toContain("--type xyzzy");
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 });
 
 describe("withTypeAsPositionalHint (get/status/delete not-found path)", () => {
@@ -110,7 +114,7 @@ describe("withTypeAsPositionalHint (get/status/delete not-found path)", () => {
     // Hint nudges at the right `--type` invocation.
     expect(e.hint).toContain("fbrain list --type task");
     expect(e.hint).toContain('"task" is a record type');
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("nudges for every record type", async () => {
     // Pins every known type so RECORD_TYPES drift is caught.
@@ -197,15 +201,18 @@ describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
     expect(stderr).not.toContain("fbrain list --type design");
     // Fires before readConfig.
     expect(stderr).not.toContain("config");
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("every record type triggers the corrected get hint", async () => {
-    for (const t of RECORD_TYPES) {
-      const { stderr } = await runCli(["get", t, "some-slug"]);
-      expect(stderr).toContain(`fbrain get some-slug --type ${t}`);
-      expect(stderr).not.toContain(`fbrain list --type ${t}`);
+    const results = await Promise.all(
+      RECORD_TYPES.map(async (t) => ({ type: t, result: await runCli(["get", t, "some-slug"]) })),
+    );
+    for (const { type, result } of results) {
+      const { stderr } = result;
+      expect(stderr).toContain(`fbrain get some-slug --type ${type}`);
+      expect(stderr).not.toContain(`fbrain list --type ${type}`);
     }
-  }, 30000);
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("single-positional `fbrain get design` is UNCHANGED (still list --type hint)", async () => {
     // The slug-lookup miss path: a live brain returns not_found and
@@ -215,7 +222,7 @@ describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
     const { stderr } = await runCli(["get", "design"]);
     expect(stderr).not.toContain("fbrain get  --type design");
     expect(stderr).not.toContain("--type design`?");
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 
   test("two positionals where the first is NOT a type are rejected", async () => {
     // `fbrain get my-slug stray` — "my-slug" isn't a type, so the generic
@@ -226,5 +233,5 @@ describe("fbrain get <type> <slug> → `get <slug> --type <type>` hint", () => {
     expect(stderr).toContain("my-slug");
     expect(stderr).toContain("stray");
     expect(stderr.toLowerCase()).not.toContain("config");
-  });
+  }, CLI_SPAWN_TIMEOUT_MS);
 });
