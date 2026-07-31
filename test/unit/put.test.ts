@@ -11,7 +11,7 @@ import {
   splitFrontmatter,
 } from "../../src/commands/put.ts";
 import { FbrainError } from "../../src/client.ts";
-import { RECORDS, RECORD_LIST_INDEX_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
+import { RECORDS, RECORD_LIST_ENTRY_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -27,7 +27,7 @@ const DESIGN_HASH = TEST_HASHES.design;
 const cfg = buildTestCfg({ userHash: "uh", nodeUrl: "http://10.0.0.1:9001" });
 
 function userMutations<T extends Record<string, unknown>>(mutations: T[]): T[] {
-  return mutations.filter((m) => m.schema !== cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY]);
+  return mutations.filter((m) => m.schema !== cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY]);
 }
 
 describe("splitFrontmatter", () => {
@@ -2013,12 +2013,9 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
   });
 });
 
-// A record-list index patch that fails must NOT be silent. The index is
-// maintained read-modify-write and has no self-heal on a present-but-stale
-// row, so a swallowed failure removes the record from `brain list` and from
-// the BM25 corpus behind `brain ask` permanently. Measured consequence on the
-// primary (2026-07-28): the rollup had fallen 760 live records behind the
-// product tables — project 48 of 416 — with no symptom anywhere.
+// A record-list entry patch that fails must NOT be silent. A swallowed failure
+// removes the record from `brain list` and from the BM25 corpus behind
+// `brain ask` until a cold-seed/admin repair refreshes the type partition.
 describe("putCmd — record-list index patch failure is surfaced, not swallowed", () => {
   function installIndexFailingMock(indexHash: string) {
     const writes: Array<{ schema: string; key: string; fields: Record<string, unknown> }> = [];
@@ -2068,7 +2065,7 @@ describe("putCmd — record-list index patch failure is surfaced, not swallowed"
   }
 
   test("the record still persists, but listIndexFailed is set and a warning is emitted", async () => {
-    const indexHash = cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY]!;
+    const indexHash = cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY]!;
     installIndexFailingMock(indexHash);
     const warnings: string[] = [];
     const r = await putCmd({

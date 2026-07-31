@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { askCmd } from "../../src/commands/ask.ts";
 import { dedupeHits, isWeakMatch, searchCmd } from "../../src/commands/search.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
-import { RECORD_LIST_INDEX_SCHEMA_KEY, RECORD_TYPES } from "../../src/schemas.ts";
+import { RECORD_LIST_ENTRY_SCHEMA_KEY, RECORD_TYPES } from "../../src/schemas.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
@@ -201,23 +201,41 @@ let savedCacheEnv: string | undefined;
 type MockResponse = { status: number; body?: unknown };
 
 function installSequencedMock(handler: (url: string, init?: RequestInit) => MockResponse): void {
-  const persistedRows = new Map<string, Map<string, Record<string, unknown>>>();
+  const persistedRows = new Map<string, Map<string, Map<string, Record<string, unknown>>>>();
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
     const rawBody = typeof init?.body === "string" ? init.body : "";
     const parsedBody = rawBody.length > 0 ? JSON.parse(rawBody) as Record<string, unknown> : {};
     if (url.includes("/api/query")) {
       const schema = typeof parsedBody.schema_name === "string" ? parsedBody.schema_name : "";
-      const filter = parsedBody.filter as { HashKey?: unknown } | undefined;
+      const filter = parsedBody.filter as
+        | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+        | undefined;
       const keyHash = typeof filter?.HashKey === "string" ? filter.HashKey : "";
-      const persisted = keyHash ? persistedRows.get(schema)?.get(keyHash) : undefined;
-      if (schema === cfg.schemaHashes[RECORD_LIST_INDEX_SCHEMA_KEY] && keyHash) {
+      if (schema === cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] && keyHash) {
+        const rows = [...(persistedRows.get(schema)?.get(keyHash)?.entries() ?? [])]
+          .map(([range, fields]) => ({ fields, key: { hash: keyHash, range } }));
         return new Response(
           JSON.stringify({
             ok: true,
-            results: persisted ? [{ fields: persisted, key: { hash: keyHash, range: null } }] : [],
-            total_count: persisted ? 1 : 0,
-            returned_count: persisted ? 1 : 0,
+            results: rows,
+            total_count: rows.length,
+            returned_count: rows.length,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      const hrk = filter?.HashRangeKey;
+      const hrHash = typeof hrk?.hash === "string" ? hrk.hash : "";
+      const hrRange = typeof hrk?.range === "string" ? hrk.range : "";
+      if (schema === cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] && hrHash && hrRange) {
+        const row = persistedRows.get(schema)?.get(hrHash)?.get(hrRange);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: row ? [{ fields: row, key: { hash: hrHash, range: hrRange } }] : [],
+            total_count: row ? 1 : 0,
+            returned_count: row ? 1 : 0,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -225,13 +243,16 @@ function installSequencedMock(handler: (url: string, init?: RequestInit) => Mock
     }
     if (url.includes("/api/mutation")) {
       const schema = typeof parsedBody.schema === "string" ? parsedBody.schema : "";
-      const key = parsedBody.key_value as { hash?: unknown } | undefined;
+      const key = parsedBody.key_value as { hash?: unknown; range?: unknown } | undefined;
       const keyHash = typeof key?.hash === "string" ? key.hash : "";
+      const keyRange = typeof key?.range === "string" ? key.range : "";
       const fields = parsedBody.fields_and_values as Record<string, unknown> | undefined;
       if (schema && keyHash && fields) {
-        const byKey = persistedRows.get(schema) ?? new Map<string, Record<string, unknown>>();
-        byKey.set(keyHash, fields);
-        persistedRows.set(schema, byKey);
+        const byHash = persistedRows.get(schema) ?? new Map<string, Map<string, Record<string, unknown>>>();
+        const byRange = byHash.get(keyHash) ?? new Map<string, Record<string, unknown>>();
+        byRange.set(keyRange, fields);
+        byHash.set(keyHash, byRange);
+        persistedRows.set(schema, byHash);
       }
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,

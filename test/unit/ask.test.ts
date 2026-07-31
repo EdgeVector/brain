@@ -21,6 +21,7 @@ import {
   appSearchAsLegacyNativeIndex,
   legacySearchResponseBody,
   buildTestCfg,
+  TEST_RECORD_LIST_ENTRY_HASH,
   TEST_HASHES,
 } from "../util.ts";
 
@@ -132,7 +133,7 @@ function installFetchStub(opts: {
     bodyQueryCountsBySchema: new Map(),
     searchCalls: 0,
   };
-  const persistedRows = new Map<string, Map<string, Record<string, unknown>>>();
+  const persistedRows = new Map<string, Map<string, Map<string, Record<string, unknown>>>>();
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const rawUrl = typeof input === "string" ? input : String(input);
     const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
@@ -151,10 +152,32 @@ function installFetchStub(opts: {
           (stub.bodyQueryCountsBySchema.get(schema) ?? 0) + 1,
         );
       }
-      const filter = (body as { filter?: { HashKey?: unknown } }).filter;
+      const filter = (body as { filter?: { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } } }).filter;
       const keyHash = typeof filter?.HashKey === "string" ? filter.HashKey : "";
-      const persisted = keyHash ? persistedRows.get(schema)?.get(keyHash) : undefined;
-      const rows = persisted ? [persisted] : (opts.queries[schema] ?? []);
+      const entrySchema = TEST_RECORD_LIST_ENTRY_HASH;
+      if (schema === entrySchema) {
+        const hrk = filter?.HashRangeKey;
+        const hrHash = typeof hrk?.hash === "string" ? hrk.hash : "";
+        const hrRange = typeof hrk?.range === "string" ? hrk.range : "";
+        const entryRows = hrHash && hrRange
+          ? [...(persistedRows.get(schema)?.get(hrHash)?.entries() ?? [])]
+              .filter(([range]) => range === hrRange)
+              .map(([, fields]) => ({ fields, key: { hash: hrHash, range: hrRange } }))
+          : keyHash
+            ? [...(persistedRows.get(schema)?.get(keyHash)?.entries() ?? [])]
+                .map(([range, fields]) => ({ fields, key: { hash: keyHash, range } }))
+            : [];
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: entryRows,
+            total_count: entryRows.length,
+            returned_count: entryRows.length,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      const rows = opts.queries[schema] ?? [];
       return new Response(
         JSON.stringify({
           ok: true,
@@ -172,14 +195,17 @@ function installFetchStub(opts: {
       const mutation = body as {
         schema?: string;
         fields_and_values?: Record<string, unknown>;
-        key_value?: { hash?: unknown };
+        key_value?: { hash?: unknown; range?: unknown };
       };
       const schema = typeof mutation.schema === "string" ? mutation.schema : "";
       const keyHash = typeof mutation.key_value?.hash === "string" ? mutation.key_value.hash : "";
+      const keyRange = typeof mutation.key_value?.range === "string" ? mutation.key_value.range : "";
       if (schema && keyHash && mutation.fields_and_values) {
-        const byKey = persistedRows.get(schema) ?? new Map<string, Record<string, unknown>>();
-        byKey.set(keyHash, mutation.fields_and_values);
-        persistedRows.set(schema, byKey);
+        const byHash = persistedRows.get(schema) ?? new Map<string, Map<string, Record<string, unknown>>>();
+        const byRange = byHash.get(keyHash) ?? new Map<string, Record<string, unknown>>();
+        byRange.set(keyRange, mutation.fields_and_values);
+        byHash.set(keyHash, byRange);
+        persistedRows.set(schema, byHash);
       }
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
@@ -477,15 +503,20 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.design)).toBe(1);
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.task)).toBe(1);
 
-      // Cold RecordListIndex seed cost is bounded per type: read index miss,
-      // body-bearing seed scan, write-existence point read, then read index hit
-      // for the rebuild. The critical invariant is still above: only one of
-      // those carries `body`, and Stage 4 adds no per-hit body fetches.
+      // Cold entry-index seed cost is bounded per type: read index miss,
+      // body-bearing seed scan, per-record write-existence point reads, marker
+      // existence point read, then read index hit for the rebuild. The critical
+      // invariant is still above: only one of those carries `body`, and Stage 4
+      // adds no per-hit body fetches.
       const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
       );
-      expect(totalQueries).toBe(4 * RECORD_TYPES.length);
+      const seededRows =
+        noteRows.length * 6 +
+        designRows.length +
+        taskRows.length;
+      expect(totalQueries).toBe(4 * RECORD_TYPES.length + seededRows);
     },
   );
 
@@ -970,13 +1001,13 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     // The ghost vector hit triggers NO extra fetch: on the cold path it's a
     // `liveById` Map miss (the in-memory corpus map), silently skipped. So the
     // only /api/query traffic is the corpus load itself: bounded cold
-    // RecordListIndex seed/read traffic per type, and zero body fetches for
+    // entry-index seed/read traffic per type, and zero body fetches for
     // the ghost beyond the single per-type body-bearing seed scan.
     const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
       (a, b) => a + b,
       0,
     );
-    expect(totalQueries).toBe(4 * RECORD_TYPES.length);
+    expect(totalQueries).toBe(4 * RECORD_TYPES.length + 1);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);
