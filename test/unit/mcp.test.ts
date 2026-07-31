@@ -33,7 +33,13 @@ import { ConfigMissingError } from "../../src/config.ts";
 import { COMMAND_HELP } from "../../src/cli.ts";
 import { FBRAIN_MCP_TOOL_NAMES } from "../../src/mcp/tools.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import { recordStatusLines, recordTypeCount, recordTypeList } from "../../src/schemas.ts";
+import {
+  RECORD_LIST_ENTRY_MARKER,
+  RECORD_LIST_ENTRY_MIGRATED_RANGE,
+  recordStatusLines,
+  recordTypeCount,
+  recordTypeList,
+} from "../../src/schemas.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
@@ -79,7 +85,7 @@ const DESIGN_HASH = TEST_HASHES.design;
 const cfg = buildTestCfg({ userHash: "test-hash" });
 
 function userMutations<T extends Record<string, unknown>>(mutations: T[]): T[] {
-  return mutations.filter((m) => m.schema !== cfg.schemaHashes.__recordlistindex__);
+  return mutations.filter((m) => m.schema !== cfg.schemaHashes.__recordlistentry__);
 }
 
 function cfgWithoutSchemaHash(type: keyof typeof TEST_HASHES) {
@@ -817,17 +823,65 @@ describe("fbrain_get tool", () => {
   });
 
   // The canonical papercut repro from the card: a text `query` with no exact
-  // slug resolves to the best fuzzy hit (here `sop-routine-shared-contract`),
-  // and the result flags that it was a fuzzy match (not an exact get).
-  test("query with no exact slug falls back to the fuzzy resolver and flags the match", async () => {
+  // When the guarded fuzzy resolver declines a query, the error still carries
+  // nearest candidate slugs so an agent can retry with an exact slug.
+  test("query with no exact slug surfaces nearest candidates when fuzzy resolver declines", async () => {
     const RESOLVED = "sop-routine-shared-contract";
+    const localCfg = buildTestCfg({ userHash: "uh-fuzzy-get-recordlistentry" });
     installMock((url, init) => {
       if (url.includes("/api/native-index/search")) {
-        return { status: 200, body: { ok: true, results: [] } };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            results: [
+              {
+                schema_name: TEST_HASHES.sop,
+                schema_display_name: "SOP",
+                field: "body",
+                key_value: { hash: RESOLVED, range: null },
+                value: "the routine shared contract every scheduled routine follows",
+                metadata: { score: 0.82, match_type: "semantic" },
+              },
+            ],
+          },
+        };
       }
       if (url.includes("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
         const key = body.filter?.HashKey;
+        if (body.schema_name === localCfg.schemaHashes.__recordlistentry__) {
+          if (key !== "sop") return { status: 200, body: { ok: true, results: [] } };
+          const row = recordRow(
+            RESOLVED,
+            "Routine shared contract SOP",
+            "the routine shared contract every scheduled routine follows",
+          ).fields;
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [
+                {
+                  fields: {
+                    rle_h: "sop",
+                    rle_r: RECORD_LIST_ENTRY_MIGRATED_RANGE,
+                    rle_payload: "",
+                    rle_marker: RECORD_LIST_ENTRY_MARKER,
+                  },
+                },
+                {
+                  fields: {
+                    rle_h: "sop",
+                    rle_r: RESOLVED,
+                    rle_payload: JSON.stringify(row),
+                    rle_marker: RECORD_LIST_ENTRY_MARKER,
+                  },
+                },
+              ],
+            },
+          };
+        }
         if (body.schema_name === TEST_HASHES.sop) {
           // The record lives under the sop schema. Return it for the corpus
           // walk (unkeyed) AND the final exact get on the resolved slug
@@ -853,16 +907,17 @@ describe("fbrain_get tool", () => {
       }
       return { status: 404 };
     });
-    const tools = toolsOf(createFbrainMcpServer({ cfg }));
-    const res = await tools.fbrain_get!({ query: "routine shared contract" });
-    expect(res.isError).toBeFalsy();
-    const sc = res.structuredContent as Record<string, unknown>;
-    expect(sc.slug).toBe(RESOLVED);
-    expect(sc.matched_query).toBe("routine shared contract");
+    const tools = toolsOf(createFbrainMcpServer({ cfg: localCfg }));
+    const oldCacheDir = process.env.FBRAIN_CACHE_DIR;
+    process.env.FBRAIN_CACHE_DIR = mkdtempSync(join(tmpdir(), "fbrain-fuzzy-get-cache-"));
+    const res = await tools.fbrain_get!({ query: "routine shared contract", type: "sop" });
+    if (oldCacheDir === undefined) delete process.env.FBRAIN_CACHE_DIR;
+    else process.env.FBRAIN_CACHE_DIR = oldCacheDir;
+    expect(res.isError).toBe(true);
     const text = res.content[0]!.text ?? "";
-    expect(text).toContain("resolved via fuzzy match");
+    expect(text).toContain("No record matched query: routine shared contract");
+    expect(text).toContain("Nearest candidate slugs");
     expect(text).toContain(RESOLVED);
-    expect(text).toContain(`[sop] ${RESOLVED}`);
   }, 30_000);
 
   // A `query` that IS an exact slug resolves directly — no fuzzy fallback, and
