@@ -26,6 +26,7 @@ import { resolveRecordsByTag } from "../tag-index.ts";
 // growing. A `-n N` flag overrides this; the truncation hint tells the
 // user what they're missing.
 export const DEFAULT_LIST_LIMIT = 20;
+export const LIST_HYDRATE_CONCURRENCY = 16;
 
 export type ListOptions = {
   cfg: Config;
@@ -294,8 +295,10 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // point-get means the record was deleted between the sweep and this fetch
   // (a stale race, not an error) — skip it, same as any other stale hit.
   const hydrated: ListEntry[] = (
-    await Promise.all(
-      trimmed.map(async (e): Promise<ListEntry | null> => {
+    await mapWithConcurrency(
+      trimmed,
+      LIST_HYDRATE_CONCURRENCY,
+      async (e): Promise<ListEntry | null> => {
         const cached = hydratedByKey.get(recordKeyId(e.type, e.slug));
         if (cached) return { type: e.type, record: cached };
         const record = await findBySlug(
@@ -305,7 +308,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
           e.slug,
         );
         return record ? { type: e.type, record } : null;
-      }),
+      },
     )
   ).filter((e): e is ListEntry => e !== null);
 
@@ -354,6 +357,30 @@ export async function listCmd(opts: ListOptions): Promise<void> {
       `… ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
     );
   }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workerCount = Math.min(Math.max(1, Math.floor(limit)), items.length);
+  const results = new Array<R>(items.length);
+  let next = 0;
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      for (;;) {
+        const index = next;
+        next += 1;
+        if (index >= items.length) return;
+        results[index] = await fn(items[index]!, index);
+      }
+    }),
+  );
+
+  return results;
 }
 
 export type RecordSummary = {

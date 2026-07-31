@@ -13,7 +13,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { listCmd } from "../../src/commands/list.ts";
+import { LIST_HYDRATE_CONCURRENCY, listCmd } from "../../src/commands/list.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import {
@@ -723,6 +723,86 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
       restore();
     }
     expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(21);
+  });
+
+  test("large explicit list windows bound concurrent point-read hydration", async () => {
+    const rows: Fields[] = Array.from({ length: 700 }, (_, i) =>
+      spikeRowAt(
+        `slug-${String(i).padStart(4, "0")}`,
+        `2026-04-${String(1 + (i % 30)).padStart(2, "0")}T00:00:00Z`,
+      ),
+    );
+    const bySlug = new Map(rows.map((row) => [String(row.slug), row]));
+    let activeHydrates = 0;
+    let maxActiveHydrates = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        const hashKey =
+          body && typeof body === "object" && body.filter && typeof body.filter === "object"
+            ? (body.filter as Record<string, unknown>).HashKey
+            : undefined;
+        if (typeof hashKey === "string") {
+          activeHydrates += 1;
+          maxActiveHydrates = Math.max(maxActiveHydrates, activeHydrates);
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          activeHydrates -= 1;
+          const row = bySlug.get(hashKey);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: row
+                ? [{ fields: row, key: { hash: String(row.slug), range: null } }]
+                : [],
+              total_count: row ? 1 : 0,
+              returned_count: row ? 1 : 0,
+              limit: 1000,
+              offset: 0,
+              has_more: false,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        const results = rows.map((fields) => ({
+          fields,
+          key: { hash: String(fields.slug), range: null },
+        }));
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results,
+            total_count: results.length,
+            returned_count: results.length,
+            limit: 1000,
+            offset: 0,
+            has_more: false,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const payload: unknown[] = [];
+    try {
+      await listCmd({
+        cfg,
+        type: "spike",
+        limit: rows.length,
+        json: true,
+        print: (line) => payload.push(JSON.parse(line)),
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect((payload[0] as unknown[]).length).toBe(rows.length);
+    expect(maxActiveHydrates).toBeLessThanOrEqual(LIST_HYDRATE_CONCURRENCY);
   });
 });
 
