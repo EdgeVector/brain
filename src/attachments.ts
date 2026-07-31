@@ -120,13 +120,6 @@ export function mediaTypeFor(filename: string): string {
   return MEDIA_TYPES[ext] ?? "application/octet-stream";
 }
 
-export function attachmentSchemasAvailable(cfg: Config): boolean {
-  return (
-    (cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY] ?? "").length > 0 &&
-    (cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY] ?? "").length > 0
-  );
-}
-
 // Lazy schema declare (the admin-snapshot pattern): installs that ran
 // `fbrain init` before attachments existed get the index + file schemas
 // minted on first use, without a re-init. Persists the canonical hashes to
