@@ -196,7 +196,7 @@ describe("list --status no-match — probe cost + unchanged hint", () => {
     const probeCalls = calls.filter((c) => c.limit === NO_MATCH_PROBE_PAGE_LIMIT);
     // One unkeyed sweep query per type (the retry stops on the first attempt
     // because live rows are visible), then ONE probe query total. The
-    // index-first path may also perform keyed RecordListIndex misses; those
+    // index-first path may also perform keyed entry-index misses; those
     // are not corpus scans and are intentionally excluded here.
     expect(sweepCalls).toHaveLength(RECORD_TYPES.length);
     for (const c of sweepCalls) {

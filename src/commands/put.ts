@@ -235,7 +235,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
       `record-list index patch FAILED for ${type}/${slug}: ` +
         `${err instanceof Error ? err.message : String(err)} — the record persisted but will ` +
         "not appear in `brain list` or the BM25 corpus behind `brain ask` until the index is " +
-        "rebuilt (scripts/migrate-record-list-to-hashrange.ts). This does not self-heal.",
+        "rebuilt by a cold-seed/admin repair pass. This does not self-heal.",
     );
   }
   await reconcileTagIndex(

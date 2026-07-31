@@ -335,11 +335,11 @@ export function arrayStringField(f: Record<string, unknown>, key: string): strin
   return [];
 }
 
-/** Config shape required for product listRecords (index-first, no silent scan). */
+/** Config shape required for product listRecords (entry-index first, no silent scan). */
 export type ListRecordsCfg = { schemaHashes: Record<string, string> };
 
 /**
- * Product list of one record type: RecordListIndex HashKey point-read first.
+ * Product list of one record type: RecordListEntry keyed partition read first.
  * Cold seed (index miss) is the only allowFullScan path — then product reads
  * stay keyed. `cfg` is REQUIRED so omit-cfg callers cannot silently full-scan.
  */
@@ -876,7 +876,7 @@ export async function hydrateSchemaBySlug(
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    // Product path: listRecords requires cfg → RecordListIndex, never silent scan.
+    // Product path: listRecords requires cfg → keyed entry index, never silent scan.
     const list = await listRecords(node, type, schemaHash, cfg);
     if (list.length > 0) {
       const bySlug = new Map<string, FbrainRecord>();

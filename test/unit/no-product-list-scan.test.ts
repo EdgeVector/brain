@@ -1,5 +1,5 @@
 // Structural guard: product modules must not call listRecords without cfg
-// (the omit-cfg path was deleted). Product paths go through RecordListIndex.
+// (the omit-cfg path was deleted). Product paths go through keyed entry rows.
 // Admin-only drains use listRecordsAdminScan explicitly.
 
 import { describe, expect, test } from "bun:test";

@@ -603,7 +603,7 @@ describe("hydrateSchemaBySlug (batch search hydrate)", () => {
     return { node, calls: () => calls };
   }
   const noSleep = { sleep: async () => {} };
-  // No RecordListIndex hash → index miss → admin cold-seed via queryAll (mock).
+  // No entry-index hash → index miss → admin cold-seed via queryAll (mock).
   const testCfg = { schemaHashes: {} as Record<string, string> };
 
   test("populated page → ONE queryAll, returns every live row keyed by slug", async () => {
