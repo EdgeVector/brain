@@ -2979,7 +2979,10 @@ async function runGate(args: Argv, verbose: Verbose): Promise<number> {
   return result.stale.length > 0 ? 1 : 0;
 }
 
-async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
+export function parseDoctorOptions(
+  args: Argv,
+  verbose?: Verbose,
+): NonNullable<Parameters<typeof doctor>[0]> {
   const intArgs = normalizeNegativeIntFlagValues(args, USAGE_WINDOW_INT_FLAGS);
   const { values } = parseCommandArgs(
     {
@@ -3022,7 +3025,7 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     }
   }
 
-  const dOpts: Parameters<typeof doctor>[0] = {};
+  const dOpts: NonNullable<Parameters<typeof doctor>[0]> = {};
   if (verbose) dOpts.verbose = verbose;
   if (values.freshness) dOpts.freshness = true;
   if (values.write) dOpts.write = true;
@@ -3041,7 +3044,11 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
     if (values["usage-path"]) usageOpts.usagePath = values["usage-path"];
     dOpts.usageOptions = usageOpts;
   }
-  return doctor(dOpts);
+  return dOpts;
+}
+
+async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
+  return doctor(parseDoctorOptions(args, verbose));
 }
 
 async function runShare(args: Argv): Promise<number> {
