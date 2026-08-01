@@ -38,14 +38,6 @@ export type SearchPlaneQueryOpts = {
   verbose?: (line: string) => void;
 };
 
-export type SearchPlaneStatus = {
-  available: boolean;
-  reason?: string;
-  docs?: number;
-  home?: string;
-  vector_state?: string;
-};
-
 export function resolveSemanticModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_SEMANTIC_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
@@ -221,38 +213,4 @@ export async function querySearchPlane(
 
   verbose("search-plane: unavailable (semantic plane not found)");
   return null;
-}
-
-export async function searchPlaneStatus(
-  opts: { lastDbHome?: string; searchHome?: string } = {},
-): Promise<SearchPlaneStatus> {
-  const bin = process.env.LASTDB_SEARCH_BIN?.trim() || "search";
-  const args = ["vector-status"];
-  if (opts.lastDbHome) args.push("--last-db-home", opts.lastDbHome);
-  const r = spawnSync(bin, args, {
-    encoding: "utf8",
-    env: process.env,
-    timeout: 30_000,
-  });
-  if (r.status === 0) {
-    try {
-      const body = JSON.parse(r.stdout) as {
-        vector?: { state?: string; vectors?: number };
-        docs?: number;
-        home?: string;
-      };
-      return {
-        available: true,
-        docs: body.vector?.vectors ?? body.docs,
-        home: body.home,
-        vector_state: body.vector?.state,
-      };
-    } catch {
-      /* fall through */
-    }
-  }
-  return {
-    available: false,
-    reason: "Search semantic plane not found (search vector-status / semantic CLI)",
-  };
 }
