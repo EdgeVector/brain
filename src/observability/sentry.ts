@@ -1,5 +1,3 @@
-export type SentryRuntimeEnvironment = Record<string, string | undefined>;
-
 export type SentryInitOptions = {
   service: string;
   dsnEnv?: string;
@@ -7,7 +5,7 @@ export type SentryInitOptions = {
   releaseEnv?: string;
   enabled?: boolean;
   installProcessHandlers?: boolean;
-  env?: SentryRuntimeEnvironment;
+  env?: Record<string, string | undefined>;
   sentryModule?: SentryModule;
 };
 
