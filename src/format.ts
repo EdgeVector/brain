@@ -6,7 +6,7 @@
 // different offset on every row and the table was unreadable. The
 // helper here sizes each column from the actual rows being printed.
 
-export type Align = "left" | "right";
+type Align = "left" | "right";
 
 export type FormatTableOptions = {
   // Per-column alignment. Defaults to "left" for every column. Length
