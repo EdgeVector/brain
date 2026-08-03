@@ -121,7 +121,7 @@ export function isCapability403Reason(s: string): s is Capability403Reason {
  * local clock view and retry the same write once; `surface` → the verb-level
  * caller should propagate the error rather than re-prompt.
  */
-export type Reaction = {
+type Reaction = {
   reason: Capability403Reason;
   discardToken: boolean;
   reacquire: boolean;
