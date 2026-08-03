@@ -26,7 +26,7 @@ import {
 } from "./capability.ts";
 import { FbrainError, type CapabilityProvider, type Verbose } from "./client.ts";
 
-export type CapabilitySessionOptions = {
+type CapabilitySessionOptions = {
   nodeUrl: string;
   store: CapabilityStore;
   transport: ConsentTransport;
