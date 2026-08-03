@@ -10,7 +10,7 @@
 
 export const RRF_DEFAULT_K = 60;
 
-export type RankedDoc = {
+type RankedDoc = {
   id: string; // canonical doc id; we use "type::slug"
   rank: number; // 1-based rank in this list
 };
