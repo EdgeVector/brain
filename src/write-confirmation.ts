@@ -1,4 +1,4 @@
-export type PutConfirmation = {
+type PutConfirmation = {
   action: "created" | "updated";
   type: string;
   slug: string;
