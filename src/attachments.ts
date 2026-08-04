@@ -265,7 +265,7 @@ async function writeAttachmentIndex(
   }
 }
 
-export type BlobRecord = {
+type BlobRecord = {
   content_hash: string;
   size: number;
   media_type: string;
