@@ -504,10 +504,11 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.task)).toBe(1);
 
       // Cold entry-index seed cost is bounded per type: read index miss,
-      // body-bearing seed scan, per-record write-existence point reads, marker
-      // existence point read, then read index hit for the rebuild. The critical
-      // invariant is still above: only one of those carries `body`, and Stage 4
-      // adds no per-hit body fetches.
+      // body-bearing seed scan, existing-partition scan (stale-extra prune before
+      // rewrite), per-record write-existence point reads, marker existence point
+      // read, then read index hit for the rebuild. The critical invariant is
+      // still above: only one of those carries `body`, and Stage 4 adds no
+      // per-hit body fetches.
       const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
@@ -516,7 +517,9 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         noteRows.length * 6 +
         designRows.length +
         taskRows.length;
-      expect(totalQueries).toBe(4 * RECORD_TYPES.length + seededRows);
+      // 5 keyed/admin queries per type on the cold path (was 4 before the
+      // list-index completeness heal added the pre-write partition scan).
+      expect(totalQueries).toBe(5 * RECORD_TYPES.length + seededRows);
     },
   );
 
@@ -1007,7 +1010,10 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       (a, b) => a + b,
       0,
     );
-    expect(totalQueries).toBe(4 * RECORD_TYPES.length + 1);
+    // +1 for the single design seed row existence point-read during cold seed.
+    // Per-type budget is 5 cold queries after the list-index completeness heal
+    // (pre-write partition scan for stale extras).
+    expect(totalQueries).toBe(5 * RECORD_TYPES.length + 1);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);
