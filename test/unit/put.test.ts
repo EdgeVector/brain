@@ -2083,7 +2083,8 @@ describe("putCmd — record-list index patch failure is surfaced, not swallowed"
     const warned = warnings.find((w) => w.includes("record-list index patch FAILED"));
     expect(warned).toBeDefined();
     expect(warned).toContain("half-commit-probe");
-    expect(warned).toContain("does not self-heal");
+    // Self-heal path: clear completeness marker so next list cold-seeds.
+    expect(warned).toMatch(/cleared the .* list-index completeness marker|reindex --list-index/);
   });
 
   test("a healthy put reports listIndexFailed false", async () => {

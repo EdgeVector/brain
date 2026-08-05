@@ -92,9 +92,14 @@ function rangeKeyOf(row: QueryRow): string | null {
 }
 
 /**
- * Records of one type from the HashRange partition. Empty unmarked partitions
- * return null so callers can cold-seed from the authoritative product schema and
- * then stamp the marker.
+ * Records of one type from the HashRange partition.
+ *
+ * Only a partition that carries the completeness marker is trusted. Unmarked
+ * partitions (including non-empty partial dual-write residue) return null so
+ * callers cold-seed from the authoritative product schema and re-stamp the
+ * marker. This is what stops a failed put dual-write from permanently hiding
+ * rows once the marker had already been set: put clears the marker, and the
+ * next list rebuilds from SOT.
  */
 export async function readTypeListIndex(
   node: NodeClient,
@@ -103,13 +108,16 @@ export async function readTypeListIndex(
 ): Promise<FbrainRecord[] | null> {
   const entries = await readTypeListEntries(node, cfg, type);
   if (entries === null) return null;
-  if (!entries.migrated && entries.records.length === 0) return null;
+  if (!entries.migrated) return null;
   return entries.records;
 }
 
 /**
  * Replace the whole list for one type. Cold-seed and admin repair path only;
  * `patchTypeListIndex` is what the hot put/delete path uses.
+ *
+ * Upserts every live SOT record, deletes partition rows not in SOT (stale
+ * dual-write residue), then stamps the completeness marker.
  */
 export async function writeTypeListIndex(
   node: NodeClient,
@@ -119,6 +127,15 @@ export async function writeTypeListIndex(
 ): Promise<void> {
   const entryHash = recordListEntryHash(cfg);
   if (!entryHash) return;
+  const want = new Set(records.map((r) => r.slug));
+  const existing = await readTypeListEntries(node, cfg, type);
+  if (existing) {
+    for (const row of existing.records) {
+      if (!want.has(row.slug)) {
+        await deleteTypeListEntry(node, cfg, type, row.slug);
+      }
+    }
+  }
   for (const record of records) {
     await upsertTypeListEntry(node, cfg, type, record);
   }
@@ -222,6 +239,81 @@ export async function patchTypeListIndex(
   } else {
     await deleteTypeListEntry(node, cfg, type, slug);
   }
+}
+
+/**
+ * Drop the completeness marker so the next product `listRecords` cold-seeds
+ * from the authoritative product schema.
+ *
+ * Without this, a failed dual-write (`listIndexFailed` on put) leaves the
+ * partition marked migrated while missing the just-written row — and
+ * `readTypeListIndex` trusts that incomplete set forever. Clearing the marker
+ * is the self-heal path: the next list pays one admin scan and re-stamps.
+ */
+export async function unmarkTypePartitionMigrated(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  type: RecordType,
+): Promise<boolean> {
+  const entryHash = recordListEntryHash(cfg);
+  if (!entryHash) return false;
+  const range = RECORD_LIST_ENTRY_MIGRATED_RANGE;
+  if (!(await entryRowExists(node, entryHash, type, range))) return true;
+  await node.deleteRecord({ schemaHash: entryHash, keyHash: type, keyRange: range });
+  return true;
+}
+
+/** Census of one type's list partition vs an authoritative set of live slugs. */
+export type TypeListIndexCensus = {
+  type: RecordType;
+  /** Rows in the list partition (excluding the completeness marker). */
+  indexed: number;
+  /** Live slugs from the SOT product schema (caller-provided). */
+  sot: number;
+  /** Slugs present in SOT but missing from the list partition. */
+  missingFromIndex: string[];
+  /** Slugs present in the list partition but absent from the live SOT set. */
+  extraInIndex: string[];
+  /** Completeness marker is present. */
+  migrated: boolean;
+  /** True when listed set == SOT set (order-independent). */
+  complete: boolean;
+};
+
+/**
+ * Compare the keyed list partition against an authoritative live-slug set.
+ * Used by `fbrain reindex --list-index` (repair) and doctor/census guards so
+ * "list is a sample" can never silently return when the projection lags SOT.
+ */
+export async function censusTypeListIndex(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  type: RecordType,
+  sotLiveSlugs: readonly string[],
+): Promise<TypeListIndexCensus | null> {
+  const entries = await readTypeListEntries(node, cfg, type);
+  if (entries === null) return null;
+  const indexedSlugs = new Set(entries.records.map((r) => r.slug));
+  const sotSet = new Set(sotLiveSlugs);
+  const missingFromIndex: string[] = [];
+  for (const s of sotSet) {
+    if (!indexedSlugs.has(s)) missingFromIndex.push(s);
+  }
+  missingFromIndex.sort();
+  const extraInIndex: string[] = [];
+  for (const s of indexedSlugs) {
+    if (!sotSet.has(s)) extraInIndex.push(s);
+  }
+  extraInIndex.sort();
+  return {
+    type,
+    indexed: indexedSlugs.size,
+    sot: sotSet.size,
+    missingFromIndex,
+    extraInIndex,
+    migrated: entries.migrated,
+    complete: missingFromIndex.length === 0 && extraInIndex.length === 0,
+  };
 }
 
 function isFbrainRecordLike(value: unknown): value is FbrainRecord {

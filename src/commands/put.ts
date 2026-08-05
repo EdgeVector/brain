@@ -231,12 +231,28 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     await patchTypeListIndex(node, opts.cfg, type, visible, slug, isTombstoned);
   } catch (err) {
     listIndexFailed = true;
-    opts.verbose?.(
-      `record-list index patch FAILED for ${type}/${slug}: ` +
-        `${err instanceof Error ? err.message : String(err)} — the record persisted but will ` +
-        "not appear in `brain list` or the BM25 corpus behind `brain ask` until the index is " +
-        "rebuilt by a cold-seed/admin repair pass. This does not self-heal.",
-    );
+    // Self-heal: clear the completeness marker so the next product list cold-
+    // seeds from SOT instead of trusting a permanently incomplete partition.
+    // Without this, a single dual-write failure left the type under-reported
+    // forever (papercut-brain-list-under-reports…: 68 papercut-lastgit-* rows
+    // invisible to every list/search while brain get still resolved them).
+    try {
+      const { unmarkTypePartitionMigrated } = await import("../record-list-index.ts");
+      await unmarkTypePartitionMigrated(node, opts.cfg, type);
+      opts.verbose?.(
+        `record-list index patch FAILED for ${type}/${slug}: ` +
+          `${err instanceof Error ? err.message : String(err)} — record persisted; ` +
+          `cleared the ${type} list-index completeness marker so the next \`brain list\` ` +
+          `cold-seeds from SOT (or run \`fbrain reindex --list-index\`).`,
+      );
+    } catch (unmarkErr) {
+      opts.verbose?.(
+        `record-list index patch FAILED for ${type}/${slug}: ` +
+          `${err instanceof Error ? err.message : String(err)}; unmark also failed: ` +
+          `${unmarkErr instanceof Error ? unmarkErr.message : String(unmarkErr)} — ` +
+          "run `fbrain reindex --list-index` to repair.",
+      );
+    }
   }
   await reconcileTagIndex(
     node,
