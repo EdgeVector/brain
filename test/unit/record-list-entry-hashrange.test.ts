@@ -5,9 +5,11 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  censusTypeListIndex,
   deleteTypeListEntry,
   patchTypeListIndex,
   readTypeListIndex,
+  unmarkTypePartitionMigrated,
   upsertTypeListEntry,
   writeTypeListIndex,
 } from "../../src/record-list-index.ts";
@@ -200,10 +202,13 @@ describe("RecordListEntry HashRange rows", () => {
     expect(got).toBeNull();
   });
 
-  test("a non-empty unmarked partition still returns its rows", async () => {
+  test("a non-empty unmarked partition returns null so the caller cold-seeds", async () => {
+    // Partial dual-write residue without the completeness marker must not be
+    // trusted — otherwise a failed put that left some rows but cleared the
+    // marker (or never stamped it) would under-report forever.
     const { node } = makeNode({ rows: { concept: { fresh: rec("fresh") } } });
     const got = await readTypeListIndex(node, MIGRATED, "concept");
-    expect(got?.map((r) => r.slug)).toEqual(["fresh"]);
+    expect(got).toBeNull();
   });
 
   test("the marker row is never returned as a record", async () => {
@@ -240,5 +245,87 @@ describe("bulk seed", () => {
     const { node } = makeNode();
     expect(await upsertTypeListEntry(node, NO_ENTRY_SCHEMA, "concept", rec("a"))).toBe(false);
     expect(await deleteTypeListEntry(node, NO_ENTRY_SCHEMA, "concept", "a")).toBe(false);
+  });
+});
+
+describe("list-index completeness self-heal + census", () => {
+  test("unmark drops the migrated marker so the next list cold-seeds", async () => {
+    const { node, rows } = makeNode({
+      rows: { concept: { alpha: rec("alpha") } },
+      migrated: ["concept"],
+    });
+    // Marked (even incomplete) is still trusted by product list until unmark.
+    const before = await readTypeListIndex(node, MIGRATED, "concept");
+    expect(before?.map((r) => r.slug)).toEqual(["alpha"]);
+    expect(Object.prototype.hasOwnProperty.call(rows.concept, RECORD_LIST_ENTRY_MIGRATED_RANGE)).toBe(
+      true,
+    );
+
+    await unmarkTypePartitionMigrated(node, MIGRATED, "concept");
+    expect(Object.prototype.hasOwnProperty.call(rows.concept, RECORD_LIST_ENTRY_MIGRATED_RANGE)).toBe(
+      false,
+    );
+    // Unmarked → null → next product list cold-seeds from SOT (even if residue rows remain).
+    const after = await readTypeListIndex(node, MIGRATED, "concept");
+    expect(after).toBeNull();
+  });
+
+  test("unmark on empty marked partition makes readTypeListIndex return null for cold-seed", async () => {
+    const { node } = makeNode({ rows: {}, migrated: ["concept"] });
+    expect(await readTypeListIndex(node, MIGRATED, "concept")).toEqual([]);
+    await unmarkTypePartitionMigrated(node, MIGRATED, "concept");
+    expect(await readTypeListIndex(node, MIGRATED, "concept")).toBeNull();
+  });
+
+  test("writeTypeListIndex removes stale extras not in SOT", async () => {
+    const { node, rows } = makeNode({
+      rows: { concept: { alpha: rec("alpha"), stale: rec("stale") } },
+      migrated: ["concept"],
+    });
+    await writeTypeListIndex(node, MIGRATED, "concept", [rec("alpha"), rec("beta")]);
+    expect(slugsIn(rows.concept)).toEqual(["alpha", "beta"]);
+    expect(Object.prototype.hasOwnProperty.call(rows.concept, RECORD_LIST_ENTRY_MIGRATED_RANGE)).toBe(
+      true,
+    );
+  });
+
+  test("census reports missing SOT slugs and complete=false", async () => {
+    const { node } = makeNode({
+      rows: { concept: { alpha: rec("alpha") } },
+      migrated: ["concept"],
+    });
+    const census = await censusTypeListIndex(node, MIGRATED, "concept", [
+      "alpha",
+      "beta",
+      "gamma",
+    ]);
+    expect(census).not.toBeNull();
+    expect(census!.indexed).toBe(1);
+    expect(census!.sot).toBe(3);
+    expect(census!.missingFromIndex).toEqual(["beta", "gamma"]);
+    expect(census!.extraInIndex).toEqual([]);
+    expect(census!.migrated).toBe(true);
+    expect(census!.complete).toBe(false);
+  });
+
+  test("census complete when listed set equals SOT", async () => {
+    const { node } = makeNode({
+      rows: { concept: { alpha: rec("alpha"), beta: rec("beta") } },
+      migrated: ["concept"],
+    });
+    const census = await censusTypeListIndex(node, MIGRATED, "concept", ["beta", "alpha"]);
+    expect(census!.complete).toBe(true);
+    expect(census!.missingFromIndex).toEqual([]);
+    expect(census!.extraInIndex).toEqual([]);
+  });
+
+  test("census flags stale extras still in the partition", async () => {
+    const { node } = makeNode({
+      rows: { concept: { alpha: rec("alpha"), stale: rec("stale") } },
+      migrated: ["concept"],
+    });
+    const census = await censusTypeListIndex(node, MIGRATED, "concept", ["alpha"]);
+    expect(census!.extraInIndex).toEqual(["stale"]);
+    expect(census!.complete).toBe(false);
   });
 });

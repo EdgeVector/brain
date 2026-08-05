@@ -731,7 +731,7 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25] [--list-index]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -762,6 +762,14 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     bulk edit so the next \`ask\` hits a warm cache instead of
                     paying for (and visibly noting) a live rebuild.
                     Standalone mode: skips the embedding refresh.
+  --list-index      rebuild the RecordListEntry keyed list partition from an
+                    admin SOT scan of each product schema (and re-stamp the
+                    completeness marker). Repairs persistent under-report when
+                    dual-write patches failed while the marker stayed set —
+                    the case where \`brain get\` still resolves rows that
+                    \`brain list\` / \`brain search\` miss. Dry-run censuses
+                    listed-set vs SOT without writing. Standalone mode: skips
+                    the embedding refresh.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
@@ -1103,6 +1111,7 @@ const REINDEX_OPTIONS = {
   tags: { type: "boolean", default: false },
   backlinks: { type: "boolean", default: false },
   bm25: { type: "boolean", default: false },
+  "list-index": { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -3412,6 +3421,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values.tags) rOpts.tags = true;
   if (values.backlinks) rOpts.backlinks = true;
   if (values.bm25) rOpts.bm25 = true;
+  if (values["list-index"]) rOpts.listIndex = true;
   await reindexCmd(rOpts);
   return 0;
 }

@@ -42,6 +42,11 @@ import {
   updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
+import {
+  censusTypeListIndex,
+  writeTypeListIndex,
+  type TypeListIndexCensus,
+} from "../record-list-index.ts";
 import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
@@ -62,6 +67,13 @@ export type ReindexOptions = {
   // cold/stale cache — running this after a bulk edit means the next `ask`
   // hits warm instead of paying for (and now visibly noting) a live rebuild.
   bm25?: boolean;
+  /**
+   * Rebuild the RecordListEntry keyed list partition from an admin SOT scan
+   * of each product schema. Repairs persistent under-report when dual-write
+   * patches failed while the completeness marker stayed set (list/search miss
+   * rows that `brain get` still resolves). Standalone mode.
+   */
+  listIndex?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -73,6 +85,8 @@ export type ReindexResult = {
   byType: Partial<Record<RecordType, { reindexed: number; skippedTombstone: number }>>;
   tagIndex?: TagIndexRebuildResult;
   backlinkIndex?: BacklinkIndexRebuildResult;
+  /** Per-type census after `--list-index` (dry-run or repair). */
+  listIndexCensus?: TypeListIndexCensus[];
 };
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
@@ -176,6 +190,10 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     return result;
   }
 
+  if (opts.listIndex) {
+    return rebuildListIndex(opts, node, print);
+  }
+
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const result: ReindexResult = {
     scanned: 0,
@@ -238,4 +256,104 @@ export function buildReindexFields(
   return updateFieldsFrom(record, type, {
     updated_at: now,
   });
+}
+
+/**
+ * Rebuild RecordListEntry partitions from admin SOT scans.
+ *
+ * Dry-run: census only (listed set vs SOT) — no writes.
+ * Live: writeTypeListIndex per type (upsert every live row + stamp migrated),
+ * then re-census so the operator sees complete=true.
+ */
+async function rebuildListIndex(
+  opts: ReindexOptions,
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  print: (line: string) => void,
+): Promise<ReindexResult> {
+  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
+  const result: ReindexResult = {
+    scanned: 0,
+    reindexed: 0,
+    skippedTombstone: 0,
+    byType: {},
+    listIndexCensus: [],
+  };
+
+  for (const type of types) {
+    let schemaHash: string;
+    try {
+      schemaHash = schemaHashFor(type, opts.cfg);
+    } catch {
+      print(missingSchemaHashReadNote([type], "skipping list-index rebuild for that type"));
+      continue;
+    }
+    // Admin full scan is the SOT for this repair — never seed via product
+    // listRecords (that would re-read the incomplete partition we're fixing).
+    const sot = await listRecordsAdminScan(node, type, schemaHash);
+    result.scanned += sot.length;
+    result.byType[type] = { reindexed: sot.length, skippedTombstone: 0 };
+
+    const before = await censusTypeListIndex(
+      node,
+      opts.cfg,
+      type,
+      sot.map((r) => r.slug),
+    );
+    if (before) {
+      result.listIndexCensus!.push(before);
+      const gap =
+        before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
+          ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
+          : " complete";
+      print(
+        `list-index ${type}: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
+      );
+      if (before.missingFromIndex.length > 0 && before.missingFromIndex.length <= 12) {
+        print(`  missing: ${before.missingFromIndex.join(", ")}`);
+      } else if (before.missingFromIndex.length > 12) {
+        print(
+          `  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`,
+        );
+      }
+    } else {
+      print(`list-index ${type}: entry schema unavailable — cannot census`);
+    }
+
+    if (opts.dryRun) {
+      result.reindexed += sot.length;
+      continue;
+    }
+
+    await writeTypeListIndex(node, opts.cfg, type, sot);
+    result.reindexed += sot.length;
+    const after = await censusTypeListIndex(
+      node,
+      opts.cfg,
+      type,
+      sot.map((r) => r.slug),
+    );
+    if (after) {
+      // Replace the pre-repair census with the post-repair truth for this type.
+      const censuses = result.listIndexCensus!;
+      const idx = censuses.findIndex((c) => c.type === type);
+      if (idx >= 0) censuses[idx] = after;
+      else censuses.push(after);
+      print(
+        `list-index ${type}: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
+      );
+    }
+  }
+
+  const prefix = opts.dryRun ? "dry-run: would rebuild list-index for" : "rebuilt list-index for";
+  const typeScope = opts.type ? ` type=${opts.type}` : "";
+  const incomplete = (result.listIndexCensus ?? []).filter((c) => !c.complete).length;
+  print(
+    `${prefix} ${result.reindexed} live record(s)${typeScope}` +
+      (opts.dryRun && incomplete > 0
+        ? ` — ${incomplete} type(s) incomplete vs SOT`
+        : opts.dryRun
+          ? " — all censused types complete"
+          : ""),
+  );
+  return result;
 }

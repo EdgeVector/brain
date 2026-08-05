@@ -1196,11 +1196,16 @@ export function newNodeClient(opts: {
         allResults.push(row);
         newOnPage++;
       }
-      // Stop on explicit `has_more: false`. Absent `has_more` (older
-      // node, or a stub) is treated as "done" — a single non-paginated
-      // response is then equivalent to the pre-pagination contract.
+      // Stop on explicit `has_more: false`. Absent page envelope used to mean
+      // "done" even when the page was full (QUERY_PAGE_SIZE) — that silently
+      // stopped at the MAX_QUERY_LIMIT=1000 cliff when a node returned
+      // page:null (measured on primary for large type partitions). Treat a
+      // full page with no envelope as "maybe more" and keep paging; a short
+      // or empty follow-up page ends the loop via the empty/newOnPage guards.
       const hasMore = pageResult.page?.hasMore === true;
-      if (!hasMore) break;
+      const fullPageMaybeMore =
+        pageResult.page === null && pageResults.length >= QUERY_PAGE_SIZE;
+      if (!hasMore && !fullPageMaybeMore) break;
       if (newOnPage === 0) {
         throw new FbrainError({
           code: "query_pagination_stalled",

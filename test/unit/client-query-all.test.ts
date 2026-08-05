@@ -47,6 +47,51 @@ afterEach(() => {
 });
 
 describe("newNodeClient.queryAll pagination guard", () => {
+  test("page:null with a full page keeps paging (MAX_QUERY_LIMIT cliff)", async () => {
+    // Primary historically returned page:null; treating that as "done" stopped
+    // after the first QUERY_PAGE_SIZE rows and under-reported large partitions.
+    // A full page without an envelope must continue; a short follow-up ends.
+    const page1 = Array.from({ length: 1000 }, (_, i) => row(`r${i}`));
+    const page2 = [row("r1000"), row("r1001")];
+    const { calls } = installMockSequence([
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: page1,
+          // no has_more / total_count — page envelope absent
+        },
+      },
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: page2,
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
+    expect(r.results.length).toBe(1002);
+    expect(calls.length).toBe(2);
+    expect((calls[1]!.body as { offset?: number }).offset).toBe(1000);
+  });
+
+  test("page:null with a short page stops (single non-paginated response)", async () => {
+    installMockSequence([
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: [row("a"), row("b")],
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    const r = await c.queryAll({ schemaHash: "h", fields: ["slug"], allowFullScan: true });
+    expect(r.results.map((x) => (x.fields as { slug: string }).slug)).toEqual(["a", "b"]);
+  });
+
   test("single page with has_more=false returns all rows as-is", async () => {
     installMockSequence([
       {
