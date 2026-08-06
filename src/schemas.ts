@@ -130,6 +130,42 @@ export const DECISION_STATUSES = [
   "superseded",
 ] as const;
 
+// A `papercut` is one observed defect in our own tooling, with its evidence.
+// Status is the REPAIR lifecycle, and the split that matters most is
+// `fixed` vs `verified`: "merged" is a fact about a repository and is NOT
+// evidence the defect is gone. Runs that conflated the two produced the
+// measured failure this type exists to end — on 2026-08-04, 40 of 107
+// prose-ledger records read OPEN at the top and closed at the bottom,
+// because `brain append` cannot rewrite the `Status:` line it follows.
+//
+//   open       filed, not repaired
+//   partial    some of it repaired, some still open (say which in the body)
+//   fixed      a change merged that should resolve it — NOT yet re-measured
+//   verified   a live check confirmed it gone (terminal)
+//   wontfix    deliberately not repairing (terminal)
+//   duplicate  superseded by another papercut — see `duplicate_of` (terminal)
+export const PAPERCUT_STATUSES = [
+  "open",
+  "partial",
+  "fixed",
+  "verified",
+  "wontfix",
+  "duplicate",
+] as const;
+
+// Severity ladder. Kept a plain String column (not an enum type) to match
+// every other field on the record; `brain papercut file` validates it.
+export const PAPERCUT_SEVERITIES = ["p0", "p1", "p2", "p3"] as const;
+
+// What KIND of thing the record is, which the prose ledger could not say —
+// and the reason a fully specified fix sat unread for three days:
+// nothing distinguished a finished proposal from a raw complaint.
+//
+//   complaint      an observation; nobody has worked out the repair yet
+//   specified-fix  the repair is worked out and written down — ready to pick up
+//   reconfirmed    a previously-closed papercut re-measured as still live
+export const PAPERCUT_KINDS = ["complaint", "specified-fix", "reconfirmed"] as const;
+
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 
 // The seven-field shape shared by Design + all six Phase 6 kinds. Building
@@ -377,6 +413,108 @@ export const decisionSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// Papercut gets a DEDICATED shape for the same reason `decision` does: the
+// things you filter, dedupe and count by have to be real columns. The prose
+// ledger this replaces stored all of them in freeform body text, and every
+// measured bookkeeping failure traced back to that one fact.
+//
+// `component` is the load-bearing one. The prose ledger scoped a family by
+// SLUG PREFIX — every "independent" enumerator ran `grep -o
+// "papercut-lastgit-[a-z0-9-]*"` — so on the axis of the prefix they were one
+// reader, and a defect filed under any other slug was invisible to all of
+// them. Measured 2026-08-06: at least 9 active LastGit defect records sat
+// outside the prefix, including a P1. A queryable column cannot be evaded by
+// naming a record badly.
+//
+// `symptom_hash` is the dedupe key: a content hash over
+// (component, normalized symptom), so a second run filing the same observable
+// collides on write instead of two hours later in a human's reading.
+export const papercutSchema: AddSchemaRequest = {
+  schema: {
+    name: "Papercut",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "Papercut",
+    purpose_statement:
+      "One observed defect in our own tooling, with its evidence, repair state and the live check that confirmed it gone",
+    schema_type: "Hash",
+    key: { hash_field: "slug" },
+    fields: [
+      "slug",
+      "title",
+      "body",
+      "status",
+      "component",
+      "repo",
+      "severity",
+      "kind",
+      "symptom_hash",
+      "fixed_by",
+      "verified_by",
+      "duplicate_of",
+      "tags",
+      "created_at",
+      "updated_at",
+    ],
+    field_types: {
+      slug: "String",
+      title: "String",
+      body: "String",
+      status: "String",
+      component: "String",
+      repo: "String",
+      severity: "String",
+      kind: "String",
+      symptom_hash: "String",
+      fixed_by: "String",
+      verified_by: "String",
+      duplicate_of: "String",
+      tags: { Array: "String" },
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      slug: "stable url-style id",
+      title: "one-line statement of the defect",
+      body: "symptom, evidence, reproduction, and the proposed or applied repair",
+      status: PAPERCUT_STATUSES.join("|"),
+      component:
+        "subsystem the defect lives in (lastdb | lastgit | kanban | brain | routines | …) — the queryable replacement for the slug-prefix family",
+      repo: "owning repo as a bare owner/name token (empty string if none)",
+      severity: PAPERCUT_SEVERITIES.join("|"),
+      kind: PAPERCUT_KINDS.join("|"),
+      symptom_hash:
+        "content hash over (component, normalized symptom) — the dedupe key checked on file",
+      fixed_by:
+        "the change that repaired it, e.g. EdgeVector/lastgit #242 (empty string until fixed)",
+      verified_by:
+        "the LIVE check that confirmed it gone — never the word 'merged' (empty string until verified)",
+      duplicate_of: "slug of the papercut this one duplicates (empty string if none)",
+      tags: "array of freeform tags",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: { title: ["word"], body: ["word"] },
+    field_data_classifications: {
+      slug: GENERAL,
+      title: GENERAL,
+      body: GENERAL,
+      status: GENERAL,
+      component: GENERAL,
+      repo: GENERAL,
+      severity: GENERAL,
+      kind: GENERAL,
+      symptom_hash: GENERAL,
+      fixed_by: GENERAL,
+      verified_by: GENERAL,
+      duplicate_of: GENERAL,
+      tags: GENERAL,
+      created_at: GENERAL,
+      updated_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export const RECORD_TYPES = [
   "design",
   "task",
@@ -388,6 +526,7 @@ export const RECORD_TYPES = [
   "spike",
   "sop",
   "decision",
+  "papercut",
 ] as const;
 export type RecordType = (typeof RECORD_TYPES)[number];
 
@@ -837,6 +976,23 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
     hasDesignSlug: false,
     extraStringFields: ["program", "gate_slug", "decided_by", "decided_on"],
   },
+  papercut: {
+    type: "papercut",
+    schema: papercutSchema,
+    statuses: PAPERCUT_STATUSES,
+    defaultStatus: "open",
+    hasDesignSlug: false,
+    extraStringFields: [
+      "component",
+      "repo",
+      "severity",
+      "kind",
+      "symptom_hash",
+      "fixed_by",
+      "verified_by",
+      "duplicate_of",
+    ],
+  },
 };
 
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
@@ -941,7 +1097,13 @@ export function resolveOwnedSchemaHash(
 const HANDWRITTEN_PURPOSES: Partial<Record<RecordType, string>> = {
   design: "An architecture or plan you intend to build",
   task: "A unit of work; links to a parent design",
+  papercut: "A defect in our own tooling — file with `brain papercut file`",
 };
+
+// Record types with NO `<type> new` verb. `papercut` is created only through
+// `brain papercut file`, which is the surface that enforces the dedupe gate;
+// a generic `papercut new` would be a documented way around it.
+export const TYPES_WITHOUT_NEW_VERB: ReadonlySet<RecordType> = new Set(["papercut"]);
 
 export const RECORD_PURPOSES: Record<RecordType, string> = Object.fromEntries(
   RECORD_TYPES.map((t) => [

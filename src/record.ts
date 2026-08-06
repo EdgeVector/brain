@@ -999,6 +999,7 @@ export type ResolvedRecord = {
 
 export const GET_RECORD_TYPE_PRECEDENCE = [
   "reference",
+  "papercut",
   "project",
   "sop",
   "decision",
@@ -1051,7 +1052,8 @@ export interface ResolveBySlugOpts {
     | "attachments"
     | "attachments migrate"
     | "detach"
-    | "attachment get";
+    | "attachment get"
+    | "papercut close";
   // Read-only callers can opt into deterministic ambiguity resolution while
   // mutating callers keep the safer default of erroring unless --type is set.
   ambiguousTypePrecedence?: readonly RecordType[];

@@ -1,6 +1,6 @@
 # brain
 
-A CLI named `brain` that uses fold_db as the storage engine for a personal brain. Ten record types — **design**, **task**, **concept**, **preference**, **reference**, **agent**, **project**, **spike**, **sop**, **decision** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe. The old `fbrain` binary remains as a compatibility alias during the migration.
+A CLI named `brain` that uses fold_db as the storage engine for a personal brain. Eleven record types — **design**, **task**, **concept**, **preference**, **reference**, **agent**, **project**, **spike**, **sop**, **decision**, **papercut** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe. The old `fbrain` binary remains as a compatibility alias during the migration.
 
 ## Prerequisites
 
@@ -156,12 +156,12 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 
 ## Commands
 
-`<TYPE>` below is one of: `design | task | concept | preference | reference | agent | project | spike | sop | decision`.
+`<TYPE>` below is one of: `design | task | concept | preference | reference | agent | project | spike | sop | decision | papercut`.
 
 | Command | What it does |
 |---|---|
 | `brain init` | Bootstraps the node + registers schemas + writes `~/.brain/config.json` with canonical hashes |
-| `brain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any of the 10 types: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, `decision`. Status defaults to the type's first enum value |
+| `brain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of any type except `papercut`: `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, `decision`. (`papercut` has no `new` verb — it is created by `brain papercut file`, which enforces the dedupe gate.) Status defaults to the type's first enum value |
 | `brain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
 | `brain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
 | `brain get <slug> [--type T] [--field PATH]…` | Prints a record by slug. Without `--type`, queries every type; on an ambiguous slug it picks a deterministic read precedence (reference before project) so common agent reads do not need a retry. `--field` projects plain values without JSON parsing |
@@ -223,6 +223,7 @@ and this table can't drift.
 | `spike` | Time-boxed investigation or exploration with a defined conclusion | `active \| concluded` | dedicated `Spike` schema |
 | `sop` | Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task | `active \| superseded \| archived` | dedicated `Sop` schema |
 | `decision` | A call a human made — the choice, its rationale, and outcome — kept as an auditable trail | `proposed \| go \| hold \| done \| moot \| superseded` | dedicated `Decision` schema |
+| `papercut` | A defect in our own tooling — file with `brain papercut file` | `open \| partial \| fixed \| verified \| wontfix \| duplicate` | dedicated `Papercut` schema |
 
 Each of the six Phase 6 types gets its own dedicated schema with a distinct `descriptive_name` + `purpose_statement`. We originally landed a single combined schema (`FbrainKindNote`) plus a `kind` discriminator as a workaround for fold_db's structural canonicalization (the node merged schemas with overlapping field positions during `/api/schemas/load`, making the second schema's data inaccessible). As of Phase E (PR #63, dual-signal canonicalization cutover) the schema service consults the purpose-statement embedding alongside the structural signal, so distinct purpose statements veto the merge and all six can share the same 7-field shape without colliding onto one canonical hash. The combined-schema workaround was retired; the consolidation migration moved every pre-Phase-E row into its per-kind canonical, and the legacy `FbrainKindNote` schema is no longer registered or read.
 
