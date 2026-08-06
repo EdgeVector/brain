@@ -53,8 +53,18 @@ import {
   recordTypeList,
   RECORD_PURPOSES,
   RECORD_TYPES,
+  TYPES_WITHOUT_NEW_VERB,
+  PAPERCUT_KINDS,
+  PAPERCUT_SEVERITIES,
+  PAPERCUT_STATUSES,
   type RecordType,
 } from "./schemas.ts";
+import { PAPERCUT_USAGE_CODES } from "./papercut.ts";
+import {
+  papercutCensusCmd,
+  papercutCloseCmd,
+  papercutFileCmd,
+} from "./commands/papercut.ts";
 import {
   FBRAIN_MCP_READ_TOOL_NAMES,
   FBRAIN_MCP_TOOL_NAMES,
@@ -119,6 +129,11 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   // `status:` in put frontmatter) is a caller-supplied malformed value, same
   // class as invalid_slug — usage error, exit 2.
   "invalid_status",
+  // Papercut invocation errors — a bad enum value for --severity/--kind/
+  // --status/--component, a missing --symptom/--evidence, a `verified` with no
+  // live check behind it, a `duplicate` with no target, or a slug that already
+  // exists. All are "you invoked it wrong", exit 2.
+  ...PAPERCUT_USAGE_CODES,
   "missing_tag_mutation",
   "invalid_raw_method",
   "invalid_raw_path",
@@ -169,6 +184,7 @@ export const COMMANDS = [
   "admin-snapshot",
   "reindex",
   "migrate",
+  "papercut",
   "mcp",
   "hook",
   "help",
@@ -182,7 +198,9 @@ const RECORD_TYPE_COUNT = recordTypeCount();
 // one-liner so a new dev sees, in the bare `fbrain` help, which of the
 // types to reach for. Purposes come from the SINGLE SHARED RECORD_PURPOSES
 // map (schemas.ts) — the same source the README uses, so the two can't drift.
-const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.map((t) => {
+const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.filter(
+  (t) => !TYPES_WITHOUT_NEW_VERB.has(t),
+).map((t) => {
   const label = `${t} new`.padEnd(14);
   return `  ${label} ${RECORD_PURPOSES[t]}`;
 }).join("\n");
@@ -219,6 +237,7 @@ ${RECORD_NEW_HELP_LINES}
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
+  papercut       file/close/census the typed defect ledger (dedupe-gated; close is one write, not two)
   mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
@@ -813,6 +832,35 @@ re-puts and re-hashes all six together.
 
 Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
+  papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B]
+                       [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
+                       [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
+brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
+brain papercut census [<component>] [--json]
+brain papercut list [<component>] [--status S] [--json]
+
+The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
+failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
+and closed at the bottom, 22 could not be counted at all, and the same defect
+was filed twice two hours apart by runs that could not see each other.
+
+file    Files a new papercut, AFTER a dedupe gate. The gate is two nets: an
+        exact \`symptom_hash\` match over (component, normalized --symptom), and a
+        token-overlap check against every LIVE papercut in the same component.
+        A hit REFUSES the write and prints the candidates; clear a false match
+        with --not-duplicate-of <slug>, which is recorded in the new body.
+
+close   Sets the status field AND appends the evidence block in ONE write, so a
+        half-closure is not expressible. --status verified additionally requires
+        --verified-by naming the LIVE check you ran; a value that looks like a
+        merge reference is rejected, because "merged" is a fact about a
+        repository and not about anything running.
+
+census  Counts by component and status, and prints its own method line.
+
+Statuses: ${PAPERCUT_STATUSES.join(" | ")}
+Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
+Kinds:    ${PAPERCUT_KINDS.join(" | ")}`,
   mcp: `fbrain mcp [install|instructions]
 
 fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
@@ -1120,6 +1168,30 @@ const MIGRATE_OPTIONS = {
   default: { type: "string" },
   "dry-run": { type: "boolean", default: false },
 } as const;
+
+// Flags across all four `papercut` subcommands. parseArgs takes one option set
+// per command, so file/close/census/list share this table and each subcommand
+// validates the flags that matter to it.
+const PAPERCUT_OPTIONS = {
+  // file
+  title: { type: "string" },
+  body: { type: "string" },
+  component: { type: "string" },
+  symptom: { type: "string" },
+  severity: { type: "string" },
+  kind: { type: "string" },
+  repo: { type: "string" },
+  tag: { type: "string", multiple: true },
+  "not-duplicate-of": { type: "string", multiple: true },
+  // close
+  status: { type: "string" },
+  evidence: { type: "string" },
+  "fixed-by": { type: "string" },
+  "verified-by": { type: "string" },
+  "duplicate-of": { type: "string" },
+  // shared
+  json: { type: "boolean", default: false },
+} as const;
 const EMPTY_OPTIONS = {} as const;
 
 // `fbrain mcp install` (alias `setup`) flags. The other mcp subcommands
@@ -1173,6 +1245,7 @@ export const CLI_SPEC = {
   "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
+  papercut: PAPERCUT_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
   help: EMPTY_OPTIONS,
@@ -1720,6 +1793,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runReindex(args, verboseFn);
     case "migrate":
       return runMigrate(args, verboseFn);
+    case "papercut":
+      return runPapercut(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "hook":
@@ -3423,6 +3498,125 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values.bm25) rOpts.bm25 = true;
   if (values["list-index"]) rOpts.listIndex = true;
   await reindexCmd(rOpts);
+  return 0;
+}
+
+const PAPERCUT_SUBCOMMANDS = ["file", "close", "census", "list"] as const;
+
+function requiredFlag(
+  values: Record<string, unknown>,
+  flag: string,
+  sub: string,
+): string {
+  const raw = values[flag];
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new FbrainError({
+      code: "invalid_papercut_field",
+      message: `papercut ${sub} requires --${flag}.`,
+      hint: `Run \`brain help papercut\` for the full form.`,
+    });
+  }
+  return raw;
+}
+
+async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
+  const sub = args[0];
+  if (!sub || sub.startsWith("-")) {
+    throw new FbrainError({
+      code: "missing_slug",
+      message: `papercut needs a subcommand: ${PAPERCUT_SUBCOMMANDS.join(" | ")}.`,
+      hint: "Run `brain help papercut`.",
+    });
+  }
+  if (!(PAPERCUT_SUBCOMMANDS as readonly string[]).includes(sub)) {
+    throw new FbrainError({
+      code: "unknown_option",
+      message: `Unknown papercut subcommand: ${sub}`,
+      hint: `Expected one of: ${PAPERCUT_SUBCOMMANDS.join(" | ")}.`,
+    });
+  }
+  const { values, positionals } = parseCommandArgs(
+    {
+      args: args.slice(1),
+      strict: true,
+      allowPositionals: true,
+      options: PAPERCUT_OPTIONS,
+    },
+    "papercut",
+  );
+  const cfg = readConfig();
+  const json = values.json === true;
+
+  if (sub === "file") {
+    const slug = positionals[0];
+    if (!slug) {
+      throw new FbrainError({
+        code: "missing_slug",
+        message: "papercut file requires a slug.",
+        hint: "brain papercut file <slug> --component C --symptom S --title T",
+      });
+    }
+    const opts: Parameters<typeof papercutFileCmd>[0] = {
+      cfg,
+      slug,
+      title: requiredFlag(values, "title", "file"),
+      body: typeof values.body === "string" ? values.body : "",
+      component: requiredFlag(values, "component", "file"),
+      symptom: requiredFlag(values, "symptom", "file"),
+      severity: typeof values.severity === "string" ? values.severity : "p2",
+      kind: typeof values.kind === "string" ? values.kind : "complaint",
+      verbose,
+      json,
+    };
+    if (typeof values.repo === "string") opts.repo = values.repo;
+    if (values.tag) opts.tags = values.tag as string[];
+    if (values["not-duplicate-of"]) {
+      opts.notDuplicateOf = values["not-duplicate-of"] as string[];
+    }
+    const result = await papercutFileCmd(opts);
+    // A blocked duplicate is a REFUSED write, and a routine that ignores the
+    // exit code must not read it as "filed". Exit 3 distinguishes it from both
+    // success (0) and a malformed invocation (2).
+    return result.action === "duplicate_blocked" ? 3 : 0;
+  }
+
+  if (sub === "close") {
+    const slug = positionals[0];
+    if (!slug) {
+      throw new FbrainError({
+        code: "missing_slug",
+        message: "papercut close requires a slug.",
+        hint: "brain papercut close <slug> --status S --evidence E",
+      });
+    }
+    const opts: Parameters<typeof papercutCloseCmd>[0] = {
+      cfg,
+      slug,
+      status: requiredFlag(values, "status", "close"),
+      evidence: requiredFlag(values, "evidence", "close"),
+      verbose,
+      json,
+    };
+    if (typeof values["fixed-by"] === "string") opts.fixedBy = values["fixed-by"];
+    if (typeof values["verified-by"] === "string") opts.verifiedBy = values["verified-by"];
+    if (typeof values["duplicate-of"] === "string") opts.duplicateOf = values["duplicate-of"];
+    await papercutCloseCmd(opts);
+    return 0;
+  }
+
+  // census / list share the component positional.
+  const component = positionals[0];
+  const cOpts: Parameters<typeof papercutCensusCmd>[0] = { cfg, verbose, json };
+  if (component) cOpts.component = component;
+  if (sub === "census") {
+    await papercutCensusCmd(cOpts);
+    return 0;
+  }
+
+  const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose, type: "papercut" };
+  if (typeof values.status === "string") lOpts.status = values.status;
+  if (json) lOpts.json = true;
+  await listCmd(lOpts);
   return 0;
 }
 

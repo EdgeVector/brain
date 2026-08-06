@@ -96,6 +96,7 @@ type DriftKey =
   | "agent"
   | "project"
   | "spike"
+  | "papercut"
   | "sop"
   | "decision";
 type DriftOverrides = Partial<Record<DriftKey, RegisteredSchema | null>>;
@@ -104,9 +105,9 @@ function mockSchemaClient(opts: {
   drift?: DriftOverrides;
   listSchemasOk?: boolean;
 }): SchemaServiceClient {
-  // Per-hash mapping covering all 9 UNIQUE_SCHEMAS entries: 2 baseline
+  // Per-hash mapping covering every product RecordType schema: 2 baseline
   // (design/task) + 6 per-kind (concept/preference/reference/agent/project/spike)
-  // + sop.
+  // + sop + decision + papercut.
   const dispatch: Array<{ hash: string; driftKey: DriftKey; schema: AddSchemaRequest }> = [
     { hash: TEST_HASHES.design, driftKey: "design", schema: RECORDS.design.schema },
     { hash: TEST_HASHES.task, driftKey: "task", schema: RECORDS.task.schema },
@@ -118,6 +119,7 @@ function mockSchemaClient(opts: {
     { hash: TEST_HASHES.spike, driftKey: "spike", schema: RECORDS.spike.schema },
     { hash: TEST_HASHES.sop, driftKey: "sop", schema: RECORDS.sop.schema },
     { hash: TEST_HASHES.decision, driftKey: "decision", schema: RECORDS.decision.schema },
+    { hash: TEST_HASHES.papercut, driftKey: "papercut", schema: RECORDS.papercut.schema },
   ];
   return {
     baseUrl: "mock",

@@ -23,6 +23,7 @@ export const TEST_HASHES: Record<RecordType, string> = {
   spike: "5".repeat(64),
   sop: "6".repeat(64),
   decision: "d".repeat(64),
+  papercut: "4".repeat(64),
 };
 
 export const TEST_TAG_INDEX_HASH = "7".repeat(64);
