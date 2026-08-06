@@ -608,7 +608,7 @@ describe("hydrateSchemaBySlug (batch search hydrate)", () => {
 
   test("populated page → ONE queryAll, returns every live row keyed by slug", async () => {
     const { node, calls } = seqNode([[{ slug: "a" }, { slug: "b" }, { slug: "c" }]]);
-    const map = await hydrateSchemaBySlug(node, "design", "h", testCfg, noSleep);
+    const map = await hydrateSchemaBySlug(node, "design", testCfg, noSleep);
     // The whole point: a SINGLE fetch hydrates the entire schema for batch lookup.
     expect(calls()).toBe(1);
     expect(map.size).toBe(3);
@@ -622,7 +622,7 @@ describe("hydrateSchemaBySlug (batch search hydrate)", () => {
 
   test("tombstoned rows are dropped (soft-deleted slug → stale skip downstream)", async () => {
     const { node } = seqNode([[{ slug: "live" }, { slug: "gone", tags: [TOMBSTONE_TAG] }]]);
-    const map = await hydrateSchemaBySlug(node, "concept", "h", testCfg, noSleep);
+    const map = await hydrateSchemaBySlug(node, "concept", testCfg, noSleep);
     expect(map.has("live")).toBe(true);
     // gone is tombstoned → absent from the map, exactly like findBySlug null.
     expect(map.has("gone")).toBe(false);
@@ -634,14 +634,14 @@ describe("hydrateSchemaBySlug (batch search hydrate)", () => {
     // schema: an empty /api/query slice on a saturated daemon is ambiguous, so
     // the schema-level fetch retries (capped) before declaring the schema empty.
     const { node, calls } = seqNode([[]]);
-    const map = await hydrateSchemaBySlug(node, "design", "h", testCfg, noSleep);
+    const map = await hydrateSchemaBySlug(node, "design", testCfg, noSleep);
     expect(map.size).toBe(0);
     expect(calls()).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
   });
 
   test("empty → populated rides out a single flake (one extra fetch)", async () => {
     const { node, calls } = seqNode([[], [{ slug: "x" }]]);
-    const map = await hydrateSchemaBySlug(node, "task", "h", testCfg, noSleep);
+    const map = await hydrateSchemaBySlug(node, "task", testCfg, noSleep);
     expect(map.get("x")?.slug).toBe("x");
     expect(calls()).toBe(2);
   });

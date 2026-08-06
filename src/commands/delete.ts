@@ -95,11 +95,10 @@ async function findLinkedTaskSlugs(
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
-  const taskHash = schemaHashFor("task", cfg);
   const isLinked = (r: FbrainRecord): boolean =>
     !isTombstoned(r) && r.design_slug === designSlug;
   const tasks = await withReadRetry(
-    () => listRecords(node, "task", taskHash, cfg),
+    () => listRecords(node, "task", cfg),
     (rows) => rows.some(isLinked),
   );
   return tasks

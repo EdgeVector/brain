@@ -34,7 +34,6 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   isTombstoned,
-  listRecords,
   listRecordsAdminScan,
   missingSchemaHashReadNote,
   nowIso,
@@ -147,7 +146,11 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     const rebuilt = await rebuildTagIndex(node, opts.cfg, {
-      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash, opts.cfg),
+      // SOT, not the product path. This is an admin repair — its own dry-run
+      // text says "from a full corpus scan" — and reading through `listRecords`
+      // would both depend on the very index this command exists to repair and
+      // push a full scan onto a path that must never issue one.
+      listRecords: (type, schemaHash) => listRecordsAdminScan(node, type, schemaHash),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
       onSkipUnavailableType: (type) =>
         print(missingSchemaHashReadNote([type], "rebuilding the tag index from the rest")),
@@ -179,7 +182,8 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     const rebuilt = await rebuildBacklinkIndex(node, opts.cfg, {
-      listRecords: (type, schemaHash) => listRecords(node, type, schemaHash, opts.cfg),
+      // SOT, not the product path — same reasoning as the tag rebuild above.
+      listRecords: (type, schemaHash) => listRecordsAdminScan(node, type, schemaHash),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
       onSkipUnavailableType: (type) =>
         print(missingSchemaHashReadNote([type], "rebuilding the backlink index from the rest")),

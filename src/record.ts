@@ -339,30 +339,49 @@ export function arrayStringField(f: Record<string, unknown>, key: string): strin
 export type ListRecordsCfg = { schemaHashes: Record<string, string> };
 
 /**
- * Product list of one record type: RecordListEntry keyed partition read first.
- * Cold seed (index miss) is the only allowFullScan path — then product reads
- * stay keyed. `cfg` is REQUIRED so omit-cfg callers cannot silently full-scan.
+ * Product list of one record type: RecordListEntry keyed partition read.
+ *
+ * NEVER scans. This path used to cold-seed the index with an admin full scan on
+ * an index miss, which meant an ordinary `brain list` sent
+ * `X-LastDB-Allow-Full-Scan: 1` from the request path. That is the exact thing
+ * [[design-lastdb-scan-deprecation-path]] (approved 2026-07-18) forbids:
+ *
+ *     Need a list view?  -> thin INDEX schema written on write + point-get bodies
+ *     Admin rebuild?     -> offline bulk only, bulk QoS, NEVER request-path
+ *
+ * The seed was a migration artifact. Before the 2026-07-28 RecordListEntry
+ * cutover there was no index, so it had to be backfilled from records that
+ * predated it. Every writer has maintained the index on write ever since, so
+ * for anything written after that cutover the index is authoritative and the
+ * seed is dead weight — reachable only for a partition that was never seeded,
+ * i.e. a brand-new record type. It stayed dormant for months and fired the
+ * first time one was added (`papercut`, 2026-08-06), where it did not merely
+ * scan: the node reported a `total_count` over the whole keyspace and paged
+ * with repeated keys until the client's loop guard aborted.
+ *
+ * A cold partition is now an ERROR that names the offline repair, because a
+ * short list that says it is short beats a scan that says nothing.
+ * `cfg` is REQUIRED so omit-cfg callers cannot silently full-scan. The product
+ * schema hash is deliberately NOT a parameter: this path never reads the
+ * product schema, and not accepting its hash is what makes that structural
+ * rather than a rule someone has to remember.
  */
 export async function listRecords(
   node: NodeClient,
   type: RecordType,
-  schemaHash: string,
   cfg: ListRecordsCfg,
 ): Promise<FbrainRecord[]> {
-  const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
+  const { readTypeListIndex } = await import("./record-list-index.ts");
   const indexed = await readTypeListIndex(node, cfg, type);
   if (indexed !== null) {
     return indexed.filter((r) => !isTombstoned(r));
   }
-  // Cold seed once with admin full scan, then product reads stay keyed.
-  return listRecordsAdminScan(node, type, schemaHash, {
-    seedIndex: async (records) => {
-      try {
-        await writeTypeListIndex(node, cfg, type, records);
-      } catch {
-        /* best-effort */
-      }
-    },
+  throw new FbrainError({
+    code: "list_index_incomplete",
+    message:
+      `the ${type} record-list index partition is not marked complete, so \`${type}\` cannot be ` +
+      "listed without a full schema scan — which product read paths must not do.",
+    hint: "Run `fbrain reindex --list-index` (admin/offline) to rebuild the partition from source of truth, then retry.",
   });
 }
 
@@ -866,7 +885,6 @@ export async function confirmVectorIndexed(
 export async function hydrateSchemaBySlug(
   node: NodeClient,
   type: RecordType,
-  schemaHash: string,
   cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
@@ -877,7 +895,7 @@ export async function hydrateSchemaBySlug(
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
     // Product path: listRecords requires cfg → keyed entry index, never silent scan.
-    const list = await listRecords(node, type, schemaHash, cfg);
+    const list = await listRecords(node, type, cfg);
     if (list.length > 0) {
       const bySlug = new Map<string, FbrainRecord>();
       for (const r of list) {
@@ -905,7 +923,6 @@ export async function hydrateSchemaBySlug(
 // read-retry budget just to confirm "no children".
 export async function findChildTasksByDesign(
   node: NodeClient,
-  taskSchemaHash: string,
   designSlug: string,
   cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
@@ -917,7 +934,7 @@ export async function findChildTasksByDesign(
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
     // Product path (brain get design): index-first via listRecords+cfg.
-    const list = await listRecords(node, "task", taskSchemaHash, cfg);
+    const list = await listRecords(node, "task", cfg);
     if (list.length > 0) {
       return list.filter(
         (r) => !isTombstoned(r) && r.design_slug === designSlug,
