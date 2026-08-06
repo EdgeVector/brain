@@ -35,6 +35,7 @@ import {
   legacySearchResponseBody,
   buildTestCfg,
   TEST_HASHES,
+  wrapFetchWithTypeListIndex,
 } from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
@@ -102,7 +103,16 @@ afterEach(() => {
 // /api/query returns the corpus rows whose schemaHash matches the requested
 // schema_name (so the BM25 corpus is loaded per-type, realistically scoped).
 function installMock(nativeHits: NativeIndexHit[], corpus: Row[]): void {
-  globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+  const rowFields = (r: Row) => ({
+    slug: r.slug,
+    title: r.title,
+    body: r.body,
+    status: "active",
+    tags: [] as string[],
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+  });
+  const inner = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const rawUrl = typeof input === "string" ? input : String(input);
     const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
     const url = appSearch?.url ?? rawUrl;
@@ -114,15 +124,7 @@ function installMock(nativeHits: NativeIndexHit[], corpus: Row[]): void {
       const results = corpus
         .filter((r) => r.schemaHash === req.schema_name)
         .map((r) => ({
-          fields: {
-            slug: r.slug,
-            title: r.title,
-            body: r.body,
-            status: "active",
-            tags: [],
-            created_at: "2026-01-01T00:00:00Z",
-            updated_at: "2026-01-02T00:00:00Z",
-          },
+          fields: rowFields(r),
           key: { hash: r.slug, range: null },
         }));
       body = { ok: true, results, total_count: results.length, returned_count: results.length };
@@ -133,7 +135,18 @@ function installMock(nativeHits: NativeIndexHit[], corpus: Row[]): void {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
-  }) as unknown as typeof globalThis.fetch;
+  }) as typeof globalThis.fetch;
+  globalThis.fetch = wrapFetchWithTypeListIndex(inner, (type) => {
+    // Map type name → product schema hash, then collect matching corpus rows.
+    const hash =
+      type === "design"
+        ? DESIGN_HASH
+        : type === "task"
+          ? TASK_HASH
+          : (TEST_HASHES as Record<string, string>)[type];
+    if (!hash) return [];
+    return corpus.filter((r) => r.schemaHash === hash).map(rowFields);
+  });
 }
 
 async function run(

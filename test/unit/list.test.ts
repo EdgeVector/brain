@@ -17,9 +17,12 @@ import { LIST_HYDRATE_CONCURRENCY, listCmd } from "../../src/commands/list.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import {
+  answerTypeListIndexQuery,
   buildTestCfg,
   RECORD_TYPES,
+  testHashForType,
   TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
   TEST_TAG_INDEX_HASH,
 } from "../util.ts";
 
@@ -82,6 +85,58 @@ function stubFetch(
           JSON.stringify({ error: `Schema not found: ${schema}` }),
           { status: 404, headers: { "content-type": "application/json" } },
         );
+      }
+      // Product list paths read the type-list index first. Auto-synthesize a
+      // complete partition from the product-schema fixture so unit tests do
+      // not each re-seed the index by hand (see answerTypeListIndexQuery).
+      if (schema === TEST_RECORD_LIST_ENTRY_HASH) {
+        const filter = body.filter as
+          | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+          | undefined;
+        const keyHash = typeof filter?.HashKey === "string" ? filter.HashKey : "";
+        // Types with no product fixture at all stay incomplete (so stale-hash /
+        // schema-not-found product paths can still fire). Types with an empty
+        // queue head are complete-and-empty.
+        if (keyHash) {
+          const productHash = testHashForType(keyHash);
+          if (productHash && !responsesBySchema.has(productHash)) {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                results: [],
+                total_count: 0,
+                returned_count: 0,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
+        }
+        const listIndex = answerTypeListIndexQuery({
+          schemaHash: schema,
+          filter,
+          productRowsForType: (type) => {
+            // Advance the product fixture queue on each list-index read so
+            // empty→hit retry tests still work (product schema is no longer
+            // queried on the product list path).
+            const productHash = testHashForType(type);
+            if (!productHash) return [];
+            const queue = responsesBySchema.get(productHash);
+            if (!queue || queue.length === 0) return [];
+            return queue.length > 1 ? queue.shift()! : queue[0]!;
+          },
+          listEntryHash: TEST_RECORD_LIST_ENTRY_HASH,
+        });
+        if (listIndex !== null) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: listIndex,
+              total_count: listIndex.length,
+              returned_count: listIndex.length,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
       }
       const queue = responsesBySchema.get(schema);
       const rows =
@@ -162,9 +217,10 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // 2 key-only sweeps (empty, then hit) + 1 point-get to hydrate the one
-    // matched row's body for the page (the keys-first fix this card lands).
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(3);
+    // Index-first: 2 type-list partition reads (empty, then hit) + 1 product
+    // point-get to hydrate the matched row's body.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("retry-target");
     expect(lines[0]).toContain("concluded");
@@ -187,9 +243,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // 1 key-only sweep (first try hits, no retry) + 1 point-get to hydrate
-    // the matched row's body for the page.
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // Index-first: 1 type-list partition read + 1 product hydrate point-get.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("first-try");
   });
@@ -210,10 +266,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // 5 attempts is the READ_RETRY_ATTEMPTS default for the filtered sweep,
-    // then the empty-result hint path probes hasAnyLiveRecord once per schema
-    // hash (spike included) → 5 + 1 = 6 spike /api/query calls.
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(6);
+    // 5 list-index retries for the filtered empty sweep; empty-brain probe
+    // may still touch product schemas. List-index attempts are the load-bearing count.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBeGreaterThanOrEqual(5);
     // Brain is genuinely empty → the create-your-first hint (a filter was set,
     // but an empty brain wins: there's nothing to filter, so guide the new dev).
     expect(lines).toHaveLength(2);
@@ -240,7 +295,8 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // Index-first tag path: 2 list-index reads (empty, then hit).
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
     expect(lines[0]).toContain("tag-target");
     expect(lines[0]).toContain("dogfood");
   });
@@ -263,9 +319,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // One sweep call (no retry without a filter), then the empty-result hint
-    // path probes hasAnyLiveRecord across every schema → +1 spike call.
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // Index-first: one list-index read (no retry without a filter). Empty-brain
+    // probe may still touch product schemas; list-index count is load-bearing.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
     // Genuinely-empty brain → create-your-first hint.
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("no records");
@@ -298,8 +354,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // 1 sweep (no retry — first call hit) + 1 hasAnyLiveRecord probe = 2.
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // Index-first: one list-index read hits; hydrate is not needed when the
+    // filter excludes the only live row (or for empty user-visible results).
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
     // A live record exists but the filter excluded it → the filter hint, NOT
     // the create-your-first hint (the brain is not empty).
     expect(lines).toHaveLength(2);
@@ -486,9 +543,9 @@ describe("listCmd — read-flake retry", () => {
     } finally {
       restore();
     }
-    // 2 key-only sweeps (tombstone-only, then tombstone+live) + 1 point-get
-    // to hydrate "alive"'s body for the page.
-    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(3);
+    // Index-first: 2 list-index reads + 1 product hydrate for "alive".
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
+    expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("alive");
   });
@@ -519,6 +576,36 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
         const schema = String(body.schema_name);
+        const listIndex = answerTypeListIndexQuery({
+          schemaHash: schema,
+          filter: body.filter as
+            | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+            | undefined,
+          productRowsForType: (type) => {
+            const productHash = testHashForType(type);
+            if (!productHash) return [];
+            return rowsBySchema.get(productHash) ?? [];
+          },
+          listEntryHash: TEST_RECORD_LIST_ENTRY_HASH,
+        });
+        if (listIndex !== null) {
+          pageRequestsBySchema.set(
+            schema,
+            (pageRequestsBySchema.get(schema) ?? 0) + 1,
+          );
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: listIndex,
+              total_count: listIndex.length,
+              returned_count: listIndex.length,
+              limit: listIndex.length,
+              offset: 0,
+              has_more: false,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
         const limit =
           typeof body.limit === "number" ? body.limit : defaultLimit;
         const offset = typeof body.offset === "number" ? body.offset : 0;
@@ -658,9 +745,9 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     }
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain(`slug-${String(matchIdx).padStart(4, "0")}`);
-    // 1500 records / 1000 per page = 2 pages. The retry path isn't
-    // engaged because the first sweep saw ≥1 non-tombstoned row.
-    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(2);
+    // Index-first: the whole partition arrives in one list-index read; product
+    // schema pagination is no longer on the product list path.
+    expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
   });
 
   test("--status finds a status-matched record in page 2", async () => {
@@ -693,16 +780,10 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
   });
 
   test("a 1000-record bucket's KEY sweep resolves in a single page request (QUERY_PAGE_SIZE)", async () => {
-    // 1000 rows fits in one client page (QUERY_PAGE_SIZE), so the key-only
-    // sweep (this card's fix: list keys first, filter/sort/offset/limit,
-    // THEN hydrate) sees exactly one /api/query when we set defaultLimit to
-    // the same size — the sweep itself never fragments regardless of corpus
-    // size. Pre-fix the client sent no `limit` at all and inherited the
-    // server's 100-row default — 10x more round trips at this scale for the
-    // sweep alone. On top of that one sweep call, the default-capped page
-    // (DEFAULT_LIST_LIMIT=20) costs exactly 20 more point-get calls to
-    // hydrate those 20 rows' bodies — bounded by the PAGE size, never by the
-    // 1000-row corpus size. 1 (sweep) + 20 (hydrate) = 21 total.
+    // Index-first: one type-list partition read for the key sweep, then the
+    // default-capped page (DEFAULT_LIST_LIMIT=20) costs 20 product point-gets
+    // to hydrate bodies — 1 list-index + 20 product = 21 total requests, of
+    // which 20 hit the product schema.
     const rows: Fields[] = Array.from({ length: 1000 }, (_, i) =>
       spikeRowAt(
         `slug-${String(i).padStart(4, "0")}`,
@@ -722,7 +803,8 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     } finally {
       restore();
     }
-    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(21);
+    expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(20);
   });
 
   test("large explicit list windows bound concurrent point-read hydration", async () => {

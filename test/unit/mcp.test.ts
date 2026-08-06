@@ -36,12 +36,20 @@ import { TOMBSTONE_TAG } from "../../src/record.ts";
 import {
   RECORD_LIST_ENTRY_MARKER,
   RECORD_LIST_ENTRY_MIGRATED_RANGE,
+  RECORD_LIST_ENTRY_SCHEMA_KEY,
   recordStatusLines,
   recordTypeCount,
   recordTypeList,
+  type RecordType,
 } from "../../src/schemas.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
+  testHashForType,
+} from "../util.ts";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,10 +207,72 @@ type TrackedWrite = {
 
 function installMock(handler: (url: string, init?: RequestInit) => MockResponse): void {
   const writes: TrackedWrite[] = [];
+  const listEntryHash =
+    cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] ?? TEST_RECORD_LIST_ENTRY_HASH;
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
     const appSearch = appSearchAsLegacyNativeIndex(url, init);
     const handlerUrl = appSearch?.url ?? url;
+
+    // Product list paths read the type-list index first and no longer cold-seed.
+    // Auto-synthesize a complete partition from tracked writes + the handler's
+    // product-schema fixture so MCP unit tests don't each re-seed by hand.
+    if (url.endsWith("/api/query") && typeof init?.body === "string") {
+      try {
+        const qBody = JSON.parse(init.body) as {
+          schema_name?: string;
+          filter?: {
+            HashKey?: unknown;
+            HashRangeKey?: { hash?: unknown; range?: unknown };
+          };
+        };
+        const schema = String(qBody.schema_name ?? "");
+        if (schema === listEntryHash) {
+          const listIndex = answerTypeListIndexQuery({
+            schemaHash: schema,
+            filter: qBody.filter,
+            listEntryHash,
+            productRowsForType: (type: RecordType) => {
+              const productHash = testHashForType(type);
+              if (!productHash) return [];
+              const fromWrites = writes
+                .filter((w) => w.schema === productHash)
+                .map((w) => w.fields);
+              if (fromWrites.length > 0) return fromWrites;
+              // Ask the per-test handler for product-schema rows (many fixtures
+              // only script product /api/query, not the list-entry schema).
+              const productBody = JSON.stringify({
+                ...qBody,
+                schema_name: productHash,
+                // list index HashKey is the type name; product point-reads use slug.
+                filter: undefined,
+              });
+              const productNext = handler(url, { ...init, body: productBody });
+              const results = (productNext.body as { results?: Array<{ fields?: Record<string, unknown> }> } | undefined)
+                ?.results;
+              if (!Array.isArray(results)) return [];
+              return results
+                .map((r) => r.fields)
+                .filter((f): f is Record<string, unknown> => !!f && typeof f === "object");
+            },
+          });
+          if (listIndex !== null) {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                results: listIndex,
+                total_count: listIndex.length,
+                returned_count: listIndex.length,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+        }
+      } catch {
+        // Fall through to handler.
+      }
+    }
+
     const next = handler(handlerUrl, init);
     if (url.endsWith("/api/mutation") && typeof init?.body === "string") {
       try {
@@ -853,10 +923,11 @@ describe("fbrain_get tool", () => {
     }
   });
 
-  // The canonical papercut repro from the card: a text `query` with no exact
-  // When the guarded fuzzy resolver declines a query, the error still carries
-  // nearest candidate slugs so an agent can retry with an exact slug.
-  test("query with no exact slug surfaces nearest candidates when fuzzy resolver declines", async () => {
+  // Text `query` with no exact slug: the fuzzy resolver (same hybrid path as
+  // fbrain_ask) must hydrate the top hit via the type-list index — product
+  // list paths no longer cold-seed. With a complete sop partition + native
+  // search hit, get resolves the best match and stamps matched_query.
+  test("query with no exact slug resolves via fuzzy match when the type-list index is complete", async () => {
     const RESOLVED = "sop-routine-shared-contract";
     const localCfg = buildTestCfg({ userHash: "uh-fuzzy-get-recordlistentry" });
     installMock((url, init) => {
@@ -944,11 +1015,13 @@ describe("fbrain_get tool", () => {
     const res = await tools.fbrain_get!({ query: "routine shared contract", type: "sop" });
     if (oldCacheDir === undefined) delete process.env.FBRAIN_CACHE_DIR;
     else process.env.FBRAIN_CACHE_DIR = oldCacheDir;
-    expect(res.isError).toBe(true);
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.slug).toBe(RESOLVED);
+    expect(sc.matched_query).toBe("routine shared contract");
     const text = res.content[0]!.text ?? "";
-    expect(text).toContain("No record matched query: routine shared contract");
-    expect(text).toContain("Nearest candidate slugs");
     expect(text).toContain(RESOLVED);
+    expect(text.toLowerCase()).toContain("fuzzy");
   }, 30_000);
 
   // A `query` that IS an exact slug resolves directly — no fuzzy fallback, and

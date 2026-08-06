@@ -194,7 +194,7 @@ export async function papercutFileCmd(
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
 
-  const existing = await listRecords(node, PAPERCUT, schemaHash, opts.cfg);
+  const existing = await listRecords(node, PAPERCUT, opts.cfg);
   const cleared = new Set((opts.notDuplicateOf ?? []).map(normalizeSlug));
   const duplicates = findDuplicateCandidates(existing, {
     component,
@@ -493,8 +493,7 @@ export const CENSUS_METHOD =
 export async function papercutCensusCmd(opts: PapercutCensusOptions): Promise<void> {
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
-  const records = await listRecords(node, PAPERCUT, schemaHash, opts.cfg);
+  const records = await listRecords(node, PAPERCUT, opts.cfg);
   const rows = buildCensus(records, opts.component);
 
   if (opts.json) {

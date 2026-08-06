@@ -11,7 +11,12 @@ import { askCmd } from "../../src/commands/ask.ts";
 import { dedupeHits, isWeakMatch, searchCmd } from "../../src/commands/search.ts";
 import type { NativeIndexHit } from "../../src/client.ts";
 import { RECORD_LIST_ENTRY_SCHEMA_KEY, RECORD_TYPES } from "../../src/schemas.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  testHashForType,
+  TEST_HASHES,
+} from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 const TASK_HASH = TEST_HASHES.task;
@@ -218,30 +223,56 @@ function installSequencedMock(handler: (url: string, init?: RequestInit) => Mock
         | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
         | undefined;
       const keyHash = typeof filter?.HashKey === "string" ? filter.HashKey : "";
-      if (schema === cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] && keyHash) {
-        const rows = [...(persistedRows.get(schema)?.get(keyHash)?.entries() ?? [])]
-          .map(([range, fields]) => ({ fields, key: { hash: keyHash, range } }));
+      if (schema === cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY]) {
+        const hrk = filter?.HashRangeKey;
+        const hrHash = typeof hrk?.hash === "string" ? hrk.hash : "";
+        const hrRange = typeof hrk?.range === "string" ? hrk.range : "";
+        let rows =
+          keyHash
+            ? [...(persistedRows.get(schema)?.get(keyHash)?.entries() ?? [])]
+                .map(([range, fields]) => ({ fields, key: { hash: keyHash, range } }))
+            : hrHash && hrRange
+              ? (() => {
+                  const row = persistedRows.get(schema)?.get(hrHash)?.get(hrRange);
+                  return row
+                    ? [{ fields: row, key: { hash: hrHash, range: hrRange } }]
+                    : [];
+                })()
+              : [];
+        if (rows.length === 0) {
+          // Synthesize a complete type-list partition from the product-schema
+          // handler response so listRecords / hydrateSchemaBySlug succeed
+          // without each test dual-writing the index.
+          const synthesized = answerTypeListIndexQuery({
+            schemaHash: schema,
+            filter,
+            productRowsForType: (type) => {
+              const productHash = testHashForType(type);
+              if (!productHash) return [];
+              const product = handler(
+                url.includes("/api/query") ? url : "http://localhost/api/query",
+                {
+                  method: "POST",
+                  body: JSON.stringify({ schema_name: productHash }),
+                },
+              );
+              const body = product.body as
+                | { results?: Array<{ fields?: Record<string, unknown> }> }
+                | undefined;
+              return (body?.results ?? [])
+                .map((r) => r.fields)
+                .filter((f): f is Record<string, unknown> => !!f);
+            },
+            listEntryHash: cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY],
+          });
+          if (synthesized) rows = synthesized;
+        }
         return new Response(
           JSON.stringify({
             ok: true,
             results: rows,
             total_count: rows.length,
             returned_count: rows.length,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      const hrk = filter?.HashRangeKey;
-      const hrHash = typeof hrk?.hash === "string" ? hrk.hash : "";
-      const hrRange = typeof hrk?.range === "string" ? hrk.range : "";
-      if (schema === cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] && hrHash && hrRange) {
-        const row = persistedRows.get(schema)?.get(hrHash)?.get(hrRange);
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            results: row ? [{ fields: row, key: { hash: hrHash, range: hrRange } }] : [],
-            total_count: row ? 1 : 0,
-            returned_count: row ? 1 : 0,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );

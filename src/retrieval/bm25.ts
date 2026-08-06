@@ -538,7 +538,7 @@ async function loadBm25Documents(
   const liveById = new Map<string, FbrainRecord>();
   for (const t of types) {
     const records = opts.seedListIndex
-      ? await listRecords(node, t, schemaHashFor(t, cfg), cfg)
+      ? await listRecords(node, t, cfg)
       : await listRecordsAdminScan(node, t, schemaHashFor(t, cfg));
     for (const r of records) {
       if (isTombstoned(r)) continue;

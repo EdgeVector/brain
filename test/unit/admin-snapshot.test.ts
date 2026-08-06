@@ -18,7 +18,12 @@ import {
 import type { NativeIndexHit, NodeClient, QueryResponse, QueryRow } from "../../src/client.ts";
 import type { RecordType } from "../../src/schemas.ts";
 import { ADMIN_SNAPSHOT_SCHEMA_KEY } from "../../src/schemas.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
+} from "../util.ts";
 
 const NOW = new Date("2026-07-15T16:00:00.000Z");
 
@@ -59,7 +64,28 @@ function mockNode(records: Partial<Record<RecordType, QueryRow[]>>): NodeClient 
     async createRecord() {},
     async updateRecord() {},
     async deleteRecord() {},
-    async queryAll({ schemaHash }): Promise<QueryResponse> {
+    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
+      if (schemaHash === TEST_RECORD_LIST_ENTRY_HASH) {
+        const listIndex = answerTypeListIndexQuery({
+          schemaHash,
+          filter: filter as
+            | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+            | undefined,
+          productRowsForType: (type) =>
+            (records[type] ?? []).map((r) => r.fields as Record<string, unknown>),
+          listEntryHash: TEST_RECORD_LIST_ENTRY_HASH,
+        });
+        const results = (listIndex ?? []).map((r) => ({
+          fields: r.fields,
+          key: { hash: r.key.hash, range: r.key.range },
+        }));
+        return {
+          ok: true,
+          results,
+          total_count: results.length,
+          returned_count: results.length,
+        };
+      }
       const type = (Object.entries(TEST_HASHES) as Array<[RecordType, string]>)
         .find(([, hash]) => hash === schemaHash)?.[0];
       const results = type ? (records[type] ?? []) : [];

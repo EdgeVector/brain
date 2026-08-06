@@ -87,10 +87,8 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   // node stays cheap (no full 5× retry burn).
   let designChildren: FbrainRecord[] | undefined;
   if (found.type === "design") {
-    const taskHash = schemaHashFor("task", opts.cfg);
     designChildren = await findChildTasksByDesign(
       node,
-      taskHash,
       found.record.slug,
       opts.cfg,
     );

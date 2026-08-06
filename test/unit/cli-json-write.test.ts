@@ -23,7 +23,7 @@ import { parseArgs } from "node:util";
 
 import { CLI_SPEC, main } from "../../src/cli.ts";
 import { writeConfig } from "../../src/config.ts";
-import { buildTestCfg } from "../util.ts";
+import { answerTypeListIndexQuery, buildTestCfg } from "../util.ts";
 
 const CLI_PATH = join(import.meta.dir, "..", "..", "src", "cli.ts");
 
@@ -150,6 +150,27 @@ describe("filter delete --json partial failure", () => {
             status: 503,
             headers: { "content-type": "application/json" },
           });
+        }
+        const listIndex = answerTypeListIndexQuery({
+          schemaHash: String(body.schema_name ?? ""),
+          filter: body.filter as
+            | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+            | undefined,
+          productRowsForType: (type) => {
+            if (type !== "design") return [];
+            return [...rows.values()];
+          },
+        });
+        if (listIndex !== null) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: listIndex,
+              total_count: listIndex.length,
+              returned_count: listIndex.length,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
         }
         const results = [...rows.entries()].map(([hash, fields]) => ({
           fields,
