@@ -162,6 +162,10 @@ function mockNodeClient(opts: {
   // for tests that point a config entry at a non-default hash and need the
   // node to report that same hash as loaded.
   loadedHashOverrides?: Partial<Record<RecordType, string>>;
+  // When set for a type, listLoadedSchemas() reports a dual-hash row: `name`
+  // stays the config / write-path hash, `identity_hash` is this override value.
+  // Models pre-fold#1352 keyed schema residual (Papercut).
+  dualHashIdentityOnly?: Partial<Record<RecordType, string>>;
   // When set, listLoadedSchemas() throws — exercises the check's catch path.
   listSchemasThrows?: Error;
   identityThrows?: Error;
@@ -217,15 +221,20 @@ function mockNodeClient(opts: {
     async listLoadedSchemas() {
       if (opts.listSchemasThrows) throw opts.listSchemasThrows;
       const omit = new Set<RecordType>(opts.missingFromNode ?? []);
-      // Return fbrain's 8 schemas under the same canonical hashes the test
+      // Return fbrain record schemas under the same canonical hashes the test
       // config writes against (TEST_HASHES), so the read-path schemas-loaded
       // check sees them as present. Omit any caller-requested types to drive
-      // a FAIL.
-      return RECORD_TYPES.filter((t) => !omit.has(t)).map((t) => ({
-        descriptive_name: t.charAt(0).toUpperCase() + t.slice(1),
-        owner_app_id: "fbrain",
-        identity_hash: opts.loadedHashOverrides?.[t] ?? TEST_HASHES[t],
-      }));
+      // a FAIL. Dual-hash rows keep `name` as the write-path hash.
+      return RECORD_TYPES.filter((t) => !omit.has(t)).map((t) => {
+        const writeHash = opts.loadedHashOverrides?.[t] ?? TEST_HASHES[t];
+        const dual = opts.dualHashIdentityOnly?.[t];
+        return {
+          descriptive_name: t.charAt(0).toUpperCase() + t.slice(1),
+          owner_app_id: "fbrain",
+          name: writeHash,
+          identity_hash: dual ?? writeHash,
+        };
+      });
     },
     async loadSchemas() {
       if (opts.loadOk === false) throw new Error("load failed");
@@ -1103,6 +1112,30 @@ describe("doctor verdict logic", () => {
     expect(
       lines.some((l) => l.includes("[FAIL] schemas-loaded") && l.includes("Concept")),
     ).toBe(true);
+  });
+
+  test("dual-hash keyed schema (name matches config, identity_hash drifts) → schemas-loaded PASS", async () => {
+    // Live residual 2026-08-06: Papercut name=5ffb961d… identity_hash=6ca32e27…
+    // after local app-schema declare; writes use name. Doctor must match the
+    // write path, not only the recomputed identity_hash field.
+    const configPath = writeCfg(makeCfg());
+    const lines: string[] = [];
+    const code = await doctor({
+      configPath,
+      print: (l) => lines.push(l),
+      schemaClientFactory: () => mockSchemaClient({}),
+      nodeClientFactory: () =>
+        mockNodeClient({
+          dualHashIdentityOnly: {
+            papercut: "6ca32e27829a00bcf9a331d7f2974d7be6b525e48bd7b9a4e5ccc778220394a0",
+          },
+        }),
+    });
+    expect(code).toBe(0);
+    expect(lines.some((l) => l.includes("[PASS] schemas-loaded"))).toBe(true);
+    expect(lines.some((l) => l.includes("[FAIL] schemas-loaded") && l.includes("Papercut"))).toBe(
+      false,
+    );
   });
 
   test("schema hash 404s in schema service → drift FAIL with init hint", async () => {
