@@ -63,7 +63,8 @@ describe("designNew", () => {
       tags: ["a", "b"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(3);
+    // create product row + type-list index dual-write + 2 tag indexes
+    expect(mutations).toHaveLength(4);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(DESIGN_HASH);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
@@ -71,8 +72,11 @@ describe("designNew", () => {
     expect(fields.title).toBe("Fresh");
     expect(fields.tags).toEqual(["a", "b"]);
     expect(fields.status).toBe("draft");
+    // List-index dual-write lands before tag indexes (see recordNew order).
+    const listIndexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(listIndexFields.rle_r).toBe("fresh-design");
     const indexFields = mutations
-      .slice(1)
+      .slice(2)
       .map((m) => m.fields_and_values as Record<string, unknown>);
     expect(indexFields.map((f) => f.slug).sort()).toEqual([
       tagIndexSlug("a"),
@@ -167,11 +171,11 @@ describe("designNew", () => {
   });
 
   test("--force skips the pre-existence check and writes (overwrite)", async () => {
-    let queryCalls = 0;
     const mutations: Array<Record<string, unknown>> = [];
     installMock((url, init) => {
       if (url.endsWith("/api/query")) {
-        queryCalls++;
+        // List-index dual-write may probe; force only skips the same-type
+        // slug_already_exists guard (no product-row pre-read before create).
         return { status: 200, body: { ok: true, results: [] } };
       }
       if (url.endsWith("/api/mutation")) {
@@ -189,8 +193,10 @@ describe("designNew", () => {
       force: true,
       ...VEC,
     });
-    expect(queryCalls).toBe(0);
-    expect(mutations).toHaveLength(1);
+    // create product row + type-list dual-write (no tag indexes)
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("create");
+    const listIndexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(listIndexFields.rle_r).toBe("forced");
   });
 });

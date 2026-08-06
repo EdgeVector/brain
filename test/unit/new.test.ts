@@ -88,7 +88,8 @@ describe("recordNew dispatches against the correct schema for each type", () => 
         tags: ["t1"],
         ...VEC,
       });
-      expect(mutations).toHaveLength(2);
+      // create product row + type-list index dual-write + tag index
+      expect(mutations).toHaveLength(3);
       expect(mutations[0]!.mutation_type).toBe("create");
       expect(mutations[0]!.schema).toBe(TEST_HASHES[type]);
       const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
@@ -97,7 +98,10 @@ describe("recordNew dispatches against the correct schema for each type", () => 
       expect(fields.body).toBe(`${type} body`);
       expect(fields.tags).toEqual(["t1"]);
       expect(fields.status).toBe(RECORDS[type].defaultStatus);
-      const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+      // List-index dual-write lands before tag index (see recordNew order).
+      const listIndexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+      expect(listIndexFields.rle_r).toBe(`${type}-slug`);
+      const indexFields = mutations[2]!.fields_and_values as Record<string, unknown>;
       expect(indexFields.slug).toBe(tagIndexSlug("t1"));
       expect(indexFields.members).toEqual([`${type}:${type}-slug`]);
       // None of the Phase 6 types carry a design_slug field.
@@ -171,10 +175,12 @@ describe("recordNew warns on cross-type slug collision", () => {
       tags: [],
       ...VEC,
     });
-    // The create still happened (non-blocking warning).
-    expect(mutations).toHaveLength(1);
+    // The create still happened (non-blocking warning) + type-list dual-write.
+    expect(mutations).toHaveLength(2);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(TEST_HASHES.design);
+    const listIndexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(listIndexFields.rle_r).toBe("wire-login");
     // The note fired, names the colliding type AND the --type recovery flag.
     const note = captured.find((l) => l.startsWith("note:"));
     expect(note).toBeDefined();
