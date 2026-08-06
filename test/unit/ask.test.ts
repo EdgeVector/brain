@@ -518,10 +518,10 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         noteRows.length * 6 +
         designRows.length +
         taskRows.length;
-      // 5 keyed/admin queries per type on the cold path (was 4 before the
-      // list-index completeness heal added the pre-write partition scan).
-      // Key-listing for BM25 fingerprint is gone (TTL owns freshness).
-      expect(totalQueries).toBe(5 * RECORD_TYPES.length + seededRows);
+      // 4 keyed/admin queries per type on the cold path after TTL BM25 (no
+      // key-listing fingerprint pass). List-index completeness heal still
+      // contributes the pre-write partition scan within that budget.
+      expect(totalQueries).toBe(4 * RECORD_TYPES.length + seededRows);
     },
   );
 
@@ -1022,9 +1022,8 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       0,
     );
     // +1 for the single design seed row existence point-read during cold seed.
-    // Per-type budget is 5 cold queries after the list-index completeness heal
-    // (pre-write partition scan for stale extras). No BM25 key-listing pass.
-    expect(totalQueries).toBe(5 * RECORD_TYPES.length + 1);
+    // Per-type budget is 4 cold queries after TTL BM25 (no key-listing pass).
+    expect(totalQueries).toBe(4 * RECORD_TYPES.length + 1);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);
