@@ -265,7 +265,11 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       verbose: opts.verbose,
       // Explicit bulk-tag: a miss/TTL-expiry pays a full-corpus body fetch.
       // Surface on stderr; offline pre-warm is `brain reindex --bm25`.
+      // Skip the advisory when the corpus is empty (0 records) — nothing was
+      // bulk-fetched, and MCP agents must not see CLI `fbrain reindex` wording
+      // on an empty-brain "no matches" path.
       onRebuild: (notice) => {
+        if (notice.keyCount === 0) return;
         printErr(
           `note: search index cache was cold/stale — rebuilding from ${notice.keyCount} record(s) ` +
             "on this request; run `fbrain reindex --bm25` offline to pre-warm it and avoid this on the next query.",

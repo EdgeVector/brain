@@ -6,7 +6,7 @@
 // Like the existing search/get/list/put tests, fetch is mocked so we
 // don't stand up a real node.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { z } from "zod";
 
 import pkg from "../../package.json" with { type: "json" };
@@ -83,6 +83,22 @@ async function mintFbrainCapabilityBlob(nodePubkey = "bm9kZS1wdWJrZXk="): Promis
 const DESIGN_HASH = TEST_HASHES.design;
 
 const cfg = buildTestCfg({ userHash: "test-hash" });
+
+// Isolate BM25 disk cache so ask/search hybrid tests do not reuse another
+// suite's warm TTL index under the shared test userHash.
+let bm25CacheDir = "";
+let savedBm25CacheEnv: string | undefined;
+beforeEach(() => {
+  bm25CacheDir = mkdtempSync(join(tmpdir(), "bm25-mcp-"));
+  savedBm25CacheEnv = process.env.FBRAIN_CACHE_DIR;
+  process.env.FBRAIN_CACHE_DIR = bm25CacheDir;
+});
+afterEach(() => {
+  if (savedBm25CacheEnv === undefined) delete process.env.FBRAIN_CACHE_DIR;
+  else process.env.FBRAIN_CACHE_DIR = savedBm25CacheEnv;
+  if (bm25CacheDir) rmSync(bm25CacheDir, { recursive: true, force: true });
+  bm25CacheDir = "";
+});
 
 function userMutations<T extends Record<string, unknown>>(mutations: T[]): T[] {
   return mutations.filter((m) => m.schema !== cfg.schemaHashes.__recordlistentry__);

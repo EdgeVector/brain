@@ -18,7 +18,10 @@
 //      can't print the whole corpus.
 //   5. A genuinely strong query is unchanged: all rows `strong`, no note.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   searchCmd,
@@ -37,6 +40,16 @@ import {
 const DESIGN_HASH = TEST_HASHES.design;
 const TASK_HASH = TEST_HASHES.task;
 const cfg = buildTestCfg({ userHash: "test-hash" });
+
+// Isolate BM25 on-disk cache per test. Warm TTL hits would otherwise reuse a
+// previous suite's corpus (shared userHash) and make keyword rescue look empty.
+let cacheDir = "";
+let savedCacheEnv: string | undefined;
+beforeEach(() => {
+  cacheDir = mkdtempSync(join(tmpdir(), "bm25-fallback-"));
+  savedCacheEnv = process.env.FBRAIN_CACHE_DIR;
+  process.env.FBRAIN_CACHE_DIR = cacheDir;
+});
 
 function hit(opts: Partial<NativeIndexHit> & { slug: string; schemaName: string }): NativeIndexHit {
   return {
@@ -64,6 +77,10 @@ const confidentFromPayload = (matches: readonly SearchHitJson[]): boolean =>
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  if (savedCacheEnv === undefined) delete process.env.FBRAIN_CACHE_DIR;
+  else process.env.FBRAIN_CACHE_DIR = savedCacheEnv;
+  if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });
+  cacheDir = "";
 });
 
 // Install a mock where the native vector search returns `nativeHits` and each
