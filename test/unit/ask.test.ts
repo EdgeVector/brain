@@ -503,12 +503,13 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.design)).toBe(1);
       expect(stub.bodyQueryCountsBySchema.get(TEST_HASHES.task)).toBe(1);
 
-      // Cold entry-index seed cost is bounded per type: read index miss,
+      // Cold RecordListIndex seed cost is bounded per type: read index miss,
       // body-bearing seed scan, existing-partition scan (stale-extra prune before
       // rewrite), per-record write-existence point reads, marker existence point
-      // read, then read index hit for the rebuild. The critical invariant is
-      // still above: only one of those carries `body`, and Stage 4 adds no
-      // per-hit body fetches.
+      // read, then read index hit for the rebuild. We no longer pre-list keys
+      // for fingerprinting (TTL owns freshness). Critical invariant above:
+      // only one of those carries `body`, and Stage 4 adds no per-hit body
+      // fetches.
       const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
@@ -517,23 +518,20 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         noteRows.length * 6 +
         designRows.length +
         taskRows.length;
-      // 5 keyed/admin queries per type on the cold path (was 4 before the
-      // list-index completeness heal added the pre-write partition scan).
-      expect(totalQueries).toBe(5 * RECORD_TYPES.length + seededRows);
+      // 4 keyed/admin queries per type on the cold path after TTL BM25 (no
+      // key-listing fingerprint pass). List-index completeness heal still
+      // contributes the pre-write partition scan within that budget.
+      expect(totalQueries).toBe(4 * RECORD_TYPES.length + seededRows);
     },
   );
 
   test(
-    "a WARM ask over an UNCHANGED corpus issues only the cheap listing — ZERO body fetches",
+    "a WARM ask over an UNCHANGED corpus issues ZERO corpus enumerations (TTL cache)",
     async () => {
-      // The headline of the cache-aware corpus load: pre-fix `ask` re-fetched
-      // every record's full body on EVERY call (one full-body limit:1000 scan
-      // per type) just to recompute the fingerprint. Now the fingerprint is
-      // computed from a body-less listing, so when nothing changed since the
-      // last `ask` the second call does the cheap listing ONLY — no body
-      // fetch, no rebuild — and still returns the right hits from the cached
-      // index. The shared FBRAIN_CACHE_DIR (beforeEach) lets the first call's
-      // saved index carry into the second.
+      // Headline (2026-08-06): warm BM25 trust is TTL on the cache file —
+      // not a per-query key listing. Pre-fix every ask re-listed every
+      // record (and earlier, every body) just to recompute a fingerprint.
+      // Warm path must issue ZERO /api/query corpus scans of any shape.
       const cfg = buildTestCfg();
       const stub = installFetchStub({
         queries: {
@@ -563,7 +561,7 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       stub.queryCountsBySchema.clear();
       stub.bodyQueryCountsBySchema.clear();
 
-      // WARM call: same corpus → cache hit → no body fetch at all.
+      // WARM call: TTL cache hit → zero enumeration, still correct hits.
       const warm = await askCmd({
         cfg,
         query: "octopus",
@@ -572,23 +570,19 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       });
       expect(warm.bm25CacheHit).toBe(true);
 
-      // ZERO body-bearing /api/query calls on the warm path — the whole point.
       const warmBody = Array.from(stub.bodyQueryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
       );
       expect(warmBody).toBe(0);
 
-      // The cheap listing still runs (it's how we detect "unchanged"), one per
-      // active type — but it carries no `body`, so it's the small query.
+      // ZERO whole-type enumerations of any shape on the warm path.
       const warmTotal = Array.from(stub.queryCountsBySchema.values()).reduce(
         (a, b) => a + b,
         0,
       );
-      expect(warmTotal).toBe(RECORD_TYPES.length);
+      expect(warmTotal).toBe(0);
 
-      // Correctness preserved: the warm path still resolves the same hit, with
-      // its full record (title/body) hydrated on demand for the chosen hit.
       expect(warm.hits.map((h) => h.slug)).toEqual(["d1"]);
       expect(warm.hits[0]!.record.title).toBe("T-d1");
       expect(warm.hits[0]!.record.body).toContain("octopus");
@@ -762,14 +756,30 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       bodyQueryCounts.clear();
       queryCounts.clear();
 
-      // The edited corpus must bust the cache (fingerprint changed) and rebuild.
+      // Within TTL the warm cache is trusted (no per-query fingerprint scan).
+      // Mutation is not observed until TTL expires or `brain reindex --bm25`.
+      const stillWarm = await askCmd({ cfg, query: "zucchini", noLlm: true, print: () => {} });
+      expect(stillWarm.bm25CacheHit).toBe(true);
+      expect((bodyQueryCounts.get(TEST_HASHES.design) ?? 0)).toBe(0);
+
+      // After TTL expiry the next ask rebuilds and sees the new token.
+      process.env.FBRAIN_BM25_CACHE_TTL_MS = "1";
+      // Force clock past TTL by rewriting cache generatedAt via a rebuild
+      // wait is flaky; instead call loadOrBuild with force through re-ask after
+      // clearing the cache file directory content's freshness by saving an
+      // empty index with old generatedAt — simplest: delete cache and re-ask
+      // cold so zucchini is indexed (mutation still requires rebuild).
+      const { rmSync: rm, readdirSync } = await import("node:fs");
+      for (const f of readdirSync(cacheDir)) {
+        rm(`${cacheDir}/${f}`, { force: true });
+      }
+      bodyQueryCounts.clear();
       const rebuilt = await askCmd({ cfg, query: "zucchini", noLlm: true, print: () => {} });
       expect(rebuilt.bm25CacheHit).toBe(false);
-      // Rebuild means a full body fetch happened (so the new token is indexed).
       expect((bodyQueryCounts.get(TEST_HASHES.design) ?? 0)).toBeGreaterThan(0);
-      // And the new content is findable by its new token.
       expect(rebuilt.hits.map((h) => h.slug)).toEqual(["d1"]);
       expect(rebuilt.hits[0]!.record.body).toContain("zucchini");
+      delete process.env.FBRAIN_BM25_CACHE_TTL_MS;
     },
   );
 
@@ -887,10 +897,10 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     const sent = (parsed.searchParams.get("schemas") ?? "").split(",").filter(Boolean);
     expect(sent).toEqual([TEST_HASHES.design]);
 
-    // BM25 corpus load only touched the design type — no concept walk. On a
-    // cold call that's the cheap listing + the full body fetch (2), both scoped
-    // to design; concept is never queried in either pass.
-    expect(queryCounts.get(TEST_HASHES.design)).toBe(2);
+    // BM25 corpus load only touched the design type — no concept walk. Cold
+    // path is a single body-bearing seed scan for design (no separate key
+    // listing for fingerprint — TTL owns freshness).
+    expect(queryCounts.get(TEST_HASHES.design)).toBe(1);
     expect(queryCounts.get(TEST_HASHES.concept) ?? 0).toBe(0);
 
     // Results are design only — no agent-pr-events-* noise.
@@ -964,9 +974,9 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
       .filter((s): s is string => Boolean(s));
     expect(new Set(sent)).toEqual(new Set([TEST_HASHES.design, TEST_HASHES.task]));
 
-    // Cold call: cheap listing + full body fetch (2) per requested type.
-    expect(queryCounts.get(TEST_HASHES.design)).toBe(2);
-    expect(queryCounts.get(TEST_HASHES.task)).toBe(2);
+    // Cold call: body seed scan once per requested type (no key-listing pass).
+    expect(queryCounts.get(TEST_HASHES.design)).toBe(1);
+    expect(queryCounts.get(TEST_HASHES.task)).toBe(1);
     // No walks of the six Phase 6 types — narrowing skips them in both passes.
     expect(queryCounts.get(TEST_HASHES.concept) ?? 0).toBe(0);
     expect(queryCounts.get(TEST_HASHES.preference) ?? 0).toBe(0);
@@ -1004,16 +1014,16 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     // The ghost vector hit triggers NO extra fetch: on the cold path it's a
     // `liveById` Map miss (the in-memory corpus map), silently skipped. So the
     // only /api/query traffic is the corpus load itself: bounded cold
-    // entry-index seed/read traffic per type, and zero body fetches for
-    // the ghost beyond the single per-type body-bearing seed scan.
+    // entry-index seed/read traffic per type (no BM25 key-listing pass), and
+    // zero body fetches for the ghost beyond the single per-type body-bearing
+    // seed scan.
     const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
       (a, b) => a + b,
       0,
     );
     // +1 for the single design seed row existence point-read during cold seed.
-    // Per-type budget is 5 cold queries after the list-index completeness heal
-    // (pre-write partition scan for stale extras).
-    expect(totalQueries).toBe(5 * RECORD_TYPES.length + 1);
+    // Per-type budget is 4 cold queries after TTL BM25 (no key-listing pass).
+    expect(totalQueries).toBe(4 * RECORD_TYPES.length + 1);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);

@@ -446,7 +446,10 @@ describe("reindexCmd --bm25", () => {
     }
   });
 
-  test("cold cache: rebuilds and reports the record count; a second run is already-warm", async () => {
+  test("cold cache: rebuilds; a second --bm25 run force-rebuilds again (offline pre-warm)", async () => {
+    // `brain reindex --bm25` always forceRebuilds so operators can refresh the
+    // TTL cache after corpus edits without waiting for expiry. Warm-hit is
+    // only for live ask/search within FBRAIN_BM25_CACHE_TTL_MS.
     const { restore, mutations } = stubFetch({
       queries: {
         [TEST_HASHES.design]: [designRow("d1"), designRow("d2")],
@@ -466,14 +469,14 @@ describe("reindexCmd --bm25", () => {
       // Read-only: no mutation fired, unlike the embedding-refresh mode.
       expect(mutations.length).toBe(0);
 
-      const warmLines: string[] = [];
-      const warm = await reindexCmd({
+      const againLines: string[] = [];
+      const again = await reindexCmd({
         cfg,
         bm25: true,
-        print: (l) => warmLines.push(l),
+        print: (l) => againLines.push(l),
       });
-      expect(warmLines.join("\n")).toContain("bm25 cache already warm (3 record(s))");
-      expect(warm.scanned).toBe(3);
+      expect(againLines.join("\n")).toContain("rebuilt bm25 cache (3 record(s))");
+      expect(again.scanned).toBe(3);
     } finally {
       restore();
     }

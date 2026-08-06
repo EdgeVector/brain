@@ -6,12 +6,14 @@
 // dedupes per (schema, slug); BM25 here mirrors that — one document per
 // (type, slug).
 //
-// Cache: the index is keyed by a fingerprint of (slug, updated_at) for
-// every live record. The fingerprint is stable iff nothing was added,
-// updated, or soft-deleted since the last build. We persist the index to
-// `~/.brain/cache/bm25-<userHash>-<typeSetHash>.json` so back-to-back
-// retrieval calls on the same corpus/type shape skip the rebuild — important
-// because `listRecords` across schemas is the dominant cost.
+// Cache freshness (won't-undo — 2026-08-06, no per-query enumeration):
+// A warm hit trusts the on-disk cache for a TTL window
+// (`FBRAIN_BM25_CACHE_TTL_MS`, default 15 minutes) based on the cache file's
+// mtime. We do **not** re-list every record key (or body) just to recompute a
+// fingerprint — that enumeration was the dominant cost of every `ask`/`search`
+// and scaled with corpus size. Rebuilds still stamp a content fingerprint for
+// debugging and for offline `brain reindex --bm25`. When the semantic search
+// plane answers, callers should skip this path entirely.
 //
 // Tokenization is intentionally simple: lowercase, split on
 // non-alphanumerics, length >= 2, English stopwords stripped. No
@@ -23,6 +25,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -32,14 +35,33 @@ import type { NodeClient, Verbose } from "../client.ts";
 import { brainDataDir, type Config } from "../config.ts";
 import {
   isTombstoned,
-  listRecordKeys,
   listRecords,
   listRecordsAdminScan,
   schemaHashFor,
   type FbrainRecord,
-  type RecordKey,
 } from "../record.ts";
 import type { RecordType } from "../schemas.ts";
+
+/** Default how long a warm BM25 cache is trusted without re-scanning the corpus. */
+export const BM25_CACHE_TTL_MS_DEFAULT = 15 * 60 * 1000;
+
+/** Resolve TTL from env; invalid/empty → default. `0` means "never trust TTL" (always rebuild unless forceRebuild is the only rebuild trigger — actually 0 = always stale). */
+export function bm25CacheTtlMs(): number {
+  const raw = process.env.FBRAIN_BM25_CACHE_TTL_MS;
+  if (raw === undefined || raw === "") return BM25_CACHE_TTL_MS_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return BM25_CACHE_TTL_MS_DEFAULT;
+  return n;
+}
+
+export function isBm25CacheFresh(
+  mtimeMs: number,
+  nowMs: number = Date.now(),
+  ttlMs: number = bm25CacheTtlMs(),
+): boolean {
+  if (ttlMs <= 0) return false;
+  return nowMs - mtimeMs < ttlMs;
+}
 
 const STOPWORDS = new Set<string>([
   "a", "an", "the", "and", "or", "but", "if", "then", "else", "of", "in", "on",
@@ -167,6 +189,11 @@ export class BM25Index {
       postings,
       docText,
     });
+  }
+
+  /** Number of documents in this index (corpus size for cache hits). */
+  get size(): number {
+    return this.documents.length;
   }
 
   // Render text (title + body) for a doc id ("type::slug"), or null if the id
@@ -371,16 +398,40 @@ export function bm25CachePath(
   return join(cacheDir, `bm25-${safe || "anon"}${typeSuffix}.json`);
 }
 
+export type CachedBm25Index = {
+  index: BM25Index;
+  path: string;
+  /** Epoch ms when the cache was built (from serialized generatedAt, else mtime). */
+  builtAtMs: number;
+};
+
 export function loadCachedIndex(
   userHash: string,
   typesOrDir?: readonly RecordType[] | string,
   cacheDir?: string,
 ): BM25Index | null {
+  return loadCachedIndexMeta(userHash, typesOrDir, cacheDir)?.index ?? null;
+}
+
+/** Load the on-disk BM25 cache with build time for TTL freshness checks. */
+export function loadCachedIndexMeta(
+  userHash: string,
+  typesOrDir?: readonly RecordType[] | string,
+  cacheDir?: string,
+): CachedBm25Index | null {
   const path = bm25CachePath(userHash, typesOrDir, cacheDir);
   if (!existsSync(path)) return null;
   try {
+    const st = statSync(path);
     const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
-    return BM25Index.fromJSON(raw);
+    const index = BM25Index.fromJSON(raw);
+    if (!index) return null;
+    const generatedAt =
+      raw && typeof raw === "object" && typeof (raw as { generatedAt?: unknown }).generatedAt === "string"
+        ? Date.parse((raw as { generatedAt: string }).generatedAt)
+        : Number.NaN;
+    const builtAtMs = Number.isFinite(generatedAt) ? generatedAt : st.mtimeMs;
+    return { index, path, builtAtMs };
   } catch {
     return null;
   }
@@ -408,19 +459,14 @@ export function saveCachedIndex(
   }
 }
 
-// Fired exactly once, right before a cache MISS pays for the full-corpus
-// body fetch (`loadBm25Documents`) — never on a cache hit. This is the
-// contract chosen for the `kill-scan-brain` follow-up (option b in
-// design-lastdb-scan-deprecation-path): rather than a silent full-type
-// `listRecords` drain on every `ask`/`search` call that happens to hit a
-// cold/stale cache, the rebuild is made EXPLICIT and observable — callers
-// (ask.ts) surface it unconditionally (not gated behind --verbose) so a live
-// request-path bulk read is never invisible, and `fbrain reindex --bm25` (see
-// reindex.ts) gives an offline path to pre-warm the cache and avoid paying
-// this on the next query.
+// Fired exactly once, right before a cache MISS / TTL expiry pays for the
+// full-corpus body fetch (`loadBm25Documents`) — never on a warm TTL hit.
+// Callers (ask.ts) surface it unconditionally so a live request-path bulk
+// read is never invisible; `brain reindex --bm25` pre-warms offline.
 export type Bm25RebuildNotice = {
   types: readonly RecordType[];
   keyCount: number;
+  reason: "miss" | "stale-ttl" | "force";
 };
 
 export async function loadOrBuildBm25Index(
@@ -431,31 +477,47 @@ export async function loadOrBuildBm25Index(
     verbose?: Verbose;
     onRebuild?: (notice: Bm25RebuildNotice) => void;
     seedListIndex?: boolean;
+    /** Offline reindex: ignore TTL and rebuild from corpus. */
+    forceRebuild?: boolean;
+    /** Override TTL (ms). Test hook. */
+    ttlMs?: number;
+    /** Override clock. Test hook. */
+    nowMs?: number;
   } = {},
 ): Promise<Bm25IndexLoad> {
   const seedListIndex = opts.seedListIndex ?? true;
-  const keys = await loadBm25Keys(node, cfg, types, { seedListIndex });
-  const fingerprint = computeFingerprint(keys);
-  const cached = loadCachedIndex(cfg.userHash, types);
-  if (cached && cached.fingerprint === fingerprint) {
+  const ttlMs = opts.ttlMs ?? bm25CacheTtlMs();
+  const nowMs = opts.nowMs ?? Date.now();
+  const forceRebuild = opts.forceRebuild === true;
+
+  const existing = forceRebuild ? null : loadCachedIndexMeta(cfg.userHash, types);
+  if (existing && isBm25CacheFresh(existing.builtAtMs, nowMs, ttlMs)) {
     opts.verbose?.(
-      `bm25: cache hit (fingerprint ${fingerprint.slice(0, 12)}...) - skipping corpus body fetch`,
+      `bm25: cache hit (ttl, fingerprint ${existing.index.fingerprint.slice(0, 12)}...) — zero corpus enumeration`,
     );
     return {
-      index: cached,
+      index: existing.index,
       liveById: new Map(),
-      corpusSize: keys.length,
+      corpusSize: existing.index.size,
       cacheHit: true,
-      fingerprint,
+      fingerprint: existing.index.fingerprint,
     };
   }
 
-  opts.onRebuild?.({ types, keyCount: keys.length });
+  const reason: Bm25RebuildNotice["reason"] = forceRebuild
+    ? "force"
+    : existing
+      ? "stale-ttl"
+      : "miss";
+
+  // Rebuild pays the full-corpus body fetch. Callers must surface this.
+  // keyCount is filled after load (we no longer pre-enumerate keys).
   const built = await loadBm25Documents(node, cfg, types, { seedListIndex });
+  opts.onRebuild?.({ types, keyCount: built.docs.length, reason });
   const index = BM25Index.build(built.docs);
   saveCachedIndex(cfg.userHash, index, types);
   opts.verbose?.(
-    `bm25: rebuilt index (${built.docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}...)`,
+    `bm25: rebuilt index (${built.docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}..., reason=${reason})`,
   );
   return {
     index,
@@ -464,22 +526,6 @@ export async function loadOrBuildBm25Index(
     cacheHit: false,
     fingerprint: index.fingerprint,
   };
-}
-
-async function loadBm25Keys(
-  node: NodeClient,
-  cfg: Config,
-  types: readonly RecordType[],
-  opts: { seedListIndex: boolean },
-): Promise<RecordKey[]> {
-  const keys: RecordKey[] = [];
-  for (const t of types) {
-    const typeKeys = await listRecordKeys(node, t, schemaHashFor(t, cfg), cfg, {
-      seedOnMiss: opts.seedListIndex,
-    });
-    for (const k of typeKeys) keys.push(k);
-  }
-  return keys;
 }
 
 async function loadBm25Documents(
