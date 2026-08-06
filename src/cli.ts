@@ -45,7 +45,11 @@ import {
   type DeliveryRecipient,
 } from "./commands/admin-snapshot.ts";
 import { parseUpdatedSince } from "./time.ts";
-import { formatPutConfirmation, indexPendingNote } from "./write-confirmation.ts";
+import {
+  formatPutConfirmation,
+  indexPendingNote,
+  listIndexFailedNote,
+} from "./write-confirmation.ts";
 import {
   buildAgentInstructionsBlock,
   isRecordType,
@@ -1995,17 +1999,20 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
   // without widening the parseArgs return type.
   const designSlug = (values as { design?: string }).design;
   if (designSlug) opts.designSlug = designSlug;
-  const { indexPending } = await recordNew(opts);
+  const { indexPending, listIndexFailed } = await recordNew(opts);
   // Under --json the structured success object is the stdout document; the
   // human line moves to stderr so `--json` stdout stays parseable (mirrors
   // the read verbs). The `indexPending` flag mirrors the MCP put's
   // `structuredContent` so a scripted CLI write has the same read-after-write
-  // search-parity signal the agent path gets.
+  // search-parity signal the agent path gets. `listIndexFailed` is the
+  // permanent dual-write failure (ask/list won't see the row until reindex).
+  const note =
+    indexPendingNote(indexPending) + listIndexFailedNote(listIndexFailed);
   if (values.json) {
-    console.error(`created ${type} ${slug}${indexPendingNote(indexPending)}`);
-    console.log(JSON.stringify({ ok: true, type, slug, indexPending }));
+    console.error(`created ${type} ${slug}${note}`);
+    console.log(JSON.stringify({ ok: true, type, slug, indexPending, listIndexFailed }));
   } else {
-    console.log(`created ${type} ${slug}${indexPendingNote(indexPending)}`);
+    console.log(`created ${type} ${slug}${note}`);
   }
   return 0;
 }

@@ -33,6 +33,11 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+/** BM25 cold rebuild is allowed on stderr; filter it when asserting advisory notes. */
+function advisoryStderr(stderr: string[]): string[] {
+  return stderr.filter((l) => !l.includes("BM25 keyword rescue"));
+}
+
 function queryResp(results: unknown[]): Response {
   return new Response(JSON.stringify({ ok: true, results }), {
     status: 200,
@@ -523,9 +528,10 @@ describe("searchCmd --json", () => {
     expect(out).toEqual(["[]"]);
     expect(JSON.parse(out[0]!)).toEqual([]);
     // The empty-result hint stays useful for interactive users — pin it
-    // to stderr so it doesn't pollute jq.
-    expect(err.length).toBe(1);
-    expect(err[0]).toContain("fbrain ask <query>");
+    // to stderr so it doesn't pollute jq. Cold BM25 rebuild may also note.
+    const notes = advisoryStderr(err);
+    expect(notes.length).toBe(1);
+    expect(notes[0]).toContain("fbrain ask <query>");
   });
 
   test("rounds the score to 6 decimals; perfect f32 cosine serializes as 1, not 1.0000001192092896", async () => {
@@ -745,9 +751,10 @@ describe("searchCmd --json", () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0].score).toBe(0.2);
     expect(parsed[0].type).toBe("design");
-    // Note went to stderr, NOT stdout.
-    expect(err.length).toBe(1);
-    expect(err[0]).toContain("no strong matches");
+    // Note went to stderr, NOT stdout. Cold BM25 rebuild may also note.
+    const notes = advisoryStderr(err);
+    expect(notes.length).toBe(1);
+    expect(notes[0]).toContain("no strong matches");
     expect(out[0]).not.toContain("note:");
   });
 });
