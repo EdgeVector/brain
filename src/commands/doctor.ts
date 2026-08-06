@@ -329,17 +329,27 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   //       `403 transport_not_attested` and the old check misdiagnosed a fully
   //       healthy, fully-loaded node as "schemas not loaded — re-run init"
   //       (re-running init can't fix a wedged socket). The read path needs
-  //       only X-User-Hash, so it answers the real question — "are fbrain's 8
-  //       schemas present in the node's DB under the exact hashes we write
-  //       against?" — accurately regardless of attestation state.
+  //       only X-User-Hash, so it answers the real question — "are fbrain's
+  //       record schemas present in the node's DB under the exact hashes we
+  //       write against?" — accurately regardless of attestation state.
+  //
+  // Match **write-path** hashes. Config `schemaHashes.*` is the catalog /
+  // storage key used by mutates. On Mini, that appears as `name` on
+  // GET /api/schemas. `identity_hash` is the node recompute and usually
+  // equals `name`; when they diverge (keyed schema dual-hash residual before
+  // fold#1352 is live on the primary, e.g. Papercut name=5ffb961d…
+  // identity_hash=6ca32e27…), only checking identity_hash false-FAILS a fully
+  // writable plane. Accept either field so doctor tracks write readiness.
   if (provisioned) {
     try {
       const loaded = await nodeClient.listLoadedSchemas();
-      const loadedHashes = new Set(
-        loaded
-          .map((s) => s.identity_hash)
-          .filter((h): h is string => typeof h === "string" && h.length > 0),
-      );
+      const loadedHashes = new Set<string>();
+      for (const s of loaded) {
+        if (typeof s.name === "string" && s.name.length > 0) loadedHashes.add(s.name);
+        if (typeof s.identity_hash === "string" && s.identity_hash.length > 0) {
+          loadedHashes.add(s.identity_hash);
+        }
+      }
       const missing = DOCTOR_RECORD_SCHEMAS.filter((entry) => {
         const hash = cfg.schemaHashes[entry.key];
         return !hash || !loadedHashes.has(hash);

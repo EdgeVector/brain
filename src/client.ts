@@ -685,11 +685,19 @@ export type SchemaServiceClient = {
 export type CapabilityProvider = () => string | null;
 
 // One entry of `GET /api/schemas` — a schema loaded into the node's DB.
-// `identity_hash` is the canonical (owner-namespaced) hash the node computed;
+// `identity_hash` is the hash the node recomputed at load; `name` is the
+// catalog / storage key the node actually writes under. On healthy Mini these
+// match. Pre-fold#1352 (and any residual dual-hash keyed schema) they can
+// diverge: catalog-pinned `name` equals the write-path hash while recomputed
+// `identity_hash` omits `:key:` layout. Callers that ask "is config hash X
+// present for writes?" must accept either field.
 // `owner_app_id` is present on app-owned schemas (e.g. `"fbrain"`).
 export type LoadedSchema = {
   descriptive_name?: string;
   owner_app_id?: string;
+  /** Catalog / storage key (what mutates and config schemaHashes use). */
+  name?: string;
+  /** Node-recomputed identity; may disagree with `name` on dual-hash residuals. */
   identity_hash?: string;
 };
 
@@ -1464,6 +1472,8 @@ export function newNodeClient(opts: {
           descriptive_name:
             typeof s.descriptive_name === "string" ? s.descriptive_name : undefined,
           owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : undefined,
+          // Catalog / write-path key. Prefer this when identity_hash drifts.
+          name: typeof s.name === "string" ? s.name : undefined,
           identity_hash: typeof s.identity_hash === "string" ? s.identity_hash : undefined,
         }));
     },
