@@ -76,13 +76,17 @@ describe("taskNew", () => {
       tags: ["a"],
       ...VEC,
     });
-    expect(mutations).toHaveLength(2);
+    // create product row + type-list index dual-write + tag index
+    expect(mutations).toHaveLength(3);
     expect(mutations[0]!.mutation_type).toBe("create");
     expect(mutations[0]!.schema).toBe(TASK_HASH);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe("open");
     expect(fields.design_slug).toBe("");
-    const indexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    // List-index dual-write lands before tag index (see recordNew order).
+    const listIndexFields = mutations[1]!.fields_and_values as Record<string, unknown>;
+    expect(listIndexFields.rle_r).toBe("t-fresh");
+    const indexFields = mutations[2]!.fields_and_values as Record<string, unknown>;
     expect(indexFields.slug).toBe(tagIndexSlug("a"));
     expect(indexFields.members).toEqual(["task:t-fresh"]);
   });
@@ -176,7 +180,8 @@ describe("taskNew", () => {
     });
     // Two keyed point-reads of the parent (validate + link), no empty-page retry.
     expect(designQueryCalls).toBe(2);
-    expect(mutations).toHaveLength(2);
+    // create product row + type-list dual-write + backlink index
+    expect(mutations).toHaveLength(3);
     expect(mutations[0]!.mutation_type).toBe("create");
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.design_slug).toBe("parent-design");

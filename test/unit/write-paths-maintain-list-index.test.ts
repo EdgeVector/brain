@@ -20,6 +20,10 @@ import { describe, expect, test } from "bun:test";
 
 const WRITE_PATHS = [
   "src/commands/put.ts",
+  // `<type> new` is the first-run write path (llms.txt `brain concept new`);
+  // without the list-index dual-write, ask/BM25 rebuild from a complete-empty
+  // partition and miss the just-created record (2026-08-06 smoke RED).
+  "src/commands/new.ts",
   "src/commands/papercut.ts",
   // Delete is the inverse of put: it must drop the list-index row or phantoms
   // survive in list/--count/BM25 while get exit-1s.

@@ -56,6 +56,10 @@ export type RecordNewResult = {
   // `PutResult.indexPending`; the CLI prints an honest "index still catching
   // up" note and surfaces it under `--json`.
   indexPending: boolean;
+  // The record persisted but its record-list index entry did not. Distinct from
+  // `indexPending` (timing): this is permanent until the index is rebuilt,
+  // because list/ask/BM25 read the type-list partition. Same field as put.
+  listIndexFailed: boolean;
 };
 
 export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult> {
@@ -139,6 +143,23 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   }
   await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
   const record = fields as FbrainRecord;
+
+  // Keep the record-list index current so list/BM25/ask never rescan product
+  // tables. First-run regression (2026-08-06 llms-txt smoke RED): `concept new`
+  // wrote the row (get worked) but never patched the type-list partition that
+  // init marks complete-and-empty — so BM25 rebuilt from 0 keys and ask/search
+  // returned no matches while vector hits were skipped as "stale". Same dual-
+  // write as put; non-fatal (record already persisted) but not silent.
+  const { maintainTypeListIndex } = await import("../record-list-index.ts");
+  const { listIndexFailed } = await maintainTypeListIndex({
+    node,
+    cfg: opts.cfg,
+    type: opts.type,
+    record,
+    slug: opts.slug,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
+
   await reconcileBacklinkIndex(
     node,
     opts.cfg,
@@ -164,14 +185,14 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   // Confirm the slug is in the vector index on a short bounded budget; on
   // timeout report `indexPending: true` so the CLI prints an honest "index
   // still catching up" note. Gated to local nodes and never throws — see
-  // `confirmVectorIndexed`. (No record-list verify-read here: unlike `put`,
-  // `<type> new` doesn't promise read-your-writes on /api/query; the vector
-  // confirmation is the user-visible search-parity concern.)
-  return confirmVectorIndexed(
+  // `confirmVectorIndexed`. BM25/ask still work immediately via the list-index
+  // patch above even when the vector plane is lagging.
+  const { indexPending } = await confirmVectorIndexed(
     opts.cfg,
     opts.type,
     opts.slug,
     opts.title,
     opts.vectorVerifyOptions,
   );
+  return { indexPending, listIndexFailed };
 }
