@@ -1468,6 +1468,8 @@ describe("read tools — structuredContent + outputSchema", () => {
     const listRes = await tools.fbrain_list!({ type: "decision" });
     expect(listRes.structuredContent).toEqual({
       records: [],
+      total: 0,
+      truncated: false,
       skipped_types: ["decision"],
     });
     expect(listRes.content[0]!.text).toContain("skipping type(s) decision");
@@ -1656,7 +1658,7 @@ describe("read tools — structuredContent + outputSchema", () => {
     expect(res.structuredContent).toBeUndefined();
   });
 
-  test("fbrain_list returns { records } matching its outputSchema, text still renders", async () => {
+  test("fbrain_list returns { records, total, truncated } matching its outputSchema, text still renders", async () => {
     installMock((url) => {
       if (url.includes("/api/query")) {
         return {
@@ -1670,9 +1672,15 @@ describe("read tools — structuredContent + outputSchema", () => {
     const res = await toolsOf(server).fbrain_list!({ type: "design", limit: 5 });
     expect(res.isError).toBeFalsy();
     expect(res.structuredContent).toBeDefined();
-    const sc = res.structuredContent as { records: Array<Record<string, unknown>> };
+    const sc = res.structuredContent as {
+      records: Array<Record<string, unknown>>;
+      total: number;
+      truncated: boolean;
+    };
     expect(Array.isArray(sc.records)).toBe(true);
     expect(sc.records).toHaveLength(2);
+    expect(sc.total).toBe(2);
+    expect(sc.truncated).toBe(false);
     expect(sc.records[0]).toMatchObject({ type: "design", status: "draft" });
     // Summary omits body (compact list shape).
     expect(sc.records[0]!).not.toHaveProperty("body");
@@ -1690,7 +1698,12 @@ describe("read tools — structuredContent + outputSchema", () => {
     });
     const server = createFbrainMcpServer({ cfg });
     const res = await toolsOf(server).fbrain_list!({ type: "design" });
-    expect(res.structuredContent).toEqual({ records: [], skipped_types: [] });
+    expect(res.structuredContent).toEqual({
+      records: [],
+      total: 0,
+      truncated: false,
+      skipped_types: [],
+    });
     const schema = outputSchemaOf(server, "fbrain_list")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
   });

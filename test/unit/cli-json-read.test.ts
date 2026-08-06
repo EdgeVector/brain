@@ -85,7 +85,7 @@ function taskFields(slug: string, over: Fields = {}): Fields {
 }
 
 describe("listCmd --json", () => {
-  test("emits a JSON array on stdout with the documented field set", async () => {
+  test("emits honesty envelope {items,total,truncated} with the documented field set", async () => {
     const row = spikeFields("alpha", { tags: ["a", "b"] });
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
@@ -110,9 +110,10 @@ describe("listCmd --json", () => {
     // Exactly one stdout line — the JSON document — and it parses.
     expect(out.length).toBe(1);
     const parsed = JSON.parse(out[0]!);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed).toHaveLength(1);
-    expect(parsed[0]).toEqual({
+    expect(parsed).toMatchObject({ total: 1, truncated: false });
+    expect(Array.isArray(parsed.items)).toBe(true);
+    expect(parsed.items).toHaveLength(1);
+    expect(parsed.items[0]).toEqual({
       type: "spike",
       slug: "alpha",
       title: "T alpha",
@@ -125,7 +126,7 @@ describe("listCmd --json", () => {
     expect(err).toEqual([]);
   });
 
-  test("empty result emits `[]`, not 'no records'", async () => {
+  test("empty result emits honesty envelope, not 'no records'", async () => {
     globalThis.fetch = (async () => queryResp([])) as unknown as typeof fetch;
     const out: string[] = [];
     const err: string[] = [];
@@ -136,18 +137,22 @@ describe("listCmd --json", () => {
       print: (l) => out.push(l),
       printErr: (l) => err.push(l),
     });
-    expect(out).toEqual(["[]"]);
-    expect(JSON.parse(out[0]!)).toEqual([]);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0]!)).toEqual({
+      items: [],
+      total: 0,
+      truncated: false,
+    });
     // Empty brain now also emits the create-your-first hint — on stderr, so
-    // stdout stays a clean parseable `[]` for jq pipelines.
+    // stdout stays a clean parseable JSON document for jq pipelines.
     expect(err).toHaveLength(1);
     expect(err[0]).toContain("no records yet");
   });
 
   test("truncation hint routes to stderr, not stdout", async () => {
     // 25 spike rows, no explicit -n → default cap of 20 trims 5.
-    // Under --json the trimmed array goes to stdout and the "K more"
-    // advisory MUST go to stderr so jq still sees a clean array.
+    // Under --json the honesty envelope goes to stdout and the "K more"
+    // advisory MUST go to stderr so jq still sees a clean document.
     const rows = Array.from({ length: 25 }, (_, i) =>
       spikeFields(`slug-${String(i).padStart(2, "0")}`, {
         updated_at: `2026-05-${String(1 + i).padStart(2, "0")}T00:00:00Z`,
@@ -175,7 +180,9 @@ describe("listCmd --json", () => {
 
     expect(out.length).toBe(1);
     const parsed = JSON.parse(out[0]!);
-    expect(parsed).toHaveLength(20);
+    expect(parsed.items).toHaveLength(20);
+    expect(parsed.total).toBe(25);
+    expect(parsed.truncated).toBe(true);
     // The advisory is on stderr and NOT polluting the JSON document.
     expect(err.length).toBe(1);
     expect(err[0]).toContain("5 more");
@@ -205,7 +212,7 @@ describe("listCmd --json", () => {
       printErr: () => {},
     });
     const parsed = JSON.parse(out[0]!);
-    expect(parsed[0].design_slug).toBe("auth");
+    expect(parsed.items[0].design_slug).toBe("auth");
   });
 });
 

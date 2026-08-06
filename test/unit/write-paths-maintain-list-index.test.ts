@@ -21,6 +21,9 @@ import { describe, expect, test } from "bun:test";
 const WRITE_PATHS = [
   "src/commands/put.ts",
   "src/commands/papercut.ts",
+  // Delete is the inverse of put: it must drop the list-index row or phantoms
+  // survive in list/--count/BM25 while get exit-1s.
+  "src/commands/delete.ts",
 ] as const;
 
 describe("write paths maintain the type-list index", () => {

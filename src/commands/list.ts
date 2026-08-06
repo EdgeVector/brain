@@ -87,10 +87,28 @@ export type ListOptions = {
 };
 
 // The single-sourced result of a `listCmd` invocation, handed to both the
-// `--json` stdout serializer and the MCP `onResult` sink. Row mode returns the
-// same summary array the CLI has always emitted; `--count` mode returns the
-// match count only.
-export type ListResult = RecordSummary[] | { count: number };
+// `--json` stdout serializer and the MCP `onResult` sink.
+//
+// Row mode is an honesty envelope (`items`/`total`/`truncated`), not a bare
+// array: `brain list` is a sample, never a census (Tom 2026-08-06). Callers
+// that need completeness-dependent sweeps must use search / point reads.
+// `--count` mode still returns the match count only.
+export type ListPageResult = {
+  items: RecordSummary[];
+  /** Match count after filters, before offset/limit (index-level). */
+  total: number;
+  /**
+   * True when this page is not the full match set (offset/limit clipped, or
+   * unhydratable index rows were repaired-out of the page). Honesty signal
+   * only — never a promise that `total` is a complete census.
+   */
+  truncated: boolean;
+};
+export type ListResult = ListPageResult | { count: number };
+
+function emptyListPage(): ListPageResult {
+  return { items: [], total: 0, truncated: false };
+}
 
 export type ListEntry = { type: RecordType; record: FbrainRecord };
 
@@ -206,7 +224,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // `no records` even when the implicit default cap would have taken
   // effect. (Iron: the cap is a UX guard against floods, not a signal.)
   if (filtered.length === 0) {
-    opts.onResult?.([]);
+    opts.onResult?.(emptyListPage());
     if (opts.fields !== undefined && opts.fields.length > 0) return;
     // Context-aware no-result hint, completing the empty-node-hint trilogy
     // (list/search/ask). `list` is step 2 of init's own Next-steps — the
@@ -243,9 +261,9 @@ export async function listCmd(opts: ListOptions): Promise<void> {
         ? "hint:  no records match that filter — try `fbrain list` with no --type/--status/--tag"
         : "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then list again";
     if (opts.json) {
-      // Stdout stays the parseable empty array `[]` so jq pipelines see a
-      // clean empty array, never the hint text; the hint goes to stderr.
-      print("[]");
+      // Honesty envelope (items/total/truncated); hint stays on stderr so
+      // stdout remains a single parseable JSON document.
+      print(JSON.stringify(emptyListPage()));
       printErr(hint);
     } else {
       print("no records");
@@ -275,11 +293,16 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // caller hasn't seen yet, not rows already skipped by `--offset`.
   const truncated = paged.length - trimmed.length;
   if (trimmed.length === 0) {
-    opts.onResult?.([]);
+    const past: ListPageResult = {
+      items: [],
+      total: filtered.length,
+      truncated: filtered.length > 0,
+    };
+    opts.onResult?.(past);
     if (opts.fields !== undefined && opts.fields.length > 0) return;
     const note = `offset ${offset} is past the ${filtered.length} matching record(s)`;
     if (opts.json) {
-      print("[]");
+      print(JSON.stringify(past));
       printErr(`note:  ${note}`);
     } else {
       print("no records");
@@ -291,9 +314,13 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // Hydrate ONLY the final page — a point-get per entry not already fetched
   // by the --tag sweep. This is the crux of the fix: no matter how large the
   // corpus, a bounded `-n N` (or the default cap) pays for at most N body
-  // fetches, never one full-type body fetch regardless of page size. A null
-  // point-get means the record was deleted between the sweep and this fetch
-  // (a stale race, not an error) — skip it, same as any other stale hit.
+  // fetches, never one full-type body fetch regardless of page size.
+  //
+  // A null point-get means the list index still has a row whose product
+  // record is gone (delete left a phantom, or a race). Do NOT silently drop
+  // it: repair the list partition and surface a stderr note so a short page
+  // never looks like a complete sample with no signal.
+  const unhydratable: Array<{ type: RecordType; slug: string }> = [];
   const hydrated: ListEntry[] = (
     await mapWithConcurrency(
       trimmed,
@@ -307,31 +334,68 @@ export async function listCmd(opts: ListOptions): Promise<void> {
           schemaHashFor(e.type, opts.cfg),
           e.slug,
         );
-        return record ? { type: e.type, record } : null;
+        if (record) return { type: e.type, record };
+        unhydratable.push({ type: e.type, slug: e.slug });
+        return null;
       },
     )
   ).filter((e): e is ListEntry => e !== null);
 
-  // One JSON document — exact same field set the human table surfaces,
-  // plus created_at/updated_at and the optional design_slug parent link.
-  // Body intentionally omitted to keep list payloads compact; consumers
-  // can `fbrain get <slug> --json` for the full record.
+  if (unhydratable.length > 0) {
+    try {
+      const { deleteTypeListEntry } = await import("../record-list-index.ts");
+      for (const row of unhydratable) {
+        try {
+          await deleteTypeListEntry(node, opts.cfg, row.type, row.slug);
+        } catch {
+          /* best-effort per-row repair */
+        }
+      }
+    } catch {
+      /* schema import / unavailable — still surface below */
+    }
+    const sample = unhydratable
+      .slice(0, 3)
+      .map((r) => `${r.type}/${r.slug}`)
+      .join(", ");
+    const more =
+      unhydratable.length > 3 ? ` (+${unhydratable.length - 3} more)` : "";
+    printErr(
+      `note:  repaired ${unhydratable.length} unhydratable list-index row(s) ` +
+        `(product get returned null): ${sample}${more}. ` +
+        `Run \`fbrain reindex --list-index\` for a full partition rebuild.`,
+    );
+  }
+
+  // One JSON document — honesty envelope so callers can tell a sample from a
+  // census. Field set per item matches the human table (plus timestamps /
+  // optional design_slug); body omitted (use `fbrain get <slug> --json`).
   //
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
-  const payload = hydrated.map(({ type, record }) => recordSummary(type, record));
-  opts.onResult?.(payload);
+  const items = hydrated.map(({ type, record }) => recordSummary(type, record));
+  const total = filtered.length;
+  const pageResult: ListPageResult = {
+    items,
+    total,
+    truncated:
+      truncated > 0 ||
+      offset > 0 ||
+      unhydratable.length > 0 ||
+      items.length < trimmed.length,
+  };
+  opts.onResult?.(pageResult);
 
   if (opts.fields !== undefined && opts.fields.length > 0) {
-    printFieldProjection(payload, opts.fields, print);
+    printFieldProjection(items, opts.fields, print);
     return;
   }
 
   if (opts.json) {
-    print(JSON.stringify(payload));
+    print(JSON.stringify(pageResult));
     // Truncation advisory still useful for `jq` users — they may
-    // wonder why the array is shorter than expected — but it must
+    // wonder why the page is shorter than expected — but it must
     // never appear on stdout under --json. Route to stderr instead.
     if (opts.limit === undefined && truncated > 0) {
       printErr(

@@ -254,6 +254,20 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     null,
     opts.verbose,
   );
+  // Drop the per-type RecordListEntry row. Without this the pre-tombstone
+  // rle_payload snapshot survives, so list/--count/BM25 still surface the
+  // slug while get exit-1s (phantom index rows).
+  {
+    const { maintainTypeListIndex } = await import("../record-list-index.ts");
+    await maintainTypeListIndex({
+      node,
+      cfg: opts.cfg,
+      type,
+      record: null,
+      slug,
+      verbose: opts.verbose,
+    });
+  }
 
   print(
     `deleted ${type} ${slug} (soft — fold_db is append-only)`,
@@ -465,6 +479,17 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
         null,
         opts.verbose,
       );
+      {
+        const { maintainTypeListIndex } = await import("../record-list-index.ts");
+        await maintainTypeListIndex({
+          node,
+          cfg: opts.cfg,
+          type: m.type,
+          record: null,
+          slug,
+          verbose: opts.verbose,
+        });
+      }
       print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
       deleted.push({ type: m.type, slug });
     } catch (err) {
