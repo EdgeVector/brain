@@ -321,3 +321,56 @@ function isFbrainRecordLike(value: unknown): value is FbrainRecord {
   const v = value as Record<string, unknown>;
   return typeof v.slug === "string" && typeof v.title === "string";
 }
+
+// Maintain the type-list index after a product write. EVERY write path that
+// creates or updates a record must call this — `put`, and `papercut file` /
+// `papercut close`.
+//
+// It exists because it was skipped. `papercut file` shipped calling
+// `node.createRecord` directly, so the first papercut ever filed landed in SOT
+// and was invisible to `brain list --type papercut` and to `papercut census`,
+// which reported "no papercuts" while `brain get` returned the record. That is
+// the same failure `papercut-brain-list-under-reports…` records — 68
+// `papercut-lastgit-*` rows invisible to every list/search while `brain get`
+// still resolved them — reproduced inside the ledger built to end it.
+//
+// Non-fatal by design: the record has already persisted and throwing here would
+// report a lost write that is not lost. But NOT silent — this index is patched
+// read-modify-write, so a dropped entry never comes back on its own, and
+// swallowing the error is how the primary's rollup drifted 760 live records
+// behind `brain list` for days with no symptom (2026-07-28). The boolean rides
+// out to the caller so an operator finds out at the write, not at an audit.
+export async function maintainTypeListIndex(opts: {
+  node: NodeClient;
+  cfg: SchemaCfg;
+  type: RecordType;
+  record: FbrainRecord;
+  slug: string;
+  verbose?: (msg: string) => void;
+}): Promise<{ listIndexFailed: boolean }> {
+  const { isTombstoned } = await import("./record.ts");
+  try {
+    await patchTypeListIndex(opts.node, opts.cfg, opts.type, opts.record, opts.slug, isTombstoned);
+    return { listIndexFailed: false };
+  } catch (err) {
+    // Self-heal: clear the completeness marker so the next product list cold-
+    // seeds from SOT instead of trusting a permanently incomplete partition.
+    try {
+      await unmarkTypePartitionMigrated(opts.node, opts.cfg, opts.type);
+      opts.verbose?.(
+        `record-list index patch FAILED for ${opts.type}/${opts.slug}: ` +
+          `${err instanceof Error ? err.message : String(err)} — record persisted; ` +
+          `cleared the ${opts.type} list-index completeness marker so the next \`brain list\` ` +
+          `cold-seeds from SOT (or run \`fbrain reindex --list-index\`).`,
+      );
+    } catch (unmarkErr) {
+      opts.verbose?.(
+        `record-list index patch FAILED for ${opts.type}/${opts.slug}: ` +
+          `${err instanceof Error ? err.message : String(err)}; unmark also failed: ` +
+          `${unmarkErr instanceof Error ? unmarkErr.message : String(unmarkErr)} — ` +
+          "run `fbrain reindex --list-index` to repair.",
+      );
+    }
+    return { listIndexFailed: true };
+  }
+}

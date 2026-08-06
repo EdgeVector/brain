@@ -224,36 +224,15 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // 760 live records behind `brain list` for days with no symptom (2026-07-28).
   // `listIndexFailed` rides out on the result so the operator finds out at the
   // write instead of during an audit months later.
-  let listIndexFailed = false;
-  try {
-    const { patchTypeListIndex } = await import("../record-list-index.ts");
-    const { isTombstoned } = await import("../record.ts");
-    await patchTypeListIndex(node, opts.cfg, type, visible, slug, isTombstoned);
-  } catch (err) {
-    listIndexFailed = true;
-    // Self-heal: clear the completeness marker so the next product list cold-
-    // seeds from SOT instead of trusting a permanently incomplete partition.
-    // Without this, a single dual-write failure left the type under-reported
-    // forever (papercut-brain-list-under-reports…: 68 papercut-lastgit-* rows
-    // invisible to every list/search while brain get still resolved them).
-    try {
-      const { unmarkTypePartitionMigrated } = await import("../record-list-index.ts");
-      await unmarkTypePartitionMigrated(node, opts.cfg, type);
-      opts.verbose?.(
-        `record-list index patch FAILED for ${type}/${slug}: ` +
-          `${err instanceof Error ? err.message : String(err)} — record persisted; ` +
-          `cleared the ${type} list-index completeness marker so the next \`brain list\` ` +
-          `cold-seeds from SOT (or run \`fbrain reindex --list-index\`).`,
-      );
-    } catch (unmarkErr) {
-      opts.verbose?.(
-        `record-list index patch FAILED for ${type}/${slug}: ` +
-          `${err instanceof Error ? err.message : String(err)}; unmark also failed: ` +
-          `${unmarkErr instanceof Error ? unmarkErr.message : String(unmarkErr)} — ` +
-          "run `fbrain reindex --list-index` to repair.",
-      );
-    }
-  }
+  const { maintainTypeListIndex } = await import("../record-list-index.ts");
+  const { listIndexFailed } = await maintainTypeListIndex({
+    node,
+    cfg: opts.cfg,
+    type,
+    record: visible,
+    slug,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
   await reconcileTagIndex(
     node,
     opts.cfg,
