@@ -354,8 +354,34 @@ async function main(): Promise<number> {
   const now = nowIso();
   let written = 0;
   let indexFailures = 0;
+  let skipped = 0;
   for (const p of clean) {
     const original = source.find((r) => r.slug === p.slug)!;
+    // RESUMABLE. A migration over hundreds of records will be interrupted —
+    // this one was, at ~2 minutes. Re-running must not double-write, so skip
+    // any slug that already has a typed record. The point read is the same
+    // keyed lookup `papercut file` uses, and it is the ONLY read here that is
+    // known to work on this schema (the full scan is the broken one).
+    const already = await findBySlug(node, "papercut", papercutHash, p.slug);
+    if (already) {
+      // Skip the SOT write — but NOT the index write. A record present in SOT
+      // and absent from the index is precisely the state this migration has to
+      // repair, and it is the state an interrupted run leaves behind. The first
+      // version of this skip `continue`d before the index patch, so re-running
+      // after an interruption left 253 of 573 records unindexed while reporting
+      // success. Resuming must converge, not freeze the gap in place.
+      const { listIndexFailed: skipIndexFailed } = await maintainTypeListIndex({
+        node,
+        cfg,
+        type: "papercut",
+        record: already,
+        slug: p.slug,
+      });
+      if (skipIndexFailed) indexFailures += 1;
+      skipped += 1;
+      written += 1;
+      continue;
+    }
     const fields = {
         slug: p.slug,
         title: p.title,
@@ -406,7 +432,10 @@ async function main(): Promise<number> {
   // the exact "under-reports and nobody can tell" state this ledger replaces.
   if (indexFailures === 0) {
     await markTypePartitionMigrated(node, cfg, "papercut");
-    console.log(`\nwrote ${written} typed papercut records; list-index seeded and marked complete`);
+    console.log(
+      `\n${written} typed papercut records present (${written - skipped} written this run, ` +
+        `${skipped} already existed); list-index seeded and marked complete`,
+    );
   } else {
     console.log(
       `\nwrote ${written} typed papercut records, but ${indexFailures} list-index patches FAILED.\n` +
