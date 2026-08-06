@@ -1073,9 +1073,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
-      // `structuredContent` is either `{ records: [summary, …] }` (row mode —
-      // the SAME array the CLI `list --json` emits, body omitted; use
-      // `fbrain_get` for the full record) or `{ count: N }` (count mode).
+      // `structuredContent` is either the honesty envelope
+      // `{ records, total, truncated }` (row mode — same `items` the CLI
+      // `list --json` emits as `items`, body omitted; use `fbrain_get` for
+      // the full record) or `{ count: N }` (count mode). `truncated` is an
+      // honesty signal only: list is a sample, never a census.
       outputSchema: {
         records: z
           .array(summarySchema)
@@ -1083,6 +1085,22 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "Record summaries, newest-first (empty array on no records). " +
               "Present in row mode; absent when `count` is set.",
+          ),
+        total: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe(
+            "Index-level match count after filters, before offset/limit. " +
+              "Honesty signal only — not a complete-census promise.",
+          ),
+        truncated: z
+          .boolean()
+          .optional()
+          .describe(
+            "True when this page is not the full match set (clipped or " +
+              "unhydratable rows repaired-out). Not a census completeness flag.",
           ),
         count: z
           .number()
@@ -1124,8 +1142,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           return listCmd(listOpts);
         },
         wrap: (result) =>
-          Array.isArray(result)
-            ? { records: result, skipped_types: skippedTypes }
+          "items" in result
+            ? {
+                records: result.items,
+                total: result.total,
+                truncated: result.truncated,
+                skipped_types: skippedTypes,
+              }
             : { count: result.count, skipped_types: skippedTypes },
       });
     },

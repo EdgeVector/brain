@@ -322,9 +322,9 @@ function isFbrainRecordLike(value: unknown): value is FbrainRecord {
   return typeof v.slug === "string" && typeof v.title === "string";
 }
 
-// Maintain the type-list index after a product write. EVERY write path that
-// creates or updates a record must call this — `put`, and `papercut file` /
-// `papercut close`.
+// Maintain the type-list index after a product write OR delete. EVERY path that
+// creates, updates, or soft-deletes a record must call this — `put`,
+// `papercut file` / `papercut close`, and `delete`.
 //
 // It exists because it was skipped. `papercut file` shipped calling
 // `node.createRecord` directly, so the first papercut ever filed landed in SOT
@@ -334,17 +334,26 @@ function isFbrainRecordLike(value: unknown): value is FbrainRecord {
 // `papercut-lastgit-*` rows invisible to every list/search while `brain get`
 // still resolved them — reproduced inside the ledger built to end it.
 //
-// Non-fatal by design: the record has already persisted and throwing here would
-// report a lost write that is not lost. But NOT silent — this index is patched
-// read-modify-write, so a dropped entry never comes back on its own, and
-// swallowing the error is how the primary's rollup drifted 760 live records
-// behind `brain list` for days with no symptom (2026-07-28). The boolean rides
-// out to the caller so an operator finds out at the write, not at an audit.
+// Delete had the inverse bug: `delete.ts` tombstoned the product row but never
+// patched the list partition, so a pre-tombstone `rle_payload` snapshot
+// survived. `list`/`--count`/BM25 still ranked the slug while `get` exit-1'd
+// (`papercut-brain-list-count-overreports-tombstoned-recordlistentry-rows`).
+// Pass `record: null` (or a tombstoned record) so `patchTypeListIndex` drops
+// the HashRange row.
+//
+// Non-fatal by design: the record has already persisted (or been tombstoned)
+// and throwing here would report a lost write that is not lost. But NOT
+// silent — this index is patched read-modify-write, so a dropped entry never
+// comes back on its own, and swallowing the error is how the primary's rollup
+// drifted 760 live records behind `brain list` for days with no symptom
+// (2026-07-28). The boolean rides out to the caller so an operator finds out
+// at the write, not at an audit.
 export async function maintainTypeListIndex(opts: {
   node: NodeClient;
   cfg: SchemaCfg;
   type: RecordType;
-  record: FbrainRecord;
+  /** Live record to upsert, or `null` / tombstoned record to drop the row. */
+  record: FbrainRecord | null;
   slug: string;
   verbose?: (msg: string) => void;
 }): Promise<{ listIndexFailed: boolean }> {

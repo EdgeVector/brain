@@ -801,7 +801,10 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
       globalThis.fetch = originalFetch;
     }
 
-    expect((payload[0] as unknown[]).length).toBe(rows.length);
+    const page = payload[0] as { items: unknown[]; total: number; truncated: boolean };
+    expect(page.items.length).toBe(rows.length);
+    expect(page.total).toBe(rows.length);
+    expect(page.truncated).toBe(false);
     expect(maxActiveHydrates).toBeLessThanOrEqual(LIST_HYDRATE_CONCURRENCY);
   });
 });
@@ -1181,7 +1184,7 @@ describe("listCmd — empty-node create-your-first hint (parity with search/ask)
     expect(lines[1]).not.toContain("no records yet");
   });
 
-  test("--json on an empty brain keeps stdout `[]` and routes the hint to stderr", async () => {
+  test("--json on an empty brain emits honesty envelope and routes the hint to stderr", async () => {
     const responses = new Map<string, Array<Fields[]>>(); // empty brain
     const { restore } = stubFetch(responses);
     const stdout: string[] = [];
@@ -1196,8 +1199,13 @@ describe("listCmd — empty-node create-your-first hint (parity with search/ask)
     } finally {
       restore();
     }
-    // Stdout is a single parseable empty array — jq pipelines stay clean.
-    expect(stdout).toEqual(["[]"]);
+    // Stdout is a single parseable honesty envelope — not a bare array census.
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!)).toEqual({
+      items: [],
+      total: 0,
+      truncated: false,
+    });
     // The hint lands on stderr.
     expect(stderr).toHaveLength(1);
     expect(stderr[0]).toContain("no records yet");
