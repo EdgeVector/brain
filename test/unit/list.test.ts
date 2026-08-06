@@ -64,15 +64,6 @@ function spikeRow(slug: string, over: Partial<Fields> = {}): Fields {
 // the SDK's own `findQueryRowByKey` picks the exact match out of it — so a
 // test only needs to enqueue the full row set once (as before); it does not
 // need to know how many extra point-get round trips the fix now makes.
-function peekQueueHead(
-  responsesBySchema: Map<string, Array<Fields[]>>,
-  schema: string,
-): Fields[] {
-  const queue = responsesBySchema.get(schema);
-  if (!queue || queue.length === 0) return [];
-  return queue[0]!;
-}
-
 function stubFetch(
   responsesBySchema: Map<string, Array<Fields[]>>,
   opts: { missingSchemas?: ReadonlySet<string> } = {},

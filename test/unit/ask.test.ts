@@ -19,7 +19,6 @@ import { askCmd, docId, parseDocId } from "../../src/commands/ask.ts";
 import { RECORD_TYPES } from "../../src/schemas.ts";
 import {
   answerTypeListIndexQuery,
-  wrapFetchWithTypeListIndex,
   appSearchAsLegacyNativeIndex,
   legacySearchResponseBody,
   buildTestCfg,
@@ -540,7 +539,8 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         ],
       });
 
-      // COLD call: warms the cache (does the full body fetch + rebuild).
+      // COLD call: warms the cache via type-list index payloads (no product
+      // schema body cold-seed scans — listRecords is index-only).
       const cold = await askCmd({
         cfg,
         query: "octopus",
@@ -552,7 +552,11 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         (a, b) => a + b,
         0,
       );
-      expect(coldBody).toBe(RECORD_TYPES.length);
+      expect(coldBody).toBe(0);
+      // Still paid one type-list partition read per record type to build BM25.
+      expect(
+        stub.queryCountsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH) ?? 0,
+      ).toBeGreaterThan(0);
 
       // Reset the counters; the index file persists in FBRAIN_CACHE_DIR.
       stub.queryCountsBySchema.clear();
@@ -794,12 +798,18 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
         rm(`${cacheDir}/${f}`, { force: true });
       }
       bodyQueryCounts.clear();
-      const rebuilt = await askCmd({ cfg, query: "zucchini", noLlm: true, print: () => {} });
-      expect(rebuilt.bm25CacheHit).toBe(false);
-      expect((bodyQueryCounts.get(TEST_HASHES.design) ?? 0)).toBeGreaterThan(0);
-      expect(rebuilt.hits.map((h) => h.slug)).toEqual(["d1"]);
-      expect(rebuilt.hits[0]!.record.body).toContain("zucchini");
-      delete process.env.FBRAIN_BM25_CACHE_TTL_MS;
+      queryCounts.clear();
+      try {
+        const rebuilt = await askCmd({ cfg, query: "zucchini", noLlm: true, print: () => {} });
+        expect(rebuilt.bm25CacheHit).toBe(false);
+        // Bodies ride the type-list payload — no product-schema body scan.
+        expect((bodyQueryCounts.get(TEST_HASHES.design) ?? 0)).toBe(0);
+        expect((queryCounts.get(TEST_RECORD_LIST_ENTRY_HASH) ?? 0)).toBeGreaterThan(0);
+        expect(rebuilt.hits.map((h) => h.slug)).toEqual(["d1"]);
+        expect(rebuilt.hits[0]!.record.body).toContain("zucchini");
+      } finally {
+        delete process.env.FBRAIN_BM25_CACHE_TTL_MS;
+      }
     },
   );
 
@@ -1067,23 +1077,21 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
     });
 
     expect(result.hits.length).toBe(0);
-    // The ghost vector hit triggers NO extra fetch: on the cold path it's a
-    // `liveById` Map miss (the in-memory corpus map), silently skipped. So the
-    // only /api/query traffic is the corpus load itself: bounded cold
-    // entry-index seed/read traffic per type (no BM25 key-listing pass), and
-    // zero body fetches for the ghost beyond the single per-type body-bearing
-    // seed scan.
+    // Ghost vector hit is a liveById Map miss — no extra product fetch.
+    // Corpus load is one type-list partition read per RECORD_TYPE (bodies in
+    // the index payload). No product-schema body cold-seed scans.
     const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
       (a, b) => a + b,
       0,
     );
-    // +1 for the single design seed row existence point-read during cold seed.
-    // Per-type budget is 4 cold queries after TTL BM25 (no key-listing pass).
-    expect(totalQueries).toBe(4 * RECORD_TYPES.length + 1);
+    expect(totalQueries).toBe(RECORD_TYPES.length);
+    expect(
+      stub.queryCountsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH) ?? 0,
+    ).toBe(RECORD_TYPES.length);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);
-    expect(totalBodyQueries).toBe(RECORD_TYPES.length);
+    expect(totalBodyQueries).toBe(0);
   });
 });
 

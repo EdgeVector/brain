@@ -23,6 +23,9 @@ echo "== typecheck =="
 bun run typecheck
 
 echo "== tests =="
+# Routines host env injects lastsecrets:// OBS_SENTRY_DSN which is not a real DSN;
+# unset so CLI stderr purity tests stay green under scheduled pickup.
+unset OBS_SENTRY_DSN SENTRY_DSN || true
 FBRAIN_SKIP_INTEGRATION="${FBRAIN_SKIP_INTEGRATION:-1}" bun test --timeout 60000
 
 echo "lastgit ci gate PASSED"

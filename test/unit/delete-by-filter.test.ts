@@ -343,7 +343,10 @@ describe("deleteByFilter — --yes (apply)", () => {
       expect(out).toContain("deleted 2 records matching --tag junk");
       // Each match got the update (tombstone) + the fold_db delete.
       expect(state.updateCalls.map((c) => c.keyHash).sort()).toEqual(["junk-a", "junk-b"]);
-      expect(state.deleteCalls.map((c) => c.keyHash).sort()).toEqual(["junk-a", "junk-b"]);
+      // Type-list dual-write may also delete partition rows keyed by type name.
+      expect(
+        state.deleteCalls.map((c) => c.keyHash).filter((k) => k === "junk-a" || k === "junk-b").sort(),
+      ).toEqual(["junk-a", "junk-b"]);
       // The non-matching record was untouched.
       expect(state.updateCalls.some((c) => c.keyHash === "keep-me")).toBe(false);
       expect(payload?.dryRun).toBe(false);
@@ -426,7 +429,9 @@ describe("deleteByFilter — --yes (apply)", () => {
       expect(out).toContain("deleted design junk-c");
       expect(out).toContain("2 records matching --type design --tag junk; 1 record failed");
       expect(state.updateCalls.map((c) => c.keyHash).sort()).toEqual(["junk-a", "junk-c"]);
-      expect(state.deleteCalls.map((c) => c.keyHash).sort()).toEqual(["junk-a", "junk-c"]);
+      expect(
+        state.deleteCalls.map((c) => c.keyHash).filter((k) => k === "junk-a" || k === "junk-c").sort(),
+      ).toEqual(["junk-a", "junk-c"]);
       expect(payload).toMatchObject({
         ok: false,
         deleted: [

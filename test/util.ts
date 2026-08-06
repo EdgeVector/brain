@@ -166,7 +166,7 @@ export function wrapFetchWithTypeListIndex(
   productRowsForType: (type: RecordType) => Array<Record<string, unknown>>,
   listEntryHash: string = TEST_RECORD_LIST_ENTRY_HASH,
 ): typeof globalThis.fetch {
-  return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  return (async (input: Request | URL | string, init?: RequestInit): Promise<Response> => {
     const url =
       typeof input === "string"
         ? input

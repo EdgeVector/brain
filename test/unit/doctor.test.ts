@@ -55,7 +55,14 @@ import { inMemoryCapabilityStore } from "../../src/keychain.ts";
 import { canonicalize, type JsonValue } from "../../src/jcs.ts";
 import { sha256Hex } from "../../src/hash.ts";
 import type { WriteNodeClient, WriteNodeClientOptions } from "../../src/write-context.ts";
-import { buildTestCfg, TEST_HASHES, TEST_NODE_URL } from "../util.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+  TEST_NODE_URL,
+  TEST_RECORD_LIST_ENTRY_HASH,
+  testHashForType,
+} from "../util.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -266,7 +273,33 @@ function mockNodeClient(opts: {
     async deleteRecord({ schemaHash, keyHash }) {
       mutations.push({ kind: "delete", slug: keyHash, schemaHash });
     },
-    async queryAll({ schemaHash }): Promise<QueryResponse> {
+    async queryAll({ schemaHash, filter }): Promise<QueryResponse> {
+      // Product listRecords reads the type-list index, not the product schema.
+      // Synthesize a complete partition from the product-schema store so pollution
+      // / list probes match real dual-write writers.
+      if (schemaHash === TEST_RECORD_LIST_ENTRY_HASH) {
+        const listIndex = answerTypeListIndexQuery({
+          schemaHash,
+          filter: filter as
+            | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+            | undefined,
+          productRowsForType: (type) => {
+            const productHash = testHashForType(type) ?? TEST_HASHES[type];
+            return (store[productHash] ?? []).map((r) => r.fields);
+          },
+          listEntryHash: TEST_RECORD_LIST_ENTRY_HASH,
+        });
+        const results = (listIndex ?? []).map((r) => ({
+          fields: r.fields,
+          key: { hash: r.key.hash, range: r.key.range },
+        }));
+        return {
+          ok: true,
+          results,
+          total_count: results.length,
+          returned_count: results.length,
+        };
+      }
       const rows = (store[schemaHash] ?? []).map<QueryRow>((r) => ({
         fields: r.fields,
         key: { hash: r.slug, range: null },

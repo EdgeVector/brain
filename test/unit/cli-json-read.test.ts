@@ -18,10 +18,13 @@ import { getRecord } from "../../src/commands/get.ts";
 import { searchCmd } from "../../src/commands/search.ts";
 import { statusCmd } from "../../src/commands/status.ts";
 import {
+  answerTypeListIndexQuery,
   appSearchAsLegacyNativeIndex,
   legacySearchResponseBody,
-  TEST_HASHES,
   buildTestCfg,
+  TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
+  testHashForType,
 } from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
@@ -328,32 +331,46 @@ describe("getRecord --json", () => {
   }, 30_000);
 
   test("design carries `children: [{slug, status}]` for its tasks", async () => {
+    const taskRows = [
+      taskFields("wire-oauth", {
+        design_slug: "auth",
+        status: "in_progress",
+        updated_at: "2026-05-02T00:00:00Z",
+      }),
+      taskFields("login-ui", {
+        design_slug: "auth",
+        status: "open",
+        updated_at: "2026-05-03T00:00:00Z",
+      }),
+    ];
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      const listIndex = answerTypeListIndexQuery({
+        schemaHash: String(body.schema_name ?? ""),
+        filter: body.filter as
+          | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+          | undefined,
+        productRowsForType: (type) => {
+          if (type === "design") return [designFields("auth")];
+          if (type === "task") return taskRows;
+          return [];
+        },
+      });
+      if (listIndex !== null) {
+        return queryResp(
+          listIndex.map((r) => ({
+            fields: r.fields,
+            key: { hash: r.key.hash, range: r.key.range },
+          })) as never,
+        );
+      }
       if (body.schema_name === TEST_HASHES.design) {
         return queryResp([asRow("auth", designFields("auth"))]);
       }
       if (body.schema_name === TEST_HASHES.task) {
-        return queryResp([
-          asRow(
-            "wire-oauth",
-            taskFields("wire-oauth", {
-              design_slug: "auth",
-              status: "in_progress",
-              updated_at: "2026-05-02T00:00:00Z",
-            }),
-          ),
-          asRow(
-            "login-ui",
-            taskFields("login-ui", {
-              design_slug: "auth",
-              status: "open",
-              updated_at: "2026-05-03T00:00:00Z",
-            }),
-          ),
-        ]);
+        return queryResp(taskRows.map((f) => asRow(String(f.slug), f)));
       }
       return queryResp([]);
     }) as unknown as typeof fetch;
@@ -387,6 +404,55 @@ function installSequencedMock(
     const rawUrl = typeof input === "string" ? input : String(input);
     const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
     const url = appSearch?.url ?? rawUrl;
+    // Product listRecords reads the type-list index; synthesize a complete
+    // partition from whatever product-schema rows the handler would return.
+    if (url.includes("/api/query") && typeof init?.body === "string") {
+      try {
+        const body = JSON.parse(init.body) as {
+          schema_name?: string;
+          filter?: {
+            HashKey?: unknown;
+            HashRangeKey?: { hash?: unknown; range?: unknown };
+          };
+        };
+        const schema = String(body.schema_name ?? "");
+        if (schema === TEST_RECORD_LIST_ENTRY_HASH) {
+          const listIndex = answerTypeListIndexQuery({
+            schemaHash: schema,
+            filter: body.filter,
+            productRowsForType: (type) => {
+              const productHash = testHashForType(type);
+              if (!productHash) return [];
+              const product = handler(url, {
+                method: "POST",
+                body: JSON.stringify({
+                  schema_name: productHash,
+                  fields: ["slug", "title", "body", "status", "tags", "created_at", "updated_at"],
+                }),
+              });
+              const results = (product.body as { results?: Array<{ fields?: Record<string, unknown> }> } | undefined)
+                ?.results;
+              if (!Array.isArray(results)) return [];
+              return results.map((r) => (r.fields ?? r) as Record<string, unknown>);
+            },
+            listEntryHash: TEST_RECORD_LIST_ENTRY_HASH,
+          });
+          if (listIndex !== null) {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                results: listIndex,
+                total_count: listIndex.length,
+                returned_count: listIndex.length,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+        }
+      } catch {
+        // fall through
+      }
+    }
     const next = handler(url, init);
     return new Response(JSON.stringify(legacySearchResponseBody(next.body ?? {}, appSearch)), {
       status: next.status,
