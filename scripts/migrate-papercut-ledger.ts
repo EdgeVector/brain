@@ -31,6 +31,10 @@ import {
   type FbrainRecord,
 } from "../src/record.ts";
 import { symptomHash } from "../src/papercut.ts";
+import {
+  maintainTypeListIndex,
+  markTypePartitionMigrated,
+} from "../src/record-list-index.ts";
 
 type Plan = {
   slug: string;
@@ -349,12 +353,10 @@ async function main(): Promise<number> {
   const papercutHash = schemaHashFor("papercut", cfg);
   const now = nowIso();
   let written = 0;
+  let indexFailures = 0;
   for (const p of clean) {
     const original = source.find((r) => r.slug === p.slug)!;
-    await node.createRecord({
-      schemaHash: papercutHash,
-      keyHash: p.slug,
-      fields: {
+    const fields = {
         slug: p.slug,
         title: p.title,
         body: original.body,
@@ -368,14 +370,52 @@ async function main(): Promise<number> {
         verified_by: "",
         duplicate_of: "",
         tags: original.tags,
-        created_at: original.created_at || now,
-        updated_at: now,
-      },
+      created_at: original.created_at || now,
+      updated_at: now,
+    };
+    await node.createRecord({ schemaHash: papercutHash, keyHash: p.slug, fields });
+
+    // SEED THE TYPE-LIST INDEX PER RECORD.
+    //
+    // Not an optimization — it is what makes the migrated ledger readable at
+    // all. `listRecords` returns the index when the partition is marked
+    // complete, and otherwise COLD-SEEDS by full-scanning the product schema.
+    // Measured on the primary 2026-08-06: that full scan is broken for this
+    // schema — the node reports a `total_count` over the whole keyspace (955,
+    // and it tracked records written to OTHER types during the session) and
+    // pages with repeated keys, so the client's loop guard aborts.
+    //
+    // Writing the index here means the cold-seed path is never taken: the
+    // migration IS the seed. See
+    // `papercut-schema-on-primary-writes-land-but-scans-return-nothing-20260806`.
+    const { listIndexFailed } = await maintainTypeListIndex({
+      node,
+      cfg,
+      type: "papercut",
+      record: { ...(fields as unknown as FbrainRecord) },
+      slug: p.slug,
     });
+    if (listIndexFailed) indexFailures += 1;
     written += 1;
+    if (written % 25 === 0) process.stderr.write(`\rwriting ${written}/${clean.length}`);
   }
-  console.log(`\nwrote ${written} typed papercut records; ${review.length} left for manual review`);
-  return 0;
+  process.stderr.write("\n");
+
+  // Mark the partition complete only if EVERY entry landed. A partition marked
+  // complete while missing rows is trusted forever by `readTypeListIndex` —
+  // the exact "under-reports and nobody can tell" state this ledger replaces.
+  if (indexFailures === 0) {
+    await markTypePartitionMigrated(node, cfg, "papercut");
+    console.log(`\nwrote ${written} typed papercut records; list-index seeded and marked complete`);
+  } else {
+    console.log(
+      `\nwrote ${written} typed papercut records, but ${indexFailures} list-index patches FAILED.\n` +
+        "Partition deliberately NOT marked complete — a complete marker over a partial index is " +
+        "trusted forever. Re-run `fbrain reindex --list-index` or re-run this migration.",
+    );
+  }
+  console.log(`${review.length} left for manual review`);
+  return indexFailures === 0 ? 0 : 1;
 }
 
 process.exit(await main());
