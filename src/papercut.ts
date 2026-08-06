@@ -35,13 +35,6 @@ export const PAPERCUT_USAGE_CODES = [
 // would reintroduce the over-closure this type exists to prevent.
 export const LIVE_PAPERCUT_STATUSES = ["open", "partial", "fixed"] as const;
 
-// Terminal statuses — no further repair work is expected.
-export const TERMINAL_PAPERCUT_STATUSES = [
-  "verified",
-  "wontfix",
-  "duplicate",
-] as const;
-
 export function isLivePapercutStatus(status: string): boolean {
   return (LIVE_PAPERCUT_STATUSES as readonly string[]).includes(status);
 }
