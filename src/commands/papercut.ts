@@ -30,6 +30,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
+import { maintainTypeListIndex } from "../record-list-index.ts";
 import {
   ensureComponent,
   ensureDuplicateTarget,
@@ -276,6 +277,29 @@ export async function papercutFileCmd(
     },
   });
 
+  // The record is in SOT. It is NOT yet listable — `brain list`, `papercut
+  // census` and BM25 all read the type-list index, and a record missing from it
+  // is invisible to every one of them while `brain get` still resolves it.
+  // Skipping this is precisely how the first papercut ever filed produced a
+  // census that said "no papercuts".
+  const filed = await findBySlug(node, PAPERCUT, schemaHash, slug);
+  const { listIndexFailed } = await maintainTypeListIndex({
+    node,
+    cfg: opts.cfg,
+    type: PAPERCUT,
+    record: filed ?? {
+      slug,
+      title: opts.title,
+      body,
+      status: "open",
+      tags: opts.tags ?? [],
+      created_at: now,
+      updated_at: now,
+    },
+    slug,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
+
   if (opts.json) {
     print(
       JSON.stringify({
@@ -284,10 +308,17 @@ export async function papercutFileCmd(
         component,
         symptom_hash: hash,
         duplicates: [],
+        list_index_failed: listIndexFailed,
       }),
     );
   } else {
     print(`filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash}`);
+    if (listIndexFailed) {
+      print(
+        "warning: the record persisted but the type-list index patch failed — it will not " +
+          "appear in `papercut census` / `brain list` until `fbrain reindex --list-index` runs.",
+      );
+    }
   }
   return { action: "filed", slug, component, symptom_hash: hash, duplicates: [] };
 }
@@ -373,6 +404,18 @@ export async function papercutCloseCmd(
     schemaHash,
     keyHash: slug,
     fields: updateFieldsFrom(record, PAPERCUT, patch),
+  });
+
+  // Same reason as the file path: the index carries `status`, so a close that
+  // skips it leaves the census counting the OLD status forever.
+  const closed = await findBySlug(node, PAPERCUT, schemaHash, slug);
+  await maintainTypeListIndex({
+    node,
+    cfg: opts.cfg,
+    type: PAPERCUT,
+    record: closed ?? { ...record, status, updated_at: now },
+    slug,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
 
   if (opts.json) {
