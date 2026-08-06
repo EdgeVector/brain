@@ -30,6 +30,12 @@ function hit(opts: Partial<NativeIndexHit> & { slug: string; schemaName: string 
   };
 }
 
+
+/** BM25 cold rebuild is allowed on stderr; filter it when asserting advisory notes. */
+function advisoryStderr(stderr: string[]): string[] {
+  return stderr.filter((l) => !l.includes("BM25 keyword rescue"));
+}
+
 describe("dedupeHits", () => {
   test("collapses multiple fragments of same record to highest-score", () => {
     const hits: NativeIndexHit[] = [
@@ -420,9 +426,11 @@ describe("searchCmd", () => {
     expect(payload![0]!.slug).toBe("socket-note");
     expect(payload![0]!.confidence).toBe("fallback");
     // Advisory (non-strong result set) lands on stderr, not among the rows.
-    expect(stderr).toHaveLength(1);
-    expect(stderr[0]).toMatch(/^note:\s/);
-    expect(stderr[0]).toContain("no strong matches");
+    // BM25 cold rebuild may also emit a note on the rescue path.
+    const notes = advisoryStderr(stderr);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^note:\s/);
+    expect(notes[0]).toContain("no strong matches");
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
   });
 
@@ -1024,9 +1032,9 @@ describe("searchCmd", () => {
     });
     // Stdout is a single parseable empty array — jq pipelines stay clean.
     expect(stdout).toEqual(["[]"]);
-    // The empty-state hint lands on stderr.
-    expect(stderr).toHaveLength(1);
-    expect(stderr[0]).toContain("no records yet");
+    // The empty-state hint lands on stderr (BM25 cold rebuild may also note).
+    const notes = advisoryStderr(stderr);
+    expect(notes.some((l) => l.includes("no records yet"))).toBe(true);
   });
 
   test("tolerates missing metadata.score → prints — in the score column", async () => {
@@ -1627,12 +1635,13 @@ describe("searchCmd", () => {
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
     expect(rows[0]).toContain("ship-it");
     expect(rows[0]).toContain("0.240");
-    // Note lands on stderr.
-    expect(stderr).toHaveLength(1);
-    expect(stderr[0]).toMatch(/^note:\s/);
-    expect(stderr[0]).toContain("no strong matches");
-    expect(stderr[0]).toContain("qwxz pqrlmn vbnghj");
-    expect(stderr[0]).toContain("fbrain ask");
+    // Note lands on stderr (BM25 rebuild note may also appear on cold rescue).
+    const notes = advisoryStderr(stderr);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^note:\s/);
+    expect(notes[0]).toContain("no strong matches");
+    expect(notes[0]).toContain("qwxz pqrlmn vbnghj");
+    expect(notes[0]).toContain("fbrain ask");
   });
 
   test("weak-match note names the `fbrain_ask` tool (not the CLI string) on the agent channel", async () => {
@@ -1686,13 +1695,14 @@ describe("searchCmd", () => {
       print: (l) => stdout.push(l),
       printErr: (l) => stderr.push(l),
     });
-    expect(stderr).toHaveLength(1);
-    expect(stderr[0]).toMatch(/^note:\s/);
-    expect(stderr[0]).toContain("no strong matches");
+    const notes = advisoryStderr(stderr);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/^note:\s/);
+    expect(notes[0]).toContain("no strong matches");
     // The agent path names the TOOL, never the CLI command string.
-    expect(stderr[0]).toContain("`fbrain_ask` tool");
-    expect(stderr[0]).toContain("(BM25 + vector hybrid)");
-    expect(stderr[0]).not.toContain("fbrain ask <query>");
+    expect(notes[0]).toContain("`fbrain_ask` tool");
+    expect(notes[0]).toContain("(BM25 + vector hybrid)");
+    expect(notes[0]).not.toContain("fbrain ask <query>");
   });
 
   test("does NOT annotate when the top score is above the confidence line (no false positive on a real match)", async () => {
@@ -1803,9 +1813,10 @@ describe("searchCmd", () => {
     // All five result rows printed (we never drop rows), advisory on stderr.
     expect(rowsOf(stdout)).toHaveLength(5);
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
-    expect(stderr).toHaveLength(1);
-    expect(stderr[0]).toContain("no strong matches");
-    expect(stderr[0]).toContain("qwxz9931 blarghonk zztopflux");
+    const notes = advisoryStderr(stderr);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("no strong matches");
+    expect(notes[0]).toContain("qwxz9931 blarghonk zztopflux");
   });
 
   test("does NOT fire when a sub-0.5 hit list grades up off the floor", async () => {

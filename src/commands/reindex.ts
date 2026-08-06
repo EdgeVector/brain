@@ -111,6 +111,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     const loaded = await loadOrBuildBm25Index(node, opts.cfg, RECORD_TYPES, {
       verbose: opts.verbose,
       seedListIndex: false,
+      forceRebuild: true,
     });
     result.scanned = loaded.corpusSize;
     result.reindexed = loaded.corpusSize;

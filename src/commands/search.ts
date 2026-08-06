@@ -300,9 +300,22 @@ async function bm25FallbackResults(
   query: string,
   limit: number | undefined,
   verbose: Verbose | undefined,
+  printErr?: (line: string) => void,
 ): Promise<ResolvedHit[]> {
-  const loaded = await loadOrBuildBm25Index(node, cfg, types, { verbose });
-  const effectiveLimit = limit && limit > 0 ? limit : loaded.corpusSize;
+  // BM25 is a rescue path only. A warm TTL cache hits with zero corpus
+  // enumeration; a miss rebuilds and must say so on stderr.
+  const loaded = await loadOrBuildBm25Index(node, cfg, types, {
+    verbose,
+    onRebuild: (notice) => {
+      printErr?.(
+        `note: BM25 keyword rescue is rebuilding from ${notice.keyCount} record(s) ` +
+          `(${notice.reason}); run \`brain reindex --bm25\` offline to pre-warm.`,
+      );
+    },
+  });
+  // Never dump the whole corpus on rescue: bound by limit or SEARCH_DEFAULT_LIMIT.
+  const effectiveLimit =
+    limit && limit > 0 ? limit : SEARCH_DEFAULT_LIMIT;
   return loaded.index.search(query, effectiveLimit).flatMap((hit) => {
     const id = `${hit.type}::${hit.slug}`;
     const record = loaded.liveById.get(id) ?? minimalRecord(hit.slug, loaded.index.recordText(id));
@@ -470,6 +483,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
       opts.query,
       effectiveLimit,
       opts.verbose,
+      printErr,
     );
     // STEP 2: MERGE the rescue rows with the native rows keyed on `type::slug`,
     // rather than wholesale-replacing the native set (which discarded every

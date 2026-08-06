@@ -42,9 +42,11 @@ import {
   resolveStdoutIsTty,
 } from "../format.ts";
 import {
+  findBySlug,
   hasAnyLiveRecord,
   missingSchemaHashReadNote,
   resolveTypeFilter,
+  schemaHashFor,
   uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
@@ -52,6 +54,7 @@ import { isRecordType, type RecordType } from "../schemas.ts";
 import {
   loadOrBuildBm25Index,
   tokenize,
+  type BM25Index,
 } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
@@ -228,35 +231,54 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
 
   const queries = [opts.query, ...expansions];
 
-  // ── Stage 1: BM25 corpus build (cached, cache-aware FETCH) ───────────
   // Capability-aware client: `ask` calls `/api/app/search` (the vector stage),
-  // which LastDB 0.22.4 gates on a held app capability. The non-search reads
-  // (the BM25 corpus `queryAll`) delegate straight through and stay header-less.
+  // which LastDB 0.22.4 gates on a held app capability. BM25 corpus reads
+  // stay header-less when the rescue path runs.
   const node = newSearchClientFromCfg(opts.cfg, opts.verbose).node;
-
-  const bm25 = await loadOrBuildBm25Index(node, opts.cfg, activeTypes, {
-    verbose: opts.verbose,
-    // Explicit, non-silent bulk-tag (kill-scan-brain follow-up, option b):
-    // a cache miss here means this LIVE `ask` call is about to pay for a
-    // full-corpus body fetch (`listRecords` per active type) — the same
-    // read this card's `list` fix removes from the default listing path.
-    // Surface it unconditionally (stderr, not gated behind --verbose) so
-    // the cost is visible rather than a hidden request-path drain, and
-    // point at the offline pre-warm path (`fbrain reindex --bm25`).
-    onRebuild: (notice) => {
-      printErr(
-        `note: search index cache was cold/stale — rebuilding from ${notice.keyCount} record(s) ` +
-          "on this request; run `fbrain reindex --bm25` offline to pre-warm it and avoid this on the next query.",
-      );
-    },
-  });
-  const index = bm25.index;
-  const liveById = bm25.liveById;
-  const corpusSize = bm25.corpusSize;
-  const bm25CacheHit = bm25.cacheHit;
-
-  // ── Stage 2: per-query BM25 + vector ─────────────────────────────────
   const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
+
+  // ── Stage 1a: semantic plane probe (primary; no BM25 when it answers) ─
+  // When the Search app plane returns hits for the original query, it is
+  // the sole ranker — we never enumerate the BM25 corpus. BM25 remains a
+  // TTL-cached rescue for plane-unavailable / empty results, plus offline
+  // `brain reindex --bm25`.
+  const planeOrig = await querySearchPlane({
+    query: opts.query,
+    k: RANKER_LIMIT,
+    schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
+    verbose: opts.verbose,
+  });
+  const planeAnswered = planeOrig !== null && planeOrig.length > 0;
+  if (planeAnswered) {
+    opts.verbose?.(
+      `search-plane answered with ${planeOrig!.length} hit(s) — skipping BM25 corpus load`,
+    );
+  }
+
+  // ── Stage 1b: BM25 only as rescue (TTL warm cache, zero enumeration) ─
+  let index: BM25Index | null = null;
+  let liveById = new Map<string, FbrainRecord>();
+  let corpusSize = 0;
+  let bm25CacheHit = true;
+  if (!planeAnswered) {
+    const bm25 = await loadOrBuildBm25Index(node, opts.cfg, activeTypes, {
+      verbose: opts.verbose,
+      // Explicit bulk-tag: a miss/TTL-expiry pays a full-corpus body fetch.
+      // Surface on stderr; offline pre-warm is `brain reindex --bm25`.
+      onRebuild: (notice) => {
+        printErr(
+          `note: search index cache was cold/stale — rebuilding from ${notice.keyCount} record(s) ` +
+            "on this request; run `fbrain reindex --bm25` offline to pre-warm it and avoid this on the next query.",
+        );
+      },
+    });
+    index = bm25.index;
+    liveById = bm25.liveById;
+    corpusSize = bm25.corpusSize;
+    bm25CacheHit = bm25.cacheHit;
+  }
+
+  // ── Stage 2: per-query rankers (plane/vector; BM25 only if loaded) ────
   const rankers: RankerInput[] = [];
   const vectorScoreById = new Map<string, number>();
   const perQueryVectorTopId = new Map<number, Map<string, number>>();
@@ -284,31 +306,34 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     seenQueries.add(q);
     const tag = qi === 0 ? "orig" : `exp${qi - 1}`;
 
-    // BM25 over this query. We re-tokenize here (cheap) to distinguish
-    // "no surviving terms" (every token was a stopword or sub-2-char)
-    // from "tokenized fine but nothing matched" — search() returns []
-    // in both cases, which makes the all-stopword query indistinguishable
-    // downstream without this peek.
+    // BM25 over this query only when the rescue index was loaded.
+    // Re-tokenize to distinguish "all stopwords" from "no matches".
     const bm25Tokens = tokenize(q);
-    const bm25Hits = index.search(q, RANKER_LIMIT);
-    const bm25Ranked = bm25Hits.map((h) => ({
-      id: docId(h.type, h.slug),
-      rank: h.rank,
-    }));
-    rankers.push({ label: `bm25:${tag}`, hits: bm25Ranked });
-    perQueryBm25TopId.set(qi, rankMap(bm25Ranked));
-    opts.verbose?.(`bm25:${tag} → ${bm25Hits.length} hit(s)`);
+    if (index) {
+      const bm25Hits = index.search(q, RANKER_LIMIT);
+      const bm25Ranked = bm25Hits.map((h) => ({
+        id: docId(h.type, h.slug),
+        rank: h.rank,
+      }));
+      rankers.push({ label: `bm25:${tag}`, hits: bm25Ranked });
+      perQueryBm25TopId.set(qi, rankMap(bm25Ranked));
+      opts.verbose?.(`bm25:${tag} → ${bm25Hits.length} hit(s)`);
+    }
 
     // Search plane (primary) or node /api/app/search (legacy/degraded).
     const clientOpts: ClientSearchOptions = {};
     if (fbrainSchemas.length > 0) clientOpts.schemas = fbrainSchemas;
     let raw: Awaited<ReturnType<typeof node.search>> = [];
-    const plane = await querySearchPlane({
-      query: q,
-      k: RANKER_LIMIT,
-      schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
-      verbose: opts.verbose,
-    });
+    // Reuse the Stage 1a probe for qi===0 so we don't double-query the plane.
+    const plane =
+      qi === 0
+        ? planeOrig
+        : await querySearchPlane({
+            query: q,
+            k: RANKER_LIMIT,
+            schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
+            verbose: opts.verbose,
+          });
     if (plane !== null && plane.length > 0) {
       raw = plane.map((h) => ({
         schema_name: h.schema_name,
@@ -378,8 +403,9 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     // on) can still rescue the query; the notice just explains why the
     // original phrasing alone produced nothing. Always shown, including
     // in --verbose mode — see the task's OUT OF SCOPE note.
-    if (qi === 0 && bm25Tokens.length === 0 && vectorRanked.length === 0) {
+    if (qi === 0 && bm25Tokens.length === 0 && vectorRanked.length === 0 && index) {
       // Advisory → stderr so `fbrain ask q 2>/dev/null` stays parseable.
+      // Only meaningful when BM25 ran (tokenizer is the BM25 one).
       printErr(
         "note: query tokenized to zero terms (all stopwords or too short); try more specific words.",
       );
@@ -390,42 +416,38 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const fused = reciprocalRankFusion(rankers, { k: RRF_DEFAULT_K });
 
   // ── Stage 4: resolve + filter ────────────────────────────────────────
-  // Both resolve paths cost ZERO additional network round-trips — that's the
-  // invariant this card preserves:
-  //   - Cache MISS: the corpus body fetch (Stage 1) already loaded every live
-  //     record into `liveById`, so resolve is a pure Map lookup.
-  //   - Cache HIT: we deliberately never fetched bodies, but the cached index
-  //     carries each doc's render text (title + body). So a chosen hit resolves
-  //     to a MINIMAL record synthesized from `index.recordText(id)` — a local
-  //     read, no network. (fold_db `/api/query` has no per-key filter, so an
-  //     on-demand single-record fetch would re-scan a whole schema page and
-  //     defeat the cache — caching the text is the right tradeoff.)
-  // Only `title` + `body` are read off the resolved record downstream (the
-  // table title column + the snippet); the synthesized record fills the rest
-  // with empty/identity values, which is sound because no consumer of
-  // `askCmd().hits[].record` reads them (verified: cli.ts + mcp/server.ts).
-  //
-  // A resolve miss means the doc is stale (vector index ahead of the live
-  // snapshot, or soft-deleted between the listing and the vector call);
-  // silently skip — same contract on both paths.
-  const resolveRecord = (id: string, slug: string): FbrainRecord | null => {
+  // Resolve paths (prefer cheapest that preserves correctness):
+  //   - BM25 cold miss: full liveById map from the corpus body fetch.
+  //   - BM25 warm TTL hit: synthesize title/body from the cached index text.
+  //   - Plane-primary (no BM25): point-get each chosen hit via findBySlug
+  //     (O(limit), never a whole-type enumeration).
+  const resolveRecord = async (
+    id: string,
+    slug: string,
+    type: RecordType,
+  ): Promise<FbrainRecord | null> => {
     const cached = liveById.get(id);
     if (cached) return cached;
-    if (!bm25CacheHit) return null; // cold path had the full map; a miss is stale
-    const text = index.recordText(id);
-    if (!text) return null; // not in the (warm) index → stale ranker hit
-    // Minimal record: only title/body are consumed downstream. design_slug is
-    // omitted (optional); the slug is authoritative from the parsed doc id (the
-    // type lives on the AskHit, derived from the same parsed doc id).
-    return {
-      slug,
-      title: text.title,
-      body: text.body,
-      status: "",
-      tags: [],
-      created_at: "",
-      updated_at: "",
-    };
+    if (index) {
+      if (!bm25CacheHit) return null; // cold path had the full map; miss is stale
+      const text = index.recordText(id);
+      if (!text) return null;
+      return {
+        slug,
+        title: text.title,
+        body: text.body,
+        status: "",
+        tags: [],
+        created_at: "",
+        updated_at: "",
+      };
+    }
+    // Plane-primary: keyed point-read for the hit only.
+    try {
+      return await findBySlug(node, type, schemaHashFor(type, opts.cfg), slug);
+    } catch {
+      return null;
+    }
   };
 
   const resolved: AskHit[] = [];
@@ -433,7 +455,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     const f = fused[i]!;
     const parsed = parseDocId(f.id);
     if (!parsed) continue;
-    const rec = resolveRecord(f.id, parsed.slug);
+    const rec = await resolveRecord(f.id, parsed.slug, parsed.type);
     if (!rec) {
       opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
       continue;
