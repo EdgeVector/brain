@@ -41,14 +41,23 @@ const DESIGN_HASH = TEST_HASHES.design;
 const TASK_HASH = TEST_HASHES.task;
 const cfg = buildTestCfg({ userHash: "test-hash" });
 
-// Isolate BM25 on-disk cache per test. Warm TTL hits would otherwise reuse a
-// previous suite's corpus (shared userHash) and make keyword rescue look empty.
+// Isolate BM25 on-disk cache + Search plane per test. Warm TTL hits would
+// otherwise reuse a previous suite's corpus (shared userHash), and a live
+// host Search index would short-circuit the mocked native+BM25 rescue path.
 let cacheDir = "";
+let searchIndexDir = "";
 let savedCacheEnv: string | undefined;
+let savedSearchIndexEnv: string | undefined;
+let savedSearchBinEnv: string | undefined;
 beforeEach(() => {
   cacheDir = mkdtempSync(join(tmpdir(), "bm25-fallback-"));
+  searchIndexDir = mkdtempSync(join(tmpdir(), "search-idx-fallback-"));
   savedCacheEnv = process.env.FBRAIN_CACHE_DIR;
+  savedSearchIndexEnv = process.env.SEARCH_INDEX_DIR;
+  savedSearchBinEnv = process.env.LASTDB_SEARCH_BIN;
   process.env.FBRAIN_CACHE_DIR = cacheDir;
+  process.env.SEARCH_INDEX_DIR = searchIndexDir;
+  process.env.LASTDB_SEARCH_BIN = "/nonexistent-last-stack-search-bin";
 });
 
 function hit(opts: Partial<NativeIndexHit> & { slug: string; schemaName: string }): NativeIndexHit {
@@ -79,8 +88,14 @@ afterEach(() => {
   globalThis.fetch = realFetch;
   if (savedCacheEnv === undefined) delete process.env.FBRAIN_CACHE_DIR;
   else process.env.FBRAIN_CACHE_DIR = savedCacheEnv;
+  if (savedSearchIndexEnv === undefined) delete process.env.SEARCH_INDEX_DIR;
+  else process.env.SEARCH_INDEX_DIR = savedSearchIndexEnv;
+  if (savedSearchBinEnv === undefined) delete process.env.LASTDB_SEARCH_BIN;
+  else process.env.LASTDB_SEARCH_BIN = savedSearchBinEnv;
   if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });
+  if (searchIndexDir) rmSync(searchIndexDir, { recursive: true, force: true });
   cacheDir = "";
+  searchIndexDir = "";
 });
 
 // Install a mock where the native vector search returns `nativeHits` and each

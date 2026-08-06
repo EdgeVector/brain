@@ -84,20 +84,35 @@ const DESIGN_HASH = TEST_HASHES.design;
 
 const cfg = buildTestCfg({ userHash: "test-hash" });
 
-// Isolate BM25 disk cache so ask/search hybrid tests do not reuse another
-// suite's warm TTL index under the shared test userHash.
+// Isolate BM25 disk cache + Search plane so ask/search hybrid tests do not
+// reuse another suite's warm TTL index or a live host search index.
 let bm25CacheDir = "";
+let searchIndexDir = "";
 let savedBm25CacheEnv: string | undefined;
+let savedSearchIndexEnv: string | undefined;
+let savedSearchBinEnv: string | undefined;
 beforeEach(() => {
   bm25CacheDir = mkdtempSync(join(tmpdir(), "bm25-mcp-"));
+  searchIndexDir = mkdtempSync(join(tmpdir(), "search-idx-mcp-"));
   savedBm25CacheEnv = process.env.FBRAIN_CACHE_DIR;
+  savedSearchIndexEnv = process.env.SEARCH_INDEX_DIR;
+  savedSearchBinEnv = process.env.LASTDB_SEARCH_BIN;
   process.env.FBRAIN_CACHE_DIR = bm25CacheDir;
+  process.env.SEARCH_INDEX_DIR = searchIndexDir;
+  // Fail fast if in-process engine is unavailable — never hang on host `search` CLI.
+  process.env.LASTDB_SEARCH_BIN = "/nonexistent-last-stack-search-bin";
 });
 afterEach(() => {
   if (savedBm25CacheEnv === undefined) delete process.env.FBRAIN_CACHE_DIR;
   else process.env.FBRAIN_CACHE_DIR = savedBm25CacheEnv;
+  if (savedSearchIndexEnv === undefined) delete process.env.SEARCH_INDEX_DIR;
+  else process.env.SEARCH_INDEX_DIR = savedSearchIndexEnv;
+  if (savedSearchBinEnv === undefined) delete process.env.LASTDB_SEARCH_BIN;
+  else process.env.LASTDB_SEARCH_BIN = savedSearchBinEnv;
   if (bm25CacheDir) rmSync(bm25CacheDir, { recursive: true, force: true });
+  if (searchIndexDir) rmSync(searchIndexDir, { recursive: true, force: true });
   bm25CacheDir = "";
+  searchIndexDir = "";
 });
 
 function userMutations<T extends Record<string, unknown>>(mutations: T[]): T[] {
