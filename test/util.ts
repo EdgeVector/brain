@@ -1,6 +1,9 @@
 // Test helpers shared across unit and integration suites.
 
 import {
+  RECORD_LIST_ENTRY_LAYOUT,
+  RECORD_LIST_ENTRY_MARKER,
+  RECORD_LIST_ENTRY_MIGRATED_RANGE,
   RECORD_LIST_ENTRY_SCHEMA_KEY,
   RECORD_TYPES,
   TAG_INDEX_SCHEMA_KEY,
@@ -8,6 +11,8 @@ import {
 } from "../src/schemas.ts";
 import { CONFIG_VERSION, type Config } from "../src/config.ts";
 import { DEFAULT_NODE_URL } from "../src/commands/init.ts";
+import { entryFieldsFor } from "../src/record-list-index.ts";
+import { rowToRecord, type FbrainRecord } from "../src/record.ts";
 
 // Synthetic 64-hex hashes for unit tests — distinct first byte per type so
 // recordTypeForHash() and schemaHashFor() lookups behave like real configs
@@ -28,6 +33,184 @@ export const TEST_HASHES: Record<RecordType, string> = {
 
 export const TEST_TAG_INDEX_HASH = "7".repeat(64);
 export const TEST_RECORD_LIST_ENTRY_HASH = "8".repeat(64);
+
+// Reverse map of TEST_HASHES so fetch/query stubs can turn a product schema
+// hash back into a RecordType when synthesizing the type-list index.
+const TEST_HASH_TO_TYPE: ReadonlyMap<string, RecordType> = new Map(
+  (Object.entries(TEST_HASHES) as Array<[RecordType, string]>).map(([t, h]) => [
+    h,
+    t,
+  ]),
+);
+
+export function testTypeForHash(hash: string): RecordType | null {
+  return TEST_HASH_TO_TYPE.get(hash) ?? null;
+}
+
+export function testHashForType(type: string): string | null {
+  return (TEST_HASHES as Record<string, string>)[type] ?? null;
+}
+
+/** Build a minimal FbrainRecord from product-schema field rows used in fixtures. */
+export function fieldsToTestRecord(
+  type: RecordType,
+  fields: Record<string, unknown>,
+): FbrainRecord {
+  return rowToRecord(
+    {
+      fields,
+      key: { hash: String(fields.slug ?? ""), range: null },
+    },
+    type,
+  );
+}
+
+export type TypeListIndexRow = {
+  fields: Record<string, string>;
+  key: { hash: string; range: string };
+};
+
+/**
+ * Encode product rows as a COMPLETE type-list partition (entries + migrated
+ * marker). Product list paths (`listRecords`) no longer cold-seed from SOT; unit
+ * fixtures that put records only on the product schema must serve this shape
+ * for `TEST_RECORD_LIST_ENTRY_HASH` or the read throws `list_index_incomplete`.
+ *
+ * Prefer this helper (or `answerTypeListIndexQuery`) over per-test edits so the
+ * fixture convention stays one place — same shape a real write leaves via
+ * `maintainTypeListIndex` / `writeTypeListIndex`.
+ */
+export function typeListIndexPartitionRows(
+  type: RecordType,
+  productFieldsList: Array<Record<string, unknown>>,
+): TypeListIndexRow[] {
+  const rows: TypeListIndexRow[] = productFieldsList.map((f) => {
+    const rec = fieldsToTestRecord(type, f);
+    return {
+      fields: entryFieldsFor(type, rec),
+      key: { hash: type, range: rec.slug },
+    };
+  });
+  rows.push({
+    fields: {
+      rle_h: type,
+      rle_r: RECORD_LIST_ENTRY_MIGRATED_RANGE,
+      rle_payload: "",
+      rle_marker: RECORD_LIST_ENTRY_MARKER,
+      layout: RECORD_LIST_ENTRY_LAYOUT,
+    },
+    key: { hash: type, range: RECORD_LIST_ENTRY_MIGRATED_RANGE },
+  });
+  return rows;
+}
+
+/**
+ * Answer a RecordListEntry `/api/query` (or `queryAll`) from product-schema
+ * fixture rows. Returns null when `schemaHash` is not the list-entry schema so
+ * callers can fall through to their product-schema handling.
+ *
+ * `productRowsForType` should return the current product fields for that type
+ * (empty array = complete-and-empty partition, which listRecords returns as []).
+ */
+export function answerTypeListIndexQuery(opts: {
+  schemaHash: string;
+  filter?: {
+    HashKey?: unknown;
+    HashRangeKey?: { hash?: unknown; range?: unknown };
+  } | null;
+  productRowsForType: (type: RecordType) => Array<Record<string, unknown>>;
+  listEntryHash?: string;
+}): TypeListIndexRow[] | null {
+  const listEntryHash = opts.listEntryHash ?? TEST_RECORD_LIST_ENTRY_HASH;
+  if (opts.schemaHash !== listEntryHash) return null;
+
+  const filter = opts.filter ?? undefined;
+  const hrk = filter?.HashRangeKey;
+  const hrHash = typeof hrk?.hash === "string" ? hrk.hash : "";
+  const hrRange = typeof hrk?.range === "string" ? hrk.range : "";
+  if (hrHash && hrRange) {
+    // Point-read of one entry or the migrated marker.
+    if (hrRange === RECORD_LIST_ENTRY_MIGRATED_RANGE) {
+      const marker = typeListIndexPartitionRows(hrHash as RecordType, []).find(
+        (r) => r.key.range === RECORD_LIST_ENTRY_MIGRATED_RANGE,
+      )!;
+      return [marker];
+    }
+    const type = hrHash as RecordType;
+    const product = opts.productRowsForType(type);
+    const match = typeListIndexPartitionRows(type, product).find(
+      (r) => r.key.range === hrRange,
+    );
+    return match ? [match] : [];
+  }
+
+  const keyHash =
+    typeof filter?.HashKey === "string" ? filter.HashKey : "";
+  if (!keyHash) {
+    // Unfiltered list-entry reads are not used by product paths; empty is fine.
+    return [];
+  }
+  const type = keyHash as RecordType;
+  return typeListIndexPartitionRows(type, opts.productRowsForType(type));
+}
+
+/**
+ * Wrap a unit-test `fetch` so `/api/query` against the RecordListEntry schema
+ * auto-synthesizes a complete type-list partition from product fixture rows.
+ * Product `listRecords` no longer cold-seeds; any mock that only serves product
+ * schemas must use this (or `answerTypeListIndexQuery` inline) or list throws
+ * `list_index_incomplete`.
+ */
+export function wrapFetchWithTypeListIndex(
+  inner: typeof globalThis.fetch,
+  productRowsForType: (type: RecordType) => Array<Record<string, unknown>>,
+  listEntryHash: string = TEST_RECORD_LIST_ENTRY_HASH,
+): typeof globalThis.fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : String((input as Request).url ?? input);
+    if (url.includes("/api/query") && typeof init?.body === "string") {
+      try {
+        const body = JSON.parse(init.body) as {
+          schema_name?: string;
+          filter?: {
+            HashKey?: unknown;
+            HashRangeKey?: { hash?: unknown; range?: unknown };
+          };
+        };
+        if (String(body.schema_name ?? "") === listEntryHash) {
+          const listIndex = answerTypeListIndexQuery({
+            schemaHash: listEntryHash,
+            filter: body.filter,
+            productRowsForType,
+            listEntryHash,
+          });
+          if (listIndex !== null) {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                results: listIndex,
+                total_count: listIndex.length,
+                returned_count: listIndex.length,
+              }),
+              {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              },
+            );
+          }
+        }
+      } catch {
+        // Fall through to the inner mock.
+      }
+    }
+    return inner(input as never, init);
+  }) as typeof globalThis.fetch;
+}
 
 // Test URL defaults: current local Mini default + the dev cloud Lambda.
 // Dev (us-west-2) — not prod — so iteration-test runs don't pollute the

@@ -23,8 +23,13 @@ import {
 } from "../../src/commands/delete.ts";
 import { FbrainError, type NodeClient } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import { RECORD_LIST_ENTRY_SCHEMA_KEY } from "../../src/schemas.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { RECORD_LIST_ENTRY_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
+} from "../util.ts";
 
 const cfg = buildTestCfg({
   userHash: "uh",
@@ -53,6 +58,22 @@ function seed(state: MockState, schemaHash: string, slug: string, fields: RowFie
   state.store.get(schemaHash)!.set(slug, fields);
 }
 
+function productRowsForTypeFromStore(
+  state: MockState,
+  type: RecordType,
+): RowFields[] {
+  const hash =
+    type === "design"
+      ? cfg.designSchemaHash
+      : type === "task"
+        ? cfg.taskSchemaHash
+        : (TEST_HASHES as Record<string, string>)[type];
+  if (!hash) return [];
+  const rows = state.store.get(hash);
+  if (!rows) return [];
+  return [...rows.values()];
+}
+
 function mockNode(state: MockState): NodeClient {
   return {
     baseUrl: "mock",
@@ -78,20 +99,40 @@ function mockNode(state: MockState): NodeClient {
     async loadSchemas() {
       return { available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] };
     },
-    async createRecord({ schemaHash, fields, keyHash }) {
+    async createRecord({ schemaHash, fields, keyHash, keyRange }) {
       if (!state.store.has(schemaHash)) state.store.set(schemaHash, new Map());
-      state.store.get(schemaHash)!.set(keyHash, fields);
+      // HashRange list-entry rows key by range; product rows by hash.
+      const storeKey = keyRange && keyRange.length > 0 ? `${keyHash}\0${keyRange}` : keyHash;
+      state.store.get(schemaHash)!.set(storeKey, fields);
     },
-    async updateRecord({ schemaHash, fields, keyHash }) {
+    async updateRecord({ schemaHash, fields, keyHash, keyRange }) {
       state.updateCalls.push({ schemaHash, fields, keyHash });
       if (!state.store.has(schemaHash)) state.store.set(schemaHash, new Map());
-      state.store.get(schemaHash)!.set(keyHash, fields);
+      const storeKey = keyRange && keyRange.length > 0 ? `${keyHash}\0${keyRange}` : keyHash;
+      state.store.get(schemaHash)!.set(storeKey, fields);
     },
     async deleteRecord({ schemaHash, keyHash }) {
       // Mimics fold_db's append-only no-op delete (see spike doc).
       state.deleteCalls.push({ schemaHash, keyHash });
     },
-    async queryAll({ schemaHash }) {
+    async queryAll({ schemaHash, filter }) {
+      const listIndex = answerTypeListIndexQuery({
+        schemaHash,
+        filter: filter as
+          | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+          | undefined,
+        productRowsForType: (type) => productRowsForTypeFromStore(state, type),
+        listEntryHash:
+          cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] ?? TEST_RECORD_LIST_ENTRY_HASH,
+      });
+      if (listIndex !== null) {
+        return {
+          ok: true,
+          results: listIndex,
+          total_count: listIndex.length,
+          returned_count: listIndex.length,
+        };
+      }
       const rows = state.store.get(schemaHash);
       if (!rows) return { ok: true, results: [], total_count: 0, returned_count: 0 };
       const results = [...rows.entries()].map(([hash, fields]) => ({
@@ -107,6 +148,41 @@ function mockNode(state: MockState): NodeClient {
       return { status: 200, headers: new Headers(), body: "", json: null };
     },
   };
+}
+
+/** Fetch Response for a type-list index query, or null when not list-entry. */
+function listIndexFetchResponse(
+  body: { schema_name?: string; filter?: unknown },
+  productLookup: (schemaHash: string) => RowFields[],
+): Response | null {
+  const listIndex = answerTypeListIndexQuery({
+    schemaHash: String(body.schema_name ?? ""),
+    filter: body.filter as
+      | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+      | undefined,
+    productRowsForType: (type) => {
+      const hash =
+        type === "design"
+          ? cfg.designSchemaHash
+          : type === "task"
+            ? cfg.taskSchemaHash
+            : (TEST_HASHES as Record<string, string>)[type];
+      if (!hash) return [];
+      return productLookup(hash);
+    },
+    listEntryHash:
+      cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] ?? TEST_RECORD_LIST_ENTRY_HASH,
+  });
+  if (listIndex === null) return null;
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      results: listIndex,
+      total_count: listIndex.length,
+      returned_count: listIndex.length,
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
 }
 
 function designRow(slug: string, over: Partial<RowFields> = {}): RowFields {
@@ -247,6 +323,13 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         const isDesign = body.schema_name === cfg.designSchemaHash;
         const isTask = body.schema_name === cfg.taskSchemaHash;
         if (isDesign) {
@@ -293,6 +376,19 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const method = init?.method ?? "GET";
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         queryCount++;
         // Design schema only — task queries return empty.
         if (body.schema_name === cfg.designSchemaHash) {
@@ -393,6 +489,19 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         queryCount++;
         if (body.schema_name !== cfg.taskSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
@@ -465,6 +574,13 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         if (body.schema_name !== cfg.designSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
             status: 200,
@@ -525,6 +641,13 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         if (body.schema_name !== cfg.designSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
             status: 200,
@@ -591,6 +714,13 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         if (body.schema_name !== cfg.designSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
             status: 200,
@@ -648,11 +778,22 @@ describe("deleteRecord — design linked-task guard", () => {
 
   test("blocks deleting a design with a live linked task; no mutation fires", async () => {
     const mutationsFired: unknown[] = [];
+    const productRows = (schemaHash: string): RowFields[] => {
+      if (schemaHash === cfg.designSchemaHash) return [designRow("parent")];
+      if (schemaHash === cfg.taskSchemaHash) {
+        return [taskRow("child", { design_slug: "parent" })];
+      }
+      return [];
+    };
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, productRows);
+          if (li) return li;
+        }
         if (body.schema_name === cfg.designSchemaHash) {
           return queryResp([asRow("parent", designRow("parent"))]);
         }
@@ -684,11 +825,25 @@ describe("deleteRecord — design linked-task guard", () => {
   });
 
   test("blocks with a sorted, pluralized list when several tasks link to the design", async () => {
+    const productRows = (schemaHash: string): RowFields[] => {
+      if (schemaHash === cfg.designSchemaHash) return [designRow("parent")];
+      if (schemaHash === cfg.taskSchemaHash) {
+        return [
+          taskRow("zeta", { design_slug: "parent" }),
+          taskRow("alpha", { design_slug: "parent" }),
+        ];
+      }
+      return [];
+    };
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, productRows);
+          if (li) return li;
+        }
         if (body.schema_name === cfg.designSchemaHash) {
           return queryResp([asRow("parent", designRow("parent"))]);
         }
@@ -717,11 +872,24 @@ describe("deleteRecord — design linked-task guard", () => {
   test("--force deletes the design despite linked tasks and warns about the orphans", async () => {
     let designQueryCount = 0;
     const captured: { update?: unknown; delete?: unknown } = {};
+    const productRows = (schemaHash: string): RowFields[] => {
+      if (schemaHash === cfg.designSchemaHash) {
+        return [designRow("parent", { title: "alive" })];
+      }
+      if (schemaHash === cfg.taskSchemaHash) {
+        return [taskRow("child", { design_slug: "parent" })];
+      }
+      return [];
+    };
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, productRows);
+          if (li) return li;
+        }
         if (body.schema_name === cfg.designSchemaHash) {
           designQueryCount++;
           // #1 = resolve (live row); later = post-delete verify (tombstoned).
@@ -772,11 +940,25 @@ describe("deleteRecord — design linked-task guard", () => {
 
   test("deletes a design when no live task links to it (tombstoned + other-design tasks ignored)", async () => {
     let designQueryCount = 0;
+    const productRows = (schemaHash: string): RowFields[] => {
+      if (schemaHash === cfg.designSchemaHash) return [designRow("lonely")];
+      if (schemaHash === cfg.taskSchemaHash) {
+        return [
+          taskRow("ghost", { design_slug: "lonely", tags: [TOMBSTONE_TAG] }),
+          taskRow("elsewhere", { design_slug: "another-design" }),
+        ];
+      }
+      return [];
+    };
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, productRows);
+          if (li) return li;
+        }
         if (body.schema_name === cfg.designSchemaHash) {
           designQueryCount++;
           if (designQueryCount === 1) {
@@ -820,6 +1002,13 @@ describe("deleteRecord — design linked-task guard", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         if (body.schema_name !== cfg.taskSchemaHash) return queryResp([]);
         queryCount++;
         if (queryCount === 1) return queryResp([asRow("solo", taskRow("solo"))]);
@@ -857,6 +1046,13 @@ describe("deleteRecord — slug whitespace trim (parity with put)", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         if (body.schema_name !== cfg.designSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
             status: 200,
@@ -928,6 +1124,13 @@ describe("deleteRecord — slug whitespace trim (parity with put)", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
+        {
+          const li = listIndexFetchResponse(body, (schemaHash) => {
+            // Prefer explicit per-test product rows when set; else empty.
+            return (globalThis as unknown as { __deleteProductRows?: (h: string) => RowFields[] }).__deleteProductRows?.(schemaHash) ?? [];
+          });
+          if (li) return li;
+        }
         if (body.schema_name !== cfg.taskSchemaHash) {
           return new Response(JSON.stringify({ ok: true, results: [] }), {
             status: 200,

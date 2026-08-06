@@ -29,6 +29,7 @@ import {
   legacySearchResponseBody,
   buildTestCfg,
   TEST_HASHES,
+  wrapFetchWithTypeListIndex,
 } from "../util.ts";
 
 const realFetch = globalThis.fetch;
@@ -81,7 +82,7 @@ function installStub(opts: {
   designRows: RowFields[];
   vectorHits: Record<string, unknown>[];
 }): void {
-  globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+  const inner = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const rawUrl = typeof input === "string" ? input : String(input);
     const appSearch = appSearchAsLegacyNativeIndex(rawUrl, init);
     const url = appSearch?.url ?? rawUrl;
@@ -106,7 +107,10 @@ function installStub(opts: {
       );
     }
     return new Response("{}", { status: 200 });
-  }) as unknown as typeof globalThis.fetch;
+  }) as typeof globalThis.fetch;
+  globalThis.fetch = wrapFetchWithTypeListIndex(inner, (type) =>
+    type === "design" ? opts.designRows : [],
+  );
 }
 
 describe("askCmd vector rank tie-break determinism", () => {

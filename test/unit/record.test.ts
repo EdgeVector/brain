@@ -29,7 +29,11 @@ import {
   type QueryResponse,
 } from "../../src/client.ts";
 import { RECORD_TYPES, type RecordType } from "../../src/schemas.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+} from "../util.ts";
 
 const cfg = buildTestCfg({
   schemaHashes: {
@@ -577,25 +581,48 @@ describe("findBySlug (keyed point-read: existence + dangling-ref checks)", () =>
 // search caller's stale skip), and (3) the same EMPTY-page flake tolerance the
 // per-hit fast-miss helper had, just hoisted to the schema level.
 describe("hydrateSchemaBySlug (batch search hydrate)", () => {
+  // Product path reads the type-list index (complete partition), never cold-
+  // seeds via admin scan. Each page is the product-row set that the index
+  // fixture synthesizes into a complete partition for that attempt.
   function seqNode(pages: Array<Array<{ slug: string; tags?: string[] }>>) {
     let calls = 0;
     const node = {
       baseUrl: "mock",
       userHash: "uh",
-      async queryAll(): Promise<QueryResponse> {
+      async queryAll(args: {
+        schemaHash: string;
+        filter?: {
+          HashKey?: unknown;
+          HashRangeKey?: { hash?: unknown; range?: unknown };
+        };
+      }): Promise<QueryResponse> {
         const page = pages[Math.min(calls, pages.length - 1)] ?? [];
         calls++;
-        const results = page.map((r) => ({
-          fields: {
-            slug: r.slug,
-            title: `T-${r.slug}`,
-            body: "B",
-            status: "draft",
-            tags: r.tags ?? [],
-            created_at: "2026-06-05T00:00:00Z",
-            updated_at: "2026-06-05T00:00:00Z",
-          },
-          key: { hash: r.slug, range: null },
+        const productFields = page.map((r) => ({
+          slug: r.slug,
+          title: `T-${r.slug}`,
+          body: "B",
+          status: "draft",
+          tags: r.tags ?? [],
+          created_at: "2026-06-05T00:00:00Z",
+          updated_at: "2026-06-05T00:00:00Z",
+        }));
+        const listIndex = answerTypeListIndexQuery({
+          schemaHash: args.schemaHash,
+          filter: args.filter,
+          productRowsForType: () => productFields,
+        });
+        if (listIndex !== null) {
+          return {
+            ok: true,
+            results: listIndex,
+            total_count: listIndex.length,
+            returned_count: listIndex.length,
+          };
+        }
+        const results = productFields.map((fields) => ({
+          fields,
+          key: { hash: String(fields.slug), range: null },
         }));
         return { ok: true, results, total_count: results.length, returned_count: results.length };
       },
@@ -603,8 +630,8 @@ describe("hydrateSchemaBySlug (batch search hydrate)", () => {
     return { node, calls: () => calls };
   }
   const noSleep = { sleep: async () => {} };
-  // No entry-index hash → index miss → admin cold-seed via queryAll (mock).
-  const testCfg = { schemaHashes: {} as Record<string, string> };
+  // Full cfg so the type-list entry schema hash is present (product path).
+  const testCfg = buildTestCfg();
 
   test("populated page → ONE queryAll, returns every live row keyed by slug", async () => {
     const { node, calls } = seqNode([[{ slug: "a" }, { slug: "b" }, { slug: "c" }]]);

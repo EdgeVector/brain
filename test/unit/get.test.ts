@@ -24,7 +24,13 @@ import { backlinkIndexTag } from "../../src/backlink-index.ts";
 import { EMPTY_PAGE_RETRY_ATTEMPTS } from "../../src/record.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import { FbrainError } from "../../src/client.ts";
-import { TEST_HASHES, TEST_TAG_INDEX_HASH, buildTestCfg } from "../util.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
+  TEST_TAG_INDEX_HASH,
+} from "../util.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
 
@@ -81,6 +87,35 @@ function backlinkIndexRow(targetSlug: string, members: string[]) {
     created_at: "2026-05-01T00:00:00Z",
     updated_at: "2026-05-01T00:00:00Z",
   });
+}
+
+
+function listIndexFetchResponse(
+  body: { schema_name?: string; filter?: unknown },
+  productLookup: (schemaHash: string) => Record<string, unknown>[],
+): Response | null {
+  const listIndex = answerTypeListIndexQuery({
+    schemaHash: String(body.schema_name ?? ""),
+    filter: body.filter as
+      | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+      | undefined,
+    productRowsForType: (type) => {
+      const hash = (TEST_HASHES as Record<string, string>)[type];
+      if (!hash) return [];
+      return productLookup(hash);
+    },
+    listEntryHash: TEST_RECORD_LIST_ENTRY_HASH,
+  });
+  if (listIndex === null) return null;
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      results: listIndex,
+      total_count: listIndex.length,
+      returned_count: listIndex.length,
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
 }
 
 describe("getRecord — bodyLimit", () => {
@@ -283,10 +318,37 @@ describe("getRecord — dangling design reference", () => {
 // recourse was `fbrain get <each-task>` one slug at a time.
 describe("getRecord — design's child tasks listing", () => {
   test("design with child tasks renders them on a `tasks:` line, newest first", async () => {
+    const productRows = (schemaHash: string): Record<string, unknown>[] => {
+      if (schemaHash === TEST_HASHES.design) return [designFields("auth")];
+      if (schemaHash === TEST_HASHES.task) {
+        return [
+          taskFields("wire-oauth", {
+            design_slug: "auth",
+            status: "in_progress",
+            updated_at: "2026-05-02T00:00:00Z",
+          }),
+          taskFields("login-ui", {
+            design_slug: "auth",
+            status: "open",
+            updated_at: "2026-05-03T00:00:00Z",
+          }),
+          taskFields("unrelated", {
+            design_slug: "other-design",
+            status: "open",
+            updated_at: "2026-05-04T00:00:00Z",
+          }),
+        ];
+      }
+      return [];
+    };
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, productRows);
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.design) {
         return queryResp([asRow("auth", designFields("auth"))]);
       }
@@ -338,10 +400,25 @@ describe("getRecord — design's child tasks listing", () => {
     // "no children" — re-introducing the first-write-of-a-type latency cliff
     // that the forward fast-miss helper already fixed. Pin the cap.
     let taskQueries = 0;
+    // Complete-and-empty task partition: listRecords returns [] and still
+    // retries EMPTY_PAGE_RETRY_ATTEMPTS times (empty page is ambiguous).
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          if (schemaHash === TEST_HASHES.design) return [designFields("solo")];
+          return [];
+        });
+        if (li) {
+          if (body.schema_name === TEST_RECORD_LIST_ENTRY_HASH) {
+            const filter = body.filter as { HashKey?: string } | undefined;
+            if (filter?.HashKey === "task") taskQueries++;
+          }
+          return li;
+        }
+      }
       if (body.schema_name === TEST_HASHES.design) {
         return queryResp([asRow("solo", designFields("solo"))]);
       }
@@ -365,10 +442,27 @@ describe("getRecord — design's child tasks listing", () => {
     // match this design's slug, that is authoritative "no children" — no
     // retry, no burn. Mirrors the forward fast-miss contract.
     let taskQueries = 0;
+    const productRows = (schemaHash: string): Record<string, unknown>[] => {
+      if (schemaHash === TEST_HASHES.design) return [designFields("standalone")];
+      if (schemaHash === TEST_HASHES.task) {
+        return [taskFields("other", { design_slug: "different-design" })];
+      }
+      return [];
+    };
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, productRows);
+        if (li) {
+          if (body.schema_name === TEST_RECORD_LIST_ENTRY_HASH) {
+            const filter = body.filter as { HashKey?: string } | undefined;
+            if (filter?.HashKey === "task") taskQueries++;
+          }
+          return li;
+        }
+      }
       if (body.schema_name === TEST_HASHES.design) {
         return queryResp([asRow("standalone", designFields("standalone"))]);
       }
@@ -395,6 +489,13 @@ describe("getRecord — design's child tasks listing", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.task) {
         taskQueries++;
         return queryResp([
@@ -414,6 +515,13 @@ describe("getRecord — design's child tasks listing", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       const key = body.filter?.HashKey;
       if (body.schema_name === TEST_TAG_INDEX_HASH) {
         if (key === tagIndexSlug(backlinkIndexTag("auth"))) {
@@ -477,6 +585,13 @@ describe("getRecord — design's child tasks listing", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       const key = body.filter?.HashKey;
       calls.push({ schema: String(body.schema_name ?? ""), keyed: key !== undefined });
 
@@ -533,6 +648,13 @@ describe("getRecord — ambiguous slug", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.reference) {
         return queryResp([
           asRow("routine-heartbeats", {
@@ -580,6 +702,13 @@ describe("getRecord — ambiguous slug", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.task) {
         return queryResp([asRow("t1", taskFields("t1", { title: "first task" }))]);
       }
@@ -599,6 +728,13 @@ describe("getRecord — ambiguous slug", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.task) {
         return queryResp([asRow("unique", taskFields("unique"))]);
       }
@@ -627,6 +763,13 @@ describe("getRecord — slug whitespace trim (parity with put/delete/link/status
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.task) {
         return queryResp([asRow("foo", taskFields("foo", { title: "trimmed" }))]);
       }
@@ -654,6 +797,13 @@ describe("getRecord — slug whitespace trim (parity with put/delete/link/status
       const url = typeof input === "string" ? input : (input as Request).url;
       if (!url.endsWith("/api/query")) return queryResp([]);
       const body = JSON.parse((init?.body as string) ?? "{}");
+      {
+        const li = listIndexFetchResponse(body, (schemaHash) => {
+          // Child-task tests set product rows on __getProductRows when needed.
+          return (globalThis as unknown as { __getProductRows?: (h: string) => Record<string, unknown>[] }).__getProductRows?.(schemaHash) ?? [];
+        });
+        if (li) return li;
+      }
       if (body.schema_name === TEST_HASHES.task) {
         return queryResp([asRow("bar", taskFields("bar"))]);
       }

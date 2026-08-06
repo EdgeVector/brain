@@ -23,7 +23,13 @@ import { describe, expect, test } from "bun:test";
 import { deleteByFilter, type DeleteBatchResult } from "../../src/commands/delete.ts";
 import { FbrainError, type NodeClient } from "../../src/client.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
-import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { RECORD_LIST_ENTRY_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
+import {
+  answerTypeListIndexQuery,
+  buildTestCfg,
+  TEST_HASHES,
+  TEST_RECORD_LIST_ENTRY_HASH,
+} from "../util.ts";
 
 const cfg = buildTestCfg({
   userHash: "uh",
@@ -50,6 +56,19 @@ function newMockState(): MockState {
 function seed(state: MockState, schemaHash: string, slug: string, fields: RowFields): void {
   if (!state.store.has(schemaHash)) state.store.set(schemaHash, new Map());
   state.store.get(schemaHash)!.set(slug, fields);
+}
+
+function productRowsForTypeFromStore(state: MockState, type: RecordType): RowFields[] {
+  const hash =
+    type === "design"
+      ? cfg.designSchemaHash
+      : type === "task"
+        ? cfg.taskSchemaHash
+        : (TEST_HASHES as Record<string, string>)[type];
+  if (!hash) return [];
+  const rows = state.store.get(hash);
+  if (!rows) return [];
+  return [...rows.values()];
 }
 
 function mockNode(state: MockState): NodeClient {
@@ -89,7 +108,24 @@ function mockNode(state: MockState): NodeClient {
       // the tombstone tag, which the verify read picks up.
       state.deleteCalls.push({ schemaHash, keyHash });
     },
-    async queryAll({ schemaHash }) {
+    async queryAll({ schemaHash, filter }) {
+      const listIndex = answerTypeListIndexQuery({
+        schemaHash,
+        filter: filter as
+          | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+          | undefined,
+        productRowsForType: (type) => productRowsForTypeFromStore(state, type),
+        listEntryHash:
+          cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] ?? TEST_RECORD_LIST_ENTRY_HASH,
+      });
+      if (listIndex !== null) {
+        return {
+          ok: true,
+          results: listIndex,
+          total_count: listIndex.length,
+          returned_count: listIndex.length,
+        };
+      }
       const rows = state.store.get(schemaHash);
       if (!rows) return { ok: true, results: [], total_count: 0, returned_count: 0 };
       const results = [...rows.entries()].map(([hash, fields]) => ({
@@ -155,6 +191,27 @@ function stubFetch(
         });
       }
       const schemaHash = body.schema_name as string;
+      // Product list paths read the type-list index first (no cold seed).
+      const listIndex = answerTypeListIndexQuery({
+        schemaHash,
+        filter: body.filter as
+          | { HashKey?: unknown; HashRangeKey?: { hash?: unknown; range?: unknown } }
+          | undefined,
+        productRowsForType: (type) => productRowsForTypeFromStore(state, type),
+        listEntryHash:
+          cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY] ?? TEST_RECORD_LIST_ENTRY_HASH,
+      });
+      if (listIndex !== null) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: listIndex,
+            total_count: listIndex.length,
+            returned_count: listIndex.length,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
       const rows = state.store.get(schemaHash);
       const results = rows
         ? [...rows.entries()].map(([hash, fields]) => ({ fields, key: { hash, range: null } }))
