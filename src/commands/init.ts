@@ -24,9 +24,11 @@ import { createHash } from "node:crypto";
 import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
 import {
   OWNER_APP_ID,
+  RECORD_TYPES,
   UNIQUE_SCHEMAS,
   resolveOwnedSchemaHash,
   schemaConfigKeys,
+  type RecordType,
 } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -346,6 +348,26 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   writeConfig(config, configPath);
   print(`        wrote config v${CONFIG_VERSION}`);
 
+  // Stamp the record-list partition of every type registered here FOR THE FIRST
+  // TIME as complete-and-empty.
+  //
+  // `readTypeListIndex` returns null for two different situations — "this
+  // partition was never seeded" and "this partition is seeded and the type has
+  // no records" — and only the first is a problem. Without this, a brand-new
+  // record type is indistinguishable from a partition that predates the
+  // 2026-07-28 RecordListEntry cutover, so every reader has to fall back to a
+  // full schema scan to tell them apart. That fallback is what
+  // `design-lastdb-scan-deprecation-path` forbids on product paths, and it is
+  // what fired the first time a new type was added (`papercut`, 2026-08-06).
+  //
+  // The test is a CONFIG DIFF, not a node resolution: a type whose key was
+  // absent from the previous config has never had a schema hash to write
+  // against, so it cannot have records, so an empty partition is the complete
+  // and correct answer for it. A type already in the config is left alone —
+  // marking one of those would falsely certify a genuinely cold partition,
+  // which is strictly worse than the scan.
+  await stampFreshTypePartitions(nodeClient, config, existing, print);
+
   // Step 5/6: inline consent — eliminate the "two-terminal dance" on first
   // write. Idempotent (skips silently when a live capability is already on
   // disk); non-TTY safe (skips with a one-line note for CI/scripts); falls
@@ -434,6 +456,50 @@ async function tryDeclareOwnedSchemasLocally(
   print(`[4/${STEPS}] loading schemas into the node`);
   print(`        app-schema declarations persisted (catalog/schema-service canonicals) ✓`);
   return { supported: true };
+}
+
+
+/**
+ * Mark the record-list partition of newly-registered types complete-and-empty.
+ *
+ * Only types absent from the PREVIOUS config are touched. That is the whole
+ * safety argument: no schema hash in config means no way to have written a
+ * record, so "no entries" is the true and complete answer, not a gap.
+ *
+ * Best-effort per type — a failure here degrades to the pre-existing behaviour
+ * for that type (a reader finds an unmarked partition) and must never fail an
+ * otherwise-successful init.
+ */
+async function stampFreshTypePartitions(
+  nodeClient: InitNodeClient,
+  config: Config,
+  existing: Config | null,
+  print: (line: string) => void,
+): Promise<void> {
+  const { markTypePartitionMigrated, recordListEntryHash } = await import(
+    "../record-list-index.ts"
+  );
+  if (!recordListEntryHash(config)) return;
+  const previous = new Set(Object.keys(existing?.schemaHashes ?? {}));
+  const fresh = RECORD_TYPES.filter(
+    (t: RecordType) => config.schemaHashes[t] !== undefined && !previous.has(t),
+  );
+  if (fresh.length === 0) return;
+  const stamped: RecordType[] = [];
+  for (const type of fresh) {
+    try {
+      if (await markTypePartitionMigrated(nodeClient as never, config, type)) {
+        stamped.push(type);
+      }
+    } catch {
+      /* best-effort: an unmarked partition is the old behaviour, not a regression */
+    }
+  }
+  if (stamped.length > 0) {
+    print(
+      `        record-list partition marked complete (new, empty): ${stamped.join(", ")}`,
+    );
+  }
 }
 
 export function formatNodeTarget(nodeUrl: string): string {
