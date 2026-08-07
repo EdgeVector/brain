@@ -23,6 +23,7 @@ import { getFbrainVersion } from "../version.ts";
 import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.ts";
 import { searchCmd, type SearchHitJson } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
+import { findCmd } from "../commands/find.ts";
 import { getRecord, formatRecordJsonWindow, type RecordJson } from "../commands/get.ts";
 import { listCmd, type ListResult } from "../commands/list.ts";
 import { parseUpdatedSince } from "../time.ts";
@@ -927,6 +928,76 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             // plain BM25 + vector + RRF, and keeping it off means the tool
             // works for any agent with zero extra config (no API key). A
             // follow-up can add an optional `expand` param if wanted.
+          });
+        },
+        wrap: (matches) => ({
+          matches,
+          confident: confidenceFromMatches(matches),
+          skipped_types: skippedTypes,
+        }),
+      });
+    },
+  );
+
+  server.registerTool(
+    "fbrain_find",
+    {
+      title: "Find fbrain records (array of match probes)",
+      description:
+        `Retrieval by an explicit array of match probes — each \`match\` entry is an independent semantic probe run against the vector plane. Unlike \`fbrain_ask\` (one query, optionally paraphrased), \`fbrain_find\` takes probes YOU supply — each MAY be huge (a paragraph, a whole record body, an error dump) — and does not distill or embed anything itself; fbrain never runs an embedding model (that stays the Search app's job). Each probe's ranked list is fused via Reciprocal Rank Fusion (RRF), so a record surfaced by multiple probes outranks one hit by only one. Pass \`type\` to restrict to one or more record types (${recordTypeList(", ")}); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first). \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`. The \`score\` is a fused-RRF value that is SMALL by construction (a top hit is ~0.02-0.03) — read rank order, never magnitude. Needs no API key and makes no LLM call. Prefer this over \`fbrain_ask\` when you already have several strong probes (e.g. a design doc's several key paragraphs, or a few candidate error strings) and want their union ranked, instead of one query brain would otherwise have to paraphrase itself.`,
+      inputSchema: {
+        match: z
+          .array(z.string())
+          .min(1)
+          .describe(
+            "One or more independent semantic probes; each may be a whole paragraph or record body. At least one is required.",
+          ),
+        type: typeEnum
+          .array()
+          .optional()
+          .describe(
+            "Restrict results to one or more record types. Omit to search all types.",
+          ),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Max results (default 5)."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      // Same shape as `fbrain_ask`'s structuredContent — `score` here is also
+      // the fused RRF score (rankers are the caller's probes instead of
+      // BM25/vector/expansions).
+      outputSchema: {
+        matches: z
+          .array(matchSchema)
+          .describe(
+            "Fused (per-probe RRF) matches, highest score first (empty on no matches). Scores are small by construction (a top hit is ~0.02–0.03) — read rank order, not magnitude.",
+          ),
+        confident: z
+          .boolean()
+          .describe(
+            "False when no strong match was found; treat `matches` as not-found/closest candidates rather than trusted answers.",
+          ),
+        skipped_types: skippedTypesSchema,
+      },
+    },
+    (args) => {
+      const skippedTypes: RecordType[] = [];
+      return runTool<SearchHitJson[]>({
+        mode: "read",
+        getCfg,
+        exec: async (cfg, print, onResult) => {
+          await findCmd({
+            cfg,
+            matches: args.match,
+            print,
+            printErr: print,
+            limit: args.limit,
+            types: args.type,
+            onResult,
+            onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
           });
         },
         wrap: (matches) => ({

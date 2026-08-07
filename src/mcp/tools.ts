@@ -1,6 +1,7 @@
 export const FBRAIN_MCP_READ_TOOL_NAMES = [
   "fbrain_search",
   "fbrain_ask",
+  "fbrain_find",
   "fbrain_get",
   "fbrain_list",
   "fbrain_backlinks",

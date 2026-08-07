@@ -30,6 +30,7 @@ import { backlinksCmd } from "./commands/backlinks.ts";
 import { buildWhichResult, formatWhich } from "./commands/which.ts";
 import { searchCmd } from "./commands/search.ts";
 import { askCmd } from "./commands/ask.ts";
+import { findCmd } from "./commands/find.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
@@ -171,6 +172,7 @@ export const COMMANDS = [
   "backlinks",
   "search",
   "ask",
+  "find",
   // Attachment verbs sit AFTER "search" on purpose: suggestCommand takes the
   // FIRST candidate at the best Levenshtein distance, and common typos like
   // "serach" tie at distance 2 between "search" and "detach" — earlier
@@ -232,6 +234,7 @@ ${RECORD_NEW_HELP_LINES}
   backlinks      list records linking to a slug
   search         semantic search over indexed records
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
+  find           retrieval by an array of match probes (each --match is fused via RRF; no embedding in brain)
   gates          list structured open human gates from the canonical open-decisions record
   gate           add, clear, or verify structured open-decisions gates
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
@@ -577,6 +580,40 @@ section also prints a no-key notice instead of silently dropping.
 
 The LLM key (only needed for --expand) is read from \$ANTHROPIC_API_KEY
 (preferred) or an optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
+  find: `fbrain find --match "<string>" [--match "<string>" ...] [-n N | --limit N] [--explain] [--type T]... [--field PATH]... [--json]
+
+Retrieval by an explicit array of match probes. Each \`--match\` is an
+independent semantic probe run against the vector plane — pass a whole
+paragraph, error dump, or record body; brain does NOT distill it to keywords
+or embed anything itself (embedding stays the Search app's job). Repeat
+\`--match\` for N probes; each probe's ranked list is fused via Reciprocal
+Rank Fusion, rankers labeled \`match[0]\`, \`match[1]\`, ... so \`--explain\`
+output stays readable.
+
+Unlike \`ask\`, there is no BM25 pass and no LLM query expansion — \`find\`'s
+recall lever is the CALLER supplying more/better probes, not brain rephrasing
+on its own.
+
+Results are printed best-first as a ranked list — \`rank · slug · type ·
+title\` per match, with a short matching body snippet indented under each row.
+
+  --match       repeatable; one semantic probe per flag (at least one required).
+  -n, --limit N max results (default 5; \`-n\` and \`--limit\` are aliases,
+                last wins)
+  --explain     print each probe (truncated) before results.
+  --type        restrict results to a record type; repeat to allow several
+                (e.g. \`--type design --type task\`).
+                One of: ${RECORD_TYPE_LIST}. Omit to search across all ${RECORD_TYPE_COUNT} types.
+  --field       project one field path as plain output; repeat or comma-separate
+                for TSV rows (e.g. --field slug, or --field slug,type,title).
+                Supports dot paths and array indexes over the result payload.
+  --json        emit a JSON array of \`{slug, score, type, title, snippet}\`
+                on stdout (parseable by \`jq\`). Empty result is \`[]\`.
+                Advisory notes and the \`--explain\` probes block route to
+                stderr. On failure, a \`{error, hint}\` JSON object is emitted
+                to stdout too, so \`--json\` stdout is always parseable.
+
+Needs no API key — no LLM call at any point.`,
   gates: `fbrain gates --open
 
 List live human gates from the single canonical \`open-decisions\` reference
@@ -1089,6 +1126,18 @@ const ASK_OPTIONS = {
   // on stdout; advisory notes and --explain expansions route to stderr.
   json: { type: "boolean", default: false },
 } as const;
+const FIND_OPTIONS = {
+  // Repeatable — each `--match` is an independent semantic probe. May be
+  // huge (a whole paragraph or record body); the caller does not distill it.
+  match: { type: "string", multiple: true },
+  limit: { type: "string", short: "n" },
+  explain: { type: "boolean", default: false },
+  type: { type: "string", multiple: true },
+  field: { type: "string", multiple: true },
+  // Machine-readable mode: emit a JSON array of `{slug, score, type, title, snippet}`
+  // on stdout; advisory notes and --explain probes route to stderr.
+  json: { type: "boolean", default: false },
+} as const;
 const GATES_OPTIONS = {
   open: { type: "boolean", default: false },
 } as const;
@@ -1240,6 +1289,7 @@ export const CLI_SPEC = {
   backlinks: BACKLINKS_OPTIONS,
   search: SEARCH_OPTIONS,
   ask: ASK_OPTIONS,
+  find: FIND_OPTIONS,
   gates: GATES_OPTIONS,
   gate: GATE_OPTIONS,
   doctor: DOCTOR_OPTIONS,
@@ -1779,6 +1829,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runSearch(args, verboseFn);
     case "ask":
       return runAsk(args, verboseFn);
+    case "find":
+      return runFind(args, verboseFn);
     case "gates":
       return runGates(args, verboseFn);
     case "gate":
@@ -2973,6 +3025,40 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   if (fields.length > 0) aOpts.fields = fields;
   if (values.json) aOpts.json = true;
   await askCmd(aOpts);
+  return 0;
+}
+
+async function runFind(args: Argv, verbose: Verbose): Promise<number> {
+  const intArgs = normalizeNegativeIntFlagValues(args, LIMIT_INT_FLAGS);
+  const { values } = parseCommandArgs(
+    {
+      args: intArgs,
+      strict: true,
+      allowPositionals: false,
+      options: FIND_OPTIONS,
+    },
+    "find",
+  );
+  const matches = (values.match ?? []).map((m) => m.trim()).filter((m) => m.length > 0);
+  if (matches.length === 0) {
+    console.error(COMMAND_HELP.find);
+    return USAGE_ERROR;
+  }
+  const findTypes = parseRecordTypeList(values.type);
+  const fields = parseFieldProjection(values.field);
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
+  const cfg = readConfig();
+  const fOpts: Parameters<typeof findCmd>[0] = { cfg, matches, verbose };
+  if (typeof limit === "number") fOpts.limit = limit;
+  if (values.explain) fOpts.explain = true;
+  if (findTypes) fOpts.types = findTypes;
+  if (fields.length > 0) fOpts.fields = fields;
+  if (values.json) fOpts.json = true;
+  await findCmd(fOpts);
   return 0;
 }
 
