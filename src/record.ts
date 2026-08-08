@@ -867,50 +867,57 @@ export async function confirmVectorIndexed(
 // each ~0.5–2 s, throwing away every row but one. Pure N+1 read amplification;
 // the dominant cost of `search` (~25–29 s on the live brain — dogfood run 115).
 //
-// This collapses the loop to ONE fetch per distinct schema: hydrate the whole
-// page once into a `Map<slug, FbrainRecord>` keyed by slug, and the caller
-// resolves every hit on that schema by map lookup. Live (non-tombstoned) rows
-// only — a tombstoned row is omitted from the map, so a hit whose record was
-// soft-deleted since indexing resolves to `undefined` and the caller skips it
-// as stale, exactly as a per-hit `findBySlug` returning null did.
+// A later pass replaced the per-hit `findBySlug` fetches with ONE whole-page
+// fetch per distinct schema, batching the N+1 into 1. But the caller already
+// knows exactly which slugs it wants — the ranked search hits — so even that
+// one page read pulls every OTHER row in the schema for nothing. This does N
+// point reads instead: `readTypeListEntryBySlug` resolves `{ HashRangeKey:
+// { hash: type, range: slug } }` as a single keyed lookup per slug, so the
+// fetch cost tracks the hit count, not the schema size.
 //
-// Empty-page flake tolerance is preserved, just hoisted from per-hit to
-// per-schema: the same EMPTY-page retry the list-scan helpers apply (an empty
-// `/api/query` slice on a saturated daemon is ambiguous — flake vs. genuinely
-// empty schema — so retry up to `EMPTY_PAGE_RETRY_ATTEMPTS`; a NON-empty page
-// is authoritative and stops immediately). A non-empty page missing a given
-// slug is an authoritative stale hit for that slug — identical observable
-// behavior to the old per-hit path, with the retry budget paid once for the
-// schema instead of once per hit on it.
+// Live (non-tombstoned) rows only — a tombstoned row is omitted from the map,
+// so a hit whose record was soft-deleted since indexing resolves to
+// `undefined` and the caller skips it as stale, exactly as a per-hit
+// `findBySlug` returning null did.
+//
+// Empty-result flake tolerance is preserved, just scoped to the slug that hit
+// it instead of the whole schema: the same EMPTY-page retry the list-scan
+// helpers apply (an empty `/api/query` slice on a saturated daemon is
+// ambiguous — flake vs. genuinely absent row — so retry that ONE slug up to
+// `EMPTY_PAGE_RETRY_ATTEMPTS`; a row found — live or tombstoned — is
+// authoritative and stops immediately). A slug never found after the retry
+// budget is an authoritative stale hit — identical observable behavior to the
+// old whole-page path, with the retry budget paid once per slug instead of
+// once per schema.
 export async function hydrateSchemaBySlug(
   node: NodeClient,
   type: RecordType,
   cfg: ListRecordsCfg,
+  slugs: readonly string[],
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
+  const { readTypeListEntryBySlug } = await import("./record-list-index.ts");
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const wait = computeBackoffMs(attempt, ceilingMs);
-    if (wait > 0) await sleep(wait);
-    // Product path: listRecords requires cfg → keyed entry index, never silent scan.
-    const list = await listRecords(node, type, cfg);
-    if (list.length > 0) {
-      const bySlug = new Map<string, FbrainRecord>();
-      for (const r of list) {
+  const bySlug = new Map<string, FbrainRecord>();
+  for (const slug of slugs) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const wait = computeBackoffMs(attempt, ceilingMs);
+      if (wait > 0) await sleep(wait);
+      const record = await readTypeListEntryBySlug(node, cfg, type, slug);
+      if (record) {
         // Drop tombstones so a soft-deleted slug resolves to `undefined`
-        // (stale skip), mirroring `findBySlug`. Last live row wins on the
-        // vanishingly-rare duplicate-slug-per-schema case; the write path's
-        // per-type uniqueness guard makes that a non-issue in practice.
-        if (!isTombstoned(r)) bySlug.set(r.slug, r);
+        // (stale skip), mirroring `findBySlug`. A found row — live or
+        // tombstoned — is authoritative, so stop retrying this slug.
+        if (!isTombstoned(record)) bySlug.set(slug, record);
+        break;
       }
-      return bySlug;
+      // Empty ⇒ ambiguous; retry this slug up to EMPTY_PAGE_RETRY_ATTEMPTS to
+      // ride out a single saturated-daemon flake before declaring it absent.
     }
-    // Empty page ⇒ ambiguous; retry up to EMPTY_PAGE_RETRY_ATTEMPTS to ride
-    // out a single saturated-daemon flake before declaring the schema empty.
   }
-  return new Map();
+  return bySlug;
 }
 
 // Reverse-direction lookup: live (non-tombstoned) tasks whose `design_slug`

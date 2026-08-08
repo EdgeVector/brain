@@ -572,20 +572,22 @@ describe("findBySlug (keyed point-read: existence + dangling-ref checks)", () =>
   });
 });
 
-// hydrateSchemaBySlug is the BATCH hydrate behind `fbrain search`'s
-// fragment→record resolution. It fetches a schema's whole page ONCE
-// (`queryAll`) into a `Map<slug, record>`, so N search hits on one schema
-// resolve from a single fetch instead of N. These tests pin: (1) ONE queryAll
-// per call regardless of how many slugs the caller will look up, (2) live rows
-// keyed by slug with tombstones dropped (a soft-deleted slug → undefined → the
-// search caller's stale skip), and (3) the same EMPTY-page flake tolerance the
-// per-hit fast-miss helper had, just hoisted to the schema level.
-describe("hydrateSchemaBySlug (batch search hydrate)", () => {
-  // Product path reads the type-list index (complete partition), never cold-
-  // seeds via admin scan. Each page is the product-row set that the index
-  // fixture synthesizes into a complete partition for that attempt.
-  function seqNode(pages: Array<Array<{ slug: string; tags?: string[] }>>) {
-    let calls = 0;
+// hydrateSchemaBySlug is the batch hydrate behind `fbrain search`'s
+// fragment→record resolution. The caller already knows exactly which slugs
+// its ranked hits need, so this point-reads each one (`HashRangeKey`) instead
+// of scanning the whole schema partition. These tests pin: (1) one queryAll
+// PER REQUESTED SLUG, never a slug outside the requested set, (2) live rows
+// keyed by slug with tombstones dropped (a soft-deleted slug → undefined →
+// the search caller's stale skip), and (3) the same EMPTY-result flake
+// tolerance the old whole-page fetch had, now scoped to the one slug that hit
+// it instead of the whole schema.
+describe("hydrateSchemaBySlug (point-read search hydrate)", () => {
+  // Each requested slug gets its own response schedule: `null` means an empty
+  // /api/query slice (ambiguous — retries), a record shape means found
+  // (authoritative — stops retrying that slug). Product path reads the
+  // type-list index, never cold-seeds via admin scan.
+  function slugNode(bySlug: Record<string, Array<{ slug: string; tags?: string[] } | null>>) {
+    const callsPerSlug: Record<string, number> = {};
     const node = {
       baseUrl: "mock",
       userHash: "uh",
@@ -596,81 +598,101 @@ describe("hydrateSchemaBySlug (batch search hydrate)", () => {
           HashRangeKey?: { hash?: unknown; range?: unknown };
         };
       }): Promise<QueryResponse> {
-        const page = pages[Math.min(calls, pages.length - 1)] ?? [];
-        calls++;
-        const productFields = page.map((r) => ({
-          slug: r.slug,
-          title: `T-${r.slug}`,
-          body: "B",
-          status: "draft",
-          tags: r.tags ?? [],
-          created_at: "2026-06-05T00:00:00Z",
-          updated_at: "2026-06-05T00:00:00Z",
-        }));
+        const range =
+          typeof args.filter?.HashRangeKey?.range === "string" ? args.filter.HashRangeKey.range : "";
+        const schedule = bySlug[range] ?? [];
+        const attempt = callsPerSlug[range] ?? 0;
+        callsPerSlug[range] = attempt + 1;
+        const outcome = schedule[Math.min(attempt, schedule.length - 1)] ?? null;
+        const productFields = outcome
+          ? [
+              {
+                slug: outcome.slug,
+                title: `T-${outcome.slug}`,
+                body: "B",
+                status: "draft",
+                tags: outcome.tags ?? [],
+                created_at: "2026-06-05T00:00:00Z",
+                updated_at: "2026-06-05T00:00:00Z",
+              },
+            ]
+          : [];
         const listIndex = answerTypeListIndexQuery({
           schemaHash: args.schemaHash,
           filter: args.filter,
           productRowsForType: () => productFields,
         });
-        if (listIndex !== null) {
-          return {
-            ok: true,
-            results: listIndex,
-            total_count: listIndex.length,
-            returned_count: listIndex.length,
-          };
-        }
-        const results = productFields.map((fields) => ({
-          fields,
-          key: { hash: String(fields.slug), range: null },
-        }));
+        const results = listIndex ?? [];
         return { ok: true, results, total_count: results.length, returned_count: results.length };
       },
     } as unknown as NodeClient;
-    return { node, calls: () => calls };
+    return {
+      node,
+      callsFor: (slug: string) => callsPerSlug[slug] ?? 0,
+      totalCalls: () => Object.values(callsPerSlug).reduce((a, b) => a + b, 0),
+    };
   }
   const noSleep = { sleep: async () => {} };
   // Full cfg so the type-list entry schema hash is present (product path).
   const testCfg = buildTestCfg();
 
-  test("populated page → ONE queryAll, returns every live row keyed by slug", async () => {
-    const { node, calls } = seqNode([[{ slug: "a" }, { slug: "b" }, { slug: "c" }]]);
-    const map = await hydrateSchemaBySlug(node, "design", testCfg, noSleep);
-    // The whole point: a SINGLE fetch hydrates the entire schema for batch lookup.
-    expect(calls()).toBe(1);
+  test("point-reads every requested slug — one queryAll per slug", async () => {
+    const { node, totalCalls } = slugNode({
+      a: [{ slug: "a" }],
+      b: [{ slug: "b" }],
+      c: [{ slug: "c" }],
+    });
+    const map = await hydrateSchemaBySlug(node, "design", testCfg, ["a", "b", "c"], noSleep);
+    expect(totalCalls()).toBe(3);
     expect(map.size).toBe(3);
     expect(map.get("a")?.slug).toBe("a");
     expect(map.get("b")?.title).toBe("T-b");
-    // A slug the caller will look up but the page lacks resolves to undefined
-    // (the search caller's "stale hit" skip) — still ONE fetch, no per-slug query.
-    expect(map.get("missing")).toBeUndefined();
-    expect(calls()).toBe(1);
+  });
+
+  test("does not fetch slugs outside the requested set", async () => {
+    // "b" exists in the store but was never asked for — hydrateSchemaBySlug
+    // must not pull it in just because it shares the schema.
+    const { node, totalCalls } = slugNode({ a: [{ slug: "a" }], b: [{ slug: "b" }] });
+    const map = await hydrateSchemaBySlug(node, "design", testCfg, ["a"], noSleep);
+    expect(map.size).toBe(1);
+    expect(map.has("b")).toBe(false);
+    expect(totalCalls()).toBe(1);
+  });
+
+  test("a slug absent from the store resolves to undefined (stale skip)", async () => {
+    const { node } = slugNode({ live: [{ slug: "live" }], missing: [null, null] });
+    const map = await hydrateSchemaBySlug(node, "design", testCfg, ["live", "missing"], noSleep);
+    expect(map.get("live")?.slug).toBe("live");
+    expect(map.has("missing")).toBe(false);
   });
 
   test("tombstoned rows are dropped (soft-deleted slug → stale skip downstream)", async () => {
-    const { node } = seqNode([[{ slug: "live" }, { slug: "gone", tags: [TOMBSTONE_TAG] }]]);
-    const map = await hydrateSchemaBySlug(node, "concept", testCfg, noSleep);
+    const { node } = slugNode({
+      live: [{ slug: "live" }],
+      gone: [{ slug: "gone", tags: [TOMBSTONE_TAG] }],
+    });
+    const map = await hydrateSchemaBySlug(node, "concept", testCfg, ["live", "gone"], noSleep);
     expect(map.has("live")).toBe(true);
     // gone is tombstoned → absent from the map, exactly like findBySlug null.
     expect(map.has("gone")).toBe(false);
     expect(map.size).toBe(1);
   });
 
-  test("empty page → retries up to EMPTY_PAGE_RETRY_ATTEMPTS, then empty map", async () => {
-    // Same flake tolerance as the per-hit fast-miss helper, hoisted to the
-    // schema: an empty /api/query slice on a saturated daemon is ambiguous, so
-    // the schema-level fetch retries (capped) before declaring the schema empty.
-    const { node, calls } = seqNode([[]]);
-    const map = await hydrateSchemaBySlug(node, "design", testCfg, noSleep);
+  test("empty result for one slug retries up to EMPTY_PAGE_RETRY_ATTEMPTS, then that slug is absent", async () => {
+    // Same flake tolerance as the old whole-page fetch, now scoped to the
+    // slug that hit it: an empty /api/query slice on a saturated daemon is
+    // ambiguous, so it retries (capped) before declaring that slug absent.
+    const { node, callsFor } = slugNode({ missing: [null] });
+    const map = await hydrateSchemaBySlug(node, "design", testCfg, ["missing"], noSleep);
     expect(map.size).toBe(0);
-    expect(calls()).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
+    expect(callsFor("missing")).toBe(EMPTY_PAGE_RETRY_ATTEMPTS);
   });
 
   test("empty → populated rides out a single flake (one extra fetch)", async () => {
-    const { node, calls } = seqNode([[], [{ slug: "x" }]]);
-    const map = await hydrateSchemaBySlug(node, "task", testCfg, noSleep);
+    const { node, callsFor } = slugNode({ x: [null, { slug: "x" }] });
+    const map = await hydrateSchemaBySlug(node, "task", testCfg, ["x"], noSleep);
     expect(map.get("x")?.slug).toBe("x");
-    expect(calls()).toBe(2);
+    expect(callsFor("x")).toBe(2);
   });
 });
 

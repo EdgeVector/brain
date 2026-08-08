@@ -92,6 +92,32 @@ function rangeKeyOf(row: QueryRow): string | null {
 }
 
 /**
+ * Point-read one type's entry row by slug. `{ HashRangeKey: { hash: type,
+ * range: slug } }` resolves as a single keyed lookup, not a partition scan —
+ * the caller already knows the exact slug it wants (e.g. a ranked search hit)
+ * and has no use for the rest of the partition.
+ */
+export async function readTypeListEntryBySlug(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  type: RecordType,
+  slug: string,
+): Promise<FbrainRecord | null> {
+  const hash = recordListEntryHash(cfg);
+  if (!hash) return null;
+  const res = await node.queryAll({
+    schemaHash: hash,
+    fields: [...RECORD_LIST_ENTRY_FIELDS],
+    filter: { HashRangeKey: { hash: type, range: slug } },
+  });
+  for (const row of res.results) {
+    const rec = recordFromEntryRow(row);
+    if (rec) return rec;
+  }
+  return null;
+}
+
+/**
  * Records of one type from the HashRange partition.
  *
  * Only a partition that carries the completeness marker is trusted. Unmarked
