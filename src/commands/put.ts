@@ -107,7 +107,10 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // design row with the slug as title. A scripted `cat $note | fbrain
   // put $slug` where $note is accidentally empty hits this trap.
   // Frontmatter-with-empty-body is still valid (explicit intent).
-  if ((frontmatter === null || frontmatter.trim().length === 0) && body.trim().length === 0) {
+  if (
+    (frontmatter === null || frontmatter.trim().length === 0) &&
+    body.trim().length === 0
+  ) {
     throw new FbrainError({
       code: "empty_stdin",
       message: "put: stdin was empty — nothing to write.",
@@ -138,7 +141,13 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // has no prior body to lose. `allowShrink` is the deliberate-truncation
   // escape hatch (`--allow-shrink` / MCP `allow_shrink`).
   if (existing) {
-    ensureNotShrinking(type, slug, existing.body, body, opts.allowShrink === true);
+    ensureNotShrinking(
+      type,
+      slug,
+      existing.body,
+      body,
+      opts.allowShrink === true,
+    );
   }
   const now = nowIso();
 
@@ -188,7 +197,12 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     // consistent with `<type> new` (see recordNew). The probe is swallowed on
     // error so it can never block or fail the create; the note goes to STDERR
     // only, leaving the `created …` stdout line and `--json` contracts intact.
-    const collisions = await findCrossTypeSlugCollisions(node, opts.cfg, type, slug);
+    const collisions = await findCrossTypeSlugCollisions(
+      node,
+      opts.cfg,
+      type,
+      slug,
+    );
     const note = crossTypeSlugNote(type, slug, collisions);
     if (note) console.error(note);
     await node.createRecord({ schemaHash: hash, fields, keyHash: slug });
@@ -204,12 +218,17 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // `deleteRecord`'s post-write verify. Self-tuning: on a warm node the
   // first read hits, no backoff spent; only a real propagation lag burns any
   // of the budget. See `verifyRecordVisible` in record.ts.
-  const visible = await verifyRecordVisible(node, type, hash, slug, opts.verifyOptions);
+  const visible = await verifyRecordVisible(
+    node,
+    type,
+    hash,
+    slug,
+    opts.verifyOptions,
+  );
   if (visible === null) {
     throw new FbrainError({
       code: "put_not_visible",
-      message:
-        `${action === "created" ? "Created" : "Updated"} ${type} "${slug}" but the row was not visible to a follow-up read within the retry budget.`,
+      message: `${action === "created" ? "Created" : "Updated"} ${type} "${slug}" but the row was not visible to a follow-up read within the retry budget.`,
       hint:
         "fold_db reported the mutation succeeded, but a verify-read kept seeing the row as absent through the full retry budget. " +
         "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
@@ -245,6 +264,19 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
       taskSlug: slug,
       task: visible,
       previousDesignSlug: existing?.design_slug,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    });
+  }
+  if (type === "papercut") {
+    const { maintainPapercutStatusIndex } = await import(
+      "../papercut-status-index.ts"
+    );
+    await maintainPapercutStatusIndex({
+      node,
+      cfg: opts.cfg,
+      slug,
+      record: visible,
+      previousStatus: existing?.status,
       ...(opts.verbose ? { verbose: opts.verbose } : {}),
     });
   }
@@ -313,14 +345,14 @@ function resolveSlug(
     (p, f) =>
       new FbrainError({
         code: "slug_conflict",
-        message:
-          `positional slug "${p}" conflicts with frontmatter \`slug: ${f}\`.`,
+        message: `positional slug "${p}" conflicts with frontmatter \`slug: ${f}\`.`,
         hint: "Drop one — they must agree. Frontmatter and the positional arg can't be set to different slugs.",
       }),
     () =>
       new FbrainError({
         code: "missing_slug",
-        message: "fbrain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
+        message:
+          "fbrain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
         hint: "Example: `fbrain put my-note` OR include `slug: my-note` in the YAML frontmatter.",
       }),
   );
@@ -343,8 +375,7 @@ function resolveRecordType(
     (fm, ov) =>
       new FbrainError({
         code: "type_conflict",
-        message:
-          `--type ${ov} conflicts with frontmatter \`type: ${fm}\`.`,
+        message: `--type ${ov} conflicts with frontmatter \`type: ${fm}\`.`,
         hint: "Drop one — they must agree. Frontmatter and --type can't both be set to different types.",
       }),
     () =>
@@ -467,7 +498,9 @@ export function splitFrontmatter(input: string): {
   }
   const closeStart = close.index!;
   const frontmatter = after.slice(0, closeStart);
-  const body = after.slice(closeStart + close[0].length).replace(/(?:\r?\n)+$/, "");
+  const body = after
+    .slice(closeStart + close[0].length)
+    .replace(/(?:\r?\n)+$/, "");
   return { frontmatter, body };
 }
 
@@ -562,10 +595,12 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
     // cases beyond the indicator digit (which we honor).
     // YAML allows the chomping indicator and explicit indent digit in either
     // order: `>2-` and `>-2` both mean "fold, strip, indent 2".
-    const blockHeader = value.match(/^([>|])(?:([-+])([1-9])?|([1-9])([-+])?)?$/);
+    const blockHeader = value.match(
+      /^([>|])(?:([-+])([1-9])?|([1-9])([-+])?)?$/,
+    );
     if (blockHeader) {
       const style = blockHeader[1] as ">" | "|";
-      const chomp = ((blockHeader[2] ?? blockHeader[5] ?? "") as "" | "-" | "+");
+      const chomp = (blockHeader[2] ?? blockHeader[5] ?? "") as "" | "-" | "+";
       const indentDigit = blockHeader[3] ?? blockHeader[4];
       const explicitIndent = indentDigit ? parseInt(indentDigit, 10) : 0;
       const bodyLines: string[] = [];

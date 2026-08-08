@@ -118,6 +118,19 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     keyHash: slug,
     fields,
   });
+  if (only.type === "papercut") {
+    const { maintainPapercutStatusIndex } = await import(
+      "../papercut-status-index.ts"
+    );
+    await maintainPapercutStatusIndex({
+      node,
+      cfg: opts.cfg,
+      slug,
+      record: { ...only.record, status: opts.newStatus, updated_at: now },
+      previousStatus: fromStatus,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    });
+  }
   print(`${only.type} ${slug}: ${fromStatus} → ${opts.newStatus}`);
   // Emit the structured payload from the SAME resolved type/slug/transition the
   // printed line uses (one source of truth — see the read/delete/link commands).

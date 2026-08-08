@@ -108,7 +108,12 @@ export const REFERENCE_STATUSES = ["active", "broken", "archived"] as const;
 
 export const AGENT_STATUSES = ["active", "archived"] as const;
 
-export const PROJECT_STATUSES = ["planning", "in_progress", "done", "archived"] as const;
+export const PROJECT_STATUSES = [
+  "planning",
+  "in_progress",
+  "done",
+  "archived",
+] as const;
 
 export const SPIKE_STATUSES = ["active", "concluded"] as const;
 
@@ -164,7 +169,11 @@ export const PAPERCUT_SEVERITIES = ["p0", "p1", "p2", "p3"] as const;
 //   complaint      an observation; nobody has worked out the repair yet
 //   specified-fix  the repair is worked out and written down — ready to pick up
 //   reconfirmed    a previously-closed papercut re-measured as still live
-export const PAPERCUT_KINDS = ["complaint", "specified-fix", "reconfirmed"] as const;
+export const PAPERCUT_KINDS = [
+  "complaint",
+  "specified-fix",
+  "reconfirmed",
+] as const;
 
 const GENERAL = { sensitivity_level: 0, data_domain: "general" };
 
@@ -488,7 +497,8 @@ export const papercutSchema: AddSchemaRequest = {
         "the change that repaired it, e.g. EdgeVector/lastgit #242 (empty string until fixed)",
       verified_by:
         "the LIVE check that confirmed it gone — never the word 'merged' (empty string until verified)",
-      duplicate_of: "slug of the papercut this one duplicates (empty string if none)",
+      duplicate_of:
+        "slug of the papercut this one duplicates (empty string if none)",
       tags: "array of freeform tags",
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
@@ -623,8 +633,10 @@ export const adminSnapshotSchema: AddSchemaRequest = {
       captured_at: "RFC 3339 capture timestamp",
       type_counts_json: "JSON object of live record counts by fbrain type",
       open_decisions_json: "JSON array of open decision slugs and titles only",
-      active_programs_head_json: "JSON array containing a short active-programs rollup head",
-      recent_heartbeats_json: "JSON array of recent heartbeat ids, timestamps, and outcomes",
+      active_programs_head_json:
+        "JSON array containing a short active-programs rollup head",
+      recent_heartbeats_json:
+        "JSON array of recent heartbeat ids, timestamps, and outcomes",
     },
     field_data_classifications: {
       slug: GENERAL,
@@ -826,7 +838,8 @@ export const attachmentFileSchema: AddSchemaRequest = {
  */
 export const RECORD_LIST_ENTRY_SCHEMA_KEY = "__recordlistentry__";
 export const RECORD_LIST_ENTRY_MARKER = "fbrain_record_list_entry_v1";
-export const RECORD_LIST_ENTRY_LAYOUT = "RecordListEntry novel hashrange rle_h x rle_r";
+export const RECORD_LIST_ENTRY_LAYOUT =
+  "RecordListEntry novel hashrange rle_h x rle_r";
 /**
  * Reserved range key marking "this type's partition holds every record of the
  * type" — i.e. legacy has been drained into it. A slug can never collide with
@@ -914,7 +927,8 @@ export const recordListEntrySchema: AddSchemaRequest = {
  */
 export const CHILD_TASK_INDEX_SCHEMA_KEY = "__childtaskindex__";
 export const CHILD_TASK_INDEX_MARKER = "fbrain_child_task_index_v1";
-export const CHILD_TASK_INDEX_LAYOUT = "ChildTaskIndex novel hashrange ctd_h x ctd_r";
+export const CHILD_TASK_INDEX_LAYOUT =
+  "ChildTaskIndex novel hashrange ctd_h x ctd_r";
 /**
  * Reserved hash partition for the global completeness marker. Design slugs
  * are kebab-case and never contain `__`, so this can never collide with a
@@ -946,9 +960,12 @@ export const childTaskIndexSchema: AddSchemaRequest = {
       ctd_marker: "String",
     },
     field_descriptions: {
-      ctd_h: "opaque partition token (parent design slug value, or the reserved global-marker hash)",
-      ctd_r: "opaque range token (child task slug value, or the reserved migrated-marker range)",
-      ctd_payload: "json object of ONE fbrain task record (not an array), empty for the marker row",
+      ctd_h:
+        "opaque partition token (parent design slug value, or the reserved global-marker hash)",
+      ctd_r:
+        "opaque range token (child task slug value, or the reserved migrated-marker range)",
+      ctd_payload:
+        "json object of ONE fbrain task record (not an array), empty for the marker row",
       ctd_marker: "constant token fbrain_child_task_index_v1",
     },
     field_classifications: {
@@ -962,6 +979,61 @@ export const childTaskIndexSchema: AddSchemaRequest = {
       ctd_r: GENERAL,
       ctd_payload: GENERAL,
       ctd_marker: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * One live papercut per HashRange row, addressed by (status, slug). Product
+ * ledger reads query one named status partition (or the six fixed status
+ * partitions) rather than the whole papercut type-list partition.
+ */
+export const PAPERCUT_STATUS_INDEX_SCHEMA_KEY = "__papercutstatusindex__";
+export const PAPERCUT_STATUS_INDEX_MARKER = "fbrain_papercut_status_index_v1";
+export const PAPERCUT_STATUS_INDEX_GLOBAL_HASH = "__psi_global__";
+export const PAPERCUT_STATUS_INDEX_MIGRATED_RANGE = "__psi_migrated__";
+export const PAPERCUT_STATUS_INDEX_FIELDS = [
+  "psi_h",
+  "psi_r",
+  "psi_payload",
+  "psi_marker",
+] as const;
+
+export const papercutStatusIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "PapercutStatusIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "PapercutStatusIndex_hashrange_v1",
+    purpose_statement:
+      "One live papercut per HashRange row (status partition x slug) so filtered ledger reads never enumerate the whole papercut partition",
+    schema_type: "HashRange",
+    key: { hash_field: "psi_h", range_field: "psi_r" },
+    fields: [...PAPERCUT_STATUS_INDEX_FIELDS],
+    field_types: {
+      psi_h: "String",
+      psi_r: "String",
+      psi_payload: "String",
+      psi_marker: "String",
+    },
+    field_descriptions: {
+      psi_h: "papercut status value, or the reserved global-marker hash",
+      psi_r: "papercut slug, or the reserved migrated-marker range",
+      psi_payload:
+        "json object of one papercut record, empty for the marker row",
+      psi_marker: "constant token fbrain_papercut_status_index_v1",
+    },
+    field_classifications: {
+      psi_h: ["no_index", "metadata"],
+      psi_r: ["no_index", "metadata"],
+      psi_payload: ["no_index", "metadata"],
+      psi_marker: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      psi_h: GENERAL,
+      psi_r: GENERAL,
+      psi_payload: GENERAL,
+      psi_marker: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -1133,6 +1205,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     types: [],
     extraKeys: [CHILD_TASK_INDEX_SCHEMA_KEY],
   },
+  {
+    key: PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
+    schema: papercutStatusIndexSchema,
+    types: [],
+    extraKeys: [PAPERCUT_STATUS_INDEX_SCHEMA_KEY],
+  },
 ];
 
 export function schemaConfigKeys(entry: {
@@ -1150,7 +1228,11 @@ export function schemaConfigKeys(entry: {
 // their canonical hashes here instead of re-POSTing (which needs a DevCert).
 export function resolveOwnedSchemaHash(
   req: AddSchemaRequest,
-  loaded: ReadonlyArray<{ descriptive_name?: string; owner_app_id?: string; identity_hash?: string }>,
+  loaded: ReadonlyArray<{
+    descriptive_name?: string;
+    owner_app_id?: string;
+    identity_hash?: string;
+  }>,
 ): string | null {
   const wantName = req.schema.descriptive_name;
   const wantOwner = req.schema.owner_app_id;
@@ -1187,7 +1269,9 @@ const HANDWRITTEN_PURPOSES: Partial<Record<RecordType, string>> = {
 // Record types with NO `<type> new` verb. `papercut` is created only through
 // `brain papercut file`, which is the surface that enforces the dedupe gate;
 // a generic `papercut new` would be a documented way around it.
-export const TYPES_WITHOUT_NEW_VERB: ReadonlySet<RecordType> = new Set(["papercut"]);
+export const TYPES_WITHOUT_NEW_VERB: ReadonlySet<RecordType> = new Set([
+  "papercut",
+]);
 
 export const RECORD_PURPOSES: Record<RecordType, string> = Object.fromEntries(
   RECORD_TYPES.map((t) => [
@@ -1201,7 +1285,9 @@ export function purposeFor(type: RecordType): string {
 }
 
 export function recordStatusLines(): string {
-  return RECORD_TYPES.map((type) => `${type} = ${RECORDS[type].statuses.join("|")}`).join("; ");
+  return RECORD_TYPES.map(
+    (type) => `${type} = ${RECORDS[type].statuses.join("|")}`,
+  ).join("; ");
 }
 
 // The single copy-paste CLAUDE.md block that teaches an agent *when* and *why*

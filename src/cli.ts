@@ -206,10 +206,12 @@ const RECORD_TYPE_COUNT = recordTypeCount();
 // map (schemas.ts) — the same source the README uses, so the two can't drift.
 const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.filter(
   (t) => !TYPES_WITHOUT_NEW_VERB.has(t),
-).map((t) => {
-  const label = `${t} new`.padEnd(14);
-  return `  ${label} ${RECORD_PURPOSES[t]}`;
-}).join("\n");
+)
+  .map((t) => {
+    const label = `${t} new`.padEnd(14);
+    return `  ${label} ${RECORD_PURPOSES[t]}`;
+  })
+  .join("\n");
 
 export const TOP_HELP = `brain — CLI brain over fold_db
 
@@ -791,7 +793,7 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25] [--list-index] [--child-task-index]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -838,6 +840,12 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     <design>\` resolve child tasks through this index once
                     it is registered and complete. Dry-run censuses the
                     indexed set vs SOT without writing. Standalone mode:
+                    skips the embedding refresh.
+  --papercut-status-index rebuild the status->papercut keyed ledger index
+                    from an admin SOT scan of the papercut schema. Repairs
+                    missing, duplicate, or old-status rows and stamps the
+                    global completeness marker. Dry-run censuses indexed
+                    status/slug pairs vs SOT without writing. Standalone mode:
                     skips the embedding refresh.
 
 Run with the global --verbose to print per-record outcome
@@ -1223,6 +1231,7 @@ const REINDEX_OPTIONS = {
   bm25: { type: "boolean", default: false },
   "list-index": { type: "boolean", default: false },
   "child-task-index": { type: "boolean", default: false },
+  "papercut-status-index": { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -1369,11 +1378,17 @@ export async function main(argv: Argv): Promise<number> {
       // spelling instead of the generic flag-placement hint, which would
       // falsely imply `fbrain init -v <value>` is valid.
       if (cmd === "-v") {
-        console.error("error: `-v` isn't a flag; did you mean `-V` / `--version`?");
+        console.error(
+          "error: `-v` isn't a flag; did you mean `-V` / `--version`?",
+        );
         return USAGE_ERROR;
       }
-      console.error(`error: \`${cmd}\` looks like an option, but it's in the command position.`);
-      console.error(`hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`);
+      console.error(
+        `error: \`${cmd}\` looks like an option, but it's in the command position.`,
+      );
+      console.error(
+        `hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`,
+      );
       return USAGE_ERROR;
     }
     // A top-level create-verb (`new`/`create`/`add`) is muscle memory from
@@ -1384,10 +1399,16 @@ export async function main(argv: Argv): Promise<number> {
     // family instead, before the generic nearest-match fallback below.
     if (CREATE_SYNONYMS.includes(cmd)) {
       const types = RECORD_TYPES.join(" | ");
-      console.error(`error: \`fbrain ${cmd}\` isn't a command — records are created per type.`);
-      console.error(`hint:  Use \`fbrain <type> new <slug>\`, e.g. \`fbrain design new my-first-idea\`.`);
+      console.error(
+        `error: \`fbrain ${cmd}\` isn't a command — records are created per type.`,
+      );
+      console.error(
+        `hint:  Use \`fbrain <type> new <slug>\`, e.g. \`fbrain design new my-first-idea\`.`,
+      );
       console.error(`       Types: ${types}`);
-      console.error(`       (or pipe markdown:  fbrain put <slug> --type <type>)`);
+      console.error(
+        `       (or pipe markdown:  fbrain put <slug> --type <type>)`,
+      );
       return USAGE_ERROR;
     }
     const suggestion = suggestCommand({
@@ -1456,7 +1477,9 @@ function isCommand(s: string): s is Command {
 // Every record type has a `<type> new` subcommand. Derived from RECORD_TYPES
 // so adding a new record type wires up "Did you mean?" and `fbrain help
 // "<type> new"` automatically.
-const COMPOUND_COMMANDS: readonly string[] = RECORD_TYPES.map((t) => `${t} new`);
+const COMPOUND_COMMANDS: readonly string[] = RECORD_TYPES.map(
+  (t) => `${t} new`,
+);
 
 // Top-level record-creation synonyms a new dev reaches for by analogy with
 // other CLIs (git/gh/cargo/npm/fkanban). None is a real fbrain command —
@@ -1471,7 +1494,10 @@ const CREATE_SYNONYMS: readonly string[] = ["new", "create", "add"];
 // rather than the bare `design`. Returns null when no candidate scores within
 // max(2, floor(input.length / 3)) edits — at which point callers fall back
 // to TOP_HELP for cold-start discovery.
-export function suggestCommand(opts: { single?: string; compound?: string }): string | null {
+export function suggestCommand(opts: {
+  single?: string;
+  compound?: string;
+}): string | null {
   let best: string | null = null;
   let bestDist = Infinity;
   let bestLen = 0;
@@ -1484,7 +1510,8 @@ export function suggestCommand(opts: { single?: string; compound?: string }): st
     }
   };
   // Compound first so a tie favors the more-specific two-token suggestion.
-  if (opts.compound) for (const c of COMPOUND_COMMANDS) consider(c, opts.compound);
+  if (opts.compound)
+    for (const c of COMPOUND_COMMANDS) consider(c, opts.compound);
   if (opts.single) for (const c of COMMANDS) consider(c, opts.single);
   if (best === null) return null;
   const threshold = Math.max(2, Math.floor(bestLen / 3));
@@ -1560,7 +1587,10 @@ function normalizeNegativeIntFlagValues(
   return out;
 }
 
-function lastIntFlagSpelling(argv: Argv, flags: readonly IntFlagSpec[]): string {
+function lastIntFlagSpelling(
+  argv: Argv,
+  flags: readonly IntFlagSpec[],
+): string {
   let last = flags[0]?.flag ?? "flag";
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -1734,9 +1764,9 @@ function parseCommandArgs<T extends ParseArgsConfig>(
           // `tag` is `multiple: true` (repeatable), so the actionable form is
           // one flag per value — the single highest-value hint for the
           // `--tags foo,bar` papercut this guards against.
-          const opt = (config.options as Record<string, { multiple?: boolean }>)[
-            suggestion
-          ];
+          const opt = (
+            config.options as Record<string, { multiple?: boolean }>
+          )[suggestion];
           const example = opt?.multiple
             ? `Repeat the flag per value: \`--${suggestion} foo --${suggestion} bar\`.`
             : `Did you mean \`--${suggestion}\`?`;
@@ -1794,7 +1824,9 @@ function printHelpFor(name: string): number {
 type Globals = { verbose: boolean };
 
 async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
-  const verboseFn = g.verbose ? (msg: string) => console.error(`[verbose] ${msg}`) : undefined;
+  const verboseFn = g.verbose
+    ? (msg: string) => console.error(`[verbose] ${msg}`)
+    : undefined;
   switch (cmd) {
     case "init":
       return runInitCmd(args, verboseFn);
@@ -1947,9 +1979,13 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   // Defaults are resolved inside runInit so it can auto-heal a stale config
   // (e.g. previously-baked `:9101 / :9102` URLs) without clobbering a user
   // override the next time `fbrain init` runs without flags.
-  const initOpts: Parameters<typeof runInit>[0] = { bootstrapName: values.name, verbose };
+  const initOpts: Parameters<typeof runInit>[0] = {
+    bootstrapName: values.name,
+    verbose,
+  };
   if (values["node-url"]) initOpts.nodeUrl = values["node-url"];
-  if (values["schema-service-url"]) initOpts.schemaServiceUrl = values["schema-service-url"];
+  if (values["schema-service-url"])
+    initOpts.schemaServiceUrl = values["schema-service-url"];
   if (values["grant-consent"] || values.yes) initOpts.grantConsent = true;
   await runInit(initOpts);
   return 0;
@@ -1962,12 +1998,20 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
 // slug-validation / stdin-fallback / "created <type> <slug>" envelope in
 // one place lets future per-type flags slot in by extending the options
 // alone.
-async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Promise<number> {
+async function runRecordNew(
+  type: RecordType,
+  args: Argv,
+  verbose: Verbose,
+): Promise<number> {
   const sub = args[0];
   if (sub !== "new") {
-    const suggestion = sub ? suggestCommand({ compound: `${type} ${sub}` }) : null;
+    const suggestion = sub
+      ? suggestCommand({ compound: `${type} ${sub}` })
+      : null;
     if (suggestion) {
-      console.error(`Unknown ${type} subcommand: ${sub}. Did you mean: ${suggestion}?`);
+      console.error(
+        `Unknown ${type} subcommand: ${sub}. Did you mean: ${suggestion}?`,
+      );
       return USAGE_ERROR;
     }
     // "I want to change this record's status" recovery. By analogy with most
@@ -1992,7 +2036,9 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
         ? undefined
         : args[statusFlagIndex + 1];
     const subIsSlugShaped =
-      sub !== undefined && !sub.startsWith("-") && /^[a-z0-9][a-z0-9-_]*$/.test(sub);
+      sub !== undefined &&
+      !sub.startsWith("-") &&
+      /^[a-z0-9][a-z0-9-_]*$/.test(sub);
     if (subIsSlugShaped || statusValue !== undefined) {
       const slugPart = subIsSlugShaped ? sub : "<slug>";
       const statusPart = statusValue ?? "<new-status>";
@@ -2005,7 +2051,9 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
       );
       return USAGE_ERROR;
     }
-    console.error(`Unknown ${type} subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP[type]}`);
+    console.error(
+      `Unknown ${type} subcommand: ${sub ?? "(none)"}\n${COMMAND_HELP[type]}`,
+    );
     return USAGE_ERROR;
   }
   const rest = args.slice(1);
@@ -2072,7 +2120,9 @@ async function runRecordNew(type: RecordType, args: Argv, verbose: Verbose): Pro
     indexPendingNote(indexPending) + listIndexFailedNote(listIndexFailed);
   if (values.json) {
     console.error(`created ${type} ${slug}${note}`);
-    console.log(JSON.stringify({ ok: true, type, slug, indexPending, listIndexFailed }));
+    console.log(
+      JSON.stringify({ ok: true, type, slug, indexPending, listIndexFailed }),
+    );
   } else {
     console.log(`created ${type} ${slug}${note}`);
   }
@@ -2153,7 +2203,8 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     // parse failures).
     if (
       err instanceof Error &&
-      ((err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ||
+      ((err as NodeJS.ErrnoException).code ===
+        "ERR_PARSE_ARGS_UNKNOWN_OPTION" ||
         (err instanceof FbrainError && err.code === "unknown_option"))
     ) {
       // `put` is intentionally frontmatter-driven — title comes from the
@@ -2453,7 +2504,8 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     // bare message.
     if (
       err instanceof Error &&
-      (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL"
+      (err as NodeJS.ErrnoException).code ===
+        "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL"
     ) {
       const positional = args.find((a) => !a.startsWith("-"));
       if (positional && isRecordType(positional)) {
@@ -2485,7 +2537,8 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
   if (values.status) lOpts.status = values.status;
   if (values.tag) lOpts.tag = values.tag;
   if (typeof limit === "number" && Number.isFinite(limit)) lOpts.limit = limit;
-  if (typeof offset === "number" && Number.isFinite(offset)) lOpts.offset = offset;
+  if (typeof offset === "number" && Number.isFinite(offset))
+    lOpts.offset = offset;
   if (values["updated-since"]) {
     lOpts.updatedSinceMs = parseUpdatedSince(values["updated-since"]);
   }
@@ -2678,7 +2731,12 @@ async function runAttach(args: Argv, verbose: Verbose): Promise<number> {
 
 async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
   const { values, positionals } = parseCommandArgs(
-    { args, strict: true, allowPositionals: true, options: ATTACHMENTS_OPTIONS },
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: ATTACHMENTS_OPTIONS,
+    },
     "attachments",
   );
   // `fbrain attachments migrate [slug]` — v1→v2 storage migration subcommand.
@@ -2758,7 +2816,12 @@ async function runDetach(args: Argv, verbose: Verbose): Promise<number> {
   }
   const cfg = readConfig();
   const type = parseRecordType(values.type);
-  const dOpts: Parameters<typeof detachCmd>[0] = { cfg, slug, nameOrRef, verbose };
+  const dOpts: Parameters<typeof detachCmd>[0] = {
+    cfg,
+    slug,
+    nameOrRef,
+    verbose,
+  };
   if (type) dOpts.type = type;
   if (values.json) {
     dOpts.print = (line: string) => console.error(line);
@@ -3049,7 +3112,9 @@ async function runFind(args: Argv, verbose: Verbose): Promise<number> {
     },
     "find",
   );
-  const matches = (values.match ?? []).map((m) => m.trim()).filter((m) => m.length > 0);
+  const matches = (values.match ?? [])
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0);
   if (matches.length === 0) {
     console.error(COMMAND_HELP.find);
     return USAGE_ERROR;
@@ -3320,11 +3385,12 @@ async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
       process.env.FBRAIN_ADMIN_MESSAGING_PSEUDONYM,
       process.env.ROUTINES_ADMIN_MESSAGING_PSEUDONYM,
     ),
-    recipientDisplayName: firstNonEmpty(
-      values["recipient-name"],
-      process.env.FBRAIN_ADMIN_RECIPIENT_NAME,
-      process.env.ROUTINES_ADMIN_RECIPIENT_NAME,
-    ) || undefined,
+    recipientDisplayName:
+      firstNonEmpty(
+        values["recipient-name"],
+        process.env.FBRAIN_ADMIN_RECIPIENT_NAME,
+        process.env.ROUTINES_ADMIN_RECIPIENT_NAME,
+      ) || undefined,
   };
   const missing = [
     ["--recipient-pubkey", recipient.recipientPubkey],
@@ -3448,7 +3514,9 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   if (values.json) {
     dOpts.print = (line: string) => console.error(line);
     dOpts.onResult = (payload) =>
-      console.log(JSON.stringify({ ok: true, slug: payload.slug, deleted: true }));
+      console.log(
+        JSON.stringify({ ok: true, slug: payload.slug, deleted: true }),
+      );
   }
   await withTypeAsPositionalHint(slug, () => deleteRecord(dOpts));
   return 0;
@@ -3481,8 +3549,11 @@ export async function runMcpCmd(args: Argv): Promise<number> {
       return USAGE_ERROR;
     }
     const { runMcpInstall } = await import("./commands/mcp-install.ts");
-    const installOpts: Parameters<typeof runMcpInstall>[0] = { yes: values.yes };
-    if (values["claude-md"] !== undefined) installOpts.claudeMd = values["claude-md"];
+    const installOpts: Parameters<typeof runMcpInstall>[0] = {
+      yes: values.yes,
+    };
+    if (values["claude-md"] !== undefined)
+      installOpts.claudeMd = values["claude-md"];
     if (values["claude-settings"] !== undefined) {
       installOpts.claudeSettings = values["claude-settings"];
     }
@@ -3515,7 +3586,9 @@ export async function runMcpCmd(args: Argv): Promise<number> {
     return 0;
   }
   if (positionals[0] !== undefined) {
-    console.error(`Unknown mcp subcommand: ${positionals[0]}\n${COMMAND_HELP.mcp}`);
+    console.error(
+      `Unknown mcp subcommand: ${positionals[0]}\n${COMMAND_HELP.mcp}`,
+    );
     return USAGE_ERROR;
   }
   // Bare `fbrain mcp` — start the stdio MCP server.
@@ -3601,6 +3674,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values.bm25) rOpts.bm25 = true;
   if (values["list-index"]) rOpts.listIndex = true;
   if (values["child-task-index"]) rOpts.childTaskIndex = true;
+  if (values["papercut-status-index"]) rOpts.papercutStatusIndex = true;
   await reindexCmd(rOpts);
   return 0;
 }
@@ -3701,9 +3775,12 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       verbose,
       json,
     };
-    if (typeof values["fixed-by"] === "string") opts.fixedBy = values["fixed-by"];
-    if (typeof values["verified-by"] === "string") opts.verifiedBy = values["verified-by"];
-    if (typeof values["duplicate-of"] === "string") opts.duplicateOf = values["duplicate-of"];
+    if (typeof values["fixed-by"] === "string")
+      opts.fixedBy = values["fixed-by"];
+    if (typeof values["verified-by"] === "string")
+      opts.verifiedBy = values["verified-by"];
+    if (typeof values["duplicate-of"] === "string")
+      opts.duplicateOf = values["duplicate-of"];
     await papercutCloseCmd(opts);
     return 0;
   }
@@ -3717,7 +3794,11 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     return 0;
   }
 
-  const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose, type: "papercut" };
+  const lOpts: Parameters<typeof listCmd>[0] = {
+    cfg,
+    verbose,
+    type: "papercut",
+  };
   if (typeof values.status === "string") lOpts.status = values.status;
   if (json) lOpts.json = true;
   await listCmd(lOpts);
@@ -3774,7 +3855,11 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
   }
 
   const cfg = readConfig();
-  const mOpts: Parameters<typeof migrateCmd>[0] = { cfg, mode: { kind: "status" }, verbose };
+  const mOpts: Parameters<typeof migrateCmd>[0] = {
+    cfg,
+    mode: { kind: "status" },
+    verbose,
+  };
 
   if (values.status) {
     mOpts.mode = { kind: "status" };
@@ -3858,7 +3943,9 @@ function parseRecordType(raw: string | undefined): RecordType | undefined {
 // Repeatable `--type` (search / ask). Validates every value against the 8
 // record types and dedupes. Returns undefined when the flag is absent so
 // callers can leave the filter unset. Case-insensitive — see parseRecordType.
-function parseRecordTypeList(raw: string[] | undefined): RecordType[] | undefined {
+function parseRecordTypeList(
+  raw: string[] | undefined,
+): RecordType[] | undefined {
   if (raw === undefined || raw.length === 0) return undefined;
   const seen = new Set<RecordType>();
   for (const v of raw) {
@@ -3911,7 +3998,9 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   }
   try {
     const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin as unknown as AsyncIterable<Buffer | Uint8Array>) {
+    for await (const chunk of process.stdin as unknown as AsyncIterable<
+      Buffer | Uint8Array
+    >) {
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     }
     return Buffer.concat(chunks).toString("utf8");
@@ -3920,7 +4009,10 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   }
 }
 
-type CaptureSentryException = (error: unknown, tags?: Record<string, string>) => Promise<void>;
+type CaptureSentryException = (
+  error: unknown,
+  tags?: Record<string, string>,
+) => Promise<void>;
 
 async function initCliSentry(): Promise<CaptureSentryException> {
   if (!process.env.OBS_SENTRY_DSN?.trim()) {
@@ -3931,7 +4023,8 @@ async function initCliSentry(): Promise<CaptureSentryException> {
     service: "fbrain-cli",
     env: {
       ...process.env,
-      OBS_SENTRY_RELEASE: process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
+      OBS_SENTRY_RELEASE:
+        process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
     },
   });
   return sentry.captureSentryException;

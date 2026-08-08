@@ -21,7 +21,6 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   findBySlug,
-  listRecords,
   normalizeSlug,
   nowIso,
   resolveBySlug,
@@ -32,6 +31,10 @@ import {
 import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import { maintainTypeListIndex } from "../record-list-index.ts";
+import {
+  maintainPapercutStatusIndex,
+  readPapercutsByStatus,
+} from "../papercut-status-index.ts";
 import {
   ensureComponent,
   ensureDuplicateTarget,
@@ -65,7 +68,11 @@ export function papercutDedupeProbes(opts: {
   body: string;
 }): string[] {
   const error = /^(?:error|exception):\s*(.+)$/im.exec(opts.body)?.[1]?.trim();
-  return [...new Set([opts.title.trim(), opts.symptom.trim(), error ?? ""].filter(Boolean))];
+  return [
+    ...new Set(
+      [opts.title.trim(), opts.symptom.trim(), error ?? ""].filter(Boolean),
+    ),
+  ];
 }
 
 export function semanticDuplicateCandidates(
@@ -80,7 +87,10 @@ export function semanticDuplicateCandidates(
     // `reconfirmed`) — folding it into the closed one would hide a regression
     // inside a record that says the defect is gone.
     if (!isLivePapercutStatus(record.status)) continue;
-    if (typeof record.component === "string" && record.component !== opts.component) {
+    if (
+      typeof record.component === "string" &&
+      record.component !== opts.component
+    ) {
       continue;
     }
     const exact = record.slug === opts.exactSlug;
@@ -154,14 +164,16 @@ export async function papercutFileCmd(
   let semanticHits: FindHit[];
   if (prior) {
     // An exact slug settles the pre-filter without paying for vector search.
-    semanticHits = [{
-      type: PAPERCUT,
-      slug: prior.slug,
-      fusedScore: 0,
-      maxSimilarity: 1,
-      matchHits: [],
-      record: prior,
-    }];
+    semanticHits = [
+      {
+        type: PAPERCUT,
+        slug: prior.slug,
+        fusedScore: 0,
+        maxSimilarity: 1,
+        matchHits: [],
+        record: prior,
+      },
+    ];
   } else {
     const probes = papercutDedupeProbes({
       title: opts.title,
@@ -288,6 +300,23 @@ export async function papercutFileCmd(
     slug,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+  const materialized = filed ?? {
+    slug,
+    title: opts.title,
+    body,
+    status: "open",
+    tags: opts.tags ?? [],
+    created_at: now,
+    updated_at: now,
+  };
+  await maintainPapercutStatusIndex({
+    node,
+    cfg: opts.cfg,
+    slug,
+    record: materialized,
+    previousStatus: undefined,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
 
   if (opts.json) {
     print(
@@ -301,7 +330,9 @@ export async function papercutFileCmd(
       }),
     );
   } else {
-    print(`filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash}`);
+    print(
+      `filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash}`,
+    );
     if (listIndexFailed) {
       print(
         "warning: the record persisted but the type-list index patch failed — it will not " +
@@ -309,7 +340,13 @@ export async function papercutFileCmd(
       );
     }
   }
-  return { action: "filed", slug, component, symptom_hash: hash, duplicates: [] };
+  return {
+    action: "filed",
+    slug,
+    component,
+    symptom_hash: hash,
+    duplicates: [],
+  };
 }
 
 export type PapercutCloseOptions = {
@@ -406,9 +443,19 @@ export async function papercutCloseCmd(
     slug,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+  await maintainPapercutStatusIndex({
+    node,
+    cfg: opts.cfg,
+    slug,
+    record: closed ?? { ...record, status, updated_at: now },
+    previousStatus: from,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
 
   if (opts.json) {
-    print(JSON.stringify({ action: "papercut_closed", slug, from, to: status }));
+    print(
+      JSON.stringify({ action: "papercut_closed", slug, from, to: status }),
+    );
   } else {
     print(`papercut ${slug}: ${from} → ${status}`);
   }
@@ -441,7 +488,10 @@ export function buildCensus(
 ): PapercutCensusRow[] {
   const byComponent = new Map<string, PapercutCensusRow>();
   for (const r of records) {
-    const c = typeof r.component === "string" && r.component.length > 0 ? r.component : "(unset)";
+    const c =
+      typeof r.component === "string" && r.component.length > 0
+        ? r.component
+        : "(unset)";
     if (component !== undefined && c !== component) continue;
     let row = byComponent.get(c);
     if (!row) {
@@ -468,7 +518,9 @@ export function buildCensus(
     if (isLivePapercutStatus(r.status)) row.live += 1;
     row.total += 1;
   }
-  return [...byComponent.values()].sort((a, b) => b.live - a.live || a.component.localeCompare(b.component));
+  return [...byComponent.values()].sort(
+    (a, b) => b.live - a.live || a.component.localeCompare(b.component),
+  );
 }
 
 // Every count prints its method. This is a rule the corpus paid for: an
@@ -476,17 +528,21 @@ export function buildCensus(
 // 44.5% win got reported as a 2.2% regression, and how a truncated
 // enumeration got copied into durable memory as a fact.
 export const CENSUS_METHOD =
-  "method: type-list index over type=papercut (keyed read, not a projection scan); " +
+  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration); " +
   "live = open+partial+fixed";
 
-export async function papercutCensusCmd(opts: PapercutCensusOptions): Promise<void> {
+export async function papercutCensusCmd(
+  opts: PapercutCensusOptions,
+): Promise<void> {
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  const records = await listRecords(node, PAPERCUT, opts.cfg);
+  const records = await readPapercutsByStatus(node, opts.cfg);
   const rows = buildCensus(records, opts.component);
 
   if (opts.json) {
-    print(JSON.stringify({ rows, method: CENSUS_METHOD, scanned: records.length }));
+    print(
+      JSON.stringify({ rows, method: CENSUS_METHOD, scanned: records.length }),
+    );
     return;
   }
   if (rows.length === 0) {
@@ -494,7 +550,8 @@ export async function papercutCensusCmd(opts: PapercutCensusOptions): Promise<vo
     print(CENSUS_METHOD);
     return;
   }
-  const header = "component            live  open part  fix  ver  wont  dup total";
+  const header =
+    "component            live  open part  fix  ver  wont  dup total";
   const lines = rows.map(
     (r) =>
       `${r.component.padEnd(20)} ${String(r.live).padStart(4)} ${String(r.open).padStart(5)} ` +

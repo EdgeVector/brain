@@ -1,6 +1,10 @@
 // `fbrain list [--type T] [--status S] [--tag T] [-n N]` — newest-first list with filters.
 
-import { newReadClientFromCfg, type NodeClient, type Verbose } from "../client.ts";
+import {
+  newReadClientFromCfg,
+  type NodeClient,
+  type Verbose,
+} from "../client.ts";
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
@@ -407,7 +411,8 @@ export async function listCmd(opts: ListOptions): Promise<void> {
 
   const lines = formatTable(
     hydrated.map(({ type, record }) => {
-      const tags = record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
+      const tags =
+        record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
       return [type, record.slug, record.status, `${record.title}${tags}`];
     }),
   );
@@ -474,7 +479,10 @@ function recordSummary(type: RecordType, r: FbrainRecord): RecordSummary {
 
 export async function resolveListEntries(
   node: NodeClient,
-  opts: Pick<ListOptions, "cfg" | "type" | "tag" | "printErr" | "onSkippedTypes">,
+  opts: Pick<
+    ListOptions,
+    "cfg" | "type" | "tag" | "printErr" | "onSkippedTypes"
+  >,
 ): Promise<ListEntry[]> {
   const { activeTypes: types } = resolveTypeFilter(
     opts.type ? [opts.type] : undefined,
@@ -486,13 +494,11 @@ export async function resolveListEntries(
   );
   if (opts.tag) {
     const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
-      findBySlug: (type, hash, slug) =>
-        findBySlug(node, type, hash, slug),
+      findBySlug: (type, hash, slug) => findBySlug(node, type, hash, slug),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
     });
     if (indexed !== null) {
-      return indexed
-        .filter((entry) => types.includes(entry.type));
+      return indexed.filter((entry) => types.includes(entry.type));
     }
   }
 
@@ -539,7 +545,10 @@ export function matchesListFilters(
 // `matchesListFilters`' `isTombstoned` check.
 export async function resolveListKeyEntries(
   node: NodeClient,
-  opts: Pick<ListOptions, "cfg" | "type" | "printErr" | "onSkippedTypes">,
+  opts: Pick<
+    ListOptions,
+    "cfg" | "type" | "status" | "printErr" | "onSkippedTypes"
+  >,
 ): Promise<Array<{ type: RecordType; key: RecordKey }>> {
   const { activeTypes: types } = resolveTypeFilter(
     opts.type ? [opts.type] : undefined,
@@ -552,9 +561,37 @@ export async function resolveListKeyEntries(
 
   const acc: Array<{ type: RecordType; key: RecordKey }> = [];
   for (const t of types) {
+    // The dedicated papercut ledger (and explicit `list --type papercut`)
+    // must be status-keyed. A global multi-type list keeps its existing
+    // per-type key walk so a newly deployed, not-yet-initialized internal
+    // index cannot make every unrelated record type unreadable.
+    if (t === "papercut" && opts.type === "papercut") {
+      const { readPapercutsByStatus } = await import(
+        "../papercut-status-index.ts"
+      );
+      const records = await readPapercutsByStatus(node, opts.cfg, opts.status);
+      for (const record of records) {
+        acc.push({
+          type: t,
+          key: {
+            type: t,
+            slug: record.slug,
+            status: record.status,
+            tags: record.tags,
+            updatedAt: record.updated_at,
+          },
+        });
+      }
+      continue;
+    }
     let keys: RecordKey[];
     try {
-      keys = await listRecordKeys(node, t, schemaHashFor(t, opts.cfg), opts.cfg);
+      keys = await listRecordKeys(
+        node,
+        t,
+        schemaHashFor(t, opts.cfg),
+        opts.cfg,
+      );
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) {
         opts.onSkippedTypes?.([t]);
