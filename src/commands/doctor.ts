@@ -26,6 +26,7 @@ import { tryReadConfig } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   runEmbeddingProbe,
+  type EmbeddingProbeDeps,
   runFreshnessProbe,
   runPollutionProbe,
   runRuntimeProbe,
@@ -88,6 +89,11 @@ export type DoctorOptions = {
     verbose?: Verbose;
     socketPath?: string;
   }) => NodeClient;
+  // For testing: inject the search plane. Without this seam the
+  // embedding-runtime probe consults the REAL plane on the host, so a test that
+  // mocks only the node is not hermetic — it passes or fails depending on
+  // whether the machine running it happens to have LastSeek installed.
+  searchPlane?: EmbeddingProbeDeps["queryPlane"];
   // --freshness probes (G3a in docs/phase-7-search-latency-spike.md).
   freshness?: boolean;
   freshnessTrials?: number;            // default 5
@@ -447,7 +453,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // Cheap when it passes (one app-search request); the heavy freshness probe stays
   // gated behind --freshness.
   if (provisioned && schemasLoadedOk) {
-    const embed = await runEmbeddingProbe(nodeClient, verbose);
+    const embed = await runEmbeddingProbe(nodeClient, verbose, {
+      queryPlane: opts.searchPlane,
+    });
     checks.push(embed);
   } else if (!nodeReachable) {
     // The probe issues a search against the node to force its ONNX load —
