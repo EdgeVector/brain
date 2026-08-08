@@ -61,7 +61,8 @@ describe("schemas", () => {
   });
 
   test("design status enum validation", () => {
-    for (const s of DESIGN_STATUSES) expect(isValidStatus("design", s)).toBe(true);
+    for (const s of DESIGN_STATUSES)
+      expect(isValidStatus("design", s)).toBe(true);
     expect(isValidStatus("design", "in_progress")).toBe(false); // task value
     expect(isValidStatus("design", "")).toBe(false);
     expect(isValidStatus("design", "DRAFT")).toBe(false);
@@ -101,14 +102,26 @@ describe("schemas", () => {
     // purpose_statement) is what keeps the canonical hashes distinct.
     const phase6 = [
       ["concept", conceptSchema, CONCEPT_STATUSES, "active", "Concept"],
-      ["preference", preferenceSchema, PREFERENCE_STATUSES, "active", "Preference"],
+      [
+        "preference",
+        preferenceSchema,
+        PREFERENCE_STATUSES,
+        "active",
+        "Preference",
+      ],
       ["reference", referenceSchema, REFERENCE_STATUSES, "active", "Reference"],
       ["agent", agentSchema, AGENT_STATUSES, "active", "Agent"],
       ["project", projectSchema, PROJECT_STATUSES, "planning", "Project"],
       ["spike", spikeSchema, SPIKE_STATUSES, "active", "Spike"],
       ["sop", sopSchema, SOP_STATUSES, "active", "Sop"],
     ] as const;
-    for (const [typeKey, schema, statuses, defaultStatus, descriptive] of phase6) {
+    for (const [
+      typeKey,
+      schema,
+      statuses,
+      defaultStatus,
+      descriptive,
+    ] of phase6) {
       expect(schema.schema.descriptive_name).toBe(descriptive);
       expect(schema.schema.fields.length).toBe(7);
       expect(schema.schema.fields).not.toContain("kind");
@@ -166,7 +179,15 @@ describe("schemas", () => {
       expect(decisionSchema.schema.field_types[col]).toBe("String");
     }
     // …and the standard envelope is still present.
-    for (const col of ["slug", "title", "body", "status", "tags", "created_at", "updated_at"]) {
+    for (const col of [
+      "slug",
+      "title",
+      "body",
+      "status",
+      "tags",
+      "created_at",
+      "updated_at",
+    ]) {
       expect(decisionSchema.schema.fields).toContain(col);
     }
     expect(decisionSchema.schema.field_types.tags).toEqual({ Array: "String" });
@@ -180,8 +201,8 @@ describe("schemas", () => {
     ]);
   });
 
-  test("UNIQUE_SCHEMAS has 18 entries: user record schemas plus internal indexes, admin snapshot, and attachment schemas", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(18);
+  test("UNIQUE_SCHEMAS has 19 entries: user record schemas plus internal indexes, admin snapshot, and attachment schemas", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(19);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "__admin_snapshot__",
@@ -189,6 +210,7 @@ describe("schemas", () => {
       "__attachmentfile__",
       "__attachmentindex__",
       "__childtaskindex__",
+      "__papercutstatusindex__",
       "__recordlistentry__",
       "__tagindex__",
       "agent",
@@ -214,6 +236,7 @@ describe("schemas", () => {
       "__recordlistindex__",
       "__recordlistentry__",
       "__childtaskindex__",
+      "__papercutstatusindex__",
     ];
     for (const entry of UNIQUE_SCHEMAS) {
       if (internalKeys.includes(entry.key)) {
@@ -227,7 +250,9 @@ describe("schemas", () => {
   });
 
   test("UNIQUE_SCHEMAS user entries are derived from RECORD_TYPES/RECORDS order", () => {
-    const userEntries = UNIQUE_SCHEMAS.filter((entry) => !entry.key.startsWith("__"));
+    const userEntries = UNIQUE_SCHEMAS.filter(
+      (entry) => !entry.key.startsWith("__"),
+    );
     expect(userEntries.map((entry) => entry.key)).toEqual([...RECORD_TYPES]);
     for (const entry of userEntries) {
       const type = entry.key as RecordType;
@@ -264,7 +289,14 @@ describe("RECORD_PURPOSES (new-dev 'use it for' one-liners)", () => {
   });
 
   test("the six Phase 6 purposes ARE the canonical purpose_statement (no drift)", () => {
-    for (const type of ["concept", "preference", "reference", "agent", "project", "spike"] as const) {
+    for (const type of [
+      "concept",
+      "preference",
+      "reference",
+      "agent",
+      "project",
+      "spike",
+    ] as const) {
       const canonical = RECORDS[type].schema.schema.purpose_statement;
       expect(canonical).toBeDefined();
       expect(RECORD_PURPOSES[type]).toBe(canonical!);
@@ -282,7 +314,9 @@ describe("RECORD_PURPOSES (new-dev 'use it for' one-liners)", () => {
   });
 
   test("README 'Record types' table surfaces every purpose string (README<->CLI can't drift)", async () => {
-    const readme = await Bun.file(new URL("../../README.md", import.meta.url)).text();
+    const readme = await Bun.file(
+      new URL("../../README.md", import.meta.url),
+    ).text();
     for (const type of RECORD_TYPES) {
       expect(readme).toContain(RECORD_PURPOSES[type]);
     }

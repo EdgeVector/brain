@@ -46,10 +46,7 @@ import {
   withReadRetry,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
-import {
-  matchesListFilters,
-  resolveListEntries,
-} from "./list.ts";
+import { matchesListFilters, resolveListEntries } from "./list.ts";
 import { unindexRecordTags } from "../tag-index.ts";
 
 export type DeleteOptions = {
@@ -203,8 +200,7 @@ async function tombstoneOne(
     throw new FbrainError({
       code: "delete_not_applied",
       message: `Soft-delete did not stick for ${type} ${slug}.`,
-      hint:
-        "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read still shows the record without the tombstone tag.",
+      hint: "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read still shows the record without the tombstone tag.",
     });
   }
 }
@@ -253,7 +249,14 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   }
 
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
-  await unindexRecordTags(node, opts.cfg, type, slug, record.tags, opts.verbose);
+  await unindexRecordTags(
+    node,
+    opts.cfg,
+    type,
+    slug,
+    record.tags,
+    opts.verbose,
+  );
   await reconcileBacklinkIndex(
     node,
     opts.cfg,
@@ -292,10 +295,21 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       verbose: opts.verbose,
     });
   }
+  if (type === "papercut") {
+    const { maintainPapercutStatusIndex } = await import(
+      "../papercut-status-index.ts"
+    );
+    await maintainPapercutStatusIndex({
+      node,
+      cfg: opts.cfg,
+      slug,
+      record: null,
+      previousStatus: record.status,
+      verbose: opts.verbose,
+    });
+  }
 
-  print(
-    `deleted ${type} ${slug} (soft — fold_db is append-only)`,
-  );
+  print(`deleted ${type} ${slug} (soft — fold_db is append-only)`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
   // printed line uses (one source of truth — see the read commands).
   opts.onResult?.({ action: "deleted", type, slug, soft: true });
@@ -371,7 +385,15 @@ async function resolveFilterMatches(
   // unstable (see list.ts), so without this the preview and the delete could
   // print the same set in different orders across invocations.
   matches.sort((a, b) =>
-    a.type !== b.type ? (a.type < b.type ? -1 : 1) : a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0,
+    a.type !== b.type
+      ? a.type < b.type
+        ? -1
+        : 1
+      : a.slug < b.slug
+        ? -1
+        : a.slug > b.slug
+          ? 1
+          : 0,
   );
   return matches;
 }
@@ -396,7 +418,9 @@ function formatBatchError(err: unknown): string {
   return String(err);
 }
 
-export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void> {
+export async function deleteByFilter(
+  opts: DeleteByFilterOptions,
+): Promise<void> {
   const print = resolvePrintSink(opts);
 
   // Defense in depth: the CLI refuses an unbounded selector before calling us,
@@ -405,7 +429,8 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
   if (!opts.tag && !opts.status && !opts.type) {
     throw new FbrainError({
       code: "unbounded_delete_selector",
-      message: "Bulk delete requires a filter — refusing to select every record.",
+      message:
+        "Bulk delete requires a filter — refusing to select every record.",
       hint: "Narrow with --tag T, --type T, and/or --status S (or delete one record with `fbrain delete <slug>`).",
     });
   }
@@ -426,7 +451,9 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
     const noun = matches.length === 1 ? "record" : "records";
     print(`Would delete ${matches.length} ${noun} matching ${selector}:`);
     for (const m of matches) print(`  ${m.type}  ${m.slug}  ${m.title}`);
-    print(`Re-run with --yes to delete ${matches.length === 1 ? "it" : "them"}.`);
+    print(
+      `Re-run with --yes to delete ${matches.length === 1 ? "it" : "them"}.`,
+    );
     opts.onResult?.({
       ok: true,
       deleted: matches.map((m) => ({ type: m.type, slug: m.slug })),
@@ -485,7 +512,13 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
         throw err;
       }
 
-      await tombstoneOne(node, opts.cfg, m.type, slug, resolved.record.created_at);
+      await tombstoneOne(
+        node,
+        opts.cfg,
+        m.type,
+        slug,
+        resolved.record.created_at,
+      );
       await unindexRecordTags(
         node,
         opts.cfg,
@@ -504,7 +537,9 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
         opts.verbose,
       );
       {
-        const { maintainTypeListIndex } = await import("../record-list-index.ts");
+        const { maintainTypeListIndex } = await import(
+          "../record-list-index.ts"
+        );
         await maintainTypeListIndex({
           node,
           cfg: opts.cfg,
@@ -519,13 +554,28 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
         resolved.record.design_slug &&
         resolved.record.design_slug.length > 0
       ) {
-        const { maintainChildTaskIndex } = await import("../child-task-index.ts");
+        const { maintainChildTaskIndex } = await import(
+          "../child-task-index.ts"
+        );
         await maintainChildTaskIndex({
           node,
           cfg: opts.cfg,
           taskSlug: slug,
           task: null,
           previousDesignSlug: resolved.record.design_slug,
+          verbose: opts.verbose,
+        });
+      }
+      if (m.type === "papercut") {
+        const { maintainPapercutStatusIndex } = await import(
+          "../papercut-status-index.ts"
+        );
+        await maintainPapercutStatusIndex({
+          node,
+          cfg: opts.cfg,
+          slug,
+          record: null,
+          previousStatus: resolved.record.status,
           verbose: opts.verbose,
         });
       }

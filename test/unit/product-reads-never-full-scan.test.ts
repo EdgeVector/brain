@@ -63,7 +63,10 @@ describe("product read paths never full-scan", () => {
     const source = await readSource("record.ts");
     const sig = source.slice(
       source.indexOf("export async function listRecords("),
-      source.indexOf("): Promise<FbrainRecord[]> {", source.indexOf("export async function listRecords(")),
+      source.indexOf(
+        "): Promise<FbrainRecord[]> {",
+        source.indexOf("export async function listRecords("),
+      ),
     );
     expect(sig.includes("schemaHash")).toBe(false);
   });
@@ -74,7 +77,8 @@ describe("product read paths never full-scan", () => {
     for await (const file of glob.scan({ cwd: SRC })) {
       const source = await readSource(file);
       if (!source.includes("listRecordsAdminScan")) continue;
-      if (!(ADMIN_SCAN_MODULES as readonly string[]).includes(file)) offenders.push(file);
+      if (!(ADMIN_SCAN_MODULES as readonly string[]).includes(file))
+        offenders.push(file);
     }
     expect(
       offenders,
@@ -99,6 +103,7 @@ describe("product read paths never full-scan", () => {
       // path) must scan the INDEX's own schema to find stale rows instead of
       // iterating a known key list.
       "child-task-index.ts",
+      "papercut-status-index.ts",
     ];
     const glob = new Bun.Glob("**/*.ts");
     const offenders: string[] = [];

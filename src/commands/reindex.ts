@@ -51,6 +51,11 @@ import {
   writeChildTaskIndex,
   type ChildTaskIndexCensus,
 } from "../child-task-index.ts";
+import {
+  censusPapercutStatusIndex,
+  writePapercutStatusIndex,
+  type PapercutStatusIndexCensus,
+} from "../papercut-status-index.ts";
 import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
@@ -86,6 +91,8 @@ export type ReindexOptions = {
    * registered. Standalone mode.
    */
   childTaskIndex?: boolean;
+  /** Rebuild the status x slug papercut ledger index from papercut SOT. */
+  papercutStatusIndex?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -94,13 +101,17 @@ export type ReindexResult = {
   scanned: number;
   reindexed: number;
   skippedTombstone: number;
-  byType: Partial<Record<RecordType, { reindexed: number; skippedTombstone: number }>>;
+  byType: Partial<
+    Record<RecordType, { reindexed: number; skippedTombstone: number }>
+  >;
   tagIndex?: TagIndexRebuildResult;
   backlinkIndex?: BacklinkIndexRebuildResult;
   /** Per-type census after `--list-index` (dry-run or repair). */
   listIndexCensus?: TypeListIndexCensus[];
   /** Census after `--child-task-index` (dry-run or repair). */
   childTaskIndexCensus?: ChildTaskIndexCensus;
+  /** Census after `--papercut-status-index` (dry-run or repair). */
+  papercutStatusIndexCensus?: PapercutStatusIndexCensus;
 };
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
@@ -156,7 +167,9 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     if (opts.dryRun) {
-      print("dry-run: --tags would rebuild the tag secondary index from a full corpus scan");
+      print(
+        "dry-run: --tags would rebuild the tag secondary index from a full corpus scan",
+      );
       result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
       return result;
     }
@@ -165,10 +178,16 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       // text says "from a full corpus scan" — and reading through `listRecords`
       // would both depend on the very index this command exists to repair and
       // push a full scan onto a path that must never issue one.
-      listRecords: (type, schemaHash) => listRecordsAdminScan(node, type, schemaHash),
+      listRecords: (type, schemaHash) =>
+        listRecordsAdminScan(node, type, schemaHash),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
       onSkipUnavailableType: (type) =>
-        print(missingSchemaHashReadNote([type], "rebuilding the tag index from the rest")),
+        print(
+          missingSchemaHashReadNote(
+            [type],
+            "rebuilding the tag index from the rest",
+          ),
+        ),
     });
     result.tagIndex = rebuilt;
     print(
@@ -192,16 +211,24 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     if (opts.dryRun) {
-      print("dry-run: --backlinks would rebuild the backlink secondary index from a full corpus scan");
+      print(
+        "dry-run: --backlinks would rebuild the backlink secondary index from a full corpus scan",
+      );
       result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
       return result;
     }
     const rebuilt = await rebuildBacklinkIndex(node, opts.cfg, {
       // SOT, not the product path — same reasoning as the tag rebuild above.
-      listRecords: (type, schemaHash) => listRecordsAdminScan(node, type, schemaHash),
+      listRecords: (type, schemaHash) =>
+        listRecordsAdminScan(node, type, schemaHash),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
       onSkipUnavailableType: (type) =>
-        print(missingSchemaHashReadNote([type], "rebuilding the backlink index from the rest")),
+        print(
+          missingSchemaHashReadNote(
+            [type],
+            "rebuilding the backlink index from the rest",
+          ),
+        ),
     });
     result.backlinkIndex = rebuilt;
     print(
@@ -218,6 +245,10 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     return rebuildChildTaskIndex(opts, node, print);
   }
 
+  if (opts.papercutStatusIndex) {
+    return rebuildPapercutStatusIndex(opts, node, print);
+  }
+
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
   const result: ReindexResult = {
     scanned: 0,
@@ -228,7 +259,9 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
 
   for (const type of types) {
     const schemaHash = schemaHashFor(type, opts.cfg);
-    const records = await listRecordsAdminScan(node, type, schemaHash, { includeTombstones: true });
+    const records = await listRecordsAdminScan(node, type, schemaHash, {
+      includeTombstones: true,
+    });
     const counts = { reindexed: 0, skippedTombstone: 0 };
     result.byType[type] = counts;
 
@@ -308,7 +341,12 @@ async function rebuildListIndex(
     try {
       schemaHash = schemaHashFor(type, opts.cfg);
     } catch {
-      print(missingSchemaHashReadNote([type], "skipping list-index rebuild for that type"));
+      print(
+        missingSchemaHashReadNote(
+          [type],
+          "skipping list-index rebuild for that type",
+        ),
+      );
       continue;
     }
     // Admin full scan is the SOT for this repair — never seed via product
@@ -332,7 +370,10 @@ async function rebuildListIndex(
       print(
         `list-index ${type}: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
       );
-      if (before.missingFromIndex.length > 0 && before.missingFromIndex.length <= 12) {
+      if (
+        before.missingFromIndex.length > 0 &&
+        before.missingFromIndex.length <= 12
+      ) {
         print(`  missing: ${before.missingFromIndex.join(", ")}`);
       } else if (before.missingFromIndex.length > 12) {
         print(
@@ -368,9 +409,13 @@ async function rebuildListIndex(
     }
   }
 
-  const prefix = opts.dryRun ? "dry-run: would rebuild list-index for" : "rebuilt list-index for";
+  const prefix = opts.dryRun
+    ? "dry-run: would rebuild list-index for"
+    : "rebuilt list-index for";
   const typeScope = opts.type ? ` type=${opts.type}` : "";
-  const incomplete = (result.listIndexCensus ?? []).filter((c) => !c.complete).length;
+  const incomplete = (result.listIndexCensus ?? []).filter(
+    (c) => !c.complete,
+  ).length;
   print(
     `${prefix} ${result.reindexed} live record(s)${typeScope}` +
       (opts.dryRun && incomplete > 0
@@ -407,13 +452,17 @@ async function rebuildChildTaskIndex(
   try {
     schemaHash = schemaHashFor("task", opts.cfg);
   } catch {
-    print(missingSchemaHashReadNote(["task"], "skipping child-task-index rebuild"));
+    print(
+      missingSchemaHashReadNote(["task"], "skipping child-task-index rebuild"),
+    );
     return result;
   }
 
   // Admin full scan is the SOT for this repair — never seed via the product
   // `listRecords`/`findChildTasksByDesign` paths, which is what we're fixing.
-  const allTasks = await listRecordsAdminScan(node, "task", schemaHash, { includeTombstones: true });
+  const allTasks = await listRecordsAdminScan(node, "task", schemaHash, {
+    includeTombstones: true,
+  });
   const liveTasks = allTasks.filter((t) => {
     if (isTombstoned(t)) {
       result.skippedTombstone++;
@@ -425,7 +474,10 @@ async function rebuildChildTaskIndex(
     .filter((t) => (t.design_slug ?? "").length > 0)
     .map((t) => `${t.design_slug} ${t.slug}`);
   result.scanned = allTasks.length;
-  result.byType.task = { reindexed: liveTasks.length, skippedTombstone: result.skippedTombstone };
+  result.byType.task = {
+    reindexed: liveTasks.length,
+    skippedTombstone: result.skippedTombstone,
+  };
 
   const before = await censusChildTaskIndex(node, opts.cfg, sotPairs);
   if (before) {
@@ -437,10 +489,15 @@ async function rebuildChildTaskIndex(
     print(
       `child-task-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
     );
-    if (before.missingFromIndex.length > 0 && before.missingFromIndex.length <= 12) {
+    if (
+      before.missingFromIndex.length > 0 &&
+      before.missingFromIndex.length <= 12
+    ) {
       print(`  missing: ${before.missingFromIndex.join(", ")}`);
     } else if (before.missingFromIndex.length > 12) {
-      print(`  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`);
+      print(
+        `  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`,
+      );
     }
   } else {
     print("child-task-index: entry schema unavailable — cannot census");
@@ -450,7 +507,11 @@ async function rebuildChildTaskIndex(
     result.reindexed = sotPairs.length;
     print(
       `dry-run: would rebuild child-task-index for ${sotPairs.length} linked task(s)` +
-        (before ? (before.complete ? " — already complete" : " — incomplete vs SOT") : ""),
+        (before
+          ? before.complete
+            ? " — already complete"
+            : " — incomplete vs SOT"
+          : ""),
     );
     return result;
   }
@@ -465,5 +526,88 @@ async function rebuildChildTaskIndex(
     );
   }
   print(`rebuilt child-task-index for ${sotPairs.length} linked task(s)`);
+  return result;
+}
+
+/** Rebuild the PapercutStatusIndex (status x slug) from papercut SOT. */
+async function rebuildPapercutStatusIndex(
+  opts: ReindexOptions,
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  print: (line: string) => void,
+): Promise<ReindexResult> {
+  const result: ReindexResult = {
+    scanned: 0,
+    reindexed: 0,
+    skippedTombstone: 0,
+    byType: {},
+  };
+  let schemaHash: string;
+  try {
+    schemaHash = schemaHashFor("papercut", opts.cfg);
+  } catch {
+    print(
+      missingSchemaHashReadNote(
+        ["papercut"],
+        "skipping papercut-status-index rebuild",
+      ),
+    );
+    return result;
+  }
+  const all = await listRecordsAdminScan(node, "papercut", schemaHash, {
+    includeTombstones: true,
+  });
+  const live = all.filter((record) => {
+    if (isTombstoned(record)) {
+      result.skippedTombstone++;
+      return false;
+    }
+    return true;
+  });
+  const sotPairs = live.map((record) => `${record.status} ${record.slug}`);
+  result.scanned = all.length;
+  result.byType.papercut = {
+    reindexed: live.length,
+    skippedTombstone: result.skippedTombstone,
+  };
+
+  const before = await censusPapercutStatusIndex(node, opts.cfg, sotPairs);
+  if (before) {
+    result.papercutStatusIndexCensus = before;
+    const gap =
+      before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
+        ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
+        : " complete";
+    print(
+      `papercut-status-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
+    );
+  } else {
+    print(
+      "papercut-status-index: entry schema unavailable — run `fbrain init` first",
+    );
+  }
+
+  if (opts.dryRun) {
+    result.reindexed = live.length;
+    print(
+      `dry-run: would rebuild papercut-status-index for ${live.length} papercut(s)` +
+        (before
+          ? before.complete
+            ? " — already complete"
+            : " — incomplete vs SOT"
+          : ""),
+    );
+    return result;
+  }
+
+  await writePapercutStatusIndex(node, opts.cfg, live);
+  result.reindexed = live.length;
+  const after = await censusPapercutStatusIndex(node, opts.cfg, sotPairs);
+  if (after) {
+    result.papercutStatusIndexCensus = after;
+    print(
+      `papercut-status-index: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
+    );
+  }
+  print(`rebuilt papercut-status-index for ${live.length} papercut(s)`);
   return result;
 }
