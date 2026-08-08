@@ -18,10 +18,12 @@ import {
 } from "../../src/papercut.ts";
 import {
   buildCensus,
-  findDuplicateCandidates,
-  similarity,
-  NEAR_DUPLICATE_THRESHOLD,
+  papercutFileCmd,
+  papercutDedupeProbes,
+  semanticDuplicateCandidates,
+  SEMANTIC_DUPLICATE_THRESHOLD,
 } from "../../src/commands/papercut.ts";
+import type { FindHit } from "../../src/commands/find.ts";
 import type { FbrainRecord } from "../../src/record.ts";
 import { RECORDS, PAPERCUT_STATUSES } from "../../src/schemas.ts";
 
@@ -61,7 +63,7 @@ describe("symptom normalization and hashing", () => {
   // Deliberate design choice, documented in normalizeSymptom: digits are kept,
   // so a drifting measurement UNDER-collides rather than over-collides. An
   // over-collision would silently fold two real defects into one record.
-  test("a changed measurement does not collide on the hash (the similarity net catches it)", () => {
+  test("a changed measurement does not collide on the hash (the semantic net catches it)", () => {
     expect(symptomHash("lastgit", "70 of 84 packs fetch 404")).not.toBe(
       symptomHash("lastgit", "71 of 84 packs fetch 404"),
     );
@@ -70,21 +72,29 @@ describe("symptom normalization and hashing", () => {
 });
 
 describe("the dedupe gate", () => {
-  const existing = [
-    rec({
+  function hit(record: FbrainRecord, maxSimilarity: number): FindHit {
+    return {
+      type: "papercut",
+      slug: record.slug,
+      fusedScore: 0.02,
+      maxSimilarity,
+      matchHits: [{ idx: 0, rank: 1 }],
+      record,
+    };
+  }
+
+  const existing = rec({
       slug: "papercut-lastgit-sweep-skips-pointer-rows",
       title: "the durability sweep skips every pack row carrying a file pointer",
-      body: "repair --backfill-file-blobs never dereferences a pointer",
+      body: "Symptom: the durability sweep skips pointer rows",
       symptom_hash: symptomHash("lastgit", "the durability sweep skips pointer rows"),
       status: "open",
-    }),
-  ];
+    });
 
-  test("an exact symptom-hash match blocks the file", () => {
-    const hits = findDuplicateCandidates(existing, {
+  test("an exact slug point-read remains the cheap pre-filter", () => {
+    const hits = semanticDuplicateCandidates([hit(existing, 0.01)], {
       component: "lastgit",
-      symptom: "the durability sweep skips pointer rows",
-      hash: symptomHash("lastgit", "the durability sweep skips pointer rows"),
+      exactSlug: existing.slug,
     });
     expect(hits).toHaveLength(1);
     expect(hits[0]!.exact).toBe(true);
@@ -93,34 +103,27 @@ describe("the dedupe gate", () => {
   // The failure this exists for: on 2026-08-04 the same defect was filed twice,
   // two hours apart, by different runs. Two agents describing one defect
   // paraphrase — so a hash alone would not have caught it.
-  test("a paraphrase with no hash match still blocks the file", () => {
-    const symptom = "the durability sweep skips every pack row that carries a file pointer";
-    const hits = findDuplicateCandidates(existing, {
+  test("a differently-worded restatement is detected by semantic similarity", () => {
+    const hits = semanticDuplicateCandidates([hit(existing, 0.79)], {
       component: "lastgit",
-      symptom,
-      hash: symptomHash("lastgit", symptom),
+      exactSlug: "papercut-lastgit-backfill-cannot-read-cas-indirections",
     });
     expect(hits).toHaveLength(1);
     expect(hits[0]!.exact).toBe(false);
-    expect(hits[0]!.score).toBeGreaterThanOrEqual(NEAR_DUPLICATE_THRESHOLD);
+    expect(hits[0]!.score).toBeGreaterThanOrEqual(SEMANTIC_DUPLICATE_THRESHOLD);
   });
 
-  test("a genuinely different defect in the same component does not block", () => {
-    const symptom = "ci watch replays the whole ref-event partition on every restart";
-    const hits = findDuplicateCandidates(existing, {
+  test("a new defect with a shared slug prefix stays below the floor", () => {
+    const hits = semanticDuplicateCandidates([hit(existing, 0.49)], {
       component: "lastgit",
-      symptom,
-      hash: symptomHash("lastgit", symptom),
+      exactSlug: "papercut-lastgit-sweep-skips-new-unrelated-thing",
     });
     expect(hits).toEqual([]);
   });
 
   test("the same symptom in a different component does not block", () => {
-    const symptom = "the durability sweep skips pointer rows";
-    const hits = findDuplicateCandidates(existing, {
+    const hits = semanticDuplicateCandidates([hit(existing, 0.99)], {
       component: "kanban",
-      symptom,
-      hash: symptomHash("kanban", symptom),
     });
     expect(hits).toEqual([]);
   });
@@ -130,74 +133,30 @@ describe("the dedupe gate", () => {
   // record whose status says the defect is gone.
   test("a terminal papercut never blocks a new filing", () => {
     for (const status of ["verified", "wontfix", "duplicate"]) {
-      const closed = [rec({ ...existing[0]!, status } as Partial<FbrainRecord> & { slug: string })];
-      const hits = findDuplicateCandidates(closed, {
+      const closed = rec({ ...existing, status } as Partial<FbrainRecord> & { slug: string });
+      const hits = semanticDuplicateCandidates([hit(closed, 0.99)], {
         component: "lastgit",
-        symptom: "the durability sweep skips pointer rows",
-        hash: symptomHash("lastgit", "the durability sweep skips pointer rows"),
       });
       expect(hits, `status ${status} should not gate`).toEqual([]);
     }
   });
 
-  test("similarity is symmetric and bounded", () => {
-    const a = "the sweep skips pointer rows entirely";
-    const b = "the sweep skips every pointer row it finds";
-    expect(similarity(a, b)).toBeCloseTo(similarity(b, a), 10);
-    expect(similarity(a, a)).toBe(1);
-    expect(similarity(a, "")).toBe(0);
-  });
-
-  // REGRESSION. The first implementation used Jaccard, which divides by the
-  // union — so every extra token of evidence in the stored record pushed the
-  // score down, and a well-documented papercut was HARDER to match than a terse
-  // one. Measured on this exact pair: 0.750 against the title, 0.529 against
-  // title+body, with the gate at 0.6. The duplicate would have been filed.
-  test("a long evidence body does not make a record harder to match", () => {
-    const short = rec({
-      slug: "short",
-      title: "the durability sweep skips every pack row carrying a file pointer",
-      body: "Symptom: the durability sweep skips pointer rows\n",
-      status: "open",
-    });
-    const documented = rec({
-      slug: "documented",
-      title: "the durability sweep skips every pack row carrying a file pointer",
-      body:
-        "Symptom: the durability sweep skips pointer rows\n\n" +
-        "repair --backfill-file-blobs never dereferences a pointer. brain is typical: " +
-        "84 of 84 packs in its covering set carry a pointer, 70 fetch HTTP 404, and the " +
-        "sweep answered noop skipped=94 unrecoverable=0 for a repo that cannot be cloned " +
-        "at all. Root cause is node-side: the file-blob plane accepts writes it cannot " +
-        "serve back, uncorrelated with size, generation or state.\n",
-      status: "open",
-    });
-    const symptom = "the durability sweep skips every pack row that carries a file pointer";
-    const hash = symptomHash("lastgit", symptom);
-    const hitShort = findDuplicateCandidates([short], { component: "lastgit", symptom, hash });
-    const hitLong = findDuplicateCandidates([documented], { component: "lastgit", symptom, hash });
-    expect(hitShort).toHaveLength(1);
-    expect(hitLong).toHaveLength(1);
-    expect(hitLong[0]!.score).toBeCloseTo(hitShort[0]!.score, 10);
-  });
-
-  // The floor that makes dividing by the shorter side safe.
-  test("a handful of shared common words does not block an unrelated filing", () => {
-    const existing = [
-      rec({
-        slug: "long-record",
-        title: "the durability sweep skips every pack row carrying a file pointer to the cas",
-        body: "Symptom: the durability sweep skips pointer rows\n",
-        status: "open",
+  test("title, symptom, and an optional error line become separate probes", () => {
+    expect(
+      papercutDedupeProbes({
+        title: "The writer stalls",
+        symptom: "writes never finish",
+        body: "Observed twice.\nError: deadline exceeded while sealing",
       }),
-    ];
-    const symptom = "the cas";
-    const hits = findDuplicateCandidates(existing, {
-      component: "lastgit",
-      symptom,
-      hash: symptomHash("lastgit", symptom),
-    });
-    expect(hits).toEqual([]);
+    ).toEqual([
+      "The writer stalls",
+      "writes never finish",
+      "deadline exceeded while sealing",
+    ]);
+  });
+
+  test("the file path contains no papercut partition enumeration", () => {
+    expect(papercutFileCmd.toString()).not.toContain("listRecords");
   });
 });
 

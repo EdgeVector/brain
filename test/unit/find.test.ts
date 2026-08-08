@@ -158,6 +158,7 @@ describe("findCmd", () => {
 
     const sharedHit = result.hits.find((h) => h.slug === "shared")!;
     expect(sharedHit.matchHits.map((m) => m.idx).sort()).toEqual([0, 1]);
+    expect(sharedHit.maxSimilarity).toBe(0.9);
     const aonlyHit = result.hits.find((h) => h.slug === "aonly")!;
     expect(aonlyHit.matchHits.map((m) => m.idx)).toEqual([0]);
     const bonlyHit = result.hits.find((h) => h.slug === "bonly")!;

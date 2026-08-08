@@ -29,6 +29,7 @@ import {
   updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
+import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import { maintainTypeListIndex } from "../record-list-index.ts";
 import {
@@ -39,22 +40,16 @@ import {
   ensureSeverity,
   ensureVerificationEvidence,
   isLivePapercutStatus,
-  normalizeSymptom,
   symptomHash,
 } from "../papercut.ts";
 
 const PAPERCUT: "papercut" = "papercut";
 
-// Token-overlap threshold for the near-duplicate gate. Deliberately
-// advisory-with-teeth: it BLOCKS the file and names the candidates, and
-// `--not-duplicate-of` is how you say "I read them, this is different" — a
-// decision that then lives in the record.
-export const NEAR_DUPLICATE_THRESHOLD = 0.6;
-
-// Floor on the absolute number of shared tokens. The overlap coefficient below
-// divides by the SHORTER text, so without this a three-word symptom fully
-// contained in a long title scores 1.0 and blocks everything.
-export const NEAR_DUPLICATE_MIN_SHARED_TOKENS = 4;
+// Raw cosine floor for semantic duplicate candidates. `find` orders with RRF,
+// whose scores are intentionally tiny and rank-relative; dedupe needs the
+// strongest absolute similarity returned by any individual probe.
+export const SEMANTIC_DUPLICATE_THRESHOLD = 0.5;
+export const SEMANTIC_DUPLICATE_LIMIT = 10;
 
 export type DuplicateCandidate = {
   slug: string;
@@ -64,52 +59,22 @@ export type DuplicateCandidate = {
   exact: boolean;
 };
 
-function tokenSet(text: string): Set<string> {
-  return new Set(normalizeSymptom(text).split(" ").filter((t) => t.length > 2));
+export function papercutDedupeProbes(opts: {
+  title: string;
+  symptom: string;
+  body: string;
+}): string[] {
+  const error = /^(?:error|exception):\s*(.+)$/im.exec(opts.body)?.[1]?.trim();
+  return [...new Set([opts.title.trim(), opts.symptom.trim(), error ?? ""].filter(Boolean))];
 }
 
-// OVERLAP COEFFICIENT (shared / size of the shorter side), not Jaccard.
-//
-// Jaccard was the first implementation and it had a property that would have
-// quietly defeated the whole gate: it divides by the UNION, so every extra
-// token in the stored record's body pushes the score down. Measured on the
-// worked example — a one-line symptom against a real record — Jaccard scored
-// the same paraphrase 0.529 against title+body and 0.750 against the title
-// alone. The better-documented a papercut was, the less likely it would catch
-// its own duplicate. That is precisely the shape of instrument defect this
-// ledger exists to record, so it does not get to ship inside it.
-//
-// Dividing by the shorter side removes the length coupling. The floor on
-// absolute shared tokens (above) covers the failure the change introduces.
-//
-// Chosen over an embedding call on purpose: this runs on every file, must be
-// deterministic for tests, and must not fail the write path when the search
-// service is unreachable. It is the SECOND net — the exact `symptom_hash`
-// match is the first — and neither is claimed to be complete.
-export function similarity(a: string, b: string): number {
-  const ta = tokenSet(a);
-  const tb = tokenSet(b);
-  if (ta.size === 0 || tb.size === 0) return 0;
-  let shared = 0;
-  for (const t of ta) if (tb.has(t)) shared += 1;
-  if (shared < NEAR_DUPLICATE_MIN_SHARED_TOKENS) return 0;
-  return shared / Math.min(ta.size, tb.size);
-}
-
-// The `Symptom:` line `papercutFileCmd` writes as the first line of every body.
-// Comparing against it — rather than the whole body — is what keeps a long,
-// well-evidenced record as findable as a terse one.
-export function storedSymptom(body: string): string {
-  const match = /^Symptom:\s*(.+)$/m.exec(body);
-  return match?.[1]?.trim() ?? "";
-}
-
-export function findDuplicateCandidates(
-  existing: readonly FbrainRecord[],
-  opts: { component: string; symptom: string; hash: string },
+export function semanticDuplicateCandidates(
+  hits: readonly FindHit[],
+  opts: { component: string; exactSlug?: string },
 ): DuplicateCandidate[] {
   const candidates: DuplicateCandidate[] = [];
-  for (const record of existing) {
+  for (const hit of hits) {
+    const record = hit.record;
     // Only live records gate a new filing. A `verified` papercut that comes
     // back is a RECONFIRMATION and deserves its own record (kind:
     // `reconfirmed`) — folding it into the closed one would hide a regression
@@ -118,21 +83,9 @@ export function findDuplicateCandidates(
     if (typeof record.component === "string" && record.component !== opts.component) {
       continue;
     }
-    const exact =
-      typeof record.symptom_hash === "string" &&
-      record.symptom_hash.length > 0 &&
-      record.symptom_hash === opts.hash;
-    // Compare against the two SHORT statements of the defect — the title and
-    // the stored `Symptom:` line — and take the better match. Never against the
-    // whole body: that is the length coupling documented on `similarity`.
-    const stored = storedSymptom(record.body ?? "");
-    const score = exact
-      ? 1
-      : Math.max(
-          similarity(opts.symptom, record.title),
-          stored.length > 0 ? similarity(opts.symptom, stored) : 0,
-        );
-    if (exact || score >= NEAR_DUPLICATE_THRESHOLD) {
+    const exact = record.slug === opts.exactSlug;
+    const score = exact ? 1 : hit.maxSimilarity;
+    if (exact || score >= SEMANTIC_DUPLICATE_THRESHOLD) {
       candidates.push({
         slug: record.slug,
         title: record.title,
@@ -193,18 +146,55 @@ export async function papercutFileCmd(
 
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
-
-  const existing = await listRecords(node, PAPERCUT, opts.cfg);
   const cleared = new Set((opts.notDuplicateOf ?? []).map(normalizeSlug));
-  const duplicates = findDuplicateCandidates(existing, {
+
+  // Preserve the cheap exact-restatement pre-filter as one point read. The
+  // fuzzy tail is semantic `find`, never a papercut partition enumeration.
+  const prior = await findBySlug(node, PAPERCUT, schemaHash, slug);
+  let semanticHits: FindHit[];
+  if (prior) {
+    // An exact slug settles the pre-filter without paying for vector search.
+    semanticHits = [{
+      type: PAPERCUT,
+      slug: prior.slug,
+      fusedScore: 0,
+      maxSimilarity: 1,
+      matchHits: [],
+      record: prior,
+    }];
+  } else {
+    const probes = papercutDedupeProbes({
+      title: opts.title,
+      symptom: opts.symptom,
+      body: opts.body,
+    });
+    try {
+      semanticHits = (
+        await findCmd({
+          cfg: opts.cfg,
+          matches: probes,
+          types: [PAPERCUT],
+          limit: SEMANTIC_DUPLICATE_LIMIT,
+          verbose: opts.verbose,
+          print: () => {},
+          printErr: () => {},
+        })
+      ).hits;
+    } catch (error) {
+      semanticHits = [];
+      opts.verbose?.(
+        `papercut dedupe: semantic probe unavailable; exact-slug pre-filter only (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+  }
+  const duplicates = semanticDuplicateCandidates(semanticHits, {
     component,
-    symptom: opts.symptom,
-    hash,
+    exactSlug: slug,
   }).filter((c) => !cleared.has(c.slug));
 
   if (duplicates.length > 0) {
     const lines = [
-      `Refusing to file: ${duplicates.length} live papercut(s) in \`${component}\` may already describe this.`,
+      `Possible duplicate: ${duplicates.length} live papercut(s) in \`${component}\` may already describe this.`,
       "",
       ...duplicates.map(
         (d) =>
@@ -237,7 +227,6 @@ export async function papercutFileCmd(
     };
   }
 
-  const prior = await findBySlug(node, PAPERCUT, schemaHash, slug);
   if (prior) {
     throw new FbrainError({
       code: "papercut_exists",
