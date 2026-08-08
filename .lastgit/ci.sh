@@ -26,6 +26,15 @@ echo "== tests =="
 # Routines host env injects lastsecrets:// OBS_SENTRY_DSN which is not a real DSN;
 # unset so CLI stderr purity tests stay green under scheduled pickup.
 unset OBS_SENTRY_DSN SENTRY_DSN || true
+# Unit tests deliberately provide their own fake LastSeek binary where needed.
+# Hide the host installation so unrelated mocked search tests cannot discover it
+# through the default command name and escape their fixture boundary.
+ci_shim_dir="$(mktemp -d)"
+trap 'rm -rf "$ci_shim_dir"' EXIT
+printf '#!/bin/sh\nexit 127\n' > "$ci_shim_dir/lastseek"
+chmod +x "$ci_shim_dir/lastseek"
+unset LASTSEEK_BIN
+export PATH="$ci_shim_dir:$PATH"
 FBRAIN_SKIP_INTEGRATION="${FBRAIN_SKIP_INTEGRATION:-1}" bun test --timeout 60000
 
 echo "lastgit ci gate PASSED"
