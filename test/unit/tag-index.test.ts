@@ -8,7 +8,7 @@ import {
 } from "../../src/client.ts";
 import type { Config } from "../../src/config.ts";
 import { findBySlug, schemaHashFor, TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
-import { TAG_INDEX_SCHEMA_KEY, type RecordType } from "../../src/schemas.ts";
+import { TAG_INDEX_SCHEMA_KEY, tagIndexSchema, type RecordType } from "../../src/schemas.ts";
 import {
   indexRecordTags,
   readTagIndex,
@@ -438,5 +438,45 @@ describe("PERF: tag query cost scales with tag cardinality, not corpus size", ()
     expect(large.matched).toBe(tagged);
     expect(small.rowsScanned).toBe(10);
     expect(large.rowsScanned).toBe(1000);
+  });
+});
+
+
+describe("TagIndex is declared non-searchable", () => {
+  // Brain is the only thing that can say this, and saying it is the entire
+  // mechanism: with `field_classifications` unset, the host emits
+  // `searchable_fields: null`, which a consumer must read as "legacy,
+  // unspecified" rather than as exclusion. Measured 2026-08-08, that omission
+  // put three `__tagidx__` machine keys in the top four of every UNSCOPED
+  // semantic query.
+  test("every field is no_index and none is word-indexed", () => {
+    const cls = tagIndexSchema.schema.field_classifications;
+    expect(cls).toBeDefined();
+    for (const field of tagIndexSchema.schema.fields) {
+      expect(cls![field], `field ${field} must be classified`).toBeDefined();
+      expect(cls![field]).toContain("no_index");
+    }
+    // The load-bearing assertion. One `word` field is all it takes for the host
+    // to start emitting this schema as searchable prose again.
+    const words = Object.entries(cls!).filter(([, c]) => c.includes("word"));
+    expect(words).toEqual([]);
+  });
+
+  test("classifications cover exactly the declared fields", () => {
+    // A field added later without a classification would silently reopen the
+    // hole, because `field_classifications` is only consulted per field.
+    const cls = tagIndexSchema.schema.field_classifications!;
+    expect(Object.keys(cls).sort()).toEqual([...tagIndexSchema.schema.fields].sort());
+  });
+
+  test("data classifications are untouched", () => {
+    // Indexability and sensitivity are different axes; this change is only the
+    // former.
+    for (const field of tagIndexSchema.schema.fields) {
+      expect(tagIndexSchema.schema.field_data_classifications[field]).toEqual({
+        sensitivity_level: 0,
+        data_domain: "general",
+      });
+    }
   });
 });

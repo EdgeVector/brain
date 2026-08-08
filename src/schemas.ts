@@ -586,6 +586,38 @@ export const tagIndexSchema: AddSchemaRequest = {
       created_at: "RFC 3339 timestamp",
       updated_at: "RFC 3339 timestamp",
     },
+    // NOT SEARCHABLE — every field, deliberately.
+    //
+    // TagIndex is brain's own bookkeeping: a machine key
+    // (`__tagidx__<sha256>`) pointing at a list of `type:slug` members. Nobody
+    // searches for it, and it is not prose.
+    //
+    // Measured 2026-08-08 on the live semantic plane, an UNSCOPED query
+    // returned this and nothing else in its top four:
+    //
+    //   0.747  TagIndex  __tagidx__8d8ea229865deee0e8e6dec4b3cf6d6e34…
+    //   0.744  TagIndex  __tagidx__4d0cf51fab3231323f683f788c36c3f62d…
+    //   0.728  TagIndex  __tagidx__b2fc4e7094dad451b55e8059bab659f7db…
+    //
+    // A bag of tag tokens lands mid-similarity against almost any query, so
+    // these crowded the head of every unscoped result. brain's own reads scope
+    // by type and were unaffected — but "any app can search its own records"
+    // means new callers arrive, and the first thing a new caller does is an
+    // unscoped query.
+    //
+    // Leaving `field_classifications` unset was not neutral: the host emits
+    // `searchable_fields: null` for it, which a consumer must read as "legacy,
+    // unspecified" rather than as exclusion. Only the owning app can say this,
+    // and saying it explicitly is the whole mechanism — so every field is
+    // enumerated, and there is deliberately no `word` field. Same shape as the
+    // attachment support schemas above.
+    field_classifications: {
+      slug: ["no_index", "metadata"],
+      tag: ["no_index", "metadata"],
+      members: ["no_index", "metadata"],
+      created_at: ["no_index", "metadata"],
+      updated_at: ["no_index", "metadata"],
+    },
     field_data_classifications: {
       slug: GENERAL,
       tag: GENERAL,
