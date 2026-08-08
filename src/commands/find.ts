@@ -77,6 +77,10 @@ export type FindHit = {
   type: RecordType;
   slug: string;
   fusedScore: number;
+  // Highest raw cosine returned for this record across the caller's probes.
+  // RRF is the ordering score; callers that need an absolute similarity
+  // floor (for example papercut dedupe) must use this value instead.
+  maxSimilarity: number;
   // Which probe indices ranked this hit, and at what rank — mirrors ask.ts's
   // expansionHits, labeled by probe index instead of expansion index.
   matchHits: Array<{ idx: number; rank: number }>;
@@ -185,6 +189,7 @@ export async function findCmd(opts: FindOptions): Promise<FindResult> {
       type: parsed.type,
       slug: parsed.slug,
       fusedScore: f.fusedScore,
+      maxSimilarity: vectorScoreById.get(f.id) ?? 0,
       matchHits,
       record: rec,
     });
