@@ -149,6 +149,21 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     fields as FbrainRecord,
     opts.verbose,
   );
+  // Keep the design->child-task index current (see child-task-index.ts). A
+  // task<->design `link` reparents the task exactly like a `put` that edits
+  // `design_slug` would — the "any task reparent" write path the index must
+  // cover, not just create/put/delete.
+  if (fromType === "task") {
+    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
+    await maintainChildTaskIndex({
+      node,
+      cfg: opts.cfg,
+      taskSlug: fromSlug,
+      task: fields as FbrainRecord,
+      previousDesignSlug: source.design_slug,
+      verbose: opts.verbose,
+    });
+  }
 
   print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}`);
   // Emit the structured payload from the SAME normalized slugs the printed

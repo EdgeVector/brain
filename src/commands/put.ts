@@ -233,6 +233,21 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     slug,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+
+  // Keep the design->child-task index current (see child-task-index.ts).
+  // `existing` is the pre-write record (undefined on create — nothing to
+  // clean up), so its design_slug is the previous partition to reconcile.
+  if (type === "task") {
+    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
+    await maintainChildTaskIndex({
+      node,
+      cfg: opts.cfg,
+      taskSlug: slug,
+      task: visible,
+      previousDesignSlug: existing?.design_slug,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    });
+  }
   await reconcileTagIndex(
     node,
     opts.cfg,

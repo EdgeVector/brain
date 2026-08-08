@@ -889,6 +889,84 @@ export const recordListEntrySchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * One live task per HashRange row, addressed by (ctd_h = design_slug) x
+ * (ctd_r = task slug). Lets `findChildTasksByDesign` / the delete cascade
+ * guard point-read one design's children (`{HashKey: designSlug}`) instead
+ * of reading the WHOLE task partition via `listRecords` and filtering by
+ * `design_slug` in the client — the same "list everything, filter locally"
+ * shape RecordListEntry replaced, one layer up: task partition size no
+ * longer bounds a single-design lookup.
+ *
+ * Same opaque-field-names shape as `recordListEntrySchema` (`ctd_*` instead
+ * of `rle_*`) so Schema Service mints a novel HashRange identity instead of
+ * field-unifying into an existing one — see the comment on
+ * `recordListEntrySchema` for why that matters.
+ *
+ * A single reserved GLOBAL marker row (`CHILD_TASK_INDEX_GLOBAL_HASH` /
+ * `CHILD_TASK_INDEX_MIGRATED_RANGE`) — not a per-design marker — records
+ * "this index reflects every live task's design_slug". One marker suffices
+ * because every write path patches its OWN row incrementally from the
+ * moment the schema is registered; only the historical backfill (every task
+ * that existed before registration) needs the bulk `fbrain reindex
+ * --child-task-index` rebuild, and that rebuild covers all designs in one
+ * pass and stamps one marker when done.
+ */
+export const CHILD_TASK_INDEX_SCHEMA_KEY = "__childtaskindex__";
+export const CHILD_TASK_INDEX_MARKER = "fbrain_child_task_index_v1";
+export const CHILD_TASK_INDEX_LAYOUT = "ChildTaskIndex novel hashrange ctd_h x ctd_r";
+/**
+ * Reserved hash partition for the global completeness marker. Design slugs
+ * are kebab-case and never contain `__`, so this can never collide with a
+ * real design's partition.
+ */
+export const CHILD_TASK_INDEX_GLOBAL_HASH = "__ctd_global__";
+export const CHILD_TASK_INDEX_MIGRATED_RANGE = "__ctd_migrated__";
+export const CHILD_TASK_INDEX_FIELDS = [
+  "ctd_h",
+  "ctd_r",
+  "ctd_payload",
+  "ctd_marker",
+] as const;
+
+export const childTaskIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "ChildTaskIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "ChildTaskIndex_hashrange_v1",
+    purpose_statement:
+      "One live task per HashRange row (design_slug partition x task slug) so a design's children resolve via a keyed partition read instead of listing every task and filtering by design_slug in the client",
+    schema_type: "HashRange",
+    key: { hash_field: "ctd_h", range_field: "ctd_r" },
+    fields: [...CHILD_TASK_INDEX_FIELDS],
+    field_types: {
+      ctd_h: "String",
+      ctd_r: "String",
+      ctd_payload: "String",
+      ctd_marker: "String",
+    },
+    field_descriptions: {
+      ctd_h: "opaque partition token (parent design slug value, or the reserved global-marker hash)",
+      ctd_r: "opaque range token (child task slug value, or the reserved migrated-marker range)",
+      ctd_payload: "json object of ONE fbrain task record (not an array), empty for the marker row",
+      ctd_marker: "constant token fbrain_child_task_index_v1",
+    },
+    field_classifications: {
+      ctd_h: ["no_index", "metadata"],
+      ctd_r: ["no_index", "metadata"],
+      ctd_payload: ["no_index", "metadata"],
+      ctd_marker: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      ctd_h: GENERAL,
+      ctd_r: GENERAL,
+      ctd_payload: GENERAL,
+      ctd_marker: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
@@ -1048,6 +1126,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: recordListEntrySchema,
     types: [],
     extraKeys: [RECORD_LIST_ENTRY_SCHEMA_KEY],
+  },
+  {
+    key: CHILD_TASK_INDEX_SCHEMA_KEY,
+    schema: childTaskIndexSchema,
+    types: [],
+    extraKeys: [CHILD_TASK_INDEX_SCHEMA_KEY],
   },
 ];
 

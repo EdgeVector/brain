@@ -934,13 +934,23 @@ export async function findChildTasksByDesign(
   cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<FbrainRecord[]> {
+  // Keyed path first: one design's children via (design_slug, task slug)
+  // partition read (child-task-index.ts) instead of the whole task
+  // partition. `null` means the index isn't registered yet (INERT ON
+  // DEPLOY) — fall through to the pre-existing list-and-filter path below,
+  // unchanged. A registered-but-unmigrated index throws loudly and that
+  // propagates, same as `listRecords`'s own contract.
+  const { readChildTasksByDesign } = await import("./child-task-index.ts");
+  const indexed = await readChildTasksByDesign(node, cfg, designSlug);
+  if (indexed !== null) return indexed;
+
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    // Product path (brain get design): index-first via listRecords+cfg.
+    // Fallback path (index not yet registered): index-first via listRecords+cfg.
     const list = await listRecords(node, "task", cfg);
     if (list.length > 0) {
       return list.filter(
