@@ -6,19 +6,83 @@ import type { RecordType } from "../../schemas.ts";
 import { MIN_BUN_VERSION, bunVersionMeetsMinimum } from "../../runtime.ts";
 import { appIdentityEnforceEnabled, newWriteNodeClient, type WriteNodeClientOptions } from "../../write-context.ts";
 import { buildTombstoneFields } from "../delete.ts";
+import { querySearchPlane } from "../../search-plane.ts";
 import type { CheckResult, DoctorOptions } from "../doctor.ts";
+
+/**
+ * Is semantic search end-to-end usable?
+ *
+ * This probe used to ask the node to run a search "so the node is forced to
+ * load its ONNX model." **There is no model in the node any more.** The
+ * in-process native index was deliberately deleted
+ * (`north-star-lastdb-strip-native-index`, status done), and Mini now answers
+ * `POST /api/app/search` with a structured
+ * `503 search_plane_required: in-process native index removed; use the Search
+ * app plane` — on purpose, as honest failure instead of empty success.
+ *
+ * The old code had no branch for that, so it fell through to a generic
+ * `ok: false` and `fbrain doctor` reported `FAIL: 1 issue` on a completely
+ * healthy host, advising "check the node log" about a route that is working as
+ * designed. A check that is permanently red is not a check — it teaches people
+ * to skip the whole report.
+ *
+ * So the probe now follows the plane instead of the retired endpoint: it asks
+ * the plane brain actually queries (`querySearchPlane` — LastSeek first, then
+ * the Search app). The node's 503 stops being a verdict and becomes what it
+ * is: confirmation that the native index is retired, which says nothing either
+ * way about whether a plane is installed.
+ */
+/** Seam for tests. Defaults to the real plane brain queries. */
+export type EmbeddingProbeDeps = {
+  queryPlane?: typeof querySearchPlane;
+};
 
 export async function runEmbeddingProbe(
   node: NodeClient,
   verbose: Verbose | undefined,
+  // Injected rather than reached for, so a test can present "no plane" without
+  // mutating `process.env.HOME` / `LASTSEEK_DISABLE`. `bun test` shares one
+  // process across files, so poking global env here silently broke unrelated
+  // `fbrain_search` tests running alongside — a test that fails other tests is
+  // worse than no test.
+  deps: EmbeddingProbeDeps = {},
 ): Promise<CheckResult> {
+  const queryPlane = deps.queryPlane ?? querySearchPlane;
+  // Ask the real plane first. A live answer here IS the end-to-end property
+  // this check exists to assert, whatever the node's own route does.
+  try {
+    const hits = await queryPlane({ query: "fbrain", k: 5, verbose });
+    if (hits !== null) {
+      verbose?.(`embedding-runtime: search plane answered (${hits.length} hits)`);
+      return {
+        name: "embedding-runtime",
+        ok: true,
+        detail: `search plane answered the probe query (${hits.length} hit${hits.length === 1 ? "" : "s"})`,
+      };
+    }
+    verbose?.("embedding-runtime: no search plane available");
+  } catch (err) {
+    // An unresolvable schema means the plane is UP and strict — a live plane
+    // rejecting a bad scope term, which is not this check's business. Anything
+    // else from the plane is a real fault worth reporting.
+    verbose?.(`embedding-runtime: search plane errored: ${errMsg(err)}`);
+    return {
+      name: "embedding-runtime",
+      ok: false,
+      detail: `search plane errored on a probe query: ${stripDoctorTip(errMsg(err))}`,
+      fix: "run `lastseek status` (or `search status`) and check the plane's own report",
+    };
+  }
+
+  // No plane answered. Ask the node, purely to tell two very different causes
+  // apart in the message.
   try {
     const hits = await node.search("fbrain", { localFallback: false });
-    verbose?.(`embedding-runtime: ok (${hits.length} hits to probe query)`);
+    verbose?.(`embedding-runtime: node answered (${hits.length} hits)`);
     return {
       name: "embedding-runtime",
       ok: true,
-      detail: "one-token search returned without an embedding-model error",
+      detail: "node in-process search answered the probe query",
     };
   } catch (err) {
     if (err instanceof FbrainError && err.code === "embedding_model_unavailable") {
@@ -31,14 +95,45 @@ export async function runEmbeddingProbe(
           "restart the node so it re-fetches the ONNX file (homebrew: `lastdb daemon stop && lastdb daemon start`)",
       };
     }
-    if (err instanceof FbrainError && err.code === "node_http_404") {
+    // 503 / 404 from this route — the node is CORRECT and there is simply no
+    // plane installed. One honest finding, and the fix is to install a plane,
+    // not to touch the node.
+    //
+    // Matched on STATUS, not on the body. Mini answers with the plain text
+    // `search_plane_required: in-process native index removed; use the Search
+    // app plane`, but `mapNodeError` does not lift a non-JSON body into the
+    // message — the message brain actually sees is just
+    // "Node /api/app/search returned HTTP 503." So a body regex here would
+    // never fire, which is precisely how the old generic branch ended up
+    // reporting a healthy host as FAIL. The regex is kept only for the day the
+    // body does come through.
+    //
+    // A transient overload would also be a 503, and that is acceptable: the
+    // plane probe above has already run, so reaching here means nothing
+    // answered either way, and "install or repair a plane" is the right
+    // instruction in both cases.
+    const retired =
+      err instanceof FbrainError &&
+      (err.code === "node_http_404" ||
+        err.code === "node_http_503" ||
+        /search_plane_required/.test(errMsg(err)));
+    if (retired) {
+      // WARN, not FAIL — and that distinction is the pre-existing contract for
+      // the 404 case, which was right and which this now extends to 503.
+      //
+      // Reaching here means no plane answered, so semantic recall is gone. But
+      // brain is not broken: `ask`/`search` fall back to BM25 keyword rescue, a
+      // real if worse capability. FAIL should mean "this does not work", and
+      // over-claiming it here would make `doctor` red on every keyword-only
+      // host — the same always-red uselessness this whole change is undoing,
+      // just pointed the other way.
       return {
         name: "embedding-runtime",
         ok: true,
         tag: "WARN",
-        detail: "Search app endpoint is unavailable; fbrain search will use local query fallback",
-        fix:
-          "upgrade the LastDB node to a build that serves the Search app route, or continue with local keyword fallback for Brain dedupe/search",
+        detail:
+          "no semantic search plane answered — the node's in-process index is retired by design, so fbrain search will use local keyword fallback",
+        fix: "install LastSeek (`host-track refresh lastseek`, then `lastseek drain`) or the Search app to restore semantic recall",
       };
     }
     return {

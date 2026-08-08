@@ -1250,13 +1250,23 @@ describe("doctor verdict logic", () => {
     expect(fixLine).toContain("lastdb daemon stop && lastdb daemon start");
   });
 
-  test("embedding-runtime probe → WARN when the Search app endpoint is missing", async () => {
+  test("embedding-runtime probe → WARN when no search plane answers", async () => {
+    // `searchPlane` is injected because the probe now consults the real plane
+    // first. Without the seam this test passed or failed depending on whether
+    // the machine running it had LastSeek installed — it mocked the node and
+    // not the plane.
+    //
+    // Still WARN, not FAIL: semantic recall is gone but brain answers via BM25
+    // keyword rescue, so this is degraded rather than broken. The wording moved
+    // from "Search app endpoint" to "search plane" because the node's route is
+    // now retired by design and a plane is a separate, installable thing.
     const configPath = writeCfg(makeCfg());
     const lines: string[] = [];
     const code = await doctor({
       configPath,
       print: (l) => lines.push(l),
       schemaClientFactory: () => mockSchemaClient({}),
+      searchPlane: async () => null,
       nodeClientFactory: () =>
         mockNodeClient({
           searchThrows: new FbrainError({
@@ -1268,10 +1278,10 @@ describe("doctor verdict logic", () => {
     expect(code).toBe(0);
     const warnLine = lines.find((l) => l.startsWith("[WARN] embedding-runtime"));
     expect(warnLine).toBeDefined();
-    expect(warnLine!).toContain("Search app endpoint");
-    expect(warnLine!).toContain("local query fallback");
+    expect(warnLine!).toContain("no semantic search plane answered");
+    expect(warnLine!).toContain("keyword fallback");
     const fixLine = lines[lines.indexOf(warnLine!) + 1] ?? "";
-    expect(fixLine).toContain("Search app route");
+    expect(fixLine).toContain("lastseek");
   });
 
   test("schema drift on a Phase 6 per-kind schema → drift FAIL", async () => {
