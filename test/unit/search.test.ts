@@ -862,16 +862,17 @@ describe("searchCmd", () => {
     expect(lines.join("\n")).not.toContain("flaky");
   }, 10_000);
 
-  test("hydrates ONCE per distinct schema, not once per hit (N+1 fix)", async () => {
-    // The perf fix this card lands. Pre-fix, search hydrated each deduped hit
-    // with its own point-read — and that fetches the WHOLE schema
-    // page via /api/query and client-filters for one slug. So N hits on one
-    // schema issued N identical full-schema fetches (the ~25–29 s live-brain
-    // latency, dogfood run 115). The fix groups hits by schema hash and fetches
-    // each DISTINCT schema exactly once. Here: 5 Design hits + 3 Task hits = 8
-    // hits across 2 distinct schemas must issue exactly 2 /api/query POSTs, not
-    // 8. We count POSTs PER schema_name so the assertion pins both the total
-    // (K, not N) and the one-per-schema invariant.
+  test("hydrates exactly the slugs each hit needs, one point read per slug", async () => {
+    // The perf fix this card lands. Search used to hydrate a schema by
+    // fetching its WHOLE partition (`listRecords`) once per distinct schema,
+    // even though the caller already knows exactly which slugs its ranked
+    // hits need — a 5-hit Design page threw away every OTHER live Design
+    // record just to keep those 5. This replaces that with N point reads
+    // (`HashRangeKey: { hash: type, range: slug }`), so the fetch count
+    // tracks the hit count, not the partition size. Here: 5 Design hits + 3
+    // Task hits must issue exactly 5 + 3 = 8 keyed `/api/query` POSTs, one per
+    // slug — never a partition-wide `HashKey` scan. We count POSTs PER
+    // schema_name so the assertion pins both the per-schema and total counts.
     const mkRow = (slug: string, title: string) => ({
       fields: {
         slug,
@@ -914,13 +915,13 @@ describe("searchCmd", () => {
     // = 5) doesn't slice the output — this test asserts the hydration COUNT and
     // that all 8 hits resolve, both of which are independent of the display cap.
     await searchCmd({ cfg, query: "anything", limit: 100, print: (l) => lines.push(l) });
-    // Exactly ONE hydrate fetch per distinct schema — the whole point of the fix.
-    expect(queryCallsBySchema.get(DESIGN_HASH)).toBe(1);
-    expect(queryCallsBySchema.get(TASK_HASH)).toBe(1);
-    // K=2 distinct schemas, not N=8 hits.
+    // One point-read fetch per requested slug — the whole point of the fix.
+    expect(queryCallsBySchema.get(DESIGN_HASH)).toBe(5);
+    expect(queryCallsBySchema.get(TASK_HASH)).toBe(3);
+    // 8 slugs, not 2 whole-partition scans.
     const totalQueryCalls = [...queryCallsBySchema.values()].reduce((a, b) => a + b, 0);
-    expect(totalQueryCalls).toBe(2);
-    // …and all 8 hits still resolved + printed (no row lost to the batching).
+    expect(totalQueryCalls).toBe(8);
+    // …and all 8 hits still resolved + printed (no row lost to the point reads).
     const rows = rowsOf(lines);
     expect(rows.length).toBe(8);
     for (const r of [...designRows, ...taskRows]) {

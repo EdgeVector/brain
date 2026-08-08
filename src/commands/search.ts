@@ -218,7 +218,6 @@ async function resolveNativeHits(
   // the `--type` filter, and record the distinct schema hashes to hydrate.
   type Candidate = { hit: NativeIndexHit; slug: string; type: RecordType; schemaHash: string };
   const candidates: Candidate[] = [];
-  const schemaHashByType = new Map<RecordType, string>();
   for (const hit of unique) {
     const slug = hit.key_value.hash;
     if (!slug) {
@@ -243,25 +242,33 @@ async function resolveNativeHits(
       continue;
     }
     const schemaHash = schemaHashFor(type, opts.cfg);
-    schemaHashByType.set(type, schemaHash);
     candidates.push({ hit, slug, type, schemaHash });
   }
 
-  // Hydrate each DISTINCT schema exactly once into a `Map<slug, record>`. The
-  // batch helper preserves the per-hit empty-page flake tolerance, just hoisted
-  // to the schema level: /api/query returns a non-deterministic top-100 slice,
-  // so an empty page on a saturated daemon is retried (capped) before the
-  // schema is declared empty, while a NON-empty page is authoritative — a slug
-  // present in the search hits but absent from a non-empty hydrated page is a
-  // genuine stale hit (record deleted since indexing). Same observable behavior
-  // as the old per-hit point-read, one fetch per schema instead of one
-  // per hit on it. Key the cache by schema HASH (not type) so the unified-MEMO
-  // types — concept/preference/reference/agent/project/spike all on one hash —
-  // share a single hydration.
+  // Hydrate each DISTINCT schema with exactly the slugs its hits need — N
+  // point reads via `hydrateSchemaBySlug`, not a whole-partition scan. The
+  // batch helper preserves the per-slug empty-result flake tolerance: an
+  // empty `/api/query` slice on a saturated daemon is ambiguous, so it's
+  // retried (capped) before that one slug is declared absent, while a found
+  // row is authoritative — a slug present in the search hits but absent from
+  // the store is a genuine stale hit (record deleted since indexing). Key the
+  // group by schema HASH (not type) so the unified-MEMO types —
+  // concept/preference/reference/agent/project/spike all on one hash — share
+  // a single hydration pass; `recordTypeForHash` always resolves a shared
+  // hash to the same canonical type, so every candidate in a group already
+  // carries that same `type`.
+  const slugsBySchema = new Map<string, { type: RecordType; slugs: Set<string> }>();
+  for (const { type, schemaHash, slug } of candidates) {
+    let group = slugsBySchema.get(schemaHash);
+    if (!group) {
+      group = { type, slugs: new Set() };
+      slugsBySchema.set(schemaHash, group);
+    }
+    group.slugs.add(slug);
+  }
   const hydrated = new Map<string, Map<string, FbrainRecord>>();
-  for (const [type, schemaHash] of schemaHashByType) {
-    if (hydrated.has(schemaHash)) continue;
-    hydrated.set(schemaHash, await hydrateSchemaBySlug(node, type, opts.cfg));
+  for (const [schemaHash, { type, slugs }] of slugsBySchema) {
+    hydrated.set(schemaHash, await hydrateSchemaBySlug(node, type, opts.cfg, [...slugs]));
   }
 
   // Pass 2: resolve every candidate by map lookup (no further round-trips).
