@@ -95,6 +95,16 @@ async function findLinkedTaskSlugs(
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
+  // Keyed path first (child-task-index.ts): one design's children via
+  // partition read instead of listing every task. `null` = index not
+  // registered yet, fall through unchanged; a registered-but-unmigrated
+  // index throws loudly (same contract as `listRecords`).
+  const { readChildTasksByDesign } = await import("../child-task-index.ts");
+  const indexed = await readChildTasksByDesign(node, cfg, designSlug);
+  if (indexed !== null) {
+    return indexed.map((r) => r.slug).sort();
+  }
+
   const isLinked = (r: FbrainRecord): boolean =>
     !isTombstoned(r) && r.design_slug === designSlug;
   const tasks = await withReadRetry(
@@ -264,6 +274,21 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       type,
       record: null,
       slug,
+      verbose: opts.verbose,
+    });
+  }
+  // Drop the design->child-task index row (see child-task-index.ts). Without
+  // this, deleting a task leaves a stale pre-tombstone snapshot in its old
+  // design's partition — the same phantom-row bug the RecordListEntry drop
+  // above exists to prevent, one layer up.
+  if (type === "task" && record.design_slug && record.design_slug.length > 0) {
+    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
+    await maintainChildTaskIndex({
+      node,
+      cfg: opts.cfg,
+      taskSlug: slug,
+      task: null,
+      previousDesignSlug: record.design_slug,
       verbose: opts.verbose,
     });
   }
@@ -486,6 +511,21 @@ export async function deleteByFilter(opts: DeleteByFilterOptions): Promise<void>
           type: m.type,
           record: null,
           slug,
+          verbose: opts.verbose,
+        });
+      }
+      if (
+        m.type === "task" &&
+        resolved.record.design_slug &&
+        resolved.record.design_slug.length > 0
+      ) {
+        const { maintainChildTaskIndex } = await import("../child-task-index.ts");
+        await maintainChildTaskIndex({
+          node,
+          cfg: opts.cfg,
+          taskSlug: slug,
+          task: null,
+          previousDesignSlug: resolved.record.design_slug,
           verbose: opts.verbose,
         });
       }

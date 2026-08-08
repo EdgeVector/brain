@@ -180,14 +180,15 @@ describe("schemas", () => {
     ]);
   });
 
-  test("UNIQUE_SCHEMAS has 17 entries: user record schemas plus internal indexes, admin snapshot, and attachment schemas", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(17);
+  test("UNIQUE_SCHEMAS has 18 entries: user record schemas plus internal indexes, admin snapshot, and attachment schemas", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(18);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "__admin_snapshot__",
       "__attachmentblob__",
       "__attachmentfile__",
       "__attachmentindex__",
+      "__childtaskindex__",
       "__recordlistentry__",
       "__tagindex__",
       "agent",
@@ -212,6 +213,7 @@ describe("schemas", () => {
       "__attachmentfile__",
       "__recordlistindex__",
       "__recordlistentry__",
+      "__childtaskindex__",
     ];
     for (const entry of UNIQUE_SCHEMAS) {
       if (internalKeys.includes(entry.key)) {

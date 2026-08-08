@@ -93,6 +93,12 @@ describe("product read paths never full-scan", () => {
       "client.ts", // implements the flag
       "record.ts", // listRecordsAdminScan, the sanctioned drain
       "commands/usage.ts", // doctor --usage, opt-in diagnostics
+      // ChildTaskIndex is keyed by design_slug (an unbounded, unenumerable
+      // set), unlike RecordListEntry's small fixed RecordType key set — so its
+      // admin rebuild (`fbrain reindex --child-task-index`, never a product
+      // path) must scan the INDEX's own schema to find stale rows instead of
+      // iterating a known key list.
+      "child-task-index.ts",
     ];
     const glob = new Bun.Glob("**/*.ts");
     const offenders: string[] = [];

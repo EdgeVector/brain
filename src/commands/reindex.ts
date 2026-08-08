@@ -46,6 +46,11 @@ import {
   writeTypeListIndex,
   type TypeListIndexCensus,
 } from "../record-list-index.ts";
+import {
+  censusChildTaskIndex,
+  writeChildTaskIndex,
+  type ChildTaskIndexCensus,
+} from "../child-task-index.ts";
 import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
@@ -73,6 +78,14 @@ export type ReindexOptions = {
    * rows that `brain get` still resolves). Standalone mode.
    */
   listIndex?: boolean;
+  /**
+   * Rebuild the ChildTaskIndex keyed (design_slug x task slug) partition
+   * from an admin SOT scan of the task schema. Repairs the same class of gap
+   * `--list-index` repairs, one layer up: a dual-write patch that failed
+   * mid-write, or a historical backfill after the schema was first
+   * registered. Standalone mode.
+   */
+  childTaskIndex?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -86,6 +99,8 @@ export type ReindexResult = {
   backlinkIndex?: BacklinkIndexRebuildResult;
   /** Per-type census after `--list-index` (dry-run or repair). */
   listIndexCensus?: TypeListIndexCensus[];
+  /** Census after `--child-task-index` (dry-run or repair). */
+  childTaskIndexCensus?: ChildTaskIndexCensus;
 };
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
@@ -197,6 +212,10 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
 
   if (opts.listIndex) {
     return rebuildListIndex(opts, node, print);
+  }
+
+  if (opts.childTaskIndex) {
+    return rebuildChildTaskIndex(opts, node, print);
   }
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
@@ -360,5 +379,91 @@ async function rebuildListIndex(
           ? " — all censused types complete"
           : ""),
   );
+  return result;
+}
+
+/**
+ * Rebuild the ChildTaskIndex (design_slug x task slug) partition from an
+ * admin SOT scan of the task schema.
+ *
+ * Dry-run: census only (indexed set vs SOT `design_slug task_slug` pairs) —
+ * no writes. Live: `writeChildTaskIndex` (upsert every live child-task row +
+ * drop stale rows + stamp the global completeness marker), then re-census so
+ * the operator sees `complete=true`.
+ */
+async function rebuildChildTaskIndex(
+  opts: ReindexOptions,
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  print: (line: string) => void,
+): Promise<ReindexResult> {
+  const result: ReindexResult = {
+    scanned: 0,
+    reindexed: 0,
+    skippedTombstone: 0,
+    byType: {},
+  };
+
+  let schemaHash: string;
+  try {
+    schemaHash = schemaHashFor("task", opts.cfg);
+  } catch {
+    print(missingSchemaHashReadNote(["task"], "skipping child-task-index rebuild"));
+    return result;
+  }
+
+  // Admin full scan is the SOT for this repair — never seed via the product
+  // `listRecords`/`findChildTasksByDesign` paths, which is what we're fixing.
+  const allTasks = await listRecordsAdminScan(node, "task", schemaHash, { includeTombstones: true });
+  const liveTasks = allTasks.filter((t) => {
+    if (isTombstoned(t)) {
+      result.skippedTombstone++;
+      return false;
+    }
+    return true;
+  });
+  const sotPairs = liveTasks
+    .filter((t) => (t.design_slug ?? "").length > 0)
+    .map((t) => `${t.design_slug} ${t.slug}`);
+  result.scanned = allTasks.length;
+  result.byType.task = { reindexed: liveTasks.length, skippedTombstone: result.skippedTombstone };
+
+  const before = await censusChildTaskIndex(node, opts.cfg, sotPairs);
+  if (before) {
+    result.childTaskIndexCensus = before;
+    const gap =
+      before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
+        ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
+        : " complete";
+    print(
+      `child-task-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
+    );
+    if (before.missingFromIndex.length > 0 && before.missingFromIndex.length <= 12) {
+      print(`  missing: ${before.missingFromIndex.join(", ")}`);
+    } else if (before.missingFromIndex.length > 12) {
+      print(`  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`);
+    }
+  } else {
+    print("child-task-index: entry schema unavailable — cannot census");
+  }
+
+  if (opts.dryRun) {
+    result.reindexed = sotPairs.length;
+    print(
+      `dry-run: would rebuild child-task-index for ${sotPairs.length} linked task(s)` +
+        (before ? (before.complete ? " — already complete" : " — incomplete vs SOT") : ""),
+    );
+    return result;
+  }
+
+  await writeChildTaskIndex(node, opts.cfg, liveTasks);
+  result.reindexed = sotPairs.length;
+  const after = await censusChildTaskIndex(node, opts.cfg, sotPairs);
+  if (after) {
+    result.childTaskIndexCensus = after;
+    print(
+      `child-task-index: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
+    );
+  }
+  print(`rebuilt child-task-index for ${sotPairs.length} linked task(s)`);
   return result;
 }

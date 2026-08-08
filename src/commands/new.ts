@@ -160,6 +160,20 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
 
+  // Keep the design->child-task index current (see child-task-index.ts).
+  // Create has no prior row to clean up, so previousDesignSlug is undefined.
+  if (opts.type === "task") {
+    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
+    await maintainChildTaskIndex({
+      node,
+      cfg: opts.cfg,
+      taskSlug: opts.slug,
+      task: record,
+      previousDesignSlug: undefined,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    });
+  }
+
   await reconcileBacklinkIndex(
     node,
     opts.cfg,

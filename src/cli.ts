@@ -791,7 +791,7 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25] [--list-index]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25] [--list-index] [--child-task-index]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -830,6 +830,15 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     \`brain list\` / \`brain search\` miss. Dry-run censuses
                     listed-set vs SOT without writing. Standalone mode: skips
                     the embedding refresh.
+  --child-task-index rebuild the design->child-task keyed index (see
+                    src/child-task-index.ts) from an admin SOT scan of the
+                    task schema (and re-stamp the completeness marker).
+                    Repairs the same class of under-report as --list-index,
+                    one layer up: \`brain get <design>\` / \`brain delete
+                    <design>\` resolve child tasks through this index once
+                    it is registered and complete. Dry-run censuses the
+                    indexed set vs SOT without writing. Standalone mode:
+                    skips the embedding refresh.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
@@ -1213,6 +1222,7 @@ const REINDEX_OPTIONS = {
   backlinks: { type: "boolean", default: false },
   bm25: { type: "boolean", default: false },
   "list-index": { type: "boolean", default: false },
+  "child-task-index": { type: "boolean", default: false },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -3590,6 +3600,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values.backlinks) rOpts.backlinks = true;
   if (values.bm25) rOpts.bm25 = true;
   if (values["list-index"]) rOpts.listIndex = true;
+  if (values["child-task-index"]) rOpts.childTaskIndex = true;
   await reindexCmd(rOpts);
   return 0;
 }
