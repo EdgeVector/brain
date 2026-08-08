@@ -1,20 +1,31 @@
 /**
  * Search plane client — primary path for brain ask/search.
  *
- * Uses the first-party Search app **semantic** plane only (MiniLM vectors,
- * schema-scoped k-NN). When the plane is unavailable, returns null so callers
- * keep node.search / BM25 rescue instead of inventing capability failures.
+ * Semantic, schema-scoped k-NN. When the plane is unavailable, returns null so
+ * callers keep node.search / BM25 rescue instead of inventing capability
+ * failures.
  *
  * Resolution order:
+ *   0. LastSeek (`lastseek query`) — the Rust successor, preferred when its
+ *      binary and index are present
  *   1. LASTDB_SEARCH_SEMANTIC_MODULE — path to search package semantic.ts
  *   2. host-track search semantic.ts
  *   3. LASTDB_SEARCH_BIN / `search semantic-query --json` (or `search query`)
+ *
+ * LastSeek goes first rather than replacing the rest, so the cutover is a
+ * property of what is installed rather than a flag day. `LASTSEEK_DISABLE=1`
+ * pins the incumbent.
+ *
+ * The scope hashes brain passes (`uniqueSchemaHashes`) are the registry names
+ * LastSeek's Schema Service table resolves directly — `reference` is
+ * `5c691083…` in both — so this tier needs no translation.
  */
 
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { lastSeekAvailable, queryLastSeek } from "./lastseek-plane.ts";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -202,6 +213,35 @@ export async function querySearchPlane(
   opts: SearchPlaneQueryOpts,
 ): Promise<SearchPlaneHit[] | null> {
   const verbose = opts.verbose ?? (() => {});
+
+  // 0) LastSeek — preferred when installed with a non-empty index.
+  //
+  // An unresolvable schema throws out of here on purpose. Catching it and
+  // falling through would land on the incumbent, which answers the same query
+  // with `[]`, and the confident-empty answer this whole plane exists to remove
+  // would be back — reintroduced by the fallback.
+  if (lastSeekAvailable()) {
+    const seek = queryLastSeek({
+      query: opts.query,
+      k: opts.k,
+      schemas: opts.schemas,
+      exact: opts.exact,
+      min_score: opts.min_score,
+      verbose,
+    });
+    if (seek !== null) {
+      verbose(`search-plane: lastseek answered hits=${seek.length}`);
+      return seek.map((h) => ({
+        // Callers compare `schema_name` against the hashes they passed, so it
+        // carries the identity, not the readable label.
+        schema_name: h.schema_identity,
+        key_hash: h.key_hash,
+        key_range: h.key_range,
+        score: h.score,
+        text: h.text,
+      }));
+    }
+  }
 
   // 1) Semantic in-process
   const sem = await querySemanticInProcess(opts);
