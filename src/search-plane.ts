@@ -180,7 +180,11 @@ function querySemanticCli(opts: SearchPlaneQueryOpts): SearchPlaneHit[] | null {
   }
   const r = spawnSync(bin, args, {
     encoding: "utf8",
-    env: { ...process.env, SEARCH_EMBEDDER: process.env.SEARCH_EMBEDDER ?? "deterministic" },
+    // The index records the embedder that created it. Let Search reopen that
+    // initialized plane instead of silently forcing the deterministic test
+    // embedder over a normal MiniLM index. An explicit SEARCH_EMBEDDER still
+    // passes through via process.env for tests and deliberate overrides.
+    env: process.env,
     timeout: 60_000,
   });
   if (r.error || r.status !== 0) {

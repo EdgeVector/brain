@@ -2,7 +2,13 @@
  * Search plane is semantic-only (host-track Search or explicit module path).
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,6 +26,11 @@ const HOST_DETERMINISTIC = resolve(
   process.env.HOME ?? "",
   ".host-track/apps/search/current/src/vector/deterministic.ts",
 );
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 
 describe("brain search-plane semantic-only", () => {
   test("resolveSemanticModulePath is exported and stable", () => {
@@ -57,6 +68,48 @@ describe("brain search-plane semantic-only", () => {
     process.env.LASTDB_SEARCH_SEMANTIC_MODULE = prevSem;
   });
 
+  test("CLI query does not invent a deterministic embedder override", async () => {
+    const fakeHome = mkdtempSync(join(tmpdir(), "brain-sp-cli-home-"));
+    const fakeBin = join(fakeHome, "search");
+    writeFileSync(
+      fakeBin,
+      `#!/bin/sh
+if [ -n "\${SEARCH_EMBEDDER:-}" ]; then
+  exit 41
+fi
+printf '%s\\n' '{"mode":"semantic","hits":[{"schema_name":"fixture-schema","key_hash":"hello","key_range":null,"score":0.9,"text":"first note"}]}'
+`,
+    );
+    chmodSync(fakeBin, 0o755);
+
+    const prevHome = process.env.HOME;
+    const prevBin = process.env.LASTDB_SEARCH_BIN;
+    const prevEmbedder = process.env.SEARCH_EMBEDDER;
+    const prevLastSeekDisable = process.env.LASTSEEK_DISABLE;
+    try {
+      process.env.HOME = fakeHome;
+      process.env.LASTDB_SEARCH_BIN = fakeBin;
+      process.env.LASTSEEK_DISABLE = "1";
+      delete process.env.SEARCH_EMBEDDER;
+
+      const hits = await querySearchPlane({ query: "first note", k: 5 });
+      expect(hits).toEqual([
+        {
+          schema_name: "fixture-schema",
+          key_hash: "hello",
+          key_range: null,
+          score: 0.9,
+          text: "first note",
+        },
+      ]);
+    } finally {
+      restoreEnv("HOME", prevHome);
+      restoreEnv("LASTDB_SEARCH_BIN", prevBin);
+      restoreEnv("SEARCH_EMBEDDER", prevEmbedder);
+      restoreEnv("LASTSEEK_DISABLE", prevLastSeekDisable);
+    }
+  });
+
   test("semantic ingest + query when host-track Search is present", async () => {
     if (!existsSync(HOST_SEMANTIC) || !existsSync(HOST_DETERMINISTIC)) {
       // Isolated CI without Search install — skip positive path.
@@ -69,6 +122,8 @@ describe("brain search-plane semantic-only", () => {
     process.env.SEARCH_HOME = home;
     process.env.SEARCH_EMBEDDER = "deterministic";
     process.env.LASTDB_SEARCH_SEMANTIC_MODULE = HOST_SEMANTIC;
+    const prevLastSeekDisable = process.env.LASTSEEK_DISABLE;
+    process.env.LASTSEEK_DISABLE = "1";
 
     const detMod = (await import(pathToFileURL(HOST_DETERMINISTIC).href)) as {
       DeterministicMiniLmCompatEmbedder: new () => {
@@ -115,5 +170,6 @@ describe("brain search-plane semantic-only", () => {
     delete process.env.SEARCH_HOME;
     delete process.env.SEARCH_EMBEDDER;
     delete process.env.LASTDB_SEARCH_SEMANTIC_MODULE;
+    restoreEnv("LASTSEEK_DISABLE", prevLastSeekDisable);
   });
 });
