@@ -1225,9 +1225,14 @@ export function newNodeClient(opts: {
             `the materialized page, so has_more never clears and pagination cannot ` +
             `progress ${DOCTOR_TIP}.`,
           hint:
-            "Upgrade the fold_db_node to a build with the tombstone-aware " +
-            "list-query count fix (fold #995). This affects only the record type " +
-            "you deleted from; other record types still work.",
+            "Check `unresolved_rows` on the raw /api/query response first: " +
+            "non-zero means rows were dropped because a tip pointed at a missing " +
+            "atom (size a repair with `lastdb db repair-dangling-tips`, dry run). " +
+            "ZERO means the count and the page disagree for another reason — walk " +
+            "the offsets with limit=1 and look for a repeated record, which is the " +
+            "alias-key defect in brain " +
+            "`papercut-lastdb-full-scan-key-list-contains-alias-keys-so-offsets-repeat-and-total-count-over-reports`. " +
+            "This affects only the record type you deleted from; other types still work.",
         });
       }
       // Defensive: a node that returns has_more=true with an empty
@@ -1249,10 +1254,17 @@ export function newNodeClient(opts: {
           `total, or rows silently dropped by unstable offset pagination on a schema ` +
           `larger than QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) ${DOCTOR_TIP}.`,
         hint:
-          "Upgrade the fold_db_node to a build with the tombstone-aware list-query " +
-          "count fix (fold #995) and stable /api/query ordering. If the gap matches " +
-          "records you recently deleted, only that record type is affected; other " +
-          "types still work.",
+          "Do NOT assume this is an outdated node — the tombstone-aware count fix " +
+          "(fold #995) has a deployed successor, and checking for it by commit " +
+          "ancestry gives a false negative because it was squash-merged. Triage " +
+          "instead: `unresolved_rows` non-zero on the raw /api/query response means " +
+          "dangling tips (size a repair with `lastdb db repair-dangling-tips`, dry " +
+          "run); `unresolved_rows` ZERO with a gap this size means the scan's key " +
+          "list holds alias keys that resolve to the same record — walk the offsets " +
+          "with limit=1 and look for a repeat. Brain: " +
+          "`papercut-lastdb-full-scan-key-list-contains-alias-keys-so-offsets-repeat-and-total-count-over-reports`. " +
+          "If the gap matches records you recently deleted, only that record type is " +
+          "affected; other types still work.",
       });
     }
     return {

@@ -188,9 +188,18 @@ describe("newNodeClient.queryAll pagination guard", () => {
       // size the impact at a glance.
       expect(fe.message).toContain("3");
       expect(fe.message).toContain("5");
-      // The hint points at the root-cause fix (the fold_db_node task) so a
-      // future reader can follow the chain.
-      expect(fe.hint ?? "").toContain("stable /api/query ordering");
+      // The hint must TRIAGE, not prescribe a version. It has to separate the
+      // two causes that produce this identical symptom — dangling tips
+      // (`unresolved_rows` non-zero) vs alias keys in the scan's key list
+      // (`unresolved_rows` zero) — because the remedies are unrelated and the
+      // old "upgrade for fold #995" text sent a reader hunting a commit that
+      // was already superseded and squashed.
+      const hint = fe.hint ?? "";
+      expect(hint).toContain("unresolved_rows");
+      expect(hint).toContain("repair-dangling-tips");
+      expect(hint).toContain("alias keys");
+      // And it must warn off the instrument that gives a false negative here.
+      expect(hint).toContain("ancestry");
     }
   });
 
@@ -232,10 +241,17 @@ describe("newNodeClient.queryAll pagination guard", () => {
       // The message names the real trigger — tombstoned/deleted keys counted in
       // total_count but omitted from the page — not a >1000-row problem.
       expect(fe.message).toContain("tombstoned");
-      // The hint points at the node-side count fix (fold #995) and is actionable
-      // for the common single-delete case (NOT "reduce the schema's row count").
-      expect(fe.hint ?? "").toContain("fold #995");
-      expect(fe.hint ?? "").not.toContain("reduce the schema");
+      // The hint must name a check the reader can RUN, not a version to upgrade
+      // to. "Upgrade for fold #995" was wrong by 2026-08-09 — that fix has a
+      // deployed successor, and following the hint sent a reader looking for a
+      // missing commit instead of at the live symptom.
+      const hint = fe.hint ?? "";
+      expect(hint).toContain("unresolved_rows");
+      expect(hint).toContain("repair-dangling-tips");
+      // Still actionable for the common single-delete case (NOT "reduce the
+      // schema's row count"), and still not an upgrade instruction.
+      expect(hint).not.toContain("reduce the schema");
+      expect(hint).not.toContain("Upgrade the fold_db_node");
     }
   });
 
