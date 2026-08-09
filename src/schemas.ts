@@ -959,8 +959,6 @@ export const recordListEntrySchema: AddSchemaRequest = {
  */
 export const CHILD_TASK_INDEX_SCHEMA_KEY = "__childtaskindex__";
 export const CHILD_TASK_INDEX_MARKER = "fbrain_child_task_index_v1";
-export const CHILD_TASK_INDEX_LAYOUT =
-  "ChildTaskIndex novel hashrange ctd_h x ctd_r";
 /**
  * Reserved hash partition for the global completeness marker. Design slugs
  * are kebab-case and never contain `__`, so this can never collide with a
