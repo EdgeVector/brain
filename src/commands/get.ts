@@ -10,7 +10,7 @@ import { resolvePrintSink } from "../format.ts";
 import {
   compareByUpdatedThenSlug,
   findBySlug,
-  findChildTasksByDesign,
+  findChildTasksByDesignForDisplay,
   GET_RECORD_TYPE_PRECEDENCE,
   NOT_FOUND_TYPED,
   normalizeSlug,
@@ -82,16 +82,29 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   // Reverse direction of the same link: when the record IS a design, list its
   // child tasks so the parent ↔ child relationship is visible both ways. Gated
   // on `found.type === "design"` so the other 7 record types pay zero
-  // additional cost; `findChildTasksByDesign` shares the empty-page cap with
-  // the forward dangling-ref probe above, so a childless design on a fresh
-  // node stays cheap (no full 5× retry burn).
+  // additional cost; the lookup shares the empty-page cap with the forward
+  // dangling-ref probe above, so a childless design on a fresh node stays cheap
+  // (no full 5× retry burn).
+  //
+  // Uses the *ForDisplay* variant: a design's body is a point get on its
+  // primary key and must not be gated on this projection. When the index is
+  // registered-but-unmigrated we still render the record and mark `tasks:`
+  // UNAVAILABLE — never `(none)`, which would be a confident wrong answer. The
+  // delete cascade guard deliberately keeps the throwing form. See
+  // `papercut-brain-get-fails-for-every-design-record-child-task-index-not-marked-complete`.
   let designChildren: FbrainRecord[] | undefined;
+  let childrenUnavailable: string | undefined;
   if (found.type === "design") {
-    designChildren = await findChildTasksByDesign(
+    const lookup = await findChildTasksByDesignForDisplay(
       node,
       found.record.slug,
       opts.cfg,
     );
+    if (lookup.status === "ok") {
+      designChildren = lookup.tasks;
+    } else {
+      childrenUnavailable = lookup.hint ?? lookup.reason;
+    }
   }
 
   const linkedFrom = await findBacklinks(node, opts.cfg, found.record.slug, {
@@ -112,6 +125,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     designMissing,
     designChildren,
     linkedFrom,
+    childrenUnavailable,
   );
   opts.onResult?.(json);
 
@@ -132,6 +146,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
       designMissing,
       designChildren,
       linkedFrom,
+      childrenUnavailable,
     ),
   );
 }
@@ -170,6 +185,10 @@ export type RecordJson = {
   // reverse-direction parent ↔ child link the human surface renders
   // on the `tasks:` line.
   children?: Array<{ slug: string; status: string }>;
+  // Set (instead of `children`) when the child-task projection could not be
+  // read — the design's own body is still returned. Distinct from
+  // `children: []`, which asserts the design genuinely has no children.
+  children_unavailable?: string;
   // Records that link to this slug, either through an explicit stored edge
   // (`task.design_slug` or a generic `link:<type>:<slug>` tag) or through a
   // `[[slug]]` body reference.
@@ -190,6 +209,7 @@ export function recordToJson(
   designMissing = false,
   children?: ReadonlyArray<FbrainRecord>,
   linkedFrom?: ReadonlyArray<Backlink>,
+  childrenUnavailable?: string,
 ): RecordJson {
   const out: RecordJson = {
     type,
@@ -214,7 +234,9 @@ export function recordToJson(
     }
     out.extra_fields = extra;
   }
-  if (type === "design" && children !== undefined) {
+  if (type === "design" && childrenUnavailable !== undefined) {
+    out.children_unavailable = childrenUnavailable;
+  } else if (type === "design" && children !== undefined) {
     const sorted = sortChildrenByUpdated(children);
     out.children = sorted.map((t) => ({ slug: t.slug, status: t.status }));
   }
@@ -241,6 +263,7 @@ export function formatRecord(
   designMissing = false,
   children?: ReadonlyArray<FbrainRecord>,
   linkedFrom?: ReadonlyArray<Backlink>,
+  childrenUnavailable?: string,
 ): string {
   const lines = [
     `[${type}] ${r.slug}`,
@@ -260,7 +283,9 @@ export function formatRecord(
     const rendered = typeof value === "string" && value.length > 0 ? value : "(none)";
     lines.push(`${padLabel(ef)}${rendered}`);
   }
-  if (type === "design" && children !== undefined) {
+  if (type === "design" && childrenUnavailable !== undefined) {
+    lines.push(`tasks:      (unavailable — ${childrenUnavailable})`);
+  } else if (type === "design" && children !== undefined) {
     if (children.length === 0) {
       lines.push("tasks:      (none)");
     } else {

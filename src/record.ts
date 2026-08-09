@@ -928,6 +928,54 @@ export async function hydrateSchemaBySlug(
 // `fbrain get <design>` on a fresh node — where the task schema page is
 // legitimately empty until its first task lands — would burn the full 5×250 ms
 // read-retry budget just to confirm "no children".
+/**
+ * A child-task lookup that can report the projection as UNAVAILABLE instead of
+ * throwing — three states, not two.
+ *
+ * `{ tasks: [] }` means "this design has no children" and is a fact.
+ * `{ unavailable }` means "we could not find out", which is NOT the same fact
+ * and must never render as `(none)`. Collapsing the two is how a broken
+ * projection turns into a confident wrong answer.
+ */
+export type ChildTasksLookup =
+  | { status: "ok"; tasks: FbrainRecord[] }
+  | { status: "unavailable"; reason: string; hint?: string };
+
+/**
+ * Display-path variant of [`findChildTasksByDesign`].
+ *
+ * Identical except that the registered-but-unmigrated index condition is
+ * returned as `unavailable` rather than thrown. Use this ONLY where the child
+ * list is being shown to a human; anything whose correctness depends on seeing
+ * every child (the delete cascade guard) must keep using the throwing form, or
+ * a design could be deleted because its children were invisible.
+ *
+ * Every other error still propagates — an unavailable projection is a specific,
+ * recognised condition, not a blanket catch.
+ */
+export async function findChildTasksByDesignForDisplay(
+  node: NodeClient,
+  designSlug: string,
+  cfg: ListRecordsCfg,
+  options?: ReadRetryOptions,
+): Promise<ChildTasksLookup> {
+  const { isChildTaskIndexIncomplete } = await import("./child-task-index.ts");
+  try {
+    return {
+      status: "ok",
+      tasks: await findChildTasksByDesign(node, designSlug, cfg, options),
+    };
+  } catch (err) {
+    if (!isChildTaskIndexIncomplete(err)) throw err;
+    const e = err as { message?: string; hint?: string };
+    return {
+      status: "unavailable",
+      reason: e.message ?? "child-task index incomplete",
+      hint: e.hint,
+    };
+  }
+}
+
 export async function findChildTasksByDesign(
   node: NodeClient,
   designSlug: string,
