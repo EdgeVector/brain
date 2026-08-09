@@ -19,6 +19,29 @@ import type { FbrainRecord } from "./record.ts";
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
 
+/**
+ * Error code for "the index is registered but was never marked complete".
+ *
+ * Exported so callers can branch on the CONDITION rather than string-matching
+ * the message. A read whose correctness depends on seeing every child (the
+ * delete cascade guard) must still fail on it; a read that only DISPLAYS
+ * children can degrade to "unavailable" instead of refusing the whole record.
+ *
+ * That distinction is the whole point: on 2026-08-08 registration shipped
+ * without its migration and every `fbrain get <design>` failed for ~17 hours,
+ * because a body read — a point get on the primary key — was gated on this
+ * projection. Brain:
+ * `papercut-brain-get-fails-for-every-design-record-child-task-index-not-marked-complete`.
+ */
+export const CHILD_TASK_INDEX_INCOMPLETE_CODE = "child_task_index_incomplete";
+
+/** Whether `err` is the registered-but-unmigrated condition above. */
+export function isChildTaskIndexIncomplete(err: unknown): boolean {
+  return (
+    err instanceof FbrainError && err.code === CHILD_TASK_INDEX_INCOMPLETE_CODE
+  );
+}
+
 /** Hash of the ChildTaskIndex HashRange schema, or null before registration. */
 export function childTaskIndexHash(cfg: SchemaCfg): string | null {
   const h = cfg.schemaHashes[CHILD_TASK_INDEX_SCHEMA_KEY];
@@ -194,7 +217,7 @@ export async function readChildTasksByDesign(
   );
   if (!migrated) {
     throw new FbrainError({
-      code: "child_task_index_incomplete",
+      code: CHILD_TASK_INDEX_INCOMPLETE_CODE,
       message:
         "the design->child-task keyed index is registered but not marked complete, so child tasks " +
         "cannot be resolved from it without a full task-partition scan — which product read paths " +

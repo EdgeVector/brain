@@ -171,6 +171,39 @@ describe("readChildTasksByDesign", () => {
     }
   });
 
+  test("the DISPLAY lookup reports unavailable where the raw read throws", async () => {
+    // Same node, same unmigrated index, two different contracts:
+    // `readChildTasksByDesign` throws (correctness callers), while the display
+    // variant degrades so `fbrain get <design>` can still render the body.
+    const { node } = makeNode({ rows: { "design-a": { t1: task("t1", "design-a") } } });
+    const { findChildTasksByDesignForDisplay } = await import("../../src/record.ts");
+
+    await expect(readChildTasksByDesign(node, REGISTERED, "design-a")).rejects.toThrow(FbrainError);
+
+    const shown = await findChildTasksByDesignForDisplay(node as never, "design-a", REGISTERED as never);
+    expect(shown.status).toBe("unavailable");
+    if (shown.status !== "unavailable") throw new Error("unreachable");
+    expect(shown.hint).toContain("fbrain reindex --child-task-index");
+  });
+
+  test("the DISPLAY lookup does NOT swallow unrelated failures", async () => {
+    // Degrading is scoped to the one recognised condition. A node error must
+    // still propagate, or `tasks:` would read "unavailable" for an outage and
+    // hide it.
+    const { findChildTasksByDesignForDisplay } = await import("../../src/record.ts");
+    const exploding = {
+      async queryAll() {
+        throw new FbrainError({ code: "node_unreachable", message: "node down" });
+      },
+      async queryByKey() {
+        throw new FbrainError({ code: "node_unreachable", message: "node down" });
+      },
+    };
+    await expect(
+      findChildTasksByDesignForDisplay(exploding as never, "design-a", REGISTERED as never),
+    ).rejects.toThrow(FbrainError);
+  });
+
   test("migrated index returns only the requested design's children", async () => {
     const { node } = makeNode({
       rows: {
