@@ -69,31 +69,6 @@ export function lastSeekBin(): string {
   return process.env.LASTSEEK_BIN?.trim() || "lastseek";
 }
 
-/** True when the LastSeek plane is usable: binary present and a store to read. */
-export function lastSeekAvailable(): boolean {
-  if (process.env.LASTSEEK_DISABLE === "1") return false;
-  const r = spawnSync(lastSeekBin(), ["status"], {
-    encoding: "utf8",
-    env: process.env,
-    timeout: 15_000,
-  });
-  if (r.error || r.status !== 0) return false;
-  try {
-    const parsed = JSON.parse(r.stdout) as {
-      ok?: boolean;
-      needs_rebuild?: boolean;
-      committed_rows?: number;
-      pending_ops?: number;
-    };
-    if (parsed.ok !== true || parsed.needs_rebuild === true) return false;
-    // An empty index is not a live plane. Treating it as one would make every
-    // query answer "no matches" while the incumbent held the whole corpus.
-    return (parsed.committed_rows ?? 0) + (parsed.pending_ops ?? 0) > 0;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Query LastSeek. Returns null when the plane is unavailable, `[]` when it is
  * up and genuinely has no matches, and throws on an unresolvable schema.

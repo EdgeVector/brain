@@ -16,7 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LastSeekUnknownSchemaError,
-  lastSeekAvailable,
   queryLastSeek,
 } from "../../src/lastseek-plane.ts";
 import { querySearchPlane } from "../../src/search-plane.ts";
@@ -48,40 +47,11 @@ afterEach(() => {
 });
 
 describe("lastseek plane", () => {
-  test("a missing binary is not a live plane", () => {
-    process.env.LASTSEEK_BIN = "/nonexistent/lastseek-xyz";
-    expect(lastSeekAvailable()).toBe(false);
-  });
-
-  test("an empty index is not a live plane", () => {
-    // Otherwise every query would answer "no matches" while the incumbent
-    // still held the whole corpus — a confident empty answer by another route.
-    process.env.LASTSEEK_BIN = fakeLastSeek(
-      `if [ "$1" = status ]; then echo '{"ok":true,"needs_rebuild":false,"committed_rows":0,"pending_ops":0}'; fi`,
-    );
-    expect(lastSeekAvailable()).toBe(false);
-  });
-
-  test("a store needing a rebuild is not a live plane", () => {
-    process.env.LASTSEEK_BIN = fakeLastSeek(
-      `if [ "$1" = status ]; then echo '{"ok":true,"needs_rebuild":true,"committed_rows":9}'; fi`,
-    );
-    expect(lastSeekAvailable()).toBe(false);
-  });
-
-  test("a populated index is a live plane", () => {
-    process.env.LASTSEEK_BIN = fakeLastSeek(
-      `if [ "$1" = status ]; then echo '${STATUS_LIVE}'; fi`,
-    );
-    expect(lastSeekAvailable()).toBe(true);
-  });
-
   test("LASTSEEK_DISABLE=1 pins the incumbent", () => {
     process.env.LASTSEEK_BIN = fakeLastSeek(
       `if [ "$1" = status ]; then echo '${STATUS_LIVE}'; fi`,
     );
     process.env.LASTSEEK_DISABLE = "1";
-    expect(lastSeekAvailable()).toBe(false);
     expect(queryLastSeek({ query: "x" })).toBeNull();
   });
 
