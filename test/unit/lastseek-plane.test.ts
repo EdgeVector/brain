@@ -11,7 +11,7 @@
  * non-zero exit was taken to mean.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,9 +32,19 @@ function fakeLastSeek(body: string): string {
 
 const STATUS_LIVE = `{"ok":true,"needs_rebuild":false,"committed_rows":42,"pending_ops":0}`;
 
+const defaultLastSeekBin = process.env.LASTSEEK_BIN;
+const defaultLastSeekDisable = process.env.LASTSEEK_DISABLE;
+const defaultLastSeekCallLog = process.env.LASTSEEK_CALL_LOG;
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
 afterEach(() => {
-  delete process.env.LASTSEEK_BIN;
-  delete process.env.LASTSEEK_DISABLE;
+  restoreEnv("LASTSEEK_BIN", defaultLastSeekBin);
+  restoreEnv("LASTSEEK_DISABLE", defaultLastSeekDisable);
+  restoreEnv("LASTSEEK_CALL_LOG", defaultLastSeekCallLog);
 });
 
 describe("lastseek plane", () => {
@@ -147,5 +157,20 @@ describe("lastseek plane", () => {
     expect(hits![0]!.schema_name).toBe("5c691083");
     expect(hits![0]!.score).toBe(0.77);
     expect(hits![0]!.text).toBe("body text");
+  });
+
+  test("querySearchPlane launches lastseek exactly once", async () => {
+    const callLog = join(mkdtempSync(join(tmpdir(), "lastseek-calls-")), "calls");
+    writeFileSync(callLog, "");
+    process.env.LASTSEEK_CALL_LOG = callLog;
+    process.env.LASTSEEK_BIN = fakeLastSeek(
+      `echo "$1" >> "$LASTSEEK_CALL_LOG"
+       echo '{"ok":true,"results":[]}'`,
+    );
+
+    await expect(querySearchPlane({ query: "x" })).resolves.toEqual([]);
+    expect(readFileSync(callLog, "utf8").trim().split("\n")).toEqual([
+      "query",
+    ]);
   });
 });

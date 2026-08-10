@@ -46,3 +46,10 @@ if (process.env.FBRAIN_FOLDDB_SOCKET === undefined) {
 if (process.env.FOLDDB_HOME === undefined) {
   process.env.FOLDDB_HOME = "/nonexistent/fbrain-unit-suite-no-folddb-home";
 }
+
+// Keep semantic-plane tests hermetic w.r.t. a host-installed LastSeek binary.
+// Tests that exercise LastSeek set LASTSEEK_BIN to their own fake subprocess
+// and restore this default afterward. Production never loads this preload.
+if (process.env.LASTSEEK_BIN === undefined) {
+  process.env.LASTSEEK_BIN = "/nonexistent/fbrain-unit-suite-no-lastseek";
+}
