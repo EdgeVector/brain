@@ -25,7 +25,7 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { lastSeekAvailable, queryLastSeek } from "./lastseek-plane.ts";
+import { queryLastSeek } from "./lastseek-plane.ts";
 
 export type SearchPlaneHit = {
   schema_name: string;
@@ -218,33 +218,31 @@ export async function querySearchPlane(
 ): Promise<SearchPlaneHit[] | null> {
   const verbose = opts.verbose ?? (() => {});
 
-  // 0) LastSeek — preferred when installed with a non-empty index.
+  // 0) LastSeek — preferred when its query can answer.
   //
   // An unresolvable schema throws out of here on purpose. Catching it and
   // falling through would land on the incumbent, which answers the same query
   // with `[]`, and the confident-empty answer this whole plane exists to remove
   // would be back — reintroduced by the fallback.
-  if (lastSeekAvailable()) {
-    const seek = queryLastSeek({
-      query: opts.query,
-      k: opts.k,
-      schemas: opts.schemas,
-      exact: opts.exact,
-      min_score: opts.min_score,
-      verbose,
-    });
-    if (seek !== null) {
-      verbose(`search-plane: lastseek answered hits=${seek.length}`);
-      return seek.map((h) => ({
-        // Callers compare `schema_name` against the hashes they passed, so it
-        // carries the identity, not the readable label.
-        schema_name: h.schema_identity,
-        key_hash: h.key_hash,
-        key_range: h.key_range,
-        score: h.score,
-        text: h.text,
-      }));
-    }
+  const seek = queryLastSeek({
+    query: opts.query,
+    k: opts.k,
+    schemas: opts.schemas,
+    exact: opts.exact,
+    min_score: opts.min_score,
+    verbose,
+  });
+  if (seek !== null) {
+    verbose(`search-plane: lastseek answered hits=${seek.length}`);
+    return seek.map((h) => ({
+      // Callers compare `schema_name` against the hashes they passed, so it
+      // carries the identity, not the readable label.
+      schema_name: h.schema_identity,
+      key_hash: h.key_hash,
+      key_range: h.key_range,
+      score: h.score,
+      text: h.text,
+    }));
   }
 
   // 1) Semantic in-process
