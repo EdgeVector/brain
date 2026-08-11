@@ -31,8 +31,9 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { NodeClient, Verbose } from "../client.ts";
+import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
 import { brainDataDir, type Config } from "../config.ts";
+import { readTypeListEntryBySlug } from "../record-list-index.ts";
 import {
   isTombstoned,
   listRecords,
@@ -40,7 +41,7 @@ import {
   schemaHashFor,
   type FbrainRecord,
 } from "../record.ts";
-import type { RecordType } from "../schemas.ts";
+import { isRecordType, type RecordType } from "../schemas.ts";
 
 /** Default how long a warm BM25 cache is trusted without re-scanning the corpus. */
 export const BM25_CACHE_TTL_MS_DEFAULT = 15 * 60 * 1000;
@@ -118,9 +119,11 @@ type Posting = {
 type DocText = { title: string; body: string };
 
 type SerializedIndex = {
-  version: 2;
+  version: 3;
   fingerprint: string;
   generatedAt: string;
+  requestedTypes: RecordType[];
+  typeCounts: Partial<Record<RecordType, number>>;
   documents: Array<{ type: RecordType; slug: string }>;
   docLengths: number[];
   avgDocLength: number;
@@ -137,6 +140,7 @@ export class BM25Index {
   private avgDocLength: number;
   private postings: Map<string, Posting[]>;
   private docText: DocText[];
+  private requestedTypes: RecordType[];
   // id ("type::slug") -> index into `documents`/`docText`. Built lazily on the
   // first `recordText` lookup so a warm `ask` can resolve a chosen hit's render
   // text in O(1) without a network fetch.
@@ -149,10 +153,14 @@ export class BM25Index {
     this.avgDocLength = serialized.avgDocLength;
     this.postings = new Map(Object.entries(serialized.postings));
     this.docText = serialized.docText;
+    this.requestedTypes = serialized.requestedTypes;
     this.fingerprint = serialized.fingerprint;
   }
 
-  static build(docs: BM25Document[]): BM25Index {
+  static build(
+    docs: BM25Document[],
+    requestedTypes: readonly RecordType[] = Array.from(new Set(docs.map((d) => d.type))),
+  ): BM25Index {
     const documents = docs.map((d) => ({ type: d.type, slug: d.slug }));
     const docLengths: number[] = [];
     const postingMap = new Map<string, Map<number, number>>();
@@ -180,9 +188,11 @@ export class BM25Index {
     const fingerprint = computeFingerprint(docs);
     const docText: DocText[] = docs.map((d) => ({ title: d.title, body: d.body }));
     return new BM25Index({
-      version: 2,
+      version: 3,
       fingerprint,
       generatedAt: new Date().toISOString(),
+      requestedTypes: [...requestedTypes],
+      typeCounts: documentCounts(documents, requestedTypes),
       documents,
       docLengths,
       avgDocLength,
@@ -194,6 +204,19 @@ export class BM25Index {
   /** Number of documents in this index (corpus size for cache hits). */
   get size(): number {
     return this.documents.length;
+  }
+
+  /** Requested type set, including types that contributed zero documents. */
+  get types(): readonly RecordType[] {
+    return this.requestedTypes;
+  }
+
+  /** Stable document slugs for one type, used by bounded activation probes. */
+  slugsForType(type: RecordType): string[] {
+    return this.documents
+      .filter((d) => d.type === type)
+      .map((d) => d.slug)
+      .sort();
   }
 
   // Render text (title + body) for a doc id ("type::slug"), or null if the id
@@ -263,9 +286,11 @@ export class BM25Index {
     const postings: Record<string, Posting[]> = {};
     for (const [k, v] of this.postings) postings[k] = v;
     return {
-      version: 2,
+      version: 3,
       fingerprint: this.fingerprint,
       generatedAt: new Date().toISOString(),
+      requestedTypes: [...this.requestedTypes],
+      typeCounts: documentCounts(this.documents, this.requestedTypes),
       documents: this.documents,
       docLengths: this.docLengths,
       avgDocLength: this.avgDocLength,
@@ -277,11 +302,12 @@ export class BM25Index {
   static fromJSON(raw: unknown): BM25Index | null {
     if (!raw || typeof raw !== "object") return null;
     const obj = raw as Partial<SerializedIndex>;
+    const version = (raw as { version?: unknown }).version;
     // v2 added `docText` (the cached render text that lets a warm `ask` resolve
     // hits without a network body fetch). A v1 file lacks it, so reject it —
     // loadCachedIndex returns null and `ask` rebuilds (one extra cold call),
     // which is the same safe fall-through as any other corrupt/stale cache.
-    if (obj.version !== 2) return null;
+    if (version !== 2 && version !== 3) return null;
     if (typeof obj.fingerprint !== "string") return null;
     if (!Array.isArray(obj.documents)) return null;
     if (!Array.isArray(obj.docLengths)) return null;
@@ -317,17 +343,54 @@ export class BM25Index {
         if (d < 0 || d >= N) return null;
       }
     }
+    const documents = obj.documents as Array<{ type: RecordType; slug: string }>;
+    if (documents.some((d) => !d || !isRecordType(d.type) || typeof d.slug !== "string")) {
+      return null;
+    }
+    const actualCounts = documentCounts(documents);
+    let requestedTypes: RecordType[];
+    if (version === 3) {
+      if (!Array.isArray(obj.requestedTypes)) return null;
+      if (obj.requestedTypes.some((t) => !isRecordType(t))) return null;
+      requestedTypes = [...new Set(obj.requestedTypes as RecordType[])];
+      if (!obj.typeCounts || typeof obj.typeCounts !== "object") return null;
+      for (const type of requestedTypes) {
+        const count = (obj.typeCounts as Partial<Record<RecordType, unknown>>)[type];
+        if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return null;
+        if (count !== (actualCounts[type] ?? 0)) return null;
+      }
+      if (documents.some((d) => !requestedTypes.includes(d.type))) return null;
+    } else {
+      // v2 compatibility: derive the manifest once, then rewrite as v3 on the
+      // next successful build. This preserves the previous cache as a
+      // regression baseline instead of discarding it before activation.
+      requestedTypes = Array.from(new Set(documents.map((d) => d.type)));
+    }
     return new BM25Index({
-      version: 2,
+      version: 3,
       fingerprint: obj.fingerprint,
       generatedAt: typeof obj.generatedAt === "string" ? obj.generatedAt : "",
-      documents: obj.documents as Array<{ type: RecordType; slug: string }>,
+      requestedTypes,
+      typeCounts: actualCounts,
+      documents,
       docLengths: obj.docLengths as number[],
       avgDocLength: obj.avgDocLength,
       postings: obj.postings as Record<string, Posting[]>,
       docText: obj.docText as DocText[],
     });
   }
+}
+
+function documentCounts(
+  documents: readonly { type: RecordType }[],
+  requestedTypes: readonly RecordType[] = [],
+): Partial<Record<RecordType, number>> {
+  const counts: Partial<Record<RecordType, number>> = {};
+  for (const type of requestedTypes) counts[type] = 0;
+  for (const document of documents) {
+    counts[document.type] = (counts[document.type] ?? 0) + 1;
+  }
+  return counts;
 }
 
 export function tokenize(text: string): string[] {
@@ -490,8 +553,12 @@ export async function loadOrBuildBm25Index(
   const nowMs = opts.nowMs ?? Date.now();
   const forceRebuild = opts.forceRebuild === true;
 
-  const existing = forceRebuild ? null : loadCachedIndexMeta(cfg.userHash, types);
-  if (existing && isBm25CacheFresh(existing.builtAtMs, nowMs, ttlMs)) {
+  // Always retain the previous cache through candidate construction. Besides
+  // serving TTL hits, it is the only bounded baseline that can distinguish a
+  // legitimately empty type from a projection rebuild that silently dropped
+  // records which were previously reachable.
+  const existing = loadCachedIndexMeta(cfg.userHash, types);
+  if (!forceRebuild && existing && isBm25CacheFresh(existing.builtAtMs, nowMs, ttlMs)) {
     opts.verbose?.(
       `bm25: cache hit (ttl, fingerprint ${existing.index.fingerprint.slice(0, 12)}...) — zero corpus enumeration`,
     );
@@ -514,7 +581,10 @@ export async function loadOrBuildBm25Index(
   // keyCount is filled after load (we no longer pre-enumerate keys).
   const built = await loadBm25Documents(node, cfg, types, { seedListIndex });
   opts.onRebuild?.({ types, keyCount: built.docs.length, reason });
-  const index = BM25Index.build(built.docs);
+  const index = BM25Index.build(built.docs, types);
+  if (existing) {
+    await assertCandidateDidNotDropLiveRecords(node, cfg, types, existing.index, index);
+  }
   saveCachedIndex(cfg.userHash, index, types);
   opts.verbose?.(
     `bm25: rebuilt index (${built.docs.length} docs, fingerprint ${index.fingerprint.slice(0, 12)}..., reason=${reason})`,
@@ -526,6 +596,40 @@ export async function loadOrBuildBm25Index(
     cacheHit: false,
     fingerprint: index.fingerprint,
   };
+}
+
+/**
+ * Refuse to activate a rebuilt cache when a prior document disappeared from
+ * the candidate but its exact RecordListEntry still point-reads as live.
+ *
+ * This runs only on a cache rebuild and only for disappeared prior slugs. It
+ * never adds a per-query corpus scan: the common warm path returns above, and
+ * each anomaly probe is one HashRange point read.
+ */
+async function assertCandidateDidNotDropLiveRecords(
+  node: NodeClient,
+  cfg: Config,
+  types: readonly RecordType[],
+  previous: BM25Index,
+  candidate: BM25Index,
+): Promise<void> {
+  for (const type of types) {
+    const candidateSlugs = new Set(candidate.slugsForType(type));
+    const disappeared = previous.slugsForType(type).filter((slug) => !candidateSlugs.has(slug));
+    for (const slug of disappeared) {
+      const record = await readTypeListEntryBySlug(node, cfg, type, slug);
+      if (!record || isTombstoned(record)) continue;
+      throw new FbrainError({
+        code: "bm25_candidate_dropped_live_record",
+        message:
+          `refusing to activate BM25 cache: candidate omitted live ${type} record \"${slug}\" ` +
+          "that remains reachable by exact record-list point read.",
+        hint:
+          "The current BM25 cache remains active. Repair the affected record-list partition " +
+          "with `fbrain reindex --list-index`, then rebuild with `fbrain reindex --bm25`.",
+      });
+    }
+  }
 }
 
 async function loadBm25Documents(

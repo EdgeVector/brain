@@ -134,4 +134,22 @@ describe("BM25Index.fromJSON structural validation", () => {
     const hits = round!.search("alpha", 10);
     expect(hits.length).toBeGreaterThan(0);
   });
+
+  test("v3 manifest preserves requested types with zero documents", () => {
+    const built = BM25Index.build(
+      [
+        {
+          type: "design",
+          slug: "alpha",
+          title: "alpha doc",
+          body: "the body",
+          updatedAt: "2026-01-01T00:00:00Z",
+        },
+      ],
+      ["design", "task"],
+    );
+    const serialized = built.toJSON();
+    expect(serialized.typeCounts).toEqual({ design: 1, task: 0 });
+    expect(BM25Index.fromJSON(JSON.parse(JSON.stringify(serialized)))).not.toBeNull();
+  });
 });
