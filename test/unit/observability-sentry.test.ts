@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { captureSentryException, initSentry, type SentryModule } from "../../src/observability/sentry";
+import {
+  captureSentryException,
+  initSentry,
+  parseObsSentryDsn,
+  type SentryModule,
+} from "../../src/observability/sentry";
 
 function mockSentry() {
   const initCalls: unknown[] = [];
@@ -129,5 +134,42 @@ describe("Sentry observability helper", () => {
       },
     ]);
     expect(sentry.flushes).toBe(1);
+  });
+
+  test("parseObsSentryDsn rejects lastsecrets and non-DSN values", () => {
+    expect(parseObsSentryDsn("")).toBeNull();
+    expect(parseObsSentryDsn("lastsecrets://obs-sentry-dsn-routines")).toBeNull();
+    expect(parseObsSentryDsn("not-a-sentry-dsn")).toBeNull();
+    expect(parseObsSentryDsn("https://public@example.invalid/1")).toBe(
+      "https://public@example.invalid/1",
+    );
+  });
+
+  test("no-ops without calling Sentry.init when DSN is a lastsecrets locator", async () => {
+    const sentry = mockSentry();
+
+    const result = await initSentry({
+      service: "fbrain-cli",
+      env: { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
+      sentryModule: sentry.module,
+      installProcessHandlers: false,
+    });
+
+    expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
+    expect(sentry.initCalls).toHaveLength(0);
+  });
+
+  test("no-ops without calling Sentry.init when DSN is garbage", async () => {
+    const sentry = mockSentry();
+
+    const result = await initSentry({
+      service: "fbrain-cli",
+      env: { OBS_SENTRY_DSN: "not-a-sentry-dsn" },
+      sentryModule: sentry.module,
+      installProcessHandlers: false,
+    });
+
+    expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
+    expect(sentry.initCalls).toHaveLength(0);
   });
 });

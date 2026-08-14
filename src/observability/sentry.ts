@@ -10,8 +10,57 @@ export type SentryInitOptions = {
 };
 
 export type SentryInitResult =
-  | { enabled: false; reason: "disabled" | "missing_dsn" }
+  | { enabled: false; reason: "disabled" | "missing_dsn" | "invalid_dsn" }
   | { enabled: true; service: string; environment?: string; release?: string };
+
+/**
+ * Parse OBS_SENTRY_DSN without calling Sentry.init.
+ *
+ * Invalid values (empty, lastsecrets:// locators, non-http(s), unparseable)
+ * return null so callers disable Sentry instead of letting @sentry/core print
+ * `Invalid Sentry Dsn: …` via console (which poisons agent 2>&1 | jq pipelines
+ * when shells merge streams, and always adds noise).
+ *
+ * Same fail-open contract as fold's Rust `parse_obs_sentry_dsn`.
+ */
+export function parseObsSentryDsn(raw: string): string | null {
+  const dsn = raw.trim();
+  if (!dsn) return null;
+
+  // Host env often injects unresolved secret locators (routinesd). Never hand
+  // these to the SDK — it only accepts https DSNs and logs on failure.
+  if (dsn.startsWith("lastsecrets://") || dsn.startsWith("lastsecrets:")) {
+    return null;
+  }
+
+  // Sentry only supports http/https DSNs. Reject everything else before init.
+  if (!/^https?:\/\//i.test(dsn)) {
+    return null;
+  }
+
+  // Mirror @sentry/core's DSN_REGEX shape closely enough that we never call
+  // init with a string the SDK would reject (and console.error).
+  // protocol://publicKey[:secret]@host[:port]/path/]projectId
+  const DSN_RE =
+    /^(?:https?):\/\/(?:[\w.-]+)(?::[\w.-]+)?@((?:\[[:.%\w]+\]|[\w.-]+))(?::\d+)?\/(.+)$/i;
+  if (!DSN_RE.test(dsn)) {
+    return null;
+  }
+
+  return dsn;
+}
+
+function warnInvalidDsn(dsnEnv: string, raw: string): void {
+  // stderr only — never stdout (JSON CLIs). Do not echo the full raw value
+  // when it looks secret-like; lastsecrets locators are safe metadata.
+  const hint =
+    raw.startsWith("lastsecrets://") || raw.startsWith("lastsecrets:")
+      ? "lastsecrets locator (not a Sentry DSN)"
+      : "not a valid https Sentry DSN";
+  process.stderr.write(
+    `observability: ${dsnEnv} is ${hint}; Sentry disabled. Resolve the secret in a process wrapper or unset the var.\n`,
+  );
+}
 
 export type SentryModule = {
   init(options: {
@@ -50,9 +99,15 @@ export async function initSentry(options: SentryInitOptions): Promise<SentryInit
     return { enabled: false, reason: "disabled" };
   }
 
-  const dsn = env[dsnEnv]?.trim();
-  if (!dsn) {
+  const dsnRaw = env[dsnEnv]?.trim();
+  if (!dsnRaw) {
     return { enabled: false, reason: "missing_dsn" };
+  }
+
+  const dsn = parseObsSentryDsn(dsnRaw);
+  if (!dsn) {
+    warnInvalidDsn(dsnEnv, dsnRaw);
+    return { enabled: false, reason: "invalid_dsn" };
   }
 
   const sentry = options.sentryModule ?? (await loadSentryModule());
