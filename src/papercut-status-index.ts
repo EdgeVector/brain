@@ -151,7 +151,7 @@ export async function unmarkPapercutStatusIndexMigrated(
   return true;
 }
 
-async function requireCompleteIndex(
+export async function requireCompletePapercutStatusIndex(
   node: NodeClient,
   cfg: SchemaCfg,
 ): Promise<string> {
@@ -187,7 +187,7 @@ export async function readPapercutsByStatus(
   cfg: SchemaCfg,
   status?: string,
 ): Promise<FbrainRecord[]> {
-  const entryHash = await requireCompleteIndex(node, cfg);
+  const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
   const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
   const { findBySlug, isTombstoned, schemaHashFor } = await import(
     "./record.ts"
@@ -229,6 +229,61 @@ export async function patchPapercutStatusIndex(
   }
   if (nextStatus && record)
     await upsertPapercutStatusEntry(node, cfg, nextStatus, record);
+}
+
+/**
+ * Make one record's keyed membership exact using only point reads/writes.
+ *
+ * The current partition is written first. That ordering makes retries safe:
+ * if a process stops while removing an old-status row, hydration rejects the
+ * stale row because the primary record carries the new status, while the new
+ * partition already contains the discoverable membership.
+ */
+export async function ensurePapercutStatusMembership(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  record: FbrainRecord,
+): Promise<void> {
+  await requireCompletePapercutStatusIndex(node, cfg);
+  await upsertPapercutStatusEntry(node, cfg, record.status, record);
+  for (const status of PAPERCUT_STATUSES) {
+    if (status === record.status) continue;
+    await deletePapercutStatusEntry(node, cfg, status, record.slug);
+  }
+}
+
+/**
+ * Persist a first-class papercut mutation as one retry-safe product operation.
+ *
+ * Membership is prepared before the primary mutation. A membership failure
+ * therefore leaves the primary untouched. A later primary failure can leave
+ * only a harmless row whose point hydration finds no matching record; retrying
+ * the same operation upserts that row and completes the primary write. After
+ * the primary succeeds, exact point deletes remove every stale status key.
+ */
+export async function persistPapercutWithStatusMembership(opts: {
+  node: NodeClient;
+  cfg: SchemaCfg;
+  record: FbrainRecord;
+  persistPrimary: () => Promise<void>;
+}): Promise<void> {
+  await requireCompletePapercutStatusIndex(opts.node, opts.cfg);
+  await upsertPapercutStatusEntry(
+    opts.node,
+    opts.cfg,
+    opts.record.status,
+    opts.record,
+  );
+  await opts.persistPrimary();
+  for (const status of PAPERCUT_STATUSES) {
+    if (status === opts.record.status) continue;
+    await deletePapercutStatusEntry(
+      opts.node,
+      opts.cfg,
+      status,
+      opts.record.slug,
+    );
+  }
 }
 
 /** Non-fatal write-path wrapper; a failed patch clears completeness. */
