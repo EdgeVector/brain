@@ -560,3 +560,162 @@ export async function papercutCensusCmd(
   );
   print([header, ...lines, "", CENSUS_METHOD].join("\n"));
 }
+
+export type PapercutListOptions = {
+  cfg: Config;
+  component?: string;
+  status?: string;
+  verbose?: Verbose;
+  print?: (line: string) => void;
+  json?: boolean;
+};
+
+// One row per papercut, carrying every stored header field.
+//
+// The prior implementation delegated to the generic record lister with
+// `type: "papercut"`, whose projection is seven generic columns
+// (type/slug/status/tags/title/created_at/updated_at). That dropped
+// `component`, `severity`, `kind`, `repo`, `fixed_by`, `verified_by`,
+// `symptom_hash` and `duplicate_of` with no partial-projection marker, so a
+// consumer read a missing field as an empty one. Those are exactly the fields
+// the shared routine procedure (`papercut-ledger-hygiene.md`) directs every
+// chief-engineer run to audit — `close --status verified` goes out of its way
+// to REQUIRE `--verified-by` and to reject a bare merge reference, and then the
+// only survey reader could not show whether it was ever supplied. An audit run
+// through the old listing concluded "no routine populates these" no matter how
+// many did.
+export type PapercutListRow = {
+  slug: string;
+  title: string;
+  status: string;
+  component: string;
+  severity: string;
+  kind: string;
+  repo: string;
+  fixed_by: string;
+  verified_by: string;
+  duplicate_of: string;
+  symptom_hash: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+function str(record: FbrainRecord, field: string): string {
+  const v = record[field];
+  return typeof v === "string" ? v : "";
+}
+
+export function componentOf(record: FbrainRecord): string {
+  const c = str(record, "component");
+  return c.length > 0 ? c : "(unset)";
+}
+
+/**
+ * Filter + order the ledger for `papercut list`.
+ *
+ * Ordering is **oldest `updated_at` first**, deliberately opposite to the
+ * newest-first convention of the generic record lister. The documented consumer
+ * of this reader is the reconcile loop in `papercut-ledger-hygiene.md` — "take
+ * the two oldest active records you have not already reconciled today" — and a
+ * newest-first sample is precisely the shape that forces that loop to reach for
+ * a second reader. Every matching row is returned, so a caller wanting the
+ * other order can just reverse it.
+ */
+export function buildPapercutList(
+  records: readonly FbrainRecord[],
+  opts: { component?: string; status?: string } = {},
+): PapercutListRow[] {
+  const rows: PapercutListRow[] = [];
+  for (const r of records) {
+    const component = componentOf(r);
+    if (opts.component !== undefined && component !== opts.component) continue;
+    if (opts.status !== undefined && r.status !== opts.status) continue;
+    rows.push({
+      slug: r.slug,
+      title: r.title,
+      status: r.status,
+      component,
+      severity: str(r, "severity"),
+      kind: str(r, "kind"),
+      repo: str(r, "repo"),
+      fixed_by: str(r, "fixed_by"),
+      verified_by: str(r, "verified_by"),
+      duplicate_of: str(r, "duplicate_of"),
+      symptom_hash: str(r, "symptom_hash"),
+      tags: Array.isArray(r.tags) ? r.tags : [],
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    });
+  }
+  return rows.sort(
+    (a, b) =>
+      a.updated_at.localeCompare(b.updated_at) || a.slug.localeCompare(b.slug),
+  );
+}
+
+// Same rule as `CENSUS_METHOD`: a reader that reports rows without saying how
+// it got them is how a 20-row cross-component sample got read as one family's
+// ledger. This one also has to say what it is NOT — the old reader silently
+// dropped its `<component>` positional, so the promise that the filter was
+// actually applied is the load-bearing half of the line.
+export const LIST_METHOD =
+  "method: status-keyed papercut index (same read as `papercut census`), " +
+  "component/status filters applied, every matching row returned, oldest-updated first";
+
+export const LIST_MARK_MAX = 100;
+
+/** Single-line, length-capped rendering for human mode only. */
+export function elide(value: string, max: number = LIST_MARK_MAX): string {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
+}
+
+export async function papercutListCmd(
+  opts: PapercutListOptions,
+): Promise<void> {
+  const print = resolvePrintSink(opts);
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  // Read one status partition when the caller named one; the whole ledger
+  // otherwise. `readPapercutsByStatus` is the same complete reader `census`
+  // uses, so list and census are two views of ONE read and cannot disagree.
+  const records = await readPapercutsByStatus(node, opts.cfg, opts.status);
+  const listOpts: { component?: string; status?: string } = {};
+  if (opts.component !== undefined) listOpts.component = opts.component;
+  if (opts.status !== undefined) listOpts.status = opts.status;
+  const rows = buildPapercutList(records, listOpts);
+
+  if (opts.json) {
+    print(JSON.stringify({ rows, total: rows.length, method: LIST_METHOD }));
+    return;
+  }
+  if (rows.length === 0) {
+    print("no papercuts");
+    print(LIST_METHOD);
+    return;
+  }
+  const header = "status    sev  component     slug";
+  const lines: string[] = [];
+  const indent = " ".repeat(30);
+  for (const r of rows) {
+    lines.push(
+      `${r.status.padEnd(9)} ${r.severity.padEnd(4)} ${r.component.padEnd(13)} ${r.slug}`,
+    );
+    if (r.title) lines.push(`${indent}${r.title}`);
+    // Closure provenance is the point of the ledger; show it where it exists
+    // rather than making every audit re-read each record to find out.
+    //
+    // `verified_by` holds a full live-check transcript by design — the close
+    // verb demands one — and several run past 500 characters, which makes a
+    // scan of 115 rows unreadable. Human mode elides; --json carries the whole
+    // value, so the audit path loses nothing.
+    const marks: string[] = [];
+    if (r.fixed_by) marks.push(`fixed-by: ${elide(r.fixed_by)}`);
+    if (r.verified_by) marks.push(`verified-by: ${elide(r.verified_by)}`);
+    if (r.duplicate_of) marks.push(`duplicate-of: ${r.duplicate_of}`);
+    if (marks.length > 0) lines.push(`${indent}[${marks.join(" · ")}]`);
+  }
+  print(
+    [header, ...lines, "", `${rows.length} row(s)`, LIST_METHOD].join("\n"),
+  );
+}

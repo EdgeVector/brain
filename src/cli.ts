@@ -69,6 +69,7 @@ import {
   papercutCensusCmd,
   papercutCloseCmd,
   papercutFileCmd,
+  papercutListCmd,
 } from "./commands/papercut.ts";
 import {
   FBRAIN_MCP_READ_TOOL_NAMES,
@@ -915,6 +916,13 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
         repository and not about anything running.
 
 census  Counts by component and status, and prints its own method line.
+
+list    The row-level view of the SAME read census counts, so the two can never
+        disagree. Applies <component> and --status, returns every matching row
+        (no sample, no cap), and carries every stored header field —
+        component/severity/kind/repo/fixed_by/verified_by/duplicate_of — because
+        those are what a closure audit is made of. Ordered oldest-updated first,
+        which is the order the reconcile loop actually consumes.
 
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
@@ -3785,23 +3793,31 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     return 0;
   }
 
-  // census / list share the component positional.
+  // census / list share the component positional. `list` used to accept it
+  // here and then never pass it on — it delegated to the generic record lister,
+  // which has no component filter at all. So `papercut list lastdb` served a
+  // 20-row newest-first sample of EVERY component (measured 2026-08-17: 8 of 20
+  // rows were kanban/lastgit/fold/pipeline), under an envelope whose `total`
+  // was the unfiltered papercut count and whose truncation hint named a `-n N`
+  // flag this subcommand's own strict parser rejects. Every chief-engineer
+  // routine pointed at this reader was surveying a cross-component sample as if
+  // it were its own family's ledger.
   const component = positionals[0];
-  const cOpts: Parameters<typeof papercutCensusCmd>[0] = { cfg, verbose, json };
-  if (component) cOpts.component = component;
   if (sub === "census") {
+    const cOpts: Parameters<typeof papercutCensusCmd>[0] = {
+      cfg,
+      verbose,
+      json,
+    };
+    if (component) cOpts.component = component;
     await papercutCensusCmd(cOpts);
     return 0;
   }
 
-  const lOpts: Parameters<typeof listCmd>[0] = {
-    cfg,
-    verbose,
-    type: "papercut",
-  };
+  const lOpts: Parameters<typeof papercutListCmd>[0] = { cfg, verbose, json };
+  if (component) lOpts.component = component;
   if (typeof values.status === "string") lOpts.status = values.status;
-  if (json) lOpts.json = true;
-  await listCmd(lOpts);
+  await papercutListCmd(lOpts);
   return 0;
 }
 

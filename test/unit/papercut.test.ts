@@ -18,6 +18,10 @@ import {
 } from "../../src/papercut.ts";
 import {
   buildCensus,
+  buildPapercutList,
+  elide,
+  LIST_MARK_MAX,
+  LIST_METHOD,
   papercutFileCmd,
   papercutDedupeProbes,
   semanticDuplicateCandidates,
@@ -250,6 +254,138 @@ describe("census", () => {
     expect(rows[0]!.total).toBe(1);
     expect(rows[0]!.open).toBe(0);
     expect(rows[0]!.live).toBe(0);
+  });
+});
+
+// `papercut list` is the only reader that yields SLUGS, and both of its
+// defects below were measured on the live primary on 2026-08-17, two days
+// after the reader shipped:
+//
+//   * `papercut list lastdb --json` returned 20 rows of which 8 were
+//     kanban/lastgit/fold/pipeline — the <component> positional was parsed and
+//     then never passed on, because the command delegated to the generic record
+//     lister, which has no component filter at all.
+//   * The same call reported `total: 630` for EVERY component (lastdb, brain,
+//     routines, disk), that being the unfiltered papercut count.
+//   * The projection served 7 generic columns and dropped `component`,
+//     `severity`, `kind`, `repo`, `fixed_by`, `verified_by`, `symptom_hash`
+//     and `duplicate_of` with no partial-projection marker — the exact fields
+//     the shared hygiene procedure tells every routine to audit.
+describe("list", () => {
+  const records = [
+    rec({ slug: "b-old", component: "lastdb", status: "open", updated_at: "2026-08-01T00:00:00.000Z" }),
+    rec({ slug: "a-new", component: "lastdb", status: "fixed", updated_at: "2026-08-09T00:00:00.000Z", fixed_by: "fold #1197" }),
+    rec({ slug: "c-mid", component: "lastdb", status: "open", updated_at: "2026-08-05T00:00:00.000Z" }),
+    rec({ slug: "d", component: "kanban", status: "open" }),
+    rec({ slug: "e", component: "", status: "open" }),
+  ];
+
+  test("filters to the named component instead of ignoring it", () => {
+    const rows = buildPapercutList(records, { component: "lastdb" });
+    expect(rows.map((r) => r.slug).sort()).toEqual(["a-new", "b-old", "c-mid"]);
+    expect(rows.every((r) => r.component === "lastdb")).toBe(true);
+  });
+
+  // The regression that mattered: a component filter that lets other
+  // components through turns a family ledger into a cross-family sample.
+  test("no foreign component survives the filter", () => {
+    const rows = buildPapercutList(records, { component: "lastdb" });
+    expect(rows.some((r) => r.component === "kanban")).toBe(false);
+    expect(rows.some((r) => r.component === "(unset)")).toBe(false);
+  });
+
+  test("an unset component is addressable as its own bucket", () => {
+    const rows = buildPapercutList(records, { component: "(unset)" });
+    expect(rows.map((r) => r.slug)).toEqual(["e"]);
+  });
+
+  test("component and status filters compose", () => {
+    const rows = buildPapercutList(records, {
+      component: "lastdb",
+      status: "open",
+    });
+    expect(rows.map((r) => r.slug)).toEqual(["b-old", "c-mid"]);
+  });
+
+  // The reconcile loop consumes "the two oldest active records"; serving it
+  // newest-first is what made it need a second reader.
+  test("orders oldest-updated first", () => {
+    const rows = buildPapercutList(records, { component: "lastdb" });
+    expect(rows.map((r) => r.slug)).toEqual(["b-old", "c-mid", "a-new"]);
+  });
+
+  test("ties break on slug so the order is total, not arbitrary", () => {
+    const same = "2026-08-04T00:00:00.000Z";
+    const rows = buildPapercutList([
+      rec({ slug: "z", component: "lastdb", updated_at: same }),
+      rec({ slug: "y", component: "lastdb", updated_at: same }),
+    ]);
+    expect(rows.map((r) => r.slug)).toEqual(["y", "z"]);
+  });
+
+  // Every field a closure audit reads must survive the projection. A missing
+  // field reads as an empty one, which is how "no routine populates
+  // verified_by" gets concluded from a reader that never served it.
+  test("carries every stored header field, not a generic 7-column subset", () => {
+    const [row] = buildPapercutList([
+      rec({
+        slug: "s",
+        component: "lastdb",
+        severity: "p1",
+        kind: "specified-fix",
+        repo: "EdgeVector/fold",
+        fixed_by: "fold #1197",
+        verified_by: "GET /api/status over the socket this run",
+        duplicate_of: "other-slug",
+        symptom_hash: "deadbeef",
+      }),
+    ]);
+    expect(row).toMatchObject({
+      component: "lastdb",
+      severity: "p1",
+      kind: "specified-fix",
+      repo: "EdgeVector/fold",
+      fixed_by: "fold #1197",
+      verified_by: "GET /api/status over the socket this run",
+      duplicate_of: "other-slug",
+      symptom_hash: "deadbeef",
+    });
+  });
+
+  test("an absent optional field is an empty string, never undefined", () => {
+    const [row] = buildPapercutList([rec({ slug: "s", component: "lastdb" })]);
+    expect(row!.fixed_by).toBe("");
+    expect(row!.verified_by).toBe("");
+    expect(row!.tags).toEqual([]);
+  });
+
+  // list and census read the same records, so a component's row count here and
+  // its `total` there are the same number by construction.
+  test("row count agrees with the census total for the same component", () => {
+    const rows = buildPapercutList(records, { component: "lastdb" });
+    const census = buildCensus(records, "lastdb");
+    expect(rows).toHaveLength(census[0]!.total);
+  });
+
+  test("no filter returns the whole ledger", () => {
+    expect(buildPapercutList(records)).toHaveLength(records.length);
+  });
+
+  // The method line is the honesty contract; the old reader's hint named a
+  // `-n N` flag its own strict parser rejected.
+  test("the method line states that the filters were applied", () => {
+    expect(LIST_METHOD).toContain("filters applied");
+    expect(LIST_METHOD).toContain("every matching row");
+  });
+
+  // Human mode only. A `verified_by` transcript is meant to be long; eliding it
+  // in --json would defeat the audit the field exists for.
+  test("elide flattens and caps, and leaves short values untouched", () => {
+    expect(elide("fold #1197")).toBe("fold #1197");
+    expect(elide("a\n  b\tc")).toBe("a b c");
+    const long = "x".repeat(LIST_MARK_MAX + 50);
+    expect(elide(long)).toHaveLength(LIST_MARK_MAX);
+    expect(elide(long).endsWith("…")).toBe(true);
   });
 });
 
