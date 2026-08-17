@@ -9,6 +9,7 @@ import {
   ensureComponent,
   ensureDuplicateTarget,
   ensureKind,
+  ensurePapercutSlug,
   ensurePapercutStatus,
   ensureSeverity,
   ensureVerificationEvidence,
@@ -224,6 +225,18 @@ describe("field validation", () => {
     expect(ensureComponent(" last-gitistan ")).toBe("last-gitistan");
     for (const bad of ["LastGit", "last gitistan", "3lastgit", "papercut-lastgit-thing", ""]) {
       expect(() => ensureComponent(bad), `should reject: ${bad}`).toThrow(FbrainError);
+    }
+  });
+
+  test("file slug must start with papercut-", () => {
+    expect(ensurePapercutSlug("papercut-brain-example")).toBe("papercut-brain-example");
+    for (const bad of [
+      "brain-papercut-file-token-overlap-refuses-unrelated-claims",
+      "portal-wt-start-help-creates-a-worktree",
+      "papercut-",
+      "",
+    ]) {
+      expect(() => ensurePapercutSlug(bad), `should reject: ${bad}`).toThrow(FbrainError);
     }
   });
 

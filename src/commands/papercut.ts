@@ -40,6 +40,7 @@ import {
   ensureComponent,
   ensureDuplicateTarget,
   ensureKind,
+  ensurePapercutSlug,
   ensurePapercutStatus,
   ensureSeverity,
   ensureVerificationEvidence,
@@ -180,7 +181,7 @@ export async function papercutFileCmd(
   opts: PapercutFileOptions,
 ): Promise<PapercutFileResult> {
   const print = resolvePrintSink(opts);
-  const slug = normalizeSlug(opts.slug);
+  const slug = ensurePapercutSlug(normalizeSlug(opts.slug));
   const component = ensureComponent(opts.component);
   const severity = ensureSeverity(opts.severity);
   const kind = ensureKind(opts.kind);

@@ -122,6 +122,25 @@ export function ensureComponent(value: string): string {
   return trimmed;
 }
 
+// Typed papercut slugs are the queue's membership key. last-stack-papercut-queue
+// (and the reconciler snapshot) abort or quarantine anything that does not
+// start with `papercut-`. The file door is the producer; reject here so one
+// unprefixed filing cannot fail-close the whole ledger reader.
+export function ensurePapercutSlug(value: string): string {
+  const slug = value.trim();
+  if (!slug.startsWith("papercut-") || slug === "papercut-") {
+    const suggested = slug.startsWith("papercut-") ? "papercut-<rest>" : `papercut-${slug}`;
+    throw new FbrainError({
+      code: "invalid_papercut_field",
+      message:
+        `Invalid slug: ${value}\n` +
+        "Typed papercuts must start with `papercut-`.\n" +
+        `Retry as ${suggested}.`,
+    });
+  }
+  return slug;
+}
+
 // `verified` is the one status that asserts a fact about the live world, so it
 // is the one status that demands its evidence inline. This is the guard for the
 // failure the whole type exists to end: a record closed on the strength of a
