@@ -22,6 +22,7 @@ import {
   elide,
   LIST_MARK_MAX,
   LIST_METHOD,
+  isIdempotentPapercutFile,
   papercutFileCmd,
   papercutDedupeProbes,
   semanticDuplicateCandidates,
@@ -161,6 +162,33 @@ describe("the dedupe gate", () => {
 
   test("the file path contains no papercut partition enumeration", () => {
     expect(papercutFileCmd.toString()).not.toContain("listRecords");
+  });
+
+  test("an exact replay is idempotent but changed input is still a conflict", () => {
+    const existing = rec({
+      slug: "papercut-retry",
+      title: "same title",
+      body: "Symptom: same symptom\n\nsame body\n",
+      status: "open",
+      component: "brain",
+      repo: "EdgeVector/brain",
+      severity: "p1",
+      kind: "specified-fix",
+      symptom_hash: "abc123",
+      tags: ["papercut", "brain"],
+    });
+    const desired = {
+      ...existing,
+      created_at: "later",
+      updated_at: "later",
+    };
+    expect(isIdempotentPapercutFile(existing, desired)).toBe(true);
+    expect(
+      isIdempotentPapercutFile(existing, {
+        ...desired,
+        body: "Symptom: changed\n\nchanged body\n",
+      }),
+    ).toBe(false);
   });
 });
 

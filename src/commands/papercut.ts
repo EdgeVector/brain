@@ -32,7 +32,8 @@ import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import { maintainTypeListIndex } from "../record-list-index.ts";
 import {
-  maintainPapercutStatusIndex,
+  ensurePapercutStatusMembership,
+  persistPapercutWithStatusMembership,
   readPapercutsByStatus,
 } from "../papercut-status-index.ts";
 import {
@@ -134,7 +135,46 @@ export type PapercutFileResult = {
   component: string;
   symptom_hash: string;
   duplicates: DuplicateCandidate[];
+  idempotent?: boolean;
 };
+
+type PapercutFileMaterialized = Pick<
+  FbrainRecord,
+  | "slug"
+  | "title"
+  | "body"
+  | "status"
+  | "tags"
+  | "created_at"
+  | "updated_at"
+> &
+  Record<string, unknown>;
+
+/** Exact same filing input may safely repair membership and return success. */
+export function isIdempotentPapercutFile(
+  existing: FbrainRecord,
+  desired: PapercutFileMaterialized,
+): boolean {
+  const scalarFields = [
+    "slug",
+    "title",
+    "body",
+    "status",
+    "component",
+    "repo",
+    "severity",
+    "kind",
+    "symptom_hash",
+  ] as const;
+  if (scalarFields.some((field) => existing[field] !== desired[field]))
+    return false;
+  const existingTags = Array.isArray(existing.tags) ? existing.tags : [];
+  const desiredTags = Array.isArray(desired.tags) ? desired.tags : [];
+  return (
+    existingTags.length === desiredTags.length &&
+    existingTags.every((tag, index) => tag === desiredTags[index])
+  );
+}
 
 export async function papercutFileCmd(
   opts: PapercutFileOptions,
@@ -157,10 +197,49 @@ export async function papercutFileCmd(
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
   const cleared = new Set((opts.notDuplicateOf ?? []).map(normalizeSlug));
+  const now = nowIso();
+  const clearedNote =
+    cleared.size > 0
+      ? `\n\nCompared against and judged distinct from: ${[...cleared]
+          .map((s) => `[[${s}]]`)
+          .join(", ")}.`
+      : "";
+  const body = `Symptom: ${opts.symptom.trim()}\n\n${opts.body.trim()}${clearedNote}\n`;
+  const materialized: PapercutFileMaterialized = {
+    slug,
+    title: opts.title,
+    body,
+    status: "open",
+    component,
+    repo: opts.repo ?? "",
+    severity,
+    kind,
+    symptom_hash: hash,
+    fixed_by: "",
+    verified_by: "",
+    duplicate_of: "",
+    tags: opts.tags ?? [],
+    created_at: now,
+    updated_at: now,
+  };
 
   // Preserve the cheap exact-restatement pre-filter as one point read. The
   // fuzzy tail is semantic `find`, never a papercut partition enumeration.
   const prior = await findBySlug(node, PAPERCUT, schemaHash, slug);
+  if (prior && isIdempotentPapercutFile(prior, materialized)) {
+    await ensurePapercutStatusMembership(node, opts.cfg, prior);
+    const result: PapercutFileResult = {
+      action: "filed",
+      slug,
+      component,
+      symptom_hash: hash,
+      duplicates: [],
+      idempotent: true,
+    };
+    if (opts.json) print(JSON.stringify(result));
+    else print(`papercut ${slug} already filed; keyed membership verified`);
+    return result;
+  }
   let semanticHits: FindHit[];
   if (prior) {
     // An exact slug settles the pre-filter without paying for vector search.
@@ -247,35 +326,16 @@ export async function papercutFileCmd(
     });
   }
 
-  const now = nowIso();
-  const clearedNote =
-    cleared.size > 0
-      ? `\n\nCompared against and judged distinct from: ${[...cleared]
-          .map((s) => `[[${s}]]`)
-          .join(", ")}.`
-      : "";
-  const body = `Symptom: ${opts.symptom.trim()}\n\n${opts.body.trim()}${clearedNote}\n`;
-
-  await node.createRecord({
-    schemaHash,
-    keyHash: slug,
-    fields: {
-      slug,
-      title: opts.title,
-      body,
-      status: "open",
-      component,
-      repo: opts.repo ?? "",
-      severity,
-      kind,
-      symptom_hash: hash,
-      fixed_by: "",
-      verified_by: "",
-      duplicate_of: "",
-      tags: opts.tags ?? [],
-      created_at: now,
-      updated_at: now,
-    },
+  await persistPapercutWithStatusMembership({
+    node,
+    cfg: opts.cfg,
+    record: materialized as FbrainRecord,
+    persistPrimary: () =>
+      node.createRecord({
+        schemaHash,
+        keyHash: slug,
+        fields: materialized,
+      }),
   });
 
   // The record is in SOT. It is NOT yet listable — `brain list`, `papercut
@@ -300,24 +360,6 @@ export async function papercutFileCmd(
     slug,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
-  const materialized = filed ?? {
-    slug,
-    title: opts.title,
-    body,
-    status: "open",
-    tags: opts.tags ?? [],
-    created_at: now,
-    updated_at: now,
-  };
-  await maintainPapercutStatusIndex({
-    node,
-    cfg: opts.cfg,
-    slug,
-    record: materialized,
-    previousStatus: undefined,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
-
   if (opts.json) {
     print(
       JSON.stringify({
@@ -426,10 +468,17 @@ export async function papercutCloseCmd(
   if (verifiedBy) patch.verified_by = verifiedBy;
   if (duplicateOf) patch.duplicate_of = normalizeSlug(duplicateOf);
 
-  await node.updateRecord({
-    schemaHash,
-    keyHash: slug,
-    fields: updateFieldsFrom(record, PAPERCUT, patch),
+  const transitioned = { ...record, ...patch } as FbrainRecord;
+  await persistPapercutWithStatusMembership({
+    node,
+    cfg: opts.cfg,
+    record: transitioned,
+    persistPrimary: () =>
+      node.updateRecord({
+        schemaHash,
+        keyHash: slug,
+        fields: updateFieldsFrom(record, PAPERCUT, patch),
+      }),
   });
 
   // Same reason as the file path: the index carries `status`, so a close that
@@ -443,15 +492,6 @@ export async function papercutCloseCmd(
     slug,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
-  await maintainPapercutStatusIndex({
-    node,
-    cfg: opts.cfg,
-    slug,
-    record: closed ?? { ...record, status, updated_at: now },
-    previousStatus: from,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
-
   if (opts.json) {
     print(
       JSON.stringify({ action: "papercut_closed", slug, from, to: status }),

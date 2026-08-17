@@ -2,10 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { FbrainError } from "../../src/client.ts";
 import {
   censusPapercutStatusIndex,
+  ensurePapercutStatusMembership,
   maintainPapercutStatusIndex,
   markPapercutStatusIndexMigrated,
   patchPapercutStatusIndex,
+  persistPapercutWithStatusMembership,
   readPapercutsByStatus,
+  requireCompletePapercutStatusIndex,
   writePapercutStatusIndex,
 } from "../../src/papercut-status-index.ts";
 import {
@@ -256,6 +259,66 @@ describe("status transition maintenance", () => {
         PAPERCUT_STATUS_INDEX_MIGRATED_RANGE
       ],
     ).toBeUndefined();
+  });
+
+  test("first-class mutation preflight requires a complete keyed index", async () => {
+    const cold = makeNode();
+    await expect(
+      requireCompletePapercutStatusIndex(cold.node, REGISTERED),
+    ).rejects.toMatchObject({ code: "papercut_status_index_incomplete" });
+    const ready = makeNode({ migrated: true });
+    expect(
+      await requireCompletePapercutStatusIndex(ready.node, REGISTERED),
+    ).toBe(ENTRY_HASH);
+  });
+
+  test("first-class filing is membership-first and repairs a partial retry", async () => {
+    const record = papercut("retry-me", "open");
+    const { node, rows } = makeNode({ migrated: true });
+    let primaryCalls = 0;
+    await expect(
+      persistPapercutWithStatusMembership({
+        node,
+        cfg: REGISTERED,
+        record,
+        persistPrimary: async () => {
+          primaryCalls += 1;
+          throw new Error("primary unavailable");
+        },
+      }),
+    ).rejects.toThrow("primary unavailable");
+    expect(primaryCalls).toBe(1);
+    expect(rows.open?.[record.slug]).toEqual(record);
+
+    await persistPapercutWithStatusMembership({
+      node,
+      cfg: REGISTERED,
+      record,
+      persistPrimary: async () => {
+        primaryCalls += 1;
+      },
+    });
+    expect(primaryCalls).toBe(2);
+    expect(rows.open?.[record.slug]).toEqual(record);
+    expect(
+      Object.values(rows).filter((part) => part[record.slug] !== undefined),
+    ).toHaveLength(1);
+  });
+
+  test("idempotent repair re-keys lifecycle membership without a scan", async () => {
+    const current = papercut("move-me", "verified");
+    const { node, rows, calls } = makeNode({
+      migrated: true,
+      rows: {
+        open: { [current.slug]: papercut(current.slug, "open") },
+        fixed: { [current.slug]: papercut(current.slug, "fixed") },
+      },
+    });
+    await ensurePapercutStatusMembership(node, REGISTERED, current);
+    expect(rows.open?.[current.slug]).toBeUndefined();
+    expect(rows.fixed?.[current.slug]).toBeUndefined();
+    expect(rows.verified?.[current.slug]).toEqual(current);
+    expect(calls.some((call) => call.allowFullScan === true)).toBe(false);
   });
 });
 
