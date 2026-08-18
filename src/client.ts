@@ -407,6 +407,19 @@ export type QueryResponse = {
   has_more?: boolean;
 };
 
+/** One live record identity returned by Mini's keys-only `GET /api/list`. */
+export type SchemaRecordKey = {
+  hash: string;
+  range?: string;
+};
+
+/** One bounded page from Mini's keys-only schema membership walk. */
+export type SchemaRecordKeyPage = {
+  keys: SchemaRecordKey[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
 // Single-request page size for the `/api/query` pagination loop. The node
 // caps individual page requests at MAX_QUERY_LIMIT (1000); we ride that
 // cap directly so a database of N records resolves in ceil(N/1000) round
@@ -803,6 +816,13 @@ export type NodeClient = {
     fields: string[];
     keyHash: string;
   }): Promise<QueryRow | null>;
+  // Admin/offline membership primitive: GET /api/list returns storage keys
+  // only, never atom bodies. Optional so legacy hand-built test doubles do not
+  // all need to grow the newly-shipped Mini route at once.
+  listRecordKeys?(
+    schemaHash: string,
+    opts?: { limit?: number; cursor?: string },
+  ): Promise<SchemaRecordKeyPage>;
   search(query: string, opts?: SearchOptions): Promise<NativeIndexHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
@@ -1535,6 +1555,50 @@ export function newNodeClient(opts: {
       const results = fromSdkRows(page.rows);
       return findQueryRowByKey(results, keyHash);
     },
+    async listRecordKeys(schemaHash, listOpts = {}) {
+      const params = new URLSearchParams({ schema: schemaHash });
+      if (listOpts.limit !== undefined) params.set("limit", String(listOpts.limit));
+      if (listOpts.cursor !== undefined) params.set("cursor", listOpts.cursor);
+      const path = `/api/list?${params.toString()}`;
+      const body = await callJsonOk(path, "GET");
+      const envelope = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+      const list =
+        envelope.list && typeof envelope.list === "object"
+          ? (envelope.list as Record<string, unknown>)
+          : null;
+      if (list === null || !Array.isArray(list.keys) || typeof list.has_more !== "boolean") {
+        throw new FbrainError({
+          code: "list_keys_bad_response",
+          message: `Node GET /api/list returned an invalid keys page for schema ${schemaHash.slice(0, 12)}….`,
+          hint: "Inspect the node response; brain expects list.keys[] and list.has_more from a Mini version with the keys-only list route.",
+        });
+      }
+      const keys: SchemaRecordKey[] = list.keys.map((raw, index) => {
+        const key = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+        if (typeof key.hash !== "string" || key.hash.length === 0) {
+          throw new FbrainError({
+            code: "list_keys_bad_response",
+            message: `Node GET /api/list returned an invalid key at index ${index} for schema ${schemaHash.slice(0, 12)}….`,
+            hint: "Inspect the node response; every listed brain record must have a non-empty hash key.",
+          });
+        }
+        return {
+          hash: key.hash,
+          ...(typeof key.range === "string" && key.range.length > 0
+            ? { range: key.range }
+            : {}),
+        };
+      });
+      const nextCursor = typeof list.next_cursor === "string" ? list.next_cursor : null;
+      if (list.has_more && nextCursor === null) {
+        throw new FbrainError({
+          code: "list_keys_bad_response",
+          message: `Node GET /api/list reported has_more=true without a next_cursor for schema ${schemaHash.slice(0, 12)}….`,
+          hint: "Inspect the node response; a truncated keys page must carry the cursor for the next page.",
+        });
+      }
+      return { keys, nextCursor, hasMore: list.has_more };
+    },
     async search(query, searchOpts) {
       const schemaTargets = uniqueStrings(searchOpts?.schemas ?? []);
       try {
@@ -1889,6 +1953,7 @@ type BoundedResponse = {
 const NODE_DATA_PLANE_ROUTES = {
   GET: [
     "/api/health",
+    "/api/list",
     "/api/schemas",
     "/api/system/auto-identity",
     "/api/native-index/search",

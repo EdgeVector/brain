@@ -35,6 +35,25 @@ afterEach(() => {
 function countingNode(): NodeClient & { queryAllCalls: number } {
   const node = {
     queryAllCalls: 0,
+    async listRecordKeys() {
+      node.queryAllCalls++;
+      return { keys: [{ hash: "d1" }], nextCursor: null, hasMore: false };
+    },
+    async queryByKey() {
+      node.queryAllCalls++;
+      return {
+        fields: {
+          slug: "d1",
+          title: "T-d1",
+          body: "octopus",
+          status: "draft",
+          tags: [],
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+        key: { hash: "d1", range: null },
+      };
+    },
     async queryAll() {
       node.queryAllCalls++;
       return {
