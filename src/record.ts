@@ -1,7 +1,12 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
 import type { NodeClient, QueryRow } from "./client.ts";
-import { FbrainError, isLoopbackNodeUrl } from "./client.ts";
+import {
+  FbrainError,
+  QUERY_PAGE_LIMIT,
+  QUERY_PAGE_SIZE,
+  isLoopbackNodeUrl,
+} from "./client.ts";
 import { newSearchClientFromCfg } from "./write-context.ts";
 import type { Config } from "./config.ts";
 import {
@@ -386,8 +391,9 @@ export async function listRecords(
 }
 
 /**
- * Explicit admin/offline full-schema drain. For migrate, reindex, doctor, and
- * index cold-seed only — never for product CLI/MCP hot paths.
+ * Explicit admin/offline schema drain. Mini enumerates live storage keys via
+ * `GET /api/list`; brain then point-gets each slug. No atom body is read by the
+ * membership walk and no request opts into the retired full-schema scan path.
  */
 export async function listRecordsAdminScan(
   node: NodeClient,
@@ -395,12 +401,59 @@ export async function listRecordsAdminScan(
   schemaHash: string,
   opts?: { seedIndex?: (records: FbrainRecord[]) => Promise<void>; includeTombstones?: boolean },
 ): Promise<FbrainRecord[]> {
-  const res = await node.queryAll({
-    schemaHash,
-    fields: fieldsFor(type),
-    allowFullScan: true,
-  });
-  const allRecords = res.results.map((row) => rowToRecord(row, type));
+  if (!node.listRecordKeys || !node.queryByKey) {
+    throw new FbrainError({
+      code: "admin_list_not_supported",
+      message: "This node client does not support the keys-only admin list path.",
+      hint: "Use the production NodeClient against a Mini version that serves GET /api/list.",
+    });
+  }
+  const rows: QueryRow[] = [];
+  const seenKeys = new Set<string>();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  let complete = false;
+  for (let pageNo = 0; pageNo < QUERY_PAGE_LIMIT; pageNo++) {
+    const page = await node.listRecordKeys(schemaHash, {
+      limit: QUERY_PAGE_SIZE,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    for (const key of page.keys) {
+      // Brain product schemas are Hash-keyed by slug. Ignore duplicate storage
+      // identities defensively; the list route is the membership authority.
+      if (seenKeys.has(key.hash)) continue;
+      seenKeys.add(key.hash);
+      const row = await node.queryByKey({
+        schemaHash,
+        fields: fieldsFor(type),
+        keyHash: key.hash,
+      });
+      // A delete can race between the membership page and its point-get. The
+      // keyed miss is authoritative, so omit it from this drain.
+      if (row !== null) rows.push(row);
+    }
+    if (!page.hasMore) {
+      complete = true;
+      break;
+    }
+    if (page.nextCursor === null || seenCursors.has(page.nextCursor)) {
+      throw new FbrainError({
+        code: "list_keys_pagination_stalled",
+        message: `Node GET /api/list did not advance its cursor while listing ${type} records.`,
+        hint: "Retry after checking the node's keys-only list route; brain will not return a silently incomplete admin drain.",
+      });
+    }
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  if (!complete) {
+    throw new FbrainError({
+      code: "list_keys_pagination_limit",
+      message: `Node GET /api/list exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
+      hint: "Retry with a healthy node; brain will not return a silently truncated admin drain.",
+    });
+  }
+  const allRecords = rows.map((row) => rowToRecord(row, type));
   const records = opts?.includeTombstones === true
     ? allRecords
     : allRecords.filter((r) => !isTombstoned(r));

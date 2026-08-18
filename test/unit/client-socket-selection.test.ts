@@ -40,6 +40,7 @@ describe("localNodeRouteSocket", () => {
     const { dataPath } = liveSockets();
     const routeCases: Array<[string, string]> = [
       ["GET", "/api/health"],
+      ["GET", "/api/list"],
       ["GET", "/api/schemas"],
       ["GET", "/api/system/auto-identity"],
       ["GET", "/api/native-index/search"],
@@ -62,6 +63,15 @@ describe("localNodeRouteSocket", () => {
         "node",
         "GET",
         "/api/native-index/search?q=foo&exact=true",
+        LOOPBACK,
+        dataPath,
+      ),
+    ).toEqual({ socketPath: dataPath, kind: "data" });
+    expect(
+      localNodeRouteSocket(
+        "node",
+        "GET",
+        "/api/list?schema=fbrain%2FConcept&limit=1000",
         LOOPBACK,
         dataPath,
       ),

@@ -95,6 +95,21 @@ function stubFetch(opts: {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
     const url = typeof input === "string" ? input : (input as Request).url;
+    if (url.includes("/api/list?")) {
+      const requestUrl = new URL(url, "http://localhost");
+      const rows = opts.queries[requestUrl.searchParams.get("schema") ?? ""] ?? [];
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          list: {
+            keys: rows.map((fields) => ({ hash: String(fields.slug ?? "") })),
+            has_more: false,
+            truncated: false,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     if (url.endsWith("/api/query")) {
       const body = JSON.parse((init?.body as string) ?? "{}");
       const rows = opts.queries[body.schema_name] ?? [];

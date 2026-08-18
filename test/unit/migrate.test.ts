@@ -120,6 +120,7 @@ function stubFetch(opts: {
   schemaRegistrations: number;
   schemaLoads: number;
   queryCountsBySchema: Map<string, number>;
+  listCountsBySchema: Map<string, number>;
 } {
   const originalFetch = globalThis.fetch;
   const mutations: Array<{
@@ -130,6 +131,7 @@ function stubFetch(opts: {
   }> = [];
   const present = opts.presentAtTarget ?? {};
   const queryCountsBySchema = new Map<string, number>();
+  const listCountsBySchema = new Map<string, number>();
   let schemaRegistrations = 0;
   let schemaLoads = 0;
   // Track the most recent POST'd schema so the subsequent GET can
@@ -183,6 +185,25 @@ function stubFetch(opts: {
           available_schemas_loaded: 4,
           schemas_loaded_to_db: 4,
           failed_schemas: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/api/list?")) {
+      const requestUrl = new URL(url, "http://localhost");
+      const schema = requestUrl.searchParams.get("schema") ?? "";
+      listCountsBySchema.set(schema, (listCountsBySchema.get(schema) ?? 0) + 1);
+      const rows: RowFields[] = present[schema]
+        ? Array.from(present[schema]!, (slug) => ({ slug }))
+        : (opts.queries[schema] ?? []);
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          list: {
+            keys: rows.map((fields) => ({ hash: String(fields.slug ?? "") })),
+            has_more: false,
+            truncated: false,
+          },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -241,6 +262,7 @@ function stubFetch(opts: {
     },
     mutations,
     queryCountsBySchema,
+    listCountsBySchema,
     get schemaRegistrations() {
       return schemaRegistrations;
     },
@@ -628,18 +650,17 @@ describe("migrateCmd --add-field", () => {
     }
   });
 
-  test("--resume: idempotency check is one bulk listRecords per affected type, not one query per record", async () => {
+  test("--resume: idempotency check is one keys-only list page per affected type", async () => {
     // Regression: the previous implementation called findBySlugRaw inside
     // the per-record loop. Each call issued queryAll(to_hash), which
     // returns every row at to_hash — so on a resume with N records the
-    // probe cost was N round-trips with ~N²/2 rows transferred. For a
-    // non-trivial dataset that scales the resume from "fast" to
-    // "hangs / OOMs the node". The fix hoists into a single bulk
-    // listRecords per affected type and uses a Set for the skip check.
+    // probe cost was N full-schema round-trips with ~N²/2 rows transferred.
+    // The admin drain now gets membership from one keys-only `/api/list` page,
+    // then point-gets only the live keys it receives.
     //
     // Setup: a fresh migration with 5 records, none yet at to_hash. We
-    // assert that the number of /api/query calls to to_hash is exactly
-    // ONE (the up-front bulk probe), independent of record count.
+    // assert that destination membership is read exactly once, independent of
+    // source record count. With no destination keys, no point-get is issued.
     const cfg = buildTestCfg();
     writeStartingConfig(cfg);
 
@@ -663,9 +684,8 @@ describe("migrateCmd --add-field", () => {
       const creates = stub.mutations.filter((m) => m.mutation_type === "create");
       expect(creates.length).toBe(5);
 
-      // The critical assertion: exactly ONE query against to_hash for
-      // the idempotency pre-pass, NOT five (one per record).
-      expect(stub.queryCountsBySchema.get(NEW_HASH) ?? 0).toBe(1);
+      expect(stub.listCountsBySchema.get(NEW_HASH) ?? 0).toBe(1);
+      expect(stub.queryCountsBySchema.get(NEW_HASH) ?? 0).toBe(0);
     } finally {
       stub.restore();
     }
