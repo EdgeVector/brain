@@ -1069,6 +1069,71 @@ export const papercutStatusIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// Typed knowledge-graph edges are one product with two access patterns. Both
+// schemas expose the same field set and differ only in key layout, allowing
+// Mini to protein-bind the fields and fold one source-keyed write into the
+// destination-keyed member without app-level payload dual-write.
+export const GRAPH_EDGE_OUT_SCHEMA_KEY = "__graphedgeout__";
+export const GRAPH_EDGE_IN_SCHEMA_KEY = "__graphedgein__";
+export const GRAPH_EDGE_FIELDS = [
+  "bge_src",
+  "bge_dst",
+  "bge_type",
+  "bge_provenance",
+  "bge_created_at",
+  "bge_out_r",
+  "bge_in_r",
+] as const;
+
+function graphEdgeSchema(
+  name: string,
+  hashField: "bge_src" | "bge_dst",
+  rangeField: "bge_out_r" | "bge_in_r",
+): AddSchemaRequest {
+  return {
+    schema: {
+      name,
+      owner_app_id: OWNER_APP_ID,
+      descriptive_name: name,
+      purpose_statement:
+        "One typed fbrain knowledge-graph edge, protein-folded between source and destination HashRange access patterns",
+      schema_type: "HashRange",
+      key: { hash_field: hashField, range_field: rangeField },
+      fields: [...GRAPH_EDGE_FIELDS],
+      field_types: Object.fromEntries(
+        GRAPH_EDGE_FIELDS.map((field) => [field, "String"]),
+      ) as Record<string, FieldType>,
+      field_descriptions: {
+        bge_src: "source record slug",
+        bge_dst: "destination record slug",
+        bge_type: "curated edge type, or mentions fallback",
+        bge_provenance: "explicit|wikilink|frontmatter",
+        bge_created_at: "RFC 3339 timestamp",
+        bge_out_r: "source range key type#destination",
+        bge_in_r: "destination range key type#source",
+      },
+      field_classifications: Object.fromEntries(
+        GRAPH_EDGE_FIELDS.map((field) => [field, ["no_index", "metadata"]]),
+      ),
+      field_data_classifications: Object.fromEntries(
+        GRAPH_EDGE_FIELDS.map((field) => [field, GENERAL]),
+      ),
+    },
+    mutation_mappers: {},
+  };
+}
+
+export const graphEdgeOutSchema = graphEdgeSchema(
+  "BrainGraphEdgeBySource_hashrange_v1",
+  "bge_src",
+  "bge_out_r",
+);
+export const graphEdgeInSchema = graphEdgeSchema(
+  "BrainGraphEdgeByDestination_hashrange_v1",
+  "bge_dst",
+  "bge_in_r",
+);
+
 export type RecordTypeDef = {
   type: RecordType;
   schema: AddSchemaRequest;
@@ -1240,6 +1305,18 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: papercutStatusIndexSchema,
     types: [],
     extraKeys: [PAPERCUT_STATUS_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: GRAPH_EDGE_OUT_SCHEMA_KEY,
+    schema: graphEdgeOutSchema,
+    types: [],
+    extraKeys: [GRAPH_EDGE_OUT_SCHEMA_KEY],
+  },
+  {
+    key: GRAPH_EDGE_IN_SCHEMA_KEY,
+    schema: graphEdgeInSchema,
+    types: [],
+    extraKeys: [GRAPH_EDGE_IN_SCHEMA_KEY],
   },
 ];
 

@@ -101,6 +101,18 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
     fields,
   });
 
+  const { maintainGraphEdges } = await import("../graph-edge.ts");
+  await maintainGraphEdges({
+    node,
+    cfg: opts.cfg,
+    sourceSlug: slug,
+    body: newBody,
+    // Append changes only the stored body; the prior put's frontmatter is not
+    // in that body, so preserve its frontmatter-origin edges.
+    preserveExistingFrontmatter: true,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
+
   const bytesAppended = newBody.length - oldBody.length;
   print(
     `appended ${bytesAppended} chars to ${only.type} ${slug} (${oldBody.length} → ${newBody.length})`,
