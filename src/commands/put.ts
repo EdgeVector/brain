@@ -298,6 +298,15 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     visible,
     opts.verbose,
   );
+  const { maintainGraphEdges } = await import("../graph-edge.ts");
+  await maintainGraphEdges({
+    node,
+    cfg: opts.cfg,
+    sourceSlug: slug,
+    body: visible.body,
+    frontmatterEdges: Array.isArray(parsed.raw.edges) ? parsed.raw.edges : [],
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
   // Read-after-write SEARCH parity (#295, CLI half). `verifyRecordVisible`
   // above proves the row is queryable via /api/query (the record-list / BM25
   // surface `get`/`list`/`ask` read), but says nothing about the native
@@ -441,7 +450,7 @@ export type ParsedFrontmatter = {
 // an unfenced input is treated as a strong signal that the user MEANT to
 // write frontmatter but forgot the opening `---`. Mirrors the keys
 // `parseFrontmatter` assigns into the typed slots — keep in sync.
-const UNFENCED_KEY_PATTERN = /^(slug|type|title|tags|status)\s*:/i;
+const UNFENCED_KEY_PATTERN = /^(slug|type|title|tags|status|edges)\s*:/i;
 
 export function splitFrontmatter(input: string): {
   frontmatter: string | null;

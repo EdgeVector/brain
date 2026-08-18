@@ -201,8 +201,8 @@ describe("schemas", () => {
     ]);
   });
 
-  test("UNIQUE_SCHEMAS has 19 entries: user record schemas plus internal indexes, admin snapshot, and attachment schemas", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(19);
+  test("UNIQUE_SCHEMAS includes user records, internal indexes, graph edges, admin snapshot, and attachments", () => {
+    expect(UNIQUE_SCHEMAS.length).toBe(21);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "__admin_snapshot__",
@@ -210,6 +210,8 @@ describe("schemas", () => {
       "__attachmentfile__",
       "__attachmentindex__",
       "__childtaskindex__",
+      "__graphedgein__",
+      "__graphedgeout__",
       "__papercutstatusindex__",
       "__recordlistentry__",
       "__tagindex__",
@@ -236,6 +238,8 @@ describe("schemas", () => {
       "__recordlistindex__",
       "__recordlistentry__",
       "__childtaskindex__",
+      "__graphedgein__",
+      "__graphedgeout__",
       "__papercutstatusindex__",
     ];
     for (const entry of UNIQUE_SCHEMAS) {

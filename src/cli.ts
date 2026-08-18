@@ -794,7 +794,7 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
+  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges] [--max-records N] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
@@ -818,6 +818,11 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     Repairs records written before the index existed or after
                     a best-effort backlink update failed. Standalone mode:
                     skips the embedding refresh.
+  --graph-edges     rebuild typed graph edges for a bounded slice of the keyed
+                    Brain list index. Preserves frontmatter-origin edges that
+                    cannot be reconstructed from stored bodies and prints the
+                    known enumeration-under-report caveat. Standalone mode.
+  --max-records N   cap --graph-edges work (default: 100; positive integer).
   --bm25            pre-warm the client-side BM25 search cache \`ask\`/\`search\`
                     read on every call, from a full corpus scan. Read-only
                     (no mutation, no --type narrowing — the cache is keyed by
@@ -1240,6 +1245,8 @@ const REINDEX_OPTIONS = {
   "list-index": { type: "boolean", default: false },
   "child-task-index": { type: "boolean", default: false },
   "papercut-status-index": { type: "boolean", default: false },
+  "graph-edges": { type: "boolean", default: false },
+  "max-records": { type: "string" },
 } as const;
 const MIGRATE_OPTIONS = {
   "add-field": { type: "boolean", default: false },
@@ -3683,6 +3690,17 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values["list-index"]) rOpts.listIndex = true;
   if (values["child-task-index"]) rOpts.childTaskIndex = true;
   if (values["papercut-status-index"]) rOpts.papercutStatusIndex = true;
+  if (values["graph-edges"]) rOpts.graphEdges = true;
+  if (typeof values["max-records"] === "string") {
+    const max = Number.parseInt(values["max-records"], 10);
+    if (!Number.isInteger(max) || max < 1) {
+      throw new FbrainError({
+        code: "invalid_limit",
+        message: `--max-records must be a positive integer, got ${JSON.stringify(values["max-records"])}.`,
+      });
+    }
+    rOpts.graphMaxRecords = max;
+  }
   await reindexCmd(rOpts);
   return 0;
 }

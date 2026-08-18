@@ -34,6 +34,7 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   isTombstoned,
+  listRecords,
   listRecordsAdminScan,
   missingSchemaHashReadNote,
   nowIso,
@@ -63,6 +64,11 @@ import {
   tagIndexAvailable,
   type TagIndexRebuildResult,
 } from "../tag-index.ts";
+import { graphEdgeHashes, reconcileGraphEdges } from "../graph-edge.ts";
+
+export const GRAPH_EDGE_BACKFILL_CAVEAT =
+  "WARNING: source enumeration uses Brain's keyed list index, which is known to under-report; " +
+  "this is a bounded repair, not proof of complete corpus coverage.";
 
 export type ReindexOptions = {
   cfg: Config;
@@ -93,6 +99,8 @@ export type ReindexOptions = {
   childTaskIndex?: boolean;
   /** Rebuild the status x slug papercut ledger index from papercut SOT. */
   papercutStatusIndex?: boolean;
+  graphEdges?: boolean;
+  graphMaxRecords?: number;
   verbose?: Verbose;
   print?: (line: string) => void;
 };
@@ -112,6 +120,7 @@ export type ReindexResult = {
   childTaskIndexCensus?: ChildTaskIndexCensus;
   /** Census after `--papercut-status-index` (dry-run or repair). */
   papercutStatusIndexCensus?: PapercutStatusIndexCensus;
+  graphEdgeRecords?: number;
 };
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
@@ -247,6 +256,49 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
 
   if (opts.papercutStatusIndex) {
     return rebuildPapercutStatusIndex(opts, node, print);
+  }
+
+  if (opts.graphEdges) {
+    const result: ReindexResult = {
+      scanned: 0,
+      reindexed: 0,
+      skippedTombstone: 0,
+      byType: {},
+      graphEdgeRecords: 0,
+    };
+    const max = opts.graphMaxRecords ?? 100;
+    if (!graphEdgeHashes(opts.cfg)) {
+      print("graph edge schemas are unavailable (run `fbrain init`); nothing to rebuild");
+      return result;
+    }
+    outer: for (const type of opts.type ? [opts.type] : RECORD_TYPES) {
+      const records = await listRecords(node, type, opts.cfg);
+      for (const record of records) {
+        if (result.scanned >= max) break outer;
+        result.scanned++;
+        if (isTombstoned(record)) {
+          result.skippedTombstone++;
+          continue;
+        }
+        if (!opts.dryRun) {
+          await reconcileGraphEdges({
+            node,
+            cfg: opts.cfg,
+            sourceSlug: record.slug,
+            body: record.body,
+            preserveExistingFrontmatter: true,
+          });
+        }
+        result.reindexed++;
+      }
+    }
+    result.graphEdgeRecords = result.reindexed;
+    const prefix = opts.dryRun ? "dry-run: would rebuild" : "rebuilt";
+    print(
+      `${prefix} graph edges for ${result.reindexed} record(s) (bounded max=${max}). ` +
+        GRAPH_EDGE_BACKFILL_CAVEAT,
+    );
+    return result;
   }
 
   const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;

@@ -180,7 +180,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
 | `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every brain read path treats the record as gone (see [Delete](#delete)) |
-| `brain reindex [--type T] [--dry-run] [--tags] [--backlinks]` | Re-puts every live record so fold_db refreshes its embedding entry, or rebuilds secondary indexes with `--tags` / `--backlinks` (see [Recovery](#recovery)) |
+| `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges]` | Re-puts live records or rebuilds bounded secondary indexes, including typed graph edges (see [Recovery](#recovery)) |
 | `brain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.brain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
 | `brain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate the brain in-process (see [MCP](#mcp)) |
 
@@ -478,11 +478,14 @@ If `fbrain search` starts returning stale or empty results — most often after 
 fbrain reindex             # all record types
 fbrain reindex --type concept --dry-run   # preview what would be touched
 fbrain reindex --backlinks # rebuild the backlink secondary index
+fbrain reindex --graph-edges --max-records 100 # bounded typed-edge repair
 ```
 
 `fbrain reindex` walks every live (non-tombstoned) record and re-issues an `update` mutation. fold_db's mutation pipeline re-runs `index_record` synchronously, which refreshes the record's embedding entry in the native index. The fresh embeddings then survive the top-50 budget even when tombstoned-but-not-purged phantoms still sit in the index alongside them.
 
 `fbrain reindex --backlinks` is a secondary-index rebuild, not an embedding refresh. It scans the live corpus once and writes backlink membership rows so `fbrain get` / `fbrain backlinks` can answer `linked_from` from keyed index reads instead of walking every schema on each lookup. Re-run `fbrain init` first if your local config predates the internal index schema.
+
+`fbrain reindex --graph-edges` is deliberately bounded and reads Brain's keyed list index. Its output warns that the active enumeration-under-report defect can omit records, so the command repairs the observed slice without claiming complete corpus coverage.
 
 What it does **not** do:
 
