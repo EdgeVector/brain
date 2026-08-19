@@ -29,6 +29,7 @@ import {
   resolveOwnedSchemaHash,
   schemaConfigKeys,
   type RecordType,
+  type UniqueSchemaEntry,
 } from "../schemas.ts";
 import {
   CONFIG_VERSION,
@@ -405,6 +406,39 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
 type InitNodeClient = ReturnType<typeof newNodeClient>;
 
+function isDeclareConflict(err: unknown): boolean {
+  return (
+    err instanceof FbrainError &&
+    (err.code === "node_http_409" || err.code === "ambiguous_schema_name")
+  );
+}
+
+/**
+ * After declare-schema 409, Mini may already have the catalog predecessor
+ * loaded. Prefer that identity hash over aborting first-run init.
+ */
+async function recoverDeclaredCanonical(
+  nodeClient: InitNodeClient,
+  entry: UniqueSchemaEntry,
+): Promise<string | null> {
+  const fromLoaded = (loaded: Awaited<ReturnType<InitNodeClient["listLoadedSchemas"]>>) =>
+    resolveOwnedSchemaHash(entry.schema, loaded);
+  try {
+    const existing = fromLoaded(await nodeClient.listLoadedSchemas());
+    if (existing) return existing;
+  } catch {
+    /* listing is best-effort; try a scoped load next */
+  }
+  const name = entry.schema.schema.descriptive_name;
+  if (!name || typeof nodeClient.loadSchemas !== "function") return null;
+  try {
+    await nodeClient.loadSchemas([name]);
+    return fromLoaded(await nodeClient.listLoadedSchemas());
+  } catch {
+    return null;
+  }
+}
+
 async function tryDeclareOwnedSchemasLocally(
   nodeClient: InitNodeClient,
   schemaHashes: Record<string, string>,
@@ -414,48 +448,107 @@ async function tryDeclareOwnedSchemasLocally(
   if (!nodeClient.declareAppSchema) {
     return { supported: false, reason: "client does not support /api/apps/declare-schema" };
   }
+  const deferred: UniqueSchemaEntry[] = [];
   for (const entry of UNIQUE_SCHEMAS) {
-    try {
-      const declared = await nodeClient.declareAppSchema(OWNER_APP_ID, entry.schema.schema);
-      // Local mint is retired. Mini declare-schema returns catalog resolutions
-      // (reuse / expand / compose / mint) whose `canonical` is the schema-service
-      // identity hash. Accept any successful declare; only reject missing canonical.
-      if (!declared.canonical || typeof declared.canonical !== "string") {
-        throw new FbrainError({
-          code: "app_schema_declare_missing_canonical",
-          message:
-            `Node declared ${entry.schema.schema.descriptive_name} without a canonical ` +
-            `identity hash (resolution=${declared.resolution ?? "unknown"}).`,
-          hint: "Register the schema with schema service (or fix declare-schema), then re-run `brain init`.",
-        });
-      }
-      // Novel shapes that still need schema-service registration: surface a
-      // clear handoff so init can fall back to the catalog publish path.
-      const resolution = String(declared.resolution ?? "");
-      if (resolution.toLowerCase() === "novel") {
-        return {
-          supported: false,
-          reason: `${entry.schema.schema.descriptive_name} declared novel — needs schema service registration`,
-        };
-      }
-      for (const key of schemaConfigKeys(entry)) {
-        schemaHashes[key] = declared.canonical;
-      }
-      const covers = schemaConfigKeys(entry).join(", ");
-      print(
-        `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
-          `(${resolution || "accepted"}; covers ${covers})`,
-      );
-    } catch (err) {
-      if (err instanceof FbrainError && err.code === "node_http_404") {
-        return { supported: false, reason: "/api/apps/declare-schema returned 404" };
-      }
-      throw err;
+    const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, print);
+    if (outcome === "unsupported") {
+      return { supported: false, reason: "/api/apps/declare-schema returned 404" };
     }
+    if (outcome === "novel") {
+      return {
+        supported: false,
+        reason: `${entry.schema.schema.descriptive_name} declared novel — needs schema service registration`,
+      };
+    }
+    if (outcome === "conflict") deferred.push(entry);
+  }
+  if (deferred.length > 0) {
+    // One retry after the rest of the catalog is on the node. Mini's first-run
+    // 409 is often a schema-service timeout/register race on a later extra
+    // schema (BrainAttachmentFile); aborting the remaining UNIQUE_SCHEMAS is
+    // what made `brain init --grant-consent` exit 1 on an empty LASTDB_HOME.
+    for (const entry of deferred) {
+      const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, print);
+      if (outcome === "ok" || outcome === "conflict-recovered") continue;
+      print(
+        `        ${entry.schema.schema.descriptive_name.padEnd(18)} → skipped after declare 409 ` +
+          `(not loaded on node; continuing first-run)`,
+      );
+    }
+  }
+  const missingRecordTypes = RECORD_TYPES.filter((t) => !schemaHashes[t]);
+  if (missingRecordTypes.length > 0) {
+    return {
+      supported: false,
+      reason:
+        `declare-schema left record types without hashes (${missingRecordTypes.join(", ")}) — ` +
+        `falling back to schema_service`,
+    };
   }
   print(`[4/${STEPS}] loading schemas into the node`);
   print(`        app-schema declarations persisted (catalog/schema-service canonicals) ✓`);
   return { supported: true };
+}
+
+type DeclareOneOutcome = "ok" | "conflict-recovered" | "conflict" | "novel" | "unsupported";
+
+async function declareOneOwnedSchema(
+  nodeClient: InitNodeClient,
+  entry: UniqueSchemaEntry,
+  schemaHashes: Record<string, string>,
+  print: (line: string) => void,
+): Promise<DeclareOneOutcome> {
+  if (!nodeClient.declareAppSchema) return "unsupported";
+  // Already recovered on a prior pass (retry of a deferred entry).
+  if (schemaConfigKeys(entry).every((k) => schemaHashes[k])) return "ok";
+  try {
+    const declared = await nodeClient.declareAppSchema(OWNER_APP_ID, entry.schema.schema);
+    // Local mint is retired. Mini declare-schema returns catalog resolutions
+    // (reuse / expand / compose / mint) whose `canonical` is the schema-service
+    // identity hash. Accept any successful declare; only reject missing canonical.
+    if (!declared.canonical || typeof declared.canonical !== "string") {
+      throw new FbrainError({
+        code: "app_schema_declare_missing_canonical",
+        message:
+          `Node declared ${entry.schema.schema.descriptive_name} without a canonical ` +
+          `identity hash (resolution=${declared.resolution ?? "unknown"}).`,
+        hint: "Register the schema with schema service (or fix declare-schema), then re-run `brain init`.",
+      });
+    }
+    // Novel shapes that still need schema-service registration: surface a
+    // clear handoff so init can fall back to the catalog publish path.
+    const resolution = String(declared.resolution ?? "");
+    if (resolution.toLowerCase() === "novel") return "novel";
+    for (const key of schemaConfigKeys(entry)) {
+      schemaHashes[key] = declared.canonical;
+    }
+    const covers = schemaConfigKeys(entry).join(", ");
+    print(
+      `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
+        `(${resolution || "accepted"}; covers ${covers})`,
+    );
+    return "ok";
+  } catch (err) {
+    if (err instanceof FbrainError && err.code === "node_http_404") return "unsupported";
+    if (!isDeclareConflict(err)) throw err;
+    const recovered = await recoverDeclaredCanonical(nodeClient, entry);
+    if (recovered) {
+      for (const key of schemaConfigKeys(entry)) {
+        schemaHashes[key] = recovered;
+      }
+      const covers = schemaConfigKeys(entry).join(", ");
+      print(
+        `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${recovered}  ` +
+          `(recovered after declare 409; covers ${covers})`,
+      );
+      return "conflict-recovered";
+    }
+    print(
+      `        ${entry.schema.schema.descriptive_name.padEnd(18)} → declare-schema 409 ` +
+        `(no loaded hash yet; not aborting remaining schemas)`,
+    );
+    return "conflict";
+  }
 }
 
 

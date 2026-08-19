@@ -3061,7 +3061,11 @@ export function mapSchemaServiceError(res: Response, body: unknown, path: string
   // hashes requires publish authority the consumer doesn't (and shouldn't) have.
   // Surface a discriminated code + actionable remedy instead of a raw
   // "HTTP 401" that gives the user nothing to act on.
-  if (res.status === 401 && reason === "cert_required") {
+  if (
+    res.status === 401 &&
+    (reason === "cert_required" ||
+      /publish key required|cert_required/i.test(`${reason ?? ""} ${msg ?? ""} ${errCode ?? ""}`))
+  ) {
     return new FbrainError({
       code: "schema_cert_required",
       message:
