@@ -532,6 +532,176 @@ describe("runInit — fresh consumer resolves cert-gated fbrain/* hashes from th
     expect(result.config.schemaHashes.design).toBeDefined();
   });
 
+  test("declare-schema 409 recovers canonical from GET /api/schemas and still finishes first-run", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-declare-409-"));
+    const configPath = join(tmpDir, "config.json");
+    const conflictName = "BrainAttachmentFile";
+    const recovered =
+      "cafef00ddeadbeefcafef00ddeadbeefcafef00ddeadbeefcafef00ddeadbeef";
+    const declareNames: string[] = [];
+
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "declare-409-userhash-0001" });
+      }
+      if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          app_id?: string;
+          schema?: { descriptive_name?: string };
+        };
+        const schema = body.schema?.descriptive_name ?? "unknown";
+        declareNames.push(schema);
+        if (schema === conflictName) {
+          return jsonResponse(409, { error: "schema_already_exists" });
+        }
+        return jsonResponse(200, {
+          app_id: body.app_id,
+          schema,
+          canonical: `${String(schema).toLowerCase()}${"0".repeat(64)}`.slice(0, 64),
+          resolution: "reuse",
+          decision: "reuse",
+        });
+      }
+      if (url.endsWith("/api/schemas") && method === "GET") {
+        const conflict = UNIQUE_SCHEMAS.find(
+          (e) => e.schema.schema.descriptive_name === conflictName,
+        );
+        return jsonResponse(200, {
+          ok: true,
+          schemas: [
+            {
+              descriptive_name: conflictName,
+              owner_app_id: conflict?.schema.schema.owner_app_id ?? OWNER_APP_ID,
+              identity_hash: recovered,
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/v1/schemas") || url.endsWith("/api/schemas/load")) {
+        return jsonResponse(500, { error: "schema_service_or_load_should_not_be_called", url });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      consent: { isTty: () => false },
+    });
+
+    expect(declareNames).toContain(conflictName);
+    expect(declareNames).toHaveLength(UNIQUE_SCHEMAS.length);
+    expect(result.config.schemaHashes.__attachmentfile__).toBe(recovered);
+    expect(lines.some((l) => l.includes("recovered after declare 409"))).toBe(true);
+    expect(lines.some((l) => l.includes("[init] ok"))).toBe(true);
+  });
+
+  test("declare-schema 409 without a loaded hash falls back to schema service instead of aborting", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-declare-409-fallback-"));
+    const configPath = join(tmpDir, "config.json");
+    const published = "b".repeat(64);
+
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "declare-409-fallback-userhash-0001" });
+      }
+      if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
+        return jsonResponse(409, { error: "schema_already_exists" });
+      }
+      if (url.endsWith("/api/schemas") && method === "GET") {
+        return jsonResponse(200, { ok: true, schemas: [] });
+      }
+      if (url.endsWith("/api/schemas/load") && method === "POST") {
+        return jsonResponse(200, {
+          schemas_loaded_to_db: UNIQUE_SCHEMAS.length,
+          failed_schemas: [],
+        });
+      }
+      if (url.includes("/v1/schemas") && method === "POST") {
+        return jsonResponse(200, { schema: { name: published } });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      consent: { isTty: () => false },
+    });
+    expect(lines.some((l) => l.includes("falling back to schema_service"))).toBe(true);
+    expect(result.config.schemaHashes.design).toBe(published);
+    expect(lines.some((l) => l.includes("[init] ok"))).toBe(true);
+  });
+
+  test("declare-schema 409 on an extra schema does not abort remaining first-run declares", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-declare-409-continue-"));
+    const configPath = join(tmpDir, "config.json");
+    const conflictName = "BrainAttachmentFile";
+    const declareNames: string[] = [];
+
+    globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const url = typeof input === "string" ? input : String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.endsWith("/api/system/auto-identity")) {
+        return jsonResponse(200, { user_hash: "declare-409-continue-userhash-0001" });
+      }
+      if (url.endsWith("/api/apps/declare-schema") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          app_id?: string;
+          schema?: { descriptive_name?: string };
+        };
+        const schema = body.schema?.descriptive_name ?? "unknown";
+        declareNames.push(schema);
+        if (schema === conflictName) {
+          return jsonResponse(409, { error: "schema_already_exists" });
+        }
+        return jsonResponse(200, {
+          app_id: body.app_id,
+          schema,
+          canonical: `${String(schema).toLowerCase()}${"0".repeat(64)}`.slice(0, 64),
+          resolution: "reuse",
+          decision: "reuse",
+        });
+      }
+      if (url.endsWith("/api/schemas") && method === "GET") {
+        return jsonResponse(200, { ok: true, schemas: [] });
+      }
+      if (url.endsWith("/api/schemas/load") && method === "POST") {
+        return jsonResponse(200, { schemas_loaded_to_db: 0, failed_schemas: [] });
+      }
+      if (url.endsWith("/v1/schemas")) {
+        return jsonResponse(500, { error: "schema_service_should_not_be_called", url });
+      }
+      return jsonResponse(404, { error: "unexpected_url", url });
+    }) as unknown as typeof globalThis.fetch;
+
+    const lines: string[] = [];
+    const result = await runInit({
+      configPath,
+      print: (l) => lines.push(l),
+      consent: { isTty: () => false },
+    });
+
+    expect(declareNames.filter((n) => n === conflictName).length).toBeGreaterThanOrEqual(2);
+    expect(new Set(declareNames)).toEqual(
+      new Set(UNIQUE_SCHEMAS.map((e) => e.schema.schema.descriptive_name)),
+    );
+    expect(result.config.schemaHashes.design).toHaveLength(64);
+    expect(result.config.schemaHashes.__attachmentfile__).toBeUndefined();
+    expect(result.config.schemaHashes.__recordlistentry__).toHaveLength(64);
+    expect(lines.some((l) => l.includes("not aborting remaining schemas"))).toBe(true);
+    expect(lines.some((l) => l.includes("[init] ok"))).toBe(true);
+  });
+
   test("cert_required POST → resolves all 8 namespaced hashes from GET /api/schemas, no throw", async () => {
     process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
     tmpDir = mkdtempSync(join(tmpdir(), "fbrain-init-resolve-"));
