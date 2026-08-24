@@ -7,6 +7,8 @@ import {
   RECORD_LIST_ENTRY_SCHEMA_KEY,
   RECORD_TYPES,
   TAG_INDEX_SCHEMA_KEY,
+  GRAPH_EDGE_IN_SCHEMA_KEY,
+  GRAPH_EDGE_OUT_SCHEMA_KEY,
   type RecordType,
 } from "../src/schemas.ts";
 import { CONFIG_VERSION, type Config } from "../src/config.ts";
@@ -33,6 +35,11 @@ export const TEST_HASHES: Record<RecordType, string> = {
 
 export const TEST_TAG_INDEX_HASH = "7".repeat(64);
 export const TEST_RECORD_LIST_ENTRY_HASH = "8".repeat(64);
+// The graph-edge planes belong to the standard `fbrain init` schema set, so a
+// realistic test config carries them. Doctor now FAILs when they are absent —
+// a test cfg without them describes a broken brain, not a default one.
+export const TEST_GRAPH_EDGE_OUT_HASH = "b".repeat(64);
+export const TEST_GRAPH_EDGE_IN_HASH = "1".repeat(64);
 
 // Reverse map of TEST_HASHES so fetch/query stubs can turn a product schema
 // hash back into a RecordType when synthesizing the type-list index.
@@ -231,6 +238,8 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
       ...TEST_HASHES,
       [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH,
       [RECORD_LIST_ENTRY_SCHEMA_KEY]: TEST_RECORD_LIST_ENTRY_HASH,
+      [GRAPH_EDGE_OUT_SCHEMA_KEY]: TEST_GRAPH_EDGE_OUT_HASH,
+      [GRAPH_EDGE_IN_SCHEMA_KEY]: TEST_GRAPH_EDGE_IN_HASH,
     },
     designSchemaHash: TEST_HASHES.design,
     taskSchemaHash: TEST_HASHES.task,
@@ -247,6 +256,21 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
       ...over.schemaHashes,
       [TAG_INDEX_SCHEMA_KEY]: TEST_TAG_INDEX_HASH,
       [RECORD_LIST_ENTRY_SCHEMA_KEY]: TEST_RECORD_LIST_ENTRY_HASH,
+    };
+  }
+  // Same reasoning, tracked separately so a caller can still describe a brain
+  // whose graph substrate is genuinely unregistered by overriding these keys.
+  if (
+    "schemaHashes" in over &&
+    over.schemaHashes !== undefined &&
+    Object.keys(over.schemaHashes).length > 0 &&
+    (!(GRAPH_EDGE_OUT_SCHEMA_KEY in over.schemaHashes) ||
+      !(GRAPH_EDGE_IN_SCHEMA_KEY in over.schemaHashes))
+  ) {
+    merged.schemaHashes = {
+      ...merged.schemaHashes,
+      [GRAPH_EDGE_OUT_SCHEMA_KEY]: TEST_GRAPH_EDGE_OUT_HASH,
+      [GRAPH_EDGE_IN_SCHEMA_KEY]: TEST_GRAPH_EDGE_IN_HASH,
     };
   }
   // Keep mirrors in sync unless caller explicitly overrode them.

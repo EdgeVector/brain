@@ -136,17 +136,68 @@ export async function reconcileGraphEdges(opts: {
   return wanted.size;
 }
 
+// An unregistered substrate is a config state, not a per-write event: every
+// `put` on that brain drops its links the same way. Warn once per process so
+// the first write says it plainly and a 200-record backfill does not print
+// the same line 200 times.
+let inertNoticeEmitted = false;
+
+/** Test seam — forget that the once-per-process inert notice was printed. */
+export function resetGraphEdgeInertNotice(): void {
+  inertNoticeEmitted = false;
+}
+
+export type MaintainGraphEdgesResult = {
+  graphEdgeIndexFailed: boolean;
+  edges: number;
+  // True when the graph-edge schemas are absent from config, so no edge row
+  // can be written whatever the body says.
+  substrateInert: boolean;
+  // Links parsed out of this body that the inert substrate discarded. Zero
+  // when the substrate is live, or when the body carries no links.
+  droppedLinks: number;
+};
+
 export async function maintainGraphEdges(
-  opts: Parameters<typeof reconcileGraphEdges>[0] & { verbose?: (message: string) => void },
-): Promise<{ graphEdgeIndexFailed: boolean; edges: number }> {
+  opts: Parameters<typeof reconcileGraphEdges>[0] & {
+    verbose?: (message: string) => void;
+    // Loud channel for the inert-substrate notice. Defaults to stderr — this
+    // one must reach a non-verbose operator, unlike `verbose`.
+    warn?: (message: string) => void;
+  },
+): Promise<MaintainGraphEdgesResult> {
+  // Before phase 1 shipped, this path returned `edges: 0` here in silence, so
+  // a brain whose config never got the two schema keys looked identical to a
+  // brain whose records simply carry no links. It is not: the links parsed
+  // fine and were thrown away. Say so.
+  if (graphEdgeHashes(opts.cfg) === null) {
+    const droppedLinks = extractGraphEdges(opts).length;
+    if (droppedLinks > 0 && !inertNoticeEmitted) {
+      inertNoticeEmitted = true;
+      const warn = opts.warn ?? ((message: string) => console.error(message));
+      warn(
+        `graph-edge substrate is INERT: parsed ${droppedLinks} link(s) in ${opts.sourceSlug} ` +
+          "and stored none, because the graph-edge schemas are not in this brain's config. " +
+          "The record is saved; its links are not queryable. " +
+          "Fix: run `fbrain init` to register them, then `fbrain reindex --graph-edges`. " +
+          "(reported once per process)",
+      );
+    }
+    return { graphEdgeIndexFailed: false, edges: 0, substrateInert: true, droppedLinks };
+  }
   try {
-    return { graphEdgeIndexFailed: false, edges: await reconcileGraphEdges(opts) };
+    return {
+      graphEdgeIndexFailed: false,
+      edges: await reconcileGraphEdges(opts),
+      substrateInert: false,
+      droppedLinks: 0,
+    };
   } catch (err) {
     opts.verbose?.(
       `graph-edge reconcile FAILED for ${opts.sourceSlug}: ${err instanceof Error ? err.message : String(err)}; ` +
         "record persisted — run `fbrain reindex --graph-edges` for bounded repair",
     );
-    return { graphEdgeIndexFailed: true, edges: 0 };
+    return { graphEdgeIndexFailed: true, edges: 0, substrateInert: false, droppedLinks: 0 };
   }
 }
 

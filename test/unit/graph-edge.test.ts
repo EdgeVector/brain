@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractGraphEdges,
+  maintainGraphEdges,
   readGraphEdges,
   reconcileGraphEdges,
+  resetGraphEdgeInertNotice,
 } from "../../src/graph-edge.ts";
 import {
   GRAPH_EDGE_IN_SCHEMA_KEY,
@@ -90,5 +92,81 @@ describe("graph edge extraction", () => {
         (edge) => edge.src,
       ),
     ).toEqual(["source"]);
+  });
+});
+
+describe("maintainGraphEdges on an unconfigured substrate", () => {
+  const inertCfg = { schemaHashes: {} } as any;
+
+  function collectWarnings() {
+    const lines: string[] = [];
+    return { lines, warn: (line: string) => lines.push(line) };
+  }
+
+  test("says the links were parsed and dropped, instead of returning 0 in silence", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    const result = await maintainGraphEdges({
+      node: foldedNode().node,
+      cfg: inertCfg,
+      sourceSlug: "source",
+      body: "[[implements::design-brain-knowledge-graph]] and [[references::other]]",
+      warn,
+    });
+    expect(result).toMatchObject({
+      edges: 0,
+      graphEdgeIndexFailed: false,
+      substrateInert: true,
+      droppedLinks: 2,
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("INERT");
+    expect(lines[0]).toContain("2 link(s)");
+    expect(lines[0]).toContain("fbrain init");
+  });
+
+  test("warns once per process, so a backfill does not repeat it per record", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    for (const slug of ["one", "two", "three"]) {
+      await maintainGraphEdges({
+        node: foldedNode().node,
+        cfg: inertCfg,
+        sourceSlug: slug,
+        body: "[[references::target]]",
+        warn,
+      });
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("one");
+  });
+
+  test("stays quiet for a body with no links — nothing was dropped", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    const result = await maintainGraphEdges({
+      node: foldedNode().node,
+      cfg: inertCfg,
+      sourceSlug: "source",
+      body: "a body that carries no wiki-links at all",
+      warn,
+    });
+    expect(result).toMatchObject({ substrateInert: true, droppedLinks: 0 });
+    expect(lines).toEqual([]);
+  });
+
+  test("reports a live substrate as not inert, and writes the edges", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    const { node } = foldedNode();
+    const result = await maintainGraphEdges({
+      node,
+      cfg: cfg as any,
+      sourceSlug: "source",
+      body: "[[implements::design-brain-knowledge-graph]]",
+      warn,
+    });
+    expect(result).toMatchObject({ edges: 1, substrateInert: false, droppedLinks: 0 });
+    expect(lines).toEqual([]);
   });
 });
