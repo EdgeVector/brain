@@ -1,0 +1,605 @@
+{
+  "$schema_version": 1,
+  "description": "Hand-labeled graph-adjacency eval fixture for the phase-3 ranking boost. Records form ten small clusters of a knowledge graph: a design or concept that carries the topic vocabulary, plus the decision, task, proof, or reference that answers a question ABOUT that topic while using almost none of its words. Each pair is labeled `adjacency` (the expected record is reachable in one hop from a record the text rankers find easily) or `control` (the expected record wins on its own text and the boost must not displace it). A boost that lifts adjacency pairs while moving control pairs is not an improvement, so both are reported separately. Slug prefix eval-graph- is reserved so seeding and teardown cannot collide with real records. Harness: scripts/eval-graph-boost.ts.",
+  "slug_prefix": "eval-graph-",
+  "records": [
+    {
+      "slug": "eval-graph-octopus-design",
+      "type": "design",
+      "title": "Octopus \u2014 multi-region cache invalidation",
+      "body": "Design for invalidating a distributed cache across geographic regions when a write lands in one shard. Walks the fan-out broadcast pattern, the back-channel, and the failure mode where a region misses the broadcast and serves a stale read until the next full sweep.\n\nSettled in [[decided-in::eval-graph-octopus-decision]]. Built by [[owns::eval-graph-octopus-task]].",
+      "tags": [
+        "eval-graph",
+        "cache",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-octopus-decision",
+      "type": "decision",
+      "title": "Broadcast, not poll",
+      "body": "We take the push path. Polling was rejected on cost. Reviewed 2026-02-11.\n\n[[references::eval-graph-octopus-design]]",
+      "tags": [
+        "eval-graph",
+        "cache"
+      ]
+    },
+    {
+      "slug": "eval-graph-octopus-task",
+      "type": "task",
+      "title": "Wire the back-channel listener",
+      "body": "Add the listener and the retry ladder. Two weeks. Owner: platform.\n\n[[implements::eval-graph-octopus-design]]",
+      "tags": [
+        "eval-graph",
+        "cache"
+      ]
+    },
+    {
+      "slug": "eval-graph-octopus-proof",
+      "type": "reference",
+      "title": "Region miss reproduced",
+      "body": "Bench log from the staging sweep. 3 of 400 writes missed a region; the sweep caught all three within 90 seconds.\n\n[[proves::eval-graph-octopus-design]]",
+      "tags": [
+        "eval-graph",
+        "cache"
+      ]
+    },
+    {
+      "slug": "eval-graph-canyon-concept",
+      "type": "concept",
+      "title": "Backpressure when producers outpace consumers",
+      "body": "What backpressure means in a streaming pipeline: the consumer signals the producer to slow down instead of dropping messages or growing an unbounded queue. Covers the credit scheme, the watermark, and why an unbounded buffer is a deferred outage.\n\nApplied in [[references::eval-graph-canyon-design]].",
+      "tags": [
+        "eval-graph",
+        "streaming",
+        "concept"
+      ]
+    },
+    {
+      "slug": "eval-graph-canyon-design",
+      "type": "design",
+      "title": "Credit-based flow control for the ingest path",
+      "body": "Each consumer issues credits. The producer may send only what it holds credit for. Credits refresh on acknowledgement.\n\n[[part-of::eval-graph-canyon-concept]]",
+      "tags": [
+        "eval-graph",
+        "streaming",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-canyon-decision",
+      "type": "decision",
+      "title": "Drop the unbounded queue",
+      "body": "Removed. It was the outage on 2026-01-30. No replacement queue without a bound.\n\n[[decided-in::eval-graph-canyon-design]]",
+      "tags": [
+        "eval-graph",
+        "streaming"
+      ]
+    },
+    {
+      "slug": "eval-graph-jaguar-design",
+      "type": "design",
+      "title": "TLS termination at the edge load balancer",
+      "body": "Terminate TLS at the edge rather than at each service. Covers certificate rotation, the SNI routing table, and the mutual-TLS hop from the edge to the mesh.\n\nSuperseded by [[supersedes::eval-graph-jaguar-v2-design]].",
+      "tags": [
+        "eval-graph",
+        "tls",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-jaguar-v2-design",
+      "type": "design",
+      "title": "Second pass on edge termination",
+      "body": "Replaces the first design. Moves rotation to the secret store and drops the SNI table in favour of the mesh's own routing.\n\n[[references::eval-graph-jaguar-design]]",
+      "tags": [
+        "eval-graph",
+        "tls",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-kestrel-task",
+      "type": "task",
+      "title": "Rotate signing keys quarterly",
+      "body": "Quarterly rotation, tracked on the calendar. Owner: security.\n\n[[implements::eval-graph-jaguar-design]]",
+      "tags": [
+        "eval-graph",
+        "tls",
+        "keys"
+      ]
+    },
+    {
+      "slug": "eval-graph-iceberg-spike",
+      "type": "spike",
+      "title": "Why search returns junk after deletes",
+      "body": "Investigation into deleted records still appearing in search results. Traces the stale vector fragments left behind by a soft delete and the index that never reclaims them.\n\n[[references::eval-graph-iceberg-concept]]",
+      "tags": [
+        "eval-graph",
+        "search",
+        "spike"
+      ]
+    },
+    {
+      "slug": "eval-graph-iceberg-concept",
+      "type": "concept",
+      "title": "Tombstones and index reclamation",
+      "body": "A soft delete writes a tombstone. Reclamation is a separate pass. Until it runs, the fragment is still addressable.\n\n[[part-of::eval-graph-iceberg-spike]]",
+      "tags": [
+        "eval-graph",
+        "search",
+        "concept"
+      ]
+    },
+    {
+      "slug": "eval-graph-iceberg-task",
+      "type": "task",
+      "title": "Reclaim fragments on the delete path",
+      "body": "Make the delete path enqueue reclamation instead of waiting for the nightly pass.\n\n[[implements::eval-graph-iceberg-spike]]",
+      "tags": [
+        "eval-graph",
+        "search"
+      ]
+    },
+    {
+      "slug": "eval-graph-iceberg-proof",
+      "type": "reference",
+      "title": "Deleted records no longer returned",
+      "body": "Run log, 2026-03-04. 200 deletes, 0 stale hits at 60 seconds.\n\n[[proves::eval-graph-iceberg-task]]",
+      "tags": [
+        "eval-graph",
+        "search"
+      ]
+    },
+    {
+      "slug": "eval-graph-ravine-design",
+      "type": "design",
+      "title": "Rate limiting middleware with a token bucket",
+      "body": "Token-bucket middleware in front of the public API. Covers the refill rate, the burst allowance, and the per-tenant key.\n\nSettled in [[decided-in::eval-graph-ravine-decision]]. Built by [[owns::eval-graph-ravine-task]].",
+      "tags": [
+        "eval-graph",
+        "limits",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-ravine-decision",
+      "type": "decision",
+      "title": "Per tenant, not per IP",
+      "body": "Keyed on the tenant. IP keying was rejected: shared egress made it punish the wrong caller.\n\n[[references::eval-graph-ravine-design]]",
+      "tags": [
+        "eval-graph",
+        "limits"
+      ]
+    },
+    {
+      "slug": "eval-graph-ravine-task",
+      "type": "task",
+      "title": "Add the middleware to the public router",
+      "body": "Insert ahead of authentication so an unauthenticated flood is cheap to reject.\n\n[[implements::eval-graph-ravine-design]]",
+      "tags": [
+        "eval-graph",
+        "limits"
+      ]
+    },
+    {
+      "slug": "eval-graph-quasar-spike",
+      "type": "spike",
+      "title": "Websocket reconnection with exponential backoff",
+      "body": "Why clients reconnect in a thundering herd after a deploy, and how jittered exponential backoff spreads them. Includes the measured herd from the 2026-02 deploy.\n\n[[references::eval-graph-quasar-decision]]",
+      "tags": [
+        "eval-graph",
+        "websocket",
+        "spike"
+      ]
+    },
+    {
+      "slug": "eval-graph-quasar-decision",
+      "type": "decision",
+      "title": "Full jitter",
+      "body": "Full jitter, not equal jitter. Measured 4x lower peak on the same herd.\n\n[[decided-in::eval-graph-quasar-spike]]",
+      "tags": [
+        "eval-graph",
+        "websocket"
+      ]
+    },
+    {
+      "slug": "eval-graph-quasar-task",
+      "type": "task",
+      "title": "Ship the jittered client",
+      "body": "Client library change plus a version gate so old clients keep the old ladder.\n\n[[implements::eval-graph-quasar-spike]]",
+      "tags": [
+        "eval-graph",
+        "websocket"
+      ]
+    },
+    {
+      "slug": "eval-graph-tundra-concept",
+      "type": "concept",
+      "title": "Back of envelope capacity planning",
+      "body": "How to size a service before it exists: request rate, payload size, fan-out factor, and the headroom multiplier. Worked example for a read-heavy API.\n\n[[references::eval-graph-tundra-reference]]",
+      "tags": [
+        "eval-graph",
+        "capacity",
+        "concept"
+      ]
+    },
+    {
+      "slug": "eval-graph-tundra-reference",
+      "type": "reference",
+      "title": "Latency numbers every engineer should know",
+      "body": "The standard table. Memory, SSD, same-datacenter round trip, cross-continent round trip.\n\n[[part-of::eval-graph-tundra-concept]]",
+      "tags": [
+        "eval-graph",
+        "capacity"
+      ]
+    },
+    {
+      "slug": "eval-graph-tundra-project",
+      "type": "project",
+      "title": "Q3 search latency improvement",
+      "body": "Cut p95 search latency. Three workstreams: index shape, cache warming, and query planning.\n\n[[references::eval-graph-tundra-concept]]",
+      "tags": [
+        "eval-graph",
+        "capacity",
+        "latency"
+      ]
+    },
+    {
+      "slug": "eval-graph-gondola-agent",
+      "type": "agent",
+      "title": "Kanban orchestrator",
+      "body": "Agent that manages task lifecycle on the board: claims a card, drives it to a merged change, and closes it with proof.\n\n[[references::eval-graph-gondola-design]]",
+      "tags": [
+        "eval-graph",
+        "agent"
+      ]
+    },
+    {
+      "slug": "eval-graph-gondola-design",
+      "type": "design",
+      "title": "Card lifecycle and the claim protocol",
+      "body": "How a card moves through the columns, what a claim means, and the compare-and-set that prevents two workers claiming one card.\n\n[[owns::eval-graph-gondola-agent]]",
+      "tags": [
+        "eval-graph",
+        "agent",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-walrus-agent",
+      "type": "agent",
+      "title": "Incident response runbook executor",
+      "body": "Reads a runbook and executes its steps, pausing at every step marked human-only.\n\n[[references::eval-graph-walrus-preference]]",
+      "tags": [
+        "eval-graph",
+        "agent",
+        "incident"
+      ]
+    },
+    {
+      "slug": "eval-graph-walrus-preference",
+      "type": "preference",
+      "title": "Pause at human-only steps",
+      "body": "Never execute a step marked human-only, even when the step looks mechanical.\n\n[[part-of::eval-graph-walrus-agent]]",
+      "tags": [
+        "eval-graph",
+        "incident"
+      ]
+    },
+    {
+      "slug": "eval-graph-elder-preference",
+      "type": "preference",
+      "title": "Never silently swallow errors",
+      "body": "An error that is caught and dropped is a defect with no report. Log it, wrap it, or let it propagate \u2014 never an empty catch.\n\n[[references::eval-graph-elder-concept]]",
+      "tags": [
+        "eval-graph",
+        "errors",
+        "preference"
+      ]
+    },
+    {
+      "slug": "eval-graph-elder-concept",
+      "type": "concept",
+      "title": "Error propagation and the empty catch",
+      "body": "Why an empty catch block is worse than a crash: the crash is observable.\n\n[[part-of::eval-graph-elder-preference]]",
+      "tags": [
+        "eval-graph",
+        "errors",
+        "concept"
+      ]
+    },
+    {
+      "slug": "eval-graph-umbra-preference",
+      "type": "preference",
+      "title": "Pin dependencies in the lockfile",
+      "body": "No floating versions. The lockfile is the build input; a range is a build that changes without a commit.\n\n[[references::eval-graph-umbra-reference]]",
+      "tags": [
+        "eval-graph",
+        "deps",
+        "preference"
+      ]
+    },
+    {
+      "slug": "eval-graph-umbra-reference",
+      "type": "reference",
+      "title": "Lockfile formats across ecosystems",
+      "body": "How each package manager records a resolved tree, and which of them are reproducible.\n\n[[part-of::eval-graph-umbra-preference]]",
+      "tags": [
+        "eval-graph",
+        "deps"
+      ]
+    },
+    {
+      "slug": "eval-graph-violet-reference",
+      "type": "reference",
+      "title": "OpenTelemetry attribute naming",
+      "body": "The semantic-convention attribute names and the rules for adding your own without colliding with a future convention.\n\n[[part-of::eval-graph-violet-design]]",
+      "tags": [
+        "eval-graph",
+        "otel"
+      ]
+    },
+    {
+      "slug": "eval-graph-violet-design",
+      "type": "design",
+      "title": "Trace attribute policy for the fleet",
+      "body": "Which attributes every span must carry, which are forbidden because they are high cardinality, and where the allowlist lives.\n\n[[references::eval-graph-violet-reference]]",
+      "tags": [
+        "eval-graph",
+        "otel",
+        "design"
+      ]
+    },
+    {
+      "slug": "eval-graph-violet-task",
+      "type": "task",
+      "title": "Enforce the allowlist in the exporter",
+      "body": "Reject a span that carries an attribute outside the list, and count the rejection.\n\n[[implements::eval-graph-violet-design]]",
+      "tags": [
+        "eval-graph",
+        "otel"
+      ]
+    }
+  ],
+  "pairs": [
+    {
+      "query": "what did we settle about multi-region cache invalidation",
+      "expected_slug": "eval-graph-octopus-decision",
+      "expected_type": "decision",
+      "kind": "adjacency",
+      "notes": "The decision's own body says almost nothing about caching; the design it references carries the vocabulary."
+    },
+    {
+      "query": "who is building the multi-region cache invalidation back-channel",
+      "expected_slug": "eval-graph-octopus-task",
+      "expected_type": "task",
+      "kind": "adjacency",
+      "notes": "Task body is an assignment, not a description of the problem."
+    },
+    {
+      "query": "distributed cache invalidation across regions design",
+      "expected_slug": "eval-graph-octopus-design",
+      "expected_type": "design",
+      "kind": "control",
+      "notes": "Text alone must win this; the boost must not displace it."
+    },
+    {
+      "query": "evidence that a region missed a cache broadcast",
+      "expected_slug": "eval-graph-octopus-proof",
+      "expected_type": "reference",
+      "kind": "adjacency",
+      "notes": "Proof body is a bench log; the phrase 'cache broadcast' lives on the design."
+    },
+    {
+      "query": "backpressure when producers outpace consumers",
+      "expected_slug": "eval-graph-canyon-concept",
+      "expected_type": "concept",
+      "kind": "control",
+      "notes": "Straight text match on the concept."
+    },
+    {
+      "query": "why did we remove the unbounded queue on the ingest path",
+      "expected_slug": "eval-graph-canyon-decision",
+      "expected_type": "decision",
+      "kind": "adjacency",
+      "notes": "'ingest path' is on the design, not on the decision."
+    },
+    {
+      "query": "credit scheme for slowing a producer down",
+      "expected_slug": "eval-graph-canyon-design",
+      "expected_type": "design",
+      "kind": "adjacency",
+      "notes": "'credit scheme' appears on the concept; the design is the answer."
+    },
+    {
+      "query": "TLS termination at the edge load balancer",
+      "expected_slug": "eval-graph-jaguar-design",
+      "expected_type": "design",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "which design replaced the first edge TLS termination pass",
+      "expected_slug": "eval-graph-jaguar-v2-design",
+      "expected_type": "design",
+      "kind": "adjacency",
+      "notes": "Both designs share vocabulary; the edge is what disambiguates."
+    },
+    {
+      "query": "quarterly rotation of the certificates used at the edge",
+      "expected_slug": "eval-graph-kestrel-task",
+      "expected_type": "task",
+      "kind": "adjacency",
+      "notes": "Task says 'signing keys', the query says certificates and edge."
+    },
+    {
+      "query": "spike investigating why search returns junk after deletes",
+      "expected_slug": "eval-graph-iceberg-spike",
+      "expected_type": "spike",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "what is the fix for stale search hits after a delete",
+      "expected_slug": "eval-graph-iceberg-task",
+      "expected_type": "task",
+      "kind": "adjacency",
+      "notes": "The task never uses the word 'stale' or 'search'."
+    },
+    {
+      "query": "proof that the delete path stopped returning removed records",
+      "expected_slug": "eval-graph-iceberg-proof",
+      "expected_type": "reference",
+      "kind": "adjacency",
+      "notes": "Proof is a run log; its subject lives on the task."
+    },
+    {
+      "query": "tombstones and when the index reclaims them",
+      "expected_slug": "eval-graph-iceberg-concept",
+      "expected_type": "concept",
+      "kind": "control",
+      "notes": "Direct text match on the concept."
+    },
+    {
+      "query": "rate limiting middleware design with a token bucket",
+      "expected_slug": "eval-graph-ravine-design",
+      "expected_type": "design",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "what key did we choose for the token bucket rate limiter",
+      "expected_slug": "eval-graph-ravine-decision",
+      "expected_type": "decision",
+      "kind": "adjacency",
+      "notes": "The decision says 'tenant' and 'IP', never 'token bucket'."
+    },
+    {
+      "query": "where does the token bucket limiter sit in the request path",
+      "expected_slug": "eval-graph-ravine-task",
+      "expected_type": "task",
+      "kind": "adjacency",
+      "notes": "Task describes router position without naming the algorithm."
+    },
+    {
+      "query": "websocket reconnection with exponential backoff",
+      "expected_slug": "eval-graph-quasar-spike",
+      "expected_type": "spike",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "which jitter strategy did we pick for websocket reconnects",
+      "expected_slug": "eval-graph-quasar-decision",
+      "expected_type": "decision",
+      "kind": "adjacency",
+      "notes": "The decision names jitter but not websockets."
+    },
+    {
+      "query": "client change for the reconnect thundering herd",
+      "expected_slug": "eval-graph-quasar-task",
+      "expected_type": "task",
+      "kind": "adjacency",
+      "notes": "'thundering herd' is only on the spike."
+    },
+    {
+      "query": "back of envelope capacity planning math",
+      "expected_slug": "eval-graph-tundra-concept",
+      "expected_type": "concept",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "reference table used for capacity sizing round trips",
+      "expected_slug": "eval-graph-tundra-reference",
+      "expected_type": "reference",
+      "kind": "adjacency",
+      "notes": "'capacity' is on the concept, not the table."
+    },
+    {
+      "query": "Q3 search latency improvement project",
+      "expected_slug": "eval-graph-tundra-project",
+      "expected_type": "project",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "kanban orchestrator agent that manages task lifecycle",
+      "expected_slug": "eval-graph-gondola-agent",
+      "expected_type": "agent",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "compare and set that stops two workers claiming one card",
+      "expected_slug": "eval-graph-gondola-design",
+      "expected_type": "design",
+      "kind": "control",
+      "notes": "Direct text match on the design."
+    },
+    {
+      "query": "incident response runbook executor agent",
+      "expected_slug": "eval-graph-walrus-agent",
+      "expected_type": "agent",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "rule about steps a runbook executor must not run itself",
+      "expected_slug": "eval-graph-walrus-preference",
+      "expected_type": "preference",
+      "kind": "adjacency",
+      "notes": "The preference never says 'runbook executor'."
+    },
+    {
+      "query": "never silently swallow errors",
+      "expected_slug": "eval-graph-elder-preference",
+      "expected_type": "preference",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "why an empty catch block is worse than a crash",
+      "expected_slug": "eval-graph-elder-concept",
+      "expected_type": "concept",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "pin dependencies in the lockfile, no floating versions",
+      "expected_slug": "eval-graph-umbra-preference",
+      "expected_type": "preference",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "which package manager lock formats are reproducible",
+      "expected_slug": "eval-graph-umbra-reference",
+      "expected_type": "reference",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "OpenTelemetry attribute naming conventions",
+      "expected_slug": "eval-graph-violet-reference",
+      "expected_type": "reference",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "policy for which span attributes are forbidden as high cardinality",
+      "expected_slug": "eval-graph-violet-design",
+      "expected_type": "design",
+      "kind": "control",
+      "notes": "Direct text match."
+    },
+    {
+      "query": "where is the span attribute allowlist enforced",
+      "expected_slug": "eval-graph-violet-task",
+      "expected_type": "task",
+      "kind": "adjacency",
+      "notes": "'allowlist' is on both, but the exporter is only on the task."
+    }
+  ]
+}

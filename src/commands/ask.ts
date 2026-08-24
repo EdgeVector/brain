@@ -72,6 +72,11 @@ import {
   resolveAnthropicKey,
   type ExpansionResult,
 } from "../retrieval/expand.ts";
+import {
+  applyAdjacencyBoost,
+  type AdjacencyAttribution,
+  type AdjacencyOptions,
+} from "../retrieval/adjacency.ts";
 
 // Kept consistent with `search`'s default page size by construction — both
 // derive from the single SEARCH_DEFAULT_LIMIT constant in search.ts.
@@ -94,6 +99,16 @@ export type AskOptions = {
   // so existing scripts/agents don't break. Ignored when `expand` is set.
   noLlm?: boolean;
   explain?: boolean;
+  // Phase-3 knowledge-graph adjacency boost. DEFAULT OFF — the design
+  // (`design-brain-knowledge-graph`, decision 4) settled that ranking changes
+  // are eval-gated, so this ships behind the flag and the default may change
+  // only on measured P@5 lift from `eval/graph/pairs.json`.
+  //
+  // When false/undefined the ask pipeline is byte-identical to before: no
+  // extra reads, no score change, no explain section.
+  graphBoost?: boolean;
+  // Tuning for the boost. Ignored unless `graphBoost` is on.
+  graphBoostOptions?: AdjacencyOptions;
   // Restrict results to these record types. Undefined / empty = all record types.
   // Repeatable on the CLI via `--type T` (e.g. `--type design --type task`).
   // BM25 corpus is built only over the requested types and the vector call
@@ -174,6 +189,10 @@ export type AskResult = {
   hits: AskHit[];
   bm25CorpusSize: number;
   bm25CacheHit: boolean;
+  // Null when the boost did not run (flag off). Non-null whenever the flag was
+  // on, INCLUDING the paths where it changed nothing — `skipped` names why, so
+  // an operator can tell "boost found no adjacency" from "boost never ran".
+  graphBoost: AdjacencyAttribution | null;
 };
 
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
@@ -417,7 +436,43 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   }
 
   // ── Stage 3: RRF fusion ──────────────────────────────────────────────
-  const fused = reciprocalRankFusion(rankers, { k: RRF_DEFAULT_K });
+  const fusedBase = reciprocalRankFusion(rankers, { k: RRF_DEFAULT_K });
+
+  // ── Stage 3b: graph adjacency boost (flag-gated, default off) ────────
+  // Runs AFTER fusion and BEFORE resolve, so it re-orders what gets resolved
+  // and costs at most `2 * seedCount` extra keyed range reads. With the flag
+  // off this block does nothing at all — no reads, no allocation beyond the
+  // baseline list the fusion already produced.
+  let graphBoost: AdjacencyAttribution | null = null;
+  let fusedOrder: Array<{ id: string; fusedScore: number }> = fusedBase;
+  if (opts.graphBoost) {
+    const boostOpts: Parameters<typeof applyAdjacencyBoost>[0] = {
+      node,
+      cfg: opts.cfg,
+      fused: fusedBase,
+    };
+    if (opts.graphBoostOptions) boostOpts.options = opts.graphBoostOptions;
+    const boosted = await applyAdjacencyBoost(boostOpts);
+    fusedOrder = boosted.fused;
+    graphBoost = boosted.attribution;
+    opts.verbose?.(
+      graphBoost.skipped
+        ? `graph boost: skipped (${graphBoost.skipped})`
+        : `graph boost: ${graphBoost.boosts.length} doc(s) boosted from ` +
+            `${graphBoost.seeds.length} seed(s), ${graphBoost.reads} keyed read(s)`,
+    );
+  }
+  // Per-doc ranker contributions stay attached to the ORIGINAL fused hits;
+  // the boost only changes order and score, never provenance.
+  const fusedContributions = new Map<string, FusedHit>(fusedBase.map((f) => [f.id, f]));
+  const fused = fusedOrder.map((f) => {
+    const original = fusedContributions.get(f.id);
+    return {
+      id: f.id,
+      fusedScore: f.fusedScore,
+      contributions: original?.contributions ?? {},
+    } satisfies FusedHit;
+  });
 
   // ── Stage 4: resolve + filter ────────────────────────────────────────
   // Resolve paths (prefer cheapest that preserves correctness):
@@ -501,6 +556,48 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     } else if (expansions.length > 0) {
       explainSink(`expansions:`);
       for (const e of expansions) explainSink(`  - ${e}`);
+      explainSink("");
+    }
+    // Graph adjacency attribution. Printed whenever the flag was on, including
+    // the no-op paths: an operator who turned the boost on and saw NOTHING in
+    // --explain would reasonably conclude the flag is broken, so every outcome
+    // says which one it is.
+    if (graphBoost) {
+      if (graphBoost.skipped === "edges-unavailable") {
+        explainSink(
+          "graph boost: skipped — the edge schemas are not configured on this node (run `brain init`/backfill).",
+        );
+      } else if (graphBoost.skipped === "no-seeds") {
+        explainSink("graph boost: skipped — no fused hits to seed adjacency from.");
+      } else if (graphBoost.boosts.length === 0) {
+        explainSink(
+          `graph boost: no adjacency — ${graphBoost.seeds.length} seed(s) ` +
+            `(${graphBoost.seeds.map((s2) => s2.slug).join(", ")}) had no edge to any other hit.`,
+        );
+      } else {
+        explainSink(
+          `graph boost: seeds ${graphBoost.seeds
+            .map((s2) => `#${s2.rank} ${s2.slug}`)
+            .join(", ")}`,
+        );
+        for (const boost of graphBoost.boosts) {
+          // Naming the ceiling matters: without it a reader sees a smaller
+          // number than the reasons below sum to and assumes a bug.
+          const clamp = boost.clampedBy
+            ? `  (clamped to #${boost.clampedBy.seedRank} ${boost.clampedBy.seedSlug}` +
+              `; raw +${boost.rawTotal.toFixed(6)})`
+            : "";
+          explainSink(`  ${boost.slug}  +${boost.total.toFixed(6)}${clamp}`);
+          for (const reason of boost.reasons) {
+            // `out` on the neighbour means the SEED points at this document.
+            const arrow = reason.direction === "out" ? "<-" : "->";
+            explainSink(
+              `    ${arrow} ${reason.seedSlug} (#${reason.seedRank}, ${reason.edgeType})` +
+                `  +${reason.contribution.toFixed(6)}`,
+            );
+          }
+        }
+      }
       explainSink("");
     }
   }
@@ -599,6 +696,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       hits: resolved,
       bm25CorpusSize: corpusSize,
       bm25CacheHit,
+      graphBoost,
     };
   }
 
@@ -741,6 +839,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     hits: resolved,
     bm25CorpusSize: corpusSize,
     bm25CacheHit,
+    graphBoost,
   };
 }
 

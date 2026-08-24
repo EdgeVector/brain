@@ -7,6 +7,12 @@
 // has nothing to explain and must exit 2 with a clear next step before any
 // retrieval runs. Also pins that `--no-llm` contradicts an explicit
 // `--expand`/`--llm`.
+//
+// Phase 3 (knowledge graph) gave `--explain` a SECOND thing to explain: the
+// graph adjacency boost. `--explain --graph-boost` is therefore accepted, and
+// the rejection now fires only when NEITHER source is on. The env switch
+// `BRAIN_GRAPH_BOOST` is cleared in `runCli` so a developer who exported it
+// cannot silently turn these rejection tests green.
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
@@ -18,7 +24,14 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
-    env: { ...process.env, FBRAIN_NO_STDIN: "1" },
+    env: {
+      ...process.env,
+      FBRAIN_NO_STDIN: "1",
+      // Explicitly OFF: the boost is an alternative satisfier for --explain,
+      // so an inherited env var would make the rejection tests vacuous.
+      BRAIN_GRAPH_BOOST: "0",
+      FBRAIN_GRAPH_BOOST: "0",
+    },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -33,7 +46,8 @@ describe("fbrain ask --explain requires expansion (strict)", () => {
     const { code, stdout, stderr } = await runCli(["ask", "anything", "--explain"]);
     expect(code).toBe(2);
     expect(stderr).toContain(
-      "error: --explain requires LLM expansion; add --expand (alias --llm).",
+      "error: --explain requires LLM expansion or the graph boost; " +
+        "add --expand (alias --llm) or --graph-boost.",
     );
     // No retrieval may run — stdout must be empty.
     expect(stdout).toBe("");
@@ -49,5 +63,25 @@ describe("fbrain ask --explain requires expansion (strict)", () => {
     const { code, stderr } = await runCli(["ask", "anything", "--expand", "--no-llm"]);
     expect(code).toBe(2);
     expect(stderr).toContain("--no-llm contradicts --expand/--llm");
+  });
+
+  test("--explain --graph-boost is accepted (the boost is explainable)", async () => {
+    const { code, stderr } = await runCli(["ask", "anything", "--explain", "--graph-boost"]);
+    // It may still fail later for want of a configured node on this machine —
+    // what must NOT happen is the usage rejection.
+    expect(stderr).not.toContain("--explain requires LLM expansion");
+    expect(code).not.toBe(2);
+  });
+
+  test("--graph-boost-weight without --graph-boost exits 2", async () => {
+    const { code, stderr } = await runCli(["ask", "anything", "--graph-boost-weight", "1.5"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("require --graph-boost");
+  });
+
+  test("--graph-boost-seeds without --graph-boost exits 2", async () => {
+    const { code, stderr } = await runCli(["ask", "anything", "--graph-boost-seeds", "2"]);
+    expect(code).toBe(2);
+    expect(stderr).toContain("require --graph-boost");
   });
 });
