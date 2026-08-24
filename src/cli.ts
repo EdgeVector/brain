@@ -27,6 +27,19 @@ import {
 } from "./commands/attach.ts";
 import { linkCmd } from "./commands/link.ts";
 import { backlinksCmd } from "./commands/backlinks.ts";
+import {
+  graphNeighborsCmd,
+  graphPathCmd,
+  graphQueryCmd,
+} from "./commands/graph.ts";
+import {
+  GRAPH_DEFAULT_MAX_HOPS,
+  GRAPH_DEFAULT_MAX_NODES,
+  GRAPH_EDGE_TYPE_VALUES,
+  GRAPH_MAX_HOPS_LIMIT,
+  type GraphDirection,
+} from "./graph-traverse.ts";
+import type { GraphEdgeType } from "./graph-edge.ts";
 import { buildWhichResult, formatWhich } from "./commands/which.ts";
 import { searchCmd } from "./commands/search.ts";
 import { askCmd } from "./commands/ask.ts";
@@ -171,6 +184,7 @@ export const COMMANDS = [
   "tag",
   "link",
   "backlinks",
+  "graph",
   "search",
   "ask",
   "find",
@@ -235,6 +249,7 @@ ${RECORD_NEW_HELP_LINES}
   attachment get materialize an attachment's bytes (sha256-verified) to disk
   link           link records (legacy default: task to parent design)
   backlinks      list records linking to a slug
+  graph          bounded traversal over typed graph edges (neighbors | path | query)
   search         semantic search over indexed records
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
   find           retrieval by an array of match probes (each --match is fused via RRF; no embedding in brain)
@@ -507,6 +522,32 @@ so dangling wiki-link intent remains queryable.
 
   --type    target type for typed explicit edges (body refs are slug-only)
   --json    emit \`{slug, type?, linked_from:[...]}\` on stdout.`,
+  graph: `fbrain graph <neighbors|path|query> [...] [--json]
+
+Bounded traversal over the typed edge substrate written by \`put\`/\`append\`
+and rebuilt by \`fbrain reindex --graph-edges\`. Every walk is keyed reads
+only — one range read per node per direction, never a scan.
+
+  fbrain graph neighbors <slug> [--direction out|in|both] [--edge-type T]...
+      One hop. Default direction \`both\`, so an isolated record and an
+      unconfigured substrate are distinguishable in the output.
+
+  fbrain graph path <src> <dst> [--max-hops N] [--direction ...] [--edge-type T]...
+      Shortest path within the hop budget. \`not found\` reports whether the
+      search was exhausted or stopped at the budget — they are different claims.
+
+  fbrain graph query <slug> [--max-hops N] [--direction ...] [--edge-type T]... [--max-nodes N]
+      Breadth-first sweep of everything reachable within the budget, with the
+      depth and the edge that first reached each hit.
+
+  --max-hops N    hop ceiling (default ${GRAPH_DEFAULT_MAX_HOPS}; hard limit ${GRAPH_MAX_HOPS_LIMIT}).
+  --max-nodes N   distinct-node budget for \`query\` (default ${GRAPH_DEFAULT_MAX_NODES}).
+                  When it binds, the result is marked TRUNCATED — a capped
+                  sweep is never presented as a complete one.
+  --direction D   out (default for path/query) | in | both (default for neighbors)
+  --edge-type T   restrict to an edge type; repeatable. One of:
+                  ${GRAPH_EDGE_TYPE_VALUES.join(", ")}
+  --json          emit the structured result on stdout.`,
   search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
 
 Semantic search across indexed records. Dedupes fragment hits per record
@@ -1236,6 +1277,13 @@ const BACKLINKS_OPTIONS = {
   type: { type: "string" },
   json: { type: "boolean", default: false },
 } as const;
+const GRAPH_OPTIONS = {
+  "max-hops": { type: "string" },
+  "max-nodes": { type: "string" },
+  direction: { type: "string" },
+  "edge-type": { type: "string", multiple: true },
+  json: { type: "boolean", default: false },
+} as const;
 const REINDEX_OPTIONS = {
   type: { type: "string" },
   "dry-run": { type: "boolean", default: false },
@@ -1321,6 +1369,7 @@ export const CLI_SPEC = {
   attachment: ATTACHMENT_OPTIONS,
   link: LINK_OPTIONS,
   backlinks: BACKLINKS_OPTIONS,
+  graph: GRAPH_OPTIONS,
   search: SEARCH_OPTIONS,
   ask: ASK_OPTIONS,
   find: FIND_OPTIONS,
@@ -1882,6 +1931,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runLink(args, verboseFn);
     case "backlinks":
       return runBacklinks(args, verboseFn);
+    case "graph":
+      return runGraph(args, verboseFn);
     case "search":
       return runSearch(args, verboseFn);
     case "ask":
@@ -3703,6 +3754,144 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   }
   await reindexCmd(rOpts);
   return 0;
+}
+
+const GRAPH_SUBCOMMANDS = ["neighbors", "path", "query"] as const;
+
+// Positive-integer flag parsing, shared by --max-hops and --max-nodes. The
+// hop ceiling itself is enforced in graph-traverse.ts (resolveMaxHops) so the
+// MCP surface inherits the same bound without re-implementing it.
+function parseGraphIntFlag(raw: unknown, flag: string): number | undefined {
+  if (typeof raw !== "string") return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new FbrainError({
+      code: "invalid_limit",
+      message: `--${flag} must be a positive integer, got ${JSON.stringify(raw)}.`,
+    });
+  }
+  return parsed;
+}
+
+function parseGraphDirection(raw: unknown): GraphDirection | undefined {
+  if (typeof raw !== "string") return undefined;
+  if (raw === "out" || raw === "in" || raw === "both") return raw;
+  throw new FbrainError({
+    code: "unknown_option",
+    message: `--direction must be one of: out | in | both (got ${JSON.stringify(raw)}).`,
+  });
+}
+
+function parseGraphEdgeTypes(raw: unknown): GraphEdgeType[] | undefined {
+  if (raw === undefined) return undefined;
+  const list = Array.isArray(raw) ? raw : [raw];
+  const out: GraphEdgeType[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "string") continue;
+    const value = entry.trim().toLowerCase();
+    // Reject rather than silently coerce. `normalizeGraphEdgeType` folds an
+    // unknown type to "mentions" on the WRITE path, which is right there;
+    // doing it here would answer a filtered query with the wrong filter.
+    if (!(GRAPH_EDGE_TYPE_VALUES as readonly string[]).includes(value)) {
+      throw new FbrainError({
+        code: "unknown_option",
+        message: `--edge-type ${JSON.stringify(entry)} is not a known edge type.`,
+        hint: `Expected one of: ${GRAPH_EDGE_TYPE_VALUES.join(", ")}.`,
+      });
+    }
+    out.push(value as GraphEdgeType);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+async function runGraph(args: Argv, verbose: Verbose): Promise<number> {
+  const sub = args[0];
+  if (!sub || sub.startsWith("-")) {
+    console.error(COMMAND_HELP.graph);
+    return USAGE_ERROR;
+  }
+  if (!(GRAPH_SUBCOMMANDS as readonly string[]).includes(sub)) {
+    throw new FbrainError({
+      code: "unknown_option",
+      message: `Unknown graph subcommand: ${sub}`,
+      hint: `Expected one of: ${GRAPH_SUBCOMMANDS.join(" | ")}.`,
+    });
+  }
+  const { values, positionals } = parseCommandArgs(
+    {
+      args: args.slice(1),
+      strict: true,
+      allowPositionals: true,
+      options: GRAPH_OPTIONS,
+    },
+    "graph",
+  );
+  const cfg = readConfig();
+  const json = values.json === true;
+  const maxHops = parseGraphIntFlag(values["max-hops"], "max-hops");
+  const maxNodes = parseGraphIntFlag(values["max-nodes"], "max-nodes");
+  const direction = parseGraphDirection(values.direction);
+  const edgeTypes = parseGraphEdgeTypes(values["edge-type"]);
+
+  if (sub === "neighbors") {
+    const slug = requireGraphPositional(positionals, 1, "neighbors", "<slug>");
+    if (slug === null) return USAGE_ERROR;
+    const opts: Parameters<typeof graphNeighborsCmd>[0] = { cfg, slug, json, verbose };
+    if (direction) opts.direction = direction;
+    if (edgeTypes) opts.edgeTypes = edgeTypes;
+    await graphNeighborsCmd(opts);
+    return 0;
+  }
+  if (sub === "path") {
+    const pair = requireGraphPositional(positionals, 2, "path", "<src> <dst>");
+    if (pair === null) return USAGE_ERROR;
+    const opts: Parameters<typeof graphPathCmd>[0] = {
+      cfg,
+      src: positionals[0] as string,
+      dst: positionals[1] as string,
+      json,
+      verbose,
+    };
+    if (maxHops !== undefined) opts.maxHops = maxHops;
+    if (direction) opts.direction = direction;
+    if (edgeTypes) opts.edgeTypes = edgeTypes;
+    await graphPathCmd(opts);
+    return 0;
+  }
+  const slug = requireGraphPositional(positionals, 1, "query", "<slug>");
+  if (slug === null) return USAGE_ERROR;
+  const opts: Parameters<typeof graphQueryCmd>[0] = { cfg, slug, json, verbose };
+  if (maxHops !== undefined) opts.maxHops = maxHops;
+  if (maxNodes !== undefined) opts.maxNodes = maxNodes;
+  if (direction) opts.direction = direction;
+  if (edgeTypes) opts.edgeTypes = edgeTypes;
+  await graphQueryCmd(opts);
+  return 0;
+}
+
+// Returns the first positional, or null after printing help. Extra positionals
+// are an error rather than an ignored tail: `graph path a b c` almost always
+// means the caller expected a multi-target form that does not exist.
+function requireGraphPositional(
+  positionals: string[],
+  need: number,
+  sub: string,
+  shape: string,
+): string | null {
+  if (positionals.length < need) {
+    console.error(COMMAND_HELP.graph);
+    return null;
+  }
+  if (positionals.length > need) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message:
+        `graph ${sub} takes exactly ${need} positional(s): ${shape} ` +
+        `(got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: `Run \`fbrain graph ${sub} ${shape}\`.`,
+    });
+  }
+  return positionals[0] as string;
 }
 
 const PAPERCUT_SUBCOMMANDS = ["file", "close", "census", "list"] as const;

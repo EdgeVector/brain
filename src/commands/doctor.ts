@@ -41,6 +41,7 @@ import {
   runMcpBootProbe,
   skippedByMcpUnresolved,
 } from "./doctor/mcp-boot.ts";
+import { runGraphEdgeLintProbe } from "./doctor/graph-lint.ts";
 import {
   checkSchemaDrift,
   safeListManifests,
@@ -486,6 +487,21 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByNodeUnreachable("write-ready"));
   } else {
     checks.push(skippedByPrereqs("write-ready"));
+  }
+
+  // Graph-edge lint — the typed edge substrate is dual-written into an
+  // out-plane and an in-plane, and nothing before this check ever compared
+  // them. A row present on one plane only is invisible from one direction, so
+  // `graph neighbors` and `graph path` silently disagree depending on which
+  // way they walked. Bounded and keyed: it seeds from a small slice of the
+  // type-list index and issues point/range reads only — see graph-lint.ts for
+  // why this samples rather than certifies.
+  if (provisioned && schemasLoadedOk) {
+    checks.push(await runGraphEdgeLintProbe(nodeClient, cfg, verbose));
+  } else if (!nodeReachable) {
+    checks.push(skippedByNodeUnreachable("graph-edge-lint"));
+  } else {
+    checks.push(skippedByPrereqs("graph-edge-lint"));
   }
 
   // Runtime probe — compare the running Bun against fbrain's documented
