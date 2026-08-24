@@ -43,6 +43,7 @@ import type { GraphEdgeType } from "./graph-edge.ts";
 import { buildWhichResult, formatWhich } from "./commands/which.ts";
 import { searchCmd } from "./commands/search.ts";
 import { askCmd } from "./commands/ask.ts";
+import { graphBoostEnabledByEnv } from "./retrieval/adjacency.ts";
 import { findCmd } from "./commands/find.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
@@ -573,7 +574,7 @@ human outputs no longer invite a misleading score comparison.
                 route to stderr. On failure, a \`{error, hint}\` JSON object
                 is emitted to stdout too, so \`--json\` stdout is always
                 parseable.`,
-  ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--type T]... [--field PATH]... [--json]
+  ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--graph-boost] [--type T]... [--field PATH]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
 fused via Reciprocal Rank Fusion. By DEFAULT it runs BM25 + vector on the
@@ -598,9 +599,21 @@ shows it as a debug column too).
                 across original + 3 expansions. Costs 1 LLM call + an API key.
   --no-llm      accepted for back-compat; a no-op now (expansion is already
                 off by default). Conflicts with --expand/--llm.
-  --explain     print the LLM-generated expansions before results.
-                Requires --expand (alias --llm) — there is nothing to explain
-                without expansion; \`--explain\` without it exits 2.
+  --explain     print the LLM-generated expansions and/or the graph-boost
+                attribution before results. Requires --expand (alias --llm)
+                or --graph-boost — with neither there is nothing to explain,
+                so \`--explain\` alone exits 2.
+  --graph-boost re-rank using the typed knowledge graph: a record adjacent to
+                one of the top hits gets a bounded score increment on the RRF
+                scale. OFF by default; the default changes only on measured
+                eval lift (\`bun scripts/eval-graph-boost.ts\`). Costs at most
+                two keyed range reads per seed and never adds a new candidate.
+                \`BRAIN_GRAPH_BOOST=1\` enables it for a whole shell.
+  --graph-boost-seeds N
+                how many top hits seed adjacency (default 3, max 10).
+  --graph-boost-weight W
+                scale on every adjacency contribution (default 0.5).
+                Both require --graph-boost.
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`). Narrows both the BM25
                 corpus and the vector schemas filter.
@@ -1191,6 +1204,13 @@ const ASK_OPTIONS = {
   // changes nothing now. Accepted so existing scripts/agents don't break.
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
+  // Phase-3 knowledge-graph adjacency boost. OFF by default — the design
+  // settled that a ranking default may change only on measured eval lift
+  // (`bun scripts/eval-graph-boost.ts`). `BRAIN_GRAPH_BOOST=1` turns it on
+  // for a whole shell without editing call sites; the flag still wins.
+  "graph-boost": { type: "boolean", default: false },
+  "graph-boost-seeds": { type: "string" },
+  "graph-boost-weight": { type: "string" },
   type: { type: "string", multiple: true },
   field: { type: "string", multiple: true },
   // Machine-readable mode: emit a JSON array of `{slug, score, type, title}`
@@ -1685,6 +1705,33 @@ function strictInt(
       message: `${opts.flag} must be a ${
         opts.min === 0 ? "non-negative" : "positive"
       } integer (got "${raw}").`,
+    });
+  }
+  return n;
+}
+
+/**
+ * Same contract as {@link strictInt} for a non-integer knob.
+ *
+ * Kept separate rather than loosening `strictInt`: every existing caller is a
+ * count or a limit where accepting "2.5" would be a bug, and a shared
+ * "number-ish" parser is exactly how that regression would arrive later.
+ */
+function strictFloat(
+  raw: string | undefined,
+  opts: {
+    flag: string;
+    min: number;
+    code: string;
+  },
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  const n = Number(trimmed);
+  if (trimmed.length === 0 || !Number.isFinite(n) || n < opts.min) {
+    throw new FbrainError({
+      code: opts.code,
+      message: `${opts.flag} must be a finite number >= ${opts.min} (got "${raw}").`,
     });
   }
   return n;
@@ -3136,13 +3183,34 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
     );
     return USAGE_ERROR;
   }
-  // --explain prints the LLM-generated expansions, so it requires expansion.
-  // With expansion now off by default, --explain without --expand has nothing
-  // to explain — exit 2 with a clear next step (keeps the old --explain
-  // --no-llm rejection, now generalized to "explain needs expansion").
-  if (values.explain && !expand) {
+  // The knowledge-graph adjacency boost. The CLI flag wins; the env var is the
+  // process-wide switch the eval harness and MCP surface use. Both default to
+  // off, so an ask with neither is the pre-phase-3 pipeline exactly.
+  const graphBoost = values["graph-boost"] || graphBoostEnabledByEnv();
+  // --explain has TWO things it can explain now: LLM expansions and the graph
+  // boost. It stays an error only when NEITHER is on, because then it would
+  // print output identical to a plain run and read as broken.
+  if (values.explain && !expand && !graphBoost) {
     console.error(
-      "error: --explain requires LLM expansion; add --expand (alias --llm).",
+      "error: --explain requires LLM expansion or the graph boost; add --expand (alias --llm) or --graph-boost.",
+    );
+    return USAGE_ERROR;
+  }
+  const graphBoostSeeds = strictInt(values["graph-boost-seeds"], {
+    flag: "--graph-boost-seeds",
+    min: 1,
+    code: "invalid_graph_boost_seeds",
+  });
+  const graphBoostWeight = strictFloat(values["graph-boost-weight"], {
+    flag: "--graph-boost-weight",
+    min: 0,
+    code: "invalid_graph_boost_weight",
+  });
+  if (!graphBoost && (graphBoostSeeds !== undefined || graphBoostWeight !== undefined)) {
+    // Tuning a boost that is not on is always a mistake, and silently ignoring
+    // it is how someone concludes the knobs do nothing.
+    console.error(
+      "error: --graph-boost-seeds/--graph-boost-weight require --graph-boost (or BRAIN_GRAPH_BOOST=1).",
     );
     return USAGE_ERROR;
   }
@@ -3163,6 +3231,13 @@ async function runAsk(args: Argv, verbose: Verbose): Promise<number> {
   if (askTypes) aOpts.types = askTypes;
   if (fields.length > 0) aOpts.fields = fields;
   if (values.json) aOpts.json = true;
+  if (graphBoost) {
+    aOpts.graphBoost = true;
+    const boostOpts: NonNullable<typeof aOpts.graphBoostOptions> = {};
+    if (graphBoostSeeds !== undefined) boostOpts.seedCount = graphBoostSeeds;
+    if (graphBoostWeight !== undefined) boostOpts.weight = graphBoostWeight;
+    if (Object.keys(boostOpts).length > 0) aOpts.graphBoostOptions = boostOpts;
+  }
   await askCmd(aOpts);
   return 0;
 }
