@@ -84,14 +84,28 @@ export async function readGraphEdges(
 ): Promise<GraphEdge[] | null> {
   const hashes = graphEdgeHashes(cfg);
   if (!hashes) return null;
+  const key = normalizeSlug(slug).toLowerCase();
   const res = await node.queryAll({
     schemaHash: hashes[direction],
     fields: [...GRAPH_EDGE_FIELDS],
-    filter: { HashKey: normalizeSlug(slug).toLowerCase() },
+    filter: { HashKey: key },
   });
+  // Measured on the primary brain 2026-08-24: querying either plane's schema
+  // hash with the same `HashKey` returns the IDENTICAL union of that slug's
+  // inbound and outbound rows. The two planes are one product under two
+  // indexes, and the node's HashKey filter does not pick the index the schema
+  // hash names. Untrimmed, an `out` read hands back edges pointing AT the
+  // slug, which `graph neighbors` then renders with the queried slug as its
+  // own neighbour, and which the mirror lint compares against itself and
+  // always calls agreement. Keep only the rows this direction actually owns.
+  // Harmless once the node discriminates: the predicate is already true then.
+  const owns = direction === "out"
+    ? (edge: GraphEdge) => edge.src === key
+    : (edge: GraphEdge) => edge.dst === key;
   return res.results
     .map(rowToEdge)
     .filter((edge): edge is GraphEdge => edge !== null)
+    .filter(owns)
     .sort(compareEdges);
 }
 
