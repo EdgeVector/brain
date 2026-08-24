@@ -700,6 +700,68 @@ CI runs the harness as a **non-blocking** step (`continue-on-error: true`) — t
 
 A typical baseline reading against a polluted homebrew daemon (the H2 case the Phase 7 spike documents) hovers around P@1 ≈ 0.4 — most queries either rank the seeded record first or get drowned by phantom/orphan-schema fragments. That number is the artifact this harness exists to track.
 
+### Graph adjacency boost (eval-gated)
+
+Phase 3 of the knowledge graph adds a second ranking signal to `brain ask`: a
+record adjacent in the typed edge graph to a record the text rankers already
+ranked highly gets a bounded score increment. It answers the query class the
+hybrid ranker cannot — the decision a design settled, the proof a task
+produced — because those records answer a question about a topic while using
+almost none of that topic's words.
+
+It is **off by default** and stays off until the eval says otherwise
+([`design-brain-knowledge-graph`](https://thelastdb.com) decision 4: ranking
+changes are eval-gated).
+
+```bash
+brain ask "<query>" --graph-boost              # turn it on for one query
+brain ask "<query>" --graph-boost --explain    # ...and show what the graph moved
+BRAIN_GRAPH_BOOST=1 brain ask "<query>"        # ...or for a whole shell
+```
+
+Cost and safety, by construction:
+
+- **Bounded reads.** Only the top `--graph-boost-seeds` hits (default 3) seed
+  the walk, and the walk is exactly one hop, so the boost adds at most two
+  keyed range reads per seed no matter how large the graph is.
+- **Ranking, not recall.** A neighbour that no ranker retrieved is never
+  injected — the boost only re-orders candidates that already matched.
+- **A ceiling.** A boosted record is clamped to the score of the best-ranked
+  seed that vouched for it, so the graph can lift a record to just under its
+  seed but never above it.
+
+Measure it with:
+
+```bash
+bun scripts/eval-graph-boost.ts                # seed, measure both arms, teardown
+bun scripts/eval-graph-boost.ts --weight 0.75  # sweep the weight
+bun scripts/eval-graph-boost.ts --out report.json
+```
+
+The fixture is [`eval/graph/pairs.json`](eval/graph/pairs.json) — 34 labeled
+queries over a 34-record graph, split into `adjacency` pairs (the boost's
+target) and `control` pairs (must not move). The harness reports P@1/P@3/P@5
+and MRR for both arms **split by class**, because a lift on adjacency paid for
+by a regression on controls is not a lift, and one blended number hides
+exactly that trade. It exits 0 with no config or an unreachable node, so CI
+treats an unmeasured run as unmeasured rather than as a failure.
+
+`test/unit/graph-boost-eval.test.ts` runs the same fixture offline through the
+real BM25 ranker and the real boost, and fails if adjacency stops improving or
+controls start regressing — the live harness cannot run in CI, so without that
+test nothing would catch a change that makes the boost useless.
+
+Measured offline over the fixture (BM25-only retrieval, so a floor rather than
+the headline number):
+
+| class | arm | P@1 | P@3 | P@5 | MRR |
+|---|---|---|---|---|---|
+| adjacency (n=16) | baseline | 37.5% | 68.8% | 75.0% | 0.544 |
+| adjacency (n=16) | boosted | 37.5% | **81.3%** | **81.3%** | **0.583** |
+| control (n=18) | baseline | 94.4% | 100.0% | 100.0% | 0.972 |
+| control (n=18) | boosted | 94.4% | 100.0% | 100.0% | 0.972 |
+
+
 ## Project status
 
 fbrain is a working prototype, not yet a 1.0. CRUD across all record types, multi-type schemas, semantic/hybrid retrieval (`search` + `ask`), soft delete, `doctor`, and the MCP agent surface are all shipped and exercised end to end. The remaining work is the G0 replacement-readiness gate (a dogfood-shaped checklist) — see [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the ship criteria and outstanding items. Until that gate ships, treat published binaries and APIs as unstable.
