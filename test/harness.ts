@@ -27,7 +27,6 @@ import { join } from "node:path";
 import {
   UNIQUE_SCHEMAS,
   schemaConfigKeys,
-  type AddSchemaRequest,
   type RecordType,
 } from "../src/schemas.ts";
 import { newNodeClient, newSchemaServiceClient } from "../src/client.ts";
@@ -513,8 +512,3 @@ try {
   console.error(`[fbrain harness] probe crashed: ${err}; treating as unavailable`);
   probedAvailable = false;
 }
-
-export type ProbeSchemas = {
-  design: AddSchemaRequest;
-  task: AddSchemaRequest;
-};
