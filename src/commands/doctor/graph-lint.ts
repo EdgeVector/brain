@@ -98,12 +98,20 @@ export async function runGraphEdgeLintProbe(
   opts: GraphLintProbeOptions = {},
 ): Promise<CheckResult> {
   const name = "graph-edge-lint";
+  // Not a SKIP. A SKIP reads as "nothing to check here" and leaves the run
+  // green, which is exactly how a primary brain sat for a phase with every
+  // `put` parsing its links and writing no edge row. The schemas ship in the
+  // standard `fbrain init` set, so their absence from config is a real defect
+  // in this brain, and the whole graph surface — neighbors, path, adjacency
+  // boost — silently answers nothing while it lasts.
   if (graphEdgesUnavailable(cfg)) {
     return {
       name,
-      ok: true,
-      tag: "SKIP",
-      detail: "graph-edge schemas are not in config",
+      ok: false,
+      tag: "FAIL",
+      detail:
+        "graph-edge schemas are not in config, so every write parses its links and stores no edge; " +
+        "`graph neighbors`, `graph path`, and the adjacency boost all read an empty graph",
       fix: "run `fbrain init` to register them, then `fbrain reindex --graph-edges`",
     };
   }
@@ -143,7 +151,14 @@ export async function runGraphEdgeLintProbe(
     return { name, ok: true, tag: "SKIP", detail: `lint could not run: ${errText(err)}` };
   }
   if (result === null) {
-    return { name, ok: true, tag: "SKIP", detail: "graph-edge schemas are not in config" };
+    // Same config defect as the pre-check above, observed one layer down.
+    return {
+      name,
+      ok: false,
+      tag: "FAIL",
+      detail: "graph-edge schemas are not in config, so no edge row can be read or written",
+      fix: "run `fbrain init` to register them, then `fbrain reindex --graph-edges`",
+    };
   }
 
   verbose?.(

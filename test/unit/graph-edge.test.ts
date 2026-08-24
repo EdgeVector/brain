@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   extractGraphEdges,
+  maintainGraphEdges,
   readGraphEdges,
   reconcileGraphEdges,
+  resetGraphEdgeInertNotice,
 } from "../../src/graph-edge.ts";
 import {
   GRAPH_EDGE_IN_SCHEMA_KEY,
@@ -90,5 +92,137 @@ describe("graph edge extraction", () => {
         (edge) => edge.src,
       ),
     ).toEqual(["source"]);
+  });
+});
+
+describe("maintainGraphEdges on an unconfigured substrate", () => {
+  const inertCfg = { schemaHashes: {} } as any;
+
+  function collectWarnings() {
+    const lines: string[] = [];
+    return { lines, warn: (line: string) => lines.push(line) };
+  }
+
+  test("says the links were parsed and dropped, instead of returning 0 in silence", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    const result = await maintainGraphEdges({
+      node: foldedNode().node,
+      cfg: inertCfg,
+      sourceSlug: "source",
+      body: "[[implements::design-brain-knowledge-graph]] and [[references::other]]",
+      warn,
+    });
+    expect(result).toMatchObject({
+      edges: 0,
+      graphEdgeIndexFailed: false,
+      substrateInert: true,
+      droppedLinks: 2,
+    });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("INERT");
+    expect(lines[0]).toContain("2 link(s)");
+    expect(lines[0]).toContain("fbrain init");
+  });
+
+  test("warns once per process, so a backfill does not repeat it per record", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    for (const slug of ["one", "two", "three"]) {
+      await maintainGraphEdges({
+        node: foldedNode().node,
+        cfg: inertCfg,
+        sourceSlug: slug,
+        body: "[[references::target]]",
+        warn,
+      });
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("one");
+  });
+
+  test("stays quiet for a body with no links — nothing was dropped", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    const result = await maintainGraphEdges({
+      node: foldedNode().node,
+      cfg: inertCfg,
+      sourceSlug: "source",
+      body: "a body that carries no wiki-links at all",
+      warn,
+    });
+    expect(result).toMatchObject({ substrateInert: true, droppedLinks: 0 });
+    expect(lines).toEqual([]);
+  });
+
+  test("reports a live substrate as not inert, and writes the edges", async () => {
+    resetGraphEdgeInertNotice();
+    const { lines, warn } = collectWarnings();
+    const { node } = foldedNode();
+    const result = await maintainGraphEdges({
+      node,
+      cfg: cfg as any,
+      sourceSlug: "source",
+      body: "[[implements::design-brain-knowledge-graph]]",
+      warn,
+    });
+    expect(result).toMatchObject({ edges: 1, substrateInert: false, droppedLinks: 0 });
+    expect(lines).toEqual([]);
+  });
+});
+
+describe("readGraphEdges against a node whose HashKey filter does not pick the index", () => {
+  // The real primary brain, measured 2026-08-24: both plane hashes answer the
+  // same HashKey with the same union of rows, because the two planes are one
+  // product under two indexes. This fixture reproduces that exactly — unlike
+  // `foldedNode`, which is stricter than the node it stands in for.
+  function unionNode(rows: readonly Record<string, unknown>[]) {
+    return {
+      async queryAll({ filter }: any) {
+        const key = filter?.HashKey;
+        return {
+          results: rows
+            .filter((f) => f.bge_src === key || f.bge_dst === key)
+            .map((fields) => ({ fields })),
+        };
+      },
+    } as any;
+  }
+
+  const row = (src: string, dst: string, type: string) => ({
+    bge_src: src,
+    bge_dst: dst,
+    bge_type: type,
+    bge_provenance: "explicit",
+    bge_created_at: "2026-08-24T00:00:00.000Z",
+    bge_out_r: `${type}#${dst}`,
+    bge_in_r: `${type}#${src}`,
+  });
+
+  const rows = [
+    row("octopus-design", "octopus-decision", "decided-in"),
+    row("octopus-task", "octopus-design", "implements"),
+    row("octopus-proof", "octopus-design", "proves"),
+  ];
+
+  test("an out read returns only edges leaving the slug", async () => {
+    const edges = await readGraphEdges(unionNode(rows), cfg as any, "octopus-design", "out");
+    expect(edges?.map((e) => `${e.type}:${e.dst}`)).toEqual(["decided-in:octopus-decision"]);
+  });
+
+  test("an in read returns only edges arriving at the slug", async () => {
+    const edges = await readGraphEdges(unionNode(rows), cfg as any, "octopus-design", "in");
+    expect(edges?.map((e) => `${e.type}:${e.src}`)).toEqual([
+      "implements:octopus-task",
+      "proves:octopus-proof",
+    ]);
+  });
+
+  test("the slug never appears as its own neighbour", async () => {
+    for (const direction of ["out", "in"] as const) {
+      const edges = await readGraphEdges(unionNode(rows), cfg as any, "octopus-design", direction);
+      const neighbours = edges?.map((e) => (direction === "out" ? e.dst : e.src)) ?? [];
+      expect(neighbours).not.toContain("octopus-design");
+    }
   });
 });

@@ -58,12 +58,19 @@ function graphNode(edges: readonly EdgeSpec[], opts: { dropFromIn?: EdgeSpec[] }
 }
 
 describe("doctor graph-edge-lint probe", () => {
-  test("SKIPs, never FAILs, when the edge schemas are not configured", async () => {
+  // Reversed 2026-08-24. The old contract was "a SKIP must stay neutral: an
+  // unbuilt graph is not an unhealthy one". On the primary brain that neutral
+  // SKIP hid a live defect for a whole phase — the schemas were missing from
+  // config, so every `put` parsed its links and wrote no edge, and doctor
+  // still printed OK. The schemas ship in the standard init set; absent, they
+  // are a fault, not an opt-out.
+  test("FAILs, never SKIPs, when the edge schemas are not configured", async () => {
     const check = await runGraphEdgeLintProbe(graphNode([]), { schemaHashes: {} } as any);
     expect(check.name).toBe("graph-edge-lint");
-    expect(check.tag).toBe("SKIP");
-    // A SKIP must stay neutral: an unbuilt graph is not an unhealthy one.
-    expect(check.ok).toBe(true);
+    expect(check.tag).toBe("FAIL");
+    expect(check.ok).toBe(false);
+    expect(check.detail).toContain("not in config");
+    expect(check.fix).toContain("fbrain init");
   });
 
   test("PASSes on a consistent graph AND states what it sampled", async () => {
