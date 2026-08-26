@@ -6,6 +6,39 @@ import {
   type SentryModule,
 } from "../../src/observability/sentry";
 
+/**
+ * Capture everything written to BOTH std streams while `run` executes.
+ *
+ * stdout is the machine channel for every JSON CLI subcommand (`brain ask
+ * --json | jq`). A diagnostic that lands there is a defect, so the test
+ * asserts the stdout side too — flipping `process.stderr.write` back to
+ * `console.log` must fail this test, not pass it quietly.
+ */
+async function captureStdio<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T; stderr: string; stdout: string }> {
+  const errWrites: string[] = [];
+  const outWrites: string[] = [];
+  const originalErr = process.stderr.write.bind(process.stderr);
+  const originalOut = process.stdout.write.bind(process.stdout);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    errWrites.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+    return true;
+  }) as typeof process.stderr.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    outWrites.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+    return true;
+  }) as typeof process.stdout.write;
+
+  try {
+    const result = await run();
+    return { result, stderr: errWrites.join(""), stdout: outWrites.join("") };
+  } finally {
+    process.stderr.write = originalErr;
+    process.stdout.write = originalOut;
+  }
+}
+
 function mockSentry() {
   const initCalls: unknown[] = [];
   const captures: unknown[] = [];
@@ -145,31 +178,65 @@ describe("Sentry observability helper", () => {
     );
   });
 
-  test("no-ops without calling Sentry.init when DSN is a lastsecrets locator", async () => {
+  test("stays silent on a lastsecrets locator without OBS_SENTRY_DEBUG", async () => {
     const sentry = mockSentry();
 
-    const result = await initSentry({
-      service: "fbrain-cli",
-      env: { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
-      sentryModule: sentry.module,
-      installProcessHandlers: false,
-    });
+    const { result, stderr, stdout } = await captureStdio(() =>
+      initSentry({
+        service: "fbrain-cli",
+        env: { OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines" },
+        sentryModule: sentry.module,
+        installProcessHandlers: false,
+      }),
+    );
 
     expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
     expect(sentry.initCalls).toHaveLength(0);
+    // A locator is the expected value in every routine shell. Printing it on
+    // each CLI invocation is the fleet-wide noise this gate removes.
+    expect(stderr).not.toContain("observability:");
+    expect(stdout).toBe("");
+  });
+
+  test("warns on a lastsecrets locator when OBS_SENTRY_DEBUG=1 — stderr only", async () => {
+    const sentry = mockSentry();
+
+    const { result, stderr, stdout } = await captureStdio(() =>
+      initSentry({
+        service: "fbrain-cli",
+        env: {
+          OBS_SENTRY_DSN: "lastsecrets://obs-sentry-dsn-routines",
+          OBS_SENTRY_DEBUG: "1",
+        },
+        sentryModule: sentry.module,
+        installProcessHandlers: false,
+      }),
+    );
+
+    expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
+    expect(sentry.initCalls).toHaveLength(0);
+    expect(stderr).toContain(
+      "observability: OBS_SENTRY_DSN is lastsecrets locator (not a Sentry DSN)",
+    );
+    // The diagnostic must never reach the JSON channel.
+    expect(stdout).toBe("");
   });
 
   test("no-ops without calling Sentry.init when DSN is garbage", async () => {
     const sentry = mockSentry();
 
-    const result = await initSentry({
-      service: "fbrain-cli",
-      env: { OBS_SENTRY_DSN: "not-a-sentry-dsn" },
-      sentryModule: sentry.module,
-      installProcessHandlers: false,
-    });
+    const { result, stderr, stdout } = await captureStdio(() =>
+      initSentry({
+        service: "fbrain-cli",
+        env: { OBS_SENTRY_DSN: "not-a-sentry-dsn", OBS_SENTRY_DEBUG: "1" },
+        sentryModule: sentry.module,
+        installProcessHandlers: false,
+      }),
+    );
 
     expect(result).toEqual({ enabled: false, reason: "invalid_dsn" });
     expect(sentry.initCalls).toHaveLength(0);
+    expect(stderr).toContain("not a valid https Sentry DSN");
+    expect(stdout).toBe("");
   });
 });
