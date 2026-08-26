@@ -50,7 +50,19 @@ export function parseObsSentryDsn(raw: string): string | null {
   return dsn;
 }
 
-function warnInvalidDsn(dsnEnv: string, raw: string): void {
+function debugObsEnabled(env: Record<string, string | undefined>): boolean {
+  const flag = env.OBS_SENTRY_DEBUG ?? env.OBS_DEBUG ?? "";
+  return flag === "1" || flag.toLowerCase() === "true";
+}
+
+function warnInvalidDsn(
+  dsnEnv: string,
+  raw: string,
+  env: Record<string, string | undefined>,
+): void {
+  // Default path is silent. A lastsecrets locator is expected in routine
+  // shells; printing it on every CLI is what poisons `2>&1 | jq` pipelines.
+  if (!debugObsEnabled(env)) return;
   // stderr only — never stdout (JSON CLIs). Do not echo the full raw value
   // when it looks secret-like; lastsecrets locators are safe metadata.
   const hint =
@@ -106,7 +118,7 @@ export async function initSentry(options: SentryInitOptions): Promise<SentryInit
 
   const dsn = parseObsSentryDsn(dsnRaw);
   if (!dsn) {
-    warnInvalidDsn(dsnEnv, dsnRaw);
+    warnInvalidDsn(dsnEnv, dsnRaw, env);
     return { enabled: false, reason: "invalid_dsn" };
   }
 
