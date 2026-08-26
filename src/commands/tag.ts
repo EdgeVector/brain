@@ -54,7 +54,7 @@ export function parseTagList(values: readonly string[] | undefined): string[] {
   return out;
 }
 
-export function applyTagMutation(
+function applyTagMutation(
   existing: readonly string[],
   add: readonly string[],
   rm: readonly string[],
