@@ -34,7 +34,7 @@ function parseEnginesBun(spec: unknown): string {
 // prerelease/build suffix (e.g. "1.3.10-canary.1+abc" → [1,3,10]). Missing
 // components default to 0 so "1.3" parses as [1,3,0]. Returns null when there
 // is no leading numeric version at all.
-export function parseVersionTriple(
+function parseVersionTriple(
   version: string,
 ): [number, number, number] | null {
   const m = version.trim().match(/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/);
@@ -47,7 +47,7 @@ export function parseVersionTriple(
 // "is my Bun new enough?" should behave (a prerelease of the minimum counts as
 // the minimum). Unparseable inputs sort as lowest so a garbage version is
 // treated as "too old" rather than silently passing.
-export function compareVersions(a: string, b: string): number {
+function compareVersions(a: string, b: string): number {
   const ta = parseVersionTriple(a);
   const tb = parseVersionTriple(b);
   if (!ta && !tb) return 0;
