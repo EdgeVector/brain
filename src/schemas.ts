@@ -100,11 +100,11 @@ export const TASK_STATUSES = [
   "cancelled",
 ] as const;
 
-export const CONCEPT_STATUSES = ["active", "archived"] as const;
+export const CONCEPT_STATUSES = ["active", "parked", "archived"] as const;
 
-export const PREFERENCE_STATUSES = ["active", "superseded"] as const;
+export const PREFERENCE_STATUSES = ["active", "parked", "superseded"] as const;
 
-export const REFERENCE_STATUSES = ["active", "broken", "archived"] as const;
+export const REFERENCE_STATUSES = ["active", "parked", "broken", "archived"] as const;
 
 export const AGENT_STATUSES = ["active", "archived"] as const;
 
@@ -117,7 +117,7 @@ export const PROJECT_STATUSES = [
 
 export const SPIKE_STATUSES = ["active", "concluded"] as const;
 
-export const SOP_STATUSES = ["active", "superseded", "archived"] as const;
+export const SOP_STATUSES = ["active", "parked", "superseded", "archived"] as const;
 
 // A `decision` is one call a human made. Status is the OUTCOME, not a
 // workflow state: `go` (approved/proceed), `hold` (deferred/parked),
@@ -1069,6 +1069,210 @@ export const papercutStatusIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * Keep-set membership: one HashRange row per live record, addressed by
+ * (type, slug). Default ask reads this partition. Presence is liveness.
+ */
+export const LIVE_INDEX_SCHEMA_KEY = "__liveindex__";
+export const LIVE_INDEX_MARKER = "fbrain_live_index_v1";
+export const LIVE_INDEX_FIELDS = [
+  "liv_h",
+  "liv_r",
+  "liv_payload",
+  "liv_marker",
+] as const;
+
+export const liveIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "LiveIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "LiveIndex_hashrange_v1",
+    purpose_statement:
+      "One live fbrain record per HashRange row (type partition x slug) so default ask never enumerates parked or deleted rows",
+    schema_type: "HashRange",
+    key: { hash_field: "liv_h", range_field: "liv_r" },
+    fields: [...LIVE_INDEX_FIELDS],
+    field_types: {
+      liv_h: "String",
+      liv_r: "String",
+      liv_payload: "String",
+      liv_marker: "String",
+    },
+    field_descriptions: {
+      liv_h: "opaque partition token (record type name)",
+      liv_r: "opaque range token (record slug)",
+      liv_payload: "json object of ONE fbrain record",
+      liv_marker: "constant token fbrain_live_index_v1",
+    },
+    field_classifications: {
+      liv_h: ["no_index", "metadata"],
+      liv_r: ["no_index", "metadata"],
+      liv_payload: ["no_index", "metadata"],
+      liv_marker: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      liv_h: GENERAL,
+      liv_r: GENERAL,
+      liv_payload: GENERAL,
+      liv_marker: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * Topic cluster membership: hash = topic, range = slug. Canonical and
+ * parked losers share a partition. The consolidator range-reads one topic.
+ */
+export const CLUSTER_INDEX_SCHEMA_KEY = "__clusterindex__";
+export const CLUSTER_INDEX_MARKER = "fbrain_cluster_index_v1";
+export const CLUSTER_INDEX_FIELDS = [
+  "clu_h",
+  "clu_r",
+  "clu_payload",
+  "clu_marker",
+] as const;
+
+export const clusterIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "ClusterIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "ClusterIndex_hashrange_v1",
+    purpose_statement:
+      "One cluster member per HashRange row (topic partition x slug) so consolidate range-reads one named topic instead of listing every record",
+    schema_type: "HashRange",
+    key: { hash_field: "clu_h", range_field: "clu_r" },
+    fields: [...CLUSTER_INDEX_FIELDS],
+    field_types: {
+      clu_h: "String",
+      clu_r: "String",
+      clu_payload: "String",
+      clu_marker: "String",
+    },
+    field_descriptions: {
+      clu_h: "opaque partition token (topic slug)",
+      clu_r: "opaque range token (record slug)",
+      clu_payload: "json object of ONE fbrain record",
+      clu_marker: "constant token fbrain_cluster_index_v1",
+    },
+    field_classifications: {
+      clu_h: ["no_index", "metadata"],
+      clu_r: ["no_index", "metadata"],
+      clu_payload: ["no_index", "metadata"],
+      clu_marker: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      clu_h: GENERAL,
+      clu_r: GENERAL,
+      clu_payload: GENERAL,
+      clu_marker: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * Parked membership, symmetric with live. A parked row stays gettable and
+ * is absent from default ask.
+ */
+export const PARKED_INDEX_SCHEMA_KEY = "__parkedindex__";
+export const PARKED_INDEX_MARKER = "fbrain_parked_index_v1";
+export const PARKED_INDEX_FIELDS = [
+  "prk_h",
+  "prk_r",
+  "prk_payload",
+  "prk_marker",
+] as const;
+
+export const parkedIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "ParkedIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "ParkedIndex_hashrange_v1",
+    purpose_statement:
+      "One parked fbrain record per HashRange row (type partition x slug) so a parked row stays keyed-reachable after it leaves the live keep set",
+    schema_type: "HashRange",
+    key: { hash_field: "prk_h", range_field: "prk_r" },
+    fields: [...PARKED_INDEX_FIELDS],
+    field_types: {
+      prk_h: "String",
+      prk_r: "String",
+      prk_payload: "String",
+      prk_marker: "String",
+    },
+    field_descriptions: {
+      prk_h: "opaque partition token (record type name)",
+      prk_r: "opaque range token (record slug)",
+      prk_payload: "json object of ONE fbrain record",
+      prk_marker: "constant token fbrain_parked_index_v1",
+    },
+    field_classifications: {
+      prk_h: ["no_index", "metadata"],
+      prk_r: ["no_index", "metadata"],
+      prk_payload: ["no_index", "metadata"],
+      prk_marker: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      prk_h: GENERAL,
+      prk_r: GENERAL,
+      prk_payload: GENERAL,
+      prk_marker: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+/**
+ * Ephemeral day membership. Hash = series:yyyy-mm-dd. The reaper names
+ * expired day hashes and deletes those primaries.
+ */
+export const EPH_INDEX_SCHEMA_KEY = "__ephindex__";
+export const EPH_INDEX_MARKER = "fbrain_eph_index_v1";
+export const EPH_INDEX_FIELDS = [
+  "eph_h",
+  "eph_r",
+  "eph_payload",
+  "eph_marker",
+] as const;
+
+export const ephIndexSchema: AddSchemaRequest = {
+  schema: {
+    name: "EphIndex",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "EphIndex_hashrange_v1",
+    purpose_statement:
+      "One ephemeral record per HashRange row (series-day partition x slug) so a reaper names expired day hashes instead of listing every record",
+    schema_type: "HashRange",
+    key: { hash_field: "eph_h", range_field: "eph_r" },
+    fields: [...EPH_INDEX_FIELDS],
+    field_types: {
+      eph_h: "String",
+      eph_r: "String",
+      eph_payload: "String",
+      eph_marker: "String",
+    },
+    field_descriptions: {
+      eph_h: "opaque partition token (series colon UTC day)",
+      eph_r: "opaque range token (record slug)",
+      eph_payload: "json object of ONE fbrain record",
+      eph_marker: "constant token fbrain_eph_index_v1",
+    },
+    field_classifications: {
+      eph_h: ["no_index", "metadata"],
+      eph_r: ["no_index", "metadata"],
+      eph_payload: ["no_index", "metadata"],
+      eph_marker: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      eph_h: GENERAL,
+      eph_r: GENERAL,
+      eph_payload: GENERAL,
+      eph_marker: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 // Typed knowledge-graph edges are one product with two access patterns. Both
 // schemas expose the same field set and differ only in key layout, allowing
 // Mini to protein-bind the fields and fold one source-keyed write into the
@@ -1305,6 +1509,30 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: papercutStatusIndexSchema,
     types: [],
     extraKeys: [PAPERCUT_STATUS_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: LIVE_INDEX_SCHEMA_KEY,
+    schema: liveIndexSchema,
+    types: [],
+    extraKeys: [LIVE_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: CLUSTER_INDEX_SCHEMA_KEY,
+    schema: clusterIndexSchema,
+    types: [],
+    extraKeys: [CLUSTER_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: PARKED_INDEX_SCHEMA_KEY,
+    schema: parkedIndexSchema,
+    types: [],
+    extraKeys: [PARKED_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: EPH_INDEX_SCHEMA_KEY,
+    schema: ephIndexSchema,
+    types: [],
+    extraKeys: [EPH_INDEX_SCHEMA_KEY],
   },
   {
     key: GRAPH_EDGE_OUT_SCHEMA_KEY,

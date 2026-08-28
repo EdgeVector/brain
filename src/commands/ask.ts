@@ -519,6 +519,22 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
       opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
       continue;
     }
+    const { liveIndexRegistered, membershipExists } = await import(
+      "../lifecycle-index.ts"
+    );
+    if (liveIndexRegistered(opts.cfg)) {
+      const live = await membershipExists(
+        node,
+        opts.cfg,
+        "live",
+        parsed.type,
+        parsed.slug,
+      );
+      if (!live) {
+        opts.verbose?.(`skip not-live: ${parsed.type}/${parsed.slug}`);
+        continue;
+      }
+    }
     resolved.push({
       type: parsed.type,
       slug: parsed.slug,

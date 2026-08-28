@@ -202,7 +202,7 @@ describe("schemas", () => {
   });
 
   test("UNIQUE_SCHEMAS includes user records, internal indexes, graph edges, admin snapshot, and attachments", () => {
-    expect(UNIQUE_SCHEMAS.length).toBe(21);
+    expect(UNIQUE_SCHEMAS.length).toBe(25);
     const keys = UNIQUE_SCHEMAS.map((e) => e.key).sort();
     expect(keys).toEqual([
       "__admin_snapshot__",
@@ -210,9 +210,13 @@ describe("schemas", () => {
       "__attachmentfile__",
       "__attachmentindex__",
       "__childtaskindex__",
+      "__clusterindex__",
+      "__ephindex__",
       "__graphedgein__",
       "__graphedgeout__",
+      "__liveindex__",
       "__papercutstatusindex__",
+      "__parkedindex__",
       "__recordlistentry__",
       "__tagindex__",
       "agent",
@@ -241,6 +245,10 @@ describe("schemas", () => {
       "__graphedgein__",
       "__graphedgeout__",
       "__papercutstatusindex__",
+      "__liveindex__",
+      "__clusterindex__",
+      "__parkedindex__",
+      "__ephindex__",
     ];
     for (const entry of UNIQUE_SCHEMAS) {
       if (internalKeys.includes(entry.key)) {

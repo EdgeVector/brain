@@ -179,6 +179,23 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   };
   if (parsed.status !== undefined) patch.status = parsed.status;
   if (parsed.tags !== undefined) patch.tags = parsed.tags;
+  {
+    const extraTags = [...(patch.tags ?? existing?.tags ?? [])];
+    const raw = parsed.raw;
+    if (typeof raw.topic === "string" && raw.topic.length > 0) {
+      extraTags.push(`topic:${raw.topic}`);
+    }
+    if (typeof raw.series === "string" && raw.series.length > 0) {
+      extraTags.push(`series:${raw.series}`);
+    }
+    if (typeof raw.eph_day === "string" && raw.eph_day.length > 0) {
+      extraTags.push(`eph-day:${raw.eph_day}`);
+    }
+    if (raw.canonical === "true") {
+      extraTags.push("canonical");
+    }
+    if (extraTags.length > 0) patch.tags = extraTags;
+  }
   if (type === "task" && typeof parsed.raw.design_slug === "string") {
     patch.design_slug = parsed.raw.design_slug;
   }
