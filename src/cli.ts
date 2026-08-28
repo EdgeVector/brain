@@ -85,6 +85,7 @@ import {
   papercutFileCmd,
   papercutListCmd,
 } from "./commands/papercut.ts";
+import { consolidateCmd, PROVE_TOPIC } from "./commands/consolidate.ts";
 import {
   FBRAIN_MCP_READ_TOOL_NAMES,
   FBRAIN_MCP_TOOL_NAMES,
@@ -207,6 +208,7 @@ export const COMMANDS = [
   "reindex",
   "migrate",
   "papercut",
+  "consolidate",
   "mcp",
   "hook",
   "help",
@@ -264,6 +266,7 @@ ${RECORD_NEW_HELP_LINES}
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   papercut       file/close/census the typed defect ledger (dedupe-gated; close is one write, not two)
+  consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
   mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
@@ -986,6 +989,20 @@ list    The row-level view of the SAME read census counts, so the two can never
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
 Kinds:    ${PAPERCUT_KINDS.join(" | ")}`,
+  consolidate: `brain consolidate --topic T [--prove] [--json]
+
+Collapse one topic cluster to one live canonical slug.
+
+  --topic    cluster hash (required unless --prove, which defaults to lifecycle-ship-proof)
+  --prove    seed a dedicated topic, run consolidate + reap, assert, then clean up
+  --json     emit {ok, topic, canonical, parked, deleted, appended} on stdout
+
+Live membership is HashRange live:{type} / slug. Cluster membership is
+cluster:{topic} / slug. Unique facts append onto the canonical. Still-true
+losers park. Pure duplicates delete. Ephemeral rows expire by day hash.
+
+The --prove pass must exit 0 on the live node. It writes only
+lifecycle-ship-proof-* slugs and deletes them before returning.`,
   mcp: `fbrain mcp [install|instructions]
 
 fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
@@ -1347,6 +1364,11 @@ const PAPERCUT_OPTIONS = {
   // shared
   json: { type: "boolean", default: false },
 } as const;
+const CONSOLIDATE_OPTIONS = {
+  topic: { type: "string" },
+  prove: { type: "boolean", default: false },
+  json: { type: "boolean", default: false },
+} as const;
 const EMPTY_OPTIONS = {} as const;
 
 // `fbrain mcp install` (alias `setup`) flags. The other mcp subcommands
@@ -1403,6 +1425,7 @@ export const CLI_SPEC = {
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
   papercut: PAPERCUT_OPTIONS,
+  consolidate: CONSOLIDATE_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
   help: EMPTY_OPTIONS,
@@ -2006,6 +2029,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runMigrate(args, verboseFn);
     case "papercut":
       return runPapercut(args, verboseFn);
+    case "consolidate":
+      return runConsolidate(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "hook":
@@ -3985,6 +4010,45 @@ function requiredFlag(
     });
   }
   return raw;
+}
+
+async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
+  const { values } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: CONSOLIDATE_OPTIONS,
+    },
+    "consolidate",
+  );
+  const prove = values.prove === true;
+  const topic = typeof values.topic === "string" ? values.topic : prove ? PROVE_TOPIC : "";
+  if (!topic) {
+    console.error(COMMAND_HELP.consolidate);
+    return USAGE_ERROR;
+  }
+  const cfg = readConfig();
+  const result = await consolidateCmd({
+    cfg,
+    topic,
+    prove,
+    json: values.json === true,
+    ...(verbose ? { verbose } : {}),
+  });
+  if (values.json) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        topic: result.topic,
+        canonical: result.canonical,
+        parked: result.parked,
+        deleted: result.deleted,
+        appended: result.appended,
+      }),
+    );
+  }
+  return 0;
 }
 
 async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {

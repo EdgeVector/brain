@@ -118,6 +118,16 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     keyHash: slug,
     fields,
   });
+  const nextRecord = { ...only.record, status: opts.newStatus, updated_at: now };
+  const { maintainLifecycleIndex } = await import("../lifecycle-index.ts");
+  await maintainLifecycleIndex({
+    node,
+    cfg: opts.cfg,
+    type: only.type,
+    record: nextRecord,
+    slug,
+    previous: only.record,
+  });
   if (only.type === "papercut") {
     const { maintainPapercutStatusIndex } = await import(
       "../papercut-status-index.ts"

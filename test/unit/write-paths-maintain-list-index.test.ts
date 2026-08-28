@@ -30,6 +30,21 @@ const WRITE_PATHS = [
   "src/commands/delete.ts",
 ] as const;
 
+describe("write paths maintain the lifecycle keep set", () => {
+  test("record-list-index maintainTypeListIndex also patches lifecycle indexes", async () => {
+    const source = await Bun.file(
+      new URL("../../src/record-list-index.ts", import.meta.url),
+    ).text();
+    expect(source.includes("maintainLifecycleIndex")).toBe(true);
+  });
+  test("status updates patch lifecycle indexes", async () => {
+    const source = await Bun.file(
+      new URL("../../src/commands/status.ts", import.meta.url),
+    ).text();
+    expect(source.includes("maintainLifecycleIndex")).toBe(true);
+  });
+});
+
 describe("write paths maintain the type-list index", () => {
   for (const path of WRITE_PATHS) {
     test(`${path} calls maintainTypeListIndex`, async () => {

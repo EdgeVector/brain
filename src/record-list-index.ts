@@ -386,6 +386,14 @@ export async function maintainTypeListIndex(opts: {
   const { isTombstoned } = await import("./record.ts");
   try {
     await patchTypeListIndex(opts.node, opts.cfg, opts.type, opts.record, opts.slug, isTombstoned);
+    const { maintainLifecycleIndex } = await import("./lifecycle-index.ts");
+    await maintainLifecycleIndex({
+      node: opts.node,
+      cfg: opts.cfg,
+      type: opts.type,
+      record: opts.record && !isTombstoned(opts.record) ? opts.record : null,
+      slug: opts.slug,
+    });
     return { listIndexFailed: false };
   } catch (err) {
     // Self-heal: clear the completeness marker so the next product list cold-
