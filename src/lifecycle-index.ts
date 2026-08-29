@@ -30,7 +30,15 @@ import {
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
 
-type IndexKind = "live" | "cluster" | "parked" | "eph";
+export type IndexKind = "live" | "cluster" | "parked" | "eph";
+
+export type LifecyclePlanOp = {
+  mutationType: "create" | "update" | "delete";
+  schemaHash: string;
+  keyHash: string;
+  keyRange: string;
+  fields: Record<string, string>;
+};
 
 const INDEX: Record<
   IndexKind,
@@ -222,6 +230,107 @@ function recordFromRow(row: QueryRow, payloadField: string): FbrainRecord | null
 
 export function liveIndexRegistered(cfg: SchemaCfg): boolean {
   return schemaHash(cfg, "live") !== null;
+}
+
+/**
+ * Derive live / parked / cluster / eph membership mutations from the previous
+ * and desired records. Missing schema hashes are skipped. Upserts use
+ * `upsertType` so a new primary can create rows and an update can rewrite them
+ * without a per-row existence read.
+ */
+export function planLifecycleMembershipOps(opts: {
+  cfg: SchemaCfg;
+  type: RecordType;
+  slug: string;
+  record: FbrainRecord | null;
+  previous?: FbrainRecord | null;
+  upsertType: "create" | "update";
+}): LifecyclePlanOp[] {
+  const { cfg, type, slug } = opts;
+  const prev = opts.previous ?? null;
+  const rec = opts.record;
+  const ops: LifecyclePlanOp[] = [];
+
+  const prevTopic = prev ? topicFromTags(prev.tags) : null;
+  const prevSeries = prev ? seriesFromTags(prev.tags) : null;
+  const prevDay = prev ? ephDayFromTags(prev.tags) : null;
+
+  const pushUpsert = (
+    kind: IndexKind,
+    hash: string,
+    range: string,
+    record: FbrainRecord,
+  ) => {
+    const schemaHash = schemaHashForKind(cfg, kind);
+    if (!schemaHash) return;
+    ops.push({
+      mutationType: opts.upsertType,
+      schemaHash,
+      keyHash: hash,
+      keyRange: range,
+      fields: entryFields(kind, hash, range, record),
+    });
+  };
+  const pushDelete = (kind: IndexKind, hash: string, range: string) => {
+    const schemaHash = schemaHashForKind(cfg, kind);
+    if (!schemaHash) return;
+    ops.push({
+      mutationType: "delete",
+      schemaHash,
+      keyHash: hash,
+      keyRange: range,
+      fields: {},
+    });
+  };
+
+  if (!rec) {
+    pushDelete("live", type, slug);
+    pushDelete("parked", type, slug);
+    if (prevTopic) pushDelete("cluster", prevTopic, slug);
+    if (prevSeries && prevDay) {
+      pushDelete("eph", ephHash(prevSeries, prevDay), slug);
+    }
+    return ops;
+  }
+
+  const topic = topicFromTags(rec.tags);
+  const series = seriesFromTags(rec.tags);
+  const day = ephDayFromTags(rec.tags);
+  const eph = isEphRecord(rec);
+  const live = !eph && isLiveStatus(type, rec.status);
+  const parked = rec.status === "parked";
+  const snap = { ...rec, type } as FbrainRecord;
+
+  if (live) {
+    pushUpsert("live", type, slug, snap);
+    pushDelete("parked", type, slug);
+  } else if (parked) {
+    pushUpsert("parked", type, slug, snap);
+    pushDelete("live", type, slug);
+  } else {
+    pushDelete("live", type, slug);
+    pushDelete("parked", type, slug);
+  }
+
+  if (topic) pushUpsert("cluster", topic, slug, snap);
+  if (prevTopic && prevTopic !== topic) pushDelete("cluster", prevTopic, slug);
+
+  if (series && day) {
+    pushUpsert("eph", ephHash(series, day), slug, rec);
+    pushDelete("live", type, slug);
+  }
+  if (
+    prevSeries &&
+    prevDay &&
+    (prevSeries !== series || prevDay !== day)
+  ) {
+    pushDelete("eph", ephHash(prevSeries, prevDay), slug);
+  }
+  return ops;
+}
+
+function schemaHashForKind(cfg: SchemaCfg, kind: IndexKind): string | null {
+  return schemaHash(cfg, kind);
 }
 
 /**

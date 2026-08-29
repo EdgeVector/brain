@@ -215,11 +215,11 @@ export async function maintainGraphEdges(
   }
 }
 
-function edgeRange(edge: Pick<GraphEdge, "type" | "dst">): string {
+export function edgeRange(edge: Pick<GraphEdge, "type" | "dst">): string {
   return `${edge.type}#${edge.dst}`;
 }
 
-function edgeFields(edge: GraphEdge): Record<string, string> {
+export function edgeFields(edge: GraphEdge): Record<string, string> {
   return {
     bge_src: edge.src,
     bge_dst: edge.dst,

@@ -18,11 +18,9 @@
 // An unrecognised `type:` errors as `unsupported_type`.
 
 import { FbrainError, type Verbose } from "../client.ts";
-import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
-  confirmVectorIndexed,
   crossTypeSlugNote,
   ensureNotShrinking,
   ensureStatus,
@@ -33,7 +31,6 @@ import {
   type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
-  verifyRecordVisible,
   type FbrainRecord,
   type RecordFieldPatch,
 } from "../record.ts";
@@ -43,7 +40,11 @@ import {
   recordTypeList,
   type RecordType,
 } from "../schemas.ts";
-import { reconcileTagIndex } from "../tag-index.ts";
+import { recordListEntryHash } from "../record-list-index.ts";
+import {
+  buildResidentWritePlan,
+  recordFromPrimaryFields,
+} from "../resident-write-plan.ts";
 
 export type PutOptions = {
   cfg: Config;
@@ -98,6 +99,16 @@ export type PutResult = {
   // permanent until the index is rebuilt, because the list index is maintained
   // by read-modify-write and has no self-heal on a present-but-stale row.
   listIndexFailed: boolean;
+  writeId?: string;
+  revision?: string;
+  durability?: "queued" | "local";
+  search?: "queued" | "ready";
+  exactProjections?: {
+    created: number;
+    updated: number;
+    deleted: number;
+    no_op: number;
+  };
 };
 
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
@@ -204,11 +215,9 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     if (typeof fromRaw === "string") patch[ef] = fromRaw;
   }
   const fields = buildRecordFields(type, base, patch);
+  const desired = recordFromPrimaryFields(fields);
 
-  const action: "created" | "updated" = existing ? "updated" : "created";
-  if (existing) {
-    await node.updateRecord({ schemaHash: hash, fields, keyHash: slug });
-  } else {
+  if (!existing) {
     // CREATE path only — an in-place update of the same type isn't a new
     // cross-type collision. Best-effort cross-type slug-collision NOTE, kept
     // consistent with `<type> new` (see recordNew). The probe is swallowed on
@@ -222,126 +231,43 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     );
     const note = crossTypeSlugNote(type, slug, collisions);
     if (note) console.error(note);
-    await node.createRecord({ schemaHash: hash, fields, keyHash: slug });
   }
-  // Read-your-writes guard. fold_db's `/api/mutation` is not RYW-consistent:
-  // the write returns before the row is queryable, so a tight put→get in the
-  // same warm process (MCP-agent path is the worst case — no bun cold-start
-  // to mask the visibility window) can return "No record" for a row that
-  // did, in fact, just land. Without this, `putCmd` would report
-  // "created"/"updated" before the row is readable; an agent then concludes
-  // its own write is lost. The verify uses the full `withReadRetry` budget
-  // (5×250 ms) because we *expect* the row to exist — same precedent as
-  // `deleteRecord`'s post-write verify. Self-tuning: on a warm node the
-  // first read hits, no backoff spent; only a real propagation lag burns any
-  // of the budget. See `verifyRecordVisible` in record.ts.
-  const visible = await verifyRecordVisible(
-    node,
-    type,
-    hash,
-    slug,
-    opts.verifyOptions,
-  );
-  if (visible === null) {
-    throw new FbrainError({
-      code: "put_not_visible",
-      message: `${action === "created" ? "Created" : "Updated"} ${type} "${slug}" but the row was not visible to a follow-up read within the retry budget.`,
-      hint:
-        "fold_db reported the mutation succeeded, but a verify-read kept seeing the row as absent through the full retry budget. " +
-        "Re-run `fbrain get` shortly; if it stays missing the write may not have persisted.",
-    });
-  }
-  // Keep the record-list index current so list/BM25 never rescan product tables.
-  //
-  // Non-fatal by design — the record itself has already persisted, and throwing
-  // here would report a lost write that is not lost. But NOT silent: this index
-  // is patched read-modify-write, so a dropped entry never comes back on its
-  // own, and swallowing the error is exactly how the primary's rollup drifted
-  // 760 live records behind `brain list` for days with no symptom (2026-07-28).
-  // `listIndexFailed` rides out on the result so the operator finds out at the
-  // write instead of during an audit months later.
-  const { maintainTypeListIndex } = await import("../record-list-index.ts");
-  const { listIndexFailed } = await maintainTypeListIndex({
-    node,
-    cfg: opts.cfg,
-    type,
-    record: visible,
-    slug,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
 
-  // Keep the design->child-task index current (see child-task-index.ts).
-  // `existing` is the pre-write record (undefined on create — nothing to
-  // clean up), so its design_slug is the previous partition to reconcile.
-  if (type === "task") {
-    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
-    await maintainChildTaskIndex({
-      node,
-      cfg: opts.cfg,
-      taskSlug: slug,
-      task: visible,
-      previousDesignSlug: existing?.design_slug,
-      ...(opts.verbose ? { verbose: opts.verbose } : {}),
-    });
-  }
-  if (type === "papercut") {
-    const { maintainPapercutStatusIndex } = await import(
-      "../papercut-status-index.ts"
-    );
-    await maintainPapercutStatusIndex({
-      node,
-      cfg: opts.cfg,
-      slug,
-      record: visible,
-      previousStatus: existing?.status,
-      ...(opts.verbose ? { verbose: opts.verbose } : {}),
-    });
-  }
-  await reconcileTagIndex(
-    node,
-    opts.cfg,
-    type,
-    slug,
-    existing?.tags ?? [],
-    visible.tags,
-    opts.verbose,
-  );
-  await reconcileBacklinkIndex(
-    node,
-    opts.cfg,
-    type,
-    slug,
-    existing,
-    visible,
-    opts.verbose,
-  );
-  const { maintainGraphEdges } = await import("../graph-edge.ts");
-  await maintainGraphEdges({
+  const frontmatterEdges = Array.isArray(parsed.raw.edges) ? parsed.raw.edges : [];
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
-    sourceSlug: slug,
-    body: visible.body,
-    frontmatterEdges: Array.isArray(parsed.raw.edges) ? parsed.raw.edges : [],
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    type,
+    schemaHash: hash,
+    previous: existing,
+    next: desired,
+    primaryFields: fields,
+    frontmatterEdges,
+    now,
   });
-  // Read-after-write SEARCH parity (#295, CLI half). `verifyRecordVisible`
-  // above proves the row is queryable via /api/query (the record-list / BM25
-  // surface `get`/`list`/`ask` read), but says nothing about the native
-  // (vector) index `fbrain search` reads — fold_db indexes the embedding
-  // asynchronously after the mutation returns. Without this, a human's first
-  // `fbrain search` right after their first create gets a jarring "no matches"
-  // for the record they just made. Confirm the slug is in the vector index on
-  // a short bounded budget; on timeout report `indexPending: true` so the CLI
-  // prints an honest "index still catching up" note. Gated to local nodes and
-  // never throws — see `confirmVectorIndexed`.
-  const { indexPending } = await confirmVectorIndexed(
-    opts.cfg,
+  if (!node.mutateBatch) {
+    throw new FbrainError({
+      code: "resident_commit_unavailable",
+      message: "this node client cannot send a Fold resident batch",
+      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
+    });
+  }
+  const receipt = await node.mutateBatch(plan.ops);
+  const writeId = receipt.mutationIds[0];
+  const durability = receipt.backgroundTasksDrained ? "local" : "queued";
+  const search = receipt.backgroundTasksDrained ? "ready" : "queued";
+  return {
     type,
     slug,
+    action: plan.action,
     title,
-    opts.vectorVerifyOptions,
-  );
-  return { type, slug, action, title, indexPending, listIndexFailed };
+    indexPending: search === "queued",
+    listIndexFailed: recordListEntryHash(opts.cfg) === null,
+    ...(writeId ? { writeId, revision: writeId } : {}),
+    durability,
+    search,
+    exactProjections: plan.counts,
+  };
 }
 
 // Two optional sources, must agree if both set, at least one required —

@@ -2461,9 +2461,16 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     console.log(
       JSON.stringify({
         ok: true,
+        action: result.action,
+        type: result.type,
         slug: result.slug,
         created: result.action === "created",
         indexPending: result.indexPending,
+        write_id: result.writeId ?? null,
+        revision: result.revision ?? null,
+        exact_projections: result.exactProjections ?? null,
+        durability: result.durability ?? "queued",
+        search: result.search ?? "queued",
       }),
     );
   } else {

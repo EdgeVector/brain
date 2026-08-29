@@ -1867,13 +1867,11 @@ describe("write tools — structuredContent + outputSchema", () => {
       action: "created",
       type: "concept",
       slug: "mcp-write-probe",
-      indexPending: false,
+      indexPending: true,
     });
     const schema = outputSchemaOf(server, "fbrain_put")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
-    // Text fallback is the same one-line confirmation as before (no
-    // indexPending suffix when the index has caught up).
-    expect(res.content[0]!.text).toBe("created concept mcp-write-probe");
+    expect(res.content[0]!.text).toMatch(/^created concept mcp-write-probe\b/);
   });
 
   test("fbrain_put on an existing slug returns action:\"updated\"", async () => {
@@ -1911,10 +1909,10 @@ describe("write tools — structuredContent + outputSchema", () => {
       body: "body text (revised)",
     });
     expect(res.isError).toBeFalsy();
-    expect(res.structuredContent).toMatchObject({ action: "updated", type: "design", slug: "mcp-write-probe", indexPending: false });
+    expect(res.structuredContent).toMatchObject({ action: "updated", type: "design", slug: "mcp-write-probe", indexPending: true });
     const schema = outputSchemaOf(server, "fbrain_put")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
-    expect(res.content[0]!.text).toBe("updated design mcp-write-probe");
+    expect(res.content[0]!.text).toMatch(/^updated design mcp-write-probe\b/);
   });
 
   test("fbrain_put error (no type) returns isError and NO structuredContent", async () => {
@@ -2347,7 +2345,7 @@ describe("fbrain_put tool", () => {
       body: "hello world from MCP",
     });
     expect(res.isError).toBeFalsy();
-    expect(res.content[0]!.text).toBe("created concept ask-test");
+    expect(res.content[0]!.text).toMatch(/^created concept ask-test\b/);
     const user = userMutations(mutations);
     expect(user).toHaveLength(1);
     expect(user[0]!.mutation_type).toBe("create");
@@ -2379,7 +2377,7 @@ describe("fbrain_put tool", () => {
     expect(parsed.tags).toEqual(["foo"]);
     const res = await toolsOf(server).fbrain_put!(parsed as Record<string, unknown>);
     expect(res.isError).toBeFalsy();
-    expect(res.content[0]!.text).toBe("created concept string-tag");
+    expect(res.content[0]!.text).toMatch(/^created concept string-tag\b/);
     const fields = mutations[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.tags).toEqual(["foo"]);
   });
@@ -2426,7 +2424,7 @@ describe("fbrain_put tool", () => {
       body_b64: Buffer.from(body, "utf8").toString("base64"),
     });
     expect(res.isError).toBeFalsy();
-    expect(res.content[0]!.text).toBe("created concept body-b64-test");
+    expect(res.content[0]!.text).toMatch(/^created concept body-b64-test\b/);
     const user = userMutations(mutations);
     expect(user).toHaveLength(1);
     const fields = user[0]!.fields_and_values as Record<string, unknown>;
@@ -2460,7 +2458,7 @@ describe("fbrain_put tool", () => {
       const res = await toolsOf(server).fbrain_put!(parsed as Record<string, unknown>);
 
       expect(res.isError, name).toBeFalsy();
-      expect(res.content[0]!.text, name).toBe(`created concept inline-${name}`);
+      expect(res.content[0]!.text, name).toMatch(new RegExp(`^created concept inline-${name}\\b`));
       const user = userMutations(mutations);
       expect(user, name).toHaveLength(1);
       const fields = user[0]!.fields_and_values as Record<string, unknown>;
@@ -2531,7 +2529,7 @@ describe("fbrain_put tool", () => {
     const fields = user[0]!.fields_and_values as Record<string, unknown>;
     expect(fields.status).toBe("reviewed");
     // One-line output, matching the tool's documented contract.
-    expect(res.content[0]!.text).toBe("created design with-status");
+    expect(res.content[0]!.text).toMatch(/^created design with-status\b/);
   });
 
   test("invalid status arg errors atomically — no mutation lands before the status validation throws", async () => {
@@ -2617,7 +2615,7 @@ describe("fbrain_put tool", () => {
       body: "raw body",
     });
     expect(res.isError).toBeFalsy();
-    expect(res.content[0]!.text).toBe("created concept fm-typed");
+    expect(res.content[0]!.text).toMatch(/^created concept fm-typed\b/);
     expect(userMutations(mutations)).toHaveLength(1);
   });
 
@@ -2653,7 +2651,7 @@ describe("fbrain_put tool", () => {
       body: "world",
     });
     expect(putRes.isError).toBeFalsy();
-    expect(putRes.content[0]!.text).toBe("created concept ryw-mcp");
+    expect(putRes.content[0]!.text).toMatch(/^created concept ryw-mcp\b/);
     const getRes = await tools.fbrain_get!({ slug: "ryw-mcp", type: "concept" });
     expect(getRes.isError).toBeFalsy();
     expect(getRes.content[0]!.text ?? "").toContain("ryw-mcp");
@@ -2691,9 +2689,9 @@ describe("fbrain_put tool", () => {
     expect(putRes.structuredContent).toMatchObject({
       action: "created",
       slug: "raw-quokka-marker",
-      indexPending: false,
+      indexPending: true,
     });
-    expect(putRes.content[0]!.text).toBe("created concept raw-quokka-marker");
+    expect(putRes.content[0]!.text).toMatch(/^created concept raw-quokka-marker\b/);
 
     // The immediately-following search in the SAME process surfaces the row.
     const searchRes = await tools.fbrain_search!({ query: "raw quokka marker" });

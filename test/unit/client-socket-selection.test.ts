@@ -46,6 +46,7 @@ describe("localNodeRouteSocket", () => {
       ["GET", "/api/native-index/search"],
       ["POST", "/api/query"],
       ["POST", "/api/mutation"],
+      ["POST", "/api/mutations/batch"],
       ["POST", "/api/app/search"],
     ];
     for (const [method, path] of routeCases) {

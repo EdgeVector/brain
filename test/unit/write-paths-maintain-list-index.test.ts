@@ -50,8 +50,9 @@ describe("write paths maintain the type-list index", () => {
     test(`${path} calls maintainTypeListIndex`, async () => {
       const source = await Bun.file(new URL(`../../${path}`, import.meta.url)).text();
       expect(
-        source.includes("maintainTypeListIndex"),
-        `${path} creates or updates records but never calls maintainTypeListIndex — ` +
+        source.includes("maintainTypeListIndex") ||
+          source.includes("buildResidentWritePlan"),
+        `${path} creates or updates records but never maintains the type-list index — ` +
           "the rows will be invisible to list/census/BM25 while `brain get` still resolves them",
       ).toBe(true);
     });
