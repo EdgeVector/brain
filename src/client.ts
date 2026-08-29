@@ -732,6 +732,21 @@ export type HealthResult = {
   version?: string;
 };
 
+export type BatchMutationOp = {
+  mutationType: "create" | "update" | "delete";
+  schemaHash: string;
+  keyHash: string;
+  keyRange?: string;
+  fields: Record<string, unknown>;
+};
+
+export type BatchMutationResult = {
+  mutationIds: string[];
+  count: number;
+  backgroundTasksDrained: boolean;
+  convergencePending: boolean;
+};
+
 export type NodeClient = {
   baseUrl: string;
   userHash: string;
@@ -791,6 +806,7 @@ export type NodeClient = {
     keyHash: string;
     keyRange?: string;
   }): Promise<void>;
+  mutateBatch?(ops: BatchMutationOp[]): Promise<BatchMutationResult>;
   queryAll(opts: {
     schemaHash: string;
     fields: string[];
@@ -1522,6 +1538,51 @@ export function newNodeClient(opts: {
       // writing a no-op atom rewriting the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash, keyRange);
     },
+    async mutateBatch(ops) {
+      if (ops.length === 0) {
+        return {
+          mutationIds: [],
+          count: 0,
+          backgroundTasksDrained: true,
+          convergencePending: false,
+        };
+      }
+      const blob = capability?.() ?? null;
+      const extraHeaders: Record<string, string> = {};
+      if (blob) {
+        extraHeaders["X-App-Capability"] = blob;
+        extraHeaders["X-Capability-Ts"] = String(Math.floor(Date.now() / 1000));
+      }
+      verbose(`→ NODE POST /api/mutations/batch count=${ops.length}`);
+      const parsed = await withSessionRepair(() =>
+        callJsonOk(
+          "/api/mutations/batch",
+          "POST",
+          {
+            mutations: ops.map((op) => ({
+              type: "mutation",
+              schema: op.schemaHash,
+              fields_and_values: op.fields,
+              key_value: { hash: op.keyHash, range: op.keyRange ?? null },
+              mutation_type: op.mutationType,
+            })),
+            convergence: "async",
+          },
+          extraHeaders,
+        ),
+      );
+      verbose(`← NODE POST /api/mutations/batch status=200`);
+      const body = (parsed ?? {}) as Record<string, unknown>;
+      const mutationIds = Array.isArray(body.mutation_ids)
+        ? body.mutation_ids.filter((id): id is string => typeof id === "string")
+        : [];
+      return {
+        mutationIds,
+        count: typeof body.count === "number" ? body.count : ops.length,
+        backgroundTasksDrained: body.background_tasks_drained === true,
+        convergencePending: body.convergence_pending !== false,
+      };
+    },
     async queryAll({ schemaHash, fields, allowFullScan, filter }) {
       return queryAllGuarded({ schemaHash, fields, allowFullScan, filter });
     },
@@ -1958,7 +2019,7 @@ const NODE_DATA_PLANE_ROUTES = {
     "/api/system/auto-identity",
     "/api/native-index/search",
   ],
-  POST: ["/api/query", "/api/mutation", "/api/app/search"],
+  POST: ["/api/query", "/api/mutation", "/api/mutations/batch", "/api/app/search"],
 } as const;
 
 // Compare the request path WITHOUT its `?query`/`#fragment` against the

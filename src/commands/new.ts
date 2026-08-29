@@ -12,12 +12,10 @@
 // than silently ignored.
 
 import { FbrainError, type Verbose } from "../client.ts";
-import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { capitalize } from "../format.ts";
 import {
-  confirmVectorIndexed,
   crossTypeSlugNote,
   findBySlug,
   findCrossTypeSlugCollisions,
@@ -25,10 +23,13 @@ import {
   type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
-  type FbrainRecord,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
-import { indexRecordTags } from "../tag-index.ts";
+import { recordListEntryHash } from "../record-list-index.ts";
+import {
+  buildResidentWritePlan,
+  recordFromPrimaryFields,
+} from "../resident-write-plan.ts";
 
 export type RecordNewOptions = {
   cfg: Config;
@@ -141,72 +142,26 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   if (entry.hasDesignSlug) {
     fields.design_slug = opts.designSlug ?? "";
   }
-  await node.createRecord({ schemaHash: hash, fields, keyHash: opts.slug });
-  const record = fields as FbrainRecord;
-
-  // Keep the record-list index current so list/BM25/ask never rescan product
-  // tables. First-run regression (2026-08-06 llms-txt smoke RED): `concept new`
-  // wrote the row (get worked) but never patched the type-list partition that
-  // init marks complete-and-empty — so BM25 rebuilt from 0 keys and ask/search
-  // returned no matches while vector hits were skipped as "stale". Same dual-
-  // write as put; non-fatal (record already persisted) but not silent.
-  const { maintainTypeListIndex } = await import("../record-list-index.ts");
-  const { listIndexFailed } = await maintainTypeListIndex({
+  const record = recordFromPrimaryFields(fields);
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: opts.type,
-    record,
-    slug: opts.slug,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    schemaHash: hash,
+    previous: null,
+    next: record,
+    primaryFields: fields,
   });
-
-  // Keep the design->child-task index current (see child-task-index.ts).
-  // Create has no prior row to clean up, so previousDesignSlug is undefined.
-  if (opts.type === "task") {
-    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
-    await maintainChildTaskIndex({
-      node,
-      cfg: opts.cfg,
-      taskSlug: opts.slug,
-      task: record,
-      previousDesignSlug: undefined,
-      ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  if (!node.mutateBatch) {
+    throw new FbrainError({
+      code: "resident_commit_unavailable",
+      message: "this node client cannot send a Fold resident batch",
+      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
     });
   }
-
-  await reconcileBacklinkIndex(
-    node,
-    opts.cfg,
-    opts.type,
-    opts.slug,
-    null,
-    record,
-    opts.verbose,
-  );
-  await indexRecordTags(
-    node,
-    opts.cfg,
-    opts.type,
-    opts.slug,
-    opts.tags,
-    opts.verbose,
-  );
-
-  // Read-after-write SEARCH parity (#295, CLI half). The native (vector) index
-  // `fbrain search` reads is populated asynchronously after the mutation
-  // returns, so a human's first `fbrain search` right after `fbrain <type> new`
-  // would otherwise get a jarring "no matches" for the record they just made.
-  // Confirm the slug is in the vector index on a short bounded budget; on
-  // timeout report `indexPending: true` so the CLI prints an honest "index
-  // still catching up" note. Gated to local nodes and never throws — see
-  // `confirmVectorIndexed`. BM25/ask still work immediately via the list-index
-  // patch above even when the vector plane is lagging.
-  const { indexPending } = await confirmVectorIndexed(
-    opts.cfg,
-    opts.type,
-    opts.slug,
-    opts.title,
-    opts.vectorVerifyOptions,
-  );
-  return { indexPending, listIndexFailed };
+  await node.mutateBatch(plan.ops);
+  return {
+    indexPending: true,
+    listIndexFailed: recordListEntryHash(opts.cfg) === null,
+  };
 }

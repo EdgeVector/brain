@@ -53,3 +53,58 @@ if (process.env.FOLDDB_HOME === undefined) {
 if (process.env.LASTSEEK_BIN === undefined) {
   process.env.LASTSEEK_BIN = "/nonexistent/fbrain-unit-suite-no-lastseek";
 }
+
+// Resident-commit writes POST `/api/mutations/batch`. Most unit fetch stubs
+// only answer `/api/mutation`. Fan a 404 batch out into per-item mutation
+// calls so those stubs keep working.
+const nativeFetch = globalThis.fetch.bind(globalThis);
+let installedFetch: typeof fetch = nativeFetch;
+
+async function batchAwareFetch(
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+  const url = typeof input === "string" ? input : String(input);
+  if (url.endsWith("/api/mutations/batch")) {
+    const direct = await installedFetch(input, init);
+    if (direct.status !== 404) return direct;
+    const raw = typeof init?.body === "string" ? init.body : "";
+    let items: unknown[] = [];
+    try {
+      const parsed = JSON.parse(raw) as { mutations?: unknown[] } | unknown[];
+      items = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed.mutations)
+          ? parsed.mutations
+          : [];
+    } catch {
+      return new Response(JSON.stringify({ error: "bad batch" }), { status: 400 });
+    }
+    const mutationUrl = url.replace(/\/api\/mutations\/batch$/, "/api/mutation");
+    for (const item of items) {
+      const itemInit = { ...(init ?? {}), body: JSON.stringify(item) };
+      const itemRes = await installedFetch(mutationUrl, itemInit);
+      if (itemRes.status !== 200) return itemRes;
+    }
+    return new Response(
+      JSON.stringify({
+        mutation_ids: items.map((_, i) => `m${i}`),
+        count: items.length,
+        background_tasks_drained: false,
+        convergence_pending: true,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }
+  return installedFetch(input, init);
+}
+
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  get() {
+    return batchAwareFetch as typeof fetch;
+  },
+  set(value: typeof fetch) {
+    installedFetch = value;
+  },
+});

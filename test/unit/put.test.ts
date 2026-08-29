@@ -486,20 +486,62 @@ type TrackedWrite = {
 
 function installMock(handler: MockHandler): void {
   const writes: TrackedWrite[] = [];
+  const wrappedHandler: MockHandler = (url, init) => {
+    if (url.endsWith("/api/mutations/batch") && typeof init?.body === "string") {
+      try {
+        const parsed = JSON.parse(init.body) as Record<string, unknown>;
+        const items = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed.mutations)
+            ? (parsed.mutations as Record<string, unknown>[])
+            : [];
+        const mutationUrl = url.replace(/\/api\/mutations\/batch$/, "/api/mutation");
+        for (const item of items) {
+          const itemInit: RequestInit = { ...init, body: JSON.stringify(item) };
+          const itemOut = handler(mutationUrl, itemInit);
+          if (itemOut.status !== 200) return itemOut;
+        }
+        return {
+          status: 200,
+          body: {
+            mutation_ids: items.map((_, i) => `m${i}`),
+            count: items.length,
+            background_tasks_drained: false,
+            convergence_pending: true,
+          },
+        };
+      } catch {
+        return { status: 400, body: { error: "bad batch" } };
+      }
+    }
+    return handler(url, init);
+  };
   globalThis.fetch = (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : String(input);
-    const out = handler(url, init);
-    if (url.endsWith("/api/mutation") && typeof init?.body === "string") {
+    const out = wrappedHandler(url, init);
+    if (
+      (url.endsWith("/api/mutation") || url.endsWith("/api/mutations/batch")) &&
+      typeof init?.body === "string"
+    ) {
       try {
         const body = JSON.parse(init.body) as Record<string, unknown>;
-        const kind = body.mutation_type;
-        if (kind === "create" || kind === "update") {
-          const keyVal = body.key_value as Record<string, unknown> | undefined;
-          writes.push({
-            schema: String(body.schema ?? ""),
-            key: String(keyVal?.hash ?? ""),
-            fields: (body.fields_and_values as Record<string, unknown>) ?? {},
-          });
+        const items = url.endsWith("/api/mutations/batch")
+          ? Array.isArray(body)
+            ? body
+            : Array.isArray(body.mutations)
+              ? (body.mutations as Record<string, unknown>[])
+              : []
+          : [body];
+        for (const item of items) {
+          const kind = item.mutation_type;
+          if (kind === "create" || kind === "update") {
+            const keyVal = item.key_value as Record<string, unknown> | undefined;
+            writes.push({
+              schema: String(item.schema ?? ""),
+              key: String(keyVal?.hash ?? ""),
+              fields: (item.fields_and_values as Record<string, unknown>) ?? {},
+            });
+          }
         }
       } catch {
         // Body wasn't JSON — ignore; tests that fire non-JSON bodies don't
@@ -1258,9 +1300,11 @@ describe("putCmd — pre-request validation + dispatch", () => {
       input: "---\ntype: concept\ntitle: Second\ntags: [b]\n---\nsecond body",
     });
     expect(r.action).toBe("updated");
-    // Existence check (keyed point-read) + verify-after-write.
-    expect(queryCalls).toBeGreaterThanOrEqual(2);
-    const user = userMutations(mutations);
+    // Existence check (keyed point-read). Tag membership may add projection reads.
+    expect(queryCalls).toBeGreaterThanOrEqual(1);
+    const user = userMutations(mutations).filter(
+      (m) => m.schema === TEST_HASHES.concept,
+    );
     expect(user).toHaveLength(1);
     expect(user[0]!.mutation_type).toBe("update");
     const fields = user[0]!.fields_and_values as Record<string, unknown>;
@@ -1514,18 +1558,10 @@ describe("putCmd — pre-request validation + dispatch", () => {
     expect(fields.tags).toEqual([]);
   });
 
-  // Read-your-writes regression — task 920a3. After `createRecord` /
-  // `updateRecord` resolves, putCmd must read the row back via
-  // `verifyRecordVisible` (full `withReadRetry` budget) before reporting
-  // "created"/"updated". Without this guard, a tight put→get loop (worst
-  // case: MCP-agent stdio, same warm process, no cold-start delay) saw
-  // "No record" for a row that did, in fact, just land — because
-  // fold_db's `/api/mutation` is not RYW-consistent and a bare point-read
-  // (`findBySlug`) is authoritative found-or-not, returning null with zero
-  // retry. This is why the verify-after-write path wraps the point-read in the
-  // full `withReadRetry` budget: the caller of a put→get is NOT expected to
-  // re-run; they conclude the data is gone.
-  describe("verify-after-write — read-your-writes regression (920a3)", () => {
+  // Resident-commit writes acknowledge the Fold batch. Exact reads are part
+  // of that commit, so put no longer polls a post-write primary verify and
+  // no longer throws put_not_visible on an empty follow-up query.
+  describe("resident commit does not poll verify-after-write", () => {
     // No-op sleep so the test doesn't pay the real 250 ms backoff schedule.
     // The verify budget is what we're asserting on; the schedule is pinned
     // separately by computeBackoffMs tests.
@@ -1596,9 +1632,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
         });
         expect(r.action).toBe("created");
         expect(mutations[0]!.mutation_type).toBe("create");
-        // 2 empty-page misses + 1 hit = at least 3 verify-reads. A bare
-        // `findBySlug` (no retry) would have given up after 1.
-        expect(queryCallsAfterMutation).toBeGreaterThanOrEqual(3);
+        expect(queryCallsAfterMutation).toBe(0);
       } finally {
         globalThis.fetch = realFetch2;
       }
@@ -1657,7 +1691,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
           verifyOptions: { sleep: noopSleep },
         });
         expect(r.action).toBe("created");
-        expect(queryCallsAfterMutation).toBeGreaterThanOrEqual(4);
+        expect(queryCallsAfterMutation).toBe(0);
       } finally {
         globalThis.fetch = realFetch2;
       }
@@ -1688,14 +1722,13 @@ describe("putCmd — pre-request validation + dispatch", () => {
           }
           return new Response("{}", { status: 404 });
         }) as unknown as typeof globalThis.fetch;
-        await expect(
-          putCmd({
-            cfg,
-            slug: "ryw-never",
-            input: "---\ntype: concept\ntitle: T\n---\nbody",
-            verifyOptions: { sleep: noopSleep, maxAttempts: 3 },
-          }),
-        ).rejects.toMatchObject({ code: "put_not_visible" });
+        const r = await putCmd({
+          cfg,
+          slug: "ryw-never",
+          input: "---\ntype: concept\ntitle: T\n---\nbody",
+          verifyOptions: { sleep: noopSleep, maxAttempts: 3 },
+        });
+        expect(r.action).toBe("created");
         expect(mutationFired).toBe(true);
       } finally {
         globalThis.fetch = realFetch2;
@@ -1893,10 +1926,9 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
       verifyOptions: { sleep: noopSleep },
       vectorVerifyOptions: { sleep: noopSleep },
     });
-    // The write path probed the native (vector) index at least once...
-    expect(searchCalls).toBeGreaterThanOrEqual(1);
-    // ...and saw the slug, so it's NOT pending.
-    expect(r.indexPending).toBe(false);
+    expect(searchCalls).toBe(0);
+    expect(r.indexPending).toBe(true);
+    expect(r.search).toBe("queued");
   });
 
   test("a timed-out probe (slug never appears) yields indexPending:true without failing the write", async () => {
@@ -1917,12 +1949,10 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
       // Pin attempts so the budget is spent quickly; no-op sleep so no backoff.
       vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 3 },
     });
-    // The write SUCCEEDED (no throw) despite the index never confirming...
     expect(r.action).toBeDefined();
-    // ...spent its whole bounded budget probing...
-    expect(searchCalls).toBe(3);
-    // ...and honestly reports the index as still catching up.
+    expect(searchCalls).toBe(0);
     expect(r.indexPending).toBe(true);
+    expect(r.search).toBe("queued");
   });
 
   test("a FLICKERING index (slug hits once then drops) yields indexPending:true — a single transient hit is not enough", async () => {
@@ -1952,13 +1982,10 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
       // 6 attempts, no real backoff; default consecutiveHits (2).
       vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 6 },
     });
-    // The write SUCCEEDED despite the flicker...
     expect(r.action).toBeDefined();
-    // ...spent its full budget chasing a stable streak it never got...
-    expect(searchCalls).toBe(6);
-    // ...and honestly reports the index as still catching up (NOT a false
-    // positive off the transient single hits).
+    expect(searchCalls).toBe(0);
     expect(r.indexPending).toBe(true);
+    expect(r.search).toBe("queued");
   });
 
   test("a flicker that then STABILIZES (two hits in a row) yields indexPending:false", async () => {
@@ -1982,10 +2009,9 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
       verifyOptions: { sleep: noopSleep },
       vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 6 },
     });
-    // Confirmed stable on the consecutive pair (probe 5), so it stops there...
-    expect(searchCalls).toBe(5);
-    // ...and reports the index as caught up.
-    expect(r.indexPending).toBe(false);
+    expect(searchCalls).toBe(0);
+    expect(r.indexPending).toBe(true);
+    expect(r.search).toBe("queued");
   });
 
   test("indexPending is false (confirm skipped) on a NON-loopback node — the lag gate only fires locally", async () => {
@@ -2006,10 +2032,9 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
       verifyOptions: { sleep: noopSleep },
       vectorVerifyOptions: { sleep: noopSleep, maxAttempts: 3 },
     });
-    // The gate skipped the native-index probe entirely (remote node)...
     expect(searchCalls).toBe(0);
-    // ...so the result reports not-pending rather than nagging the user.
-    expect(r.indexPending).toBe(false);
+    expect(r.indexPending).toBe(true);
+    expect(r.search).toBe("queued");
   });
 });
 
@@ -2064,27 +2089,16 @@ describe("putCmd — record-list index patch failure is surfaced, not swallowed"
     }) as unknown as typeof globalThis.fetch;
   }
 
-  test("the record still persists, but listIndexFailed is set and a warning is emitted", async () => {
+  test("a list-projection 413 rejects the whole resident batch", async () => {
     const indexHash = cfg.schemaHashes[RECORD_LIST_ENTRY_SCHEMA_KEY]!;
     installIndexFailingMock(indexHash);
-    const warnings: string[] = [];
-    const r = await putCmd({
-      cfg,
-      slug: "half-commit-probe",
-      input: "---\ntype: design\ntitle: T\n---\nbody",
-      verbose: (m) => warnings.push(m),
-    });
-    // The write itself is honest — the record DID land, so this must not throw
-    // and must not report a failure of the record write.
-    expect(r.action).toBe("created");
-    expect(r.slug).toBe("half-commit-probe");
-    // ...but the half-commit is reported rather than swallowed.
-    expect(r.listIndexFailed).toBe(true);
-    const warned = warnings.find((w) => w.includes("record-list index patch FAILED"));
-    expect(warned).toBeDefined();
-    expect(warned).toContain("half-commit-probe");
-    // Self-heal path: clear completeness marker so next list cold-seeds.
-    expect(warned).toMatch(/cleared the .* list-index completeness marker|reindex --list-index/);
+    await expect(
+      putCmd({
+        cfg,
+        slug: "half-commit-probe",
+        input: "---\ntype: design\ntitle: T\n---\nbody",
+      }),
+    ).rejects.toMatchObject({ code: "node_http_413" });
   });
 
   test("a healthy put reports listIndexFailed false", async () => {
