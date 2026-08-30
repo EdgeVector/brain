@@ -851,7 +851,7 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `fbrain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges] [--max-records N] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
+  reindex: `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges] [--max-records N] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
 
 Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
 present by re-issuing an update mutation. fold_db's EmbeddingIndex is not

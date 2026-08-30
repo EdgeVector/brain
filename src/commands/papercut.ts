@@ -30,12 +30,12 @@ import {
 } from "../record.ts";
 import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
-import { maintainTypeListIndex } from "../record-list-index.ts";
+import { recordListEntryHash } from "../record-list-index.ts";
+import { readPapercutsByStatus } from "../papercut-status-index.ts";
 import {
-  ensurePapercutStatusMembership,
-  persistPapercutWithStatusMembership,
-  readPapercutsByStatus,
-} from "../papercut-status-index.ts";
+  buildResidentWritePlan,
+  commitResidentWritePlan,
+} from "../resident-write-plan.ts";
 import {
   ensureComponent,
   ensureDuplicateTarget,
@@ -228,7 +228,17 @@ export async function papercutFileCmd(
   // fuzzy tail is semantic `find`, never a papercut partition enumeration.
   const prior = await findBySlug(node, PAPERCUT, schemaHash, slug);
   if (prior && isIdempotentPapercutFile(prior, materialized)) {
-    await ensurePapercutStatusMembership(node, opts.cfg, prior);
+    const primaryFields = updateFieldsFrom(prior, PAPERCUT, {});
+    const plan = await buildResidentWritePlan({
+      node,
+      cfg: opts.cfg,
+      type: PAPERCUT,
+      schemaHash,
+      previous: prior,
+      next: prior,
+      primaryFields,
+    });
+    await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
     const result: PapercutFileResult = {
       action: "filed",
       slug,
@@ -327,40 +337,23 @@ export async function papercutFileCmd(
     });
   }
 
-  await persistPapercutWithStatusMembership({
-    node,
-    cfg: opts.cfg,
-    record: materialized as FbrainRecord,
-    persistPrimary: () =>
-      node.createRecord({
-        schemaHash,
-        keyHash: slug,
-        fields: materialized,
-      }),
-  });
-
-  // The record is in SOT. It is NOT yet listable — `brain list`, `papercut
-  // census` and BM25 all read the type-list index, and a record missing from it
-  // is invisible to every one of them while `brain get` still resolves it.
-  // Skipping this is precisely how the first papercut ever filed produced a
-  // census that said "no papercuts".
-  const filed = await findBySlug(node, PAPERCUT, schemaHash, slug);
-  const { listIndexFailed } = await maintainTypeListIndex({
+  const record = materialized as FbrainRecord;
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: PAPERCUT,
-    record: filed ?? {
-      slug,
-      title: opts.title,
-      body,
-      status: "open",
-      tags: opts.tags ?? [],
-      created_at: now,
-      updated_at: now,
-    },
-    slug,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    schemaHash,
+    previous: null,
+    next: record,
+    primaryFields: materialized,
+    now,
   });
+  await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+
+  // The resident batch writes the primary row, the list row, and the status
+  // row together. A missing list schema is the only case where this version
+  // cannot include the list projection.
+  const listIndexFailed = recordListEntryHash(opts.cfg) === null;
   if (opts.json) {
     print(
       JSON.stringify({
@@ -379,7 +372,7 @@ export async function papercutFileCmd(
     if (listIndexFailed) {
       print(
         "warning: the record persisted but the type-list index patch failed — it will not " +
-          "appear in `papercut census` / `brain list` until `fbrain reindex --list-index` runs.",
+          "appear in `papercut census` / `brain list` until `brain reindex --list-index` runs.",
       );
     }
   }
@@ -470,29 +463,19 @@ export async function papercutCloseCmd(
   if (duplicateOf) patch.duplicate_of = normalizeSlug(duplicateOf);
 
   const transitioned = { ...record, ...patch } as FbrainRecord;
-  await persistPapercutWithStatusMembership({
-    node,
-    cfg: opts.cfg,
-    record: transitioned,
-    persistPrimary: () =>
-      node.updateRecord({
-        schemaHash,
-        keyHash: slug,
-        fields: updateFieldsFrom(record, PAPERCUT, patch),
-      }),
-  });
-
-  // Same reason as the file path: the index carries `status`, so a close that
-  // skips it leaves the census counting the OLD status forever.
-  const closed = await findBySlug(node, PAPERCUT, schemaHash, slug);
-  await maintainTypeListIndex({
+  const primaryFields = updateFieldsFrom(record, PAPERCUT, patch);
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: PAPERCUT,
-    record: closed ?? { ...record, status, updated_at: now },
-    slug,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    schemaHash,
+    previous: record,
+    next: transitioned,
+    primaryFields,
+    now,
   });
+  await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+
   if (opts.json) {
     print(
       JSON.stringify({ action: "papercut_closed", slug, from, to: status }),

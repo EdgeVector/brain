@@ -1,12 +1,22 @@
 import { describe, expect, test } from "bun:test";
 
-import type { NodeClient } from "../../src/client.ts";
-import { GRAPH_EDGE_OUT_SCHEMA_KEY } from "../../src/schemas.ts";
+import { FbrainError, type NodeClient } from "../../src/client.ts";
+import {
+  GRAPH_EDGE_OUT_SCHEMA_KEY,
+  PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
+  RECORD_LIST_ENTRY_SCHEMA_KEY,
+} from "../../src/schemas.ts";
 import {
   buildResidentWritePlan,
+  commitResidentWritePlan,
   recordFromPrimaryFields,
 } from "../../src/resident-write-plan.ts";
-import { TEST_HASHES, TEST_GRAPH_EDGE_OUT_HASH, buildTestCfg } from "../util.ts";
+import {
+  TEST_HASHES,
+  TEST_GRAPH_EDGE_OUT_HASH,
+  TEST_RECORD_LIST_ENTRY_HASH,
+  buildTestCfg,
+} from "../util.ts";
 
 function mockNode(): NodeClient {
   return {
@@ -95,5 +105,131 @@ describe("buildResidentWritePlan", () => {
     expect(graph.some((op) => op.keyRange === "mentions#keep")).toBe(false);
     const dropped = graph.find((op) => op.keyRange === "mentions#drop");
     expect(dropped?.mutationType).toBe("delete");
+  });
+
+  test("a papercut transition repairs exact list and status rows in the resident batch", async () => {
+    const papercutStatusHash = "3".repeat(64);
+    const cfg = buildTestCfg({
+      schemaHashes: {
+        ...TEST_HASHES,
+        [RECORD_LIST_ENTRY_SCHEMA_KEY]: TEST_RECORD_LIST_ENTRY_HASH,
+        [PAPERCUT_STATUS_INDEX_SCHEMA_KEY]: papercutStatusHash,
+      },
+    });
+    const previous = recordFromPrimaryFields({
+      slug: "index-repair",
+      title: "Index repair",
+      body: "Evidence",
+      status: "open",
+      tags: [],
+      component: "brain",
+      severity: "p1",
+      kind: "recurring",
+      created_at: "2026-08-29T00:00:00.000Z",
+      updated_at: "2026-08-29T00:00:00.000Z",
+    });
+    const next = {
+      ...previous,
+      status: "verified",
+      updated_at: "2026-08-29T01:00:00.000Z",
+    };
+    const node = {
+      ...mockNode(),
+      queryAll: async ({
+        schemaHash,
+        filter,
+      }: {
+        schemaHash: string;
+        filter?: {
+          HashRangeKey?: { hash: string; range: string };
+        };
+      }) => ({
+        ok: true,
+        results:
+          schemaHash === papercutStatusHash &&
+          filter?.HashRangeKey?.hash === "verified" &&
+          filter.HashRangeKey.range === next.slug
+            ? [
+                {
+                  fields: { psi_h: "verified", psi_r: next.slug },
+                  key: { hash: "verified", range: next.slug },
+                },
+              ]
+            : [],
+      }),
+    } as unknown as NodeClient;
+    const primaryFields = {
+      slug: next.slug,
+      title: next.title,
+      body: next.body,
+      status: next.status,
+      tags: next.tags,
+      component: "brain",
+      severity: "p1",
+      kind: "recurring",
+      created_at: next.created_at,
+      updated_at: next.updated_at,
+    };
+    const plan = await buildResidentWritePlan({
+      node,
+      cfg,
+      type: "papercut",
+      schemaHash: TEST_HASHES.papercut,
+      previous,
+      next,
+      primaryFields,
+    });
+    expect(
+      plan.ops.find((op) => op.projection === "primary")?.mutationType,
+    ).toBe("update");
+    expect(
+      plan.ops.find((op) => op.projection === "list")?.mutationType,
+    ).toBe("create");
+    expect(
+      plan.ops.find(
+        (op) =>
+          op.projection === "papercut-status" && op.keyHash === "open",
+      )?.mutationType,
+    ).toBe("delete");
+    expect(
+      plan.ops.find(
+        (op) =>
+          op.projection === "papercut-status" && op.keyHash === "verified",
+      )?.mutationType,
+    ).toBe("update");
+  });
+
+  test("resident commit wraps a batch rejection with exact projection context", async () => {
+    const node = {
+      ...mockNode(),
+      mutateBatch: async () => {
+        throw new Error("batch rejected");
+      },
+    } as unknown as NodeClient;
+    try {
+      await commitResidentWritePlan({
+        node,
+        type: "papercut",
+        slug: "index-repair",
+        plan: {
+          action: "updated",
+          counts: { created: 0, updated: 1, deleted: 0, no_op: 0 },
+          ops: [
+            {
+              mutationType: "update",
+              schemaHash: TEST_HASHES.papercut,
+              keyHash: "index-repair",
+              fields: {},
+              projection: "primary",
+            },
+          ],
+        },
+      });
+      throw new Error("expected resident commit to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(FbrainError);
+      expect((error as FbrainError).code).toBe("resident_commit_failed");
+      expect((error as Error).message).toContain("projections: primary");
+    }
   });
 });

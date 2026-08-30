@@ -14,6 +14,11 @@ import {
   updateFieldsFrom,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
+import {
+  buildResidentWritePlan,
+  commitResidentWritePlan,
+  recordFromPrimaryFields,
+} from "../resident-write-plan.ts";
 
 export type StatusOptions = {
   cfg: Config;
@@ -113,34 +118,18 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     status: opts.newStatus,
     updated_at: now,
   });
-  await node.updateRecord({
-    schemaHash: hash,
-    keyHash: slug,
-    fields,
-  });
-  const nextRecord = { ...only.record, status: opts.newStatus, updated_at: now };
-  const { maintainLifecycleIndex } = await import("../lifecycle-index.ts");
-  await maintainLifecycleIndex({
+  const nextRecord = recordFromPrimaryFields(fields);
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: only.type,
-    record: nextRecord,
-    slug,
     previous: only.record,
+    next: nextRecord,
+    schemaHash: hash,
+    primaryFields: fields,
+    now,
   });
-  if (only.type === "papercut") {
-    const { maintainPapercutStatusIndex } = await import(
-      "../papercut-status-index.ts"
-    );
-    await maintainPapercutStatusIndex({
-      node,
-      cfg: opts.cfg,
-      slug,
-      record: { ...only.record, status: opts.newStatus, updated_at: now },
-      previousStatus: fromStatus,
-      ...(opts.verbose ? { verbose: opts.verbose } : {}),
-    });
-  }
+  await commitResidentWritePlan({ node, plan, type: only.type, slug });
   print(`${only.type} ${slug}: ${fromStatus} → ${opts.newStatus}`);
   // Emit the structured payload from the SAME resolved type/slug/transition the
   // printed line uses (one source of truth — see the read/delete/link commands).

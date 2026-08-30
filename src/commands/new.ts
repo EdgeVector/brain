@@ -28,6 +28,7 @@ import { RECORDS, type RecordType } from "../schemas.ts";
 import { recordListEntryHash } from "../record-list-index.ts";
 import {
   buildResidentWritePlan,
+  commitResidentWritePlan,
   recordFromPrimaryFields,
 } from "../resident-write-plan.ts";
 
@@ -152,14 +153,12 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     next: record,
     primaryFields: fields,
   });
-  if (!node.mutateBatch) {
-    throw new FbrainError({
-      code: "resident_commit_unavailable",
-      message: "this node client cannot send a Fold resident batch",
-      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
-    });
-  }
-  await node.mutateBatch(plan.ops);
+  await commitResidentWritePlan({
+    node,
+    plan,
+    type: opts.type,
+    slug: opts.slug,
+  });
   return {
     indexPending: true,
     listIndexFailed: recordListEntryHash(opts.cfg) === null,

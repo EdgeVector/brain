@@ -47,6 +47,7 @@ afterEach(() => {
 type MutationBody = {
   mutation_type?: string;
   fields_and_values?: Record<string, unknown>;
+  schema?: string;
   schema_name?: string;
 };
 
@@ -166,8 +167,11 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
         type: "concept",
       });
       expect(res.isError).toBeFalsy();
-      expect(mutations).toHaveLength(1);
-      expect(mutations[0]!.fields_and_values!.status).toBe("archived");
+      expect(mutations).toHaveLength(2);
+      const primary = mutations.find(
+        (mutation) => mutation.schema === TEST_HASHES.concept,
+      );
+      expect(primary?.fields_and_values?.status).toBe("archived");
       expect(res.structuredContent).toEqual({
         action: "status_changed",
         type: "concept",

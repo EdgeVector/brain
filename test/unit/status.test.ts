@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { FbrainError } from "../../src/client.ts";
 import { statusCmd } from "../../src/commands/status.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 
@@ -64,13 +65,27 @@ describe("statusCmd — slug whitespace trim (parity with put/delete/link)", () 
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/api/mutation")) {
+      if (url.endsWith("/api/mutations/batch")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
-        if (body.mutation_type === "update") captured.update = body;
-        return new Response(JSON.stringify({ ok: true, success: true }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+        captured.update = body.mutations.find(
+          (mutation: Record<string, unknown>) =>
+            mutation.schema === cfg.taskSchemaHash &&
+            mutation.mutation_type === "update",
+        );
+        return new Response(
+          JSON.stringify({
+            mutation_ids: body.mutations.map(
+              (_: unknown, i: number) => `mutation-${i}`,
+            ),
+            count: body.mutations.length,
+            background_tasks_drained: true,
+            convergence_pending: false,
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
       }
       return new Response("{}", { status: 200 });
     }) as unknown as typeof fetch;
@@ -99,6 +114,60 @@ describe("statusCmd — slug whitespace trim (parity with put/delete/link)", () 
       // Success line uses the trimmed slug — consistent with how put / delete
       // / link echo it.
       expect(lines.join("\n")).toContain("task foo: open → in_progress");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a failed resident batch reports failure and never prints success", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.taskSchemaHash) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [
+              { fields: taskRow("foo"), key: { hash: "foo", range: null } },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutations/batch")) {
+        return new Response(JSON.stringify({ error: "batch rejected" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      const lines: string[] = [];
+      const onResult: unknown[] = [];
+      try {
+        await statusCmd({
+          cfg,
+          slug: "foo",
+          newStatus: "in_progress",
+          type: "task",
+          print: (line) => lines.push(line),
+          onResult: (result) => onResult.push(result),
+        });
+        throw new Error("expected status update to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(FbrainError);
+        expect((error as FbrainError).code).toBe("node_http_500");
+      }
+      expect(lines).toEqual([]);
+      expect(onResult).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }

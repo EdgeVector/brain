@@ -149,6 +149,31 @@ function makeNode(
       calls.push({ op: "delete", keyHash, keyRange });
       if (keyRange && rows[keyHash]) delete rows[keyHash][keyRange];
     },
+    async mutateBatch(ops: any[]) {
+      calls.push({ op: "batch" });
+      for (const op of ops) {
+        if (op.mutationType === "delete") {
+          calls.push({ op: "delete", keyHash: op.keyHash, keyRange: op.keyRange });
+          const partition = rows[op.keyHash];
+          if (op.keyRange && partition) {
+            delete partition[op.keyRange];
+          }
+        } else {
+          calls.push({
+            op: op.mutationType,
+            keyHash: op.keyHash,
+            keyRange: op.keyRange,
+          });
+          putRow(op.schemaHash, op.fields, op.keyHash, op.keyRange);
+        }
+      }
+      return {
+        mutationIds: ops.map((_, index) => `mutation-${index}`),
+        count: ops.length,
+        backgroundTasksDrained: true,
+        convergencePending: false,
+      };
+    },
   } as any;
   return { node, rows, records, calls };
 }
@@ -238,7 +263,7 @@ describe("status transition maintenance", () => {
     expect(memberships).toHaveLength(1);
   });
 
-  test("failed patch is non-fatal but clears the completeness marker", async () => {
+  test("failed legacy cleanup is fatal and preserves the completeness marker", async () => {
     const { node, rows } = makeNode({ migrated: true });
     const failing = {
       ...node,
@@ -246,19 +271,22 @@ describe("status transition maintenance", () => {
         throw new Error("write failed");
       },
     };
-    const result = await maintainPapercutStatusIndex({
-      node: failing as any,
-      cfg: REGISTERED,
-      slug: "p1",
-      record: papercut("p1", "open"),
-      previousStatus: undefined,
+    await expect(
+      maintainPapercutStatusIndex({
+        node: failing as any,
+        cfg: REGISTERED,
+        slug: "p1",
+        record: papercut("p1", "open"),
+        previousStatus: undefined,
+      }),
+    ).rejects.toMatchObject({
+      code: "papercut_status_index_patch_failed",
     });
-    expect(result.papercutStatusIndexFailed).toBe(true);
     expect(
       rows[PAPERCUT_STATUS_INDEX_GLOBAL_HASH]?.[
         PAPERCUT_STATUS_INDEX_MIGRATED_RANGE
       ],
-    ).toBeUndefined();
+    ).toBe("MARK");
   });
 
   test("first-class mutation preflight requires a complete keyed index", async () => {
@@ -352,6 +380,50 @@ describe("offline rebuild", () => {
       (await censusPapercutStatusIndex(node, REGISTERED, []))?.complete,
     ).toBe(true);
   });
+
+  test("a complete rebuild is a no-op instead of rewriting every membership", async () => {
+    const current = papercut("p1", "verified");
+    const { node, calls } = makeNode({
+      rows: { verified: { p1: current } },
+      records: { p1: current },
+      migrated: true,
+    });
+    await writePapercutStatusIndex(node, REGISTERED, [current]);
+    expect(calls.filter((call) => call.op === "batch")).toHaveLength(0);
+    expect(
+      calls.filter((call) =>
+        ["create", "update", "delete"].includes(call.op),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("a large cold rebuild keeps the marker for the final bounded batch", async () => {
+    const records = [
+      papercut("p1", "open"),
+      papercut("p2", "fixed"),
+      papercut("p3", "verified"),
+      papercut("p4", "partial"),
+    ];
+    const { node, rows, calls } = makeNode({
+      records: Object.fromEntries(records.map((record) => [record.slug, record])),
+    });
+    await writePapercutStatusIndex(node, REGISTERED, records, {
+      batchSize: 3,
+      drainMs: 0,
+      retryDelaysMs: [0],
+      sleep: async () => {},
+    });
+    expect(calls.filter((call) => call.op === "batch")).toHaveLength(2);
+    expect(rows.open?.p1).toEqual(records[0]);
+    expect(rows.fixed?.p2).toEqual(records[1]);
+    expect(rows.verified?.p3).toEqual(records[2]);
+    expect(rows.partial?.p4).toEqual(records[3]);
+    expect(
+      rows[PAPERCUT_STATUS_INDEX_GLOBAL_HASH]?.[
+        PAPERCUT_STATUS_INDEX_MIGRATED_RANGE
+      ],
+    ).toBe("MARK");
+  });
 });
 
 describe("product path contract", () => {
@@ -364,5 +436,14 @@ describe("product path contract", () => {
     );
     expect(census).not.toContain("listRecords(");
     expect(census).toContain("readPapercutsByStatus");
+  });
+
+  test("first-class papercut writes use one resident batch", async () => {
+    const source = await Bun.file(
+      new URL("../../src/commands/papercut.ts", import.meta.url),
+    ).text();
+    expect(source).toContain("commitResidentWritePlan");
+    expect(source).not.toContain("persistPapercutWithStatusMembership({");
+    expect(source).not.toContain("maintainTypeListIndex({");
   });
 });

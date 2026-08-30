@@ -3,7 +3,13 @@
 // partition (or the fixed set of status partitions) instead of the whole
 // papercut type-list partition.
 
-import { FbrainError, type NodeClient, type QueryRow } from "./client.ts";
+import {
+  FbrainError,
+  type BatchMutationOp,
+  type BatchMutationResult,
+  type NodeClient,
+  type QueryRow,
+} from "./client.ts";
 import {
   PAPERCUT_STATUSES,
   PAPERCUT_STATUS_INDEX_FIELDS,
@@ -39,7 +45,7 @@ function slugFromEntryRow(row: QueryRow): string | null {
   return typeof slug === "string" && slug.length > 0 ? slug : null;
 }
 
-async function entryRowExists(
+export async function papercutStatusEntryExists(
   node: NodeClient,
   entryHash: string,
   hash: string,
@@ -62,7 +68,12 @@ export async function upsertPapercutStatusEntry(
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash || status.length === 0) return false;
   const fields = entryFieldsFor(status, record);
-  const exists = await entryRowExists(node, entryHash, status, record.slug);
+  const exists = await papercutStatusEntryExists(
+    node,
+    entryHash,
+    status,
+    record.slug,
+  );
   if (exists) {
     await node.updateRecord({
       schemaHash: entryHash,
@@ -89,7 +100,8 @@ export async function deletePapercutStatusEntry(
 ): Promise<boolean> {
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash || status.length === 0) return false;
-  if (!(await entryRowExists(node, entryHash, status, slug))) return true;
+  if (!(await papercutStatusEntryExists(node, entryHash, status, slug)))
+    return true;
   await node.deleteRecord({
     schemaHash: entryHash,
     keyHash: status,
@@ -110,7 +122,7 @@ export async function markPapercutStatusIndexMigrated(
     psi_payload: "",
     psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
   };
-  const exists = await entryRowExists(
+  const exists = await papercutStatusEntryExists(
     node,
     entryHash,
     PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
@@ -134,7 +146,7 @@ export async function unmarkPapercutStatusIndexMigrated(
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash) return false;
   if (
-    !(await entryRowExists(
+    !(await papercutStatusEntryExists(
       node,
       entryHash,
       PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
@@ -161,10 +173,10 @@ export async function requireCompletePapercutStatusIndex(
       code: "papercut_status_index_incomplete",
       message:
         "the status-keyed papercut index is not registered, so the ledger cannot read it without enumerating the whole papercut partition.",
-      hint: "Run `fbrain init`, then `fbrain reindex --papercut-status-index` (admin/offline), and retry.",
+      hint: "Run `brain init`, then `brain reindex --papercut-status-index` (admin/offline), and retry.",
     });
   }
-  const migrated = await entryRowExists(
+  const migrated = await papercutStatusEntryExists(
     node,
     entryHash,
     PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
@@ -175,7 +187,7 @@ export async function requireCompletePapercutStatusIndex(
       code: "papercut_status_index_incomplete",
       message:
         "the status-keyed papercut index is registered but not marked complete, so the ledger cannot trust it without enumerating the whole papercut partition.",
-      hint: "Run `fbrain reindex --papercut-status-index` (admin/offline) to rebuild the index from source of truth, then retry.",
+      hint: "Run `brain reindex --papercut-status-index` (admin/offline) to rebuild the index from source of truth, then retry.",
     });
   }
   return entryHash;
@@ -286,7 +298,14 @@ export async function persistPapercutWithStatusMembership(opts: {
   }
 }
 
-/** Non-fatal write-path wrapper; a failed patch clears completeness. */
+/**
+ * Legacy projection patch for delete paths that are not resident-batched yet.
+ *
+ * Never clear the global marker here. A failed removal can leave only a stale
+ * row, and every ledger read point-hydrates the primary before it returns that
+ * row. The primary tombstone therefore makes the stale row invisible. The
+ * caller receives a hard error, so the failed cleanup stays observable.
+ */
 export async function maintainPapercutStatusIndex(opts: {
   node: NodeClient;
   cfg: SchemaCfg;
@@ -294,7 +313,7 @@ export async function maintainPapercutStatusIndex(opts: {
   record: FbrainRecord | null;
   previousStatus: string | undefined;
   verbose?: (msg: string) => void;
-}): Promise<{ papercutStatusIndexFailed: boolean }> {
+}): Promise<{ papercutStatusIndexFailed: false }> {
   try {
     await patchPapercutStatusIndex(
       opts.node,
@@ -305,39 +324,92 @@ export async function maintainPapercutStatusIndex(opts: {
     );
     return { papercutStatusIndexFailed: false };
   } catch (err) {
-    try {
-      await unmarkPapercutStatusIndexMigrated(opts.node, opts.cfg);
-      opts.verbose?.(
-        `papercut status-index patch FAILED for ${opts.slug}: ` +
-          `${err instanceof Error ? err.message : String(err)}; record persisted — cleared the ` +
-          "completeness marker so the next ledger read errors loudly (run `fbrain reindex --papercut-status-index`).",
-      );
-    } catch (unmarkErr) {
-      opts.verbose?.(
-        `papercut status-index patch FAILED for ${opts.slug}: ` +
-          `${err instanceof Error ? err.message : String(err)}; unmark also failed: ` +
-          `${unmarkErr instanceof Error ? unmarkErr.message : String(unmarkErr)} — run \`fbrain reindex --papercut-status-index\` to repair.`,
-      );
-    }
-    return { papercutStatusIndexFailed: true };
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new FbrainError({
+      code: "papercut_status_index_patch_failed",
+      message:
+        `papercut status-index cleanup failed for ${opts.slug}: ${detail}. ` +
+        "The primary mutation completed, but the command did not report success.",
+      hint:
+        "Retry the exact command. If the keyed census still differs from source of truth, run `brain reindex --papercut-status-index`.",
+      agentHint:
+        "Retry the exact command. A stale membership is filtered through the primary record and cannot appear as a live papercut.",
+      cause: err,
+    });
   }
 }
 
-/** Offline/admin rebuild from the authoritative live papercut set. */
+export const PAPERCUT_STATUS_REINDEX_BATCH_SIZE = 64;
+export const PAPERCUT_STATUS_REINDEX_DRAIN_MS = 500;
+
+type ReindexWriteOptions = {
+  batchSize?: number;
+  drainMs?: number;
+  retryDelaysMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+};
+
+function isPersistQueueFull(error: unknown): boolean {
+  return (
+    error instanceof FbrainError &&
+    error.code === "node_http_503" &&
+    error.message.includes("persist_queue_full")
+  );
+}
+
+async function commitReindexBatch(
+  node: NodeClient,
+  ops: BatchMutationOp[],
+  opts: ReindexWriteOptions,
+): Promise<BatchMutationResult> {
+  if (!node.mutateBatch) {
+    throw new FbrainError({
+      code: "resident_commit_unavailable",
+      message: "this node client cannot send a Fold resident batch",
+      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
+    });
+  }
+  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const delays = opts.retryDelaysMs ?? [0, 1000, 2000, 4000, 8000];
+  let lastError: unknown;
+  for (const delayMs of delays) {
+    if (delayMs > 0) await sleep(delayMs);
+    try {
+      return await node.mutateBatch(ops);
+    } catch (error) {
+      lastError = error;
+      if (!isPersistQueueFull(error)) throw error;
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Offline/admin repair from the authoritative live papercut set.
+ *
+ * Only the membership delta is written. A small repair plus its completeness
+ * marker lands in one resident batch. A cold rebuild uses bounded batches,
+ * keeps the marker absent between batches, and pauses while persistence drains.
+ */
 export async function writePapercutStatusIndex(
   node: NodeClient,
   cfg: SchemaCfg,
   livePapercuts: readonly FbrainRecord[],
+  writeOpts: ReindexWriteOptions = {},
 ): Promise<void> {
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash) return;
-  await unmarkPapercutStatusIndexMigrated(node, cfg);
   const existing = await node.queryAll({
     schemaHash: entryHash,
     fields: [...PAPERCUT_STATUS_INDEX_FIELDS],
     allowFullScan: true,
   });
-  const want = new Set(livePapercuts.map((r) => `${r.status} ${r.slug}`));
+  const wanted = new Map(
+    livePapercuts.map((record) => [`${record.status} ${record.slug}`, record]),
+  );
+  const present = new Set<string>();
+  const delta: BatchMutationOp[] = [];
+  let markerExists = false;
   for (const row of existing.results) {
     const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
     const hash = row.key?.hash ?? fields.psi_h;
@@ -347,20 +419,105 @@ export async function writePapercutStatusIndex(
       hash === PAPERCUT_STATUS_INDEX_GLOBAL_HASH &&
       range === PAPERCUT_STATUS_INDEX_MIGRATED_RANGE
     ) {
+      markerExists = true;
       continue;
     }
-    if (!want.has(`${hash} ${range}`)) {
-      await node.deleteRecord({
+    const pair = `${hash} ${range}`;
+    present.add(pair);
+    if (!wanted.has(pair)) {
+      delta.push({
+        mutationType: "delete",
         schemaHash: entryHash,
         keyHash: hash,
         keyRange: range,
+        fields: {},
       });
     }
   }
-  for (const record of livePapercuts) {
-    await upsertPapercutStatusEntry(node, cfg, record.status, record);
+  for (const [pair, record] of wanted) {
+    if (present.has(pair)) continue;
+    delta.push({
+      mutationType: "create",
+      schemaHash: entryHash,
+      keyHash: record.status,
+      keyRange: record.slug,
+      fields: entryFieldsFor(record.status, record),
+    });
   }
-  await markPapercutStatusIndexMigrated(node, cfg);
+
+  const markerFields = {
+    psi_h: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+    psi_r: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+    psi_payload: "",
+    psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
+  };
+  if (delta.length === 0 && markerExists) return;
+
+  const batchSize = Math.max(
+    2,
+    writeOpts.batchSize ?? PAPERCUT_STATUS_REINDEX_BATCH_SIZE,
+  );
+  if (delta.length + 1 <= batchSize) {
+    await commitReindexBatch(
+      node,
+      [
+        ...delta,
+        {
+          mutationType: markerExists ? "update" : "create",
+          schemaHash: entryHash,
+          keyHash: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+          keyRange: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+          fields: markerFields,
+        },
+      ],
+      writeOpts,
+    );
+    return;
+  }
+
+  if (markerExists) {
+    await commitReindexBatch(
+      node,
+      [
+        {
+          mutationType: "delete",
+          schemaHash: entryHash,
+          keyHash: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+          keyRange: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+          fields: {},
+        },
+      ],
+      writeOpts,
+    );
+  }
+
+  const sleep =
+    writeOpts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const pending = [...delta];
+  while (pending.length > batchSize - 1) {
+    const receipt = await commitReindexBatch(
+      node,
+      pending.splice(0, batchSize),
+      writeOpts,
+    );
+    if (receipt.convergencePending || !receipt.backgroundTasksDrained) {
+      await sleep(writeOpts.drainMs ?? PAPERCUT_STATUS_REINDEX_DRAIN_MS);
+    }
+  }
+  await commitReindexBatch(
+    node,
+    [
+      ...pending,
+      {
+        mutationType: "create",
+        schemaHash: entryHash,
+        keyHash: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+        keyRange: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+        fields: markerFields,
+      },
+    ],
+    writeOpts,
+  );
 }
 
 export type PapercutStatusIndexCensus = {
@@ -379,7 +536,7 @@ export async function censusPapercutStatusIndex(
 ): Promise<PapercutStatusIndexCensus | null> {
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash) return null;
-  const migrated = await entryRowExists(
+  const migrated = await papercutStatusEntryExists(
     node,
     entryHash,
     PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
