@@ -51,7 +51,7 @@ export async function backlinksCmd(opts: BacklinksOptions): Promise<void> {
   print(formatBacklinks(json));
 }
 
-export function backlinksToJson(
+function backlinksToJson(
   slug: string,
   type: RecordType | undefined,
   links: ReadonlyArray<Backlink>,
@@ -69,7 +69,7 @@ export function backlinksToJson(
   return out;
 }
 
-export function formatBacklinks(json: BacklinksJson): string {
+function formatBacklinks(json: BacklinksJson): string {
   const target = json.type === undefined ? json.slug : `${json.type} ${json.slug}`;
   if (json.linked_from.length === 0) return `backlinks for ${target}: (none)`;
   const lines = [`backlinks for ${target}:`];
