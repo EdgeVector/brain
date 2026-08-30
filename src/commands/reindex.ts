@@ -634,7 +634,7 @@ async function rebuildPapercutStatusIndex(
     );
   } else {
     print(
-      "papercut-status-index: entry schema unavailable — run `fbrain init` first",
+      "papercut-status-index: entry schema unavailable — run `brain init` first",
     );
   }
 

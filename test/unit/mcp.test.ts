@@ -2825,6 +2825,7 @@ describe("fbrain_delete tool", () => {
 type MutationBody = {
   mutation_type?: string;
   fields_and_values?: Record<string, unknown>;
+  schema?: string;
   schema_name?: string;
 };
 function parseBody(init?: RequestInit): Record<string, unknown> {
@@ -2872,8 +2873,12 @@ describe("fbrain_status tool", () => {
     });
     expect(res.isError).toBeFalsy();
     // The body is PRESERVED — the whole point vs a status-only fbrain_put.
-    expect(mutations).toHaveLength(1);
-    const fields = mutations[0]!.fields_and_values!;
+    expect(mutations).toHaveLength(2);
+    const primary = mutations.find(
+      (mutation) => mutation.schema === TEST_HASHES.concept,
+    );
+    expect(primary).toBeDefined();
+    const fields = primary!.fields_and_values!;
     expect(fields.status).toBe("archived");
     expect(fields.body).toBe("the body");
     // Structured output + schema conformance.

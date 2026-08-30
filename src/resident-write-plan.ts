@@ -2,13 +2,16 @@
 // every exact projection. Search stays out of the default plan.
 
 import { backlinkIndexTag, backlinkTargetSlugs } from "./backlink-index.ts";
-import type { NodeClient } from "./client.ts";
+import {
+  FbrainError,
+  type BatchMutationResult,
+  type NodeClient,
+} from "./client.ts";
 import type { Config } from "./config.ts";
 import {
   CHILD_TASK_INDEX_MARKER,
   CHILD_TASK_INDEX_SCHEMA_KEY,
   PAPERCUT_STATUS_INDEX_MARKER,
-  PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
   type RecordType,
 } from "./schemas.ts";
 import {
@@ -24,7 +27,12 @@ import {
   entryFieldsFor,
   entryKeyFor,
   recordListEntryHash,
+  typeListEntryExists,
 } from "./record-list-index.ts";
+import {
+  papercutStatusEntryExists,
+  papercutStatusIndexHash,
+} from "./papercut-status-index.ts";
 import {
   memberKey,
   readTagIndex,
@@ -110,17 +118,23 @@ function countOps(ops: PlannedMutation[]): ExactProjectionCounts {
   return counts;
 }
 
-function planListOp(opts: {
+async function planListOp(opts: {
+  node: NodeClient;
   cfg: Pick<Config, "schemaHashes">;
   type: RecordType;
   record: FbrainRecord;
-  upsertType: "create" | "update";
-}): PlannedMutation | null {
+}): Promise<PlannedMutation | null> {
   const schemaHash = recordListEntryHash(opts.cfg);
   if (!schemaHash) return null;
   const { hash, range } = entryKeyFor(opts.type, opts.record.slug);
+  const exists = await typeListEntryExists(
+    opts.node,
+    schemaHash,
+    opts.type,
+    opts.record.slug,
+  );
   return {
-    mutationType: opts.upsertType,
+    mutationType: exists ? "update" : "create",
     schemaHash,
     keyHash: hash,
     keyRange: range,
@@ -236,15 +250,15 @@ function planChildTaskOps(opts: {
   return ops;
 }
 
-function planPapercutStatusOps(opts: {
+async function planPapercutStatusOps(opts: {
+  node: NodeClient;
   cfg: Pick<Config, "schemaHashes">;
   type: RecordType;
   record: FbrainRecord;
   previous: FbrainRecord | null;
-  upsertType: "create" | "update";
-}): PlannedMutation[] {
+}): Promise<PlannedMutation[]> {
   if (opts.type !== "papercut") return [];
-  const schemaHash = opts.cfg.schemaHashes[PAPERCUT_STATUS_INDEX_SCHEMA_KEY];
+  const schemaHash = papercutStatusIndexHash(opts.cfg);
   if (!schemaHash) return [];
   const ops: PlannedMutation[] = [];
   const previousStatus = opts.previous?.status ?? "";
@@ -260,8 +274,14 @@ function planPapercutStatusOps(opts: {
     });
   }
   if (nextStatus.length > 0) {
+    const exists = await papercutStatusEntryExists(
+      opts.node,
+      schemaHash,
+      nextStatus,
+      opts.record.slug,
+    );
     ops.push({
-      mutationType: opts.upsertType,
+      mutationType: exists ? "update" : "create",
       schemaHash,
       keyHash: nextStatus,
       keyRange: opts.record.slug,
@@ -373,11 +393,11 @@ export async function buildResidentWritePlan(opts: {
     });
   }
 
-  const listOp = planListOp({
+  const listOp = await planListOp({
+    node: opts.node,
     cfg: opts.cfg,
     type: opts.type,
     record: opts.next,
-    upsertType,
   });
   if (listOp) ops.push(listOp);
 
@@ -412,13 +432,13 @@ export async function buildResidentWritePlan(opts: {
     }),
   );
   ops.push(
-    ...planPapercutStatusOps({
+    ...(await planPapercutStatusOps({
+      node: opts.node,
       cfg: opts.cfg,
       type: opts.type,
       record: opts.next,
       previous: opts.previous,
-      upsertType,
-    }),
+    })),
   );
 
   const tags = await planTagMembershipOps({
@@ -454,6 +474,43 @@ export async function buildResidentWritePlan(opts: {
   const counts = countOps(unique);
   counts.no_op = noOp;
   return { action, ops: unique, counts };
+}
+
+export async function commitResidentWritePlan(opts: {
+  node: NodeClient;
+  plan: ResidentWritePlan;
+  type: RecordType;
+  slug: string;
+}): Promise<BatchMutationResult> {
+  if (!opts.node.mutateBatch) {
+    throw new FbrainError({
+      code: "resident_commit_unavailable",
+      message: "this node client cannot send a Fold resident batch",
+      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
+    });
+  }
+  try {
+    return await opts.node.mutateBatch(opts.plan.ops);
+  } catch (err) {
+    // Preserve typed transport and consent errors. Callers use their codes for
+    // recovery, including the MCP cold-capability self-warm path.
+    if (err instanceof FbrainError) throw err;
+    const detail = err instanceof Error ? err.message : String(err);
+    const projections = [
+      ...new Set(opts.plan.ops.map((op) => op.projection)),
+    ].join(", ");
+    throw new FbrainError({
+      code: "resident_commit_failed",
+      message:
+        `resident commit failed for ${opts.type} ${opts.slug} ` +
+        `(projections: ${projections || "none"}): ${detail}`,
+      hint:
+        "Retry the exact command. The resident batch commits the primary record and its exact projections as one operation.",
+      agentHint:
+        "Retry the exact command. Do not repair one projection separately from the primary record.",
+      cause: err,
+    });
+  }
 }
 
 function dedupeOps(ops: PlannedMutation[]): PlannedMutation[] {

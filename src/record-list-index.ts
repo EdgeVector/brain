@@ -169,7 +169,7 @@ export async function writeTypeListIndex(
 }
 
 /** Point-read one HashRange row to decide create vs update. */
-async function entryRowExists(
+export async function typeListEntryExists(
   node: NodeClient,
   entryHash: string,
   type: RecordType,
@@ -194,7 +194,7 @@ export async function upsertTypeListEntry(
   if (!entryHash) return false;
   const { hash, range } = entryKeyFor(type, record.slug);
   const fields = entryFieldsFor(type, record);
-  const exists = await entryRowExists(node, entryHash, type, record.slug);
+  const exists = await typeListEntryExists(node, entryHash, type, record.slug);
   if (exists) {
     await node.updateRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
   } else {
@@ -222,7 +222,7 @@ export async function markTypePartitionMigrated(
     rle_marker: RECORD_LIST_ENTRY_MARKER,
     layout: RECORD_LIST_ENTRY_LAYOUT,
   };
-  const exists = await entryRowExists(node, entryHash, type, range);
+  const exists = await typeListEntryExists(node, entryHash, type, range);
   if (exists) {
     await node.updateRecord({ schemaHash: entryHash, fields, keyHash: type, keyRange: range });
   } else {
@@ -241,7 +241,7 @@ export async function deleteTypeListEntry(
   const entryHash = recordListEntryHash(cfg);
   if (!entryHash) return false;
   const { hash, range } = entryKeyFor(type, slug);
-  if (!(await entryRowExists(node, entryHash, type, slug))) return true;
+  if (!(await typeListEntryExists(node, entryHash, type, slug))) return true;
   await node.deleteRecord({ schemaHash: entryHash, keyHash: hash, keyRange: range });
   return true;
 }
@@ -284,7 +284,7 @@ export async function unmarkTypePartitionMigrated(
   const entryHash = recordListEntryHash(cfg);
   if (!entryHash) return false;
   const range = RECORD_LIST_ENTRY_MIGRATED_RANGE;
-  if (!(await entryRowExists(node, entryHash, type, range))) return true;
+  if (!(await typeListEntryExists(node, entryHash, type, range))) return true;
   await node.deleteRecord({ schemaHash: entryHash, keyHash: type, keyRange: range });
   return true;
 }

@@ -41,7 +41,8 @@ describe("write paths maintain the lifecycle keep set", () => {
     const source = await Bun.file(
       new URL("../../src/commands/status.ts", import.meta.url),
     ).text();
-    expect(source.includes("maintainLifecycleIndex")).toBe(true);
+    expect(source.includes("buildResidentWritePlan")).toBe(true);
+    expect(source.includes("commitResidentWritePlan")).toBe(true);
   });
 });
 

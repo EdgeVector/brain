@@ -43,6 +43,7 @@ import {
 import { recordListEntryHash } from "../record-list-index.ts";
 import {
   buildResidentWritePlan,
+  commitResidentWritePlan,
   recordFromPrimaryFields,
 } from "../resident-write-plan.ts";
 
@@ -245,14 +246,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     frontmatterEdges,
     now,
   });
-  if (!node.mutateBatch) {
-    throw new FbrainError({
-      code: "resident_commit_unavailable",
-      message: "this node client cannot send a Fold resident batch",
-      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
-    });
-  }
-  const receipt = await node.mutateBatch(plan.ops);
+  const receipt = await commitResidentWritePlan({ node, plan, type, slug });
   const writeId = receipt.mutationIds[0];
   const durability = receipt.backgroundTasksDrained ? "local" : "queued";
   const search = receipt.backgroundTasksDrained ? "ready" : "queued";
