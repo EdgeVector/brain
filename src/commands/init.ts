@@ -171,6 +171,101 @@ export type InitResult = {
 
 const STEPS = 6;
 
+// Per-schema `/api/apps/declare-schema` costs seconds on a cold node: the node
+// resolves each definition against the catalog / schema service. Measured on a
+// fresh isolated LastDB home on 2026-08-30, one at a time took 15-22 s each, so
+// the 25 owned schemas alone spent ~450 s and the public first-run smoke's
+// 120 s bound killed init in the middle of the list. The calls are independent
+// -- each writes its own `schemaHashes` keys -- so they run as a bounded pool.
+// The bound is deliberate: the node's QoS sheds bulk work, and 25 at once is a
+// self-inflicted thundering herd on the one socket init needs.
+export const DEFAULT_DECLARE_CONCURRENCY = 6;
+
+export function declareConcurrency(): number {
+  const raw = process.env.FBRAIN_INIT_DECLARE_CONCURRENCY;
+  if (raw === undefined || raw.length === 0) return DEFAULT_DECLARE_CONCURRENCY;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_DECLARE_CONCURRENCY;
+  return n;
+}
+
+// Wall-clock budget for the best-effort deferred-409 retry pass.
+export const DEFAULT_DEFERRED_RETRY_BUDGET_MS = 20_000;
+
+export function deferredRetryBudgetMs(): number {
+  const raw = process.env.FBRAIN_INIT_DEFERRED_RETRY_BUDGET_MS;
+  if (raw === undefined || raw.length === 0) return DEFAULT_DEFERRED_RETRY_BUDGET_MS;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_DEFERRED_RETRY_BUDGET_MS;
+  return n;
+}
+
+/**
+ * Resolve `work`, or `onExpiry` if it has not settled within `ms`.
+ *
+ * The underlying request is not cancelled — it keeps running until its own HTTP
+ * deadline and is then discarded. That is the point: the caller stops WAITING
+ * on a best-effort step, without depending on the step being cancellable.
+ */
+export async function withDeadline<T, E>(
+  work: Promise<T>,
+  ms: number,
+  onExpiry: E,
+): Promise<T | E> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<E>((resolve) => {
+    timer = setTimeout(() => resolve(onExpiry), ms);
+    // Don't hold the process open on the loser of the race.
+    (timer as { unref?: () => void }).unref?.();
+  });
+  // When the deadline wins, `work` is still pending. If it later REJECTS, that
+  // rejection has no handler and the runtime reports it as unhandled — which
+  // would turn a bounded skip into a crashed init. Attaching a no-op handler
+  // marks it observed; the race below still sees a rejection that arrives first.
+  work.catch(() => {});
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Run `worker` over `items` with at most `limit` in flight.
+ *
+ * Results keep the INPUT order, not the completion order, so a caller can still
+ * report the first failure by list position and stay deterministic. A worker
+ * that throws stores the error; nothing is rethrown here, because the declare
+ * pass has to finish the whole list before it can tell a fatal error from a
+ * conflict it will retry.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<Array<{ ok: true; value: R } | { ok: false; error: unknown }>> {
+  const results: Array<{ ok: true; value: R } | { ok: false; error: unknown }> = new Array(
+    items.length,
+  );
+  let next = 0;
+  const width = Math.max(1, Math.min(limit, items.length));
+  const runners = Array.from({ length: width }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      const item = items[i];
+      if (item === undefined) return;
+      try {
+        results[i] = { ok: true, value: await worker(item, i) };
+      } catch (error) {
+        results[i] = { ok: false, error };
+      }
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
@@ -302,7 +397,35 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
   const schemaHashes: Record<string, string> = {};
-  const localDeclare = await tryDeclareOwnedSchemasLocally(nodeClient, schemaHashes, print);
+
+  // Checkpoint the config DURING declaration, not only after it.
+  //
+  // Declaration is the long step, and the public first-run smoke bounds init at
+  // 120 s. Writing the config only at the end meant a killed init left no file
+  // at all, so one slow step reported as four failures: every later command
+  // died with "Config not found at ~/.brain/config.json". A checkpoint turns
+  // that into a partial-but-valid config — the types already declared work, and
+  // re-running init idempotently fills in the rest.
+  //
+  // The first write can only happen once `design` and `task` have hashes:
+  // `assertConfigShape` rejects a config whose two legacy mirror fields are
+  // empty, so an earlier write would produce a file its own reader throws on —
+  // strictly worse than no file.
+  let checkpointed = false;
+  const writeCheckpointConfig = (): void => {
+    if (checkpointed) return;
+    if (!schemaHashes.design || !schemaHashes.task) return;
+    checkpointed = true;
+    writeConfig(buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes }), configPath);
+    print(`        checkpointed config to ${configPath} (partial; init still running)`);
+  };
+
+  const localDeclare = await tryDeclareOwnedSchemasLocally(
+    nodeClient,
+    schemaHashes,
+    print,
+    writeCheckpointConfig,
+  );
   if (!localDeclare.supported) {
     print(
       `        node does not expose local app-schema declaration yet (${localDeclare.reason}); ` +
@@ -321,24 +444,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // mid-grant doesn't lose schema state — the next init re-runs the consent
   // step idempotently).
   print(`[5/${STEPS}] writing config to ${configPath}`);
-  const config: Config = {
-    configVersion: CONFIG_VERSION,
-    nodeUrl,
-    schemaServiceUrl,
-    userHash,
-    schemaHashes,
-    designSchemaHash: schemaHashes.design ?? "",
-    taskSchemaHash: schemaHashes.task ?? "",
-  };
-  // Persist an explicit owner-session socket override (app-isolation flip,
-  // fold#739) when one was provided via `FBRAIN_FOLDDB_SOCKET` — so later
-  // commands attest against the same non-default node without re-supplying the
-  // env. Unset → omitted, and attestation falls back to the default
-  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
-  const socketOverride = process.env.FBRAIN_FOLDDB_SOCKET;
-  if (socketOverride && socketOverride.length > 0) {
-    config.nodeSocketPath = socketOverride;
-  }
+  const config = buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes });
   // Mini first-run: local declare means schemas never went through
   // schema_service, so consent-request against the cloud app registry will
   // 404 "app not registered". Pin client enforce-off so NodeOwner writes work
@@ -404,6 +510,42 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   return { config, bootstrapped, consent };
 }
 
+/**
+ * Assemble the on-disk config from the pieces init has resolved so far.
+ *
+ * Shared by the mid-declaration checkpoint and the final step-5 write, so the
+ * partial file a killed init leaves behind has exactly the same shape as a
+ * complete one — only fewer `schemaHashes` entries.
+ */
+function buildConfig(parts: {
+  nodeUrl: string;
+  schemaServiceUrl: string;
+  userHash: string;
+  schemaHashes: Record<string, string>;
+}): Config {
+  const config: Config = {
+    configVersion: CONFIG_VERSION,
+    nodeUrl: parts.nodeUrl,
+    schemaServiceUrl: parts.schemaServiceUrl,
+    userHash: parts.userHash,
+    // Copy: the caller keeps mutating `schemaHashes` as later schemas land, and
+    // a checkpointed config must not change under the file already written.
+    schemaHashes: { ...parts.schemaHashes },
+    designSchemaHash: parts.schemaHashes.design ?? "",
+    taskSchemaHash: parts.schemaHashes.task ?? "",
+  };
+  // Persist an explicit owner-session socket override (app-isolation flip,
+  // fold#739) when one was provided via `FBRAIN_FOLDDB_SOCKET` — so later
+  // commands attest against the same non-default node without re-supplying the
+  // env. Unset → omitted, and attestation falls back to the default
+  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
+  const socketOverride = process.env.FBRAIN_FOLDDB_SOCKET;
+  if (socketOverride && socketOverride.length > 0) {
+    config.nodeSocketPath = socketOverride;
+  }
+  return config;
+}
+
 type InitNodeClient = ReturnType<typeof newNodeClient>;
 
 function isDeclareConflict(err: unknown): boolean {
@@ -443,37 +585,84 @@ async function tryDeclareOwnedSchemasLocally(
   nodeClient: InitNodeClient,
   schemaHashes: Record<string, string>,
   print: (line: string) => void,
+  onSchemaDeclared?: () => void,
 ): Promise<{ supported: true } | { supported: false; reason: string }> {
-  print(`[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} fbrain-owned schemas via node`);
+  const width = declareConcurrency();
+  print(
+    `[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} fbrain-owned schemas via node ` +
+      `(${width} at a time)`,
+  );
   if (!nodeClient.declareAppSchema) {
     return { supported: false, reason: "client does not support /api/apps/declare-schema" };
   }
+  // Each schema resolves against the catalog independently and writes only its
+  // own `schemaHashes` keys, so the pass is safe to run concurrently. Progress
+  // is printed on completion, which is the point: a caller watching a first run
+  // can tell "slow" from "wedged" without waiting out the whole list.
+  let done = 0;
+  const settled = await mapWithConcurrency(UNIQUE_SCHEMAS, width, async (entry) => {
+    const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, (line) => {
+      done += 1;
+      print(`${line}   [${done}/${UNIQUE_SCHEMAS.length}]`);
+    });
+    if (outcome === "ok" || outcome === "conflict-recovered") onSchemaDeclared?.();
+    return outcome;
+  });
+  // Report by LIST position, not by completion order, so the same node state
+  // always produces the same reason string.
   const deferred: UniqueSchemaEntry[] = [];
-  for (const entry of UNIQUE_SCHEMAS) {
-    const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, print);
-    if (outcome === "unsupported") {
+  for (const [i, result] of settled.entries()) {
+    const entry = UNIQUE_SCHEMAS[i];
+    if (entry === undefined) continue;
+    if (!result.ok) throw result.error;
+    if (result.value === "unsupported") {
       return { supported: false, reason: "/api/apps/declare-schema returned 404" };
     }
-    if (outcome === "novel") {
+    if (result.value === "novel") {
       return {
         supported: false,
         reason: `${entry.schema.schema.descriptive_name} declared novel — needs schema service registration`,
       };
     }
-    if (outcome === "conflict") deferred.push(entry);
+    if (result.value === "conflict") deferred.push(entry);
   }
   if (deferred.length > 0) {
     // One retry after the rest of the catalog is on the node. Mini's first-run
     // 409 is often a schema-service timeout/register race on a later extra
     // schema (BrainAttachmentFile); aborting the remaining UNIQUE_SCHEMAS is
     // what made `brain init --grant-consent` exit 1 on an empty LASTDB_HOME.
+    //
+    // The retry is BEST-EFFORT — its own failure path already skips the schema
+    // and continues — so it gets a wall-clock bound. On a fresh isolated home
+    // on 2026-08-30 the single deferred BrainAttachmentFile retry took 60 s and
+    // returned the same 409, which alone pushed a 65 s init to 125 s and past
+    // the public first-run smoke's 120 s bound. A best-effort step must not be
+    // what decides whether first-run completes.
+    const budgetMs = deferredRetryBudgetMs();
+    const deadline = Date.now() + budgetMs;
+    print(
+      `        retrying ${deferred.length} deferred declare${deferred.length === 1 ? "" : "s"} ` +
+        `(best-effort, ${Math.round(budgetMs / 1000)}s budget)`,
+    );
     for (const entry of deferred) {
-      const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, print);
-      if (outcome === "ok" || outcome === "conflict-recovered") continue;
-      print(
-        `        ${entry.schema.schema.descriptive_name.padEnd(18)} → skipped after declare 409 ` +
-          `(not loaded on node; continuing first-run)`,
-      );
+      const remaining = deadline - Date.now();
+      const outcome =
+        remaining > 0
+          ? await withDeadline(
+              declareOneOwnedSchema(nodeClient, entry, schemaHashes, print),
+              remaining,
+              "expired" as const,
+            )
+          : ("expired" as const);
+      if (outcome === "ok" || outcome === "conflict-recovered") {
+        onSchemaDeclared?.();
+        continue;
+      }
+      const why =
+        outcome === "expired"
+          ? `skipped after declare 409 (retry budget spent; continuing first-run)`
+          : `skipped after declare 409 (not loaded on node; continuing first-run)`;
+      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${why}`);
     }
   }
   const missingRecordTypes = RECORD_TYPES.filter((t) => !schemaHashes[t]);
