@@ -20,7 +20,9 @@ import { FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
+  crossTypeSlugNote,
   findBySlug,
+  findCrossTypeSlugCollisions,
   normalizeSlug,
   nowIso,
   resolveBySlug,
@@ -349,6 +351,23 @@ export async function papercutFileCmd(
     now,
   });
   await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+
+  // Same best-effort cross-type collision NOTE that `fbrain new` and
+  // `fbrain put` emit on a create. `papercut file` did not, and that silence
+  // is how the fleet accumulated 55 slugs holding BOTH a `reference` (the
+  // pre-2026-08-04 prose ledger record, closed and archived) and a `papercut`
+  // (the typed row, `open`) — measured on the primary 2026-09-01, 55 of 58 in
+  // component `lastgit`. Every one of those was filed through this verb, over
+  // an ancestor it never mentioned. STDERR only, swallowed on error, so it can
+  // neither fail the file nor perturb stdout/`--json`.
+  const collisions = await findCrossTypeSlugCollisions(
+    node,
+    opts.cfg,
+    PAPERCUT,
+    slug,
+  );
+  const collisionNote = crossTypeSlugNote(PAPERCUT, slug, collisions);
+  if (collisionNote) console.error(collisionNote);
 
   // The resident batch writes the primary row, the list row, and the status
   // row together. A missing list schema is the only case where this version

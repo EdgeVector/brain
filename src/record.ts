@@ -1127,9 +1127,30 @@ export function crossTypeSlugNote(
   );
 }
 
+// A slug that resolved under a type OTHER than the one being returned. Carried
+// so a reader that had to CHOOSE can say so — see `ResolvedRecord.also_types`.
+export type SlugTwin = {
+  type: RecordType;
+  status: string;
+};
+
 export type ResolvedRecord = {
   type: RecordType;
   record: FbrainRecord;
+  // Non-empty only when an UNTYPED lookup matched more than one schema and
+  // `ambiguousTypePrecedence` picked this one. The other matches are already
+  // paid for — `resolveBySlug` point-reads every type in parallel — so dropping
+  // them on the floor threw away an answer the caller had already bought.
+  //
+  // Measured 2026-09-01 on the primary: 55 `papercut-*` slugs exist as BOTH a
+  // `reference` (the pre-2026-08-04 prose ledger record, `status: archived`)
+  // and a `papercut` (the typed ledger row, `status: open`). `reference`
+  // outranks `papercut` in GET_RECORD_TYPE_PRECEDENCE, so `fbrain get <slug>`
+  // returned the archived ancestor and never mentioned the open twin. 52 of
+  // those disagree on status, and 55 of 58 are component `lastgit`, so the
+  // LastGit backlog was being read two different ways by two different verbs.
+  // A read that had to choose must say that it chose.
+  also_types?: readonly SlugTwin[];
 };
 
 export const GET_RECORD_TYPE_PRECEDENCE = [
@@ -1294,7 +1315,13 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
       matches.some((m) => m.type === t),
     );
     if (preferredType !== undefined) {
-      return matches.find((m) => m.type === preferredType)!;
+      const chosen = matches.find((m) => m.type === preferredType)!;
+      return {
+        ...chosen,
+        also_types: matches
+          .filter((m) => m.type !== preferredType)
+          .map((m) => ({ type: m.type, status: m.record.status })),
+      };
     }
 
     const matchedTypes = matches.map((m) => m.type).join(", ");

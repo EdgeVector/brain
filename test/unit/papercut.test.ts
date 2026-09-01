@@ -24,6 +24,7 @@ import {
   LIST_MARK_MAX,
   LIST_METHOD,
   isIdempotentPapercutFile,
+  papercutCloseCmd,
   papercutFileCmd,
   papercutDedupeProbes,
   semanticDuplicateCandidates,
@@ -163,6 +164,25 @@ describe("the dedupe gate", () => {
 
   test("the file path contains no papercut partition enumeration", () => {
     expect(papercutFileCmd.toString()).not.toContain("listRecords");
+  });
+
+  // `fbrain new` and `fbrain put` both announce a cross-type slug collision on
+  // a create. `papercut file` did not, and that silence is how 55 slugs came to
+  // hold BOTH a `reference` (the pre-2026-08-04 prose record, later archived)
+  // and a `papercut` (the typed row, `open`) — measured on the primary
+  // 2026-09-01, 55 of 58 in component `lastgit`. Every one was filed through
+  // this verb, over an ancestor it never mentioned.
+  test("the file path announces a cross-type slug collision, like new and put", () => {
+    const src = papercutFileCmd.toString();
+    expect(src).toContain("findCrossTypeSlugCollisions");
+    expect(src).toContain("crossTypeSlugNote");
+  });
+
+  // Pins the note to the CREATE verb. `close` operates on a slug that already
+  // exists, so the same note there is noise, not news — and putting it there
+  // would leave the create path silent, which is the bug.
+  test("the close path does NOT emit the create-time collision note", () => {
+    expect(papercutCloseCmd.toString()).not.toContain("crossTypeSlugNote");
   });
 
   test("an exact replay is idempotent but changed input is still a conflict", () => {
