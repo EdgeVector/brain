@@ -998,6 +998,45 @@ describe("resolveBySlug", () => {
     });
   });
 
+  // The precedence pick is the whole reason the LastGit backlog could be read
+  // two ways at once: 55 `papercut-*` slugs hold BOTH a `reference` (the
+  // pre-2026-08-04 prose record, archived) and a `papercut` (the typed row,
+  // open), and `reference` outranks `papercut`. The reads for every type are
+  // already paid — they run in parallel above — so the discarded matches are
+  // an answer the caller bought and used to throw away.
+  test("precedence pick carries the discarded matches, with their statuses", async () => {
+    const node = mockNode({
+      [TEST_HASHES.reference]: [row("dual", { status: "archived" })],
+      [TEST_HASHES.project]: [row("dual", { status: "planning" })],
+    });
+
+    const found = await resolveBySlug({
+      node,
+      cfg,
+      slug: "dual",
+      ambiguousTypePrecedence: ["reference", "project"],
+    });
+
+    expect(found.type).toBe("reference");
+    expect(found.also_types).toEqual([{ type: "project", status: "planning" }]);
+  });
+
+  test("an unambiguous slug carries no also_types", async () => {
+    const node = mockNode({
+      [TEST_HASHES.reference]: [row("solo", { status: "active" })],
+    });
+
+    const found = await resolveBySlug({
+      node,
+      cfg,
+      slug: "solo",
+      ambiguousTypePrecedence: ["reference", "project"],
+    });
+
+    expect(found.type).toBe("reference");
+    expect(found.also_types).toBeUndefined();
+  });
+
   test("untyped lookup skips record types absent from older configs", async () => {
     const oldCfg = buildTestCfg({
       schemaHashes: {

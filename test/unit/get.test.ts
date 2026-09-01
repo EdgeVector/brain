@@ -914,6 +914,54 @@ describe("decision extra fields on the read surface", () => {
     expect(text).toContain("gate_slug:  (none)");
   });
 
+  // The `also:` line sits directly under `status:` because the twin's status is
+  // the field that disagrees, and the reader is about to act on the one above
+  // it. Both surfaces must carry it: an agent reads the MCP window, a human
+  // reads the CLI header, and this defect was found because BOTH said
+  // "archived" about a defect the typed ledger still counts as open.
+  function papercutTwin(): FbrainRecord {
+    return {
+      slug: "papercut-lastgit-example",
+      title: "an example defect",
+      body: "Status: OPEN\n",
+      status: "archived",
+      tags: [],
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    } as FbrainRecord;
+  }
+
+  test("formatRecord names the twin type AND its status, under status:", () => {
+    const text = formatRecord(papercutTwin(), "reference", false, undefined, undefined, undefined, [
+      { type: "papercut", status: "open" },
+    ]);
+    expect(text).toContain("also:       papercut (status open)");
+    expect(text).toContain("fbrain get papercut-lastgit-example --type papercut");
+    const lines = text.split("\n");
+    const statusAt = lines.findIndex((l) => l.startsWith("status:"));
+    const alsoAt = lines.findIndex((l) => l.startsWith("also:"));
+    expect(alsoAt).toBe(statusAt + 1);
+  });
+
+  test("formatRecord omits also: when there is no twin", () => {
+    const text = formatRecord(papercutTwin(), "reference");
+    expect(text).not.toContain("also:");
+  });
+
+  test("formatRecordJsonWindow carries also_types (MCP get parity)", () => {
+    const json = recordToJson(papercutTwin(), "reference", false, undefined, undefined, undefined, [
+      { type: "papercut", status: "open" },
+    ]);
+    expect(json.also_types).toEqual([{ type: "papercut", status: "open" }]);
+    const text = formatRecordJsonWindow(json, {
+      body: json.body,
+      offset: 0,
+      total: json.body.length,
+      truncated: false,
+    });
+    expect(text).toContain("also:       papercut (status open)");
+  });
+
   test("formatRecordJsonWindow renders extra fields (MCP get parity)", () => {
     const json = recordToJson(decisionRecord(), "decision");
     const text = formatRecordJsonWindow(json, {

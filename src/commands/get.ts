@@ -18,6 +18,7 @@ import {
   schemaHashFor,
   type Backlink,
   type FbrainRecord,
+  type SlugTwin,
 } from "../record.ts";
 import { RECORDS, type RecordType } from "../schemas.ts";
 
@@ -126,6 +127,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     designChildren,
     linkedFrom,
     childrenUnavailable,
+    found.also_types,
   );
   opts.onResult?.(json);
 
@@ -147,6 +149,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
       designChildren,
       linkedFrom,
       childrenUnavailable,
+      found.also_types,
     ),
   );
 }
@@ -198,6 +201,12 @@ export type RecordJson = {
     status: string;
     via: Array<"explicit" | "body">;
   }>;
+  // Other schemas that ALSO hold this slug. Present only on an untyped lookup
+  // that matched more than one type, where GET_RECORD_TYPE_PRECEDENCE picked
+  // the one returned above. Without this the caller cannot tell a
+  // one-record slug from a chosen-among-several slug, and the twin's `status`
+  // is the field most likely to disagree.
+  also_types?: Array<{ type: RecordType; status: string }>;
   created_at: string;
   updated_at: string;
   body: string;
@@ -210,6 +219,7 @@ export function recordToJson(
   children?: ReadonlyArray<FbrainRecord>,
   linkedFrom?: ReadonlyArray<Backlink>,
   childrenUnavailable?: string,
+  alsoTypes?: readonly SlugTwin[],
 ): RecordJson {
   const out: RecordJson = {
     type,
@@ -221,6 +231,9 @@ export function recordToJson(
     updated_at: r.updated_at,
     body: r.body,
   };
+  if (alsoTypes !== undefined && alsoTypes.length > 0) {
+    out.also_types = alsoTypes.map((t) => ({ type: t.type, status: t.status }));
+  }
   if (RECORDS[type].hasDesignSlug) {
     out.design_slug = r.design_slug ?? "";
     if (designMissing) out.design_missing = true;
@@ -264,13 +277,21 @@ export function formatRecord(
   children?: ReadonlyArray<FbrainRecord>,
   linkedFrom?: ReadonlyArray<Backlink>,
   childrenUnavailable?: string,
+  alsoTypes?: readonly SlugTwin[],
 ): string {
   const lines = [
     `[${type}] ${r.slug}`,
     `title:      ${r.title}`,
     `status:     ${r.status}`,
-    `tags:       ${r.tags.length === 0 ? "(none)" : r.tags.join(", ")}`,
   ];
+  // Directly under `status:`, because the twin's status is the field that
+  // disagrees and the reader is about to act on the one printed above.
+  if (alsoTypes !== undefined && alsoTypes.length > 0) {
+    lines.push(`also:       ${formatAlsoTypes(r.slug, alsoTypes)}`);
+  }
+  lines.push(
+    `tags:       ${r.tags.length === 0 ? "(none)" : r.tags.join(", ")}`,
+  );
   if (RECORDS[type].hasDesignSlug) {
     const hasDesign = r.design_slug !== undefined && r.design_slug.length > 0;
     const designValue = hasDesign
@@ -334,8 +355,13 @@ export function formatRecordJsonWindow(
     `[${json.type}] ${json.slug}`,
     `title:      ${json.title}`,
     `status:     ${json.status}`,
-    `tags:       ${json.tags.length === 0 ? "(none)" : json.tags.join(", ")}`,
   ];
+  if (json.also_types !== undefined && json.also_types.length > 0) {
+    lines.push(`also:       ${formatAlsoTypes(json.slug, json.also_types)}`);
+  }
+  lines.push(
+    `tags:       ${json.tags.length === 0 ? "(none)" : json.tags.join(", ")}`,
+  );
   if (json.design_slug !== undefined) {
     const hasDesign = json.design_slug.length > 0;
     const designValue = hasDesign
@@ -378,6 +404,22 @@ export function formatRecordJsonWindow(
     }
   }
   return lines.join("\n");
+}
+
+// One line naming every OTHER schema holding this slug, each with its own
+// status and a runnable command to read it. The status is included because a
+// bare type list ("also exists as a papercut") still leaves the reader
+// believing the status they just read applies to the defect — which is the
+// exact misread this line exists to stop.
+function formatAlsoTypes(
+  slug: string,
+  twins: readonly { type: RecordType; status: string }[],
+): string {
+  const rendered = twins
+    .map((t) => `${t.type} (status ${t.status})`)
+    .join(", ");
+  const example = twins[0]!.type;
+  return `${rendered} — read with \`fbrain get ${slug} --type ${example}\``;
 }
 
 function formatLinkedFrom(
