@@ -3,12 +3,15 @@ import {
   extractGraphEdges,
   maintainGraphEdges,
   readGraphEdges,
+  readGraphEdgesDetailed,
   reconcileGraphEdges,
   resetGraphEdgeInertNotice,
 } from "../../src/graph-edge.ts";
 import {
   GRAPH_EDGE_IN_SCHEMA_KEY,
+  GRAPH_EDGE_NEIGHBOR_FIELDS,
   GRAPH_EDGE_OUT_SCHEMA_KEY,
+  GRAPH_EDGE_RECONCILE_FIELDS,
   graphEdgeInSchema,
   graphEdgeOutSchema,
 } from "../../src/schemas.ts";
@@ -25,13 +28,16 @@ const cfg = {
 
 function foldedNode() {
   const rows = new Map<string, Record<string, unknown>>();
+  const lastQueries: Array<{ schemaHash: string; fields: string[]; filter: unknown }> = [];
   const node = {
-    async queryAll({ schemaHash, filter }: any) {
+    lastQueries,
+    async queryAll({ schemaHash, fields, filter }: any) {
+      lastQueries.push({ schemaHash, fields: [...(fields ?? [])], filter });
       const hash = filter?.HashKey;
       const result = [...rows.values()].filter((f) =>
         schemaHash === OUT ? f.bge_src === hash : f.bge_dst === hash,
       );
-      return { results: result.map((fields) => ({ fields })) };
+      return { results: result.map((rowFields) => ({ fields: rowFields })) };
     },
     async createRecord({ fields }: any) {
       rows.set(`${fields.bge_src}|${fields.bge_out_r}`, fields);
@@ -224,5 +230,63 @@ describe("readGraphEdges against a node whose HashKey filter does not pick the i
       const neighbours = edges?.map((e) => (direction === "out" ? e.dst : e.src)) ?? [];
       expect(neighbours).not.toContain("octopus-design");
     }
+  });
+
+  test("droppedOwns counts union rows the owns predicate drops", async () => {
+    const detailed = await readGraphEdgesDetailed(
+      unionNode(rows),
+      cfg as any,
+      "octopus-design",
+      "out",
+    );
+    expect(detailed.edges).toHaveLength(1);
+    expect(detailed.droppedOwns).toBe(2);
+  });
+});
+
+describe("graph-edge neighbor vs reconcile field lists", () => {
+  test("neighbor HashKey omits range keys and created_at", async () => {
+    const { node } = foldedNode();
+    await reconcileGraphEdges({
+      node,
+      cfg: cfg as any,
+      sourceSlug: "source",
+      body: "[[implements::design-a]]",
+      now: "2026-08-18T00:00:00Z",
+    });
+    node.lastQueries.length = 0;
+    await readGraphEdges(node, cfg as any, "source", "out");
+    expect(node.lastQueries).toHaveLength(1);
+    expect(node.lastQueries[0]!.filter).toEqual({ HashKey: "source" });
+    expect(node.lastQueries[0]!.fields).toEqual([...GRAPH_EDGE_NEIGHBOR_FIELDS]);
+    expect(node.lastQueries[0]!.fields).not.toContain("bge_out_r");
+    expect(node.lastQueries[0]!.fields).not.toContain("bge_in_r");
+    expect(node.lastQueries[0]!.fields).not.toContain("bge_created_at");
+  });
+
+  test("reconcile HashKey includes created_at so a second put keeps the timestamp", async () => {
+    const { node } = foldedNode();
+    await reconcileGraphEdges({
+      node,
+      cfg: cfg as any,
+      sourceSlug: "source",
+      body: "[[implements::design-a]]",
+      now: "2026-08-18T00:00:00Z",
+    });
+    node.lastQueries.length = 0;
+    await reconcileGraphEdges({
+      node,
+      cfg: cfg as any,
+      sourceSlug: "source",
+      body: "[[implements::design-a]]",
+      now: "2026-09-02T00:00:00Z",
+    });
+    expect(node.lastQueries[0]!.fields).toEqual([...GRAPH_EDGE_RECONCILE_FIELDS]);
+    expect(node.lastQueries[0]!.fields).toContain("bge_created_at");
+    expect(node.lastQueries[0]!.filter).toEqual({ HashKey: "source" });
+    const edges = await readGraphEdges(node, cfg as any, "source", "out", {
+      fields: GRAPH_EDGE_RECONCILE_FIELDS,
+    });
+    expect(edges?.[0]?.created_at).toBe("2026-08-18T00:00:00Z");
   });
 });

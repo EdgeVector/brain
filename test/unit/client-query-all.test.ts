@@ -362,3 +362,40 @@ describe("newNodeClient.queryByKey ignored-filter guard", () => {
     });
   });
 });
+
+describe("newNodeClient.queryAll keyed-filter allow-list", () => {
+  test("a non-empty HashRangePrefix is keyed and does not throw full_scan_not_allowed", async () => {
+    const { calls } = installMockSequence([
+      {
+        status: 200,
+        body: {
+          ok: true,
+          results: [row("target")],
+          total_count: 1,
+          has_more: false,
+        },
+      },
+    ]);
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    const r = await c.queryAll({
+      schemaHash: "h",
+      fields: ["slug"],
+      filter: { HashRangePrefix: { hash: "target", prefix: "implements#" } },
+    });
+    expect(r.results).toHaveLength(1);
+    expect(calls[0]?.body).toMatchObject({
+      filter: { HashRangePrefix: { hash: "target", prefix: "implements#" } },
+    });
+  });
+
+  test("an unkeyed queryAll still throws full_scan_not_allowed", async () => {
+    const c = newNodeClient({ baseUrl: "http://127.0.0.1:9001", userHash: "u" });
+    try {
+      await c.queryAll({ schemaHash: "h", fields: ["slug"] });
+      throw new Error("did not throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FbrainError);
+      expect((err as FbrainError).code).toBe("full_scan_not_allowed");
+    }
+  });
+});

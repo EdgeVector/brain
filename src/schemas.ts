@@ -1289,6 +1289,20 @@ export const GRAPH_EDGE_FIELDS = [
   "bge_in_r",
 ] as const;
 
+/** Neighbor / path / query / lint / adjacency. Omits range keys and created_at. */
+export const GRAPH_EDGE_NEIGHBOR_FIELDS = [
+  "bge_src",
+  "bge_dst",
+  "bge_type",
+  "bge_provenance",
+] as const;
+
+/** Reconcile must keep created_at so a second put does not reset the timestamp. */
+export const GRAPH_EDGE_RECONCILE_FIELDS = [
+  ...GRAPH_EDGE_NEIGHBOR_FIELDS,
+  "bge_created_at",
+] as const;
+
 function graphEdgeSchema(
   name: string,
   hashField: "bge_src" | "bge_dst",
