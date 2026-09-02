@@ -10,7 +10,7 @@ type PutConfirmation = {
   // 760 live records behind `brain list` before anyone noticed (2026-07-28).
   listIndexFailed?: boolean;
   revision?: string;
-  durability?: "queued" | "local";
+  durability?: "queued" | "durable";
   search?: "queued" | "ready";
 };
 

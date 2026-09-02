@@ -232,4 +232,86 @@ describe("buildResidentWritePlan", () => {
       expect((error as Error).message).toContain("projections: primary");
     }
   });
+
+  test("durable resident commit makes one batch call and accepts exact durable", async () => {
+    const calls: unknown[][] = [];
+    const node = {
+      ...mockNode(),
+      mutateBatch: async (...args: Parameters<NonNullable<NodeClient["mutateBatch"]>>) => {
+        calls.push(args);
+        return {
+          mutationIds: ["m1"],
+          count: 1,
+          backgroundTasksDrained: false,
+          convergencePending: true,
+          durability: "durable" as const,
+        };
+      },
+    } as NodeClient;
+    const receipt = await commitResidentWritePlan({
+      node,
+      type: "concept",
+      slug: "durable-note",
+      durable: true,
+      plan: {
+        action: "created",
+        counts: { created: 1, updated: 0, deleted: 0, no_op: 0 },
+        ops: [
+          {
+            mutationType: "create",
+            schemaHash: TEST_HASHES.concept,
+            keyHash: "durable-note",
+            fields: {},
+            projection: "primary",
+          },
+        ],
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[1]).toEqual({ durability: "durable" });
+    expect(receipt.durability).toBe("durable");
+  });
+
+  for (const durability of ["queued", undefined] as const) {
+    test(`durable resident commit rejects ${durability ?? "missing"} without a retry`, async () => {
+      let calls = 0;
+      const node = {
+        ...mockNode(),
+        mutateBatch: async () => {
+          calls++;
+          return {
+            mutationIds: ["m1"],
+            count: 1,
+            backgroundTasksDrained: true,
+            convergencePending: false,
+            ...(durability ? { durability } : {}),
+          };
+        },
+      } as NodeClient;
+
+      await expect(
+        commitResidentWritePlan({
+          node,
+          type: "concept",
+          slug: "durable-note",
+          durable: true,
+          plan: {
+            action: "created",
+            counts: { created: 1, updated: 0, deleted: 0, no_op: 0 },
+            ops: [
+              {
+                mutationType: "create",
+                schemaHash: TEST_HASHES.concept,
+                keyHash: "durable-note",
+                fields: {},
+                projection: "primary",
+              },
+            ],
+          },
+        }),
+      ).rejects.toMatchObject({ code: "durability_not_confirmed" });
+      expect(calls).toBe(1);
+    });
+  }
 });
