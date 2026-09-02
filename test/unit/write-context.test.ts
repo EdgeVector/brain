@@ -129,6 +129,56 @@ describe("newWriteNodeClient — enforcement ON", () => {
     expect(query!.headers["X-App-Capability"]).toBeUndefined();
     expect(query!.headers["X-Capability-Ts"]).toBeUndefined();
   });
+
+  test("durable batch does not retry a capability rejection", async () => {
+    process.env.FBRAIN_APP_IDENTITY_ENFORCE = "true";
+    const blob = await mintTokenBlob();
+    const store = inMemoryCapabilityStore();
+    await store.save({
+      appId: "fbrain",
+      nodeUrl: NODE_URL,
+      nodePubkey: NODE_PUBKEY,
+      capabilityId: "cap-1234",
+      blob,
+    });
+
+    let batchCalls = 0;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.endsWith("/api/mutations/batch")) {
+        batchCalls++;
+        return new Response(
+          JSON.stringify({ status: 403, reason: "capability_expired" }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const { node } = newWriteNodeClient({
+      baseUrl: NODE_URL,
+      userHash: "u",
+      store,
+      print: () => {},
+    });
+    await expect(
+      node.mutateBatch!(
+        [
+          {
+            mutationType: "create",
+            schemaHash: "h",
+            keyHash: "s",
+            fields: { slug: "s" },
+          },
+        ],
+        { durability: "durable" },
+      ),
+    ).rejects.toMatchObject({ capabilityReason: "capability_expired" });
+    expect(batchCalls).toBe(1);
+  });
 });
 
 describe("newWriteNodeClient — non-interactive consent fast-fail", () => {

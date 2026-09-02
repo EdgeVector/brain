@@ -142,13 +142,18 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
     async deleteRecord(args) {
       await session.runWrite(() => base.deleteRecord(args));
     },
-    async mutateBatch(args) {
-      return session.runWrite(() => {
+    async mutateBatch(args, options) {
+      const send = () => {
         if (!base.mutateBatch) {
           throw new Error("node client is missing mutateBatch");
         }
-        return base.mutateBatch(args);
-      });
+        return base.mutateBatch(args, options);
+      };
+      if (options?.durability === "durable") {
+        await session.ensureCapability();
+        return send();
+      }
+      return session.runWrite(send);
     },
   };
 

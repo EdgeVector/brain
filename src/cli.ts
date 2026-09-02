@@ -48,7 +48,7 @@ import { findCmd } from "./commands/find.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
 import { shareCmd } from "./commands/share.ts";
-import { putCmd } from "./commands/put.ts";
+import { putCmd, type PutResult } from "./commands/put.ts";
 import { appendCmd } from "./commands/append.ts";
 import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
@@ -334,7 +334,7 @@ live capability is already on disk.
   spike: simpleNewHelp("spike"),
   sop: simpleNewHelp("sop"),
   decision: simpleNewHelp("decision"),
-  put: `fbrain put [<slug>] [--type T] [--json]
+  put: `fbrain put [<slug>] [--type T] [--durable] [--json]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
 and upsert a record. Re-putting the same slug updates in place —
@@ -350,6 +350,8 @@ If both are set and disagree, the put errors with type_conflict.
 
   --type    ${RECORD_TYPE_LIST}
             (case-insensitive; overrides absent frontmatter, errors on conflict)
+  --durable require an exact durable disk receipt for the one resident batch.
+            This option does not wait for search readiness.
   --json    emit \`{ok, slug, created}\` on stdout (\`created\` is true on insert,
             false on update); the human \`created/updated …\` line moves to
             stderr so \`--json\` stdout is always parseable. On failure a
@@ -1108,6 +1110,9 @@ const TASK_OPTIONS = {
 } as const;
 const PUT_OPTIONS = {
   type: { type: "string" },
+  // Ask Fold for a durable receipt on every operation in the one resident
+  // batch. A queued or missing receipt fails the command without a retry.
+  durable: { type: "boolean", default: false },
   // Opt out of the body-shrink guard: allow a re-put whose body is
   // dramatically smaller than the existing record's (a deliberate truncation).
   // Without it, a re-put that would drop >half the existing body — or clear a
@@ -2427,6 +2432,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   if (positionals[0]) pOpts.slug = positionals[0];
   if (values.type !== undefined) pOpts.typeOverride = values.type;
   if (values["allow-shrink"]) pOpts.allowShrink = true;
+  if (values.durable) pOpts.durable = true;
   if (verbose) pOpts.verbose = verbose;
   let result;
   try {
@@ -2458,25 +2464,27 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   // put's existing created/updated signal.
   if (values.json) {
     console.error(formatPutConfirmation(result));
-    console.log(
-      JSON.stringify({
-        ok: true,
-        action: result.action,
-        type: result.type,
-        slug: result.slug,
-        created: result.action === "created",
-        indexPending: result.indexPending,
-        write_id: result.writeId ?? null,
-        revision: result.revision ?? null,
-        exact_projections: result.exactProjections ?? null,
-        durability: result.durability ?? "queued",
-        search: result.search ?? "queued",
-      }),
-    );
+    console.log(JSON.stringify(putJsonPayload(result)));
   } else {
     console.log(formatPutConfirmation(result));
   }
   return 0;
+}
+
+export function putJsonPayload(result: PutResult): Record<string, unknown> {
+  return {
+    ok: true,
+    action: result.action,
+    type: result.type,
+    slug: result.slug,
+    created: result.action === "created",
+    indexPending: result.indexPending,
+    write_id: result.writeId ?? null,
+    revision: result.revision ?? null,
+    exact_projections: result.exactProjections ?? null,
+    durability: result.durability ?? "queued",
+    search: result.search ?? "queued",
+  };
 }
 
 async function runAppend(args: Argv, verbose: Verbose): Promise<number> {

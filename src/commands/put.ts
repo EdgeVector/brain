@@ -78,6 +78,9 @@ export type PutOptions = {
   // — the data-loss protection for the get(windowed)→edit→re-put loop. Set
   // true (`--allow-shrink` / MCP `allow_shrink`) for a deliberate truncation.
   allowShrink?: boolean;
+  // Ask Fold to confirm disk durability for every operation in the exact
+  // resident batch. A queued or missing receipt fails closed.
+  durable?: boolean;
 };
 
 export type PutResult = {
@@ -102,7 +105,7 @@ export type PutResult = {
   listIndexFailed: boolean;
   writeId?: string;
   revision?: string;
-  durability?: "queued" | "local";
+  durability?: "queued" | "durable";
   search?: "queued" | "ready";
   exactProjections?: {
     created: number;
@@ -246,9 +249,15 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     frontmatterEdges,
     now,
   });
-  const receipt = await commitResidentWritePlan({ node, plan, type, slug });
+  const receipt = await commitResidentWritePlan({
+    node,
+    plan,
+    type,
+    slug,
+    durable: opts.durable,
+  });
   const writeId = receipt.mutationIds[0];
-  const durability = receipt.backgroundTasksDrained ? "local" : "queued";
+  const durability = receipt.durability ?? "queued";
   const search = receipt.backgroundTasksDrained ? "ready" : "queued";
   return {
     type,

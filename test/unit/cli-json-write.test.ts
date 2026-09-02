@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { CLI_SPEC, main } from "../../src/cli.ts";
+import { CLI_SPEC, main, putJsonPayload } from "../../src/cli.ts";
 import { writeConfig } from "../../src/config.ts";
 import { answerTypeListIndexQuery, buildTestCfg } from "../util.ts";
 
@@ -91,6 +91,63 @@ describe("--json is a recognized flag on every write verb", () => {
       expect(parsed).toHaveProperty("error");
     });
   }
+});
+
+describe("put durable CLI contract", () => {
+  test("CLI_SPEC.put accepts --durable", () => {
+    const { values } = parseArgs({
+      args: ["--durable"],
+      strict: true,
+      allowPositionals: true,
+      options: CLI_SPEC.put,
+    });
+    expect(values.durable).toBe(true);
+  });
+
+  test("real put argv accepts --durable", async () => {
+    const { stdout, stderr } = await runCli([
+      "put",
+      "durable-note",
+      "--type",
+      "concept",
+      "--durable",
+      "--json",
+    ]);
+    expect(stderr).not.toContain("Unknown option");
+    expect(JSON.parse(stdout.trim())).toHaveProperty("error");
+  });
+
+  test("durable JSON reports disk durability without changing search state", () => {
+    const payload = putJsonPayload({
+      type: "concept",
+      slug: "durable-note",
+      action: "created",
+      title: "Durable note",
+      indexPending: true,
+      listIndexFailed: false,
+      writeId: "m1",
+      revision: "m1",
+      durability: "durable",
+      search: "queued",
+      exactProjections: {
+        created: 2,
+        updated: 0,
+        deleted: 0,
+        no_op: 0,
+      },
+    });
+
+    expect(payload.durability).toBe("durable");
+    expect(payload.search).toBe("queued");
+    expect(payload.indexPending).toBe(true);
+  });
+
+  test("put help documents --durable and its search boundary", async () => {
+    const { code, stdout } = await runCli(["help", "put"]);
+    expect(code).toBe(0);
+    expect(stdout).toContain("--durable");
+    expect(stdout).toContain("does not wait for search readiness");
+  });
 });
 
 describe("write-verb help documents --json + the emitted object", () => {
