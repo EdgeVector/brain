@@ -5,6 +5,7 @@ import {
   ensurePapercutStatusMembership,
   maintainPapercutStatusIndex,
   markPapercutStatusIndexMigrated,
+  PAPERCUT_HYDRATE_BATCH_SIZE,
   patchPapercutStatusIndex,
   persistPapercutWithStatusMembership,
   readPapercutsByStatus,
@@ -108,6 +109,17 @@ function makeNode(
     },
     async queryAll({ filter, allowFullScan }: any) {
       calls.push({ op: "query", filter, allowFullScan });
+      const hashKeys = filter?.HashKeys as string[] | undefined;
+      if (Array.isArray(hashKeys)) {
+        return {
+          results: hashKeys.flatMap((slug) => {
+            const record = records[slug];
+            return record
+              ? [{ fields: record, key: { hash: slug, range: null } }]
+              : [];
+          }),
+        };
+      }
       const hrk = filter?.HashRangeKey as
         | { hash: string; range: string }
         | undefined;
@@ -238,6 +250,48 @@ describe("status-keyed papercut reads", () => {
       .map((call) => (call.filter as any).HashKey);
     expect(hashes).toEqual([...PAPERCUT_STATUSES]);
     expect(calls.some((call) => call.allowFullScan === true)).toBe(false);
+  });
+
+  test("filtered render hydrates one partition in HashKeys batches, not a serial point loop", async () => {
+    const n = 400;
+    const openRows: Record<string, ReturnType<typeof papercut>> = {};
+    for (let i = 0; i < n; i++) {
+      const rec = papercut(`open-${String(i).padStart(3, "0")}`, "open");
+      openRows[rec.slug] = rec;
+    }
+    const { node, calls } = makeNode({
+      rows: { open: openRows },
+      migrated: true,
+    });
+    const started = Date.now();
+    const got = await readPapercutsByStatus(node, REGISTERED, "open");
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(got).toHaveLength(n);
+    const queryCalls = calls.filter((call) => call.op === "query");
+    expect(queryCalls.length).toBeLessThanOrEqual(
+      Math.ceil(n / PAPERCUT_HYDRATE_BATCH_SIZE) + 2,
+    );
+    const hashKeysCalls = queryCalls.filter((call) =>
+      Array.isArray((call.filter as any)?.HashKeys),
+    );
+    expect(hashKeysCalls).toHaveLength(Math.ceil(n / PAPERCUT_HYDRATE_BATCH_SIZE));
+    expect(
+      hashKeysCalls.every(
+        (call) =>
+          ((call.filter as any).HashKeys as string[]).length <=
+          PAPERCUT_HYDRATE_BATCH_SIZE,
+      ),
+    ).toBe(true);
+  });
+
+  test("batched hydrate still drops a stale index row whose primary status moved", async () => {
+    const live = papercut("moved", "fixed");
+    const { node } = makeNode({
+      rows: { open: { moved: papercut("moved", "open") } },
+      records: { moved: live },
+      migrated: true,
+    });
+    expect(await readPapercutsByStatus(node, REGISTERED, "open")).toEqual([]);
   });
 });
 
