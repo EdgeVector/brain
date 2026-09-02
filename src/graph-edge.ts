@@ -2,9 +2,10 @@ import type { NodeClient, QueryRow } from "./client.ts";
 import type { Config } from "./config.ts";
 import { normalizeSlug } from "./record.ts";
 import {
-  GRAPH_EDGE_FIELDS,
   GRAPH_EDGE_IN_SCHEMA_KEY,
+  GRAPH_EDGE_NEIGHBOR_FIELDS,
   GRAPH_EDGE_OUT_SCHEMA_KEY,
+  GRAPH_EDGE_RECONCILE_FIELDS,
 } from "./schemas.ts";
 
 export const GRAPH_EDGE_TYPES = [
@@ -76,18 +77,30 @@ export function graphEdgeHashes(
   return out && inbound ? { out, in: inbound } : null;
 }
 
-export async function readGraphEdges(
+export type ReadGraphEdgesOpts = {
+  fields?: readonly string[];
+  verbose?: (message: string) => void;
+};
+
+export type ReadGraphEdgesDetailed = {
+  edges: GraphEdge[] | null;
+  droppedOwns: number;
+};
+
+export async function readGraphEdgesDetailed(
   node: NodeClient,
   cfg: Pick<Config, "schemaHashes">,
   slug: string,
   direction: "out" | "in",
-): Promise<GraphEdge[] | null> {
+  opts?: ReadGraphEdgesOpts,
+): Promise<ReadGraphEdgesDetailed> {
   const hashes = graphEdgeHashes(cfg);
-  if (!hashes) return null;
+  if (!hashes) return { edges: null, droppedOwns: 0 };
   const key = normalizeSlug(slug).toLowerCase();
+  const fields = [...(opts?.fields ?? GRAPH_EDGE_NEIGHBOR_FIELDS)];
   const res = await node.queryAll({
     schemaHash: hashes[direction],
-    fields: [...GRAPH_EDGE_FIELDS],
+    fields,
     filter: { HashKey: key },
   });
   // Measured on the primary brain 2026-08-24: querying either plane's schema
@@ -102,11 +115,28 @@ export async function readGraphEdges(
   const owns = direction === "out"
     ? (edge: GraphEdge) => edge.src === key
     : (edge: GraphEdge) => edge.dst === key;
-  return res.results
+  const mapped = res.results
     .map(rowToEdge)
-    .filter((edge): edge is GraphEdge => edge !== null)
-    .filter(owns)
-    .sort(compareEdges);
+    .filter((edge): edge is GraphEdge => edge !== null);
+  const kept = mapped.filter(owns).sort(compareEdges);
+  return { edges: kept, droppedOwns: mapped.length - kept.length };
+}
+
+export async function readGraphEdges(
+  node: NodeClient,
+  cfg: Pick<Config, "schemaHashes">,
+  slug: string,
+  direction: "out" | "in",
+  opts?: ReadGraphEdgesOpts,
+): Promise<GraphEdge[] | null> {
+  const detailed = await readGraphEdgesDetailed(node, cfg, slug, direction, opts);
+  if (detailed.edges !== null) {
+    opts?.verbose?.(
+      `graph-edges ${direction} fields=${(opts?.fields ?? GRAPH_EDGE_NEIGHBOR_FIELDS).length} ` +
+        `kept=${detailed.edges.length} droppedOwns=${detailed.droppedOwns}`,
+    );
+  }
+  return detailed.edges;
 }
 
 export async function reconcileGraphEdges(opts: {
@@ -120,7 +150,9 @@ export async function reconcileGraphEdges(opts: {
 }): Promise<number> {
   const hashes = graphEdgeHashes(opts.cfg);
   if (!hashes) return 0;
-  const existing = (await readGraphEdges(opts.node, opts.cfg, opts.sourceSlug, "out")) ?? [];
+  const existing = (await readGraphEdges(opts.node, opts.cfg, opts.sourceSlug, "out", {
+    fields: GRAPH_EDGE_RECONCILE_FIELDS,
+  })) ?? [];
   const desired = extractGraphEdges(opts);
   if (opts.preserveExistingFrontmatter) {
     for (const edge of existing) {

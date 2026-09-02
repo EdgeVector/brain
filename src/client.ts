@@ -1211,11 +1211,17 @@ export function newNodeClient(opts: {
     filter?: { HashKey?: string; [k: string]: unknown };
   }): Promise<QueryResponse> => {
     // Keyed filters never need the admin full-scan header.
+    // HashRangePrefix / Range / Keys are is_key_restricted on Mini (LastGit
+    // already allows them). Do not add scan-class RangePrefix / HashRange.
     const keyed =
       filter !== undefined &&
       typeof filter === "object" &&
       filter !== null &&
-      ("HashKey" in filter || "HashRangeKey" in filter);
+      ("HashKey" in filter ||
+        "HashRangeKey" in filter ||
+        "HashRangePrefix" in filter ||
+        "HashRangeRange" in filter ||
+        "HashRangeKeys" in filter);
     if (!keyed && allowFullScan !== true) {
       throw new FbrainError({
         code: "full_scan_not_allowed",
