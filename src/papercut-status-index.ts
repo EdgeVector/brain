@@ -163,6 +163,84 @@ export async function unmarkPapercutStatusIndexMigrated(
   return true;
 }
 
+/** Slugs hydrated per keyed `HashKeys` query. `N/8 + 2` node reads at N=400. */
+export const PAPERCUT_HYDRATE_BATCH_SIZE = 8;
+/** Parallel point-read width when the node rejects `HashKeys`. */
+export const PAPERCUT_HYDRATE_CONCURRENCY = 16;
+
+function chunkSlugs(slugs: readonly string[], size: number): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < slugs.length; i += size) {
+    out.push(slugs.slice(i, i + size));
+  }
+  return out;
+}
+
+function isUnsupportedHashKeysFilter(error: unknown): boolean {
+  const text =
+    error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /hashkeys|unknown filter|unrecognized filter|invalid filter|bad request/i.test(
+    text,
+  );
+}
+
+async function hydratePapercutsBySlug(opts: {
+  node: NodeClient;
+  papercutHash: string;
+  slugs: readonly string[];
+  findBySlug: (
+    node: NodeClient,
+    type: "papercut",
+    schemaHash: string,
+    slug: string,
+  ) => Promise<FbrainRecord | null>;
+  fieldsFor: (type: "papercut") => string[];
+  rowToRecord: (row: QueryRow, type: "papercut") => FbrainRecord;
+}): Promise<Map<string, FbrainRecord>> {
+  const bySlug = new Map<string, FbrainRecord>();
+  if (opts.slugs.length === 0) return bySlug;
+  const fields = opts.fieldsFor("papercut");
+  const batches = chunkSlugs(opts.slugs, PAPERCUT_HYDRATE_BATCH_SIZE);
+  try {
+    for (const batch of batches) {
+      const res = await opts.node.queryAll({
+        schemaHash: opts.papercutHash,
+        fields,
+        filter: { HashKeys: batch },
+      });
+      for (const row of res.results) {
+        const record = opts.rowToRecord(row, "papercut");
+        if (record.slug.length > 0) bySlug.set(record.slug, record);
+      }
+    }
+    return bySlug;
+  } catch (error) {
+    if (!isUnsupportedHashKeysFilter(error)) throw error;
+  }
+  // Live Mini without HashKeys: bounded-parallel point reads, not a serial loop.
+  const pending = [...opts.slugs];
+  const width = Math.min(PAPERCUT_HYDRATE_CONCURRENCY, pending.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: width }, async () => {
+      for (;;) {
+        const i = next;
+        next += 1;
+        if (i >= pending.length) return;
+        const slug = pending[i]!;
+        const record = await opts.findBySlug(
+          opts.node,
+          "papercut",
+          opts.papercutHash,
+          slug,
+        );
+        if (record) bySlug.set(slug, record);
+      }
+    }),
+  );
+  return bySlug;
+}
+
 export async function requireCompletePapercutStatusIndex(
   node: NodeClient,
   cfg: SchemaCfg,
@@ -201,9 +279,8 @@ export async function readPapercutsByStatus(
 ): Promise<FbrainRecord[]> {
   const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
   const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
-  const { findBySlug, isTombstoned, schemaHashFor } = await import(
-    "./record.ts"
-  );
+  const { findBySlug, isTombstoned, schemaHashFor, fieldsFor, rowToRecord } =
+    await import("./record.ts");
   const papercutHash = schemaHashFor("papercut", cfg);
   const out: FbrainRecord[] = [];
   for (const partition of statuses) {
@@ -212,10 +289,21 @@ export async function readPapercutsByStatus(
       fields: [...PAPERCUT_STATUS_INDEX_FIELDS],
       filter: { HashKey: partition },
     });
+    const slugs: string[] = [];
     for (const row of res.results) {
       const slug = slugFromEntryRow(row);
-      if (!slug) continue;
-      const record = await findBySlug(node, "papercut", papercutHash, slug);
+      if (slug) slugs.push(slug);
+    }
+    const hydrated = await hydratePapercutsBySlug({
+      node,
+      papercutHash,
+      slugs,
+      findBySlug,
+      fieldsFor,
+      rowToRecord,
+    });
+    for (const slug of slugs) {
+      const record = hydrated.get(slug);
       // Fail closed against a process dying between old-row deletion and the
       // new-row upsert: never serve a stale row under the wrong status.
       if (record && !isTombstoned(record) && record.status === partition)

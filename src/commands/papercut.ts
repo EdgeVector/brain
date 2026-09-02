@@ -703,7 +703,7 @@ export function buildPapercutList(
 // dropped its `<component>` positional, so the promise that the filter was
 // actually applied is the load-bearing half of the line.
 export const LIST_METHOD =
-  "method: status-keyed papercut index (same read as `papercut census`), " +
+  "method: status-keyed papercut index with batched hydrate (same read as `papercut census`), " +
   "component/status filters applied, every matching row returned, oldest-updated first";
 
 export const LIST_MARK_MAX = 100;

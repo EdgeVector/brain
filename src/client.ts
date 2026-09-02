@@ -1216,7 +1216,12 @@ export function newNodeClient(opts: {
       filter !== undefined &&
       typeof filter === "object" &&
       filter !== null &&
-      ("HashKey" in filter || "HashRangeKey" in filter);
+      ("HashKey" in filter ||
+        "HashKeys" in filter ||
+        "HashRangeKey" in filter ||
+        "HashRangeKeys" in filter ||
+        "HashRangePrefix" in filter ||
+        "HashRangeRange" in filter);
     if (!keyed && allowFullScan !== true) {
       throw new FbrainError({
         code: "full_scan_not_allowed",
