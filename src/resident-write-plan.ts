@@ -481,6 +481,7 @@ export async function commitResidentWritePlan(opts: {
   plan: ResidentWritePlan;
   type: RecordType;
   slug: string;
+  durable?: boolean;
 }): Promise<BatchMutationResult> {
   if (!opts.node.mutateBatch) {
     throw new FbrainError({
@@ -490,7 +491,23 @@ export async function commitResidentWritePlan(opts: {
     });
   }
   try {
-    return await opts.node.mutateBatch(opts.plan.ops);
+    const receipt = await opts.node.mutateBatch(
+      opts.plan.ops,
+      opts.durable ? { durability: "durable" } : undefined,
+    );
+    if (opts.durable && receipt.durability !== "durable") {
+      throw new FbrainError({
+        code: "durability_not_confirmed",
+        message:
+          `the node did not confirm durable storage for ${opts.type} ${opts.slug} ` +
+          `(receipt: ${receipt.durability ?? "missing"})`,
+        hint:
+          "The resident batch can already exist. Read the record before a manual retry.",
+        agentHint:
+          "Do not retry automatically. Read the record and inspect node health before a manual retry.",
+      });
+    }
+    return receipt;
   } catch (err) {
     // Preserve typed transport and consent errors. Callers use their codes for
     // recovery, including the MCP cold-capability self-warm path.

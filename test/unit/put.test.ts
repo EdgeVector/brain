@@ -508,6 +508,10 @@ function installMock(handler: MockHandler): void {
             count: items.length,
             background_tasks_drained: false,
             convergence_pending: true,
+            durability:
+              items.length > 0 && items.every((item) => item.durability === "durable")
+                ? "durable"
+                : "queued",
           },
         };
       } catch {
@@ -584,6 +588,36 @@ afterEach(() => {
 });
 
 describe("putCmd — pre-request validation + dispatch", () => {
+  test("durable put marks every resident operation and keeps search readiness separate", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    installMock((url, init) => {
+      if (url.endsWith("/api/query")) {
+        return { status: 200, body: { ok: true, results: [] } };
+      }
+      if (url.endsWith("/api/mutation")) {
+        mutations.push(JSON.parse(String(init?.body ?? "{}")));
+        return { status: 200, body: { ok: true } };
+      }
+      return { status: 404 };
+    });
+
+    const result = await putCmd({
+      cfg,
+      slug: "durable-put",
+      input: "---\ntype: concept\ntitle: Durable put\n---\nbody",
+      durable: true,
+    });
+
+    expect(mutations.length).toBeGreaterThan(1);
+    for (const mutation of mutations) {
+      expect(mutation.durability).toBe("durable");
+      expect(mutation).not.toHaveProperty("synchronous");
+    }
+    expect(result.durability).toBe("durable");
+    expect(result.search).toBe("queued");
+    expect(result.indexPending).toBe(true);
+  });
+
   test("invalid slug rejects before any HTTP traffic", async () => {
     let touched = false;
     installMock(() => {

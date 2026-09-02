@@ -745,6 +745,11 @@ export type BatchMutationResult = {
   count: number;
   backgroundTasksDrained: boolean;
   convergencePending: boolean;
+  durability?: "queued" | "durable";
+};
+
+export type BatchMutationOptions = {
+  durability?: "durable";
 };
 
 export type NodeClient = {
@@ -806,7 +811,10 @@ export type NodeClient = {
     keyHash: string;
     keyRange?: string;
   }): Promise<void>;
-  mutateBatch?(ops: BatchMutationOp[]): Promise<BatchMutationResult>;
+  mutateBatch?(
+    ops: BatchMutationOp[],
+    options?: BatchMutationOptions,
+  ): Promise<BatchMutationResult>;
   queryAll(opts: {
     schemaHash: string;
     fields: string[];
@@ -1044,19 +1052,34 @@ export function newNodeClient(opts: {
       sdkTransport.target,
     );
 
+  const callJsonOnce = async (
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<{ status: number; body: unknown }> => {
+    const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
+    const { res, readBody } = await callNodeRaw(
+      url,
+      path,
+      method,
+      body,
+      userHash,
+      verbose,
+      headers,
+      socketPath,
+    );
+    const parsed = await readBody();
+    return { status: res.status, body: parsed };
+  };
+
   const callJson = async (
     path: string,
     method: "GET" | "POST",
     body?: unknown,
     extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> => {
-    const send = async (): Promise<{ status: number; body: unknown }> => {
-      const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
-      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, headers, socketPath);
-      const parsed = await readBody();
-      return { status: res.status, body: parsed };
-    };
-    const first = await send();
+    const first = await callJsonOnce(path, method, body, extraHeaders);
     // Re-pair once on a stale-session 403. A restarted node drops its in-memory
     // session token, so a request that was attested moments ago now returns
     // `403 {"error":"transport_not_attested"}`. Invalidate the cached token and
@@ -1065,7 +1088,7 @@ export function newNodeClient(opts: {
     if (first.status === 403 && bodyError(first.body) === TRANSPORT_NOT_ATTESTED) {
       verbose(`← NODE ${method} ${path} 403 transport_not_attested — re-pairing once`);
       invalidateSession();
-      return send();
+      return callJsonOnce(path, method, body, extraHeaders);
     }
     return first;
   };
@@ -1083,6 +1106,22 @@ export function newNodeClient(opts: {
     extraHeaders?: Record<string, string>,
   ): Promise<unknown> => {
     const { status, body: parsed } = await callJson(path, method, body, extraHeaders);
+    if (status !== 200) throw mapNodeError(status, parsed, path);
+    return parsed;
+  };
+
+  const callJsonOkOnce = async (
+    path: string,
+    method: "GET" | "POST",
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<unknown> => {
+    const { status, body: parsed } = await callJsonOnce(
+      path,
+      method,
+      body,
+      extraHeaders,
+    );
     if (status !== 200) throw mapNodeError(status, parsed, path);
     return parsed;
   };
@@ -1538,7 +1577,7 @@ export function newNodeClient(opts: {
       // writing a no-op atom rewriting the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash, keyRange);
     },
-    async mutateBatch(ops) {
+    async mutateBatch(ops, options) {
       if (ops.length === 0) {
         return {
           mutationIds: [],
@@ -1554,33 +1593,53 @@ export function newNodeClient(opts: {
         extraHeaders["X-Capability-Ts"] = String(Math.floor(Date.now() / 1000));
       }
       verbose(`→ NODE POST /api/mutations/batch count=${ops.length}`);
-      const parsed = await withSessionRepair(() =>
-        callJsonOk(
-          "/api/mutations/batch",
-          "POST",
-          {
-            mutations: ops.map((op) => ({
-              type: "mutation",
-              schema: op.schemaHash,
-              fields_and_values: op.fields,
-              key_value: { hash: op.keyHash, range: op.keyRange ?? null },
-              mutation_type: op.mutationType,
-            })),
-            convergence: "async",
-          },
-          extraHeaders,
-        ),
-      );
+      const requestBody = {
+        mutations: ops.map((op) => ({
+          type: "mutation",
+          schema: op.schemaHash,
+          fields_and_values: op.fields,
+          key_value: { hash: op.keyHash, range: op.keyRange ?? null },
+          mutation_type: op.mutationType,
+          ...(options?.durability === "durable"
+            ? { durability: "durable" as const }
+            : {}),
+        })),
+        convergence: "async",
+      };
+      // A durable write has ambiguous state after any error. Send it once and
+      // surface the first result; only the default queued path may repair an
+      // owner session and retry automatically.
+      const parsed =
+        options?.durability === "durable"
+          ? await callJsonOkOnce(
+              "/api/mutations/batch",
+              "POST",
+              requestBody,
+              extraHeaders,
+            )
+          : await withSessionRepair(() =>
+              callJsonOk(
+                "/api/mutations/batch",
+                "POST",
+                requestBody,
+                extraHeaders,
+              ),
+            );
       verbose(`← NODE POST /api/mutations/batch status=200`);
       const body = (parsed ?? {}) as Record<string, unknown>;
       const mutationIds = Array.isArray(body.mutation_ids)
         ? body.mutation_ids.filter((id): id is string => typeof id === "string")
         : [];
+      const durability =
+        body.durability === "queued" || body.durability === "durable"
+          ? body.durability
+          : undefined;
       return {
         mutationIds,
         count: typeof body.count === "number" ? body.count : ops.length,
         backgroundTasksDrained: body.background_tasks_drained === true,
         convergencePending: body.convergence_pending !== false,
+        ...(durability ? { durability } : {}),
       };
     },
     async queryAll({ schemaHash, fields, allowFullScan, filter }) {
