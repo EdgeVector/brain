@@ -437,6 +437,7 @@ describe("list", () => {
   test("the method line states that the filters were applied", () => {
     expect(LIST_METHOD).toContain("filters applied");
     expect(LIST_METHOD).toContain("every matching row");
+    expect(LIST_METHOD).toContain("batched hydrate");
   });
 
   // Human mode only. A `verified_by` transcript is meant to be long; eliding it
