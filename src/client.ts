@@ -48,6 +48,7 @@ import {
 
 import type { Config } from "./config.ts";
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
+import { beginFetch, endFetch } from "./slow-call.ts";
 
 export type Verbose = (msg: string) => void;
 
@@ -2239,6 +2240,10 @@ async function boundedNodeFetch(opts: {
     socketPath: opts.socketPath,
     routeSocket: localRouteSocket,
   };
+  // Slow-call accounting covers the same span as the deadline: send through
+  // body fully read, failures included — a timed-out fetch still spent the
+  // wall clock it is charged for.
+  const slowCallStart = beginFetch();
   try {
     if (localRouteSocket) {
       // Loopback node URL: socket-only, never the retired TCP port.
@@ -2267,6 +2272,7 @@ async function boundedNodeFetch(opts: {
     throw new BoundedFetchFailure(err, failureCtx);
   } finally {
     clearTimeout(timer);
+    endFetch(slowCallStart, `${opts.method} ${pathOnly(opts.path)}`);
   }
 }
 
