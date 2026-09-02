@@ -10,6 +10,7 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 import pkg from "../package.json" with { type: "json" };
 import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
+import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
 import { parseFieldProjection } from "./field-projection.ts";
 import { runInit } from "./commands/init.ts";
@@ -4413,10 +4414,15 @@ if (import.meta.main) {
     try {
       captureTopLevel = await initCliSentry();
       const code = await main(process.argv.slice(2));
+      // Before exit on both paths: a call that stalled past the slow-call
+      // threshold names which phase ate the wall clock (pre-send / node /
+      // between-requests / after-last-response) instead of vanishing.
+      reportSlowCall();
       process.exit(code);
     } catch (err) {
       await captureTopLevel(err, { entrypoint: "cli", top_level: "true" });
       console.error(err);
+      reportSlowCall();
       process.exit(1);
     }
   })();
