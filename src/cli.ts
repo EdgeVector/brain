@@ -961,7 +961,7 @@ Example:
                        [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
 brain papercut census [<component>] [--json]
-brain papercut list [<component>] [--status S] [--json]
+brain papercut list [<component>] [--status S] [--index-only] [--json]
 
 The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
 failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
@@ -988,6 +988,11 @@ list    The row-level view of the SAME read census counts, so the two can never
         component/severity/kind/repo/fixed_by/verified_by/duplicate_of — because
         those are what a closure audit is made of. Ordered oldest-updated first,
         which is the order the reconcile loop actually consumes.
+        --index-only returns slug + status partition straight from the keyed
+        index with NO per-record hydrate (one node read per partition instead
+        of one per row; the hydrated open ledger measured 214s on the primary).
+        The status is the partition key, not re-verified per record, and there
+        is no component filter — queue consumers point-get what they act on.
 
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
@@ -1363,6 +1368,8 @@ const PAPERCUT_OPTIONS = {
   "not-duplicate-of": { type: "string", multiple: true },
   // close
   status: { type: "string" },
+  // list
+  "index-only": { type: "boolean" },
   evidence: { type: "string" },
   "fixed-by": { type: "string" },
   "verified-by": { type: "string" },
@@ -4179,6 +4186,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   const lOpts: Parameters<typeof papercutListCmd>[0] = { cfg, verbose, json };
   if (component) lOpts.component = component;
   if (typeof values.status === "string") lOpts.status = values.status;
+  if (values["index-only"] === true) lOpts.indexOnly = true;
   await papercutListCmd(lOpts);
   return 0;
 }

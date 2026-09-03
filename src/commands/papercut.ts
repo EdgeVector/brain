@@ -33,7 +33,10 @@ import {
 import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import { recordListEntryHash } from "../record-list-index.ts";
-import { readPapercutsByStatus } from "../papercut-status-index.ts";
+import {
+  readPapercutSlugsByStatus,
+  readPapercutsByStatus,
+} from "../papercut-status-index.ts";
 import {
   buildResidentWritePlan,
   commitResidentWritePlan,
@@ -608,6 +611,11 @@ export type PapercutListOptions = {
   cfg: Config;
   component?: string;
   status?: string;
+  /**
+   * Slug + status partition only, no record hydrate. For queue consumers that
+   * re-verify on their own point-get. See `readPapercutSlugsByStatus`.
+   */
+  indexOnly?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -706,6 +714,16 @@ export const LIST_METHOD =
   "method: status-keyed papercut index with batched hydrate (same read as `papercut census`), " +
   "component/status filters applied, every matching row returned, oldest-updated first";
 
+// The index-only projection has to say what it did NOT do: the row's `status`
+// is the partition key the slug was found under and was not re-verified
+// against the record, and no header field beyond slug/status is present. A
+// consumer that reads this as the hydrated ledger would treat a missing field
+// as an empty one — the exact defect the hydrated row type exists to prevent.
+export const LIST_INDEX_ONLY_METHOD =
+  "method: status-keyed papercut index, index-only projection (slug + status partition; " +
+  "records not hydrated, status not re-verified per record, no component filter), " +
+  "status filter applied, every matching row returned, slug order";
+
 export const LIST_MARK_MAX = 100;
 
 /** Single-line, length-capped rendering for human mode only. */
@@ -719,6 +737,36 @@ export async function papercutListCmd(
 ): Promise<void> {
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  if (opts.indexOnly) {
+    // One keyed partition read, zero point hydrates. The hydrated reader below
+    // measured 214s for the 2171-row open ledger on the primary (2026-09-03),
+    // which starved every fleet consumer with a 20s read cap.
+    if (opts.component !== undefined) {
+      throw new FbrainError({
+        code: "papercut_list_index_only_no_component",
+        message:
+          "`--index-only` reads the status-keyed index without hydrating records, and `component` is a record field the index does not carry.",
+        hint: "Drop the <component> positional for --index-only, or drop --index-only to get the hydrated, component-filtered ledger.",
+      });
+    }
+    const rows = (
+      await readPapercutSlugsByStatus(node, opts.cfg, opts.status)
+    ).sort((a, b) => a.slug.localeCompare(b.slug));
+    if (opts.json) {
+      print(
+        JSON.stringify({
+          rows,
+          total: rows.length,
+          method: LIST_INDEX_ONLY_METHOD,
+        }),
+      );
+      return;
+    }
+    for (const r of rows) print(`${r.status.padEnd(9)} ${r.slug}`);
+    print(`${rows.length} row(s)`);
+    print(LIST_INDEX_ONLY_METHOD);
+    return;
+  }
   // Read one status partition when the caller named one; the whole ledger
   // otherwise. `readPapercutsByStatus` is the same complete reader `census`
   // uses, so list and census are two views of ONE read and cannot disagree.
