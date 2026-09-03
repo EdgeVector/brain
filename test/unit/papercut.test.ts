@@ -23,7 +23,12 @@ import {
   elide,
   LIST_MARK_MAX,
   LIST_INDEX_ONLY_METHOD,
+  CENSUS_METHOD,
+  CENSUS_METHOD_FAST,
+  censusMethod,
   LIST_METHOD,
+  LIST_METHOD_FAST,
+  listMethod,
   isIdempotentPapercutFile,
   papercutCloseCmd,
   papercutFileCmd,
@@ -509,10 +514,41 @@ describe("list", () => {
 
   // The method line is the honesty contract; the old reader's hint named a
   // `-n N` flag its own strict parser rejected.
-  test("the method line states that the filters were applied", () => {
-    expect(LIST_METHOD).toContain("filters applied");
-    expect(LIST_METHOD).toContain("every matching row");
-    expect(LIST_METHOD).toContain("batched hydrate");
+  // census and list are two views of ONE read, so their method lines have to
+  // agree about which read that was — otherwise a count and its rows can be
+  // taken from different readings and nothing says so.
+  test("the census method line names the same two readings as the list line", () => {
+    for (const line of [CENSUS_METHOD, CENSUS_METHOD_FAST]) {
+      expect(line).toContain("status-keyed papercut index");
+      expect(line).toContain("live = open+partial+fixed");
+    }
+    expect(CENSUS_METHOD_FAST).toContain("index payload snapshot");
+    expect(CENSUS_METHOD_FAST).toContain("NOT point-read");
+    expect(CENSUS_METHOD).toContain("point-read");
+    expect(CENSUS_METHOD).not.toContain("payload snapshot");
+    // --fast must name the two fields it can serve stale, or a reader has no
+    // way to know the ordering it just used was not the ledger's.
+    expect(CENSUS_METHOD_FAST).toContain("updated_at");
+    expect(CENSUS_METHOD_FAST).toContain("tags");
+    expect(censusMethod(false)).toBe(CENSUS_METHOD);
+    expect(censusMethod(true)).toBe(CENSUS_METHOD_FAST);
+  });
+
+  test("the method line states that the filters were applied, and which read produced the rows", () => {
+    for (const line of [LIST_METHOD, LIST_METHOD_FAST]) {
+      expect(line).toContain("filters applied");
+      expect(line).toContain("every matching row");
+      expect(line).toContain("status-keyed papercut index");
+    }
+    // The two readings do not cost the same and do not catch the same defects,
+    // so a reader must be able to tell from the line alone which one ran.
+    expect(LIST_METHOD_FAST).toContain("index payload snapshot");
+    expect(LIST_METHOD_FAST).toContain("NOT point-read");
+    expect(LIST_METHOD).toContain("point-read");
+    expect(LIST_METHOD).not.toContain("payload snapshot");
+    expect(LIST_METHOD_FAST).toContain("possibly-stale updated_at");
+    expect(listMethod(false)).toBe(LIST_METHOD);
+    expect(listMethod(true)).toBe(LIST_METHOD_FAST);
   });
 
   // The index-only line must name what it skipped, and must still identify

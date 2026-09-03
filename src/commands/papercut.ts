@@ -592,6 +592,8 @@ export async function papercutCloseCmd(
 export type PapercutCensusOptions = {
   cfg: Config;
   component?: string;
+  /** Serve records from the index payload snapshot instead of point-reading. */
+  fast?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -655,26 +657,41 @@ export function buildCensus(
 // 44.5% win got reported as a 2.2% regression, and how a truncated
 // enumeration got copied into durable memory as a fact.
 export const CENSUS_METHOD =
-  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration); " +
+  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
+  "every record point-read and re-checked against its partition; " +
   "live = open+partial+fixed";
+
+/** The same census, counted from the snapshot the index already carries. */
+export const CENSUS_METHOD_FAST =
+  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
+  "records read from the index payload snapshot, NOT point-read (--fast): " +
+  "component/status/severity/kind/repo/title/fixed_by/verified_by/duplicate_of are current, " +
+  "updated_at and tags can lag a write made before this index was last rebuilt; " +
+  "live = open+partial+fixed";
+
+export function censusMethod(fast: boolean): string {
+  return fast ? CENSUS_METHOD_FAST : CENSUS_METHOD;
+}
 
 export async function papercutCensusCmd(
   opts: PapercutCensusOptions,
 ): Promise<void> {
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  const records = await readPapercutsByStatus(node, opts.cfg);
+  const fast = opts.fast === true;
+  const method = censusMethod(fast);
+  const records = await readPapercutsByStatus(node, opts.cfg, undefined, {
+    fast,
+  });
   const rows = buildCensus(records, opts.component);
 
   if (opts.json) {
-    print(
-      JSON.stringify({ rows, method: CENSUS_METHOD, scanned: records.length }),
-    );
+    print(JSON.stringify({ rows, method, scanned: records.length }));
     return;
   }
   if (rows.length === 0) {
     print("no papercuts");
-    print(CENSUS_METHOD);
+    print(method);
     return;
   }
   const header =
@@ -685,7 +702,7 @@ export async function papercutCensusCmd(
       `${String(r.partial).padStart(4)} ${String(r.fixed).padStart(4)} ${String(r.verified).padStart(4)} ` +
       `${String(r.wontfix).padStart(5)} ${String(r.duplicate).padStart(4)} ${String(r.total).padStart(5)}`,
   );
-  print([header, ...lines, "", CENSUS_METHOD].join("\n"));
+  print([header, ...lines, "", method].join("\n"));
 }
 
 export type PapercutListOptions = {
@@ -697,6 +714,8 @@ export type PapercutListOptions = {
    * re-verify on their own point-get. See `readPapercutSlugsByStatus`.
    */
   indexOnly?: boolean;
+  /** Serve records from the index payload snapshot instead of point-reading. */
+  fast?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -792,8 +811,21 @@ export function buildPapercutList(
 // dropped its `<component>` positional, so the promise that the filter was
 // actually applied is the load-bearing half of the line.
 export const LIST_METHOD =
-  "method: status-keyed papercut index with batched hydrate (same read as `papercut census`), " +
+  "method: status-keyed papercut index (same read as `papercut census`), " +
+  "every record point-read and re-checked against its partition, " +
   "component/status filters applied, every matching row returned, oldest-updated first";
+
+/** The same listing, served from the snapshot the index already carries. */
+export const LIST_METHOD_FAST =
+  "method: status-keyed papercut index (same read as `papercut census`), " +
+  "records read from the index payload snapshot, NOT point-read (--fast), " +
+  "component/status filters applied, every matching row returned, " +
+  "ordered by a possibly-stale updated_at — the header fields are current, " +
+  "updated_at and tags can lag a write made before this index was last rebuilt";
+
+export function listMethod(fast: boolean): string {
+  return fast ? LIST_METHOD_FAST : LIST_METHOD;
+}
 
 // The index-only projection has to say what it did NOT do: the row's `status`
 // is the partition key the slug was found under and was not re-verified
@@ -819,9 +851,9 @@ export async function papercutListCmd(
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   if (opts.indexOnly) {
-    // One keyed partition read, zero point hydrates. The hydrated reader below
-    // measured 214s for the 2171-row open ledger on the primary (2026-09-03),
-    // which starved every fleet consumer with a 20s read cap.
+    // One keyed partition read, and not even a payload parse: this projection
+    // is the slug/status pair a queue consumer re-verifies on its own point
+    // get.
     if (opts.component !== undefined) {
       throw new FbrainError({
         code: "papercut_list_index_only_no_component",
@@ -851,19 +883,23 @@ export async function papercutListCmd(
   // Read one status partition when the caller named one; the whole ledger
   // otherwise. `readPapercutsByStatus` is the same complete reader `census`
   // uses, so list and census are two views of ONE read and cannot disagree.
-  const records = await readPapercutsByStatus(node, opts.cfg, opts.status);
+  const fast = opts.fast === true;
+  const method = listMethod(fast);
+  const records = await readPapercutsByStatus(node, opts.cfg, opts.status, {
+    fast,
+  });
   const listOpts: { component?: string; status?: string } = {};
   if (opts.component !== undefined) listOpts.component = opts.component;
   if (opts.status !== undefined) listOpts.status = opts.status;
   const rows = buildPapercutList(records, listOpts);
 
   if (opts.json) {
-    print(JSON.stringify({ rows, total: rows.length, method: LIST_METHOD }));
+    print(JSON.stringify({ rows, total: rows.length, method }));
     return;
   }
   if (rows.length === 0) {
     print("no papercuts");
-    print(LIST_METHOD);
+    print(method);
     return;
   }
   const header = "status    sev  component     slug";
@@ -887,7 +923,5 @@ export async function papercutListCmd(
     if (r.duplicate_of) marks.push(`duplicate-of: ${r.duplicate_of}`);
     if (marks.length > 0) lines.push(`${indent}[${marks.join(" · ")}]`);
   }
-  print(
-    [header, ...lines, "", `${rows.length} row(s)`, LIST_METHOD].join("\n"),
-  );
+  print([header, ...lines, "", `${rows.length} row(s)`, method].join("\n"));
 }

@@ -961,8 +961,8 @@ Example:
                        [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
                        [--not-duplicate-of-any]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
-brain papercut census [<component>] [--json]
-brain papercut list [<component>] [--status S] [--index-only] [--json]
+brain papercut census [<component>] [--fast] [--json]
+brain papercut list [<component>] [--status S] [--index-only] [--fast] [--json]
 
 The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
 failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
@@ -991,6 +991,20 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
 
 census  Counts by component and status, and prints its own method line.
 
+        census and list both point-read every record by default, which is
+        what catches a record whose status moved without this index following.
+        --fast serves each record from the snapshot the index already carries
+        instead: one node query per status partition and zero point reads
+        (2208 open rows, 3.4s against 44.8s on the primary, 2026-09-03).
+        Measured over those same rows, every header field the snapshot returns
+        was current; updated_at was stale on 1028 of them and tags on 5,
+        because brain append and brain tag used to write the record without
+        patching this index. They now patch it, so new drift stops, but rows
+        written before that keep a stale updated_at until
+        brain reindex --papercut-status-index rebuilds the index. Do not use
+        --fast for anything ordered or filtered by updated_at. Either way the
+        method line says which reading produced the numbers.
+
 list    The row-level view of the SAME read census counts, so the two can never
         disagree. Applies <component> and --status, returns every matching row
         (no sample, no cap), and carries every stored header field —
@@ -998,10 +1012,9 @@ list    The row-level view of the SAME read census counts, so the two can never
         those are what a closure audit is made of. Ordered oldest-updated first,
         which is the order the reconcile loop actually consumes.
         --index-only returns slug + status partition straight from the keyed
-        index with NO per-record hydrate (one node read per partition instead
-        of one per row; the hydrated open ledger measured 214s on the primary).
-        The status is the partition key, not re-verified per record, and there
-        is no component filter — queue consumers point-get what they act on.
+        index, without even parsing the payload. The status is the partition
+        key, not re-verified per record, and there is no component filter —
+        queue consumers point-get what they act on.
 
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
@@ -1378,8 +1391,9 @@ const PAPERCUT_OPTIONS = {
   "not-duplicate-of-any": { type: "boolean" },
   // close
   status: { type: "string" },
-  // list
+  // census / list
   "index-only": { type: "boolean" },
+  fast: { type: "boolean" },
   evidence: { type: "string" },
   "fixed-by": { type: "string" },
   "verified-by": { type: "string" },
@@ -4190,6 +4204,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       json,
     };
     if (component) cOpts.component = component;
+    if (values.fast === true) cOpts.fast = true;
     await papercutCensusCmd(cOpts);
     return 0;
   }
@@ -4198,6 +4213,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   if (component) lOpts.component = component;
   if (typeof values.status === "string") lOpts.status = values.status;
   if (values["index-only"] === true) lOpts.indexOnly = true;
+  if (values.fast === true) lOpts.fast = true;
   await papercutListCmd(lOpts);
   return 0;
 }
