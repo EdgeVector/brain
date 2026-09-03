@@ -61,6 +61,23 @@ const PAPERCUT: "papercut" = "papercut";
 export const SEMANTIC_DUPLICATE_THRESHOLD = 0.5;
 export const SEMANTIC_DUPLICATE_LIMIT = 10;
 
+// How many papercuts to RETRIEVE before the component / live-status / cleared
+// filters run. This is deliberately much larger than SEMANTIC_DUPLICATE_LIMIT,
+// which bounds what is DISPLAYED.
+//
+// The bug this closes (measured 2026-08-17 → 2026-09-03, 15+ recurrences on
+// papercut-brain-papercut-file-token-overlap-refuses-unrelated-claims): `find`
+// sliced to 10 hits across EVERY component, and only then did we drop
+// out-of-component records, terminal records, and the caller's
+// --not-duplicate-of set. So a disclaimed candidate still occupied a retrieval
+// slot: clearing it did not widen the view, it just revealed whatever the slice
+// had been hiding. One filing cost five full re-sends of the whole --body, and
+// the round-trip count had no upper bound.
+//
+// Retrieving wide and filtering after makes an exclusion actually free a slot,
+// so the candidate set SHRINKS monotonically across attempts instead of moving.
+export const SEMANTIC_DUPLICATE_FETCH_LIMIT = 60;
+
 export type DuplicateCandidate = {
   slug: string;
   title: string;
@@ -115,6 +132,25 @@ export function semanticDuplicateCandidates(
   return candidates.sort((a, b) => b.score - a.score);
 }
 
+/**
+ * Split the surviving candidates into the ones that still REFUSE the filing and
+ * the ones a bulk `--not-duplicate-of-any` waiver clears.
+ *
+ * An EXACT slug match is never waivable. It is not a similarity judgement the
+ * filer can overrule — it says the record already exists, and the correct
+ * answer is `papercut_exists` (or the idempotent replay), not a second row.
+ */
+export function partitionWaivedCandidates(
+  candidates: readonly DuplicateCandidate[],
+  waiveAll: boolean,
+): { duplicates: DuplicateCandidate[]; waived: string[] } {
+  if (!waiveAll) return { duplicates: [...candidates], waived: [] };
+  return {
+    duplicates: candidates.filter((c) => c.exact),
+    waived: candidates.filter((c) => !c.exact).map((c) => c.slug),
+  };
+}
+
 export type PapercutFileOptions = {
   cfg: Config;
   slug: string;
@@ -130,6 +166,17 @@ export type PapercutFileOptions = {
   // slug it was compared against so the judgement is auditable rather than a
   // silent `--force`.
   notDuplicateOf?: string[];
+  // Bulk form of the escape hatch: clear EVERY candidate the gate raises, in
+  // one call. Still auditable — each cleared slug is written into the new
+  // record's body, and the note says the waiver was the bulk one, so a reader
+  // can tell "I read seven records and judged each distinct" apart from "I
+  // waived whatever came back".
+  //
+  // Exists because the per-slug form made the cost of filing unbounded: the
+  // standing rule is ALWAYS file papercuts, and a gate that charges five full
+  // --body re-sends per record is a standing incentive to skip filing — the
+  // exact failure the typed ledger was built to prevent.
+  notDuplicateOfAny?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -142,6 +189,8 @@ export type PapercutFileResult = {
   symptom_hash: string;
   duplicates: DuplicateCandidate[];
   idempotent?: boolean;
+  // Candidates cleared by --not-duplicate-of-any on THIS call, when it fired.
+  waived?: string[];
 };
 
 type PapercutFileMaterialized = Pick<
@@ -281,7 +330,10 @@ export async function papercutFileCmd(
           cfg: opts.cfg,
           matches: probes,
           types: [PAPERCUT],
-          limit: SEMANTIC_DUPLICATE_LIMIT,
+          // Retrieve wide, filter after — see SEMANTIC_DUPLICATE_FETCH_LIMIT.
+          // Every already-cleared slug is additional headroom, so disclaiming
+          // one candidate cannot push an unseen one out of the result set.
+          limit: SEMANTIC_DUPLICATE_FETCH_LIMIT + cleared.size,
           verbose: opts.verbose,
           print: () => {},
           printErr: () => {},
@@ -294,10 +346,20 @@ export async function papercutFileCmd(
       );
     }
   }
-  const duplicates = semanticDuplicateCandidates(semanticHits, {
+  // Every in-component live candidate over the floor, not a top-k page of them.
+  // The refusal used to report a slice while reading as a complete count
+  // ("Possible duplicate: 2 live papercut(s) ..."), so clearing the named two
+  // surfaced two more and the filer had no way to learn the whole set in one
+  // call.
+  const remaining = semanticDuplicateCandidates(semanticHits, {
     component,
     exactSlug: slug,
   }).filter((c) => !cleared.has(c.slug));
+
+  const { duplicates, waived } = partitionWaivedCandidates(
+    remaining,
+    opts.notDuplicateOfAny === true,
+  );
 
   if (duplicates.length > 0) {
     const lines = [
@@ -308,9 +370,11 @@ export async function papercutFileCmd(
           `  ${d.exact ? "EXACT" : `${Math.round(d.score * 100)}%  `}  ${d.slug}  [${d.status}]\n         ${d.title}`,
       ),
       "",
-      "Read them. Then either:",
+      "This is the COMPLETE candidate set for this filing, not a first page:",
+      "clearing these cannot reveal more. Read them. Then either:",
       "  * add your evidence to the existing record:  brain append <slug> --type papercut",
       "  * or, if yours is genuinely different:        --not-duplicate-of <slug> (repeatable)",
+      "  * or, having read all of the above:           --not-duplicate-of-any",
     ];
     if (opts.json) {
       print(
@@ -340,6 +404,16 @@ export async function papercutFileCmd(
       message: `papercut ${slug} already exists (status: ${prior.status}).`,
       hint: "Use `brain append <slug> --type papercut` to add evidence, or pick a new slug.",
     });
+  }
+
+  // Write the bulk waiver into the record itself. `--force` would leave no
+  // trace; this leaves the exact slugs, and wording a reader can distinguish
+  // from the per-slug form above, so a later reconcile can re-judge the call.
+  if (waived.length > 0) {
+    materialized.body =
+      `${materialized.body.trimEnd()}\n\nFiled with --not-duplicate-of-any after the gate raised ` +
+      `${waived.length} candidate(s) in \`${component}\`, cleared as a set rather than ` +
+      `individually: ${waived.map((s) => `[[${s}]]`).join(", ")}.\n`;
   }
 
   const record = materialized as FbrainRecord;
@@ -384,6 +458,7 @@ export async function papercutFileCmd(
         component,
         symptom_hash: hash,
         duplicates: [],
+        waived,
         list_index_failed: listIndexFailed,
       }),
     );
@@ -391,6 +466,11 @@ export async function papercutFileCmd(
     print(
       `filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash}`,
     );
+    if (waived.length > 0) {
+      print(
+        `  --not-duplicate-of-any cleared ${waived.length} candidate(s), recorded in the body: ${waived.join(", ")}`,
+      );
+    }
     if (listIndexFailed) {
       print(
         "warning: the record persisted but the type-list index patch failed — it will not " +
@@ -404,6 +484,7 @@ export async function papercutFileCmd(
     component,
     symptom_hash: hash,
     duplicates: [],
+    waived,
   };
 }
 

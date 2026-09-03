@@ -959,6 +959,7 @@ Example:
   papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B]
                        [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
                        [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
+                       [--not-duplicate-of-any]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
 brain papercut census [<component>] [--json]
 brain papercut list [<component>] [--status S] [--index-only] [--json]
@@ -970,9 +971,17 @@ was filed twice two hours apart by runs that could not see each other.
 
 file    Files a new papercut, AFTER a dedupe gate. The gate is two nets: an
         exact \`symptom_hash\` match over (component, normalized --symptom), and a
-        token-overlap check against every LIVE papercut in the same component.
-        A hit REFUSES the write and prints the candidates; clear a false match
-        with --not-duplicate-of <slug>, which is recorded in the new body.
+        similarity check against every LIVE papercut in the same component.
+        LIVE means open, partial, or fixed — \`fixed\` still gates, because the
+        fix is not proven on any machine until the record reads \`verified\`.
+        A hit REFUSES the write and prints the candidates.
+
+        The refusal prints the COMPLETE candidate set, so clearing what it named
+        cannot reveal a second page. Clear a false match with
+        --not-duplicate-of <slug>, or, once you have read them all,
+        --not-duplicate-of-any. Both are recorded in the new record's body —
+        the bulk form says so in its own words, so a reader can tell the two
+        apart. Neither can clear an EXACT slug match.
 
 close   Sets the status field AND appends the evidence block in ONE write, so a
         half-closure is not expressible. --status verified additionally requires
@@ -1366,6 +1375,7 @@ const PAPERCUT_OPTIONS = {
   repo: { type: "string" },
   tag: { type: "string", multiple: true },
   "not-duplicate-of": { type: "string", multiple: true },
+  "not-duplicate-of-any": { type: "boolean" },
   // close
   status: { type: "string" },
   // list
@@ -4128,6 +4138,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     if (values["not-duplicate-of"]) {
       opts.notDuplicateOf = values["not-duplicate-of"] as string[];
     }
+    if (values["not-duplicate-of-any"]) opts.notDuplicateOfAny = true;
     const result = await papercutFileCmd(opts);
     // A blocked duplicate is a REFUSED write, and a routine that ignores the
     // exit code must not read it as "filed". Exit 3 distinguishes it from both
