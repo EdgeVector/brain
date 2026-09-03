@@ -18,6 +18,7 @@ import {
   LastSeekUnknownSchemaError,
   queryLastSeek,
 } from "../../src/lastseek-plane.ts";
+import { resetSubprocessTotals, subprocessMsSoFar } from "../../src/slow-call.ts";
 import { querySearchPlane } from "../../src/search-plane.ts";
 
 /** Write a fake `lastseek` that answers `status` and `query` from a script. */
@@ -34,6 +35,8 @@ const STATUS_LIVE = `{"ok":true,"needs_rebuild":false,"committed_rows":42,"pendi
 const defaultLastSeekBin = process.env.LASTSEEK_BIN;
 const defaultLastSeekDisable = process.env.LASTSEEK_DISABLE;
 const defaultLastSeekCallLog = process.env.LASTSEEK_CALL_LOG;
+const defaultLastSeekTimeout = process.env.LASTSEEK_TIMEOUT_MS;
+const defaultLastSeekBudget = process.env.LASTSEEK_BUDGET_MS;
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -44,6 +47,9 @@ afterEach(() => {
   restoreEnv("LASTSEEK_BIN", defaultLastSeekBin);
   restoreEnv("LASTSEEK_DISABLE", defaultLastSeekDisable);
   restoreEnv("LASTSEEK_CALL_LOG", defaultLastSeekCallLog);
+  restoreEnv("LASTSEEK_TIMEOUT_MS", defaultLastSeekTimeout);
+  restoreEnv("LASTSEEK_BUDGET_MS", defaultLastSeekBudget);
+  resetSubprocessTotals();
 });
 
 describe("lastseek plane", () => {
@@ -142,5 +148,96 @@ describe("lastseek plane", () => {
     expect(readFileSync(callLog, "utf8").trim().split("\n")).toEqual([
       "query",
     ]);
+  });
+
+  // ── Deadline and budget ─────────────────────────────────────────────────
+  //
+  // The original spawn carried a 60 s timeout, which is above every caller's
+  // budget: an agent Bash step is 45 s, and `brain ask` spawns once per query
+  // phrasing. On 2026-09-03 one 35.1 s spawn was backgrounded at 45 s and two
+  // routines then idled to their 50-minute timeouts. These tests pin the two
+  // properties that stop that: the tier gives up inside a caller's budget, and
+  // it never gives up quietly.
+  test("a spawn past its deadline is stopped, degrades to null, and says so", () => {
+    process.env.LASTSEEK_TIMEOUT_MS = "300";
+    process.env.LASTSEEK_BIN = fakeLastSeek(`sleep 5; echo '{"ok":true,"results":[]}'`);
+
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void said.push(a.join(" "));
+    let hits: unknown;
+    const started = Date.now();
+    try {
+      hits = queryLastSeek({ query: "x" });
+    } finally {
+      console.error = realError;
+    }
+    const elapsed = Date.now() - started;
+
+    // Null, not a throw: falling through to the incumbent is the designed
+    // degrade, and it is what keeps the caller's answer non-empty.
+    expect(hits).toBeNull();
+    // Bounded by the deadline, not by the 5 s sleep.
+    expect(elapsed).toBeLessThan(3_000);
+    // A silent degrade would be the worse bug — the caller must be able to
+    // tell LastSeek's ranking from the cheaper ranker's.
+    expect(said.join("\n")).toContain("deadline");
+    // And the time is charged to the helper, so the report can name it.
+    expect(subprocessMsSoFar()).toBeGreaterThan(0);
+  });
+
+  test("a clean non-zero exit is still the quiet unavailable path", () => {
+    // Only the deadline miss is loud. An absent index is the normal
+    // fall-through this tier was built for and must stay silent.
+    process.env.LASTSEEK_BIN = fakeLastSeek(
+      `echo 'lastseek: io: no such file or directory' >&2; exit 1`,
+    );
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void said.push(a.join(" "));
+    try {
+      expect(queryLastSeek({ query: "x" })).toBeNull();
+    } finally {
+      console.error = realError;
+    }
+    expect(said).toEqual([]);
+  });
+
+  test("once the cumulative budget is spent, later phrasings skip the spawn", () => {
+    // `brain ask` calls this once per phrasing. Four slow spawns under the old
+    // 60 s per-spawn timeout could block for four minutes; the budget is what
+    // bounds the CALL rather than each spawn.
+    const callLog = join(mkdtempSync(join(tmpdir(), "lastseek-budget-")), "calls");
+    writeFileSync(callLog, "");
+    process.env.LASTSEEK_CALL_LOG = callLog;
+    process.env.LASTSEEK_TIMEOUT_MS = "300";
+    process.env.LASTSEEK_BUDGET_MS = "200";
+    process.env.LASTSEEK_BIN = fakeLastSeek(
+      `echo "$1" >> "$LASTSEEK_CALL_LOG"; sleep 5; echo '{"ok":true,"results":[]}'`,
+    );
+
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void said.push(a.join(" "));
+    try {
+      expect(queryLastSeek({ query: "one" })).toBeNull();
+      expect(queryLastSeek({ query: "two" })).toBeNull();
+      expect(queryLastSeek({ query: "three" })).toBeNull();
+    } finally {
+      console.error = realError;
+    }
+
+    // The first spawn spends the budget; the rest never launch.
+    expect(readFileSync(callLog, "utf8").trim().split("\n")).toEqual(["query"]);
+    expect(said.join("\n")).toContain("helper budget");
+  });
+
+  test("LASTSEEK_BUDGET_MS=0 disables the budget without disabling the tier", () => {
+    // An operator who wants the old unbounded behaviour needs a way to say so
+    // that is not "turn the better ranker off entirely".
+    process.env.LASTSEEK_BUDGET_MS = "0";
+    process.env.LASTSEEK_BIN = fakeLastSeek(`echo '{"ok":true,"results":[]}'`);
+    expect(queryLastSeek({ query: "one" })).toEqual([]);
+    expect(queryLastSeek({ query: "two" })).toEqual([]);
   });
 });

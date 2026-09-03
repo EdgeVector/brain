@@ -15,6 +15,30 @@
  * does not have. A daemon here would add a lifecycle to supervise and buy
  * nothing.
  *
+ * # Why the spawn is bounded, and bounded THIS low
+ *
+ * That ~100 ms is the measurement this file was written against, and it is
+ * still right on a warm machine. The original deadline was 60 s per spawn,
+ * which is not a deadline so much as a promise never to give up: it sits above
+ * every caller's budget. An agent's Bash step is 45 s, and `brain ask` spawns
+ * once per query phrasing — original plus expansions — so four slow spawns
+ * could block for four minutes with nothing named.
+ *
+ * That is not hypothetical. On 2026-09-03 a slow spawn held `brain ask` for
+ * 35.1 s; the harness backgrounded the call at 45 s, and two routines
+ * (`pr-reaper`, `owner-lastdb-data-lifecycle`) then sat to their 50-minute
+ * timeouts waiting on a background task a one-turn dispatch can never receive.
+ * Node service time for the same call was 5.5 s, so nothing was wrong with the
+ * database
+ * (`papercut-brain-ask-pre-send-35s-exceeds-agent-45s-bash-timeout-routines-idle-to-50-min-timeout-20260903`).
+ *
+ * So: a per-spawn deadline of 10 s (100x the measured cost) and a cumulative
+ * budget of 20 s across the whole CLI invocation, both overridable. Blowing
+ * either is not an error — this tier is already designed to return null and
+ * fall through to the incumbent, which is the papercut's own suggested fix:
+ * degrade to the cheaper ranker and SAY SO. The saying-so is the part that
+ * was missing; a silent degrade would be a worse bug than the stall.
+ *
  * # Why an unknown schema is thrown, not swallowed
  *
  * LastSeek's central fix is that a scope term resolving to nothing is an ERROR
@@ -29,6 +53,30 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { beginSubprocess, endSubprocess, subprocessMsSoFar } from "./slow-call.ts";
+
+/** Per-spawn deadline. 100x the measured cold-query cost. */
+const DEFAULT_TIMEOUT_MS = 10_000;
+/** Cumulative deadline across one CLI invocation, over all spawns. */
+const DEFAULT_BUDGET_MS = 20_000;
+
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/** The one stderr voice of this tier. Only the degrade paths speak: a caller
+ * that silently loses the better ranker cannot tell a good answer from a
+ * cheaper one. */
+function notice(line: string): void {
+  try {
+    console.error(`brain: ${line}`);
+  } catch {
+    // A notice must never turn a green exit red.
+  }
+}
 
 export type LastSeekHit = {
   /** The canonical schema identity the row is keyed on. */
@@ -84,16 +132,49 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
     args.push("--min-score", String(opts.min_score));
   }
 
+  const timeoutMs = envMs("LASTSEEK_TIMEOUT_MS", DEFAULT_TIMEOUT_MS);
+  const budgetMs = envMs("LASTSEEK_BUDGET_MS", DEFAULT_BUDGET_MS);
+
+  // Budget check BEFORE the spawn: once this invocation has spent its helper
+  // time, further phrasings are not worth another caller-visible stall. The
+  // incumbent ranker still answers them.
+  const spentMs = subprocessMsSoFar();
+  if (budgetMs > 0 && spentMs >= budgetMs) {
+    notice(
+      `lastseek: skipped — this call already spent ${(spentMs / 1000).toFixed(1)}s of its ` +
+        `${(budgetMs / 1000).toFixed(1)}s helper budget (LASTSEEK_BUDGET_MS); ` +
+        "ranking this query with the incumbent search plane instead.",
+    );
+    return null;
+  }
+
+  const started = beginSubprocess();
   const r = spawnSync(lastSeekBin(), args, {
     encoding: "utf8",
     env: process.env,
-    timeout: 60_000,
+    timeout: timeoutMs > 0 ? timeoutMs : undefined,
   });
+  endSubprocess(started, "lastseek query");
 
   if (r.status !== 0) {
     const stderr = (r.stderr ?? "").trim();
     if (/unknown schema/i.test(stderr)) {
       throw new LastSeekUnknownSchemaError(stderr);
+    }
+    // A deadline miss is reported on stderr, not swallowed into `verbose`.
+    // `spawnSync` signals a timeout as ETIMEDOUT (Bun/Node set `error` and
+    // leave `status` null), and the SIGTERM'd child is indistinguishable from
+    // a crash by exit code alone.
+    const timedOut =
+      (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" ||
+      (r.status === null && r.signal !== null);
+    if (timedOut) {
+      notice(
+        `lastseek: query exceeded its ${(timeoutMs / 1000).toFixed(1)}s deadline ` +
+          "(LASTSEEK_TIMEOUT_MS) and was stopped; ranking with the incumbent search " +
+          "plane instead. Results are the cheaper ranker's, not LastSeek's.",
+      );
+      return null;
     }
     verbose(
       `lastseek: unavailable (${r.error?.message ?? `exit ${r.status}`}${stderr ? `: ${stderr}` : ""})`,
