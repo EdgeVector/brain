@@ -28,7 +28,10 @@ import {
   papercutCloseCmd,
   papercutFileCmd,
   papercutDedupeProbes,
+  partitionWaivedCandidates,
   semanticDuplicateCandidates,
+  SEMANTIC_DUPLICATE_FETCH_LIMIT,
+  SEMANTIC_DUPLICATE_LIMIT,
   SEMANTIC_DUPLICATE_THRESHOLD,
 } from "../../src/commands/papercut.ts";
 import type { FindHit } from "../../src/commands/find.ts";
@@ -165,6 +168,77 @@ describe("the dedupe gate", () => {
 
   test("the file path contains no papercut partition enumeration", () => {
     expect(papercutFileCmd.toString()).not.toContain("listRecords");
+  });
+
+  // Measured 2026-08-17 → 2026-09-03 on
+  // papercut-brain-papercut-file-token-overlap-refuses-unrelated-claims: one
+  // filing cost five full re-sends of the whole --body, revealing two NEW
+  // candidates per round. The cause was ordering — `find` sliced to 10 hits
+  // across EVERY component, and the component / live-status / --not-duplicate-of
+  // filters ran on that slice. So a disclaimed candidate still held a retrieval
+  // slot and clearing it only uncovered what the slice had hidden.
+  describe("the retrieval pool is spent AFTER the filters, not before", () => {
+    test("the fetch pool is wider than the displayed candidate cap", () => {
+      expect(SEMANTIC_DUPLICATE_FETCH_LIMIT).toBeGreaterThan(
+        SEMANTIC_DUPLICATE_LIMIT,
+      );
+    });
+
+    // The load-bearing half: every already-cleared slug must buy headroom, or
+    // the round-trip count has no upper bound.
+    test("each cleared slug widens the fetch so an exclusion frees a slot", () => {
+      const src = papercutFileCmd.toString();
+      expect(src).toContain("SEMANTIC_DUPLICATE_FETCH_LIMIT + cleared.size");
+    });
+
+    test("the refusal states the candidate set is complete", () => {
+      const src = papercutFileCmd.toString();
+      expect(src).toContain("COMPLETE candidate set");
+    });
+  });
+
+  // The escape hatch that bounds filing at two invocations. The standing rule
+  // is ALWAYS file papercuts; a gate that charges five --body re-sends per
+  // record is a standing incentive to skip filing, which is the exact failure
+  // the typed ledger exists to prevent.
+  describe("--not-duplicate-of-any", () => {
+    const candidates = [
+      { slug: "papercut-a", title: "a", status: "open", score: 0.78, exact: false },
+      { slug: "papercut-b", title: "b", status: "fixed", score: 0.71, exact: false },
+    ];
+
+    test("without the flag every candidate still refuses the filing", () => {
+      const { duplicates, waived } = partitionWaivedCandidates(candidates, false);
+      expect(duplicates).toHaveLength(2);
+      expect(waived).toEqual([]);
+    });
+
+    test("with the flag the whole set is cleared in ONE call", () => {
+      const { duplicates, waived } = partitionWaivedCandidates(candidates, true);
+      expect(duplicates).toEqual([]);
+      expect(waived).toEqual(["papercut-a", "papercut-b"]);
+    });
+
+    // An exact slug match is not a similarity judgement the filer may overrule:
+    // it says the record already exists. Waiving it would let the bulk flag
+    // become a silent --force over a live record.
+    test("an EXACT slug match is never waivable", () => {
+      const withExact = [
+        ...candidates,
+        { slug: "papercut-mine", title: "mine", status: "open", score: 1, exact: true },
+      ];
+      const { duplicates, waived } = partitionWaivedCandidates(withExact, true);
+      expect(duplicates.map((d) => d.slug)).toEqual(["papercut-mine"]);
+      expect(waived).not.toContain("papercut-mine");
+    });
+
+    // `--force` would leave no trace. The waiver must stay auditable, and a
+    // reader must be able to tell it apart from the per-slug form.
+    test("the waived slugs are written into the record body", () => {
+      const src = papercutFileCmd.toString();
+      expect(src).toContain("--not-duplicate-of-any after the gate raised");
+      expect(src).toContain("cleared as a set rather than");
+    });
   });
 
   // `fbrain new` and `fbrain put` both announce a cross-type slug collision on
