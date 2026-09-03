@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { appendBody, appendCmd } from "../../src/commands/append.ts";
 import { FbrainError } from "../../src/client.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { PAPERCUT_STATUS_INDEX_SCHEMA_KEY } from "../../src/schemas.ts";
 
 const cfg = buildTestCfg({
   userHash: "uh",
@@ -121,6 +122,123 @@ describe("appendCmd", () => {
       oldBodyChars: "existing body".length,
     });
     expect(lines[0]).toContain("appended");
+  });
+
+  test("appending to a papercut refreshes the status-index snapshot", async () => {
+    // The index row carries a JSON copy of the whole record. Before this,
+    // append wrote the record and left that copy behind: measured on the
+    // primary 2026-09-03, 1028 of 2208 open rows (46.6%) carried a stale
+    // `updated_at` for exactly this reason, and append is the prescribed way
+    // to grow a papercut.
+    const mutations: Array<Record<string, unknown>> = [];
+    const papercutCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: {
+        ...TEST_HASHES,
+        [PAPERCUT_STATUS_INDEX_SCHEMA_KEY]: "5".repeat(64),
+      },
+    });
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== papercutCfg.schemaHashes.papercut) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [
+              {
+                fields: {
+                  ...conceptRow("pc-1"),
+                  status: "open",
+                  component: "brain",
+                },
+                key: { hash: "pc-1", range: null },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation"))
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+      return new Response(JSON.stringify({ ok: true, success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await appendCmd({
+      cfg: papercutCfg,
+      slug: "pc-1",
+      chunk: "a new recurrence",
+      type: "papercut",
+      print: () => {},
+    });
+
+    const indexWrite = mutations.find(
+      (m) =>
+        m.schema === papercutCfg.schemaHashes[PAPERCUT_STATUS_INDEX_SCHEMA_KEY],
+    );
+    expect(indexWrite).toBeDefined();
+    const fields = (indexWrite!.fields_and_values ??
+      indexWrite!.fields) as Record<string, unknown>;
+    expect(fields.psi_h).toBe("open");
+    expect(fields.psi_r).toBe("pc-1");
+    const snapshot = JSON.parse(String(fields.psi_payload));
+    // The snapshot carries the GROWN body, not the one it replaced.
+    expect(snapshot.body).toBe("existing body\n\na new recurrence");
+    expect(snapshot.slug).toBe("pc-1");
+    expect(snapshot.status).toBe("open");
+  });
+
+  test("appending to a non-papercut writes no status-index row", async () => {
+    const mutations: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}");
+        if (body.schema_name !== cfg.schemaHashes.concept) {
+          return new Response(JSON.stringify({ ok: true, results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [
+              { fields: conceptRow("note"), key: { hash: "note", range: null } },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation"))
+        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+      return new Response(JSON.stringify({ ok: true, success: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    await appendCmd({
+      cfg,
+      slug: "note",
+      chunk: "x",
+      type: "concept",
+      print: () => {},
+    });
+    expect(
+      mutations.some((m) =>
+        String(m.fields_and_values ?? m.fields ?? "").includes("psi_payload"),
+      ),
+    ).toBe(false);
   });
 
   test("empty chunk is rejected with empty_append (nothing to append)", async () => {

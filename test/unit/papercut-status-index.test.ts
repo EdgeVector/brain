@@ -11,6 +11,7 @@ import {
   persistPapercutWithStatusMembership,
   readPapercutSlugsByStatus,
   readPapercutsByStatus,
+  recordFromEntryRow,
   requireCompletePapercutStatusIndex,
   writePapercutStatusIndex,
 } from "../../src/papercut-status-index.ts";
@@ -21,7 +22,22 @@ import {
   PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
   PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
 } from "../../src/schemas.ts";
-import type { FbrainRecord } from "../../src/record.ts";
+import { TOMBSTONE_TAG, type FbrainRecord } from "../../src/record.ts";
+
+/** Serve one slug's index row with no `psi_payload`, as a pre-payload index would. */
+function wipePayload(inner: any, slug: string) {
+  return async (args: any) => {
+    const res = await inner(args);
+    return {
+      ...res,
+      results: res.results.map((row: any) =>
+        row.key?.range === slug
+          ? { ...row, fields: { ...row.fields, psi_payload: "" } }
+          : row,
+      ),
+    };
+  };
+}
 
 const ENTRY_HASH = "psihash";
 const PAPERCUT_HASH = "papercuthash";
@@ -304,7 +320,7 @@ describe("status-keyed papercut reads", () => {
     expect(calls.some((call) => call.allowFullScan === true)).toBe(false);
   });
 
-  test("filtered render hydrates one partition in HashKeys batches, not a serial point loop", async () => {
+  test("the default read hydrates one partition in HashKeys batches, not a serial point loop", async () => {
     const n = 400;
     const openRows: Record<string, ReturnType<typeof papercut>> = {};
     for (let i = 0; i < n; i++) {
@@ -388,7 +404,11 @@ describe("status-keyed papercut reads", () => {
     ).toBe(false);
   });
 
-  test("batched hydrate still drops a stale index row whose primary status moved", async () => {
+  test("the default read drops a stale index row whose primary status moved; --fast cannot see it", async () => {
+    // The cost of serving from the payload, stated rather than implied. A
+    // papercut whose record moved to `fixed` while its index row stayed under
+    // `open` carries a payload that ALSO says `open` — it was written when the
+    // row was placed. Only a point read of the record can catch that.
     const live = papercut("moved", "fixed");
     const { node } = makeNode({
       rows: { open: { moved: papercut("moved", "open") } },
@@ -396,6 +416,128 @@ describe("status-keyed papercut reads", () => {
       migrated: true,
     });
     expect(await readPapercutsByStatus(node, REGISTERED, "open")).toEqual([]);
+    expect(
+      (
+        await readPapercutsByStatus(node, REGISTERED, "open", { fast: true })
+      ).map((r) => r.slug),
+    ).toEqual(["moved"]);
+  });
+
+  test("--fast serves every row from the index payload and issues zero point reads", async () => {
+    const n = 40;
+    const openRows: Record<string, ReturnType<typeof papercut>> = {};
+    for (let i = 0; i < n; i++) {
+      const rec = papercut(`open-${String(i).padStart(2, "0")}`, "open");
+      openRows[rec.slug] = rec;
+    }
+    const { node, calls } = makeNode({
+      rows: { open: openRows },
+      migrated: true,
+    });
+    const got = await readPapercutsByStatus(node, REGISTERED, "open", {
+      fast: true,
+    });
+    expect(got.map((r) => r.slug).sort()).toEqual(Object.keys(openRows).sort());
+    // Every header field a closure audit reads comes back, not just the slug.
+    expect(got[0]).toMatchObject({ component: "brain", title: got[0]!.title });
+    expect(
+      calls.filter((call) => Array.isArray((call.filter as any)?.HashKeys)),
+    ).toHaveLength(0);
+    // One partition read, plus the migrated-marker check. Nothing per row.
+    expect(calls.filter((call) => call.op === "query")).toHaveLength(2);
+  });
+
+  test("--fast point-hydrates only the rows whose payload is unusable", async () => {
+    const good = papercut("has-payload", "open");
+    const bare = papercut("no-payload", "open");
+    const { node, calls } = makeNode({
+      rows: { open: { [good.slug]: good, [bare.slug]: bare } },
+      migrated: true,
+    });
+    // An index row written before psi_payload existed: the row is there, the
+    // snapshot is not. It must still be served, not silently dropped.
+    (node as any).queryAll = wipePayload((node as any).queryAll, bare.slug);
+    const got = await readPapercutsByStatus(node, REGISTERED, "open", {
+      fast: true,
+    });
+    expect(got.map((r) => r.slug).sort()).toEqual([
+      "has-payload",
+      "no-payload",
+    ]);
+    const hydrateCalls = calls.filter((call) =>
+      Array.isArray((call.filter as any)?.HashKeys),
+    );
+    expect(hydrateCalls).toHaveLength(1);
+    expect((hydrateCalls[0]!.filter as any).HashKeys).toEqual(["no-payload"]);
+  });
+
+  test("--fast fails closed on a tombstoned payload", async () => {
+    const dead = papercut("tombstoned", "open");
+    dead.tags = [TOMBSTONE_TAG];
+    const { node } = makeNode({
+      rows: { open: { [dead.slug]: dead } },
+      migrated: true,
+    });
+    expect(
+      await readPapercutsByStatus(node, REGISTERED, "open", { fast: true }),
+    ).toEqual([]);
+  });
+});
+
+describe("recordFromEntryRow", () => {
+  const row = (payload: unknown, range = "p1") => ({
+    fields: {
+      psi_h: "open",
+      psi_r: range,
+      psi_payload: typeof payload === "string" ? payload : JSON.stringify(payload),
+      psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
+    },
+    key: { hash: "open", range },
+  });
+
+  test("parses the record the index row already carries", () => {
+    const rec = papercut("p1", "open");
+    expect(recordFromEntryRow(row(rec) as any)).toMatchObject(rec);
+  });
+
+  test("returns null for an empty, unparseable, or non-object payload", () => {
+    expect(recordFromEntryRow(row("") as any)).toBeNull();
+    expect(recordFromEntryRow(row("{not json") as any)).toBeNull();
+    expect(recordFromEntryRow(row([1, 2]) as any)).toBeNull();
+    expect(recordFromEntryRow(row(null) as any)).toBeNull();
+  });
+
+  test("returns null when the payload is missing the fields a caller reads", () => {
+    expect(recordFromEntryRow(row({ status: "open", tags: [] }) as any)).toBeNull();
+    expect(recordFromEntryRow(row({ slug: "p1", tags: [] }) as any)).toBeNull();
+    expect(
+      recordFromEntryRow(row({ slug: "p1", status: "open" }) as any),
+    ).toBeNull();
+  });
+
+  test("returns null when the payload names a different slug than its own row", () => {
+    // A crossed payload would otherwise serve one papercut's fields under
+    // another's key, which no downstream reader could detect.
+    expect(
+      recordFromEntryRow(row(papercut("other", "open"), "p1") as any),
+    ).toBeNull();
+  });
+
+  test("returns null for the reserved marker row", () => {
+    expect(
+      recordFromEntryRow({
+        fields: {
+          psi_h: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+          psi_r: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+          psi_payload: "",
+          psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
+        },
+        key: {
+          hash: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+          range: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+        },
+      } as any),
+    ).toBeNull();
   });
 });
 

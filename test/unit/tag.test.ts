@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { tagCmd } from "../../src/commands/tag.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
+import { PAPERCUT_STATUS_INDEX_SCHEMA_KEY } from "../../src/schemas.ts";
 
 const cfg = buildTestCfg({ userHash: "uh" });
 
@@ -164,6 +165,121 @@ describe("tagCmd", () => {
       expect(mutations).toHaveLength(0);
     } finally {
       restore();
+    }
+  });
+
+  test("tagging a papercut refreshes the status-index snapshot", async () => {
+    // Same defect as `brain append`: the index row carries a JSON copy of the
+    // record, so a tag write that skips it leaves that copy behind. Measured
+    // on the primary 2026-09-03: 5 of 2208 open rows carried stale `tags`.
+    const papercutCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: {
+        ...TEST_HASHES,
+        [PAPERCUT_STATUS_INDEX_SCHEMA_KEY]: "5".repeat(64),
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    const mutations: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}") as Record<
+          string,
+          unknown
+        >;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results:
+              body.schema_name === TEST_HASHES.papercut
+                ? [conceptRow("pc-1", { status: "open", component: "brain" })]
+                : [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation"))
+        mutations.push(
+          JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>,
+        );
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      await tagCmd({
+        cfg: papercutCfg,
+        slug: "pc-1",
+        type: "papercut",
+        add: ["owner:agent-harness"],
+        print: () => {},
+      });
+      const indexWrite = mutations.find(
+        (m) =>
+          m.schema ===
+          papercutCfg.schemaHashes[PAPERCUT_STATUS_INDEX_SCHEMA_KEY],
+      );
+      expect(indexWrite).toBeDefined();
+      const fields = indexWrite!.fields_and_values as Record<string, unknown>;
+      expect(fields.psi_h).toBe("open");
+      const snapshot = JSON.parse(String(fields.psi_payload));
+      // The snapshot carries the NEW tag set, not the one it replaced.
+      expect(snapshot.tags).toEqual(["existing", "owner:agent-harness"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("an idempotent papercut tag write touches neither record nor index", async () => {
+    const papercutCfg = buildTestCfg({
+      userHash: "uh",
+      schemaHashes: {
+        ...TEST_HASHES,
+        [PAPERCUT_STATUS_INDEX_SCHEMA_KEY]: "5".repeat(64),
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    const mutations: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        const body = JSON.parse((init?.body as string) ?? "{}") as Record<
+          string,
+          unknown
+        >;
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results:
+              body.schema_name === TEST_HASHES.papercut
+                ? [conceptRow("pc-1", { status: "open" })]
+                : [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/api/mutation"))
+        mutations.push(
+          JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>,
+        );
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      await tagCmd({
+        cfg: papercutCfg,
+        slug: "pc-1",
+        type: "papercut",
+        add: ["existing"],
+        print: () => {},
+      });
+      expect(mutations).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 

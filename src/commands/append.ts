@@ -101,6 +101,24 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
     fields,
   });
 
+  // The status-keyed papercut index carries a snapshot of the whole record, so
+  // a body/updated_at write that does not patch it leaves that snapshot stale.
+  // Measured on the primary 2026-09-03: 1028 of 2208 open rows (46.6%) carried
+  // a stale `updated_at` for exactly this reason, and `brain append` is the
+  // prescribed way to grow a papercut record.
+  if (only.type === "papercut") {
+    const { patchPapercutStatusIndex } = await import(
+      "../papercut-status-index.ts"
+    );
+    await patchPapercutStatusIndex(
+      node,
+      opts.cfg,
+      slug,
+      { ...only.record, body: newBody, updated_at: now },
+      only.record.status,
+    );
+  }
+
   const { maintainGraphEdges } = await import("../graph-edge.ts");
   await maintainGraphEdges({
     node,

@@ -39,6 +39,42 @@ function entryFieldsFor(
   };
 }
 
+/**
+ * The papercut record the index row already carries.
+ *
+ * `psi_payload` is a JSON snapshot of the whole record, written by
+ * `entryFieldsFor` / `planPapercutStatusOps` in the SAME mutation that places
+ * the row in its status partition. It was stored from the first version of
+ * this index and, until this function existed, never read: every ledger read
+ * shipped the payload over the wire and then threw it away to point-get the
+ * same record back one slug at a time.
+ *
+ * Returns null when the field is absent, unparseable, or carries a different
+ * slug than the row it came from, so the caller can point-hydrate that one row
+ * instead of dropping it. A payload that parses is still subject to the
+ * caller's fail-closed checks (tombstone, and status-equals-partition).
+ */
+export function recordFromEntryRow(row: QueryRow): FbrainRecord | null {
+  const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
+  const raw = fields.psi_payload;
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return null;
+  const record = parsed as FbrainRecord;
+  if (typeof record.slug !== "string" || record.slug.length === 0) return null;
+  if (typeof record.status !== "string") return null;
+  if (!Array.isArray(record.tags)) return null;
+  const rowSlug = slugFromEntryRow(row);
+  if (rowSlug !== null && rowSlug !== record.slug) return null;
+  return record;
+}
+
 function slugFromEntryRow(row: QueryRow): string | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
   const slug = row.key?.range ?? fields.psi_r;
@@ -293,17 +329,48 @@ export async function requireCompletePapercutStatusIndex(
   return entryHash;
 }
 
-/** Read one named status partition, or every fixed status partition. */
+/**
+ * Read one named status partition, or every fixed status partition.
+ *
+ * Default: point-read every record. One node request per row (2208 open rows
+ * measured 44.8s across 2215 requests on the primary, 2026-09-03).
+ *
+ * `fast: true`: serve each row from the `psi_payload` snapshot the index
+ * already carries, so a full-ledger read is one keyed query per status
+ * partition and ZERO point reads (the same 2208 rows in 3.4s). A row whose
+ * payload is missing or unparseable still falls back to a point read, so an
+ * index written before the payload existed reads correctly.
+ *
+ * The snapshot is written by the resident write plan, so it is only as fresh
+ * as the last write that went through it. Measured against the primary on
+ * 2026-09-03, across all 2208 open rows: `status`, `component`, `severity`,
+ * `kind`, `repo`, `title`, `fixed_by`, `verified_by` and `duplicate_of` agreed
+ * on EVERY row, while `updated_at` was stale on 1028 (46.6%) and `tags` on 5.
+ * `brain append` and `brain tag` were writing the record without patching this
+ * index; both now patch it, so new drift stops, but rows written before that
+ * fix keep their stale `updated_at` until the index is rebuilt
+ * (`brain reindex --papercut-status-index`). Until then `fast` must not be
+ * used for anything ordered or filtered by `updated_at` — which is what
+ * `papercut list` orders by.
+ *
+ * Both readings apply the same fail-closed filter: a tombstoned record, or one
+ * whose own `status` disagrees with the partition it sat in, is dropped rather
+ * than served under the wrong status. Only the point read can catch a record
+ * whose status moved without the index following; the payload cannot, because
+ * a write that skipped the index also skipped the payload.
+ */
 export async function readPapercutsByStatus(
   node: NodeClient,
   cfg: SchemaCfg,
   status?: string,
+  opts?: { fast?: boolean },
 ): Promise<FbrainRecord[]> {
   const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
   const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
   const { findBySlug, isTombstoned, schemaHashFor, fieldsFor, rowToRecord } =
     await import("./record.ts");
   const papercutHash = schemaHashFor("papercut", cfg);
+  const fast = opts?.fast === true;
   const out: FbrainRecord[] = [];
   for (const partition of statuses) {
     const res = await node.queryAll({
@@ -312,20 +379,30 @@ export async function readPapercutsByStatus(
       filter: { HashKey: partition },
     });
     const slugs: string[] = [];
+    const fromPayload = new Map<string, FbrainRecord>();
     for (const row of res.results) {
       const slug = slugFromEntryRow(row);
-      if (slug) slugs.push(slug);
+      if (!slug) continue;
+      slugs.push(slug);
+      if (!fast) continue;
+      const record = recordFromEntryRow(row);
+      if (record) fromPayload.set(slug, record);
     }
+    // Point-read only what the payload could not answer: everything by
+    // default, and under `fast` just the rows with no usable snapshot.
+    const pending = fast
+      ? slugs.filter((slug) => !fromPayload.has(slug))
+      : slugs;
     const hydrated = await hydratePapercutsBySlug({
       node,
       papercutHash,
-      slugs,
+      slugs: pending,
       findBySlug,
       fieldsFor,
       rowToRecord,
     });
     for (const slug of slugs) {
-      const record = hydrated.get(slug);
+      const record = hydrated.get(slug) ?? fromPayload.get(slug);
       // Fail closed against a process dying between old-row deletion and the
       // new-row upsert: never serve a stale row under the wrong status.
       if (record && !isTombstoned(record) && record.status === partition)
