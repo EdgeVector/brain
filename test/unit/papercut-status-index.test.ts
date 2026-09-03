@@ -3,6 +3,7 @@ import { FbrainError } from "../../src/client.ts";
 import {
   censusPapercutStatusIndex,
   ensurePapercutStatusMembership,
+  isUnsupportedHashKeysFilter,
   maintainPapercutStatusIndex,
   markPapercutStatusIndexMigrated,
   PAPERCUT_HYDRATE_BATCH_SIZE,
@@ -57,6 +58,8 @@ function makeNode(
     rows?: Record<string, Record<string, Stored>>;
     records?: Record<string, FbrainRecord>;
     migrated?: boolean;
+    /** Thrown by every `HashKeys` query — a node that predates the filter. */
+    hashKeysError?: Error;
   } = {},
 ) {
   const rows: Record<string, Record<string, Stored>> = {};
@@ -111,6 +114,7 @@ function makeNode(
       calls.push({ op: "query", filter, allowFullScan });
       const hashKeys = filter?.HashKeys as string[] | undefined;
       if (Array.isArray(hashKeys)) {
+        if (opts.hashKeysError) throw opts.hashKeysError;
         return {
           results: hashKeys.flatMap((slug) => {
             const record = records[slug];
@@ -282,6 +286,58 @@ describe("status-keyed papercut reads", () => {
           PAPERCUT_HYDRATE_BATCH_SIZE,
       ),
     ).toBe(true);
+  });
+
+  test("a node that rejects HashKeys with the live 400 grammar text still hydrates through point reads", async () => {
+    // Live primary 0.23.3-1435-g211325fc2, 2026-09-03: `brain papercut list`
+    // died on this exact FbrainError for every filter (papercut
+    // papercut-brain-papercut-list-http-400-grammar).
+    const n = 20;
+    const openRows: Record<string, ReturnType<typeof papercut>> = {};
+    for (let i = 0; i < n; i++) {
+      const rec = papercut(`open-${String(i).padStart(2, "0")}`, "open");
+      openRows[rec.slug] = rec;
+    }
+    const reject = new FbrainError({
+      code: "node_http_400",
+      message:
+        "Node /api/query returned HTTP 400 [a key was present with a value outside its grammar].",
+    });
+    const { node, calls } = makeNode({
+      rows: { open: openRows },
+      migrated: true,
+      hashKeysError: reject,
+    });
+    const got = await readPapercutsByStatus(node, REGISTERED, "open");
+    expect(got.map((r) => r.slug).sort()).toEqual(
+      Object.keys(openRows).sort(),
+    );
+    const hashKeysCalls = calls.filter(
+      (call) => call.op === "query" && Array.isArray((call.filter as any)?.HashKeys),
+    );
+    expect(hashKeysCalls).toHaveLength(1);
+  });
+
+  test("isUnsupportedHashKeysFilter: any HTTP 400 on the hydrate query means point reads; 5xx and timeouts still throw", () => {
+    expect(
+      isUnsupportedHashKeysFilter(
+        new FbrainError({
+          code: "node_http_400",
+          message: "Node /api/query returned HTTP 400 [a key was present with a value outside its grammar].",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isUnsupportedHashKeysFilter(new Error("unknown filter HashKeys")),
+    ).toBe(true);
+    expect(
+      isUnsupportedHashKeysFilter(
+        new FbrainError({ code: "node_http_503", message: "Node /api/query returned HTTP 503: shed." }),
+      ),
+    ).toBe(false);
+    expect(
+      isUnsupportedHashKeysFilter(new Error("node did not respond within 30000ms")),
+    ).toBe(false);
   });
 
   test("batched hydrate still drops a stale index row whose primary status moved", async () => {

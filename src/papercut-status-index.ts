@@ -176,10 +176,31 @@ function chunkSlugs(slugs: readonly string[], size: number): string[][] {
   return out;
 }
 
-function isUnsupportedHashKeysFilter(error: unknown): boolean {
+/**
+ * Whether the node refused the `HashKeys` hydrate query because it does not
+ * serve that filter. A Mini that predates `HashKeys` answers `/api/query` with
+ * an HTTP 400 reject — on 0.23.3-1435 the text is
+ * `a key was present with a value outside its grammar` — so any 400 on this
+ * one query means "use point reads", not "the list is broken". A 5xx, a
+ * timeout, or a transport error is still thrown to the caller.
+ */
+export function isUnsupportedHashKeysFilter(error: unknown): boolean {
+  const status =
+    error !== null && typeof error === "object"
+      ? Number(
+          (error as { status?: unknown; httpStatus?: unknown }).status ??
+            (error as { httpStatus?: unknown }).httpStatus,
+        )
+      : Number.NaN;
+  if (status === 400) return true;
+  const code =
+    error !== null && typeof error === "object"
+      ? (error as { code?: unknown }).code
+      : undefined;
+  if (code === "node_http_400") return true;
   const text =
     error instanceof Error ? `${error.name} ${error.message}` : String(error);
-  return /hashkeys|unknown filter|unrecognized filter|invalid filter|bad request/i.test(
+  return /hashkeys|unknown filter|unrecognized filter|invalid filter|bad request|http 400|outside its grammar|invalid[ _]value/i.test(
     text,
   );
 }
@@ -218,7 +239,8 @@ async function hydratePapercutsBySlug(opts: {
     if (!isUnsupportedHashKeysFilter(error)) throw error;
   }
   // Live Mini without HashKeys: bounded-parallel point reads, not a serial loop.
-  const pending = [...opts.slugs];
+  // Batches that answered before the reject already sit in `bySlug`.
+  const pending = opts.slugs.filter((slug) => !bySlug.has(slug));
   const width = Math.min(PAPERCUT_HYDRATE_CONCURRENCY, pending.length);
   let next = 0;
   await Promise.all(
