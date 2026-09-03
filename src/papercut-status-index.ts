@@ -335,6 +335,50 @@ export async function readPapercutsByStatus(
   return out;
 }
 
+/** One status-index row: the papercut slug and the partition it sits in. */
+export type PapercutStatusIndexRow = { slug: string; status: string };
+
+/**
+ * Read one status partition (or every fixed partition) WITHOUT hydrating the
+ * papercut records: one keyed query per partition, zero point reads.
+ *
+ * `readPapercutsByStatus` point-hydrates every row so it can fail closed on a
+ * stale index entry. On the primary that hydrate measured 1.7-1.9s and ~250
+ * group loads per row (`lastdb ops`, 2026-09-03), so the 2171-row open ledger
+ * took 214s wall across 2191 node requests — 10x the papercut reconciler's 20s
+ * read cap, which is why the papercut→card path was dead for 8 days
+ * (papercut-lastdb-reconciler-policies-query-slow). Its two fleet consumers
+ * (`last-stack-papercut-queue snapshot` and the lifecycle-close helper) only
+ * use the slug and re-verify status on their own point-get, so they read this
+ * projection instead.
+ *
+ * Contract: `status` is the partition key the row was found under, NOT
+ * re-verified against the record. A consumer that needs the fail-closed row
+ * must point-get it. A ledger audit that needs header fields still uses the
+ * hydrating reader.
+ */
+export async function readPapercutSlugsByStatus(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  status?: string,
+): Promise<PapercutStatusIndexRow[]> {
+  const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
+  const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
+  const out: PapercutStatusIndexRow[] = [];
+  for (const partition of statuses) {
+    const res = await node.queryAll({
+      schemaHash: entryHash,
+      fields: [...PAPERCUT_STATUS_INDEX_FIELDS],
+      filter: { HashKey: partition },
+    });
+    for (const row of res.results) {
+      const slug = slugFromEntryRow(row);
+      if (slug) out.push({ slug, status: partition });
+    }
+  }
+  return out;
+}
+
 /** Move one papercut between status partitions, or remove it on delete. */
 export async function patchPapercutStatusIndex(
   node: NodeClient,

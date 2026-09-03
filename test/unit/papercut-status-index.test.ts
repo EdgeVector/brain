@@ -9,6 +9,7 @@ import {
   PAPERCUT_HYDRATE_BATCH_SIZE,
   patchPapercutStatusIndex,
   persistPapercutWithStatusMembership,
+  readPapercutSlugsByStatus,
   readPapercutsByStatus,
   requireCompletePapercutStatusIndex,
   writePapercutStatusIndex,
@@ -253,6 +254,53 @@ describe("status-keyed papercut reads", () => {
       .filter((call) => (call.filter as any)?.HashKey !== undefined)
       .map((call) => (call.filter as any).HashKey);
     expect(hashes).toEqual([...PAPERCUT_STATUSES]);
+    expect(calls.some((call) => call.allowFullScan === true)).toBe(false);
+  });
+
+  test("index-only read returns slug + partition from one keyed read and never hydrates", async () => {
+    const rows: Record<string, ReturnType<typeof papercut>> = {};
+    for (const slug of ["open-c", "open-a", "open-b"])
+      rows[slug] = papercut(slug, "open");
+    const { node, calls } = makeNode({
+      rows: { open: rows, verified: { "done-one": papercut("done-one", "verified") } },
+      migrated: true,
+    });
+    const got = await readPapercutSlugsByStatus(node, REGISTERED, "open");
+    expect(got.map((r) => r.slug).sort()).toEqual(["open-a", "open-b", "open-c"]);
+    expect(got.every((r) => r.status === "open")).toBe(true);
+    expect(Object.keys(got[0]!).sort()).toEqual(["slug", "status"]);
+    const queryCalls = calls.filter((call) => call.op === "query");
+    // One partition read for `open`, one point read for the migrated marker,
+    // and no HashKeys hydrate batch at all.
+    expect(
+      queryCalls.filter((call) => Array.isArray((call.filter as any)?.HashKeys)),
+    ).toHaveLength(0);
+    expect(
+      queryCalls
+        .filter((call) => (call.filter as any)?.HashKey !== undefined)
+        .map((call) => (call.filter as any).HashKey),
+    ).toEqual(["open"]);
+    expect(calls.some((call) => call.allowFullScan === true)).toBe(false);
+  });
+
+  test("index-only read without a status walks the fixed partitions, never a scan", async () => {
+    const { node, calls } = makeNode({
+      rows: {
+        open: { "open-one": papercut("open-one", "open") },
+        fixed: { "fixed-one": papercut("fixed-one", "fixed") },
+      },
+      migrated: true,
+    });
+    const got = await readPapercutSlugsByStatus(node, REGISTERED);
+    expect(got.map((r) => `${r.status} ${r.slug}`).sort()).toEqual([
+      "fixed fixed-one",
+      "open open-one",
+    ]);
+    expect(
+      calls
+        .filter((call) => (call.filter as any)?.HashKey !== undefined)
+        .map((call) => (call.filter as any).HashKey),
+    ).toEqual([...PAPERCUT_STATUSES]);
     expect(calls.some((call) => call.allowFullScan === true)).toBe(false);
   });
 

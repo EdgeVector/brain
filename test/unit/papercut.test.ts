@@ -22,6 +22,7 @@ import {
   buildPapercutList,
   elide,
   LIST_MARK_MAX,
+  LIST_INDEX_ONLY_METHOD,
   LIST_METHOD,
   isIdempotentPapercutFile,
   papercutCloseCmd,
@@ -438,6 +439,17 @@ describe("list", () => {
     expect(LIST_METHOD).toContain("filters applied");
     expect(LIST_METHOD).toContain("every matching row");
     expect(LIST_METHOD).toContain("batched hydrate");
+  });
+
+  // The index-only line must name what it skipped, and must still identify
+  // itself as the status-keyed index so queue consumers that pin that phrase
+  // accept it.
+  test("the index-only method line says the rows were not hydrated", () => {
+    expect(LIST_INDEX_ONLY_METHOD).toContain("status-keyed papercut index");
+    expect(LIST_INDEX_ONLY_METHOD).toContain("index-only");
+    expect(LIST_INDEX_ONLY_METHOD).toContain("not hydrated");
+    expect(LIST_INDEX_ONLY_METHOD).toContain("not re-verified");
+    expect(LIST_INDEX_ONLY_METHOD).not.toContain("batched hydrate");
   });
 
   // Human mode only. A `verified_by` transcript is meant to be long; eliding it
