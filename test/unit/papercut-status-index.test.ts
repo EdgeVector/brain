@@ -6,6 +6,7 @@ import {
   isUnsupportedHashKeysFilter,
   maintainPapercutStatusIndex,
   markPapercutStatusIndexMigrated,
+  newPapercutReadStats,
   PAPERCUT_HYDRATE_BATCH_SIZE,
   patchPapercutStatusIndex,
   persistPapercutWithStatusMembership,
@@ -469,6 +470,86 @@ describe("status-keyed papercut reads", () => {
     );
     expect(hydrateCalls).toHaveLength(1);
     expect((hydrateCalls[0]!.filter as any).HashKeys).toEqual(["no-payload"]);
+  });
+
+  test("narrow point-reads only the rows whose snapshot already matches", async () => {
+    // The defect this closes: `papercut list --status open --severity p0`
+    // returned 22 rows and point-read all 2251 open ones. The filter was
+    // applied AFTER the whole partition had been hydrated.
+    const openRows: Record<string, FbrainRecord> = {};
+    for (let i = 0; i < 40; i++) {
+      const rec = papercut(`open-${String(i).padStart(2, "0")}`, "open");
+      (rec as any).severity = i < 3 ? "p0" : "p2";
+      openRows[rec.slug] = rec;
+    }
+    const { node, calls } = makeNode({ rows: { open: openRows }, migrated: true });
+    const stats = newPapercutReadStats();
+    const got = await readPapercutsByStatus(node, REGISTERED, "open", {
+      narrow: (r) => (r as any).severity === "p0",
+      stats,
+    });
+    expect(got.map((r) => r.slug).sort()).toEqual([
+      "open-00",
+      "open-01",
+      "open-02",
+    ]);
+    expect(stats).toEqual({ rows: 40, pointReads: 3, narrowedOut: 37 });
+    // Every returned record still came from a point read, so `updated_at` and
+    // the ordering built on it are exact for the rows actually served.
+    const hydrated = calls.filter((call) =>
+      Array.isArray((call.filter as any)?.HashKeys),
+    );
+    expect(hydrated.flatMap((c) => (c.filter as any).HashKeys).sort()).toEqual([
+      "open-00",
+      "open-01",
+      "open-02",
+    ]);
+  });
+
+  test("narrow never rules out a row whose snapshot it cannot read", async () => {
+    // A row written before `psi_payload` existed has no snapshot to judge. It
+    // must be point-read and judged on the record, not dropped for being
+    // unreadable — dropping it would silently shrink the answer.
+    const match = papercut("has-payload", "open");
+    (match as any).severity = "p0";
+    const bare = papercut("no-payload", "open");
+    (bare as any).severity = "p0";
+    const { node } = makeNode({
+      rows: { open: { [match.slug]: match, [bare.slug]: bare } },
+      migrated: true,
+    });
+    (node as any).queryAll = wipePayload((node as any).queryAll, bare.slug);
+    const stats = newPapercutReadStats();
+    const got = await readPapercutsByStatus(node, REGISTERED, "open", {
+      narrow: (r) => (r as any).severity === "p0",
+      stats,
+    });
+    expect(got.map((r) => r.slug).sort()).toEqual([
+      "has-payload",
+      "no-payload",
+    ]);
+    expect(stats.narrowedOut).toBe(0);
+    expect(stats.pointReads).toBe(2);
+  });
+
+  test("narrow does not defeat the fail-closed status check", async () => {
+    // The snapshot says `open` because it was written when the row was placed.
+    // Narrowing must not become a second way to serve a row under a status its
+    // record no longer carries.
+    const live = papercut("moved", "fixed");
+    (live as any).severity = "p0";
+    const stale = papercut("moved", "open");
+    (stale as any).severity = "p0";
+    const { node } = makeNode({
+      rows: { open: { moved: stale } },
+      records: { moved: live },
+      migrated: true,
+    });
+    expect(
+      await readPapercutsByStatus(node, REGISTERED, "open", {
+        narrow: (r) => (r as any).severity === "p0",
+      }),
+    ).toEqual([]);
   });
 
   test("--fast fails closed on a tombstoned payload", async () => {
