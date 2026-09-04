@@ -79,7 +79,11 @@ import {
   PAPERCUT_STATUSES,
   type RecordType,
 } from "./schemas.ts";
-import { PAPERCUT_USAGE_CODES } from "./papercut.ts";
+import {
+  ensureKind,
+  ensureSeverity,
+  PAPERCUT_USAGE_CODES,
+} from "./papercut.ts";
 import {
   papercutCensusCmd,
   papercutCloseCmd,
@@ -962,7 +966,9 @@ Example:
                        [--not-duplicate-of-any]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
 brain papercut census [<component>] [--point-read] [--json]
-brain papercut list [<component>] [--status S] [--index-only] [--fast] [--json]
+brain papercut list [<component>] [--status S] [--severity p0|p1|p2|p3]
+                    [--kind K] [--repo owner/name] [--tag T]...
+                    [--index-only] [--fast] [--json]
 
 The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
 failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
@@ -1381,7 +1387,7 @@ const MIGRATE_OPTIONS = {
 // Flags across all four `papercut` subcommands. parseArgs takes one option set
 // per command, so file/close/census/list share this table and each subcommand
 // validates the flags that matter to it.
-const PAPERCUT_OPTIONS = {
+export const PAPERCUT_OPTIONS = {
   // file
   title: { type: "string" },
   body: { type: "string" },
@@ -4046,7 +4052,7 @@ function requireGraphPositional(
   return positionals[0] as string;
 }
 
-const PAPERCUT_SUBCOMMANDS = ["file", "close", "census", "list"] as const;
+export const PAPERCUT_SUBCOMMANDS = ["file", "close", "census", "list"] as const;
 
 function requiredFlag(
   values: Record<string, unknown>,
@@ -4103,6 +4109,88 @@ async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
   return 0;
 }
 
+// One shared option table means a flag meant for another subcommand parses
+// cleanly and then falls on the floor. That is not hypothetical: `list`
+// accepted `--severity`, `--kind`, `--repo` and `--tag`, applied none of them,
+// and the strict parser's own unknown-option hint listed all four as valid
+// options of the command that was ignoring them. A run asking for the p0 rows
+// got all 2144 open ones with nothing in the output to say so.
+//
+// `list` now applies those four. This table closes the class rather than the
+// instance: a flag a subcommand does not consume is REFUSED, so the next one
+// added to the shared table cannot be silently dropped by the other three.
+// `--json` is the one flag all four genuinely consume. It also carries
+// `default: false`, so it is never `undefined` — a consumption check written
+// against undefined alone would refuse it on every single papercut call.
+const PAPERCUT_SHARED_FLAGS = ["json"] as const;
+
+export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
+  Record<string, readonly string[]>
+> = {
+  file: [
+    ...PAPERCUT_SHARED_FLAGS,
+    "title",
+    "body",
+    "component",
+    "symptom",
+    "severity",
+    "kind",
+    "repo",
+    "tag",
+    "not-duplicate-of",
+    "not-duplicate-of-any",
+  ],
+  close: [
+    ...PAPERCUT_SHARED_FLAGS,
+    "status",
+    "evidence",
+    "fixed-by",
+    "verified-by",
+    "duplicate-of",
+  ],
+  census: [...PAPERCUT_SHARED_FLAGS, "fast", "point-read"],
+  list: [
+    ...PAPERCUT_SHARED_FLAGS,
+    "status",
+    "index-only",
+    "fast",
+    "severity",
+    "kind",
+    "repo",
+    "tag",
+  ],
+};
+
+// `component` is the positional both readers take, not a flag, so it is absent
+// from the census/list rows above on purpose.
+export function assertPapercutFlagsConsumed(
+  sub: string,
+  values: Record<string, unknown>,
+): void {
+  const consumed = new Set(PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? []);
+  const stray = Object.keys(PAPERCUT_OPTIONS).filter(
+    (f) => !consumed.has(f) && values[f] !== undefined,
+  );
+  if (stray.length === 0) return;
+  const flags = stray.map((f) => `--${f}`).join(", ");
+  const uses = (PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? [])
+    .map((f) => `--${f}`)
+    .join(" ");
+  // The operator who types `papercut census --severity p0` wants the p0 rows
+  // narrowed, and `list` is the reader that can do it. Saying so costs one
+  // clause and saves the round trip through `brain help papercut`.
+  const toList =
+    sub === "census" &&
+    stray.some((f) => PAPERCUT_FLAGS_BY_SUBCOMMAND.list?.includes(f))
+      ? ` To filter rows by ${stray.join("/")}, use \`brain papercut list\`.`
+      : "";
+  throw new FbrainError({
+    code: "papercut_flag_not_consumed",
+    message: `papercut ${sub} does not use ${flags}, so passing ${stray.length === 1 ? "it" : "them"} would change nothing about the result.`,
+    hint: `Flags ${sub} uses: ${uses}.${toList} Run \`brain help papercut\` for the full form.`,
+  });
+}
+
 async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0];
   if (!sub || sub.startsWith("-")) {
@@ -4128,6 +4216,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     },
     "papercut",
   );
+  assertPapercutFlagsConsumed(sub, values as Record<string, unknown>);
   const cfg = readConfig();
   const json = values.json === true;
 
@@ -4220,6 +4309,14 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   if (typeof values.status === "string") lOpts.status = values.status;
   if (values["index-only"] === true) lOpts.indexOnly = true;
   if (values.fast === true) lOpts.fast = true;
+  // Validated, not passed through: an unvalidated `--severity p1 ` or `--kind
+  // fix` matches no row, and a filter that answers "0 rows" for a typo is the
+  // same lie in a quieter voice as one that ignores the flag outright.
+  if (typeof values.severity === "string")
+    lOpts.severity = ensureSeverity(values.severity);
+  if (typeof values.kind === "string") lOpts.kind = ensureKind(values.kind);
+  if (typeof values.repo === "string") lOpts.repo = values.repo;
+  if (values.tag) lOpts.tags = values.tag as string[];
   await papercutListCmd(lOpts);
   return 0;
 }

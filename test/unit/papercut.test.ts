@@ -28,6 +28,7 @@ import {
   censusMethod,
   LIST_METHOD,
   LIST_METHOD_FAST,
+  listFilterClause,
   listMethod,
   isIdempotentPapercutFile,
   papercutCloseCmd,
@@ -566,9 +567,14 @@ describe("list", () => {
 
   test("the method line states that the filters were applied, and which read produced the rows", () => {
     for (const line of [LIST_METHOD, LIST_METHOD_FAST]) {
-      expect(line).toContain("filters applied");
+      expect(line).toContain("FILTERS");
       expect(line).toContain("every matching row");
       expect(line).toContain("status-keyed papercut index");
+    }
+    for (const fast of [false, true]) {
+      expect(listMethod(fast, { component: "lastdb" })).toContain(
+        "component filters applied",
+      );
     }
     // The two readings do not cost the same and do not catch the same defects,
     // so a reader must be able to tell from the line alone which one ran.
@@ -577,8 +583,74 @@ describe("list", () => {
     expect(LIST_METHOD).toContain("point-read");
     expect(LIST_METHOD).not.toContain("payload snapshot");
     expect(LIST_METHOD_FAST).toContain("possibly-stale updated_at");
-    expect(listMethod(false)).toBe(LIST_METHOD);
-    expect(listMethod(true)).toBe(LIST_METHOD_FAST);
+    expect(listMethod(false, {})).toContain("point-read");
+    expect(listMethod(true, {})).toContain("--fast");
+  });
+
+  // The line used to say "component/status filters applied" as a fixed string.
+  // That was true only while those were the only two filters the reader could
+  // be handed, and it kept saying it while four more were accepted and thrown
+  // away. The clause is now computed from the same filters the row loop reads,
+  // so it cannot claim a filter that was not applied — nor stay silent about
+  // one that was.
+  test("the method line names the filters actually applied, and says so when none was", () => {
+    expect(listMethod(false, {})).toContain(
+      "no filter given, every papercut returned",
+    );
+    expect(listMethod(false, {})).not.toContain("filters applied");
+    expect(listFilterClause({ severity: "p0" })).toBe(
+      "severity filters applied",
+    );
+    expect(listFilterClause({ status: "open", severity: "p0" })).toBe(
+      "status/severity filters applied",
+    );
+    // Order is the table's order, not the caller's, so two callers asking for
+    // the same filters cannot produce two different method lines.
+    expect(listFilterClause({ severity: "p0", status: "open" })).toBe(
+      "status/severity filters applied",
+    );
+    expect(
+      listFilterClause({
+        component: "brain",
+        status: "open",
+        severity: "p1",
+        kind: "complaint",
+        repo: "EdgeVector/brain",
+        tags: ["cli"],
+      }),
+    ).toBe("component/status/severity/kind/repo/tags filters applied");
+  });
+
+  // 2026-09-04, live primary: `brain papercut list --status open --severity p0`
+  // returned 2144 rows — 108 p0, 397 p1, 1141 p2, 498 p3. The flag was parsed,
+  // dropped, and named as a valid option by the parser's own unknown-option
+  // hint. Every triage routine that ranks by leverage starts with this call.
+  test("severity, kind, repo and tag filter the rows instead of being dropped", () => {
+    const rows = [
+      rec({ slug: "p0-a", component: "brain", severity: "p0", kind: "complaint", repo: "EdgeVector/brain", tags: ["cli", "read-path"] }),
+      rec({ slug: "p2-b", component: "brain", severity: "p2", kind: "complaint", repo: "EdgeVector/brain", tags: ["cli"] }),
+      rec({ slug: "p0-c", component: "kanban", severity: "p0", kind: "specified-fix", repo: "EdgeVector/fkanban", tags: ["read-path"] }),
+    ];
+    expect(buildPapercutList(rows, { severity: "p0" }).map((r) => r.slug)).toEqual(["p0-a", "p0-c"]);
+    expect(buildPapercutList(rows, { kind: "specified-fix" }).map((r) => r.slug)).toEqual(["p0-c"]);
+    expect(buildPapercutList(rows, { repo: "EdgeVector/brain" }).map((r) => r.slug)).toEqual(["p0-a", "p2-b"]);
+    // AND across tags: narrowing the request must not widen the result.
+    expect(buildPapercutList(rows, { tags: ["cli"] }).map((r) => r.slug)).toEqual(["p0-a", "p2-b"]);
+    expect(buildPapercutList(rows, { tags: ["cli", "read-path"] }).map((r) => r.slug)).toEqual(["p0-a"]);
+    // and they compose with the two filters that already worked
+    expect(
+      buildPapercutList(rows, { component: "brain", severity: "p0" }).map((r) => r.slug),
+    ).toEqual(["p0-a"]);
+  });
+
+  // A record whose severity was never stored must not be swept up by
+  // `--severity p2` just because p2 is what `papercut file` defaults to. The
+  // filter reads the stored field, not the default that would have been
+  // written; an unfiltered listing still shows the row.
+  test("an unstored severity matches no severity filter", () => {
+    const rows = [rec({ slug: "bare", component: "brain", severity: "" })];
+    expect(buildPapercutList(rows, { severity: "p2" })).toEqual([]);
+    expect(buildPapercutList(rows, {}).map((r) => r.slug)).toEqual(["bare"]);
   });
 
   // The index-only line must name what it skipped, and must still identify
