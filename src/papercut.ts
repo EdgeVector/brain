@@ -27,6 +27,14 @@ export const PAPERCUT_USAGE_CODES = [
   "missing_verification",
   "missing_duplicate_target",
   "papercut_exists",
+  // Flag-combination refusals on the readers. Both say "this invocation asks
+  // for something this subcommand cannot do", which is the same class as a bad
+  // enum value and belongs on the same exit code as the `--limit` rejection
+  // that sends an operator to the flag list in the first place. Both exited 1
+  // before 2026-09-04, so a caller separating "invoked it wrong" (2) from "it
+  // ran and failed" (1) put them on the wrong side.
+  "papercut_flag_not_consumed",
+  "papercut_list_index_only_no_component",
 ] as const;
 
 // Statuses that mean "this defect is still costing us something". `partial`
