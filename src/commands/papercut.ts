@@ -592,8 +592,18 @@ export async function papercutCloseCmd(
 export type PapercutCensusOptions = {
   cfg: Config;
   component?: string;
-  /** Serve records from the index payload snapshot instead of point-reading. */
+  /**
+   * Accepted and ignored: serving records from the index payload snapshot is
+   * now the default for `census`. Kept so callers that opted in still parse.
+   */
   fast?: boolean;
+  /**
+   * Point-read every record and re-check it against its partition, instead of
+   * counting from the index snapshot. The only reading that catches a record
+   * whose status moved without the index following; costs one node request per
+   * row.
+   */
+  pointRead?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -656,21 +666,44 @@ export function buildCensus(
 // instrument that reports a number without saying how it got it is how a
 // 44.5% win got reported as a 2.2% regression, and how a truncated
 // enumeration got copied into durable memory as a fact.
+//
+// `buildCensus` reads exactly two fields off each record: `component` and
+// `status`. Both are written only by verbs that go through the resident write
+// plan (`papercut file`, `papercut close`, `put`, `status`), and that plan
+// patches this index in the same write. So the snapshot cannot lag on either
+// one, and the census does not need a point read to be correct. Measured on
+// the primary over all 2230 common open rows on 2026-09-04, snapshot against
+// point read: `component` and `status` disagreed on ZERO rows, while
+// `updated_at` disagreed on 1044 (46.8%) and `tags` on 5 — the two fields
+// `brain append` and `brain tag` used to write without patching the index, and
+// the two fields the census never reads.
+//
+// The point read remains available as `--point-read`, because it is the only
+// reading that can catch a record whose status moved WITHOUT this index
+// following. That is a repair-detection check, not a counting method, and it
+// costs one node request per row: 2977 requests and 141.8s against 3.3s for
+// the same ledger on the same primary. Charging every caller of `census` that
+// price to run an index audit made the ledger's own sizing instrument more
+// expensive than the thing it sizes — `Papercut` is a top-five lifetime
+// consumer on the node — so the audit is opt-in and the count is not.
 export const CENSUS_METHOD =
   "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
-  "every record point-read and re-checked against its partition; " +
+  "component and status read from the index payload snapshot, which the resident write plan " +
+  "patches on every write of either field (no point reads); " +
+  "run --point-read to re-read every record and catch a status the index did not follow; " +
   "live = open+partial+fixed";
 
-/** The same census, counted from the snapshot the index already carries. */
-export const CENSUS_METHOD_FAST =
+/** The audit reading: every record point-read and re-checked against its partition. */
+export const CENSUS_METHOD_POINT_READ =
   "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
-  "records read from the index payload snapshot, NOT point-read (--fast): " +
-  "component/status/severity/kind/repo/title/fixed_by/verified_by/duplicate_of are current, " +
-  "updated_at and tags can lag a write made before this index was last rebuilt; " +
+  "every record point-read and re-checked against its partition (--point-read); " +
   "live = open+partial+fixed";
 
-export function censusMethod(fast: boolean): string {
-  return fast ? CENSUS_METHOD_FAST : CENSUS_METHOD;
+/**
+ * @param pointRead re-read every record instead of counting from the snapshot.
+ */
+export function censusMethod(pointRead: boolean): string {
+  return pointRead ? CENSUS_METHOD_POINT_READ : CENSUS_METHOD;
 }
 
 export async function papercutCensusCmd(
@@ -678,10 +711,13 @@ export async function papercutCensusCmd(
 ): Promise<void> {
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  const fast = opts.fast === true;
-  const method = censusMethod(fast);
+  // The count is served from the index snapshot unless the caller asks for the
+  // audit reading. `opts.fast` stays accepted so existing callers that opted
+  // in to the snapshot keep working; it now names the default.
+  const pointRead = opts.pointRead === true;
+  const method = censusMethod(pointRead);
   const records = await readPapercutsByStatus(node, opts.cfg, undefined, {
-    fast,
+    fast: !pointRead,
   });
   const rows = buildCensus(records, opts.component);
 

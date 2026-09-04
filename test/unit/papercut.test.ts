@@ -24,7 +24,7 @@ import {
   LIST_MARK_MAX,
   LIST_INDEX_ONLY_METHOD,
   CENSUS_METHOD,
-  CENSUS_METHOD_FAST,
+  CENSUS_METHOD_POINT_READ,
   censusMethod,
   LIST_METHOD,
   LIST_METHOD_FAST,
@@ -518,20 +518,50 @@ describe("list", () => {
   // agree about which read that was — otherwise a count and its rows can be
   // taken from different readings and nothing says so.
   test("the census method line names the same two readings as the list line", () => {
-    for (const line of [CENSUS_METHOD, CENSUS_METHOD_FAST]) {
+    for (const line of [CENSUS_METHOD, CENSUS_METHOD_POINT_READ]) {
       expect(line).toContain("status-keyed papercut index");
       expect(line).toContain("live = open+partial+fixed");
     }
-    expect(CENSUS_METHOD_FAST).toContain("index payload snapshot");
-    expect(CENSUS_METHOD_FAST).toContain("NOT point-read");
-    expect(CENSUS_METHOD).toContain("point-read");
-    expect(CENSUS_METHOD).not.toContain("payload snapshot");
-    // --fast must name the two fields it can serve stale, or a reader has no
-    // way to know the ordering it just used was not the ledger's.
-    expect(CENSUS_METHOD_FAST).toContain("updated_at");
-    expect(CENSUS_METHOD_FAST).toContain("tags");
+    // The DEFAULT counts from the snapshot, and must say so plus name the
+    // escape hatch — a reader who suspects the index needs to know one exists.
+    expect(CENSUS_METHOD).toContain("index payload snapshot");
+    expect(CENSUS_METHOD).toContain("no point reads");
+    expect(CENSUS_METHOD).toContain("--point-read");
+    // It must also name WHY the snapshot is sound for this count: the two
+    // fields it reads are patched by the same write plan that writes them.
+    expect(CENSUS_METHOD).toContain("component and status");
+    expect(CENSUS_METHOD).toContain("resident write plan");
+    // The audit reading names itself and does not claim to be the snapshot.
+    expect(CENSUS_METHOD_POINT_READ).toContain("point-read");
+    expect(CENSUS_METHOD_POINT_READ).toContain("--point-read");
+    expect(CENSUS_METHOD_POINT_READ).not.toContain("payload snapshot");
     expect(censusMethod(false)).toBe(CENSUS_METHOD);
-    expect(censusMethod(true)).toBe(CENSUS_METHOD_FAST);
+    expect(censusMethod(true)).toBe(CENSUS_METHOD_POINT_READ);
+  });
+
+  // The census reads `component` and `status` and nothing else. That is the
+  // whole reason it can be served from the snapshot: those are the two fields
+  // measured at ZERO drift across 2230 open rows, while `updated_at` was stale
+  // on 1044 of them. If a future column tallies another field, this test fails
+  // and the default has to be re-argued rather than silently becoming wrong.
+  test("buildCensus reads only component and status off each record", () => {
+    const touched = new Set<string>();
+    const probe = (component: string, status: string) =>
+      new Proxy({ component, status } as Record<string, unknown>, {
+        get(target, key) {
+          if (typeof key !== "string") return undefined;
+          touched.add(key);
+          return target[key];
+        },
+        has(target, key) {
+          if (typeof key !== "string") return false;
+          touched.add(key);
+          return key in target;
+        },
+      }) as unknown as FbrainRecord;
+
+    buildCensus([probe("lastdb", "open"), probe("brain", "verified")]);
+    expect([...touched].sort()).toEqual(["component", "status"]);
   });
 
   test("the method line states that the filters were applied, and which read produced the rows", () => {
