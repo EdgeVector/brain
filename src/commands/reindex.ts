@@ -615,20 +615,23 @@ async function rebuildPapercutStatusIndex(
     }
     return true;
   });
-  const sotPairs = live.map((record) => `${record.status} ${record.slug}`);
   result.scanned = all.length;
   result.byType.papercut = {
     reindexed: live.length,
     skippedTombstone: result.skippedTombstone,
   };
 
-  const before = await censusPapercutStatusIndex(node, opts.cfg, sotPairs);
+  const before = await censusPapercutStatusIndex(node, opts.cfg, live);
   if (before) {
     result.papercutStatusIndexCensus = before;
-    const gap =
-      before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
-        ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
-        : " complete";
+    // `stale` is counted separately from `missing`/`extra` because it is a
+    // different failure: the row is in the right partition and its snapshot
+    // disagrees with the record. Printing only membership is how this index
+    // reported `complete` while 46.6% of its payloads were out of date.
+    const gap = before.complete
+      ? " complete"
+      : ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}` +
+        ` stale=${before.stalePayload.length}`;
     print(
       `papercut-status-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
     );
@@ -653,11 +656,12 @@ async function rebuildPapercutStatusIndex(
 
   await writePapercutStatusIndex(node, opts.cfg, live);
   result.reindexed = live.length;
-  const after = await censusPapercutStatusIndex(node, opts.cfg, sotPairs);
+  const after = await censusPapercutStatusIndex(node, opts.cfg, live);
   if (after) {
     result.papercutStatusIndexCensus = after;
     print(
-      `papercut-status-index: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
+      `papercut-status-index: rebuilt — indexed=${after.indexed} sot=${after.sot}` +
+        ` stale=${after.stalePayload.length} complete=${after.complete}`,
     );
   }
   print(`rebuilt papercut-status-index for ${live.length} papercut(s)`);

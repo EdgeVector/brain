@@ -667,10 +667,9 @@ describe("offline rebuild", () => {
         PAPERCUT_STATUS_INDEX_MIGRATED_RANGE
       ],
     ).toBe("MARK");
-    const census = await censusPapercutStatusIndex(node, REGISTERED, [
-      "verified p1",
-    ]);
+    const census = await censusPapercutStatusIndex(node, REGISTERED, [current]);
     expect(census?.complete).toBe(true);
+    expect(census?.stalePayload).toEqual([]);
   });
 
   test("marker can be stamped on an empty, complete index", async () => {
@@ -695,6 +694,82 @@ describe("offline rebuild", () => {
         ["create", "update", "delete"].includes(call.op),
       ),
     ).toHaveLength(0);
+  });
+
+  test("a present row whose payload is stale is refreshed, not skipped", async () => {
+    // The row is in the RIGHT partition under the RIGHT slug; only its
+    // `psi_payload` snapshot is out of date. The rebuild used to key entirely
+    // on the (status, slug) pair and `continue` here, so the one tool that
+    // claims to repair this index could not repair payload drift at all.
+    const current = papercut("p1", "open");
+    current.title = "title after the append";
+    current.updated_at = "2026-09-03T22:00:00Z";
+    const stale = papercut("p1", "open");
+    const { node, rows, calls } = makeNode({
+      rows: { open: { p1: stale } },
+      records: { p1: current },
+      migrated: true,
+    });
+
+    await writePapercutStatusIndex(node, REGISTERED, [current]);
+
+    expect(rows.open?.p1).toEqual(current);
+    expect(
+      calls.filter((call) => call.op === "delete" || call.op === "create"),
+    ).toHaveLength(0);
+  });
+
+  test("census reports a stale payload and refuses to call the index complete", async () => {
+    const current = papercut("p1", "open");
+    current.updated_at = "2026-09-03T22:00:00Z";
+    const { node } = makeNode({
+      rows: { open: { p1: papercut("p1", "open") } },
+      records: { p1: current },
+      migrated: true,
+    });
+
+    const census = await censusPapercutStatusIndex(node, REGISTERED, [current]);
+
+    // Membership is perfect. That is exactly the state the pair-only census
+    // called `complete` while every `--fast` reader served the old snapshot.
+    expect(census?.missingFromIndex).toEqual([]);
+    expect(census?.extraInIndex).toEqual([]);
+    expect(census?.stalePayload).toEqual(["open p1"]);
+    expect(census?.complete).toBe(false);
+  });
+
+  test("census clears once the rebuild has refreshed the stale row", async () => {
+    const current = papercut("p1", "open");
+    current.updated_at = "2026-09-03T22:00:00Z";
+    const { node } = makeNode({
+      rows: { open: { p1: papercut("p1", "open") } },
+      records: { p1: current },
+      migrated: true,
+    });
+
+    expect(
+      (await censusPapercutStatusIndex(node, REGISTERED, [current]))?.complete,
+    ).toBe(false);
+    await writePapercutStatusIndex(node, REGISTERED, [current]);
+    const after = await censusPapercutStatusIndex(node, REGISTERED, [current]);
+    expect(after?.stalePayload).toEqual([]);
+    expect(after?.complete).toBe(true);
+  });
+
+  test("a row with an unreadable payload is refreshed rather than left in place", async () => {
+    const current = papercut("p1", "open");
+    const { node, rows } = makeNode({
+      rows: { open: { p1: current } },
+      records: { p1: current },
+      migrated: true,
+    });
+    node.queryAll = wipePayload(node.queryAll.bind(node), "p1") as any;
+
+    const census = await censusPapercutStatusIndex(node, REGISTERED, [current]);
+    expect(census?.stalePayload).toEqual(["open p1"]);
+
+    await writePapercutStatusIndex(node, REGISTERED, [current]);
+    expect(rows.open?.p1).toEqual(current);
   });
 
   test("a large cold rebuild keeps the marker for the final bounded batch", async () => {
