@@ -221,7 +221,13 @@ async function proveConsolidate(
 
   const before = await getBody(opts.cfg, "preference", canonSlug);
   const result = await runConsolidate({ ...opts, topic, now });
-  await reapEphSeries(opts, "proof", today);
+  const reaped = await reapEphSeries(opts, "proof", today);
+  if (reaped < 1) {
+    throw new FbrainError({
+      code: "consolidate_prove_failed",
+      message: "eph reap deleted 0 rows",
+    });
+  }
 
   const after = await getBody(opts.cfg, "preference", canonSlug);
   if (!after.startsWith(before)) {
@@ -317,7 +323,8 @@ export async function reapEphSeries(
     for (const row of rows) {
       const rec = row.record;
       if (!rec) continue;
-      const type = inferType(opts.cfg, rec) ?? "reference";
+      const type = inferType(opts.cfg, rec);
+      if (!type) continue;
       try {
         await deleteRecord({
           cfg: opts.cfg,
@@ -398,8 +405,12 @@ ephemeral proof closeout
 `;
 }
 
-function inferType(_cfg: { schemaHashes: Record<string, string> }, rec: FbrainRecord): RecordType | null {
+/** Product type stamped on the membership payload. Missing type is not preference. */
+export function inferType(
+  _cfg: { schemaHashes: Record<string, string> },
+  rec: FbrainRecord,
+): RecordType | null {
   const extra = rec.type;
   if (typeof extra === "string" && isRecordType(extra)) return extra;
-  return "preference";
+  return null;
 }

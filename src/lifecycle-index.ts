@@ -316,7 +316,7 @@ export function planLifecycleMembershipOps(opts: {
   if (prevTopic && prevTopic !== topic) pushDelete("cluster", prevTopic, slug);
 
   if (series && day) {
-    pushUpsert("eph", ephHash(series, day), slug, rec);
+    pushUpsert("eph", ephHash(series, day), slug, snap);
     pushDelete("live", type, slug);
   }
   if (
@@ -390,7 +390,7 @@ export async function maintainLifecycleIndex(opts: {
   }
 
   if (series && day) {
-    await upsertMembership(node, cfg, "eph", ephHash(series, day), slug, rec);
+    await upsertMembership(node, cfg, "eph", ephHash(series, day), slug, snap);
     await deleteMembership(node, cfg, "live", type, slug);
   }
   if (

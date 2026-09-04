@@ -10,6 +10,7 @@ import {
   utcDay,
   type ClusterMember,
 } from "../../src/lifecycle.ts";
+import { inferType } from "../../src/commands/consolidate.ts";
 import type { FbrainRecord } from "../../src/record.ts";
 
 function rec(slug: string, body: string, extra: Partial<FbrainRecord> = {}): FbrainRecord {
@@ -82,5 +83,22 @@ describe("factBlock", () => {
     const block = factBlock("hello", "loser-1", "2026-08-27");
     expect(block).toContain("from loser-1");
     expect(block).toContain("hello");
+  });
+});
+
+describe("inferType from membership payload", () => {
+  const cfg = { schemaHashes: {} };
+
+  test("uses the stamped product type", () => {
+    expect(inferType(cfg, rec("eph-ref", "closeout", { type: "reference" }))).toBe(
+      "reference",
+    );
+    expect(inferType(cfg, rec("eph-pref", "closeout", { type: "preference" }))).toBe(
+      "preference",
+    );
+  });
+
+  test("does not default a missing type to preference", () => {
+    expect(inferType(cfg, rec("eph-unstamped", "closeout"))).toBeNull();
   });
 });
