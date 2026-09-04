@@ -823,7 +823,7 @@ function str(record: FbrainRecord, field: string): string {
   return typeof v === "string" ? v : "";
 }
 
-export function componentOf(record: FbrainRecord): string {
+function componentOf(record: FbrainRecord): string {
   const c = str(record, "component");
   return c.length > 0 ? c : "(unset)";
 }
