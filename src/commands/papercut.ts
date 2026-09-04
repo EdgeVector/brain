@@ -741,10 +741,40 @@ export async function papercutCensusCmd(
   print([header, ...lines, "", method].join("\n"));
 }
 
-export type PapercutListOptions = {
-  cfg: Config;
+// The row filters `list` applies. This is ONE table because the defect it
+// closes is a filter that was parsed and then never passed on: `<component>`
+// in August 2026, and `--severity`/`--kind`/`--repo`/`--tag` until
+// 2026-09-04. Each was accepted by the CLI's strict parser, named as valid by
+// that parser's own unknown-option hint, and then dropped without a word — so
+// a triage run that asked for the p0 rows was served all 2144 open rows and
+// had nothing in the output to tell it apart from a real answer.
+//
+// A key added here must also be filtered by `buildPapercutList`, named by
+// `listFilterClause`, and consumed by the CLI's `list` flag table. The guard
+// tests assert all four, so a new filter cannot be half-wired the way these
+// four were.
+export type PapercutListFilters = {
   component?: string;
   status?: string;
+  severity?: string;
+  kind?: string;
+  repo?: string;
+  /** A row matches when it carries EVERY tag given, not any of them. */
+  tags?: readonly string[];
+};
+
+/** The filter keys, in the order the method line names them. */
+export const PAPERCUT_LIST_FILTERS = [
+  "component",
+  "status",
+  "severity",
+  "kind",
+  "repo",
+  "tags",
+] as const;
+
+export type PapercutListOptions = PapercutListFilters & {
+  cfg: Config;
   /**
    * Slug + status partition only, no record hydrate. For queue consumers that
    * re-verify on their own point-get. See `readPapercutSlugsByStatus`.
@@ -811,13 +841,23 @@ export function componentOf(record: FbrainRecord): string {
  */
 export function buildPapercutList(
   records: readonly FbrainRecord[],
-  opts: { component?: string; status?: string } = {},
+  opts: PapercutListFilters = {},
 ): PapercutListRow[] {
   const rows: PapercutListRow[] = [];
   for (const r of records) {
     const component = componentOf(r);
+    const tags = Array.isArray(r.tags) ? r.tags : [];
     if (opts.component !== undefined && component !== opts.component) continue;
     if (opts.status !== undefined && r.status !== opts.status) continue;
+    if (opts.severity !== undefined && str(r, "severity") !== opts.severity)
+      continue;
+    if (opts.kind !== undefined && str(r, "kind") !== opts.kind) continue;
+    if (opts.repo !== undefined && str(r, "repo") !== opts.repo) continue;
+    // AND, not any: `--tag read-path --tag cli` asks for the rows carrying
+    // both. Any-semantics would widen the result as the caller narrows the
+    // request, which is the shape of failure this whole change is about.
+    if (opts.tags !== undefined && !opts.tags.every((t) => tags.includes(t)))
+      continue;
     rows.push({
       slug: r.slug,
       title: r.title,
@@ -830,7 +870,7 @@ export function buildPapercutList(
       verified_by: str(r, "verified_by"),
       duplicate_of: str(r, "duplicate_of"),
       symptom_hash: str(r, "symptom_hash"),
-      tags: Array.isArray(r.tags) ? r.tags : [],
+      tags,
       created_at: r.created_at,
       updated_at: r.updated_at,
     });
@@ -849,18 +889,38 @@ export function buildPapercutList(
 export const LIST_METHOD =
   "method: status-keyed papercut index (same read as `papercut census`), " +
   "every record point-read and re-checked against its partition, " +
-  "component/status filters applied, every matching row returned, oldest-updated first";
+  "FILTERS, every matching row returned, oldest-updated first";
 
 /** The same listing, served from the snapshot the index already carries. */
 export const LIST_METHOD_FAST =
   "method: status-keyed papercut index (same read as `papercut census`), " +
   "records read from the index payload snapshot, NOT point-read (--fast), " +
-  "component/status filters applied, every matching row returned, " +
+  "FILTERS, every matching row returned, " +
   "ordered by a possibly-stale updated_at — the header fields are current, " +
   "updated_at and tags can lag a write made before this index was last rebuilt";
 
-export function listMethod(fast: boolean): string {
-  return fast ? LIST_METHOD_FAST : LIST_METHOD;
+// The old line said "component/status filters applied" as a fixed string, and
+// that was accurate only for as long as those were the only two filters the
+// reader could be given. It stayed on screen unchanged while four more were
+// accepted and dropped. Naming the filters ACTUALLY applied, computed from the
+// same table the row loop reads, is the half of the line a caller can check.
+export function listFilterClause(filters: PapercutListFilters): string {
+  const applied = PAPERCUT_LIST_FILTERS.filter(
+    (f) => filters[f] !== undefined,
+  );
+  return applied.length === 0
+    ? "no filter given, every papercut returned"
+    : `${applied.join("/")} filters applied`;
+}
+
+export function listMethod(
+  fast: boolean,
+  filters: PapercutListFilters = {},
+): string {
+  return (fast ? LIST_METHOD_FAST : LIST_METHOD).replace(
+    "FILTERS",
+    listFilterClause(filters),
+  );
 }
 
 // The index-only projection has to say what it did NOT do: the row's `status`
@@ -890,12 +950,19 @@ export async function papercutListCmd(
     // One keyed partition read, and not even a payload parse: this projection
     // is the slug/status pair a queue consumer re-verifies on its own point
     // get.
-    if (opts.component !== undefined) {
+    // `--index-only` reads slug + status partition and nothing else, so every
+    // other filter names a record field that is not present to filter on.
+    // Refusing is the point: the previous release refused `component` here and
+    // silently ignored the rest, which is the same accepted-and-dropped shape
+    // this change exists to remove.
+    const unservable = PAPERCUT_LIST_FILTERS.filter(
+      (f) => f !== "status" && opts[f] !== undefined,
+    );
+    if (unservable.length > 0) {
       throw new FbrainError({
         code: "papercut_list_index_only_no_component",
-        message:
-          "`--index-only` reads the status-keyed index without hydrating records, and `component` is a record field the index does not carry.",
-        hint: "Drop the <component> positional for --index-only, or drop --index-only to get the hydrated, component-filtered ledger.",
+        message: `\`--index-only\` reads the status-keyed index without hydrating records, and ${unservable.join(", ")} ${unservable.length === 1 ? "is a record field" : "are record fields"} the index does not carry.`,
+        hint: "Drop --index-only to get the hydrated, filtered ledger, or drop the filter it cannot serve.",
       });
     }
     const rows = (
@@ -920,14 +987,16 @@ export async function papercutListCmd(
   // otherwise. `readPapercutsByStatus` is the same complete reader `census`
   // uses, so list and census are two views of ONE read and cannot disagree.
   const fast = opts.fast === true;
-  const method = listMethod(fast);
+  const filters: PapercutListFilters = {};
+  for (const f of PAPERCUT_LIST_FILTERS) {
+    const v = opts[f];
+    if (v !== undefined) Object.assign(filters, { [f]: v });
+  }
+  const method = listMethod(fast, filters);
   const records = await readPapercutsByStatus(node, opts.cfg, opts.status, {
     fast,
   });
-  const listOpts: { component?: string; status?: string } = {};
-  if (opts.component !== undefined) listOpts.component = opts.component;
-  if (opts.status !== undefined) listOpts.status = opts.status;
-  const rows = buildPapercutList(records, listOpts);
+  const rows = buildPapercutList(records, filters);
 
   if (opts.json) {
     print(JSON.stringify({ rows, total: rows.length, method }));
