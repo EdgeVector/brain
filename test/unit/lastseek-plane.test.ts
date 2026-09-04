@@ -210,7 +210,14 @@ describe("lastseek plane", () => {
     const callLog = join(mkdtempSync(join(tmpdir(), "lastseek-budget-")), "calls");
     writeFileSync(callLog, "");
     process.env.LASTSEEK_CALL_LOG = callLog;
-    process.env.LASTSEEK_TIMEOUT_MS = "300";
+    // The kill has to leave the helper room to record that it ran. The fake
+    // writes its call log and THEN sleeps, so a 300 ms timeout made the
+    // assertion below depend on "a process starts and runs one echo in under
+    // 300 ms" — a property of the host, not of the code under test. It held
+    // until the suite ran on a loaded machine and the log came back empty.
+    // 1200 ms is far above process startup and far below bun's 5 s per-test
+    // deadline, and the budget stays what the test is actually about.
+    process.env.LASTSEEK_TIMEOUT_MS = "1200";
     process.env.LASTSEEK_BUDGET_MS = "200";
     process.env.LASTSEEK_BIN = fakeLastSeek(
       `echo "$1" >> "$LASTSEEK_CALL_LOG"; sleep 5; echo '{"ok":true,"results":[]}'`,

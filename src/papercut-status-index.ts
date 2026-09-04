@@ -75,6 +75,46 @@ export function recordFromEntryRow(row: QueryRow): FbrainRecord | null {
   return record;
 }
 
+/**
+ * A key-order-independent serialization, used ONLY to compare a stored
+ * `psi_payload` against the record it is supposed to mirror.
+ *
+ * `entryFieldsFor` writes `JSON.stringify(record)`, whose key order follows
+ * the record object's own insertion order. A record rebuilt from an admin
+ * scan need not carry its keys in the order they had when the payload was
+ * written, so comparing the raw strings would call an identical payload stale
+ * and rewrite every row on every rebuild. Sorting keys compares CONTENT.
+ */
+function stablePayload(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stablePayload).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stablePayload(obj[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * True when the row's `psi_payload` snapshot already mirrors `record`.
+ *
+ * A row whose payload is absent, unparseable or slug-crossed reports FALSE, so
+ * the rebuild refreshes it rather than leaving a row it cannot read. This is
+ * the check that makes the rebuild a repair for payload drift and not only for
+ * membership: `(status, slug)` can be correct on a row whose snapshot is
+ * months stale, and every reader that trusts the snapshot then serves that.
+ */
+export function entryPayloadMatches(
+  row: QueryRow,
+  record: FbrainRecord,
+): boolean {
+  const stored = recordFromEntryRow(row);
+  if (stored === null) return false;
+  return stablePayload(stored) === stablePayload(record);
+}
+
 function slugFromEntryRow(row: QueryRow): string | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
   const slug = row.key?.range ?? fields.psi_r;
@@ -638,7 +678,7 @@ export async function writePapercutStatusIndex(
   const wanted = new Map(
     livePapercuts.map((record) => [`${record.status} ${record.slug}`, record]),
   );
-  const present = new Set<string>();
+  const present = new Map<string, QueryRow>();
   const delta: BatchMutationOp[] = [];
   let markerExists = false;
   for (const row of existing.results) {
@@ -654,7 +694,7 @@ export async function writePapercutStatusIndex(
       continue;
     }
     const pair = `${hash} ${range}`;
-    present.add(pair);
+    present.set(pair, row);
     if (!wanted.has(pair)) {
       delta.push({
         mutationType: "delete",
@@ -666,7 +706,24 @@ export async function writePapercutStatusIndex(
     }
   }
   for (const [pair, record] of wanted) {
-    if (present.has(pair)) continue;
+    const existingRow = present.get(pair);
+    // A row already in the right partition is NOT necessarily current. Until
+    // this branch existed the rebuild skipped it outright, so `psi_payload`
+    // drift was unrepairable by the only tool that claims to repair the index:
+    // membership was rebuilt, the snapshot every `--fast` read serves was not.
+    // A row whose snapshot already matches still writes nothing, so a healthy
+    // rebuild stays a no-op instead of rewriting the whole ledger.
+    if (existingRow !== undefined) {
+      if (entryPayloadMatches(existingRow, record)) continue;
+      delta.push({
+        mutationType: "update",
+        schemaHash: entryHash,
+        keyHash: record.status,
+        keyRange: record.slug,
+        fields: entryFieldsFor(record.status, record),
+      });
+      continue;
+    }
     delta.push({
       mutationType: "create",
       schemaHash: entryHash,
@@ -756,15 +813,34 @@ export type PapercutStatusIndexCensus = {
   sot: number;
   missingFromIndex: string[];
   extraInIndex: string[];
+  /**
+   * Rows in the right partition whose `psi_payload` snapshot disagrees with
+   * the record. Membership can be perfect while these are months stale, and
+   * they are what every `--fast` reader serves.
+   */
+  stalePayload: string[];
   migrated: boolean;
   complete: boolean;
 };
 
+/**
+ * Index health against the papercut source of truth.
+ *
+ * Takes the live RECORDS, not `status slug` pair strings, because a pair-only
+ * census can only see membership. It answered `complete` on an index where
+ * 46.6% of rows carried a stale `psi_payload` — while shipping that payload
+ * over the wire to make the judgment. The signature is the guard: there is no
+ * way to ask for this census and skip the snapshot check.
+ */
 export async function censusPapercutStatusIndex(
   node: NodeClient,
   cfg: SchemaCfg,
-  sotPairs: readonly string[],
+  sot: readonly FbrainRecord[],
 ): Promise<PapercutStatusIndexCensus | null> {
+  const sotPairs = sot.map((record) => `${record.status} ${record.slug}`);
+  const byPair = new Map(
+    sot.map((record) => [`${record.status} ${record.slug}`, record]),
+  );
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash) return null;
   const migrated = await papercutStatusEntryExists(
@@ -779,6 +855,7 @@ export async function censusPapercutStatusIndex(
     allowFullScan: true,
   });
   const indexedSet = new Set<string>();
+  const stalePayload: string[] = [];
   for (const row of res.results) {
     const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
     const hash = row.key?.hash ?? fields.psi_h;
@@ -790,20 +867,29 @@ export async function censusPapercutStatusIndex(
     ) {
       continue;
     }
-    indexedSet.add(`${hash} ${range}`);
+    const pair = `${hash} ${range}`;
+    indexedSet.add(pair);
+    const record = byPair.get(pair);
+    if (record !== undefined && !entryPayloadMatches(row, record))
+      stalePayload.push(pair);
   }
   const sotSet = new Set(sotPairs);
   const missingFromIndex = [...sotSet]
     .filter((key) => !indexedSet.has(key))
     .sort();
   const extraInIndex = [...indexedSet].filter((key) => !sotSet.has(key)).sort();
+  stalePayload.sort();
   return {
     indexed: indexedSet.size,
     sot: sotSet.size,
     missingFromIndex,
     extraInIndex,
+    stalePayload,
     migrated,
     complete:
-      migrated && missingFromIndex.length === 0 && extraInIndex.length === 0,
+      migrated &&
+      missingFromIndex.length === 0 &&
+      extraInIndex.length === 0 &&
+      stalePayload.length === 0,
   };
 }
