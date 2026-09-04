@@ -309,7 +309,7 @@ async function proveConsolidate(
   return result;
 }
 
-export async function reapEphSeries(
+async function reapEphSeries(
   opts: ConsolidateOptions,
   series: string,
   today: string,
