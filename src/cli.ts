@@ -961,7 +961,7 @@ Example:
                        [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
                        [--not-duplicate-of-any]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
-brain papercut census [<component>] [--fast] [--json]
+brain papercut census [<component>] [--point-read] [--json]
 brain papercut list [<component>] [--status S] [--index-only] [--fast] [--json]
 
 The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
@@ -991,19 +991,23 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
 
 census  Counts by component and status, and prints its own method line.
 
-        census and list both point-read every record by default, which is
-        what catches a record whose status moved without this index following.
-        --fast serves each record from the snapshot the index already carries
-        instead: one node query per status partition and zero point reads
-        (2208 open rows, 3.4s against 44.8s on the primary, 2026-09-03).
-        Measured over those same rows, every header field the snapshot returns
-        was current; updated_at was stale on 1028 of them and tags on 5,
-        because brain append and brain tag used to write the record without
-        patching this index. They now patch it, so new drift stops, but rows
-        written before that keep a stale updated_at until
-        brain reindex --papercut-status-index rebuilds the index. Do not use
-        --fast for anything ordered or filtered by updated_at. Either way the
-        method line says which reading produced the numbers.
+        It counts from the snapshot the index already carries: one node query
+        per status partition and ZERO point reads. It reads exactly two fields,
+        component and status, and both are written only by verbs that go
+        through the resident write plan, which patches this index in the same
+        write — so neither can lag. Measured on the primary over all 2230
+        common open rows (2026-09-04), snapshot against point read: component
+        and status disagreed on ZERO rows.
+        --point-read re-reads every record and re-checks it against its
+        partition. That is the only reading that catches a record whose status
+        moved without this index following, and it is an index audit rather
+        than a counting method: 2977 node requests and 141.8s, against 3.3s for
+        the same ledger the same hour. Reach for it when you suspect the index,
+        or after brain reindex --papercut-status-index.
+        list keeps the point read as ITS default, because list is ordered
+        oldest-updated-first and updated_at is exactly the field the snapshot
+        can lag on (stale on 1044 of those 2230 rows). Either way the method
+        line says which reading produced the numbers.
 
 list    The row-level view of the SAME read census counts, so the two can never
         disagree. Applies <component> and --status, returns every matching row
@@ -1394,6 +1398,7 @@ const PAPERCUT_OPTIONS = {
   // census / list
   "index-only": { type: "boolean" },
   fast: { type: "boolean" },
+  "point-read": { type: "boolean" },
   evidence: { type: "string" },
   "fixed-by": { type: "string" },
   "verified-by": { type: "string" },
@@ -4205,6 +4210,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     };
     if (component) cOpts.component = component;
     if (values.fast === true) cOpts.fast = true;
+    if (values["point-read"] === true) cOpts.pointRead = true;
     await papercutCensusCmd(cOpts);
     return 0;
   }
