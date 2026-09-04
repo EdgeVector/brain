@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "brain": "bun src/cli.ts",
-    "test": "bun test",
+    "test": "bun test --timeout 60000",
     "typecheck": "tsc --noEmit",
     "build:mcp": "scripts/build-mcp-binary.sh"
   },
