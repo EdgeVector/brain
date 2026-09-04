@@ -118,7 +118,7 @@ export function resetSubprocessTotals(): void {
 }
 
 /** Milliseconds of `spans` that fall inside the half-open window [from, to). */
-export function overlapMs(spans: SubprocessSpan[], from: number, to: number): number {
+function overlapMs(spans: SubprocessSpan[], from: number, to: number): number {
   if (!(to > from)) return 0;
   let sum = 0;
   for (const s of spans) {
