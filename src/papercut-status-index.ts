@@ -215,30 +215,6 @@ export async function markPapercutStatusIndexMigrated(
   return true;
 }
 
-export async function unmarkPapercutStatusIndexMigrated(
-  node: NodeClient,
-  cfg: SchemaCfg,
-): Promise<boolean> {
-  const entryHash = papercutStatusIndexHash(cfg);
-  if (!entryHash) return false;
-  if (
-    !(await papercutStatusEntryExists(
-      node,
-      entryHash,
-      PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
-      PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
-    ))
-  ) {
-    return true;
-  }
-  await node.deleteRecord({
-    schemaHash: entryHash,
-    keyHash: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
-    keyRange: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
-  });
-  return true;
-}
-
 /** Slugs hydrated per keyed `HashKeys` query. `N/8 + 2` node reads at N=400. */
 export const PAPERCUT_HYDRATE_BATCH_SIZE = 8;
 /** Parallel point-read width when the node rejects `HashKeys`. */
