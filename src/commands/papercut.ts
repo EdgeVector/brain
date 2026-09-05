@@ -783,6 +783,11 @@ export type PapercutListOptions = PapercutListFilters & {
   indexOnly?: boolean;
   /** Serve records from the index payload snapshot instead of point-reading. */
   fast?: boolean;
+  /**
+   * Keep only the rows whose BODY claims a resolution the typed status does
+   * not carry. Forces point reads; refuses `--fast` and `--index-only`.
+   */
+  bodyResolved?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -817,6 +822,13 @@ export type PapercutListRow = {
   tags: string[];
   created_at: string;
   updated_at: string;
+  /**
+   * Present ONLY under `--body-resolved`, and only on rows that matched: the
+   * body line claiming a resolution the typed `status` does not carry. It is a
+   * CANDIDATE marker for a live re-check, never a verdict — see
+   * `bodyResolutionClaim`.
+   */
+  body_claim?: BodyResolutionClaim;
 };
 
 function str(record: FbrainRecord, field: string): string {
@@ -827,6 +839,97 @@ function str(record: FbrainRecord, field: string): string {
 function componentOf(record: FbrainRecord): string {
   const c = str(record, "component");
   return c.length > 0 ? c : "(unset)";
+}
+
+/**
+ * A resolution claim the record makes about ITSELF, in its own body.
+ *
+ * The ledger predates the typed `status` column, so a run that fixed a defect
+ * wrote its verdict as prose — `Status: FIXED`, `Verified: <live check>` — and
+ * the typed header stayed wherever the record was filed. Measured on the
+ * primary 2026-09-05: of the 16 open rows carrying a `fixed_by` header, 11
+ * said `Status: FIXED` AND carried a `Verified:` line while the typed status
+ * still read `open`, the oldest since 2026-08-05. `papercut list --status
+ * open` and `papercut census` both rank on the typed field, so those counted
+ * as outstanding defect load in every reader, and nothing compared the two —
+ * which is what made them invisible as closure candidates for a month.
+ *
+ * `**FIXED**` is in the corpus, so the markers tolerate emphasis and the list
+ * or quote prefixes a Markdown body puts in front of a line.
+ */
+export type BodyResolutionClaim = {
+  /** `verified` asserts a live re-check; `fixed` asserts only a merge. */
+  level: "verified" | "fixed";
+  /** The line that matched, so a reader can show its own evidence. */
+  line: string;
+};
+
+const BODY_STATUS_CLAIM =
+  /^[\s>#*-]*Status:\s*\**\s*(FIXED|VERIFIED|RESOLVED)\b/i;
+const BODY_VERIFIED_CLAIM = /^[\s>#*-]*Verified(?:-by)?:\s*\**\s*\S/i;
+
+/** The strongest resolution claim the body makes, or null if it makes none. */
+export function bodyResolutionClaim(body: unknown): BodyResolutionClaim | null {
+  if (typeof body !== "string" || body.length === 0) return null;
+  let fixed: string | null = null;
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    if (BODY_VERIFIED_CLAIM.test(line)) return { level: "verified", line };
+    const m = BODY_STATUS_CLAIM.exec(line);
+    if (m === null) continue;
+    // A `Status:` line naming VERIFIED is itself a live-check claim.
+    if ((m[1] ?? "").toUpperCase() === "VERIFIED")
+      return { level: "verified", line };
+    // Keep the FIRST fixed claim but keep scanning: a `Verified:` line later
+    // in the same closing block outranks it, and the two usually sit together.
+    if (fixed === null) fixed = line;
+  }
+  return fixed === null ? null : { level: "fixed", line: fixed };
+}
+
+/**
+ * The typed statuses a body claim cannot improve on. `wontfix` and `duplicate`
+ * are deliberate terminal decisions and `verified` is already the strongest
+ * state, so a resolution line under any of them is consistent, not stale.
+ */
+const PAPERCUT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  "verified",
+  "wontfix",
+  "duplicate",
+]);
+
+/**
+ * True when the body asserts a state the typed header does not.
+ *
+ * `partial` is excluded deliberately, and it is the exclusion worth stating:
+ * `partial` MEANS the body carries a resolved half and an unresolved one
+ * (`PAPERCUT_STATUSES`: "some of it repaired, some still open — say which in
+ * the body"), so a resolution line inside one is expected and says nothing
+ * about the record as a whole. Reporting those would bury the real finding
+ * under rows behaving exactly as documented.
+ *
+ * `fixed` plus a `verified` claim IS reported. `fixed` means "merged, NOT yet
+ * re-measured", so a body that already records a live check is one
+ * `papercut close --status verified` away with its evidence written down.
+ */
+export function bodyClaimOutranksStatus(
+  claim: BodyResolutionClaim | null,
+  status: string,
+): boolean {
+  if (claim === null) return false;
+  if (PAPERCUT_TERMINAL_STATUSES.has(status)) return false;
+  if (status === "open") return true;
+  if (status === "fixed") return claim.level === "verified";
+  return false;
+}
+
+/** The claim to report for a row, or null when the row is not a candidate. */
+export function staleClosureClaim(
+  record: FbrainRecord,
+): BodyResolutionClaim | null {
+  const claim = bodyResolutionClaim(record.body);
+  return bodyClaimOutranksStatus(claim, record.status) ? claim : null;
 }
 
 /**
@@ -874,12 +977,19 @@ export function matchesPapercutFilters(
 export function buildPapercutList(
   records: readonly FbrainRecord[],
   opts: PapercutListFilters = {},
+  bodyResolved: boolean = false,
 ): PapercutListRow[] {
   const rows: PapercutListRow[] = [];
   for (const r of records) {
     const component = componentOf(r);
     const tags = Array.isArray(r.tags) ? r.tags : [];
     if (!matchesPapercutFilters(r, opts)) continue;
+    // Deliberately NOT part of `matchesPapercutFilters`: that predicate is the
+    // one handed to the index reader to pre-select candidates from the payload
+    // snapshot, and this claim is read off `body`, the field an append writes.
+    // Narrowing on it would decide from the snapshot the caller was refused.
+    const claim = bodyResolved ? staleClosureClaim(r) : null;
+    if (bodyResolved && claim === null) continue;
     rows.push({
       slug: r.slug,
       title: r.title,
@@ -895,6 +1005,7 @@ export function buildPapercutList(
       tags,
       created_at: r.created_at,
       updated_at: r.updated_at,
+      ...(claim === null ? {} : { body_claim: claim }),
     });
   }
   return rows.sort(
@@ -993,6 +1104,21 @@ export const LIST_INDEX_ONLY_METHOD =
   "records not hydrated, status not re-verified per record, no component filter), " +
   "status filter applied, every matching row returned, slug order";
 
+/**
+ * What `--body-resolved` did, appended to whichever method line applies.
+ *
+ * It has to say CANDIDATES out loud. A reader that saw a filtered list of rows
+ * whose bodies say FIXED could reasonably flip them in bulk, and the whole
+ * reason these rows are worth surfacing is that the live check was never
+ * re-run — a body claiming verified is a hypothesis until someone re-measures.
+ * This reader has no write path at all, by construction.
+ */
+export const LIST_METHOD_BODY_RESOLVED =
+  "; --body-resolved: kept only rows whose BODY claims a resolution the typed " +
+  "status does not carry (status open, or fixed carrying a live-check line); " +
+  "records point-read because `body` is the field being matched — these are " +
+  "CANDIDATES for a live re-check, NOT closures, and this reader never writes";
+
 export const LIST_MARK_MAX = 100;
 
 /** Single-line, length-capped rendering for human mode only. */
@@ -1004,6 +1130,34 @@ export function elide(value: string, max: number = LIST_MARK_MAX): string {
 export async function papercutListCmd(
   opts: PapercutListOptions,
 ): Promise<void> {
+  // Refuse a bad flag COMBINATION before opening a client: an invocation
+  // this reader cannot serve is a usage error, and it should not need a
+  // reachable node to say so.
+  const bodyResolved = opts.bodyResolved === true;
+  // Refuse rather than silently degrade, the same way `--index-only` refuses a
+  // filter it cannot serve. `--fast` CAN reach a body — `psi_payload` is a
+  // snapshot of the whole record — which is exactly why this has to be an
+  // explicit refusal instead of an absence: the snapshot lags `brain append`
+  // for any row written before appends began patching this index, and an
+  // append is precisely the write that puts a closing block into a body. The
+  // rows a stale snapshot would drop are the newest and most interesting ones,
+  // and dropping them is silent.
+  if (bodyResolved && opts.fast === true) {
+    throw new FbrainError({
+      code: "papercut_list_body_resolved_needs_point_read",
+      message:
+        "`--body-resolved` matches the record body, and `--fast` serves bodies from the index payload snapshot, which lags exactly the appends this filter looks for.",
+      hint: "Drop --fast. A row whose closing block was appended after the last index rebuild would be missed, and missing it is silent.",
+    });
+  }
+  if (bodyResolved && opts.indexOnly === true) {
+    throw new FbrainError({
+      code: "papercut_list_index_only_no_body",
+      message:
+        "`--index-only` reads the status-keyed index without hydrating records, and `body` is a record field that projection does not carry.",
+      hint: "Drop --index-only to get the hydrated ledger that --body-resolved can filter.",
+    });
+  }
   const print = resolvePrintSink(opts);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   if (opts.indexOnly) {
@@ -1064,7 +1218,7 @@ export async function papercutListCmd(
       : undefined,
     stats,
   });
-  const method = listMethod(
+  const baseMethod = listMethod(
     fast,
     filters,
     narrowBy
@@ -1075,7 +1229,8 @@ export async function papercutListCmd(
         }
       : undefined,
   );
-  const rows = buildPapercutList(records, filters);
+  const rows = buildPapercutList(records, filters, bodyResolved);
+  const method = bodyResolved ? `${baseMethod}${LIST_METHOD_BODY_RESOLVED}` : baseMethod;
 
   if (opts.json) {
     print(JSON.stringify({ rows, total: rows.length, method }));
@@ -1106,6 +1261,13 @@ export async function papercutListCmd(
     if (r.verified_by) marks.push(`verified-by: ${elide(r.verified_by)}`);
     if (r.duplicate_of) marks.push(`duplicate-of: ${r.duplicate_of}`);
     if (marks.length > 0) lines.push(`${indent}[${marks.join(" · ")}]`);
+    // The matched line IS the finding. A row listed without it just asserts
+    // that some rule fired, and the operator has to re-read the record to see
+    // what for.
+    if (r.body_claim)
+      lines.push(
+        `${indent}body claims ${r.body_claim.level}: ${elide(r.body_claim.line)}`,
+      );
   }
   print([header, ...lines, "", `${rows.length} row(s)`, method].join("\n"));
 }

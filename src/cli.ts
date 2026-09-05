@@ -968,7 +968,7 @@ brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified
 brain papercut census [<component>] [--point-read] [--json]
 brain papercut list [<component>] [--status S] [--severity p0|p1|p2|p3]
                     [--kind K] [--repo owner/name] [--tag T]...
-                    [--index-only] [--fast] [--json]
+                    [--index-only] [--fast] [--body-resolved] [--json]
 
 The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
 failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
@@ -1025,6 +1025,18 @@ list    The row-level view of the SAME read census counts, so the two can never
         index, without even parsing the payload. The status is the partition
         key, not re-verified per record, and there is no component filter —
         queue consumers point-get what they act on.
+        --body-resolved keeps only the rows whose BODY claims a resolution the
+        typed status does not carry: status open with a Status: FIXED/RESOLVED
+        or Verified: line, or status fixed carrying a live-check line. The
+        ledger predates the typed status column, so runs wrote their verdict as
+        prose and left the header alone — 11 of the 16 open rows with a
+        fixed_by header read that way on 2026-09-05, the oldest since
+        2026-08-05, and every reader that ranks by status counted them as
+        outstanding. These are CANDIDATES for a live re-check, not closures: a
+        body claiming verified is a hypothesis until someone re-measures, so
+        this is a reader with no write path. Refuses --fast and --index-only,
+        because body is the field it matches and neither reading can be trusted
+        for it.
 
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
@@ -1404,6 +1416,7 @@ export const PAPERCUT_OPTIONS = {
   // census / list
   "index-only": { type: "boolean" },
   fast: { type: "boolean" },
+  "body-resolved": { type: "boolean" },
   "point-read": { type: "boolean" },
   evidence: { type: "string" },
   "fixed-by": { type: "string" },
@@ -4154,6 +4167,7 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "status",
     "index-only",
     "fast",
+    "body-resolved",
     "severity",
     "kind",
     "repo",
@@ -4309,6 +4323,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   if (typeof values.status === "string") lOpts.status = values.status;
   if (values["index-only"] === true) lOpts.indexOnly = true;
   if (values.fast === true) lOpts.fast = true;
+  if (values["body-resolved"] === true) lOpts.bodyResolved = true;
   // Validated, not passed through: an unvalidated `--severity p1 ` or `--kind
   // fix` matches no row, and a filter that answers "0 rows" for a typo is the
   // same lie in a quieter voice as one that ignores the flag outright.

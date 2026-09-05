@@ -35,6 +35,8 @@ export const PAPERCUT_USAGE_CODES = [
   // ran and failed" (1) put them on the wrong side.
   "papercut_flag_not_consumed",
   "papercut_list_index_only_no_component",
+  "papercut_list_index_only_no_body",
+  "papercut_list_body_resolved_needs_point_read",
 ] as const;
 
 // Statuses that mean "this defect is still costing us something". `partial`
