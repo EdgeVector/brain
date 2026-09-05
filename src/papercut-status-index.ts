@@ -370,6 +370,22 @@ export async function requireCompletePapercutStatusIndex(
 }
 
 /**
+ * What one `readPapercutsByStatus` call actually did, so a reader can say so
+ * in its method line instead of asserting it. `rows` is what the partition
+ * held, `narrowedOut` is what the snapshot ruled out unread, `pointReads` is
+ * what it charged the node.
+ */
+export type PapercutReadStats = {
+  rows: number;
+  pointReads: number;
+  narrowedOut: number;
+};
+
+export function newPapercutReadStats(): PapercutReadStats {
+  return { rows: 0, pointReads: 0, narrowedOut: 0 };
+}
+
+/**
  * Read one named status partition, or every fixed status partition.
  *
  * Default: point-read every record. One node request per row (2208 open rows
@@ -398,12 +414,36 @@ export async function requireCompletePapercutStatusIndex(
  * than served under the wrong status. Only the point read can catch a record
  * whose status moved without the index following; the payload cannot, because
  * a write that skipped the index also skipped the payload.
+ *
+ * `narrow`: a predicate over the payload snapshot that selects which rows are
+ * worth point-reading at all. This is what makes a FILTERED list cost the size
+ * of its answer instead of the size of the partition. `papercut list --status
+ * open --severity p0` returned 22 rows and point-read all 2251 open ones
+ * (2258 node requests, 715.6s of node time, measured on the primary
+ * 2026-09-04); an owner-review run measuring the same read got
+ * socket-not-reachable from the load it created. With `narrow`, only the rows
+ * whose snapshot already matches are point-read — and they are then filtered
+ * AGAIN on the point-read record, so a snapshot that wrongly includes a row
+ * cannot put it in the answer.
+ *
+ * The cost, stated rather than implied: a row whose snapshot disagrees with
+ * the record ON A FILTER FIELD is dropped without being read, so it can be
+ * missed. That is why `narrow` must only ever be given fields measured stable.
+ * Across all 2252 open rows on the primary, 2026-09-04: `severity`, `kind`,
+ * `repo`, `component`, `status`, `title`, `fixed_by`, `verified_by`,
+ * `duplicate_of`, `symptom_hash`, `created_at` and `tags` agreed with the
+ * point-read record on EVERY row; only `updated_at` disagreed, on 2. A row
+ * with no usable snapshot is never narrowed out — it is point-read, as before.
  */
 export async function readPapercutsByStatus(
   node: NodeClient,
   cfg: SchemaCfg,
   status?: string,
-  opts?: { fast?: boolean },
+  opts?: {
+    fast?: boolean;
+    narrow?: (record: FbrainRecord) => boolean;
+    stats?: PapercutReadStats;
+  },
 ): Promise<FbrainRecord[]> {
   const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
   const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
@@ -411,6 +451,8 @@ export async function readPapercutsByStatus(
     await import("./record.ts");
   const papercutHash = schemaHashFor("papercut", cfg);
   const fast = opts?.fast === true;
+  const narrow = opts?.narrow;
+  const stats = opts?.stats;
   const out: FbrainRecord[] = [];
   for (const partition of statuses) {
     const res = await node.queryAll({
@@ -423,16 +465,24 @@ export async function readPapercutsByStatus(
     for (const row of res.results) {
       const slug = slugFromEntryRow(row);
       if (!slug) continue;
+      if (stats) stats.rows += 1;
+      // Parse the snapshot when EITHER reading needs it: `fast` serves from
+      // it, `narrow` decides from it. A row it cannot parse falls through to
+      // the point read in both cases.
+      const record = fast || narrow ? recordFromEntryRow(row) : null;
+      if (narrow && record && !narrow(record)) {
+        if (stats) stats.narrowedOut += 1;
+        continue;
+      }
       slugs.push(slug);
-      if (!fast) continue;
-      const record = recordFromEntryRow(row);
-      if (record) fromPayload.set(slug, record);
+      if (fast && record) fromPayload.set(slug, record);
     }
     // Point-read only what the payload could not answer: everything by
     // default, and under `fast` just the rows with no usable snapshot.
     const pending = fast
       ? slugs.filter((slug) => !fromPayload.has(slug))
       : slugs;
+    if (stats) stats.pointReads += pending.length;
     const hydrated = await hydratePapercutsBySlug({
       node,
       papercutHash,

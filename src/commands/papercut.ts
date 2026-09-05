@@ -34,6 +34,7 @@ import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import { recordListEntryHash } from "../record-list-index.ts";
 import {
+  newPapercutReadStats,
   readPapercutSlugsByStatus,
   readPapercutsByStatus,
 } from "../papercut-status-index.ts";
@@ -823,7 +824,7 @@ function str(record: FbrainRecord, field: string): string {
   return typeof v === "string" ? v : "";
 }
 
-export function componentOf(record: FbrainRecord): string {
+function componentOf(record: FbrainRecord): string {
   const c = str(record, "component");
   return c.length > 0 ? c : "(unset)";
 }
@@ -839,6 +840,37 @@ export function componentOf(record: FbrainRecord): string {
  * a second reader. Every matching row is returned, so a caller wanting the
  * other order can just reverse it.
  */
+/**
+ * The ONE row-filter predicate. `buildPapercutList` applies it to the records
+ * it renders, and `papercutListCmd` hands the same closure to the index reader
+ * to pre-select candidates from the payload snapshot. They cannot disagree
+ * about what a filter means, because there is only one of them.
+ *
+ * `status` is included for the rendering caller. Candidate narrowing
+ * deliberately omits it: the partition key already selects the status, and the
+ * reader's fail-closed check must stay free to catch a record whose status
+ * moved without the index following.
+ */
+export function matchesPapercutFilters(
+  r: FbrainRecord,
+  opts: PapercutListFilters = {},
+): boolean {
+  const tags = Array.isArray(r.tags) ? r.tags : [];
+  if (opts.component !== undefined && componentOf(r) !== opts.component)
+    return false;
+  if (opts.status !== undefined && r.status !== opts.status) return false;
+  if (opts.severity !== undefined && str(r, "severity") !== opts.severity)
+    return false;
+  if (opts.kind !== undefined && str(r, "kind") !== opts.kind) return false;
+  if (opts.repo !== undefined && str(r, "repo") !== opts.repo) return false;
+  // AND, not any: `--tag read-path --tag cli` asks for the rows carrying
+  // both. Any-semantics would widen the result as the caller narrows the
+  // request, which is the shape of failure this whole change is about.
+  if (opts.tags !== undefined && !opts.tags.every((t) => tags.includes(t)))
+    return false;
+  return true;
+}
+
 export function buildPapercutList(
   records: readonly FbrainRecord[],
   opts: PapercutListFilters = {},
@@ -847,17 +879,7 @@ export function buildPapercutList(
   for (const r of records) {
     const component = componentOf(r);
     const tags = Array.isArray(r.tags) ? r.tags : [];
-    if (opts.component !== undefined && component !== opts.component) continue;
-    if (opts.status !== undefined && r.status !== opts.status) continue;
-    if (opts.severity !== undefined && str(r, "severity") !== opts.severity)
-      continue;
-    if (opts.kind !== undefined && str(r, "kind") !== opts.kind) continue;
-    if (opts.repo !== undefined && str(r, "repo") !== opts.repo) continue;
-    // AND, not any: `--tag read-path --tag cli` asks for the rows carrying
-    // both. Any-semantics would widen the result as the caller narrows the
-    // request, which is the shape of failure this whole change is about.
-    if (opts.tags !== undefined && !opts.tags.every((t) => tags.includes(t)))
-      continue;
+    if (!matchesPapercutFilters(r, opts)) continue;
     rows.push({
       slug: r.slug,
       title: r.title,
@@ -904,6 +926,33 @@ export const LIST_METHOD_FAST =
 // reader could be given. It stayed on screen unchanged while four more were
 // accepted and dropped. Naming the filters ACTUALLY applied, computed from the
 // same table the row loop reads, is the half of the line a caller can check.
+/**
+ * The filters a payload snapshot may decide on its own.
+ *
+ * `status` is absent deliberately — see `matchesPapercutFilters`. Every field
+ * here was measured against the point-read record on all 2252 open rows of the
+ * primary on 2026-09-04 and disagreed on none; `updated_at`, the one field
+ * that did drift, is not a filter and so cannot narrow anything.
+ */
+export const PAPERCUT_NARROWABLE_FILTERS = PAPERCUT_LIST_FILTERS.filter(
+  (f) => f !== "status",
+);
+
+/** The filters that will actually pre-select candidates for this call. */
+export function narrowingFilters(
+  filters: PapercutListFilters,
+): PapercutListFilters | null {
+  const picked: PapercutListFilters = {};
+  let any = false;
+  for (const f of PAPERCUT_NARROWABLE_FILTERS) {
+    const v = filters[f];
+    if (v === undefined) continue;
+    Object.assign(picked, { [f]: v });
+    any = true;
+  }
+  return any ? picked : null;
+}
+
 export function listFilterClause(filters: PapercutListFilters): string {
   const applied = PAPERCUT_LIST_FILTERS.filter(
     (f) => filters[f] !== undefined,
@@ -916,10 +965,21 @@ export function listFilterClause(filters: PapercutListFilters): string {
 export function listMethod(
   fast: boolean,
   filters: PapercutListFilters = {},
+  narrowed?: { fields: readonly string[]; rows: number; pointReads: number },
 ): string {
-  return (fast ? LIST_METHOD_FAST : LIST_METHOD).replace(
+  const base = (fast ? LIST_METHOD_FAST : LIST_METHOD).replace(
     "FILTERS",
     listFilterClause(filters),
+  );
+  if (!narrowed) return base;
+  // Say what was NOT read, and why that could be wrong. A reader who only
+  // learns the command got faster cannot tell a narrowed answer from a
+  // complete one, and this reader's whole contract is that it returns every
+  // matching row.
+  return (
+    `${base}; candidates pre-selected from the index snapshot on ` +
+    `${narrowed.fields.join("/")} (${narrowed.pointReads} of ${narrowed.rows} ` +
+    `rows point-read) — a row whose snapshot disagrees on those fields is not read`
   );
 }
 
@@ -992,10 +1052,29 @@ export async function papercutListCmd(
     const v = opts[f];
     if (v !== undefined) Object.assign(filters, { [f]: v });
   }
-  const method = listMethod(fast, filters);
+  // Narrow on the record-field filters, then filter AGAIN on what came back.
+  // The second pass is what makes a wrongly-including snapshot harmless: it
+  // costs one point read, not a wrong row.
+  const narrowBy = narrowingFilters(filters);
+  const stats = newPapercutReadStats();
   const records = await readPapercutsByStatus(node, opts.cfg, opts.status, {
     fast,
+    narrow: narrowBy
+      ? (record) => matchesPapercutFilters(record, narrowBy)
+      : undefined,
+    stats,
   });
+  const method = listMethod(
+    fast,
+    filters,
+    narrowBy
+      ? {
+          fields: Object.keys(narrowBy),
+          rows: stats.rows,
+          pointReads: stats.pointReads,
+        }
+      : undefined,
+  );
   const rows = buildPapercutList(records, filters);
 
   if (opts.json) {
