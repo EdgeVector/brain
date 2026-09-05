@@ -29,7 +29,7 @@ import {
 } from "./record.ts";
 import { RECORD_TYPES, type RecordType } from "./schemas.ts";
 
-export const BACKLINK_INDEX_TAG_PREFIX = "__fbrain_backlink__:";
+const BACKLINK_INDEX_TAG_PREFIX = "__fbrain_backlink__:";
 
 export type BacklinkIndexRebuildResult = {
   targetsIndexed: number;
