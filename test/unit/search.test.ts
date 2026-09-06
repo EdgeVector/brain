@@ -449,7 +449,6 @@ describe("searchCmd", () => {
     // surfaced FIRST and honestly labeled `fallback` — never `strong` — and the
     // weak-match advisory fires on stderr (this used to silently claim strong).
     const rowsOut = rowsOf(stdout);
-    if (rowsOut.length !== 1) console.log("DIAG search stdout=", JSON.stringify(stdout), "stderr=", JSON.stringify(stderr), "env=", JSON.stringify({s: process.env.FBRAIN_FOLDDB_SOCKET, h: process.env.FOLDDB_HOME, l: process.env.LASTDB_HOME, seek: process.env.LASTSEEK_BIN, cwd: process.cwd()}));
     expect(rowsOut).toHaveLength(1);
     expect(rowsOut[0]).toContain("socket-note");
     expect(rowsOut[0]).toContain("—");
