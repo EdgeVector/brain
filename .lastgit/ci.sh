@@ -51,6 +51,20 @@ mkdir -p "$ci_shim_dir/search-home"
 export LASTDB_SEARCH_BIN="$ci_shim_dir/search"
 export SEARCH_HOME="$ci_shim_dir/search-home"
 unset LASTDB_SEARCH_SEMANTIC_MODULE
-FBRAIN_SKIP_INTEGRATION="${FBRAIN_SKIP_INTEGRATION:-1}" bun test --timeout 60000
+# The Forge host runner (act hostexecutor) attaches a pseudo-terminal to every
+# step, so under Forge CI `process.stdin.isTTY` and `process.stdout.isTTY` are
+# BOTH true — unlike the LastGit watcher, a Bash tool, or any pipe. Three test
+# families branch on exactly that and fail only there (Forgejo runs 3, 9, 10,
+# 11, 12, 13, 14 on 2026-09-06, 23 failures each, green everywhere else):
+#   - `acquireCapability` skips its non-interactive fast-fail when stdin is a
+#     TTY and issues the consent request instead (MCP cold-capability tests saw
+#     `app_not_registered` where they expect `consent_required_non_interactive`);
+#   - `ask`/`search` print the dimmed `columns:` legend on stdout when stdout
+#     is a TTY, so every row-count assertion is off by one (run 13's DIAG dump:
+#     stdout[0] = "\e[2m  columns: rank · slug · type · title …\e[0m").
+# Detach the suite from the runner's pty: stdin from /dev/null, stdout and
+# stderr through a pipe. `set -o pipefail` above keeps bun's exit status.
+# papercut-brain-search-tests-not-hermetic-host-search-plane-answers-real-hits-20260906
+FBRAIN_SKIP_INTEGRATION="${FBRAIN_SKIP_INTEGRATION:-1}" bun test --timeout 60000 </dev/null 2>&1 | cat
 
 echo "lastgit ci gate PASSED"
