@@ -403,7 +403,7 @@ Records can point at things three ways, in increasing order of weight:
 1. **`[[slug]]` wiki links** in the body — cheap, brain-internal, indexed by
    `backlinks`.
 2. **Cross-app URIs** in the body (e.g. `lastsecrets://<slug>`,
-   `lastdb:///<repo>`) — pointers into sibling apps that own the data.
+   `http://localhost:3300/EdgeVector/.git<repo>`) — pointers into sibling apps that own the data.
 3. **Real attachments** — the file's bytes live in the brain, content-addressed
    and cloud-synced with the rest of the node's data.
 

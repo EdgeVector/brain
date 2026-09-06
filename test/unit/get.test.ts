@@ -570,16 +570,21 @@ describe("getRecord — design's child tasks listing", () => {
         captured = json;
       },
     });
-    expect(lines.join("\n")).toContain("linked_from: task note-auth (body), task wire-oauth (explicit)");
+    // Index-only: the two sources are NOT point-read, so no `(via)` suffix and
+    // no status — `fbrain backlinks` is the hydrated view.
+    expect(lines.join("\n")).toContain("linked_from: task note-auth, task wire-oauth");
     expect(captured).toMatchObject({
       linked_from: [
-        { type: "task", slug: "note-auth", via: ["body"] },
-        { type: "task", slug: "wire-oauth", via: ["explicit"] },
+        { type: "task", slug: "note-auth" },
+        { type: "task", slug: "wire-oauth" },
       ],
     });
+    const json = captured as { linked_from: Array<Record<string, unknown>> };
+    expect(json.linked_from[0]).not.toHaveProperty("via");
+    expect(json.linked_from[0]).not.toHaveProperty("status");
   });
 
-  test("non-design linked_from uses keyed index and source reads only", async () => {
+  test("non-design linked_from uses the keyed index read only, no source reads", async () => {
     const calls: Array<{ schema: string; keyed: boolean }> = [];
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
@@ -627,12 +632,15 @@ describe("getRecord — design's child tasks listing", () => {
       print: (l) => lines.push(l),
     });
 
-    expect(lines.join("\n")).toContain("linked_from: concept source-note (body)");
+    expect(lines.join("\n")).toContain("linked_from: concept source-note");
     expect(calls.every((call) => call.keyed)).toBe(true);
+    // Exactly two requests: the record, then the backlink index. The source
+    // (`concept source-note`) is listed from the index and never point-read —
+    // that per-source hydration was the 25-request amplifier on popular
+    // records (papercut-brain-get-issues-33-node-requests-for-one-record).
     expect(calls.map((call) => call.schema)).toEqual([
       TEST_HASHES.task,
       TEST_TAG_INDEX_HASH,
-      TEST_HASHES.concept,
     ]);
   });
 });

@@ -24,6 +24,7 @@ import {
   schemaHashFor,
   wikiLinkSlugs,
   type Backlink,
+  type BacklinkRef,
   type BacklinkVia,
   type FbrainRecord,
 } from "./record.ts";
@@ -38,6 +39,51 @@ export type BacklinkIndexRebuildResult = {
 
 export function backlinkIndexTag(targetSlug: string): string {
   return `${BACKLINK_INDEX_TAG_PREFIX}${normalizeSlug(targetSlug)}`;
+}
+
+// Index-only backlink listing: ONE keyed read of the membership record, no
+// per-source hydration. This is what `fbrain get` renders as `linked_from`.
+//
+// Why a second reader exists: `findBacklinks` below point-reads every source
+// record to fetch its status and re-derive `via`, so a get of a record with
+// 23 inbound links cost 25 node requests — the dominant amplifier behind the
+// 18–45 s gets measured 2026-09-06 under node load
+// (papercut-brain-get-issues-33-node-requests-for-one-record). Every crawl
+// consumer of `linked_from` only walks the slugs; the decorated view (status,
+// via, dropped stale members) stays on `fbrain backlinks`.
+//
+// Members are returned as stored: a source whose edge was removed but whose
+// membership row has not been reconciled yet is still listed. That is the
+// index's freshness, not a new inconsistency — `findBacklinks` filters those
+// by re-reading the source, which is exactly the cost this reader removes.
+export async function listBacklinkMembers(
+  node: NodeClient,
+  cfg: Config,
+  targetSlug: string,
+  options?: { verbose?: Verbose },
+): Promise<BacklinkRef[]> {
+  if (!tagIndexAvailable(cfg)) {
+    options?.verbose?.(
+      "backlinks index unavailable; returning fast empty linked_from " +
+        "(run `fbrain init`, then `fbrain reindex --backlinks` to populate it)",
+    );
+    return [];
+  }
+  const index = await readTagIndex(node, cfg, backlinkIndexTag(normalizeSlug(targetSlug)));
+  if (index === null) return [];
+
+  const seen = new Set<string>();
+  const refs: BacklinkRef[] = [];
+  for (const member of index.members) {
+    if (seen.has(member)) continue;
+    seen.add(member);
+    const parsed = parseMemberKey(member);
+    if (parsed === null) continue;
+    if (cfg.schemaHashes[parsed.type] === undefined) continue;
+    refs.push({ type: parsed.type, slug: parsed.slug });
+  }
+  refs.sort((a, b) => a.type.localeCompare(b.type) || a.slug.localeCompare(b.slug));
+  return refs;
 }
 
 export async function findBacklinks(

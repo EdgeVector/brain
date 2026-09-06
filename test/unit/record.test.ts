@@ -12,6 +12,7 @@ import {
   READ_RETRY_ATTEMPTS,
   READ_RETRY_BACKOFF_MS,
   resolveBySlug,
+  typeHintFromSlug,
   resolveTypeFilter,
   rowToRecord,
   schemaHashFor,
@@ -1594,5 +1595,134 @@ describe("verifyVectorIndexed — consecutive-hit (anti-flicker) contract", () =
     });
     expect(visible).toBe(false);
     expect(calls()).toBe(4);
+  });
+});
+
+// Untyped lookups probe the type named by the slug prefix first (one keyed
+// read) and only pay the parallel all-types sweep on a miss. This is the
+// request-count fix for the dominant brain verb
+// (papercut-brain-get-issues-33-node-requests-for-one-record).
+describe("resolveBySlug — slug-prefix type hint", () => {
+  type Row = { fields: Record<string, unknown> };
+  type Seed = Record<string, Row[]>;
+
+  function row(slug: string): Row {
+    return {
+      fields: {
+        slug,
+        title: "T",
+        body: "B",
+        status: "open",
+        tags: [],
+        created_at: "2026-05-01T00:00:00Z",
+        updated_at: "2026-05-01T00:00:00Z",
+      },
+    };
+  }
+
+  // Counting mock: records which schema each keyed probe hit, in order.
+  function mockNode(seed: Seed, probed: string[]): NodeClient {
+    return {
+      baseUrl: "mock",
+      userHash: "uh",
+      async autoIdentity() {
+        return { provisioned: true, userHash: "uh" };
+      },
+      async health() {
+        return { ok: true, uptime_s: 1 };
+      },
+      async bootstrap() {
+        return { userHash: "uh" };
+      },
+      async requestConsent() {
+        return { status: 202, body: { request_id: "r" } };
+      },
+      async consentStatus() {
+        return { status: 200, body: { status: "granted" } };
+      },
+      async listLoadedSchemas() {
+        return [];
+      },
+      async loadSchemas() {
+        return { available_schemas_loaded: 0, schemas_loaded_to_db: 0, failed_schemas: [] };
+      },
+      async createRecord() {},
+      async updateRecord() {},
+      async deleteRecord() {},
+      async queryAll({ schemaHash }): Promise<QueryResponse> {
+        probed.push(schemaHash);
+        const rows = seed[schemaHash] ?? [];
+        const results = rows.map((r) => ({
+          fields: r.fields,
+          key: { hash: r.fields.slug as string, range: null },
+        }));
+        return { ok: true, results, total_count: results.length, returned_count: results.length };
+      },
+      async search() {
+        return [];
+      },
+      async rawCall() {
+        return { status: 200, headers: new Headers(), body: "", json: null };
+      },
+    };
+  }
+
+  const cfg = buildTestCfg({ schemaHashes: { ...TEST_HASHES } });
+  const registered = RECORD_TYPES.filter((t) => cfg.schemaHashes[t] !== undefined).length;
+
+  test("typeHintFromSlug maps known prefixes and leaves the rest alone", () => {
+    expect(typeHintFromSlug("papercut-brain-get-slow")).toBe("papercut");
+    expect(typeHintFromSlug("concepts-lastdb-canonical-model")).toBe("concept");
+    expect(typeHintFromSlug("north-star-lastdb-no-scan-access")).toBe("project");
+    expect(typeHintFromSlug("closeout-20260906-deep-dive")).toBe("reference");
+    expect(typeHintFromSlug("  Decision-2026-09-06-x ")).toBe("decision");
+    // A bare prefix is not a slug that names a type.
+    expect(typeHintFromSlug("papercut-")).toBeNull();
+    expect(typeHintFromSlug("routine-heartbeats")).toBeNull();
+  });
+
+  test("hinted hit is ONE keyed read on the hinted schema, no sweep", async () => {
+    const probed: string[] = [];
+    const node = mockNode({ [TEST_HASHES.papercut]: [row("papercut-foo")] }, probed);
+    const r = await resolveBySlug({ node, cfg, slug: "papercut-foo" });
+    expect(r.type).toBe("papercut");
+    expect(r.record.slug).toBe("papercut-foo");
+    expect(probed).toEqual([TEST_HASHES.papercut]);
+    // A hinted hit does not sweep, so it cannot report twins.
+    expect(r.also_types).toBeUndefined();
+  });
+
+  test("hinted miss falls through to the sweep without re-probing the hinted type", async () => {
+    const probed: string[] = [];
+    // A `papercut-…` slug that only exists as a legacy reference record.
+    const node = mockNode({ [TEST_HASHES.reference]: [row("papercut-legacy")] }, probed);
+    const r = await resolveBySlug({ node, cfg, slug: "papercut-legacy" });
+    expect(r.type).toBe("reference");
+    expect(probed[0]).toBe(TEST_HASHES.papercut);
+    expect(probed.filter((h) => h === TEST_HASHES.papercut)).toHaveLength(1);
+    // hint + every other registered type, once each.
+    expect(probed).toHaveLength(registered);
+  });
+
+  test("an unknown prefix takes the full sweep exactly as before", async () => {
+    const probed: string[] = [];
+    const node = mockNode({ [TEST_HASHES.sop]: [row("routine-heartbeats")] }, probed);
+    const r = await resolveBySlug({ node, cfg, slug: "routine-heartbeats" });
+    expect(r.type).toBe("sop");
+    expect(probed).toHaveLength(registered);
+  });
+
+  test("explicit type wins over the prefix hint", async () => {
+    const probed: string[] = [];
+    const node = mockNode(
+      {
+        [TEST_HASHES.papercut]: [row("papercut-twin")],
+        [TEST_HASHES.reference]: [row("papercut-twin")],
+      },
+      probed,
+    );
+    const r = await resolveBySlug({ node, cfg, slug: "papercut-twin", type: "reference" });
+    expect(r.type).toBe("reference");
+    expect(probed).toEqual([TEST_HASHES.reference]);
   });
 });
