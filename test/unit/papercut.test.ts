@@ -584,7 +584,14 @@ describe("list", () => {
     expect(LIST_METHOD).not.toContain("payload snapshot");
     expect(LIST_METHOD_FAST).toContain("possibly-stale updated_at");
     expect(listMethod(false, {})).toContain("point-read");
-    expect(listMethod(true, {})).toContain("--fast");
+    // The audit reading names the flag that produces it, because it is now the
+    // opt-in half of the pair — the default says only that it did NOT do it.
+    expect(listMethod(false, {})).toContain("--point-read");
+    expect(listMethod(true, {})).not.toContain("(--point-read)");
+    // `--fast` is accepted and ignored now that the snapshot is the default.
+    // The line must not claim a flag the caller did not pass.
+    expect(listMethod(true, {})).not.toContain("--fast");
+    expect(listMethod(true, {})).toContain("run --point-read");
   });
 
   // The line used to say "component/status filters applied" as a fixed string.

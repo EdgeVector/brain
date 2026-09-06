@@ -14,6 +14,7 @@ import {
   PAPERCUT_NARROWABLE_FILTERS,
   buildPapercutList,
   listMethod,
+  listReadsSnapshot,
   matchesPapercutFilters,
   narrowingFilters,
   type PapercutListFilters,
@@ -114,6 +115,32 @@ describe("listMethod", () => {
   test("an unnarrowed listing makes no such claim", () => {
     expect(listMethod(false, { status: "open" })).not.toContain(
       "pre-selected",
+    );
+  });
+});
+
+// The reading `list` performs by default is a decision with a two-orders-of-
+// magnitude cost difference behind it (2026-09-06 on the primary: 10 node
+// requests and 21.7s of node service time for the snapshot, against 3404
+// requests and 2743.3s for the point read of the same 3388-row ledger). It was
+// an inline condition, and `census` flipping while `list` did not went
+// unnoticed for two days because nothing asserted either default.
+describe("listReadsSnapshot", () => {
+  test("the snapshot is the default reading", () => {
+    expect(listReadsSnapshot({})).toBe(true);
+  });
+
+  test("--point-read opts into the per-record audit reading", () => {
+    expect(listReadsSnapshot({ pointRead: true })).toBe(false);
+  });
+
+  // --body-resolved matches the record BODY, and the snapshot lags exactly the
+  // appends that filter looks for, so it forces the point read whatever else
+  // was asked for.
+  test("--body-resolved forces the point read", () => {
+    expect(listReadsSnapshot({ bodyResolved: true })).toBe(false);
+    expect(listReadsSnapshot({ bodyResolved: true, pointRead: true })).toBe(
+      false,
     );
   });
 });

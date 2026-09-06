@@ -781,8 +781,20 @@ export type PapercutListOptions = PapercutListFilters & {
    * re-verify on their own point-get. See `readPapercutSlugsByStatus`.
    */
   indexOnly?: boolean;
-  /** Serve records from the index payload snapshot instead of point-reading. */
+  /**
+   * Accepted and ignored: serving records from the index payload snapshot is
+   * now the default for `list` too. Kept so callers that opted in still parse,
+   * and still refused alongside `--body-resolved`, where it asks for a reading
+   * that filter cannot use.
+   */
   fast?: boolean;
+  /**
+   * Point-read every record and re-check it against its partition, instead of
+   * reading it from the index payload snapshot. The only reading that catches
+   * a record whose header moved without the index following; costs one node
+   * request per row.
+   */
+  pointRead?: boolean;
   /**
    * Keep only the rows whose BODY claims a resolution the typed status does
    * not carry. Forces point reads; refuses `--fast` and `--index-only`.
@@ -1021,16 +1033,50 @@ export function buildPapercutList(
 // actually applied is the load-bearing half of the line.
 export const LIST_METHOD =
   "method: status-keyed papercut index (same read as `papercut census`), " +
-  "every record point-read and re-checked against its partition, " +
+  "every record point-read and re-checked against its partition (--point-read), " +
   "FILTERS, every matching row returned, oldest-updated first";
 
-/** The same listing, served from the snapshot the index already carries. */
+/**
+ * The default listing, served from the snapshot the index already carries.
+ *
+ * `census` flipped to this reading on 2026-09-04 and `list` deliberately did
+ * not, on one measured objection: `list` is ordered oldest-updated-first
+ * because the reconcile loop consumes it in that order, and `updated_at` was
+ * stale on 1044 of 2230 rows (46.8%) — it was the one field `brain append` and
+ * `brain tag` wrote without patching this index.
+ *
+ * Those two verbs patch the index now, and the objection was re-measured on
+ * the primary 2026-09-06 rather than assumed to still hold. Two readings, one
+ * unfiltered pair and one controlled sandwich (fast, point-read, fast, so a
+ * row written mid-window is excluded rather than counted as lag):
+ *
+ * | reading | rows | node requests | node service time |
+ * |---|---|---|---|
+ * | point-read, unfiltered | 3388 | 3404 | 2743.3s (199.4s wall) |
+ * | snapshot, unfiltered   | 3389 |   10 |   21.7s (21.9s wall)  |
+ * | point-read, --severity p0 | 274 | 290 | 369.8s |
+ * | snapshot,   --severity p0 | 274 |  10 |  32.1s |
+ *
+ * Agreement, snapshot against point read, on the 273 of 274 sandwich rows that
+ * did not change during the window: every stored field agreed — status,
+ * severity, kind, component, repo, fixed_by, verified_by, duplicate_of, title,
+ * tags, created_at, symptom_hash — and `updated_at` disagreed on ONE row
+ * (0.37%, against 46.8% two days earlier). On the unfiltered pair, 2 of 3388
+ * rows carried a snapshot `updated_at` older than the point read, both last
+ * written 2026-09-04, i.e. residue from before the patch rather than new drift.
+ *
+ * So the ordering objection now costs the reconcile loop at most a couple of
+ * positions, and the reading it was protecting cost 340x the node requests of
+ * the one it rejected. `--point-read` keeps the audit reading, which is still
+ * the only one that catches a header the index did not follow.
+ */
 export const LIST_METHOD_FAST =
   "method: status-keyed papercut index (same read as `papercut census`), " +
-  "records read from the index payload snapshot, NOT point-read (--fast), " +
+  "records read from the index payload snapshot, NOT point-read, " +
   "FILTERS, every matching row returned, " +
   "ordered by a possibly-stale updated_at — the header fields are current, " +
-  "updated_at and tags can lag a write made before this index was last rebuilt";
+  "updated_at and tags can lag a write made before this index was last rebuilt; " +
+  "run --point-read to re-read every record and catch a header the index did not follow";
 
 // The old line said "component/status filters applied" as a fixed string, and
 // that was accurate only for as long as those were the only two filters the
@@ -1119,6 +1165,28 @@ export const LIST_METHOD_BODY_RESOLVED =
   "records point-read because `body` is the field being matched — these are " +
   "CANDIDATES for a live re-check, NOT closures, and this reader never writes";
 
+/**
+ * Which reading `list` performs for a given invocation.
+ *
+ * Extracted so the DEFAULT is a tested property rather than an inline
+ * condition. `census` flipped to the snapshot on 2026-09-04 and `list` did
+ * not, and the two readers then disagreed on cost by two orders of magnitude
+ * for two days without anything failing.
+ *
+ * @returns true to read rows from the index payload snapshot, false to
+ * point-read every record and re-check it against its partition.
+ */
+export function listReadsSnapshot(opts: {
+  pointRead?: boolean;
+  bodyResolved?: boolean;
+}): boolean {
+  // `--body-resolved` matches the record BODY, which the snapshot lags for any
+  // row appended to before the last index rebuild — and an append is exactly
+  // the write that puts a closing block into a body.
+  if (opts.bodyResolved === true) return false;
+  return opts.pointRead !== true;
+}
+
 export const LIST_MARK_MAX = 100;
 
 /** Single-line, length-capped rendering for human mode only. */
@@ -1200,7 +1268,8 @@ export async function papercutListCmd(
   // Read one status partition when the caller named one; the whole ledger
   // otherwise. `readPapercutsByStatus` is the same complete reader `census`
   // uses, so list and census are two views of ONE read and cannot disagree.
-  const fast = opts.fast === true;
+  // See LIST_METHOD_FAST for why the snapshot is the default reading.
+  const fast = listReadsSnapshot({ pointRead: opts.pointRead, bodyResolved });
   const filters: PapercutListFilters = {};
   for (const f of PAPERCUT_LIST_FILTERS) {
     const v = opts[f];
