@@ -1,9 +1,12 @@
 // `fbrain get <slug> [--type T]` — print a record.
-// If --type is omitted, queries every registered schema. If the slug exists in
-// multiple schemas, returns the match selected by GET_RECORD_TYPE_PRECEDENCE.
+// If --type is omitted, the type named by the slug prefix is probed first; on
+// a miss every registered schema is queried, and if the slug exists in
+// multiple schemas the match selected by GET_RECORD_TYPE_PRECEDENCE is
+// returned. `linked_from` is read from the backlink index only (slugs and
+// types, one request); `fbrain backlinks` is the hydrated view.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
-import { findBacklinks } from "../backlink-index.ts";
+import { listBacklinkMembers } from "../backlink-index.ts";
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -16,7 +19,7 @@ import {
   normalizeSlug,
   resolveBySlug,
   schemaHashFor,
-  type Backlink,
+  type BacklinkRef,
   type FbrainRecord,
   type SlugTwin,
 } from "../record.ts";
@@ -108,8 +111,9 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     }
   }
 
-  const linkedFrom = await findBacklinks(node, opts.cfg, found.record.slug, {
-    targetType: found.type,
+  // Index-only: one keyed read, no per-source hydration. See
+  // `listBacklinkMembers` for why `get` stopped point-reading every source.
+  const linkedFrom = await listBacklinkMembers(node, opts.cfg, found.record.slug, {
     verbose: opts.verbose,
   });
 
@@ -194,12 +198,14 @@ export type RecordJson = {
   children_unavailable?: string;
   // Records that link to this slug, either through an explicit stored edge
   // (`task.design_slug` or a generic `link:<type>:<slug>` tag) or through a
-  // `[[slug]]` body reference.
+  // `[[slug]]` body reference. `get` fills this from the backlink index only
+  // (type + slug); `status` and `via` are present only on the hydrated
+  // `fbrain backlinks` view, which point-reads every source.
   linked_from?: Array<{
     type: RecordType;
     slug: string;
-    status: string;
-    via: Array<"explicit" | "body">;
+    status?: string;
+    via?: Array<"explicit" | "body">;
   }>;
   // Other schemas that ALSO hold this slug. Present only on an untyped lookup
   // that matched more than one type, where GET_RECORD_TYPE_PRECEDENCE picked
@@ -217,7 +223,7 @@ export function recordToJson(
   type: RecordType,
   designMissing = false,
   children?: ReadonlyArray<FbrainRecord>,
-  linkedFrom?: ReadonlyArray<Backlink>,
+  linkedFrom?: ReadonlyArray<BacklinkRef>,
   childrenUnavailable?: string,
   alsoTypes?: readonly SlugTwin[],
 ): RecordJson {
@@ -257,8 +263,8 @@ export function recordToJson(
     out.linked_from = linkedFrom.map((link) => ({
       type: link.type,
       slug: link.slug,
-      status: link.status,
-      via: link.via,
+      ...(link.status !== undefined ? { status: link.status } : {}),
+      ...(link.via !== undefined ? { via: link.via } : {}),
     }));
   }
   return out;
@@ -275,7 +281,7 @@ export function formatRecord(
   type: RecordType,
   designMissing = false,
   children?: ReadonlyArray<FbrainRecord>,
-  linkedFrom?: ReadonlyArray<Backlink>,
+  linkedFrom?: ReadonlyArray<BacklinkRef>,
   childrenUnavailable?: string,
   alsoTypes?: readonly SlugTwin[],
 ): string {
@@ -318,16 +324,7 @@ export function formatRecord(
     }
   }
   if (linkedFrom !== undefined) {
-    lines.push(
-      `linked_from: ${formatLinkedFrom(
-        linkedFrom.map((link) => ({
-          type: link.type,
-          slug: link.slug,
-          status: link.status,
-          via: link.via,
-        })),
-      )}`,
-    );
+    lines.push(`linked_from: ${formatLinkedFrom(linkedFrom)}`);
   }
   lines.push(`created_at: ${r.created_at}`);
   lines.push(`updated_at: ${r.updated_at}`);
@@ -422,11 +419,18 @@ function formatAlsoTypes(
   return `${rendered} — read with \`fbrain get ${slug} --type ${example}\``;
 }
 
+// `type slug` per entry; the `(via)` suffix only when a hydrated view supplied
+// it. Consumers that crawl this line split on `, ` and take the second token
+// (last-stack-design-pack), so both shapes parse the same.
 function formatLinkedFrom(
-  linkedFrom: NonNullable<RecordJson["linked_from"]>,
+  linkedFrom: ReadonlyArray<BacklinkRef>,
 ): string {
   if (linkedFrom.length === 0) return "(none)";
   return linkedFrom
-    .map((link) => `${link.type} ${link.slug} (${link.via.join(", ")})`)
+    .map((link) =>
+      link.via !== undefined
+        ? `${link.type} ${link.slug} (${link.via.join(", ")})`
+        : `${link.type} ${link.slug}`,
+    )
     .join(", ");
 }

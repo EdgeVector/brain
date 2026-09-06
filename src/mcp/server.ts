@@ -443,13 +443,14 @@ const recordSchema = z.object({
       z.object({
         type: z.enum(RECORD_TYPES),
         slug: z.string(),
-        status: z.string(),
-        via: z.array(z.enum(["explicit", "body"])),
+        status: z.string().optional(),
+        via: z.array(z.enum(["explicit", "body"])).optional(),
       }),
     )
     .optional()
     .describe(
-      "Backlinks to this slug from explicit stored edges and body [[slug]] references.",
+      "Backlinks to this slug, read from the backlink index (type + slug only). " +
+        "Call fbrain_backlinks for each source's status and how it links.",
     ),
   created_at: z.string().describe("ISO-8601 creation timestamp."),
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),

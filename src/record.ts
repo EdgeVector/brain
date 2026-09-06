@@ -46,6 +46,16 @@ export type Backlink = {
   updated_at: string;
 };
 
+// The index-only backlink shape `fbrain get` renders: type + slug straight
+// from the membership record. `status`/`via` are present only when a caller
+// paid for hydration (`fbrain backlinks`), so a `Backlink` is a `BacklinkRef`.
+export type BacklinkRef = {
+  type: RecordType;
+  slug: string;
+  status?: string;
+  via?: BacklinkVia[];
+};
+
 const GENERIC_LINK_TAG_PREFIX = "link:";
 
 export function genericLinkTag(toType: RecordType, toSlug: string): string {
@@ -1231,6 +1241,42 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   const types: readonly RecordType[] = opts.type
     ? [opts.type]
     : RECORD_TYPES.filter((t) => opts.cfg.schemaHashes[t] !== undefined);
+
+  // Keyed point-read (found-or-not, no full scan) — `raw` mirrors
+  // `findBySlugRaw` (tombstoned rows returned; only `delete`'s raw path
+  // uses it) vs the tombstone-filtered `findBySlug`.
+  const probeType = async (t: RecordType): Promise<ResolvedRecord | null> => {
+    const hash = schemaHashFor(t, opts.cfg);
+    const row = opts.raw === true
+      ? await findBySlugRaw(opts.node, t, hash, opts.slug)
+      : await findBySlug(opts.node, t, hash, opts.slug);
+    if (row === null) return null;
+    if (opts.raw && isTombstoned(row)) return null;
+    if (opts.filter && !opts.filter(row, t)) return null;
+    return { type: t, record: row };
+  };
+
+  // Untyped lookup: probe the type the slug PREFIX names first, with one
+  // keyed read, and return on a hit. Most slugs carry their type as a prefix
+  // (`papercut-…`, `design-…`, `decision-…`, `sop-…`), and the untyped sweep
+  // below is 11 parallel requests per call on the single most frequent brain
+  // verb (3,334 untyped gets in six days of agent sessions, 2026-09-06,
+  // papercut-brain-get-issues-33-node-requests-for-one-record). The trade: a
+  // hinted HIT does not detect a twin under another type, so `also_types` is
+  // absent for it. `--type` still overrides, a hinted MISS still pays the
+  // full sweep with the twin contract intact, and `fbrain status`/`delete`
+  // callers that need the twin check pass `type` explicitly today.
+  let missedHint: RecordType | null = null;
+  if (opts.type === undefined) {
+    const hint = typeHintFromSlug(opts.slug);
+    if (hint !== null && opts.cfg.schemaHashes[hint] !== undefined) {
+      const hinted = await probeType(hint);
+      if (hinted !== null) return hinted;
+      missedHint = hint;
+    }
+  }
+  const sweepTypes = missedHint === null ? types : types.filter((t) => t !== missedHint);
+
   // Per-type retry, run in parallel. The previous shape wrapped one
   // outer withReadRetry around a sequential sweep that returned the
   // FIRST attempt with any hit — but the `/api/query` top-100 page
@@ -1242,21 +1288,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   // Giving each type its own retry budget lets the flaked type
   // recover within its own loop, so ambiguity is detected before the
   // helper returns.
-  const perType = await Promise.all(
-    types.map(async (t): Promise<ResolvedRecord | null> => {
-      const hash = schemaHashFor(t, opts.cfg);
-      // Keyed point-read (found-or-not, no full scan) — `raw` mirrors
-      // `findBySlugRaw` (tombstoned rows returned; only `delete`'s raw path
-      // uses it) vs the tombstone-filtered `findBySlug`.
-      const row = opts.raw === true
-        ? await findBySlugRaw(opts.node, t, hash, opts.slug)
-        : await findBySlug(opts.node, t, hash, opts.slug);
-      if (row === null) return null;
-      if (opts.raw && isTombstoned(row)) return null;
-      if (opts.filter && !opts.filter(row, t)) return null;
-      return { type: t, record: row };
-    }),
-  );
+  const perType = await Promise.all(sweepTypes.map(probeType));
   const matches: ResolvedRecord[] = perType.filter(
     (m): m is ResolvedRecord => m !== null,
   );
@@ -1400,6 +1432,39 @@ function memoryFilenameStemHint(
 // on `" foo "` resolve the same record `put` stored under `"foo"`.
 export function normalizeSlug(slug: string): string {
   return slug.trim();
+}
+
+// Slug-prefix → record-type hints for the untyped `resolveBySlug` fast path.
+// Longer prefixes first so `concepts-` wins over a hypothetical `concept-`
+// twin entry. A slug whose prefix is not here (or whose hinted type is not
+// registered) takes the full sweep exactly as before. Keep this a HINT: a
+// `design-…` slug stored as a project (they exist) misses the hint and is
+// found by the sweep one request later.
+const SLUG_PREFIX_TYPE_HINTS: ReadonlyArray<readonly [string, RecordType]> = [
+  ["papercut-", "papercut"],
+  ["design-", "design"],
+  ["decision-", "decision"],
+  ["sop-", "sop"],
+  ["concepts-", "concept"],
+  ["concept-", "concept"],
+  ["preferences-", "preference"],
+  ["preference-", "preference"],
+  ["north-star-", "project"],
+  ["project-", "project"],
+  ["closeout-", "reference"],
+  ["checkpoint-", "reference"],
+  ["reference-", "reference"],
+  ["spike-", "spike"],
+  ["agent-", "agent"],
+  ["task-", "task"],
+];
+
+export function typeHintFromSlug(slug: string): RecordType | null {
+  const s = normalizeSlug(slug).toLowerCase();
+  for (const [prefix, type] of SLUG_PREFIX_TYPE_HINTS) {
+    if (s.startsWith(prefix) && s.length > prefix.length) return type;
+  }
+  return null;
 }
 
 // Shared "newest first, then slug ascending" record comparator. Both

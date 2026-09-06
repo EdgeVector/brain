@@ -1689,10 +1689,13 @@ ${tableRows}
 
    Link records with \`fbrain_link\`. Passing only \`from_slug\` and \`to_slug\`
    preserves the legacy task → design default; pass \`from_type\`/\`to_type\` for
-   non-default explicit links. Use \`fbrain_backlinks\` or \`fbrain_get\`'s
-   \`linked_from\` field to see both explicit edges and body \`[[slug]]\`
-   references. Slugs are per-type, so pass \`type\` to
-   \`fbrain_get\`/\`fbrain_delete\` whenever a slug could be ambiguous.
+   non-default explicit links. \`fbrain_get\`'s \`linked_from\` field lists the
+   type and slug of every record that links here (one index read, cheap to
+   crawl); call \`fbrain_backlinks\` when you also need each source's status
+   and whether it links by explicit edge or body \`[[slug]]\` reference.
+   Slugs are per-type, so pass \`type\` to \`fbrain_get\`/\`fbrain_delete\`
+   whenever a slug could be ambiguous; without it, the type named by the
+   slug prefix (\`papercut-…\`, \`design-…\`) is tried first.
 
 4. **It scales — call it liberally.** Point lookups (\`fbrain_get\`, a filtered
    \`fbrain_list\`) are index-backed and stay flat, well under a millisecond, from
