@@ -49,6 +49,12 @@ jobs:
             echo "$d" >> "$GITHUB_PATH"
           done
 
+      - name: DIAG job environment (temporary)
+        run: |
+          env | sort | grep -v -i -E 'token|secret|password|key=' || true
+          echo "--- socket: $(ls -la /Users/tomtang/.lastdb/data/folddb.sock 2>&1)"
+          echo "--- bun: $(which bun) $(bun --version)"; echo "--- cwd: $(pwd)"; cat bunfig.toml
+
       # The runner forces color into every step; the LastGit watcher never did.
       - name: Merge gate (.lastgit/ci.sh)
         env:

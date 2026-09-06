@@ -3907,6 +3907,7 @@ describe("MCP cold-capability self-warm", () => {
       const tools = toolsOf(createFbrainMcpServer({ cfg }));
       const res = await tools.fbrain_put!({ slug: "cold-baseline", type: "concept", body: "b" });
       expect(res.isError).toBe(true);
+      if (!String(res.content[0]!.text).includes("grant fbrain consent")) console.log("DIAG mcp text=", JSON.stringify(res.content[0]!.text), "env=", JSON.stringify({s: process.env.FBRAIN_FOLDDB_SOCKET, h: process.env.FOLDDB_HOME, l: process.env.LASTDB_HOME, enforce: process.env.FBRAIN_APP_IDENTITY_ENFORCE, capdir: process.env.FBRAIN_CAPABILITY_DIR, cwd: process.cwd()}));
       // The agent-voiced remediation from the consent_required_non_interactive
       // FbrainError — proves we hit exactly that error.
       expect(res.content[0]!.text).toContain("grant fbrain consent");

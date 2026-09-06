@@ -1253,6 +1253,7 @@ describe("askCmd stdout/stderr discipline (advisory notes → stderr)", () => {
     // Stdout: exactly one result row (+ its indented snippet line), no
     // `note:` line interleaved among them.
     const rows = stdout.filter((l) => !l.startsWith("    "));
+    if (rows.length !== 1) console.log("DIAG ask stdout=", JSON.stringify(stdout), "stderr=", JSON.stringify(stderr));
     expect(rows).toHaveLength(1);
     for (const line of stdout) expect(line).not.toMatch(/^note:\s/);
     expect(rows[0]).toContain("d1");
