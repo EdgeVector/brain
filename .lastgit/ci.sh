@@ -35,6 +35,22 @@ printf '#!/bin/sh\nexit 127\n' > "$ci_shim_dir/lastseek"
 chmod +x "$ci_shim_dir/lastseek"
 unset LASTSEEK_BIN
 export PATH="$ci_shim_dir:$PATH"
+# The incumbent planes behind LastSeek escape the same way: src/search-plane.ts
+# falls through to the host-track semantic module (over $HOME/.lastdb/apps/search)
+# and then to the `search semantic-query` CLI. On a host with the search app
+# installed both answer REAL hits from the primary's index whenever the node is
+# fast enough, so mocked-fetch tests that count rows or queries drift by one and
+# the gate's verdict follows node latency (Forgejo run 3 on main, 2026-09-06:
+# 23 searchCmd failures; same tree green locally three times). Point the CLI at
+# an exit-127 shim and the module at an empty search home so neither plane can
+# produce a hit. LASTSEEK_DISABLE is deliberately NOT set: lastseek-plane tests
+# supply their own fake binary and expect that tier to run.
+# papercut-brain-search-tests-not-hermetic-host-search-plane-answers-real-hits-20260906
+cp "$ci_shim_dir/lastseek" "$ci_shim_dir/search"
+mkdir -p "$ci_shim_dir/search-home"
+export LASTDB_SEARCH_BIN="$ci_shim_dir/search"
+export SEARCH_HOME="$ci_shim_dir/search-home"
+unset LASTDB_SEARCH_SEMANTIC_MODULE
 FBRAIN_SKIP_INTEGRATION="${FBRAIN_SKIP_INTEGRATION:-1}" bun test --timeout 60000
 
 echo "lastgit ci gate PASSED"
