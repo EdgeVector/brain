@@ -1,3 +1,4 @@
-lastgit
-# PR/CR venue of record for EdgeVector/brain.
-# Only the FIRST line is the venue; everything below is a comment.
+forgejo
+# Gate of record for EdgeVector/brain: Forgejo (http://localhost:3300), Tom 2026-09-06.
+# The LastGit repo lastdb:///brain is disabled: no CRs, no pushes. Workflow: sop-forge-pr-workflow.
+# Decision: decision-2026-09-06-all-repos-venue-forgejo-no-lastgit-default.
