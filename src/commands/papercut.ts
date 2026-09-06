@@ -28,6 +28,7 @@ import {
   resolveBySlug,
   schemaHashFor,
   updateFieldsFrom,
+  withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
 import { findCmd, type FindHit } from "./find.ts";
@@ -192,7 +193,47 @@ export type PapercutFileResult = {
   idempotent?: boolean;
   // Candidates cleared by --not-duplicate-of-any on THIS call, when it fired.
   waived?: string[];
+  // On a refusal that followed `--not-duplicate-of`: the slugs the flag
+  // removed from the candidate set, and the ones it named that matched no
+  // candidate at all. See `clearedDiagnostics`.
+  cleared?: string[];
+  cleared_unmatched?: string[];
 };
+
+export type ClearedDiagnostics = {
+  /** Given slugs that named a candidate and were removed. */
+  cleared: string[];
+  /** Given slugs that matched NO candidate — a typo, an elided slug, a stale copy. */
+  unmatched: string[];
+  /** One human line stating both, for the refusal text. */
+  line: string;
+};
+
+/**
+ * What `--not-duplicate-of` actually did against THIS candidate set.
+ *
+ * Null when no slug was given, so a first refusal prints nothing extra. When
+ * slugs were given, the line says how many named a candidate and lists every
+ * one that did not — because a refusal that repeats the same wall after the
+ * filer cleared it by name is indistinguishable from an ignored flag unless
+ * the command says which slugs it recognised.
+ */
+export function clearedDiagnostics(
+  candidates: readonly DuplicateCandidate[],
+  cleared: ReadonlySet<string>,
+): ClearedDiagnostics | null {
+  if (cleared.size === 0) return null;
+  const candidateSlugs = new Set(candidates.map((c) => c.slug));
+  const matched: string[] = [];
+  const unmatched: string[] = [];
+  for (const s of cleared) (candidateSlugs.has(s) ? matched : unmatched).push(s);
+  const head = `--not-duplicate-of: ${matched.length} of ${cleared.size} given slug(s) named a candidate and were cleared`;
+  const tail =
+    unmatched.length === 0
+      ? "; the rows above are the candidates that remain."
+      : `; ${unmatched.length} matched NO candidate (check the exact slug text, it must equal the slug column above): ${unmatched.join(", ")}`;
+  return { cleared: matched, unmatched, line: head + tail };
+}
 
 type PapercutFileMaterialized = Pick<
   FbrainRecord,
@@ -352,10 +393,12 @@ export async function papercutFileCmd(
   // ("Possible duplicate: 2 live papercut(s) ..."), so clearing the named two
   // surfaced two more and the filer had no way to learn the whole set in one
   // call.
-  const remaining = semanticDuplicateCandidates(semanticHits, {
+  const allCandidates = semanticDuplicateCandidates(semanticHits, {
     component,
     exactSlug: slug,
-  }).filter((c) => !cleared.has(c.slug));
+  });
+  const remaining = allCandidates.filter((c) => !cleared.has(c.slug));
+  const clearing = clearedDiagnostics(allCandidates, cleared);
 
   const { duplicates, waived } = partitionWaivedCandidates(
     remaining,
@@ -377,6 +420,13 @@ export async function papercutFileCmd(
       "  * or, if yours is genuinely different:        --not-duplicate-of <slug> (repeatable)",
       "  * or, having read all of the above:           --not-duplicate-of-any",
     ];
+    // A refusal that follows a `--not-duplicate-of` must say what the flags
+    // DID. On 2026-09-06 a filer cleared all 10 named candidates and was
+    // refused with the same 10, and the refusal text gave no way to tell "the
+    // flag was ignored" from "the slugs did not match": both read as the
+    // identical wall. Naming the cleared count and the unmatched slugs makes
+    // the next occurrence self-diagnosing.
+    if (clearing) lines.push("", clearing.line);
     if (opts.json) {
       print(
         JSON.stringify({
@@ -385,6 +435,7 @@ export async function papercutFileCmd(
           component,
           symptom_hash: hash,
           duplicates,
+          ...(clearing ? { cleared: clearing.cleared, cleared_unmatched: clearing.unmatched } : {}),
         }),
       );
     } else {
@@ -396,6 +447,7 @@ export async function papercutFileCmd(
       component,
       symptom_hash: hash,
       duplicates,
+      ...(clearing ? { cleared: clearing.cleared, cleared_unmatched: clearing.unmatched } : {}),
     };
   }
 
@@ -507,7 +559,116 @@ export type PapercutCloseResult = {
   slug: string;
   from: string;
   to: string;
+  /** Present when the slug also exists as a `reference` record. */
+  twin?: PapercutTwinResult;
 };
+
+/** What `papercut close` did to the reference twin of a dual-typed slug. */
+export type PapercutTwinResult = {
+  type: "reference";
+  from: string;
+  to: string;
+  /** False when the twin already carried the target status. */
+  changed: boolean;
+  /** After a change: the re-read agreed with the write. */
+  persisted: boolean;
+  /** After a change: the status the re-read returned. */
+  reread?: string;
+  /** Set when the twin could not be read; nothing was written to it. */
+  error?: string;
+};
+
+/** The `reference` status a typed close implies, or null when it implies none. */
+export const REFERENCE_TWIN_CLOSED = "archived";
+
+/**
+ * Typed `fixed`, `verified`, `wontfix` and `duplicate` all mean the reference
+ * ledger's `archived`: measured 2026-08-18, every agreeing dual-typed pair on
+ * the primary was one of those four against `archived` (27 + 13 + 1 rows),
+ * and `open`/`partial` against `active` (33 + 7). `partial` stays live on
+ * both sides on purpose — it means the body carries an unresolved half.
+ */
+export function referenceTwinStatusFor(typedStatus: string): string | null {
+  return isLivePapercutStatus(typedStatus) && typedStatus !== "fixed"
+    ? null
+    : REFERENCE_TWIN_CLOSED;
+}
+
+async function closeReferenceTwin(opts: {
+  node: ReturnType<typeof newWriteClientFromCfg>["node"];
+  cfg: Config;
+  slug: string;
+  status: string;
+  stamp: string;
+  now: string;
+  verbose?: Verbose;
+}): Promise<PapercutTwinResult | null> {
+  const target = referenceTwinStatusFor(opts.status);
+  if (target === null) return null;
+  if (opts.cfg.schemaHashes.reference === undefined) return null;
+  const refHash = schemaHashFor("reference", opts.cfg);
+  let twin: FbrainRecord | null;
+  try {
+    twin = await findBySlug(opts.node, "reference", refHash, opts.slug);
+  } catch (error) {
+    // The typed close is already committed. A twin read that fails must not
+    // turn a successful close into an error, but it must not be silent either:
+    // silence is how the two copies drifted for a month.
+    return {
+      type: "reference",
+      from: "?",
+      to: target,
+      changed: false,
+      persisted: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (twin === null) return null;
+  if (twin.status === target) {
+    return { type: "reference", from: twin.status, to: target, changed: false, persisted: true };
+  }
+  const patch = {
+    status: target,
+    body: `${twin.body.replace(/\s+$/, "")}\n${opts.stamp}`,
+    updated_at: opts.now,
+  };
+  const primaryFields = updateFieldsFrom(twin, "reference", patch);
+  const next = { ...twin, ...patch } as FbrainRecord;
+  const plan = await buildResidentWritePlan({
+    node: opts.node,
+    cfg: opts.cfg,
+    type: "reference",
+    schemaHash: refHash,
+    previous: twin,
+    next,
+    primaryFields,
+    now: opts.now,
+  });
+  await commitResidentWritePlan({
+    node: opts.node,
+    plan,
+    type: "reference",
+    slug: opts.slug,
+  });
+  // Verify-after-write with the full point-read retry budget. The defect on
+  // record (papercut-brain-status-write-reports-a-transition-it-did-not-
+  // persist-after-a-typed-close) is precisely a reference status write that
+  // printed its transition and re-read as `active`, so this verb does not
+  // print one it has not re-read.
+  const seen = await withReadRetry(
+    () => findBySlug(opts.node, "reference", refHash, opts.slug),
+    (r) => r !== null && r.status === target,
+  );
+  const reread = seen?.status ?? "(missing)";
+  return {
+    type: "reference",
+    from: twin.status,
+    to: target,
+    changed: true,
+    persisted: reread === target,
+    reread,
+  };
+}
 
 // The whole point of this command: ONE call performs both writes. The prose
 // ledger required two (`brain append` for the evidence, `brain status` for the
@@ -580,14 +741,58 @@ export async function papercutCloseCmd(
   });
   await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
 
+  // The reference twin, in the SAME verb. Measured 2026-08-18 on the
+  // `papercut-lastdb-*` family: 3 of 84 dual-typed slugs read typed-CLOSED x
+  // reference-ACTIVE, every one of them closed through this verb and then
+  // hand-written on the reference side as a separate `brain status`, which is
+  // the step a run can forget and the write that was observed not to persist
+  // when it followed this one. The `papercut-lastgit-*` family drifted 92 of
+  // 121 the OTHER way for the mirror-image reason. Writing the twin here
+  // removes both the step and the ordering.
+  const twin = await closeReferenceTwin({
+    node,
+    cfg: opts.cfg,
+    slug,
+    status,
+    stamp,
+    now,
+    verbose: opts.verbose,
+  });
+
   if (opts.json) {
     print(
-      JSON.stringify({ action: "papercut_closed", slug, from, to: status }),
+      JSON.stringify({
+        action: "papercut_closed",
+        slug,
+        from,
+        to: status,
+        ...(twin ? { twin } : {}),
+      }),
     );
   } else {
     print(`papercut ${slug}: ${from} → ${status}`);
+    if (twin && twin.changed) print(`reference ${slug}: ${twin.from} → ${twin.to}`);
+    else if (twin) print(`reference ${slug}: already ${twin.to}, left as is`);
+    if (twin && twin.changed && !twin.persisted) {
+      print(
+        `warning: reference ${slug} re-read as "${twin.reread}" after the write; ` +
+          `re-run \`brain status ${slug} ${twin.to} --type reference\` and re-read it.`,
+      );
+    }
+    if (twin?.error) {
+      print(
+        `warning: the reference twin of ${slug} could not be read (${twin.error}); ` +
+          `its status was NOT written. Close it with \`brain status ${slug} archived --type reference\`.`,
+      );
+    }
   }
-  return { action: "papercut_closed", slug, from, to: status };
+  return {
+    action: "papercut_closed",
+    slug,
+    from,
+    to: status,
+    ...(twin ? { twin } : {}),
+  };
 }
 
 export type PapercutCensusOptions = {
@@ -841,6 +1046,12 @@ export type PapercutListRow = {
    * `bodyResolutionClaim`.
    */
   body_claim?: BodyResolutionClaim;
+  /**
+   * Present ONLY under `--body-resolved`, on a live row whose body names
+   * `Closes-when:` children that ALL read closed. A CANDIDATE, never a
+   * verdict — see `closesWhenClaim`.
+   */
+  closes_when?: ClosesWhenClaim;
 };
 
 function str(record: FbrainRecord, field: string): string {
@@ -945,6 +1156,91 @@ export function staleClosureClaim(
 }
 
 /**
+ * `Closes-when: <slug>` — a record whose status is a FUNCTION of another's.
+ *
+ * A record that fixes most of itself and splits the last item out to a child
+ * record keeps its own status `open`, and from that moment its true status is
+ * "closed when the child is". No reader computed that: on 2026-08-18 a
+ * `papercut-lastgit-*` parent stayed open for 3.5 h after its child was
+ * verified and surfaced as the stalest genuinely-open record in its family,
+ * consuming the audit budget that exists to find real work. The convention
+ * shipped that day as prose; this is the reader for it.
+ *
+ * Forms accepted, one per line, any Markdown prefix:
+ *   Closes-when: [[child-slug]]
+ *   Closes-when: child-slug
+ *   Closes-when: [[a]], [[b]]        (ALL must be closed)
+ */
+const BODY_CLOSES_WHEN = /^[\s>#*-]*Closes-when:\s*(.+)$/i;
+const SLUG_TOKEN = /[a-z0-9][a-z0-9._-]*/gi;
+
+export function closesWhenSlugs(body: unknown): string[] {
+  if (typeof body !== "string" || body.length === 0) return [];
+  const out: string[] = [];
+  for (const raw of body.split("\n")) {
+    const m = BODY_CLOSES_WHEN.exec(raw.trim());
+    if (m === null) continue;
+    // Strip wikilink brackets, then take every slug-shaped token. A trailing
+    // clause ("— once #370 lands") is prose, not a slug, but any token in it
+    // that looks like a slug would be read as one; keep the line to slugs.
+    const text = (m[1] ?? "").replace(/\[\[|\]\]/g, " ");
+    for (const tok of text.match(SLUG_TOKEN) ?? []) {
+      if (tok.includes("-") && !out.includes(tok)) out.push(tok);
+    }
+  }
+  return out;
+}
+
+/**
+ * The statuses under which a child counts as closed for its parent. Both
+ * ledgers' terminal states, because the child may live in either: a typed
+ * papercut closes to `fixed`/`verified`/`wontfix`/`duplicate`, a legacy
+ * reference record to `archived`.
+ */
+export const CHILD_CLOSED_STATUSES: ReadonlySet<string> = new Set([
+  "fixed",
+  "verified",
+  "wontfix",
+  "duplicate",
+  "archived",
+]);
+
+export type ClosesWhenClaim = {
+  /** Every child the record named, with the status each was read at. */
+  children: { slug: string; status: string }[];
+};
+
+/**
+ * The claim to report for a row whose every named child reads closed, or null.
+ *
+ * Only a live parent is a candidate: a terminal one has already been decided.
+ * A child that could not be read (absent from `childStatus`) blocks the claim
+ * rather than being skipped — an unread dependency is unknown, not satisfied.
+ *
+ * This is a CANDIDATE, not a closure, and more so than a body claim: the
+ * child's status says the child's item is done, and only the child's FIX
+ * says whether that covers the parent's item. The counter-example is on
+ * record — the same command, same flag, adjacent sentences, different row
+ * class — and it took a code read to see. So the reader surfaces the pair and
+ * the operator reads the fix.
+ */
+export function closesWhenClaim(
+  record: FbrainRecord,
+  childStatus: ReadonlyMap<string, string>,
+): ClosesWhenClaim | null {
+  if (PAPERCUT_TERMINAL_STATUSES.has(record.status)) return null;
+  const slugs = closesWhenSlugs(record.body);
+  if (slugs.length === 0) return null;
+  const children: { slug: string; status: string }[] = [];
+  for (const slug of slugs) {
+    const status = childStatus.get(slug);
+    if (status === undefined || !CHILD_CLOSED_STATUSES.has(status)) return null;
+    children.push({ slug, status });
+  }
+  return { children };
+}
+
+/**
  * Filter + order the ledger for `papercut list`.
  *
  * Ordering is **oldest `updated_at` first**, deliberately opposite to the
@@ -990,6 +1286,8 @@ export function buildPapercutList(
   records: readonly FbrainRecord[],
   opts: PapercutListFilters = {},
   bodyResolved: boolean = false,
+  /** Status of every `Closes-when:` child the caller could read, by slug. */
+  childStatus: ReadonlyMap<string, string> = new Map(),
 ): PapercutListRow[] {
   const rows: PapercutListRow[] = [];
   for (const r of records) {
@@ -1001,7 +1299,8 @@ export function buildPapercutList(
     // snapshot, and this claim is read off `body`, the field an append writes.
     // Narrowing on it would decide from the snapshot the caller was refused.
     const claim = bodyResolved ? staleClosureClaim(r) : null;
-    if (bodyResolved && claim === null) continue;
+    const dependency = bodyResolved ? closesWhenClaim(r, childStatus) : null;
+    if (bodyResolved && claim === null && dependency === null) continue;
     rows.push({
       slug: r.slug,
       title: r.title,
@@ -1018,6 +1317,7 @@ export function buildPapercutList(
       created_at: r.created_at,
       updated_at: r.updated_at,
       ...(claim === null ? {} : { body_claim: claim }),
+      ...(dependency === null ? {} : { closes_when: dependency }),
     });
   }
   return rows.sort(
@@ -1161,7 +1461,9 @@ export const LIST_INDEX_ONLY_METHOD =
  */
 export const LIST_METHOD_BODY_RESOLVED =
   "; --body-resolved: kept only rows whose BODY claims a resolution the typed " +
-  "status does not carry (status open, or fixed carrying a live-check line); " +
+  "status does not carry (status open, or fixed carrying a live-check line), " +
+  "and live rows whose body names `Closes-when:` children that ALL read " +
+  "fixed/verified/wontfix/duplicate/archived (each child point-read; read the child's FIX before closing the parent); " +
   "records point-read because `body` is the field being matched — these are " +
   "CANDIDATES for a live re-check, NOT closures, and this reader never writes";
 
@@ -1185,6 +1487,39 @@ export function listReadsSnapshot(opts: {
   // the write that puts a closing block into a body.
   if (opts.bodyResolved === true) return false;
   return opts.pointRead !== true;
+}
+
+/**
+ * Point-read every `Closes-when:` child the given records name, typed
+ * papercut first and legacy reference second, and return the status each was
+ * read at. A child absent from both ledgers is left out of the map, which
+ * `closesWhenClaim` treats as unknown, not closed.
+ */
+export async function readClosesWhenChildren(
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  cfg: Config,
+  records: readonly FbrainRecord[],
+): Promise<Map<string, string>> {
+  const wanted = new Set<string>();
+  for (const r of records) for (const s of closesWhenSlugs(r.body)) wanted.add(s);
+  const out = new Map<string, string>();
+  if (wanted.size === 0) return out;
+  const papercutHash = schemaHashFor(PAPERCUT, cfg);
+  const referenceHash =
+    cfg.schemaHashes.reference === undefined ? null : schemaHashFor("reference", cfg);
+  await Promise.all(
+    [...wanted].map(async (slug) => {
+      const typed = await findBySlug(node, PAPERCUT, papercutHash, slug);
+      if (typed !== null) {
+        out.set(slug, typed.status);
+        return;
+      }
+      if (referenceHash === null) return;
+      const legacy = await findBySlug(node, "reference", referenceHash, slug);
+      if (legacy !== null) out.set(slug, legacy.status);
+    }),
+  );
+  return out;
 }
 
 export const LIST_MARK_MAX = 100;
@@ -1298,7 +1633,12 @@ export async function papercutListCmd(
         }
       : undefined,
   );
-  const rows = buildPapercutList(records, filters, bodyResolved);
+  // `Closes-when:` children are point-read, in either ledger, only under
+  // --body-resolved: that is the reading that already paid for every body.
+  const childStatus = bodyResolved
+    ? await readClosesWhenChildren(node, opts.cfg, records)
+    : new Map<string, string>();
+  const rows = buildPapercutList(records, filters, bodyResolved, childStatus);
   const method = bodyResolved ? `${baseMethod}${LIST_METHOD_BODY_RESOLVED}` : baseMethod;
 
   if (opts.json) {
@@ -1336,6 +1676,12 @@ export async function papercutListCmd(
     if (r.body_claim)
       lines.push(
         `${indent}body claims ${r.body_claim.level}: ${elide(r.body_claim.line)}`,
+      );
+    if (r.closes_when)
+      lines.push(
+        `${indent}closes-when: ${r.closes_when.children
+          .map((c) => `[[${c.slug}]] is ${c.status}`)
+          .join(", ")} — read the child's fix before closing`,
       );
   }
   print([header, ...lines, "", `${rows.length} row(s)`, method].join("\n"));

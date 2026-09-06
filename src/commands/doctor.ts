@@ -43,6 +43,10 @@ import {
 } from "./doctor/mcp-boot.ts";
 import { runGraphEdgeLintProbe } from "./doctor/graph-lint.ts";
 import {
+  PAPERCUT_STATUS_INDEX_CHECK,
+  runPapercutStatusIndexProbe,
+} from "./doctor/papercut-status-index.ts";
+import {
   checkSchemaDrift,
   safeListManifests,
   schemaServiceFixHint,
@@ -502,6 +506,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByNodeUnreachable("graph-edge-lint"));
   } else {
     checks.push(skippedByPrereqs("graph-edge-lint"));
+  }
+
+  // Papercut status index — the one keyed index every typed-ledger read goes
+  // through. Two point reads (config, then the completeness marker with the
+  // point-read retry budget), so it is cheaper than the census it protects.
+  if (provisioned && schemasLoadedOk) {
+    checks.push(await runPapercutStatusIndexProbe(nodeClient, cfg, verbose));
+  } else if (!nodeReachable) {
+    checks.push(skippedByNodeUnreachable(PAPERCUT_STATUS_INDEX_CHECK));
+  } else {
+    checks.push(skippedByPrereqs(PAPERCUT_STATUS_INDEX_CHECK));
   }
 
   // Runtime probe — compare the running Bun against fbrain's documented

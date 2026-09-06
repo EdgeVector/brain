@@ -54,6 +54,28 @@ if (process.env.LASTSEEK_BIN === undefined) {
   process.env.LASTSEEK_BIN = "/nonexistent/fbrain-unit-suite-no-lastseek";
 }
 
+// Keep the unit suite hermetic w.r.t. the TERMINAL. Three code paths read a
+// real TTY flag at call time: the consent fast-fail (`process.stdin.isTTY` —
+// interactive shells poll the node for a grant, non-interactive ones fail fast
+// with `consent_required_non_interactive`), and the human-only column legend
+// on `ask`/`search` (`process.stdout.isTTY`). Measured 2026-09-06: the Forgejo
+// host runner gives every job step a pseudo-terminal, so on the merge gate the
+// suite believed it was interactive — the MCP cold-capability tests reached
+// the live primary (`app_not_registered`), and the `ask`/`search` row parsers
+// counted a dimmed legend line as a result row: 23 identical failures on every
+// brain head since the venue move, 0 on the same host under a pipe. Pin the
+// flags off, the same way the socket and home are pinned above, so the shape
+// of the shell that runs `bun test` cannot un-mock the suite. Tests that want
+// the TTY path inject `isTty: () => true` (ask/search/init-consent all take
+// it), which is unaffected by these properties.
+for (const stream of [process.stdin, process.stdout, process.stderr]) {
+  try {
+    Object.defineProperty(stream, "isTTY", { value: false, configurable: true, writable: true });
+  } catch {
+    // A stream that refuses the property is not a TTY-backed one.
+  }
+}
+
 // Resident-commit writes POST `/api/mutations/batch`. Most unit fetch stubs
 // only answer `/api/mutation`. Fan a 404 batch out into per-item mutation
 // calls so those stubs keep working.

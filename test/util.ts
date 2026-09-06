@@ -9,6 +9,7 @@ import {
   TAG_INDEX_SCHEMA_KEY,
   GRAPH_EDGE_IN_SCHEMA_KEY,
   GRAPH_EDGE_OUT_SCHEMA_KEY,
+  PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
   type RecordType,
 } from "../src/schemas.ts";
 import { CONFIG_VERSION, type Config } from "../src/config.ts";
@@ -40,6 +41,9 @@ export const TEST_RECORD_LIST_ENTRY_HASH = "8".repeat(64);
 // a test cfg without them describes a broken brain, not a default one.
 export const TEST_GRAPH_EDGE_OUT_HASH = "b".repeat(64);
 export const TEST_GRAPH_EDGE_IN_HASH = "1".repeat(64);
+// The status-keyed papercut index is likewise part of the standard init set:
+// every typed-ledger read goes through it, and doctor FAILs when it is absent.
+export const TEST_PAPERCUT_STATUS_INDEX_HASH = "0".repeat(64);
 
 // Reverse map of TEST_HASHES so fetch/query stubs can turn a product schema
 // hash back into a RecordType when synthesizing the type-list index.
@@ -240,6 +244,7 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
       [RECORD_LIST_ENTRY_SCHEMA_KEY]: TEST_RECORD_LIST_ENTRY_HASH,
       [GRAPH_EDGE_OUT_SCHEMA_KEY]: TEST_GRAPH_EDGE_OUT_HASH,
       [GRAPH_EDGE_IN_SCHEMA_KEY]: TEST_GRAPH_EDGE_IN_HASH,
+      [PAPERCUT_STATUS_INDEX_SCHEMA_KEY]: TEST_PAPERCUT_STATUS_INDEX_HASH,
     },
     designSchemaHash: TEST_HASHES.design,
     taskSchemaHash: TEST_HASHES.task,
@@ -271,6 +276,19 @@ export function buildTestCfg(over: Partial<Config> = {}): Config {
       ...merged.schemaHashes,
       [GRAPH_EDGE_OUT_SCHEMA_KEY]: TEST_GRAPH_EDGE_OUT_HASH,
       [GRAPH_EDGE_IN_SCHEMA_KEY]: TEST_GRAPH_EDGE_IN_HASH,
+    };
+  }
+  // Same again for the papercut status index. A caller describing a brain
+  // whose typed ledger is genuinely unregistered overrides the key explicitly.
+  if (
+    "schemaHashes" in over &&
+    over.schemaHashes !== undefined &&
+    Object.keys(over.schemaHashes).length > 0 &&
+    !(PAPERCUT_STATUS_INDEX_SCHEMA_KEY in over.schemaHashes)
+  ) {
+    merged.schemaHashes = {
+      ...merged.schemaHashes,
+      [PAPERCUT_STATUS_INDEX_SCHEMA_KEY]: TEST_PAPERCUT_STATUS_INDEX_HASH,
     };
   }
   // Keep mirrors in sync unless caller explicitly overrode them.

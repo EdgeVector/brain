@@ -60,9 +60,15 @@ import {
   buildTestCfg,
   TEST_HASHES,
   TEST_NODE_URL,
+  TEST_PAPERCUT_STATUS_INDEX_HASH,
   TEST_RECORD_LIST_ENTRY_HASH,
   testHashForType,
 } from "../util.ts";
+import {
+  PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+  PAPERCUT_STATUS_INDEX_MARKER,
+  PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+} from "../../src/schemas.ts";
 
 const DESIGN_HASH = TEST_HASHES.design;
 
@@ -299,6 +305,32 @@ function mockNodeClient(opts: {
           total_count: results.length,
           returned_count: results.length,
         };
+      }
+      // A healthy default brain carries the papercut status index with its
+      // completeness marker present; the doctor probe point-reads that one row.
+      if (schemaHash === TEST_PAPERCUT_STATUS_INDEX_HASH) {
+        const hrk = (filter as { HashRangeKey?: { hash?: unknown; range?: unknown } } | undefined)
+          ?.HashRangeKey;
+        const hit =
+          hrk?.hash === PAPERCUT_STATUS_INDEX_GLOBAL_HASH &&
+          hrk?.range === PAPERCUT_STATUS_INDEX_MIGRATED_RANGE;
+        const results: QueryRow[] = hit
+          ? [
+              {
+                fields: {
+                  psi_h: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+                  psi_r: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+                  psi_payload: "",
+                  psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
+                },
+                key: {
+                  hash: PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+                  range: PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+                },
+              },
+            ]
+          : [];
+        return { ok: true, results, total_count: results.length, returned_count: results.length };
       }
       const rows = (store[schemaHash] ?? []).map<QueryRow>((r) => ({
         fields: r.fields,

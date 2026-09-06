@@ -18,7 +18,7 @@ import {
   PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
   PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
 } from "./schemas.ts";
-import type { FbrainRecord } from "./record.ts";
+import type { FbrainRecord, ReadRetryOptions } from "./record.ts";
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
 
@@ -315,6 +315,41 @@ async function hydratePapercutsBySlug(opts: {
   return bySlug;
 }
 
+/**
+ * Read the completeness marker with the same retry budget `resolveBySlug`
+ * spends on a keyed point read.
+ *
+ * The marker is ONE row, and until 2026-09-06 it was read exactly once, with
+ * no retry, by every reader and every gate. `/api/query` is known to null a
+ * real row out of one page under load — that is why `resolveBySlug` retries
+ * per type — and the ledger paid for that flake fleet-wide three times
+ * (2026-08-09, 08-28, 08-29), each within hours of a LastDB cutover, each
+ * reading "registered but not marked complete", each clearing on its own with
+ * no rebuild having run. A missed marker read is not a missing marker: it
+ * turns every census, list and dedupe gate into a refusal at once, and the
+ * duplicate filings that follow are exactly what the index exists to stop.
+ *
+ * A genuinely absent marker still refuses, one retry budget later.
+ */
+export async function papercutStatusIndexMarkerPresent(
+  node: NodeClient,
+  entryHash: string,
+  retry?: ReadRetryOptions,
+): Promise<boolean> {
+  const { withReadRetry } = await import("./record.ts");
+  return withReadRetry(
+    () =>
+      papercutStatusEntryExists(
+        node,
+        entryHash,
+        PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
+        PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
+      ),
+    (present) => present,
+    retry,
+  );
+}
+
 export async function requireCompletePapercutStatusIndex(
   node: NodeClient,
   cfg: SchemaCfg,
@@ -328,12 +363,7 @@ export async function requireCompletePapercutStatusIndex(
       hint: "Run `brain init`, then `brain reindex --papercut-status-index` (admin/offline), and retry.",
     });
   }
-  const migrated = await papercutStatusEntryExists(
-    node,
-    entryHash,
-    PAPERCUT_STATUS_INDEX_GLOBAL_HASH,
-    PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
-  );
+  const migrated = await papercutStatusIndexMarkerPresent(node, entryHash);
   if (!migrated) {
     throw new FbrainError({
       code: "papercut_status_index_incomplete",
