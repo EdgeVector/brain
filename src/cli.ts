@@ -968,7 +968,7 @@ brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified
 brain papercut census [<component>] [--point-read] [--json]
 brain papercut list [<component>] [--status S] [--severity p0|p1|p2|p3]
                     [--kind K] [--repo owner/name] [--tag T]...
-                    [--index-only] [--fast] [--body-resolved] [--json]
+                    [--index-only] [--point-read] [--body-resolved] [--json]
 
 The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
 failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
@@ -1010,9 +1010,9 @@ census  Counts by component and status, and prints its own method line.
         than a counting method: 2977 node requests and 141.8s, against 3.3s for
         the same ledger the same hour. Reach for it when you suspect the index,
         or after brain reindex --papercut-status-index.
-        list keeps the point read as ITS default, because list is ordered
-        oldest-updated-first and updated_at is exactly the field the snapshot
-        can lag on (stale on 1044 of those 2230 rows). Either way the method
+        list reads the same snapshot by default as of 2026-09-06; it kept the
+        point read until then, because list is ordered oldest-updated-first and
+        updated_at was the field the snapshot lagged on. Either way the method
         line says which reading produced the numbers.
 
 list    The row-level view of the SAME read census counts, so the two can never
@@ -1021,6 +1021,21 @@ list    The row-level view of the SAME read census counts, so the two can never
         component/severity/kind/repo/fixed_by/verified_by/duplicate_of — because
         those are what a closure audit is made of. Ordered oldest-updated first,
         which is the order the reconcile loop actually consumes.
+
+        Like census, it reads each row from the snapshot the index already
+        carries: one node query per status partition and ZERO point reads.
+        Measured on the primary 2026-09-06, unfiltered: 10 node requests and
+        21.7s of node service time, against 3404 requests and 2743.3s for the
+        point read of the same ledger. In a controlled fast/point-read/fast
+        sandwich over 274 rows, the 273 that did not change during the window
+        agreed on EVERY stored field; updated_at disagreed on one row (0.37%,
+        against 46.8% on 2026-09-04, before brain append and brain tag began
+        patching this index).
+        --point-read re-reads every record and re-checks it against its
+        partition. That is the only reading that catches a record whose header
+        moved without this index following, and it is an index audit rather
+        than a listing method. Reach for it when you suspect the index, or
+        after brain reindex --papercut-status-index.
         --index-only returns slug + status partition straight from the keyed
         index, without even parsing the payload. The status is the partition
         key, not re-verified per record, and there is no component filter —
@@ -4167,6 +4182,7 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "status",
     "index-only",
     "fast",
+    "point-read",
     "body-resolved",
     "severity",
     "kind",
@@ -4323,6 +4339,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   if (typeof values.status === "string") lOpts.status = values.status;
   if (values["index-only"] === true) lOpts.indexOnly = true;
   if (values.fast === true) lOpts.fast = true;
+  if (values["point-read"] === true) lOpts.pointRead = true;
   if (values["body-resolved"] === true) lOpts.bodyResolved = true;
   // Validated, not passed through: an unvalidated `--severity p1 ` or `--kind
   // fix` matches no row, and a filter that answers "0 rows" for a typo is the
