@@ -58,8 +58,8 @@ export type DeleteOptions = {
 };
 
 // The structured payload the MCP `fbrain_delete` tool returns in
-// `structuredContent` (mirrors the printed `deleted <type> <slug> (soft …)`
-// line). `soft` is invariant `true`.
+// `structuredContent` (mirrors the printed `deleted <type> <slug>` line).
+// `soft` is invariant `true` on the payload, not in the printed text.
 export type DeleteResult = {
   action: "deleted";
   type: RecordType;

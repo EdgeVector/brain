@@ -1973,8 +1973,9 @@ describe("write tools — structuredContent + outputSchema", () => {
     });
     const schema = outputSchemaOf(server, "fbrain_delete")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();
-    // Text fallback unchanged — still the soft-delete confirmation line.
-    expect(res.content[0]!.text).toContain("deleted design doomed (soft");
+    // Text fallback matches the CLI confirmation line (`deleted <type> <slug>`).
+    // `soft` lives on structuredContent, not in the human text.
+    expect(res.content[0]!.text).toContain("deleted design doomed");
   });
 
   test("fbrain_delete error (missing slug) returns isError and NO structuredContent", async () => {
