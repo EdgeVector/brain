@@ -116,7 +116,7 @@ both lines: `created concept mcp-smoketest` and
 
 Expected: Claude calls `fbrain_delete` with `{slug: "mcp-smoketest",
 type: "concept"}` and surfaces
-`deleted concept mcp-smoketest (soft — fold_db is append-only; …)`.
+`deleted concept mcp-smoketest`.
 Verify with `fbrain get mcp-smoketest` — should return
 `No record with slug "mcp-smoketest"`. The slug is reusable
 immediately afterward.

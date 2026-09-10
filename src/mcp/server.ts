@@ -547,15 +547,18 @@ const putResultSchema = z.object({
     ),
 });
 
-// `fbrain_delete` → `{action, type, slug, soft}`. `soft` is always `true` —
-// fold_db is append-only, so every delete is a tombstone, never a hard delete.
+// `fbrain_delete` → `{action, type, slug, soft}`. `soft` stays `true`
+// because the CLI still stamps a tombstone tag. Native LastDB Delete also
+// runs and a later get misses.
 const deleteResultSchema = z.object({
   action: z.literal("deleted").describe("Always `deleted`."),
   type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type deleted."),
   slug: z.string().describe("Resolved record slug."),
   soft: z
     .literal(true)
-    .describe("Always true — the delete is a soft tombstone (fold_db is append-only)."),
+    .describe(
+      "Always true — the CLI also stamps a tombstone tag. Native LastDB Delete still converges tip absence.",
+    ),
 });
 
 const backlinksResultSchema = z.object({
@@ -1704,12 +1707,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "Delete fbrain record",
       description:
-        "Soft-delete a record. fold_db is append-only — the workaround " +
-        "stamps a tombstone tag so every fbrain read path treats the " +
-        "record as gone. Without `type`, probes every type and errors if " +
-        "the slug exists in multiple. Deleting a design still referenced " +
-        "by live tasks is blocked unless `force` is set (the slug becomes " +
-        "reusable after delete).",
+        "Delete a record. LastDB native Delete converges tip absence so a " +
+        "later get misses. The CLI also stamps a tombstone tag so older " +
+        "read paths hide the row. Without `type`, probes every type and " +
+        "errors if the slug exists in multiple. Deleting a design still " +
+        "referenced by live tasks is blocked unless `force` is set (the " +
+        "slug becomes reusable after delete).",
       inputSchema: {
         slug: requiredText("Record slug."),
         type: typeEnum

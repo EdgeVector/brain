@@ -266,7 +266,7 @@ ${RECORD_NEW_HELP_LINES}
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
   share          (placeholder) — team sync is not wired up yet
-  delete         soft-delete a record (fold_db is append-only)
+  delete         delete a record (native LastDB Delete; also stamps a tombstone tag)
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
@@ -793,10 +793,10 @@ Prints a notice and exits 1.`,
   delete: `fbrain delete <slug> [--type T] [--force] [--json]
 fbrain delete --tag T [--type T] [--status S] [--yes] [--force] [--json]
 
-Soft-deletes records. fold_db's mutation pipeline is append-only, so the
-workaround overwrites every user field with sentinels and stamps a
-tombstone tag. All fbrain read paths (get, list, status, link, search)
-then filter the record out.
+Deletes a record. LastDB native Delete converges tip absence, so a later
+get misses the row. The CLI also overwrites user fields with sentinels and
+stamps a tombstone tag so older read paths hide the row. All fbrain read
+paths (get, list, status, link, search) treat the slug as gone.
 
 SINGLE-SLUG mode — \`fbrain delete <slug>\`:
 Without --type, queries every registered schema; errors with "specify
@@ -804,7 +804,7 @@ Without --type, queries every registered schema; errors with "specify
 "No <type>: <slug>" if the slug is already deleted or never existed.
 
 FILTER (bulk) mode — \`fbrain delete --tag T [--type T] [--status S]\`:
-Soft-deletes EVERY live record matching the filter — the SAME
+Deletes EVERY live record matching the filter — the SAME
 --tag/--type/--status selectors \`fbrain list\` accepts. DRY-RUN BY
 DEFAULT: it prints the records that WOULD be deleted (type · slug ·
 title) plus a count and exits WITHOUT mutating. Re-run with --yes to

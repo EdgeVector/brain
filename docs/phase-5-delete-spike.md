@@ -1,5 +1,10 @@
 # fbrain Phase 5 delete spike — fold_db append-only delete
 
+**CURRENT 2026-09-10:** LastDB native Delete now converges tip absence. This
+spike is the 2026-05-23 probe. Do not treat the verdict below as live product
+truth. `brain delete` still stamps a tombstone tag and fires native Delete.
+A later get misses.
+
 **Date:** 2026-05-23
 **Spike duration:** ~30min (probes + source read)
 **fold_db ref:** `/Users/tomtang/code/edgevector/fold` (the same monorepo Phase 0–3 used)
@@ -130,7 +135,8 @@ fbrain delete <slug> [--type design|task]
 5. **Verify** by re-reading the record raw (a new `findBySlugRaw` that bypasses the tombstone filter) and asserting `tags.includes("__fbrain_deleted__")`. If verification fails, throw `FbrainError{code: "delete_not_applied"}` with a hint to re-run with `--verbose` and check the node log.
 6. **Print** the result honestly:
    ```
-   deleted <type> <slug> (soft — fold_db is append-only; see docs/phase-5-delete-spike.md)
+   deleted <type> <slug>
+   (2026-05-23 print also said "soft — fold_db is append-only"; that label is retired)
    ```
 7. Exit `0`.
 
