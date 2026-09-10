@@ -1,30 +1,19 @@
-// `fbrain delete <slug> [--type T]` — soft-delete a record.
+// `fbrain delete <slug> [--type T]` — delete a record.
 //
-// fold_db's mutation pipeline is append-only — see docs/phase-5-delete-spike.md.
-// A real "hard delete" cannot be implemented today, so this command:
+// LastDB native `MutationType::Delete` converges tip absence on the persist
+// lane. A later get misses the row. This command:
 //   1. Overwrites every user field with sentinel values and stamps the
-//      tombstone tag (TOMBSTONE_TAG from record.ts).
-//   2. Fires the fold_db `mutation_type=delete` for symbolic intent and
-//      forward-compat with a future hard-delete path. The minimal
-//      `fields_and_values: {}` body is used per the spike.
-//   3. Verifies the soft-delete by reading the record back and asserting
-//      it is no longer user-visible — either filtered out (per-field
-//      fold_db tombstone) or carrying our tombstone tag.
+//      tombstone tag (TOMBSTONE_TAG from record.ts) so older fbrain read
+//      paths still hide the row if a native Delete read is delayed.
+//   2. Fires fold_db `mutation_type=delete` with an empty
+//      `fields_and_values` body. That is the native Delete, not a no-op.
+//   3. Verifies by reading the record back. Success is either a miss
+//      (native Delete hid the row) or a row that still carries the
+//      tombstone tag. Only "row visible AND not tombstoned" fails.
 //
-// Every other fbrain read path (`get`, `list`, `status`, `link`, `search`)
-// filters tombstoned records out via `findBySlug` / `list`'s explicit check,
-// so the user-visible behavior matches a hard delete.
-//
-// Verify semantics evolved with fold_db: when the spike was written,
-// `MutationType::Delete` was a no-op so the verify checked that our
-// tombstone tag had landed on the still-present row. Current fold_db
-// repurposes `MutationType::Delete` as a per-field tombstone write that
-// the default query filter hides (see
-// `fold_db/crates/core/src/fold_db_core/mutation_manager.rs` —
-// "MutationType::Delete is repurposed as the tombstone write"), so the
-// post-delete read may legitimately return null. Both null and "row with
-// our tombstone tag" are success; only "row visible with no tombstone
-// tag" raises delete_not_applied.
+// Historical Phase 5 (2026-05-23) treated Delete as a sync-log marker
+// only. That is no longer true. See docs/phase-5-delete-spike.md for the
+// old probe, not for live product truth.
 
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
 import { reconcileBacklinkIndex } from "../backlink-index.ts";
@@ -63,8 +52,8 @@ export type DeleteOptions = {
   // Structured-output sink, mirroring the read commands' `onResult`: fires
   // once on the success path with the SAME resolved `type`/`slug` the printed
   // `deleted <type> <slug>` line uses, so the MCP `structuredContent` can't
-  // drift from the human text. `soft` is always `true` — fold_db is
-  // append-only, so every delete is a tombstone, never a hard delete.
+  // drift from the human text. `soft` stays `true` because the CLI still
+  // stamps a tombstone tag; native LastDB Delete also runs and get misses.
   onResult?: (payload: DeleteResult) => void;
 };
 
@@ -178,7 +167,7 @@ async function tombstoneOne(
   // default queries — which the verify below tolerates.
   await node.deleteRecord({ schemaHash, keyHash: slug });
 
-  // Verify the soft-delete landed. A successful delete leaves the row in
+  // Verify the delete landed. A successful delete leaves the row in
   // one of two states:
   //   (a) row absent from the raw read — current fold_db's
   //       `MutationType::Delete` writes a per-field tombstone that the
@@ -309,7 +298,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     });
   }
 
-  print(`deleted ${type} ${slug} (soft — fold_db is append-only)`);
+  print(`deleted ${type} ${slug}`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
   // printed line uses (one source of truth — see the read commands).
   opts.onResult?.({ action: "deleted", type, slug, soft: true });
@@ -579,7 +568,7 @@ export async function deleteByFilter(
           verbose: opts.verbose,
         });
       }
-      print(`deleted ${m.type} ${slug} (soft — fold_db is append-only)`);
+      print(`deleted ${m.type} ${slug}`);
       deleted.push({ type: m.type, slug });
     } catch (err) {
       const error = formatBatchError(err);

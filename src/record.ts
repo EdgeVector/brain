@@ -87,9 +87,8 @@ export function wikiLinkSlugs(body: string): string[] {
   return Array.from(found);
 }
 
-// Soft-delete sentinel — see docs/phase-5-delete-spike.md. fold_db is
-// append-only, so `fbrain delete` overwrites the record's user fields and
-// stamps this tag; every fbrain read path filters records carrying it.
+// Tombstone sentinel. `fbrain delete` still stamps this tag so older read
+// paths hide the row. Native LastDB Delete also converges tip absence.
 export const TOMBSTONE_TAG = "__fbrain_deleted__";
 
 export function isTombstoned(r: FbrainRecord): boolean {

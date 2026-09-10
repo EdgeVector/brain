@@ -179,7 +179,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `brain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
-| `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Soft-deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). fold_db is append-only — the workaround stamps a tombstone tag so every brain read path treats the record as gone (see [Delete](#delete)) |
+| `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). LastDB native Delete converges tip absence. The CLI also stamps a tombstone tag so older read paths hide the row (see [Delete](#delete)) |
 | `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges]` | Re-puts live records or rebuilds bounded secondary indexes, including typed graph edges (see [Recovery](#recovery)) |
 | `brain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.brain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
 | `brain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`; write: `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link` — so agents can read and mutate the brain in-process (see [MCP](#mcp)) |
@@ -439,16 +439,18 @@ planned migration to the node's native CAS blob plane.
 
 ## Delete
 
-fold_db's mutation pipeline is documented as append-only — `MutationType::Delete` writes a sync-log marker but does not remove molecule entries on local storage. `POST /api/mutation` with `mutation_type=delete` therefore returns `{ok: true, success: true}` but the record is still present on every read path. **This is documented behavior, not a bug** (see fold_db's own `apple_consolidation.rs`).
+LastDB native `MutationType::Delete` converges tip absence on the persist lane. A later `brain get` misses the row. Restart does not resurrect it. Atom reclaim and cloud-bill shrink are a later janitor.
 
-`fbrain delete` works around this at the fbrain layer:
+`fbrain delete`:
 
 1. Resolves `--type` the same way `fbrain get` does (probes both schemas if omitted; errors on ambiguous slug).
-2. Fires an `update` mutation that overwrites every user field with sentinel values (`title="(deleted)"`, `body=""`, `status="archived"|"cancelled"`, `tags=["__fbrain_deleted__"]`, `design_slug=""` for tasks).
-3. Fires the fold_db `delete` mutation for forward-compat (when fold_db ever grows a real hard-delete, this call starts mattering).
-4. Verifies by reading the record back and asserting the tombstone tag is present. If verification fails, errors with `delete_not_applied`.
+2. Fires an `update` mutation that overwrites every user field with sentinel values (`title="(deleted)"`, `body=""`, `status="archived"|"cancelled"`, `tags=["__fbrain_deleted__"]`, `design_slug=""` for tasks) so older fbrain read paths hide the row.
+3. Fires the fold_db `delete` mutation (native Delete).
+4. Verifies by reading the record back. Success is a miss or a row that still carries the tombstone tag. If the row is still visible without the tag, errors with `delete_not_applied`.
 
-Every fbrain read path (`get`, `list`, `status`, `link`, `search`) filters tombstoned records via `findBySlug`, so the user-visible behavior matches a hard delete. The slug is also reusable: `fbrain design new <same-slug>` (no `--force`) recreates it cleanly.
+Every fbrain read path (`get`, `list`, `status`, `link`, `search`) treats the slug as gone. The slug is reusable: `fbrain design new <same-slug>` (no `--force`) recreates it.
+
+The 2026-05-23 Phase 5 spike said Delete was a sync-log marker only. That is historical. Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) as the old probe, not as live product truth.
 
 ### Bulk delete (filter mode)
 
@@ -456,7 +458,7 @@ To purge a batch of throwaway records in one command, `fbrain delete` also accep
 
 ```bash
 fbrain delete --tag dogfood                 # DRY-RUN: preview what would be deleted
-fbrain delete --tag dogfood --yes           # actually soft-delete every match
+fbrain delete --tag dogfood --yes           # actually delete every match
 fbrain delete --tag probe --type concept --status archived --yes
 ```
 
@@ -467,8 +469,6 @@ fbrain delete --tag probe --type concept --status archived --yes
 - **`--json`** in filter mode emits `{ok, deleted: [{type, slug}], dryRun}` so scripts and agents can consume the result.
 
 `fbrain raw POST /api/query` is the escape hatch — it returns the raw fold_db state including tombstoned rows.
-
-Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) for the full source-code references, probe transcripts, and the fold_db follow-up that's been filed.
 
 ## Recovery
 
