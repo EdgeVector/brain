@@ -2988,6 +2988,44 @@ type NodeErrorRule = {
 // tuple that matches nothing falls through to the generic `node_http_${status}`
 // mapping in `mapNodeError`.
 const NODE_ERROR_RULES: NodeErrorRule[] = [
+  // Atom content over the node's hard size limit (fold#870, won't-undo
+  // `preference-lastdb-atom-size-hard-limit-64kib`). The node answers
+  // `413 {"error":"atom_content_too_large","size":N,"limit":M,...}` and stores
+  // nothing. Without this rule that lands as a generic `node_http_413` whose
+  // text names neither the record nor the remedy, so a routine that grows one
+  // record by `brain append` on every fire keeps retrying the same write until
+  // someone reads the node log (Sentry 7644788289: 214 rejections on the
+  // brain's Reference schema, 2026-07-31 → 2026-09-06, every one the same
+  // record crossing the raised 512 KiB ceiling by a few hundred bytes). The
+  // record is full; the fix is a successor record, never a bigger limit.
+  {
+    match: (ctx) => ctx.status === 413 && ctx.errCode === "atom_content_too_large",
+    build: (ctx) => {
+      const size = bodyNumberField(ctx.body, "size");
+      const limit = bodyNumberField(ctx.body, "limit");
+      const sizes =
+        size !== undefined && limit !== undefined
+          ? ` (${size} bytes; the node's limit is ${limit} bytes)`
+          : "";
+      return {
+        code: "record_too_large",
+        message:
+          `Node rejected ${ctx.path}: the record body is over the atom content limit${sizes}. ` +
+          "Nothing was stored; the record is unchanged.",
+        hint:
+          "This record is full. Do not raise LASTDB_MAX_ATOM_CONTENT_BYTES for it — atoms are " +
+          "structured field values, not a log. Start a successor record (same type, slug " +
+          "suffixed with a date such as `<slug>-20260914`), link the two from each other, and " +
+          "append new material to the successor. For a large opaque payload use file-blob/CAS " +
+          "and keep only the pointer in the record.",
+        agentHint:
+          "record_too_large: the body exceeds the node's atom content limit and the write was " +
+          "refused with nothing stored. Create a successor record `<slug>-<YYYYMMDD>` with " +
+          "`brain put`, add a `Continues: <slug>` line to it and a `Continued-In: <successor>` " +
+          "line to the original, then `brain append` the successor. Never retry the same append.",
+      };
+    },
+  },
   // Owner-verb attestation 403 (app-isolation flip, fold#739). The node gates
   // owner verbs — `/api/schemas/load`, owner-isolation bypass, etc. — behind an
   // attested transport and returns `403 {"error":"transport_not_attested"}` to
