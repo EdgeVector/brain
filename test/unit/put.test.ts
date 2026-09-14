@@ -2132,7 +2132,7 @@ describe("putCmd — record-list index patch failure is surfaced, not swallowed"
         slug: "half-commit-probe",
         input: "---\ntype: design\ntitle: T\n---\nbody",
       }),
-    ).rejects.toMatchObject({ code: "node_http_413" });
+    ).rejects.toMatchObject({ code: "record_too_large" });
   });
 
   test("a healthy put reports listIndexFailed false", async () => {

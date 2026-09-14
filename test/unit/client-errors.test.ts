@@ -1042,6 +1042,48 @@ describe("client error mapping", () => {
     expect(err.hint).toContain("folddb.sock");
   });
 
+  // The node's hard atom-content limit (fold#870) answers a full record with
+  // `413 atom_content_too_large` and stores nothing. The mapping must name the
+  // remedy — a successor record — on both channels, and must never suggest a
+  // bigger limit (Sentry 7644788289: 214 rejections of one growing record).
+  test("mapNodeError 413 atom_content_too_large → record_too_large with a successor-record remedy", () => {
+    const err = mapNodeError(
+      413,
+      {
+        ok: false,
+        error: "atom_content_too_large",
+        size: 524_837,
+        limit: 524_288,
+        default_limit: 65_536,
+        absolute_max_limit: 1_048_576,
+        env: "LASTDB_MAX_ATOM_CONTENT_BYTES",
+        message: "atom content too large: 524837 bytes exceeds hard limit of 524288 bytes",
+      },
+      "/api/mutation",
+    );
+    expect(err.code).toBe("record_too_large");
+    expect(err.message).toContain("/api/mutation");
+    expect(err.message).toContain("524837 bytes");
+    expect(err.message).toContain("524288 bytes");
+    expect(err.message).toContain("Nothing was stored");
+    expect(err.hint).toContain("successor record");
+    expect(err.hint).toContain("Do not raise LASTDB_MAX_ATOM_CONTENT_BYTES");
+    expect(err.agentHint).toContain("record_too_large");
+    expect(err.agentHint).toContain("Never retry the same append");
+  });
+
+  test("mapNodeError 413 without the typed body stays a generic node_http_413", () => {
+    const err = mapNodeError(413, { error: "payload_too_large" }, "/api/mutation");
+    expect(err.code).toBe("node_http_413");
+  });
+
+  test("mapNodeError 413 atom_content_too_large without sizes still names the remedy", () => {
+    const err = mapNodeError(413, { error: "atom_content_too_large" }, "/api/mutation");
+    expect(err.code).toBe("record_too_large");
+    expect(err.message).not.toContain("undefined");
+    expect(err.hint).toContain("successor record");
+  });
+
   test("schema service POST without schema.name throws schema_register_no_hash", async () => {
     installMock([{ status: 201, body: { something: "weird" } }]);
     const c = newSchemaServiceClient("http://127.0.0.1:9102");
