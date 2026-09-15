@@ -19,7 +19,7 @@ import {
   type RecordType,
 } from "./schemas.ts";
 
-export const TAG_INDEX_SLUG_PREFIX = "__tagidx__";
+const TAG_INDEX_SLUG_PREFIX = "__tagidx__";
 
 const TAG_INDEX_FIELDS = ["slug", "tag", "members", "created_at", "updated_at"];
 const TAG_INDEX_WRITE_MAX_ATTEMPTS = 4;
