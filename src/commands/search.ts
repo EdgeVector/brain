@@ -406,6 +406,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const plane = await querySearchPlane({
     query: opts.query,
     k: 50,
+    caller: "brain/search",
     schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
     verbose: opts.verbose,
   });

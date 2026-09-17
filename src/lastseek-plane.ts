@@ -93,6 +93,8 @@ export type LastSeekHit = {
 export type LastSeekQueryOpts = {
   query: string;
   k?: number;
+  /** Stable process role for LastSeek operator metrics. */
+  caller?: string;
   /**
    * Scope terms. LastSeek accepts a readable name (`Card`), a schema identity
    * hash, or a registry name, and resolves all three through its Schema
@@ -149,9 +151,12 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
   }
 
   const started = beginSubprocess();
+  const env = opts.caller
+    ? { ...process.env, LASTSEEK_CALLER: opts.caller }
+    : process.env;
   const r = spawnSync(lastSeekBin(), args, {
     encoding: "utf8",
-    env: process.env,
+    env,
     timeout: timeoutMs > 0 ? timeoutMs : undefined,
   });
   endSubprocess(started, "lastseek query");

@@ -264,6 +264,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const planeOrig = await querySearchPlane({
     query: opts.query,
     k: RANKER_LIMIT,
+    caller: "brain/ask",
     schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
     verbose: opts.verbose,
   });
@@ -354,6 +355,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         : await querySearchPlane({
             query: q,
             k: RANKER_LIMIT,
+            caller: "brain/ask",
             schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
             verbose: opts.verbose,
           });

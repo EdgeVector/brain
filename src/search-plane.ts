@@ -39,6 +39,8 @@ export type SearchPlaneHit = {
 export type SearchPlaneQueryOpts = {
   query: string;
   k?: number;
+  /** Stable command role for LastSeek operator metrics. */
+  caller?: string;
   schemas?: string[];
   exact?: boolean;
   min_score?: number;
@@ -227,6 +229,7 @@ export async function querySearchPlane(
   const seek = queryLastSeek({
     query: opts.query,
     k: opts.k,
+    caller: opts.caller,
     schemas: opts.schemas,
     exact: opts.exact,
     min_score: opts.min_score,
