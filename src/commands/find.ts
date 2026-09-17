@@ -116,6 +116,7 @@ export async function findCmd(opts: FindOptions): Promise<FindResult> {
     const plane = await querySearchPlane({
       query: probe,
       k: RANKER_LIMIT,
+      caller: "brain/find",
       schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
       verbose: opts.verbose,
     });
