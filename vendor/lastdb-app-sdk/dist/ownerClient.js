@@ -24,6 +24,7 @@
 import { existsSync } from 'node:fs';
 import { capabilityStoreKey } from './capabilityStore.js';
 import { LastDbClient } from './client.js';
+import { LASTDB_DB_HEADER, resolveDbLocator, } from './dbHandle.js';
 import { TransportError } from './errors.js';
 import { discoverTransport, httpTransport, udsTransport, } from './transport.js';
 /**
@@ -91,7 +92,7 @@ function resolveOwnerTransport(options) {
     if (baseUrl !== undefined && baseUrl.length > 0) {
         return httpTransport(baseUrl, headers, { timeoutMs });
     }
-    throw new TransportError('ownerClient requires a reachable node: pass a loopback `baseUrl`, or a `socketPath` whose file exists');
+    throw new TransportError('ownerClient requires a reachable node: pass a loopback `baseUrl`, or a `socketPath` whose file exists', 'connect');
 }
 /**
  * Build a capability-less {@link LastDbClient} for an OWNER / HOST-context app.
@@ -117,7 +118,15 @@ function resolveOwnerTransport(options) {
  * ```
  */
 export function ownerClient(options) {
-    const transport = resolveOwnerTransport(options);
-    return new LastDbClient(options.appId, transport, NOOP_CAPABILITY_STORE, null, capabilityStoreKey(options.appId, transport.target), transport.target);
+    const dbLocator = resolveDbLocator(options.db);
+    // Inject X-LastDB-Db into transport default headers when not already set.
+    const defaultHeaders = {
+        ...(options.defaultHeaders ?? {}),
+    };
+    if (!Object.keys(defaultHeaders).some((k) => k.toLowerCase() === LASTDB_DB_HEADER.toLowerCase())) {
+        defaultHeaders[LASTDB_DB_HEADER] = dbLocator;
+    }
+    const transport = resolveOwnerTransport({ ...options, defaultHeaders });
+    return new LastDbClient(options.appId, transport, NOOP_CAPABILITY_STORE, null, capabilityStoreKey(options.appId, transport.target), transport.target, { dbLocator });
 }
 //# sourceMappingURL=ownerClient.js.map

@@ -1,1 +1,1 @@
-{"version":3,"file":"apiRoutes.d.ts","sourceRoot":"","sources":["../src/apiRoutes.ts"],"names":[],"mappings":"AAAA,kEAAkE;AAClE,eAAO,MAAM,iBAAiB;;wCAED,MAAM;;;;;;CAOzB,CAAC;AAEX,qEAAqE;AACrE,eAAO,MAAM,wBAAwB,iKAK3B,CAAC"}
+{"version":3,"file":"apiRoutes.d.ts","sourceRoot":"","sources":["../src/apiRoutes.ts"],"names":[],"mappings":"AAAA,kEAAkE;AAClE,eAAO,MAAM,iBAAiB;;wCAED,MAAM;;;;;;;;IASjC,4EAA4E;;CAEpE,CAAC;AAEX;;;;;;;;;GASG;AACH,eAAO,MAAM,sBAAsB,IAAI,CAAC;AAExC,qEAAqE;AACrE,eAAO,MAAM,wBAAwB,6QAQ3B,CAAC"}

@@ -58,7 +58,7 @@ function captureFetch(captured: Captured[], status = 200): void {
     }
     captured.push({ url, headers, body: typeof init?.body === "string" ? init.body : "" });
     // Mutations return 200 ok; everything else also 200 ok.
-    return new Response(JSON.stringify({ ok: true }), {
+    return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
       status,
       headers: { "Content-Type": "application/json" },
     });
@@ -152,7 +152,7 @@ describe("newWriteNodeClient — enforcement ON", () => {
           { status: 403, headers: { "content-type": "application/json" } },
         );
       }
-      return new Response(JSON.stringify({ ok: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });

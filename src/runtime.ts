@@ -20,6 +20,24 @@ export const MIN_BUN_VERSION: string = parseEnginesBun(
   (pkg as { engines?: { bun?: unknown } }).engines?.bun,
 );
 
+// The LastDB node request-grammar version brain needs, from `lastdb.minApiVersion`
+// in package.json (see the app-sdk README, "Version handshake"). `0` = no
+// requirement: the node is never asked. Raise it in the same change that makes
+// brain send a key an older node would refuse; `connect`-time enforcement then
+// fails on ONE line that names the fix instead of a bare 400 on the first
+// write (the 2026-09-03 `durability` incident). Malformed → 0 so a packaging
+// mistake never bricks every command.
+export const MIN_LASTDB_API_VERSION: number = parseMinApiVersion(
+  (pkg as { lastdb?: { minApiVersion?: unknown } }).lastdb?.minApiVersion,
+);
+
+function parseMinApiVersion(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+// Who is asking, for the NodeTooOldError message (`brain 0.8.1 needs …`).
+export const BRAIN_APP_LABEL = `brain ${pkg.version}`;
+
 function parseEnginesBun(spec: unknown): string {
   if (typeof spec === "string") {
     // Strip a leading range operator (>=, >, ^, ~, =, v) and surrounding

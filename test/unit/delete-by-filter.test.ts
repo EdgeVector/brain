@@ -232,12 +232,12 @@ function stubFetch(
       if (body.mutation_type === "delete") {
         state.deleteCalls.push({ schemaHash, keyHash });
       }
-      return new Response(JSON.stringify({ ok: true, success: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     }
-    return new Response("{}", { status: 200 });
+    return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
   }) as unknown as typeof fetch;
   return () => {
     globalThis.fetch = original;

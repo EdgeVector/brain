@@ -16,7 +16,8 @@
 import { capabilityStoreKey, defaultCapabilityStore, } from './capabilityStore.js';
 import { LASTDB_API_ROUTES } from './apiRoutes.js';
 import { verifyCapabilityBlob } from './capabilityToken.js';
-import { AppInSandboxError, AuthenticationRequiredError, CapabilityDeniedError, CapabilityRevokedError, CapabilityVerificationError, CasConflictError, ConsentDeniedError, ConsentExpiredError, ConsentRequestNotFoundError, ConsentTimeoutError, FullScanNotAllowedError, InvalidScopeError, PermissionDeniedError, QueryPaginationError, RequestRejectedError, UnexpectedResponseError, UnknownAppError, } from './errors.js';
+import { AppInSandboxError, AuthenticationRequiredError, CapabilityDeniedError, CapabilityRevokedError, CapabilityVerificationError, CasConflictError, ConsentDeniedError, ConsentExpiredError, ConsentRequestNotFoundError, ConsentTimeoutError, FullScanNotAllowedError, InvalidScopeError, NodeTooOldError, PermissionDeniedError, QueryPaginationError, RequestRejectedError, UnexpectedResponseError, UnknownAppError, } from './errors.js';
+import { LASTDB_DB_HEADER, resolveDbLocator, } from './dbHandle.js';
 import { discoverTransport, httpTransport, udsTransport, } from './transport.js';
 /** The HTTP header carrying `base64(JSON CapabilityToken)`. */
 const CAPABILITY_HEADER = 'X-App-Capability';
@@ -24,6 +25,11 @@ const CAPABILITY_HEADER = 'X-App-Capability';
 const CAPABILITY_TS_HEADER = 'X-Capability-Ts';
 /** Design-mandated poll cadence for `consent-status` (~2s). */
 const DEFAULT_POLL_INTERVAL_MS = 2000;
+/**
+ * The exact publication route has a 130s server budget. Give that route a
+ * larger client deadline without changing the 30s default for ordinary calls.
+ */
+const EXACT_CLOUD_PUBLICATION_TIMEOUT_MS = 150_000;
 function queryRowDedupKey(row) {
     if (row.keyValue !== null) {
         return `kv:${row.keyValue.hash ?? ''}\u0000${row.keyValue.range ?? ''}`;
@@ -75,6 +81,12 @@ export async function connect(options) {
         if (clientLabel.length > 0) {
             defaultHeaders['X-LastDB-Client'] = clientLabel;
         }
+    }
+    // Multi-DB handle: explicit option → LASTDB_DB env → personal. Never
+    // clobber a caller-supplied X-LastDB-Db.
+    const dbLocator = resolveDbLocator(options.db);
+    if (!Object.keys(defaultHeaders).some((k) => k.toLowerCase() === LASTDB_DB_HEADER.toLowerCase())) {
+        defaultHeaders[LASTDB_DB_HEADER] = dbLocator;
     }
     const discoverSocket = options.discoverSocket ?? true;
     let transport;
@@ -132,7 +144,19 @@ export async function connect(options) {
             capability = null;
         }
     }
-    return new LastDbClient(appId, transport, store, capability, storeKey, nodeTarget, { verifyCapability, schemaResolver: options.schemaResolver });
+    const client = new LastDbClient(appId, transport, store, capability, storeKey, nodeTarget, {
+        verifyCapability,
+        schemaResolver: options.schemaResolver,
+        dbLocator,
+    });
+    // The compatibility handshake runs before any data request so an app that
+    // is newer than the node fails on ONE line that names the fix, not on its
+    // first write with a 400 that hides which side moved.
+    const required = options.requireApiVersion ?? 0;
+    if (required > 0) {
+        await client.requireApiVersion(required, options.appLabel ?? appId);
+    }
+    return client;
 }
 /** A connected LastDB app client. Construct via {@link connect}. */
 export class LastDbClient {
@@ -144,6 +168,8 @@ export class LastDbClient {
     nodeTarget;
     verifyCapability;
     schemaResolver;
+    /** Canonical multi-DB locator forwarded on every data-path request. */
+    dbLocator;
     constructor(appId, transport, store, capability, 
     /** The node-scoped capability-store key: `capabilityStoreKey(appId, node)`. */
     storeKey, 
@@ -157,6 +183,7 @@ export class LastDbClient {
         this.nodeTarget = nodeTarget;
         this.verifyCapability = options.verifyCapability ?? false;
         this.schemaResolver = options.schemaResolver ?? null;
+        this.dbLocator = options.dbLocator ?? resolveDbLocator(undefined);
     }
     /** Where this client is pointed (for diagnostics). */
     get target() {
@@ -165,6 +192,51 @@ export class LastDbClient {
     /** Whether a capability is currently loaded. */
     get hasCapability() {
         return this.capability !== null;
+    }
+    // -------------------------------------------------------------------------
+    // Version handshake
+    // -------------------------------------------------------------------------
+    /**
+     * `GET /api/version` — the client↔node compatibility handshake. Reads no
+     * node state and needs no capability. A node that predates the route (404)
+     * yields `{ apiVersion: 0, handshake: false }` rather than an error, so a
+     * caller can still print what it learned.
+     */
+    async version() {
+        const res = await this.transport.send('GET', LASTDB_API_ROUTES.version);
+        if (res.status === 404) {
+            return {
+                apiVersion: 0,
+                build: null,
+                capabilities: {},
+                instanceId: null,
+                handshake: false,
+            };
+        }
+        if (res.status !== 200) {
+            throw new UnexpectedResponseError(`version returned ${res.status}`, res.status, res.body);
+        }
+        return parseNodeVersion(res.body);
+    }
+    /**
+     * Refuse to proceed against a node whose `api_version` is below `required`.
+     * Throws {@link NodeTooOldError}, whose message is the one line an operator
+     * needs (`… Run: brew upgrade lastdb …`). Returns the node's version on
+     * success so a caller can log it. `connect({ requireApiVersion })` calls
+     * this for you.
+     */
+    async requireApiVersion(required, appLabel) {
+        const node = await this.version();
+        if (node.apiVersion < required) {
+            throw new NodeTooOldError({
+                reason: 'api_version_below_required',
+                required,
+                reported: node.apiVersion,
+                build: node.build,
+                app: appLabel ?? this.appId,
+            });
+        }
+        return node;
     }
     // -------------------------------------------------------------------------
     // Consent flow
@@ -294,6 +366,30 @@ export class LastDbClient {
     // Data path
     // -------------------------------------------------------------------------
     /**
+     * `GET /api/list` — return one page of live record keys without hydrating
+     * atom bodies. Use this for membership, then point-read the keys whose
+     * fields you need. A page is not a census: follow `next_cursor` while
+     * `has_more` is true.
+     */
+    async list(schemaName, opts = {}) {
+        const resolved = await this.resolveDataPathSchema(schemaName);
+        const params = new URLSearchParams({ schema: resolved.nodeSchemaName });
+        if (opts.limit !== undefined) {
+            params.set('limit', String(opts.limit));
+        }
+        if (opts.cursor !== undefined) {
+            params.set('cursor', opts.cursor);
+        }
+        const res = await this.transport.send('GET', `${LASTDB_API_ROUTES.list}?${params.toString()}`, { headers: this.capabilityHeaders() });
+        if (res.status === 200) {
+            return {
+                ...parseListResponse(res.body),
+                schema: resolved.appSchemaName,
+            };
+        }
+        throw this.mapDataError('list', res.status, res.body);
+    }
+    /**
      * `POST /api/query`. Reads fields from `schemaName` (a schema or a view).
      * Auto-attaches the capability headers when one is loaded.
      *
@@ -323,6 +419,9 @@ export class LastDbClient {
         }
         if (filter.cursor !== undefined) {
             body.cursor = filter.cursor;
+        }
+        if (filter.where !== undefined) {
+            body.where = mapPredicateFields(filter.where, resolved.appToNodeFields);
         }
         const headers = { ...this.capabilityHeaders() };
         if (opts.allowFullScan === true) {
@@ -420,7 +519,7 @@ export class LastDbClient {
         }
         if (!truncatedByMaxRows &&
             lastPage !== null &&
-            lastPage.totalCount !== rows.length) {
+            (lastPage.totalCount === undefined || lastPage.totalCount !== rows.length)) {
             throw new QueryPaginationError('total_count_mismatch', {
                 totalCount: lastPage.totalCount,
                 collectedCount: rows.length,
@@ -465,19 +564,95 @@ export class LastDbClient {
         if (op.expected !== undefined) {
             body.expected = mapCasExpectation(op.expected, resolved.appToNodeFields);
         }
-        const res = await this.transport.send('POST', LASTDB_API_ROUTES.mutation, {
+        if (op.convergence !== undefined) {
+            body.convergence = op.convergence;
+        }
+        if (op.durability !== undefined) {
+            body.durability = op.durability;
+        }
+        if (op.cloudPublication !== undefined) {
+            body.cloud_publication = op.cloudPublication;
+        }
+        if (op.mustExist !== undefined) {
+            body.must_exist = op.mustExist;
+        }
+        const sendOptions = {
+            headers: this.capabilityHeaders(),
+            body,
+        };
+        if (op.cloudPublication === 'wait') {
+            sendOptions.minimumTimeoutMs = EXACT_CLOUD_PUBLICATION_TIMEOUT_MS;
+        }
+        const res = await this.transport.send('POST', LASTDB_API_ROUTES.mutation, sendOptions);
+        if (res.status === 200) {
+            if (!isObject(res.body)) {
+                throw new UnexpectedResponseError('mutation returned a non-object body', 200, res.body);
+            }
+            const b = res.body;
+            const mutationIds = parseMutationIds(b, res.body);
+            const written = parseMutationWritten(b, res.body);
+            const firingsObserved = parseMutationFiringsObserved(b, res.body);
+            const result = {
+                written,
+                mutationIds,
+                firingsObserved,
+            };
+            if (typeof b['background_tasks_drained'] === 'boolean') {
+                result.backgroundTasksDrained = b['background_tasks_drained'];
+            }
+            if (typeof b['convergence_pending'] === 'boolean') {
+                result.convergencePending = b['convergence_pending'];
+            }
+            if (typeof b['local_committed'] === 'boolean') {
+                result.localCommitted = b['local_committed'];
+            }
+            if (b['cloud_capture'] !== undefined) {
+                result.cloudCapture = parseMutationCloudCapture(b['cloud_capture']);
+            }
+            if (b['cloud_publication'] !== undefined) {
+                result.cloudPublication = parseMutationCloudPublication(b['cloud_publication']);
+            }
+            if (op.cloudPublication === 'wait') {
+                const exactMutationUuid = mutationIds.length === 1 ? mutationIds[0] : undefined;
+                if (b['durability'] !== 'durable' ||
+                    result.localCommitted !== true ||
+                    result.cloudCapture === undefined ||
+                    result.cloudPublication === undefined ||
+                    exactMutationUuid === undefined ||
+                    result.cloudCapture.mutationUuid !== exactMutationUuid ||
+                    result.cloudPublication.mutationUuid !== exactMutationUuid ||
+                    result.cloudPublication.state === 'not_requested' ||
+                    (result.cloudCapture.state === 'failed' &&
+                        result.cloudPublication.state !== 'failed') ||
+                    (result.cloudPublication.state !== 'failed' &&
+                        result.cloudPublication.targets.length === 0)) {
+                    throw new UnexpectedResponseError('mutation returned an unbound exact cloud publication receipt', 200, res.body);
+                }
+            }
+            return result;
+        }
+        throw this.mapDataError('mutation', res.status, res.body);
+    }
+    /**
+     * Read durable changed-row metadata since an opaque cursor. The node owns
+     * scope: a verified app sees only its authorized schemas, and `target` can
+     * only narrow that set. Rows are hints; point-read product state after wake.
+     */
+    async changes(opts = {}) {
+        const body = {};
+        if (opts.since !== undefined)
+            body.since_cursor = opts.since;
+        if (opts.limit !== undefined)
+            body.limit = opts.limit;
+        if (opts.target !== undefined)
+            body.target = opts.target;
+        const res = await this.transport.send('POST', LASTDB_API_ROUTES.appChanges, {
             headers: this.capabilityHeaders(),
             body,
         });
-        if (res.status === 200) {
-            const b = res.body;
-            return {
-                written: b.written,
-                mutationIds: b.mutation_ids,
-                firingsObserved: b.firings_observed,
-            };
-        }
-        throw this.mapDataError('mutation', res.status, res.body);
+        if (res.status === 200)
+            return parseChangesResponse(res.body);
+        throw this.mapDataError('changes', res.status, res.body);
     }
     /**
      * `POST /api/app/search` — the **node-authoritative scoped search**
@@ -570,13 +745,19 @@ export class LastDbClient {
     // -------------------------------------------------------------------------
     /** Capability headers, present only when a capability is loaded. */
     capabilityHeaders() {
-        if (this.capability === null) {
-            return {};
-        }
-        return {
-            [CAPABILITY_HEADER]: this.capability,
-            [CAPABILITY_TS_HEADER]: nowEpochSecs(),
+        // Always stamp the DB handle on data-path calls so Mini scopes storage
+        // even when the transport was built without defaultHeaders (ownerClient
+        // / hand-built transports). Transport defaultHeaders of the same name win
+        // only when the caller merges them after this object — here we set it
+        // unconditionally on the per-call headers.
+        const headers = {
+            [LASTDB_DB_HEADER]: this.dbLocator,
         };
+        if (this.capability !== null) {
+            headers[CAPABILITY_HEADER] = this.capability;
+            headers[CAPABILITY_TS_HEADER] = nowEpochSecs();
+        }
+        return headers;
     }
     /**
      * Resolve an app schema name to the node-facing schema + field maps (the
@@ -616,6 +797,13 @@ export class LastDbClient {
             return new PermissionDeniedError(b.error ?? `${verb} permission denied`);
         }
         if (status === 400) {
+            // `unknown_key` is the node telling us it does not know a key we sent:
+            // this client is newer than the node. It is a version-skew fact, not a
+            // request-shape bug, so it gets the typed error whose message names
+            // the fix. (The node never echoes the key — its I4 rule.)
+            if (b.kind === 'unknown_key') {
+                return new NodeTooOldError({ reason: 'unknown_key', reported: null, build: null, app: this.appId }, body ?? null);
+            }
             // Production 400 bodies are not uniform: the dev mirror sends
             // `{kind, error}`, production handlers send `{error}` or `{message}`
             // (or richer envelopes). Prefer `error`, fall back to the node's
@@ -706,6 +894,33 @@ function mapFieldRecord(row, fields) {
 function mapCasExpectation(expected, fields) {
     return { ...expected, field: mapFieldName(expected.field, fields) };
 }
+/**
+ * Map each two-pass predicate's `field` app→node, leaving the comparison
+ * payload (`value` / `values` / `instant`) untouched — only `field` names a
+ * schema field. The variant tag and any unrecognized shape pass through
+ * verbatim so the SDK never rewrites a predicate dialect the node may add
+ * later; an unknown tag reaches the node and is rejected there, loudly,
+ * instead of being silently dropped here.
+ */
+function mapPredicateFields(where, fields) {
+    return where.map((predicate) => {
+        const [entry] = Object.entries(predicate);
+        if (entry === undefined) {
+            return predicate;
+        }
+        const [tag, body] = entry;
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+            return predicate;
+        }
+        const inner = body;
+        if (typeof inner.field !== 'string') {
+            return predicate;
+        }
+        return {
+            [tag]: { ...inner, field: mapFieldName(inner.field, fields) },
+        };
+    });
+}
 function mapQueryResult(result, resolved) {
     return {
         ...result,
@@ -725,6 +940,44 @@ function mapFieldKeyedJson(value, fields) {
         return value;
     }
     return mapFieldRecord(value, fields);
+}
+/** Parse a successful keys-only `GET /api/list` response. */
+export function parseListResponse(body) {
+    if (!isObject(body) || !isObject(body['list'])) {
+        throw new UnexpectedResponseError('list returned an invalid envelope', 200, body);
+    }
+    const page = body['list'];
+    const schema = page['schema'];
+    const rawKeys = page['keys'];
+    const nextCursor = page['next_cursor'];
+    const hasMore = page['has_more'];
+    const truncated = page['truncated'];
+    if (typeof schema !== 'string' ||
+        !Array.isArray(rawKeys) ||
+        (nextCursor !== undefined && nextCursor !== null && typeof nextCursor !== 'string') ||
+        typeof hasMore !== 'boolean' ||
+        typeof truncated !== 'boolean') {
+        throw new UnexpectedResponseError('list returned an invalid keys page', 200, body);
+    }
+    const keys = rawKeys.map((raw) => {
+        if (!isObject(raw) || typeof raw['hash'] !== 'string') {
+            throw new UnexpectedResponseError('list returned an invalid record key', 200, raw);
+        }
+        const range = raw['range'];
+        if (range !== undefined && typeof range !== 'string') {
+            throw new UnexpectedResponseError('list returned an invalid record key', 200, raw);
+        }
+        return range === undefined || range.length === 0
+            ? { hash: raw['hash'] }
+            : { hash: raw['hash'], range };
+    });
+    return {
+        schema,
+        keys,
+        next_cursor: typeof nextCursor === 'string' ? nextCursor : null,
+        has_more: hasMore,
+        truncated,
+    };
 }
 /**
  * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
@@ -755,7 +1008,9 @@ export function parseQueryResponse(body) {
  * `limit` / `offset` / `has_more`, per `fold_db_node`'s `QueryResponse`) off
  * a 200 `/api/query` body. Returns `null` when the node reported none (the
  * dev-node mirror, pre-pagination nodes) — the SDK never invents pagination
- * the node didn't do.
+ * the node didn't do. A paginated response may set `total_count: null` when
+ * the node intentionally skipped an exact count; keep the page metadata so
+ * `queryAll` can fail closed instead of treating the drain as clean.
  */
 function parseQueryPage(body, returnedRows) {
     if (!isObject(body)) {
@@ -766,15 +1021,17 @@ function parseQueryPage(body, returnedRows) {
     const offset = body['offset'];
     const hasMore = body['has_more'];
     const nextCursor = parseKeyValue(body['next_cursor']);
-    if (typeof totalCount !== 'number' ||
-        typeof limit !== 'number' ||
+    if (typeof limit !== 'number' ||
         typeof offset !== 'number' ||
         typeof hasMore !== 'boolean') {
         return null;
     }
+    if (totalCount !== null && totalCount !== undefined && typeof totalCount !== 'number') {
+        return null;
+    }
     const returnedCount = body['returned_count'];
     return {
-        totalCount,
+        totalCount: typeof totalCount === 'number' ? totalCount : undefined,
         returnedCount: typeof returnedCount === 'number' ? returnedCount : returnedRows,
         limit,
         offset,
@@ -785,6 +1042,142 @@ function parseQueryPage(body, returnedRows) {
 /** Whether a value is a non-array JSON object. */
 function isObject(v) {
     return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.trim().length > 0;
+}
+const U64_MAX_DECIMAL = '18446744073709551615';
+function isPositiveU64Decimal(value) {
+    if (typeof value !== 'string' ||
+        !/^[1-9][0-9]*$/.test(value) ||
+        value.length > U64_MAX_DECIMAL.length) {
+        return false;
+    }
+    return (value.length < U64_MAX_DECIMAL.length || value <= U64_MAX_DECIMAL);
+}
+/** Normalize the legacy ID list and the current single-route mutation ID. */
+function parseMutationIds(body, raw) {
+    if ('mutation_ids' in body) {
+        const ids = body['mutation_ids'];
+        if (Array.isArray(ids) &&
+            ids.length > 0 &&
+            ids.every(isNonEmptyString)) {
+            return ids;
+        }
+        throw new UnexpectedResponseError('mutation returned invalid mutation_ids', 200, raw);
+    }
+    const id = body['mutation_id'];
+    if (isNonEmptyString(id)) {
+        return [id];
+    }
+    throw new UnexpectedResponseError('mutation returned no mutation ID', 200, raw);
+}
+/** Preserve legacy `written`; otherwise normalize current `success: true`. */
+function parseMutationWritten(body, raw) {
+    if ('written' in body) {
+        const written = body['written'];
+        if (typeof written === 'number') {
+            return written;
+        }
+        throw new UnexpectedResponseError('mutation returned an invalid written count', 200, raw);
+    }
+    if (body['success'] === true) {
+        return 1;
+    }
+    throw new UnexpectedResponseError('mutation returned no success marker', 200, raw);
+}
+/** Preserve the legacy firing count; current single-route responses omit it. */
+function parseMutationFiringsObserved(body, raw) {
+    if (!('firings_observed' in body)) {
+        return 0;
+    }
+    const firingsObserved = body['firings_observed'];
+    if (typeof firingsObserved === 'number') {
+        return firingsObserved;
+    }
+    throw new UnexpectedResponseError('mutation returned an invalid firings_observed count', 200, raw);
+}
+function isMutationCloudCaptureState(value) {
+    return value === 'durable' || value === 'failed';
+}
+function isMutationCloudPublicationState(value) {
+    return (value === 'not_requested' ||
+        value === 'pending' ||
+        value === 'published' ||
+        value === 'failed');
+}
+/** Parse one durable cloud-intent receipt without weakening its guarantee. */
+function parseMutationCloudCapture(raw) {
+    if (!isObject(raw)) {
+        throw new UnexpectedResponseError('mutation returned an invalid cloud_capture receipt', 200, raw);
+    }
+    const state = raw['state'];
+    const durable = raw['durable'];
+    const mutationUuid = raw['mutation_uuid'];
+    const error = raw['error'];
+    if (!isMutationCloudCaptureState(state) ||
+        typeof durable !== 'boolean' ||
+        !isNonEmptyString(mutationUuid) ||
+        (error !== null && typeof error !== 'string')) {
+        throw new UnexpectedResponseError('mutation returned an invalid cloud_capture receipt', 200, raw);
+    }
+    const coherent = state === 'durable'
+        ? durable && error === null
+        : !durable && isNonEmptyString(error);
+    if (!coherent) {
+        throw new UnexpectedResponseError('mutation returned an incoherent cloud_capture receipt', 200, raw);
+    }
+    return { state, durable, mutationUuid, error };
+}
+/** Parse one exact target coordinate and preserve the frontier as text. */
+function parseMutationCloudPublicationTarget(raw) {
+    if (!isObject(raw)) {
+        throw new UnexpectedResponseError('mutation returned an invalid cloud publication target', 200, raw);
+    }
+    const targetId = raw['target_id'];
+    const targetLabel = raw['target_label'];
+    const writerId = raw['writer_id'];
+    const frontier = raw['frontier'];
+    if (!isNonEmptyString(targetId) ||
+        typeof targetLabel !== 'string' ||
+        !isNonEmptyString(writerId) ||
+        !isPositiveU64Decimal(frontier)) {
+        throw new UnexpectedResponseError('mutation returned an invalid cloud publication target', 200, raw);
+    }
+    return { targetId, targetLabel, writerId, frontier };
+}
+/** Parse the exact off-box receipt and map its wire names to the SDK surface. */
+function parseMutationCloudPublication(raw) {
+    if (!isObject(raw)) {
+        throw new UnexpectedResponseError('mutation returned an invalid cloud_publication receipt', 200, raw);
+    }
+    const state = raw['state'];
+    const published = raw['published'];
+    const mutationUuid = raw['mutation_uuid'];
+    const targets = raw['targets'];
+    const error = raw['error'];
+    if (!isMutationCloudPublicationState(state) ||
+        typeof published !== 'boolean' ||
+        !isNonEmptyString(mutationUuid) ||
+        !Array.isArray(targets) ||
+        (error !== null && typeof error !== 'string')) {
+        throw new UnexpectedResponseError('mutation returned an invalid cloud_publication receipt', 200, raw);
+    }
+    const coherent = (state === 'published' && published && error === null) ||
+        (state === 'failed' && !published && isNonEmptyString(error)) ||
+        ((state === 'pending' || state === 'not_requested') &&
+            !published &&
+            error === null);
+    if (!coherent) {
+        throw new UnexpectedResponseError('mutation returned an incoherent cloud_publication receipt', 200, raw);
+    }
+    return {
+        state,
+        published,
+        mutationUuid,
+        targets: targets.map(parseMutationCloudPublicationTarget),
+        error,
+    };
 }
 /**
  * Normalize one raw query row into a {@link QueryRow}. An enveloped row
@@ -851,6 +1244,55 @@ function parseKeyValue(rawKey) {
     const range = typeof rawKey['range'] === 'string' ? rawKey['range'] : null;
     return hash !== null || range !== null ? { hash, range } : null;
 }
+/** Parse a successful `POST /api/app/changes` cursor page. */
+export function parseChangesResponse(body) {
+    if (!isObject(body)) {
+        throw new UnexpectedResponseError('changes returned a non-object body', 200, body);
+    }
+    const nextCursor = body['next_cursor'];
+    const hasMore = body['has_more'];
+    const gap = body['gap'];
+    const rawChanges = body['changes'];
+    if (typeof nextCursor !== 'string' || typeof hasMore !== 'boolean' || typeof gap !== 'boolean' || !Array.isArray(rawChanges)) {
+        throw new UnexpectedResponseError('changes returned an invalid cursor page', 200, body);
+    }
+    const changes = rawChanges.map((raw) => {
+        if (!isObject(raw) || !isObject(raw['key'])) {
+            throw new UnexpectedResponseError('changes returned an invalid event', 200, raw);
+        }
+        const keyRaw = raw['key'];
+        const cursor = raw['cursor'];
+        const mutationId = raw['mutation_id'];
+        const schemaName = raw['schema_name'];
+        const operation = raw['operation'];
+        const committedAtMs = raw['committed_at_ms'];
+        const backgroundTasksDrained = raw['background_tasks_drained'];
+        const convergencePending = raw['convergence_pending'];
+        if (typeof cursor !== 'string' ||
+            typeof mutationId !== 'string' ||
+            typeof schemaName !== 'string' ||
+            typeof operation !== 'string' ||
+            typeof committedAtMs !== 'number' ||
+            typeof backgroundTasksDrained !== 'boolean' ||
+            typeof convergencePending !== 'boolean') {
+            throw new UnexpectedResponseError('changes returned an invalid event', 200, raw);
+        }
+        return {
+            cursor,
+            mutationId,
+            schemaName,
+            key: {
+                hash: typeof keyRaw['hash'] === 'string' ? keyRaw['hash'] : null,
+                range: typeof keyRaw['range'] === 'string' ? keyRaw['range'] : null,
+            },
+            operation,
+            committedAtMs,
+            backgroundTasksDrained,
+            convergencePending,
+        };
+    });
+    return { changes, nextCursor, hasMore, gap };
+}
 /**
  * Parse a `200` `/api/app/search` body into a {@link SearchResult}.
  *
@@ -871,6 +1313,32 @@ export function parseSearchResponse(body) {
     return { hits };
 }
 /** Parse `GET /api/system/auto-identity` success JSON. */
+/**
+ * Parse a `GET /api/version` 200 body. Tolerant of a node that omits a
+ * field: a missing `api_version` reads as `0`, the same as a 404, because a
+ * handshake that cannot state its version has not stated compatibility.
+ */
+export function parseNodeVersion(body) {
+    const b = (body ?? {});
+    const apiVersion = typeof b.api_version === 'number' && Number.isInteger(b.api_version) && b.api_version >= 0
+        ? b.api_version
+        : 0;
+    const capabilities = {};
+    if (b.capabilities && typeof b.capabilities === 'object') {
+        for (const [k, v] of Object.entries(b.capabilities)) {
+            if (typeof v === 'boolean') {
+                capabilities[k] = v;
+            }
+        }
+    }
+    return {
+        apiVersion,
+        build: typeof b.build === 'string' && b.build.length > 0 ? b.build : null,
+        capabilities,
+        instanceId: typeof b.instance_id === 'string' && b.instance_id.length > 0 ? b.instance_id : null,
+        handshake: true,
+    };
+}
 export function parseAutoIdentityResponse(body) {
     const b = isObject(body) ? body : {};
     const userHash = b['user_hash'];

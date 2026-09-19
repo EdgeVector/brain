@@ -184,7 +184,7 @@ describe("client error mapping", () => {
       init?: RequestInit & { unix?: string },
     ): Promise<Response> => {
       calls.push({ url: typeof input === "string" ? input : String(input), unix: init?.unix });
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof globalThis.fetch;
     try {
       const c = newNodeClient({
@@ -211,7 +211,7 @@ describe("client error mapping", () => {
       init?: RequestInit & { unix?: string },
     ): Promise<Response> => {
       calls.push({ url: typeof input === "string" ? input : String(input), unix: init?.unix });
-      return new Response(JSON.stringify({ ok: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });

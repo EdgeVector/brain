@@ -58,6 +58,7 @@ import { runUsageReport, type UsageOptions } from "./usage.ts";
 import { type CapabilityStore } from "../capability.ts";
 import { defaultCapabilityStore } from "../keychain.ts";
 import { UNIQUE_SCHEMAS } from "../schemas.ts";
+import { MIN_LASTDB_API_VERSION } from "../runtime.ts";
 import type { WriteNodeClient, WriteNodeClientOptions } from "../write-context.ts";
 
 export {
@@ -228,6 +229,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     userHash: cfg.userHash,
     verbose,
     socketPath: nodeSocketPath,
+    // doctor describes an old node instead of refusing to look at it.
+    skipApiVersionGate: true,
   });
 
   // --usage diverts to the team-adoption report (G13). It needs a valid
@@ -289,6 +292,35 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
     checks.push({ name: "node-reachable", ok: true, detail: nodeReachableDetail });
     verbose?.(`node-reachable: ok`);
+    // The client↔node version handshake (`GET /api/version`). PASS when the
+    // node's api_version meets brain's declared floor (package.json
+    // `lastdb.minApiVersion`); a node that predates the route reports 0 and
+    // still PASSES while the floor is 0. This is the one line that explains
+    // a `400 unknown_key` before anyone sees one.
+    if (nodeClient.nodeVersion) {
+      try {
+        const nv = await nodeClient.nodeVersion();
+        const build = nv.build ? ` build ${nv.build}` : "";
+        const reported = nv.handshake ? `api_version ${nv.apiVersion}${build}` : "no /api/version (node predates the handshake)";
+        if (nv.apiVersion >= MIN_LASTDB_API_VERSION) {
+          checks.push({
+            name: "node-api-version",
+            ok: true,
+            detail: `${reported}; brain needs >= ${MIN_LASTDB_API_VERSION}`,
+          });
+        } else {
+          checks.push({
+            name: "node-api-version",
+            ok: false,
+            detail: `${reported}; brain needs >= ${MIN_LASTDB_API_VERSION}`,
+            fix: "brew upgrade lastdb && brew services restart lastdb",
+          });
+        }
+        verbose?.(`node-api-version: ${reported}`);
+      } catch (err) {
+        verbose?.(`node version probe failed (non-fatal): ${errMsg(err)}`);
+      }
+    }
     if (identity.provisioned) {
       provisioned = true;
       checks.push({

@@ -30,6 +30,7 @@ import {
   UnknownAppError,
   AppInSandboxError,
   InvalidScopeError,
+  NodeTooOldError,
   ConsentDeniedError,
   CapabilityRevokedError,
   ConsentExpiredError,
@@ -43,12 +44,14 @@ import {
   type QueryResult as SdkQueryResult,
   type QueryRow as SdkQueryRow,
   type SearchHit as SdkSearchHit,
+  type NodeVersion as SdkNodeVersion,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
 
 import type { Config } from "./config.ts";
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
 import { beginFetch, endFetch } from "./slow-call.ts";
+import { BRAIN_APP_LABEL, MIN_LASTDB_API_VERSION } from "./runtime.ts";
 
 export type Verbose = (msg: string) => void;
 
@@ -766,6 +769,14 @@ export type NodeClient = {
   // version on its node-reachable line; a failure here must NOT be treated as
   // the node being down (the auto-identity probe owns that verdict).
   health(): Promise<HealthResult>;
+  // GET /api/version — the client↔node compatibility handshake (app-sdk
+  // `version()`). A node that predates the route reports `apiVersion: 0`,
+  // `handshake: false`; never an error. `brain doctor` prints it. The gate
+  // that ENFORCES `MIN_LASTDB_API_VERSION` runs once per client before the
+  // first data request (see `requireNodeApiVersion` in `newNodeClient`).
+  // Optional on the type (like `declareAppSchema`) so the hand-written test
+  // doubles stay small; the real client always provides it.
+  nodeVersion?(): Promise<SdkNodeVersion>;
   bootstrap(name: string): Promise<{ userHash: string }>;
   // App-identity consent handshake (app_identity v3.1). request-consent +
   // consent-status are the two app-driven steps; the owner grants out-of-band
@@ -973,6 +984,10 @@ export function newNodeClient(opts: {
   // socket is absent (a non-isolation node) mint fails fast and fbrain proceeds
   // unattested, exactly as today.
   socketPath?: string;
+  // Skip the client↔node version gate. Only `brain doctor` sets this: doctor
+  // is the tool that DESCRIBES an old node (its `node-api-version` check), so
+  // it must be allowed to look at one. Every other command keeps the gate.
+  skipApiVersionGate?: boolean;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const verbose = opts.verbose ?? noopVerbose;
@@ -1021,11 +1036,33 @@ export function newNodeClient(opts: {
   // owner-session token attaches to the SDK's consent/mutation calls too, and
   // an invalidation-after-403 re-pair is reflected without rebuilding the
   // transport.
+  // The client↔node version gate (app-sdk "Version handshake"). Resolved ONCE
+  // per client before the first data request on either wire path (the SDK
+  // transport below and `callJsonOnce`). With `MIN_LASTDB_API_VERSION` = 0 it
+  // resolves without IO; with a positive floor it reads `GET /api/version`
+  // and throws the SDK's NodeTooOldError — one line that names the fix — so
+  // a brain newer than the node stops before its first write, not on a bare
+  // 400 after it. The version route itself is exempt from the gate (it IS
+  // the gate), as is `/health`, so `brain doctor` can still describe an old
+  // node instead of refusing to look at it.
+  let apiVersionGate: Promise<void> | null = null;
+  const requireNodeApiVersion = (path: string): Promise<void> => {
+    if (isVersionGateExempt(path)) return Promise.resolve();
+    if (apiVersionGate === null) {
+      apiVersionGate =
+        MIN_LASTDB_API_VERSION > 0 && !opts.skipApiVersionGate
+          ? gateOnNodeApiVersion(sdkClient(null))
+          : Promise.resolve();
+    }
+    return apiVersionGate;
+  };
+
   const sdkTransport = fetchTransport(
     url,
     { "X-User-Hash": userHash, "X-LastDB-Client": "brain" },
     sessionHeader,
     socketPath,
+    requireNodeApiVersion,
   );
 
   // SDK clients constructed here never use the SDK's capability store —
@@ -1059,6 +1096,7 @@ export function newNodeClient(opts: {
     body?: unknown,
     extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> => {
+    await requireNodeApiVersion(path);
     const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
     const { res, readBody } = await callNodeRaw(
       url,
@@ -1278,7 +1316,11 @@ export function newNodeClient(opts: {
         keyed ? undefined : { allowFullScan: true },
       );
       const pageResults = fromSdkRows(pageResult.rows);
-      if (pageResult.page !== null) lastTotalCount = pageResult.page.totalCount;
+      // SDK 0.3+: `totalCount` is optional — the node may report pagination
+      // state and decline the exact count. Keep the last count it did give.
+      if (pageResult.page !== null && pageResult.page.totalCount !== undefined) {
+        lastTotalCount = pageResult.page.totalCount;
+      }
       let newOnPage = 0;
       for (const row of pageResults) {
         const k = recordDedupKey(row);
@@ -1390,6 +1432,9 @@ export function newNodeClient(opts: {
       if (typeof b.uptime_s === "number") result.uptime_s = b.uptime_s;
       if (typeof b.version === "string" && b.version.length > 0) result.version = b.version;
       return result;
+    },
+    nodeVersion() {
+      return sdkClient(null).version();
     },
     async bootstrap(name) {
       const { status, body } = await callJson("/api/setup/bootstrap", "POST", { name });
@@ -2675,6 +2720,21 @@ function connectionError(
  * outgoing requests), and (b) a non-JSON body degrades to `body: null`
  * instead of a hard transport error, matching fbrain's tolerant `parseBody`.
  */
+// Resolve the version gate: the SDK's NodeTooOldError propagates to the
+// caller (it is the one line that names the fix), so this only narrows the
+// resolved type. An async function, not a promise chain, so the
+// floating-promise guard sees the rejection path.
+async function gateOnNodeApiVersion(sdk: LastDbClient): Promise<void> {
+  await sdk.requireApiVersion(MIN_LASTDB_API_VERSION, BRAIN_APP_LABEL);
+}
+
+// Paths the version gate never waits on: the handshake itself and the
+// liveness probe, so describing an old node (`brain doctor`) still works.
+function isVersionGateExempt(path: string): boolean {
+  const bare = path.split("?")[0] ?? path;
+  return bare === "/api/version" || bare === "/health" || bare === "/api/health";
+}
+
 function fetchTransport(
   baseUrl: string,
   defaultHeaders: Record<string, string>,
@@ -2685,6 +2745,9 @@ function fetchTransport(
   // same owner-session attestation the raw node path does.
   dynamicHeaders?: () => Promise<Record<string, string>>,
   socketPath?: string,
+  // Awaited before every send except the version route itself: the
+  // client↔node version gate (see `requireNodeApiVersion`).
+  gate?: (path: string) => Promise<void>,
 ): SdkTransport {
   return {
     target: baseUrl,
@@ -2693,6 +2756,7 @@ function fetchTransport(
       path: string,
       options: { headers?: Record<string, string>; body?: unknown } = {},
     ) {
+      if (gate) await gate(path);
       const headers: Record<string, string> = {
         ...defaultHeaders,
         ...(dynamicHeaders ? await dynamicHeaders() : {}),
@@ -2907,6 +2971,19 @@ function mapSdkDataError(
   path: string,
   socketPath?: string,
 ): FbrainError {
+  // NB: NodeTooOldError subclasses RequestRejectedError — order matters. Its
+  // message is already the one line an operator needs (who needs what, what
+  // the node reports, the brew command); wrapping it as "HTTP 400" would bury
+  // the fact that the NODE is the side that moved.
+  if (err instanceof NodeTooOldError) {
+    return new FbrainError({
+      code: "node_too_old",
+      message: err.message,
+      agentHint:
+        "The LastDB node is older than this brain. Ask the owner to upgrade LastDB; do not rewrite the request.",
+      cause: err,
+    });
+  }
   // NB: CapabilityDeniedError subclasses PermissionDeniedError — order matters.
   if (err instanceof CapabilityDeniedError) {
     const body: Record<string, unknown> = { status: 403, reason: err.reason };

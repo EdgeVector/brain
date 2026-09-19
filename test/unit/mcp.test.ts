@@ -1852,7 +1852,7 @@ describe("write tools — structuredContent + outputSchema", () => {
         // Empty page → put-side verify sees the row via installMock's splice.
         return { status: 200, body: { ok: true, results: [] } };
       }
-      if (url.includes("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.includes("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
@@ -1896,7 +1896,7 @@ describe("write tools — structuredContent + outputSchema", () => {
         // Existing row present → putCmd resolves action=updated.
         return { status: 200, body: { ok: true, results: [recordRow("mcp-write-probe")] } };
       }
-      if (url.includes("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.includes("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
@@ -1958,7 +1958,7 @@ describe("write tools — structuredContent + outputSchema", () => {
           },
         };
       }
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
@@ -2003,7 +2003,7 @@ describe("write tools — structuredContent + outputSchema", () => {
         }
         return { status: 200, body: { ok: true, results: [] } };
       }
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
@@ -2044,7 +2044,7 @@ describe("write tools — structuredContent + outputSchema", () => {
         }
         return { status: 200, body: { ok: true, results: [] } };
       }
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
@@ -2097,7 +2097,7 @@ describe("write tools — structuredContent + outputSchema", () => {
         }
         return { status: 200, body: { ok: true, results: [] } };
       }
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     const server = createFbrainMcpServer({ cfg });
@@ -2335,7 +2335,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2364,7 +2364,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2413,7 +2413,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2445,7 +2445,7 @@ describe("fbrain_put tool", () => {
         if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
         if (url.endsWith("/api/mutation")) {
           mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-          return { status: 200, body: { ok: true } };
+          return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
         }
         return { status: 404 };
       });
@@ -2473,7 +2473,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2510,7 +2510,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2551,7 +2551,7 @@ describe("fbrain_put tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2605,7 +2605,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2640,7 +2640,7 @@ describe("fbrain_put tool", () => {
       if (url.endsWith("/api/mutation")) {
         // Body is consumed by the wrapper's splice; no need to capture.
         void init;
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2674,7 +2674,7 @@ describe("fbrain_put tool", () => {
     installMock((url, init) => {
       void init;
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       // Native-index search is auto-spliced from tracked writes by installMock.
       return { status: 404 };
     });
@@ -2716,7 +2716,7 @@ describe("fbrain_put tool", () => {
     installMock((url, init) => {
       void init;
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       // Explicit 200 with NO hits → the auto-splice is bypassed (status 200),
       // so the vector-index confirmation polls its whole budget and times out.
       if (url.includes("/api/native-index/search")) {
@@ -2802,7 +2802,7 @@ describe("fbrain_delete tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true, success: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2862,7 +2862,7 @@ describe("fbrain_status tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2912,7 +2912,7 @@ describe("fbrain_status tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2944,7 +2944,7 @@ describe("fbrain_status tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -2972,7 +2972,7 @@ describe("fbrain_status tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3078,7 +3078,7 @@ describe("fbrain_append tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3115,7 +3115,7 @@ describe("fbrain_append tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3134,7 +3134,7 @@ describe("fbrain_append tool", () => {
     installMock((url, init) => {
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 200, body: { ok: true, results: [] } };
     });
@@ -3160,7 +3160,7 @@ describe("fbrain_append tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3186,7 +3186,7 @@ describe("fbrain_append tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3216,7 +3216,7 @@ describe("fbrain_append tool", () => {
         }
         if (url.endsWith("/api/mutation")) {
           mutations.push(parseBody(init) as MutationBody);
-          return { status: 200, body: { ok: true } };
+          return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
         }
         return { status: 404 };
       });
@@ -3321,7 +3321,7 @@ describe("fbrain_put — body-shrink guard", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3351,7 +3351,7 @@ describe("fbrain_put — body-shrink guard", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3424,7 +3424,7 @@ describe("fbrain_link tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3495,7 +3495,7 @@ describe("fbrain_link tool", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -3896,7 +3896,7 @@ describe("MCP cold-capability self-warm", () => {
     installMock((url) => {
       if (url.includes("/api/native-index/search")) return { status: 200, body: { results: [] } };
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
   }

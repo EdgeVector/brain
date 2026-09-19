@@ -34,11 +34,15 @@ export class FoldDbError extends Error {
         Object.setPrototypeOf(this, new.target.prototype);
     }
 }
-// ---------------------------------------------------------------------------
-// Transport / protocol
-// ---------------------------------------------------------------------------
 /** A network/transport failure (socket error, connection refused, DNS, etc.). */
 export class TransportError extends FoldDbError {
+    kind;
+    status;
+    constructor(message, kind = 'connect', options = {}) {
+        super(message);
+        this.kind = kind;
+        this.status = options.status;
+    }
 }
 /**
  * The node answered with an HTTP status the SDK has no specific class for.
@@ -392,6 +396,34 @@ export class RequestRejectedError extends FoldDbError {
         super(message);
         this.kind = kind;
         this.body = body;
+    }
+}
+/** The one line an operator needs. Same shape from every app. */
+export function nodeTooOldMessage(detail) {
+    const who = detail.app ?? 'this client';
+    const build = detail.build ? ` (build ${detail.build})` : '';
+    const remedy = 'Run: brew upgrade lastdb && brew services restart lastdb';
+    if (detail.reason === 'unknown_key') {
+        const need = detail.required !== undefined ? ` ${who} needs api_version >= ${detail.required}.` : '';
+        return (`LastDB node does not know a request key ${who} sent` +
+            ` (400 unknown_key)${build}: the client is newer than the node.${need} ${remedy}`);
+    }
+    const reported = detail.reported === null ? 'no api_version' : `api_version ${detail.reported}`;
+    return (`${who} needs LastDB api_version >= ${detail.required ?? '?'}; ` +
+        `this node reports ${reported}${build}. ${remedy}`);
+}
+/**
+ * The node is older than this client needs. Subclasses
+ * {@link RequestRejectedError} (kind `unknown_key` or
+ * `api_version_below_required`) so an app that already catches request
+ * rejections keeps working, and can branch on `instanceof NodeTooOldError`
+ * to print {@link NodeTooOldError.message} and exit instead of retrying.
+ */
+export class NodeTooOldError extends RequestRejectedError {
+    detail;
+    constructor(detail, body = null) {
+        super(detail.reason, nodeTooOldMessage(detail), body);
+        this.detail = detail;
     }
 }
 /**

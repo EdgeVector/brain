@@ -119,7 +119,7 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -155,7 +155,7 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -251,7 +251,7 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -284,7 +284,7 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(parseBody(init) as MutationBody);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });

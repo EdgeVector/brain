@@ -347,12 +347,12 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       }
       if (url.endsWith("/api/mutation")) {
         mutationsFired.push(init?.body);
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       await expect(deleteRecord({ cfg, slug: "dual" })).rejects.toMatchObject({
@@ -431,12 +431,12 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
         const body = JSON.parse((init?.body as string) ?? "{}");
         if (body.mutation_type === "update") captured.update = body;
         if (body.mutation_type === "delete") captured.delete = body;
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -541,12 +541,12 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
       if (url.endsWith("/api/mutation")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
         if (body.mutation_type === "update") captured.update = body;
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       await deleteRecord({ cfg, slug: "doomed-t", type: "task", print: () => {} });
@@ -606,12 +606,12 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
         });
       }
       if (url.endsWith("/api/mutation")) {
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -684,12 +684,12 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
         );
       }
       if (url.endsWith("/api/mutation")) {
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -739,12 +739,12 @@ describe("deleteRecord — runtime behavior via real client against a mock fetch
         );
       }
       if (url.endsWith("/api/mutation")) {
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       await expect(
@@ -767,7 +767,7 @@ describe("deleteRecord — design linked-task guard", () => {
       headers: { "content-type": "application/json" },
     });
   const mutationResp = (): Response =>
-    new Response(JSON.stringify({ ok: true, success: true }), {
+    new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -806,7 +806,7 @@ describe("deleteRecord — design linked-task guard", () => {
         mutationsFired.push(init?.body);
         return mutationResp();
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       await expect(
@@ -855,7 +855,7 @@ describe("deleteRecord — design linked-task guard", () => {
         }
         return queryResp([]);
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       await expect(
@@ -916,7 +916,7 @@ describe("deleteRecord — design linked-task guard", () => {
         if (body.mutation_type === "delete") captured.delete = body;
         return mutationResp();
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -979,7 +979,7 @@ describe("deleteRecord — design linked-task guard", () => {
       if (url.endsWith("/api/mutation")) {
         return mutationResp();
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -1015,7 +1015,7 @@ describe("deleteRecord — design linked-task guard", () => {
         return queryResp([]); // verify: purged
       }
       if (url.endsWith("/api/mutation")) return mutationResp();
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -1080,12 +1080,12 @@ describe("deleteRecord — slug whitespace trim (parity with put)", () => {
           mutated = true;
         }
         if (body.mutation_type === "delete") captured.delete = body;
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];
@@ -1154,12 +1154,12 @@ describe("deleteRecord — slug whitespace trim (parity with put)", () => {
       if (url.endsWith("/api/mutation")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
         if (body.mutation_type === "update") mutated = true;
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response("{}", { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
       const lines: string[] = [];

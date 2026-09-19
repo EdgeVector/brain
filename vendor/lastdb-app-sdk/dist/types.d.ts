@@ -28,6 +28,39 @@ export interface KeyValue {
     hash: string | null;
     range: string | null;
 }
+/** Options for the keys-only {@link LastDbClient.list} membership page. */
+export interface ListOptions {
+    /** Page size sent to Mini (default 100, clamped by Mini to 1000). */
+    limit?: number;
+    /** Opaque exclusive cursor returned by the previous page. */
+    cursor?: string;
+}
+/** One live record identity from a keys-only schema membership page. */
+export interface ListRecordKey {
+    hash: string;
+    /** Present only when the schema key has a non-empty range component. */
+    range?: string;
+}
+/**
+ * One keys-only `GET /api/list` page.
+ *
+ * The pagination names intentionally match Mini's public list envelope. The
+ * cursor is opaque: pass it back unchanged via {@link ListOptions.cursor}.
+ */
+export interface ListResult {
+    schema: string;
+    keys: ListRecordKey[];
+    next_cursor: string | null;
+    has_more: boolean;
+    /** Same honesty signal as `has_more`; one page is not a census. */
+    truncated: boolean;
+}
+/** Mutation convergence mode for `POST /api/mutation`. */
+export type MutationConvergence = 'sync' | 'async';
+/** Local persistence policy for `POST /api/mutation`. */
+export type MutationDurability = 'queued' | 'durable';
+/** Exact off-box publication policy for one durable delete. */
+export type MutationCloudPublication = 'wait';
 /**
  * The full per-row envelope the node returns for `/api/query`. The node's
  * `results` array carries one object per result key shaped
@@ -109,6 +142,13 @@ export interface ConnectOptions {
      */
     defaultHeaders?: Record<string, string>;
     /**
+     * Explicit multi-DB handle (`lastdb://personal`, `lastdb://org/…`, or
+     * 64-hex). Defaults to `process.env.LASTDB_DB` then personal. Sent on every
+     * request as `X-LastDB-Db` so Mini scopes mutate/query (org cohabitation).
+     * Prefer letting `org <app>` inject `LASTDB_DB` rather than hard-coding.
+     */
+    db?: string;
+    /**
      * Best-effort ops label for Mini request telemetry (`X-LastDB-Client`).
      * Not a security boundary — any process can claim any string. Defaults to
      * {@link ConnectOptions.appId} when unset. Pass explicitly to override
@@ -118,7 +158,9 @@ export interface ConnectOptions {
     /**
      * Per-request transport timeout in milliseconds for consent and data-plane
      * HTTP calls. Defaults to 30_000 so a wedged node cannot leave app requests
-     * pending forever.
+     * pending forever. An exact cloud-publication mutation raises this to at
+     * least 150_000 without shortening a larger value. Set a larger value when
+     * the node's handler-timeout override makes its exact route exceed 150s.
      */
     timeoutMs?: number;
     /**
@@ -171,6 +213,39 @@ export interface ConnectOptions {
      * schemas and fields pass through unchanged.
      */
     schemaResolver?: SchemaResolver;
+    /**
+     * The node request-grammar version this app needs (see
+     * `LASTDB_SDK_API_VERSION` for the one the SDK was written against). When
+     * set, `connect` reads `GET /api/version` first and throws
+     * `NodeTooOldError` — one line that names the fix — when the node reports
+     * a lower number, or `0` because it predates the route. `0` (or unset)
+     * declares no requirement and skips the read. Declare it in the app's
+     * manifest and pass it through; raise it only when the app starts sending
+     * a key an older node would refuse.
+     */
+    requireApiVersion?: number;
+    /**
+     * Who is asking, for the `NodeTooOldError` message (e.g. `brain 0.8.1`).
+     * Defaults to `appId`.
+     */
+    appLabel?: string;
+}
+/**
+ * The node's answer to `GET /api/version`, the client↔node compatibility
+ * handshake. `handshake` is `false` when the node predates the route (404):
+ * every other field then carries its "unknown" value and `apiVersion` is `0`.
+ */
+export interface NodeVersion {
+    /** The request-grammar version the node speaks (`0` = predates the route). */
+    apiVersion: number;
+    /** The node's baked build string (`null` when unknown). */
+    build: string | null;
+    /** Capability flags the node advertises (same map as `/health`). */
+    capabilities: Record<string, boolean>;
+    /** Process-lifetime instance id (`null` when unknown). */
+    instanceId: string | null;
+    /** Whether the node answered the route at all. */
+    handshake: boolean;
 }
 /**
  * Consent scope. `"wildcard"` requests `{appId}/*` (one prompt covers the
@@ -190,9 +265,12 @@ export interface RequestConsentResult {
 /**
  * Optional query filter. The node's `/api/query` accepts a `fold_db` `Query`
  * — `{schema_name, fields}` plus an optional range filter — alongside
- * top-level `limit`/`offset` pagination fields. Newer production nodes also
- * accept a top-level `cursor` (`KeyValue`) returned as `page.nextCursor`; this
- * keyset path is what `queryAll` uses when available.
+ * top-level `limit`/`offset` pagination fields. Production nodes also accept a
+ * top-level `cursor` (`KeyValue`), but ONLY the unfiltered push-down consumes
+ * one — see {@link QueryFilter.cursor}. Offset is the paging mechanism for
+ * every key-restricted (`HashKey`/`HashRange*`) read, which is every product
+ * read; `queryAll` follows `page.nextCursor` when the node returns one and
+ * otherwise advances by offset.
  *
  * Pagination: production `fold_db_node` applies `limit` (default 100 —
  * `DEFAULT_QUERY_LIMIT` — clamped to `MAX_QUERY_LIMIT` 1000) and `offset`
@@ -232,11 +310,83 @@ export interface QueryFilter {
     offset?: number;
     /**
      * Keyset cursor returned by a prior page's `page.nextCursor`. Forwarded
-     * verbatim as top-level `cursor`; when present, production nodes page after
-     * that key instead of using offset arithmetic.
+     * verbatim as top-level `cursor`.
+     *
+     * Only send one the node actually handed you. The node consumes a cursor on
+     * a single path — the unfiltered `can_push_down` push-down — and a
+     * key-restricted read (`HashKey`/`HashRange*`) carries a filter, so it never
+     * reaches that branch. Sending a cursor on a filtered read is silently
+     * ignored: the node re-serves the same page, `has_more` never flips, and a
+     * client that paged by cursor instead of offset would not terminate. The
+     * node therefore returns `next_cursor: null` on every offset-paged shape, so
+     * following `page.nextCursor` is safe by construction.
      */
     cursor?: KeyValue;
+    /**
+     * Two-pass field predicates, forwarded as the request's top-level `where`
+     * (`fold_db` `Query.field_predicates`). Multiple predicates are AND'd.
+     *
+     * The node loads ONLY the predicate fields first, then loads the requested
+     * projection for the keys that matched — so a predicate that rejects most of
+     * a partition keeps the fat projection off the wire entirely. This is the
+     * difference between filtering server-side and draining a partition to
+     * `Array.prototype.filter` it in the app.
+     *
+     * Predicate `field` names are app-facing and are mapped to node-side names
+     * exactly like {@link QueryFilter.fields}.
+     *
+     * A `where` is a filter, NOT an index: the node still walks the candidate
+     * keys the `filter` selects. Keep the key filter as narrow as possible and
+     * use `where` to trim within it.
+     */
+    where?: QueryFieldPredicate[];
 }
+/**
+ * One two-pass field predicate (`fold_db` `FieldPredicate`). Externally tagged:
+ * exactly one variant key per object, e.g.
+ * `{ eq: { field: 'state', value: 'available' } }`.
+ */
+export type QueryFieldPredicate = 
+/** field value == value */
+{
+    eq: {
+        field: string;
+        value: JsonValue;
+    };
+}
+/** field value is one of values */
+ | {
+    in: {
+        field: string;
+        values: JsonValue[];
+    };
+}
+/** field timestamp >= instant (RFC3339 string, or Unix seconds/millis) */
+ | {
+    after: {
+        field: string;
+        instant: JsonValue;
+    };
+}
+/** field timestamp <= instant (RFC3339 string, or Unix seconds/millis) */
+ | {
+    before: {
+        field: string;
+        instant: JsonValue;
+    };
+}
+/** field exists and is not null */
+ | {
+    present: {
+        field: string;
+    };
+}
+/** field is missing or null */
+ | {
+    absent: {
+        field: string;
+    };
+};
 /** Mapping for one app-facing schema name on the query/mutate data path. */
 export interface SchemaMapping {
     /**
@@ -292,12 +442,14 @@ export type SchemaResolver = (appSchemaName: string) => SchemaResolverResult | P
  */
 export interface QueryPage {
     /**
-     * Total records matching the query before `offset`/`limit` were applied.
+     * Total records matching the query before `offset`/`limit` were applied,
+     * when the node ran the count. `undefined` means the node intentionally
+     * reported pagination state but declined to compute the exact count.
      * Capped at the node's internal fetch cap (10k) for unfiltered queries —
      * when `hasMore` is true and `totalCount` equals that cap there may be
      * more records the node did not load.
      */
-    totalCount: number;
+    totalCount?: number;
     /** Number of records actually returned in this page (`rows.length`). */
     returnedCount: number;
     /** Page size the node applied (its default when the request sent none). */
@@ -486,7 +638,7 @@ export type CasExpectation = {
 /**
  * A mutation operation. Mirrors the node's `Operation::Mutation` envelope
  * (`{type:"mutation", schema, fields_and_values, key_value, mutation_type}`),
- * plus the optional `expected` CAS precondition.
+ * plus optional CAS and convergence controls.
  * The SDK fills `type` and `schema`; the caller supplies the rest.
  */
 export interface MutationOp {
@@ -510,11 +662,99 @@ export interface MutationOp {
      * unconditional write (the prior SDK behavior). See {@link CasExpectation}.
      */
     expected?: CasExpectation;
+    /**
+     * Optional post-write convergence mode. Omit for the node default (`async`):
+     * the mutation returns after the write commits without waiting on background
+     * tasks, and the response may set `convergencePending: true`. Pass `sync`
+     * only when the caller needs background work drained before the response.
+     */
+    convergence?: MutationConvergence;
+    /**
+     * Optional local persistence policy. Omit for the node default (`queued`).
+     * Pass `durable` when the response must follow a local persistence barrier.
+     */
+    durability?: MutationDurability;
+    /**
+     * Optional exact cloud publication wait. The node accepts `wait` only with
+     * `mutationType: "delete"` and `durability: "durable"`. The server validates
+     * this combination and returns an exact target/writer/frontier receipt.
+     */
+    cloudPublication?: MutationCloudPublication;
+    /**
+     * Local request policy on `delete`: when `true`, a missing key is a loud
+     * miss instead of an idempotent success. Forwarded as the node's
+     * `must_exist` field. Omit it (the default) for ordinary delete-means-gone.
+     * Not a second eraser — do not send `mutationType: "purge"`.
+     */
+    mustExist?: boolean;
+}
+/** Durable cloud-intent state for one locally committed mutation. */
+export type MutationCloudCaptureState = 'durable' | 'failed';
+/** The crash-safe cloud-intent receipt for one mutation. */
+export interface MutationCloudCaptureReceipt {
+    state: MutationCloudCaptureState;
+    durable: boolean;
+    mutationUuid: string;
+    error: string | null;
+}
+/** Exact off-box publication state for one mutation. */
+export type MutationCloudPublicationState = 'not_requested' | 'pending' | 'published' | 'failed';
+/** One required cloud target coordinate in an exact publication receipt. */
+export interface MutationCloudPublicationTarget {
+    targetId: string;
+    targetLabel: string;
+    writerId: string;
+    /** Exact decimal frontier. It is a string because it can exceed JS integer precision. */
+    frontier: string;
+}
+/** Off-box publication receipt for one mutation. */
+export interface MutationCloudPublicationReceipt {
+    state: MutationCloudPublicationState;
+    published: boolean;
+    mutationUuid: string;
+    targets: MutationCloudPublicationTarget[];
+    error: string | null;
 }
 /** `POST /api/mutation` success body. */
 export interface MutationResult {
     written: number;
     mutationIds: string[];
     firingsObserved: number;
+    backgroundTasksDrained?: boolean;
+    convergencePending?: boolean;
+    /** Present for a durable delete, including a post-commit cloud failure. */
+    localCommitted?: boolean;
+    /** Present for a durable delete after the node attempts durable intent capture. */
+    cloudCapture?: MutationCloudCaptureReceipt;
+    /** Present for a durable delete; inspect `published` for exact off-box success. */
+    cloudPublication?: MutationCloudPublicationReceipt;
+}
+/** Options for the durable, node-scoped app change feed. */
+export interface ChangesOptions {
+    /** Opaque cursor returned by a prior call. Omit to begin at retained start. */
+    since?: string;
+    /** Maximum raw feed rows examined by the node (1..500). */
+    limit?: number;
+    /** Optional single schema target; the node intersects it with caller scope. */
+    target?: string;
+}
+/** Thin changed-row metadata. Consumers point-read the authoritative row. */
+export interface ChangeEvent {
+    cursor: string;
+    mutationId: string;
+    schemaName: string;
+    key: KeyValue;
+    operation: string;
+    committedAtMs: number;
+    backgroundTasksDrained: boolean;
+    convergencePending: boolean;
+}
+/** One cursor page from `POST /api/app/changes`. */
+export interface ChangesResult {
+    changes: ChangeEvent[];
+    nextCursor: string;
+    hasMore: boolean;
+    /** Cursor fell behind bounded feed retention; rescan declared product keys. */
+    gap: boolean;
 }
 //# sourceMappingURL=types.d.ts.map

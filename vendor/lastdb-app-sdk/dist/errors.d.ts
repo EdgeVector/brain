@@ -29,8 +29,14 @@
 export declare class FoldDbError extends Error {
     constructor(message: string);
 }
+export type TransportErrorKind = 'timeout' | 'protocol' | 'connect';
 /** A network/transport failure (socket error, connection refused, DNS, etc.). */
 export declare class TransportError extends FoldDbError {
+    readonly kind: TransportErrorKind;
+    readonly status?: number;
+    constructor(message: string, kind?: TransportErrorKind, options?: {
+        status?: number;
+    });
 }
 /**
  * The node answered with an HTTP status the SDK has no specific class for.
@@ -273,6 +279,42 @@ export declare class RequestRejectedError extends FoldDbError {
     constructor(kind: string, message: string, 
     /** The raw parsed 400 response body, verbatim (`null` when none). */
     body?: unknown);
+}
+/**
+ * Why the SDK decided the node is too old for this client.
+ *
+ * - `api_version_below_required`: the preflight read `GET /api/version` (or
+ *   got a 404 from a node that predates the route, reported as `0`) and the
+ *   number is below what the app declared.
+ * - `unknown_key`: a data route answered `400 {kind:"unknown_key"}` — the node
+ *   does not know a key this client sent. The key is never echoed by the node
+ *   (its I4 rule), which is fine: the fix is the same either way.
+ */
+export type NodeTooOldReason = 'api_version_below_required' | 'unknown_key';
+/** The facts {@link NodeTooOldError} carries for a one-line remedy. */
+export interface NodeTooOldDetail {
+    reason: NodeTooOldReason;
+    /** What the app declared it needs (`connect({ requireApiVersion })`). */
+    required?: number;
+    /** What the node reported (`0` = predates the handshake; `null` = unknown). */
+    reported: number | null;
+    /** The node's baked build string when it reported one. */
+    build: string | null;
+    /** Who is asking, for the message (e.g. `brain 0.8.1`). */
+    app?: string;
+}
+/** The one line an operator needs. Same shape from every app. */
+export declare function nodeTooOldMessage(detail: NodeTooOldDetail): string;
+/**
+ * The node is older than this client needs. Subclasses
+ * {@link RequestRejectedError} (kind `unknown_key` or
+ * `api_version_below_required`) so an app that already catches request
+ * rejections keeps working, and can branch on `instanceof NodeTooOldError`
+ * to print {@link NodeTooOldError.message} and exit instead of retrying.
+ */
+export declare class NodeTooOldError extends RequestRejectedError {
+    readonly detail: NodeTooOldDetail;
+    constructor(detail: NodeTooOldDetail, body?: unknown);
 }
 /**
  * The detail fields the node carries on a `409 {error:"cas_conflict"}` body,

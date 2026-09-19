@@ -129,7 +129,7 @@ function stubFetch(opts: {
       const body = JSON.parse((init?.body as string) ?? "{}");
       mutations.push(body);
       opts.onMutation?.(body);
-      return new Response(JSON.stringify({ ok: true, success: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });

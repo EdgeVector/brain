@@ -243,7 +243,7 @@ describe("filter delete --json partial failure", () => {
         if (body.mutation_type === "update") {
           rows.set(body.key_value.hash, body.fields_and_values);
         }
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });

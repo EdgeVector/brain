@@ -81,7 +81,7 @@ describe("appendCmd", () => {
       if (url.endsWith("/api/mutation")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
         if (body.mutation_type === "update") captured.update = body;
-        return new Response(JSON.stringify({ ok: true, success: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -167,7 +167,7 @@ describe("appendCmd", () => {
       }
       if (url.endsWith("/api/mutation"))
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-      return new Response(JSON.stringify({ ok: true, success: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -221,7 +221,7 @@ describe("appendCmd", () => {
       }
       if (url.endsWith("/api/mutation"))
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-      return new Response(JSON.stringify({ ok: true, success: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });

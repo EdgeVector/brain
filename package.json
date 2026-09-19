@@ -24,6 +24,9 @@
   "engines": {
     "bun": ">=1.3.10"
   },
+  "lastdb": {
+    "minApiVersion": 0
+  },
   "bin": {
     "brain": "bin/brain",
     "brain-mcp": "bin/brain-mcp"
