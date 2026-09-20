@@ -50,7 +50,7 @@ function installRecordMock(rows: Record<string, unknown>[]): {
     }
     if (url.endsWith("/api/mutation")) {
       mutations.push(JSON.parse((init?.body as string) ?? "{}") as MutationBody);
-      return new Response(JSON.stringify({ ok: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -203,7 +203,7 @@ describe("tagCmd", () => {
         mutations.push(
           JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>,
         );
-      return new Response(JSON.stringify({ ok: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -264,7 +264,7 @@ describe("tagCmd", () => {
         mutations.push(
           JSON.parse((init?.body as string) ?? "{}") as Record<string, unknown>,
         );
-      return new Response(JSON.stringify({ ok: true }), {
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -302,7 +302,7 @@ describe("tagCmd", () => {
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}") as MutationBody);
       }
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), { status: 200 });
     }) as unknown as typeof globalThis.fetch;
     try {
       await expect(

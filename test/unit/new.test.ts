@@ -75,7 +75,7 @@ describe("recordNew dispatches against the correct schema for each type", () => 
         }
         if (url.endsWith("/api/mutation")) {
           mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-          return { status: 200, body: { ok: true } };
+          return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
         }
         return { status: 404 };
       });
@@ -155,7 +155,7 @@ describe("recordNew warns on cross-type slug collision", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -194,7 +194,7 @@ describe("recordNew warns on cross-type slug collision", () => {
     // Every type's page is empty ⇒ no collision.
     installMock((url) => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
-      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true } };
+      if (url.endsWith("/api/mutation")) return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       return { status: 404 };
     });
     await recordNew({
@@ -230,7 +230,7 @@ describe("recordNew warns on cross-type slug collision", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutationSeen = true;
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });

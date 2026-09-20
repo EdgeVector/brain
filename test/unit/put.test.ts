@@ -596,7 +596,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse(String(init?.body ?? "{}")));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -636,7 +636,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -669,7 +669,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -739,7 +739,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/mutation")) {
         const body = init?.body ? JSON.parse(init.body as string) : {};
         mutations.push(body);
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -776,7 +776,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations1.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -796,7 +796,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations2.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -823,7 +823,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -854,7 +854,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -875,7 +875,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -896,7 +896,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -916,7 +916,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1003,7 +1003,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1037,7 +1037,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1075,7 +1075,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1096,7 +1096,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1149,7 +1149,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1170,7 +1170,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1196,7 +1196,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1243,7 +1243,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1279,7 +1279,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1324,7 +1324,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1365,7 +1365,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1402,7 +1402,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1441,7 +1441,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1518,7 +1518,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1556,7 +1556,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1579,7 +1579,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1628,7 +1628,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
           if (url.endsWith("/api/mutation")) {
             mutations.push(JSON.parse((init?.body as string) ?? "{}"));
             mutationFired = true;
-            return new Response(JSON.stringify({ ok: true }), {
+            return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             });
@@ -1697,7 +1697,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
           const url = typeof input === "string" ? input : String(input);
           if (url.endsWith("/api/mutation")) {
             mutationFired = true;
-            return new Response(JSON.stringify({ ok: true }), {
+            return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             });
@@ -1743,7 +1743,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
           const url = typeof input === "string" ? input : String(input);
           if (url.endsWith("/api/mutation")) {
             mutationFired = true;
-            return new Response(JSON.stringify({ ok: true }), {
+            return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             });
@@ -1806,7 +1806,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
           if (url.endsWith("/api/mutation")) {
             mutations.push(JSON.parse((init?.body as string) ?? "{}"));
             mutationFired = true;
-            return new Response(JSON.stringify({ ok: true }), {
+            return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
               status: 200,
               headers: { "Content-Type": "application/json" },
             });
@@ -1849,7 +1849,7 @@ describe("putCmd — pre-request validation + dispatch", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -1906,7 +1906,7 @@ describe("putCmd vector-index confirmation — read-after-write search parity (#
     globalThis.fetch = (async (input: unknown): Promise<Response> => {
       const url = typeof input === "string" ? input : String(input);
       if (url.endsWith("/api/mutation")) {
-        return new Response(JSON.stringify({ ok: true }), {
+        return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -2141,7 +2141,7 @@ describe("putCmd — record-list index patch failure is surfaced, not swallowed"
       if (url.endsWith("/api/query")) return { status: 200, body: { ok: true, results: [] } };
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });

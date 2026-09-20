@@ -8,6 +8,16 @@
  * option, so one implementation covers both — the only difference is whether
  * we pass `host`/`port` or `socketPath`.
  */
+/**
+ * The per-request correlation-ID header the node's request-ops telemetry
+ * reads (sanitized to ≤96 chars server-side and rendered as `req=<id>` in
+ * `lastdb ops` "Slowest recent"). The transport mints a fresh UUID per
+ * request when neither the per-call headers nor the transport's
+ * `defaultHeaders` already carry one — per-request by design: a static
+ * default header would stamp every call with the same ID and defeat
+ * correlation. A caller-supplied value (either seam) is never clobbered.
+ */
+export declare const REQUEST_ID_HEADER = "x-lastdb-request-id";
 /** A parsed HTTP response: status + the parsed JSON body (or `null`). */
 export interface RawResponse {
     status: number;
@@ -24,6 +34,10 @@ export interface Transport {
     send(method: 'GET' | 'POST', path: string, options?: {
         headers?: Record<string, string>;
         body?: unknown;
+        /** Override this transport's timeout for one request. */
+        timeoutMs?: number;
+        /** Raise, but never shorten, the effective timeout for one request. */
+        minimumTimeoutMs?: number;
     }): Promise<RawResponse>;
 }
 /** Per-transport behavior shared by TCP and Unix-domain-socket HTTP. */

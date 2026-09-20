@@ -64,7 +64,7 @@ describe("taskNew", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -118,7 +118,7 @@ describe("taskNew", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -165,7 +165,7 @@ describe("taskNew", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });
@@ -197,7 +197,7 @@ describe("taskNew", () => {
       }
       if (url.endsWith("/api/mutation")) {
         mutations.push(JSON.parse((init?.body as string) ?? "{}"));
-        return { status: 200, body: { ok: true } };
+        return { status: 200, body: { ok: true, success: true, mutation_id: "m-test" } };
       }
       return { status: 404 };
     });

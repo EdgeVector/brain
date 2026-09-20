@@ -27,6 +27,11 @@ export interface OwnerClientOptions {
     /** Canonical app id this client acts as (e.g. `"fbrain"`). */
     appId: string;
     /**
+     * Explicit multi-DB handle. Defaults to `process.env.LASTDB_DB` then
+     * `lastdb://personal`. Forwarded as `X-LastDB-Db` on every request.
+     */
+    db?: string;
+    /**
      * Loopback TCP base URL of the node (e.g. `http://127.0.0.1:9101`), used as
      * the fallback when no socket is available. Optional only when a
      * `socketPath` that exists is supplied — otherwise there is nothing to talk
