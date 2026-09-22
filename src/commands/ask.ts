@@ -26,6 +26,7 @@
 // notice).
 
 import {
+  FbrainError,
   recordTypeForHash,
   type SearchOptions as ClientSearchOptions,
   type Verbose,
@@ -52,6 +53,7 @@ import {
 } from "../record.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
 import {
+  bm25DegradedLine,
   loadOrBuildBm25Index,
   tokenize,
   type BM25Index,
@@ -195,6 +197,17 @@ export type AskResult = {
   graphBoost: AdjacencyAttribution | null;
 };
 
+/**
+ * Wall-clock budget for hydrating ask hits, in ms. After it is spent, the
+ * remaining candidates are listed as unverified instead of waiting on a busy
+ * node. `BRAIN_ASK_HYDRATE_BUDGET_MS` overrides (0 disables hydration waits).
+ */
+export function askHydrateBudgetMs(): number {
+  const raw = process.env.BRAIN_ASK_HYDRATE_BUDGET_MS;
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 15_000;
+}
+
 export async function askCmd(opts: AskOptions): Promise<AskResult> {
   const { print, printErr } = resolvePrintSinks(opts);
   const limit = Math.max(1, opts.limit ?? DEFAULT_LIMIT);
@@ -295,6 +308,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
             "on this request; run `fbrain reindex --bm25` offline to pre-warm it and avoid this on the next query.",
         );
       },
+        onDegraded: (notice) => printErr(bm25DegradedLine(notice)),
     });
     index = bm25.index;
     liveById = bm25.liveById;
@@ -482,6 +496,20 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
   //   - BM25 warm TTL hit: synthesize title/body from the cached index text.
   //   - Plane-primary (no BM25): point-get each chosen hit via findBySlug
   //     (O(limit), never a whole-type enumeration).
+  // A busy node is NOT a stale record. Before 2026-09-22 a `service_timeout`
+  // inside the point-get was caught and reported as "skip stale", so a live
+  // hit silently vanished, and a timeout in the membership read failed the
+  // whole ask after the search plane had already answered in 0.2s.
+  const isBusyNodeError = (err: unknown): boolean =>
+    err instanceof FbrainError &&
+    (err.code === "service_timeout" || err.code === "node_busy" || err.code === "too_many_concurrent_reads");
+
+  type ResolveOutcome =
+    | { kind: "ok"; rec: FbrainRecord }
+    | { kind: "stale" }
+    | { kind: "not-live" }
+    | { kind: "busy" };
+
   const resolveRecord = async (
     id: string,
     slug: string,
@@ -503,50 +531,95 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
         updated_at: "",
       };
     }
-    // Plane-primary: keyed point-read for the hit only.
+    // Plane-primary: keyed point-read for the hit only. A busy-node error
+    // propagates (see isBusyNodeError); any other failure reads as absent.
     try {
       return await findBySlug(node, type, schemaHashFor(type, opts.cfg), slug);
-    } catch {
+    } catch (err) {
+      if (isBusyNodeError(err)) throw err;
       return null;
     }
   };
 
-  const resolved: AskHit[] = [];
-  for (let i = 0; i < fused.length && resolved.length < limit; i++) {
-    const f = fused[i]!;
-    const parsed = parseDocId(f.id);
-    if (!parsed) continue;
-    const rec = await resolveRecord(f.id, parsed.slug, parsed.type);
-    if (!rec) {
-      opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
-      continue;
+  const { liveIndexRegistered, membershipExists } = await import("../lifecycle-index.ts");
+  const checkLive = liveIndexRegistered(opts.cfg);
+  const resolveOne = async (id: string, slug: string, type: RecordType): Promise<ResolveOutcome> => {
+    try {
+      const rec = await resolveRecord(id, slug, type);
+      if (!rec) return { kind: "stale" };
+      if (checkLive && !(await membershipExists(node, opts.cfg, "live", type, slug))) {
+        return { kind: "not-live" };
+      }
+      return { kind: "ok", rec };
+    } catch (err) {
+      if (isBusyNodeError(err)) return { kind: "busy" };
+      throw err;
     }
-    const { liveIndexRegistered, membershipExists } = await import(
-      "../lifecycle-index.ts"
+  };
+
+  // Hydrate in rank order, a small window at a time, CONCURRENTLY within the
+  // window. Measured 2026-09-22 under load 87: `ask --limit 5` hydrated 13
+  // hits with 2 sequential reads each — 20 node requests, 19.5s — after the
+  // search plane answered in 0.2s. The window keeps rank order (results are
+  // taken in fused order) and stops as soon as `limit` live hits are in hand.
+  const HYDRATE_WINDOW = 4;
+  const resolved: AskHit[] = [];
+  const unverified: Array<{ type: RecordType; slug: string }> = [];
+  const hydrateDeadlineMs = Date.now() + askHydrateBudgetMs();
+  let i = 0;
+  while (i < fused.length && resolved.length < limit) {
+    if (Date.now() > hydrateDeadlineMs) {
+      // Budget spent: list what was not hydrated instead of waiting on a busy
+      // node. The candidates came from the search plane; they are real slugs.
+      for (; i < fused.length && resolved.length + unverified.length < limit * 2; i++) {
+        const parsed = parseDocId(fused[i]!.id);
+        if (parsed) unverified.push({ type: parsed.type, slug: parsed.slug });
+      }
+      break;
+    }
+    const window = fused.slice(i, i + Math.max(1, Math.min(HYDRATE_WINDOW, limit - resolved.length + 1)));
+    i += window.length;
+    const outcomes = await Promise.all(
+      window.map(async (f) => {
+        const parsed = parseDocId(f.id);
+        if (!parsed) return null;
+        return { f, parsed, out: await resolveOne(f.id, parsed.slug, parsed.type) };
+      }),
     );
-    if (liveIndexRegistered(opts.cfg)) {
-      const live = await membershipExists(
-        node,
-        opts.cfg,
-        "live",
-        parsed.type,
-        parsed.slug,
-      );
-      if (!live) {
+    for (const o of outcomes) {
+      if (!o || resolved.length >= limit) continue;
+      const { f, parsed, out } = o;
+      if (out.kind === "stale") {
+        opts.verbose?.(`skip stale: ${parsed.type}/${parsed.slug}`);
+        continue;
+      }
+      if (out.kind === "not-live") {
         opts.verbose?.(`skip not-live: ${parsed.type}/${parsed.slug}`);
         continue;
       }
+      if (out.kind === "busy") {
+        unverified.push({ type: parsed.type, slug: parsed.slug });
+        continue;
+      }
+      resolved.push({
+        type: parsed.type,
+        slug: parsed.slug,
+        fusedScore: f.fusedScore,
+        bm25Rank: perQueryBm25TopId.get(0)?.get(f.id) ?? null,
+        vectorRank: perQueryVectorTopId.get(0)?.get(f.id) ?? null,
+        vectorScore: vectorScoreById.get(f.id) ?? null,
+        expansionHits: collectExpansionHits(f, perQueryBm25TopId, perQueryVectorTopId),
+        record: out.rec,
+      });
     }
-    resolved.push({
-      type: parsed.type,
-      slug: parsed.slug,
-      fusedScore: f.fusedScore,
-      bm25Rank: perQueryBm25TopId.get(0)?.get(f.id) ?? null,
-      vectorRank: perQueryVectorTopId.get(0)?.get(f.id) ?? null,
-      vectorScore: vectorScoreById.get(f.id) ?? null,
-      expansionHits: collectExpansionHits(f, perQueryBm25TopId, perQueryVectorTopId),
-      record: rec,
-    });
+  }
+  if (unverified.length > 0) {
+    printErr(
+      `warning: node busy — ${unverified.length} candidate(s) were not hydrated: ` +
+        unverified.map((u) => `${u.type}/${u.slug}`).join(", ") +
+        ". They are search-plane matches, not verified live records; point-read one with `brain get <slug>`. " +
+        "Do not restart the node.",
+    );
   }
 
   // ── Stage 5: print ───────────────────────────────────────────────────

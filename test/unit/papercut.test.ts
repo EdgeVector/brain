@@ -324,7 +324,13 @@ describe("field validation", () => {
   test("component must be a bare lowercase token", () => {
     expect(ensureComponent("lastgit")).toBe("lastgit");
     expect(ensureComponent(" last-gitistan ")).toBe("last-gitistan");
-    for (const bad of ["LastGit", "last gitistan", "3lastgit", "papercut-lastgit-thing", ""]) {
+    // Common service-name spellings normalise to the token instead of refusing
+    // (papercut-brain-papercut-component-token-reject).
+    expect(ensureComponent("LastGit")).toBe("lastgit");
+    expect(ensureComponent("lastdb_uds")).toBe("lastdb-uds");
+    expect(ensureComponent("fold_db")).toBe("fold-db");
+    expect(ensureComponent("last gitistan")).toBe("last-gitistan");
+    for (const bad of ["3lastgit", "papercut-lastgit-thing", "", "a/b"]) {
       expect(() => ensureComponent(bad), `should reject: ${bad}`).toThrow(FbrainError);
     }
   });

@@ -33,7 +33,7 @@ import {
   uniqueSchemaHashes,
   type FbrainRecord,
 } from "../record.ts";
-import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
+import { bm25DegradedLine, loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { type RecordType } from "../schemas.ts";
@@ -319,6 +319,7 @@ async function bm25FallbackResults(
           `(${notice.reason}); run \`brain reindex --bm25\` offline to pre-warm.`,
       );
     },
+    onDegraded: (notice) => printErr?.(bm25DegradedLine(notice)),
   });
   // Never dump the whole corpus on rescue: bound by limit or SEARCH_DEFAULT_LIMIT.
   const effectiveLimit =

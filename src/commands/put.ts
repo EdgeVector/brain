@@ -24,6 +24,7 @@ import {
   crossTypeSlugNote,
   ensureNotShrinking,
   ensureStatus,
+  normalizeStatus,
   findBySlug,
   findCrossTypeSlugCollisions,
   buildRecordFields,
@@ -141,7 +142,10 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // Validate status against the resolved type's enum BEFORE any HTTP
   // traffic so a bad status — typo or wrong enum for the type — never
   // racks up a network round-trip. Mirrors validateSlug's pre-flight.
-  if (parsed.status !== undefined) ensureStatus(type, parsed.status);
+  if (parsed.status !== undefined) {
+    parsed.status = normalizeStatus(type, parsed.status);
+    ensureStatus(type, parsed.status);
+  }
 
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const hash = schemaHashFor(type, opts.cfg);
@@ -520,12 +524,24 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
       continue;
     }
 
-    const kv = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+    let kv = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+    // A top-level key with stray leading whitespace (\` tags: [a, b]\`) is the
+    // most common authoring slip (seven recorded failures 2026-09-21..22). It
+    // is accepted ONLY when no block list is open (\`currentList === null\`):
+    // inside a block list an indented \`key:\` is real YAML nesting, and
+    // reading it as a top-level key would be wrong, so that case still
+    // refuses.
+    if (!kv && currentList === null) {
+      kv = line.match(/^[ \t]+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+    }
     if (!kv) {
+      const indented = /^[ \t]+[A-Za-z_][A-Za-z0-9_]*\s*:/.test(line);
       throw new FbrainError({
         code: "frontmatter_malformed",
         message: `Frontmatter line ${i + 1} is not "key: value": ${JSON.stringify(line)}.`,
-        hint: "fbrain accepts a YAML SUBSET: `key: value` per line, optional inline `[a, b]`, optional block `\\n  - a`.",
+        hint: indented
+          ? "The line is an indented key inside a block list. Top-level keys start at column 0; list items are `  - value`."
+          : "fbrain accepts a YAML SUBSET: `key: value` per line, optional inline `[a, b]`, optional block `\\n  - a`.",
       });
     }
 
