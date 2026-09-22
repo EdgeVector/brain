@@ -107,3 +107,24 @@ describe("listIndexRepairHint", () => {
     );
   });
 });
+
+describe("gbrainCandidatePaths", () => {
+  test("maps a bare slug to typed page paths, reference last", async () => {
+    const { gbrainCandidatePaths } = await import("../../src/primary-brain.ts");
+    expect(gbrainCandidatePaths("sop-forge-pr-workflow")).toEqual([
+      "sop/sop-forge-pr-workflow",
+      "reference/sop-forge-pr-workflow",
+    ]);
+    expect(gbrainCandidatePaths("open-cutovers")).toEqual(["reference/open-cutovers"]);
+    expect(gbrainCandidatePaths("concepts-x")[0]).toBe("wiki/concepts/concepts-x");
+    expect(gbrainCandidatePaths("x-y", "decision")[0]).toBe("decision/x-y");
+    expect(gbrainCandidatePaths("reference/a")).toEqual(["reference/a"]);
+  });
+
+  test("readFromPrimary does nothing when this brain is primary", async () => {
+    const { readFromPrimary } = await import("../../src/primary-brain.ts");
+    const p = join(cacheDir, "brain-config.json");
+    writeFileSync(p, JSON.stringify({ primary: "brain" }));
+    expect(readFromPrimary("sop-forge-pr-workflow", undefined, p)).toBeNull();
+  });
+});

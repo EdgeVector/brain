@@ -61,3 +61,82 @@ export function listIndexRepairHint(type: string, path = brainConfigPath()): str
     "Repair: run `brain reindex --list-index` (admin/offline) to rebuild the partition from source of truth, then retry."
   );
 }
+
+// ── Point-read fallback to the primary brain ────────────────────────────────
+// While another brain is primary, settled records (SOPs, decisions, designs,
+// preferences) live there, and the LastDB brain holds only what was written
+// after the cutover. Instructions and routines still say `brain get <slug>`,
+// so every such read missed: sop-forge-pr-workflow, open-cutovers,
+// design-lastdb-platform-work-for-git-forge, the venue decision, and more
+// (eleven papercuts, 2026-09-20..22). A MISS here now falls back to one
+// point read on the primary, and says so on stderr. Writes are unchanged.
+
+/** gbrain page directory for a record type (concepts live under wiki/). */
+const GBRAIN_TYPE_DIRS: Record<string, string> = {
+  concept: "wiki/concepts",
+  concepts: "wiki/concepts",
+  projects: "projects",
+};
+
+/** Candidate gbrain page paths for a bare slug, best guess first. */
+export function gbrainCandidatePaths(slug: string, type?: string): string[] {
+  if (slug.includes("/")) return [slug];
+  const out: string[] = [];
+  const add = (dir: string | undefined) => {
+    if (!dir) return;
+    const p = `${dir}/${slug}`;
+    if (!out.includes(p)) out.push(p);
+  };
+  if (type) add(GBRAIN_TYPE_DIRS[type] ?? type);
+  const head = slug.split("-", 1)[0]!.toLowerCase();
+  for (const key of [head, head.replace(/s$/, ""), `${head}s`]) {
+    if (["design", "decision", "preference", "reference", "sop", "task", "project", "spike", "agent", "papercut"].includes(key)) {
+      add(key);
+    }
+    if (key === "concept" || key === "concepts") add("wiki/concepts");
+  }
+  // Records whose slug does not start with a type word (open-cutovers,
+  // routine-heartbeats) are most often references.
+  add("reference");
+  if (type === "project" || head === "project") add("projects");
+  return out;
+}
+
+function gbrainBin(): string | null {
+  if (process.env.GBRAIN_BIN) return process.env.GBRAIN_BIN;
+  const onPath = Bun.which("gbrain");
+  if (onPath) return onPath;
+  const bunGlobal = join(homedir(), ".bun", "bin", "gbrain");
+  try {
+    readFileSync(bunGlobal);
+    return bunGlobal;
+  } catch {
+    return null;
+  }
+}
+
+export type PrimaryRead = { path: string; text: string };
+
+/**
+ * One point read on the primary brain, or null. Only gbrain is supported;
+ * each candidate path is one `gbrain get` with a bounded timeout.
+ */
+export function readFromPrimary(slug: string, type?: string, cfgPath = brainConfigPath()): PrimaryRead | null {
+  if (!lastdbBrainIsNotPrimary(cfgPath)) return null;
+  if (primaryBrain(cfgPath) !== "gbrain") return null;
+  const bin = gbrainBin();
+  if (!bin) return null;
+  const timeoutMs = Number(process.env.BRAIN_PRIMARY_FALLBACK_TIMEOUT_MS ?? 30_000);
+  for (const path of gbrainCandidatePaths(slug, type)) {
+    const proc = Bun.spawnSync([bin, "get", path], {
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: Number.isFinite(timeoutMs) ? timeoutMs : 30_000,
+    });
+    if (proc.exitCode === 0) {
+      const text = proc.stdout.toString();
+      if (text.trim().length > 0) return { path, text };
+    }
+  }
+  return null;
+}

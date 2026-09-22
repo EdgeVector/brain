@@ -13,6 +13,7 @@ import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
 import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
+import { primaryBrain, readFromPrimary } from "./primary-brain.ts";
 import { parseFieldProjection } from "./field-projection.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
@@ -2718,7 +2719,30 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
   if (fields.length > 0) getOpts.fields = fields;
   if (values.json) getOpts.json = true;
-  await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
+  try {
+    await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
+  } catch (err) {
+    // Split-brain period: a miss here may be a settled record that lives only
+    // in the primary brain (gbrain). Human output only; --json / --field keep
+    // their exact contract and still report the miss.
+    if (
+      err instanceof FbrainError &&
+      err.code === "not_found" &&
+      !getOpts.json &&
+      (getOpts.fields === undefined || getOpts.fields.length === 0)
+    ) {
+      const hit = readFromPrimary(slug, getOpts.type);
+      if (hit) {
+        process.stderr.write(
+          `note: "${slug}" is not in the LastDB brain; served from the primary brain (${primaryBrain() ?? "gbrain"}) page ${hit.path}. ` +
+            "Writes (put/append) still go to the LastDB brain.\n",
+        );
+        process.stdout.write(hit.text.endsWith("\n") ? hit.text : `${hit.text}\n`);
+        return 0;
+      }
+    }
+    throw err;
+  }
   return 0;
 }
 
