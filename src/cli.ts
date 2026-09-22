@@ -5,6 +5,7 @@
 // canonical schema hash being targeted — per the Phase 0 spike's
 // debugging guidance.
 
+import { readFileSync } from "node:fs";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
@@ -12,6 +13,7 @@ import { getFbrainVersion } from "./version.ts";
 import { FbrainError } from "./client.ts";
 import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
+import { primaryBrain, readFromPrimary } from "./primary-brain.ts";
 import { parseFieldProjection } from "./field-projection.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
@@ -73,6 +75,7 @@ import {
   recordTypeList,
   RECORD_PURPOSES,
   RECORD_TYPES,
+  statusValuesFor,
   TYPES_WITHOUT_NEW_VERB,
   PAPERCUT_KINDS,
   PAPERCUT_SEVERITIES,
@@ -222,6 +225,11 @@ export type Command = (typeof COMMANDS)[number];
 
 const RECORD_TYPE_LIST = recordTypeList();
 const RECORD_TYPE_COUNT = recordTypeCount();
+// Valid \`status:\` values per type, printed by \`brain help put\`. Derived from
+// the enums so the help cannot drift from the validator.
+const STATUS_HELP = RECORD_TYPES.map(
+  (t) => `  ${t.padEnd(11)}${statusValuesFor(t).join(" | ")}`,
+).join("\n");
 
 // The `<type> new` command lines carry each record type's "use it for"
 // one-liner so a new dev sees, in the bare `fbrain` help, which of the
@@ -366,7 +374,17 @@ Frontmatter (between leading \`---\` lines) keys honored:
   slug     string         (positional arg overrides; conflict if both differ)
   type     same ${RECORD_TYPE_COUNT} values as --type
   title    string         (default: first H1 in body, else slug)
+  status   per type, below (\`complete\` on a reference maps to \`archived\`)
   tags     [a, b]         (inline) OR a block list of \`  - tag\` lines
+
+Top-level keys start at column 0. A stray leading space on a top-level key
+is tolerated; inside a block list an indented \`key:\` is refused.
+
+Slugs are lowercase: [a-z0-9][a-z0-9-_]*. Lowercase an ISO timestamp
+(20260921T183748Z -> 20260921t183748z).
+
+Statuses by type:
+${STATUS_HELP}
 
 Body after the closing \`---\` becomes the record's body (indexed for
 search). Empty body is valid as long as the type is set.
@@ -960,7 +978,7 @@ re-puts and re-hashes all six together.
 
 Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
-  papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B]
+  papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B | --body-file PATH|-]
                        [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
                        [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
                        [--not-duplicate-of-any]
@@ -1418,6 +1436,7 @@ export const PAPERCUT_OPTIONS = {
   // file
   title: { type: "string" },
   body: { type: "string" },
+  "body-file": { type: "string" },
   component: { type: "string" },
   symptom: { type: "string" },
   severity: { type: "string" },
@@ -2700,7 +2719,30 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
   if (fields.length > 0) getOpts.fields = fields;
   if (values.json) getOpts.json = true;
-  await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
+  try {
+    await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
+  } catch (err) {
+    // Split-brain period: a miss here may be a settled record that lives only
+    // in the primary brain (gbrain). Human output only; --json / --field keep
+    // their exact contract and still report the miss.
+    if (
+      err instanceof FbrainError &&
+      err.code === "not_found" &&
+      !getOpts.json &&
+      (getOpts.fields === undefined || getOpts.fields.length === 0)
+    ) {
+      const hit = readFromPrimary(slug, getOpts.type);
+      if (hit) {
+        process.stderr.write(
+          `note: "${slug}" is not in the LastDB brain; served from the primary brain (${primaryBrain() ?? "gbrain"}) page ${hit.path}. ` +
+            "Writes (put/append) still go to the LastDB brain.\n",
+        );
+        process.stdout.write(hit.text.endsWith("\n") ? hit.text : `${hit.text}\n`);
+        return 0;
+      }
+    }
+    throw err;
+  }
   return 0;
 }
 
@@ -4159,6 +4201,7 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     ...PAPERCUT_SHARED_FLAGS,
     "title",
     "body",
+    "body-file",
     "component",
     "symptom",
     "severity",
@@ -4221,6 +4264,31 @@ export function assertPapercutFlagsConsumed(
   });
 }
 
+// `--body "<text>"` goes through the shell, which expands `$VAR` and
+// backticks inside double quotes and silently corrupts evidence. `--body-file
+// <path>` (or `-` for stdin) reads the body byte-exact.
+async function papercutBodyFromFlags(values: Record<string, unknown>): Promise<string> {
+  const file = values["body-file"];
+  if (typeof file === "string") {
+    if (typeof values.body === "string") {
+      throw new FbrainError({
+        code: "papercut_body_conflict",
+        message: "papercut file takes --body OR --body-file, not both.",
+      });
+    }
+    if (file === "-") return await Bun.stdin.text();
+    try {
+      return readFileSync(file, "utf8");
+    } catch (err) {
+      throw new FbrainError({
+        code: "papercut_body_file_unreadable",
+        message: `--body-file ${file}: ${(err as Error).message}`,
+      });
+    }
+  }
+  return typeof values.body === "string" ? values.body : "";
+}
+
 async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0];
   if (!sub || sub.startsWith("-")) {
@@ -4263,7 +4331,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       cfg,
       slug,
       title: requiredFlag(values, "title", "file"),
-      body: typeof values.body === "string" ? values.body : "",
+      body: await papercutBodyFromFlags(values),
       component: requiredFlag(values, "component", "file"),
       symptom: requiredFlag(values, "symptom", "file"),
       severity: typeof values.severity === "string" ? values.severity : "p2",
@@ -4481,6 +4549,12 @@ function parseRecordType(raw: string | undefined): RecordType | undefined {
   if (raw === undefined) return undefined;
   const normalised = raw.trim().toLowerCase();
   if (isRecordType(normalised)) return normalised;
+  // `brain get` shows a papercut's KIND (complaint | specified-fix |
+  // reconfirmed) in its header, and agents copy that into `--type`. The kind
+  // is a papercut field, not a record type, so it maps to `papercut`.
+  if ((PAPERCUT_KINDS as readonly string[]).includes(normalised.replace(/_/g, "-"))) {
+    return "papercut";
+  }
   throw new FbrainError({
     code: "invalid_type",
     message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,

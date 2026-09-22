@@ -1,5 +1,6 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
+import { listIndexRepairHint } from "./primary-brain.ts";
 import type { NodeClient, QueryRow } from "./client.ts";
 import {
   FbrainError,
@@ -395,7 +396,7 @@ export async function listRecords(
     message:
       `the ${type} record-list index partition is not marked complete, so \`${type}\` cannot be ` +
       "listed without a full schema scan — which product read paths must not do.",
-    hint: "Run `fbrain reindex --list-index` (admin/offline) to rebuild the partition from source of truth, then retry.",
+    hint: listIndexRepairHint(type),
   });
 }
 
@@ -1495,8 +1496,11 @@ export function validateSlug(slug: string): void {
     // in the slug positional. Spotting spaces or uppercase in an otherwise-
     // free-form input is a strong hint they meant `--title`; surface the
     // exact slug we'd suggest so they can copy-paste.
+    const onlyUppercase = !/\s/.test(slug) && /^[a-z0-9][a-z0-9-_]*$/.test(slug.toLowerCase());
     const looksLikeTitle = /\s/.test(slug) || /[A-Z]/.test(slug);
-    const hint = looksLikeTitle
+    const hint = onlyUppercase
+      ? `slugs are lowercase only; use "${slug.toLowerCase()}" (an ISO timestamp like 20260921T183748Z becomes 20260921t183748z).`
+      : looksLikeTitle
       ? `the first argument is a slug (identifier); pass your title with --title and use a slug like "${suggestSlug(slug)}".`
       : "Slugs are lowercase, start with a letter or digit, and use [a-z0-9-_].";
     throw new FbrainError({
@@ -1517,6 +1521,26 @@ function suggestSlug(raw: string): string {
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug.length > 0 ? slug : "my-record";
+}
+
+// Status words agents reach for that are not in a type's enum, mapped to the
+// enum value that means the same thing. \`complete\` on a closeout reference
+// was refused at write time (papercut-brain-reference-status-rejects-complete).
+const STATUS_ALIASES: Partial<Record<RecordType, Record<string, string>>> = {
+  reference: { complete: "archived", completed: "archived", done: "archived" },
+  design: { proposed: "draft", draft_proposal: "draft" },
+  task: { complete: "done", completed: "done", "in-progress": "in_progress", doing: "in_progress" },
+  project: { complete: "done", completed: "done", "in-progress": "in_progress", active: "in_progress" },
+  spike: { complete: "concluded", completed: "concluded", done: "concluded" },
+  concept: { complete: "archived", done: "archived" },
+  sop: { complete: "archived", done: "archived" },
+};
+
+/** Map a known alias (\`complete\` on a reference) to the enum value; else unchanged. */
+export function normalizeStatus(type: RecordType, status: string): string {
+  const s = status.trim();
+  if (isValidStatus(type, s)) return s;
+  return STATUS_ALIASES[type]?.[s.toLowerCase()] ?? s;
 }
 
 export function ensureStatus(type: RecordType, status: string): void {

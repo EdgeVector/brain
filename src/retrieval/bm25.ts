@@ -101,6 +101,13 @@ export type Bm25IndexLoad = {
   corpusSize: number;
   cacheHit: boolean;
   fingerprint: string;
+  /**
+   * Types whose record-list partition was not marked complete during a
+   * request-path rebuild. Non-empty means the index is DEGRADED: either the
+   * previous (stale) cache was served, or a partial in-memory index that was
+   * NOT persisted. Callers must say so; they must not fail the read.
+   */
+  degradedTypes?: RecordType[];
 };
 
 type Posting = {
@@ -532,6 +539,25 @@ export type Bm25RebuildNotice = {
   reason: "miss" | "stale-ttl" | "force";
 };
 
+export type Bm25DegradedNotice = {
+  skippedTypes: RecordType[];
+  /** stale-cache: the previous cache was served; partial: an unsaved index without the skipped types. */
+  served: "stale-cache" | "partial";
+};
+
+/** One stderr line for a degraded keyword index. Shared by `search` and `ask`. */
+export function bm25DegradedLine(notice: Bm25DegradedNotice): string {
+  const types = notice.skippedTypes.join(", ");
+  const served =
+    notice.served === "stale-cache"
+      ? "served the previous keyword index"
+      : "searched the other types only";
+  return (
+    `warning: the ${types} record-list index is not marked complete; ${served}. ` +
+    "Results are a sample and can miss records of that type. Point-read a known slug with `brain get <slug>`."
+  );
+}
+
 export async function loadOrBuildBm25Index(
   node: NodeClient,
   cfg: Config,
@@ -539,6 +565,8 @@ export async function loadOrBuildBm25Index(
   opts: {
     verbose?: Verbose;
     onRebuild?: (notice: Bm25RebuildNotice) => void;
+    /** A type partition was incomplete; the index is degraded (see Bm25IndexLoad.degradedTypes). */
+    onDegraded?: (notice: Bm25DegradedNotice) => void;
     seedListIndex?: boolean;
     /** Offline reindex: ignore TTL and rebuild from corpus. */
     forceRebuild?: boolean;
@@ -579,7 +607,41 @@ export async function loadOrBuildBm25Index(
 
   // Rebuild pays the full-corpus body fetch. Callers must surface this.
   // keyCount is filled after load (we no longer pre-enumerate keys).
-  const built = await loadBm25Documents(node, cfg, types, { seedListIndex });
+  //
+  // A request-path rebuild (not `--force`) tolerates a type whose list-index
+  // partition is not marked complete. Search is a candidate SAMPLE, never a
+  // census, so one incomplete partition must degrade the answer, not refuse
+  // it: on 2026-09-22 an incomplete `design` marker made every untyped
+  // `brain search` / `brain ask` fail, and with them the Kind:pr admission
+  // gate. The offline rebuild (`forceRebuild`) stays strict.
+  const tolerateIncomplete = !forceRebuild && seedListIndex;
+  const built = await loadBm25Documents(node, cfg, types, { seedListIndex, tolerateIncomplete });
+  if (built.skippedTypes.length > 0) {
+    const skipped = built.skippedTypes;
+    if (existing) {
+      opts.onDegraded?.({ skippedTypes: skipped, served: "stale-cache" });
+      return {
+        index: existing.index,
+        liveById: new Map(),
+        corpusSize: existing.index.size,
+        cacheHit: true,
+        fingerprint: existing.index.fingerprint,
+        degradedTypes: skipped,
+      };
+    }
+    opts.onDegraded?.({ skippedTypes: skipped, served: "partial" });
+    const partial = BM25Index.build(built.docs, types);
+    // Deliberately NOT saved: a persisted partial cache would read as complete
+    // to the next caller and to the dropped-live-record guard.
+    return {
+      index: partial,
+      liveById: built.liveById,
+      corpusSize: built.docs.length,
+      cacheHit: false,
+      fingerprint: partial.fingerprint,
+      degradedTypes: skipped,
+    };
+  }
   opts.onRebuild?.({ types, keyCount: built.docs.length, reason });
   const index = BM25Index.build(built.docs, types);
   if (existing) {
@@ -636,14 +698,28 @@ async function loadBm25Documents(
   node: NodeClient,
   cfg: Config,
   types: readonly RecordType[],
-  opts: { seedListIndex: boolean },
-): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord> }> {
+  opts: { seedListIndex: boolean; tolerateIncomplete?: boolean },
+): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord>; skippedTypes: RecordType[] }> {
   const docs: BM25Document[] = [];
   const liveById = new Map<string, FbrainRecord>();
+  const skippedTypes: RecordType[] = [];
   for (const t of types) {
-    const records = opts.seedListIndex
-      ? await listRecords(node, t, cfg)
-      : await listRecordsAdminScan(node, t, schemaHashFor(t, cfg));
+    let records: FbrainRecord[];
+    try {
+      records = opts.seedListIndex
+        ? await listRecords(node, t, cfg)
+        : await listRecordsAdminScan(node, t, schemaHashFor(t, cfg));
+    } catch (err) {
+      if (
+        opts.tolerateIncomplete &&
+        err instanceof FbrainError &&
+        err.code === "list_index_incomplete"
+      ) {
+        skippedTypes.push(t);
+        continue;
+      }
+      throw err;
+    }
     for (const r of records) {
       if (isTombstoned(r)) continue;
       docs.push({
@@ -656,5 +732,5 @@ async function loadBm25Documents(
       liveById.set(`${t}::${r.slug}`, r);
     }
   }
-  return { docs, liveById };
+  return { docs, liveById, skippedTypes };
 }

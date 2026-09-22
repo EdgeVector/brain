@@ -94,7 +94,19 @@ export function ensureSeverity(value: string): string {
 }
 
 export function ensureKind(value: string): string {
-  return ensureOneOf(value, PAPERCUT_KINDS, "--kind");
+  const v = value.trim().toLowerCase().replace(/_/g, "-");
+  if (v === "needs-human") {
+    throw new FbrainError({
+      code: "invalid_papercut_field",
+      message:
+        `Invalid --kind: ${value}\nExpected one of: ${PAPERCUT_KINDS.join(" | ")}`,
+      hint:
+        "`needs_human` is a kanban block status, not a papercut kind. File the papercut with " +
+        "`--kind complaint` and put the human gate on the card with " +
+        "`kanban set <slug> --block-status needs_human --block-reason \"...\"`.",
+    });
+  }
+  return ensureOneOf(v, PAPERCUT_KINDS, "--kind");
 }
 
 export function ensurePapercutStatus(value: string): string {
@@ -107,7 +119,16 @@ export function ensurePapercutStatus(value: string): string {
 export const COMPONENT_MAX_LENGTH = 32;
 
 export function ensureComponent(value: string): string {
-  const trimmed = value.trim();
+  // Normalise the common spellings of a service name (\`lastdb_uds\`,
+  // \`LastDB\`, \`fold_db\`) to the bare token form instead of refusing them:
+  // lowercase, and \`_\`/space/\`.\` become \`-\`. The narrow format below still
+  // holds for what is stored.
+  const trimmed = value
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s.]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
   if (!/^[a-z][a-z0-9-]*$/.test(trimmed) || trimmed.length > COMPONENT_MAX_LENGTH) {
     throw new FbrainError({
       code: "invalid_papercut_field",
