@@ -211,6 +211,23 @@ describe("RecordListEntry HashRange rows", () => {
     expect(got).toBeNull();
   });
 
+  test("an unmarked partition is refused before any partition read", async () => {
+    // A refused list must cost one marker point-read, not a load of every row
+    // in the partition (papercut-lastdb-list-incomplete-index-refuses-after-shard-loads-20260923).
+    const { node } = makeNode({ rows: { design: { d1: rec("d1"), d2: rec("d2") } } });
+    const filters: Array<Record<string, unknown> | undefined> = [];
+    const inner = node.queryAll.bind(node);
+    node.queryAll = async (q: { schemaHash: string; fields: string[]; filter?: Record<string, unknown> }) => {
+      filters.push(q.filter);
+      return inner(q);
+    };
+    const got = await readTypeListIndex(node, MIGRATED, "design");
+    expect(got).toBeNull();
+    expect(filters).toEqual([
+      { HashRangeKey: { hash: "design", range: RECORD_LIST_ENTRY_MIGRATED_RANGE } },
+    ]);
+  });
+
   test("the marker row is never returned as a record", async () => {
     const { node } = makeNode({ rows: { concept: { alpha: rec("alpha") } }, migrated: ["concept"] });
     const got = await readTypeListIndex(node, MIGRATED, "concept");

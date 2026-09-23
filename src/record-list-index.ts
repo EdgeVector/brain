@@ -132,6 +132,16 @@ export async function readTypeListIndex(
   cfg: SchemaCfg,
   type: RecordType,
 ): Promise<FbrainRecord[] | null> {
+  // Point-read the completeness marker BEFORE the partition read. An unmarked
+  // partition is refused anyway, so reading its rows first only burns node
+  // work: a `design` list refused this way still cost 452 cold shard loads per
+  // call (papercut-lastdb-list-incomplete-index-refuses-after-shard-loads-20260923).
+  // The marker is one reserved (type, range) row, so this is O(1).
+  const entryHash = recordListEntryHash(cfg);
+  if (!entryHash) return null;
+  if (!(await typeListEntryExists(node, entryHash, type, RECORD_LIST_ENTRY_MIGRATED_RANGE))) {
+    return null;
+  }
   const entries = await readTypeListEntries(node, cfg, type);
   if (entries === null) return null;
   if (!entries.migrated) return null;
