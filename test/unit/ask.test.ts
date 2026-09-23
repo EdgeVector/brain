@@ -1078,16 +1078,17 @@ describe("askCmd resolve N+1 regression (Stage 4)", () => {
 
     expect(result.hits.length).toBe(0);
     // Ghost vector hit is a liveById Map miss — no extra product fetch.
-    // Corpus load is one type-list partition read per RECORD_TYPE (bodies in
-    // the index payload). No product-schema body cold-seed scans.
+    // Corpus load per RECORD_TYPE is one completeness-marker point-read plus
+    // one type-list partition read (bodies in the index payload). No
+    // product-schema body cold-seed scans.
     const totalQueries = Array.from(stub.queryCountsBySchema.values()).reduce(
       (a, b) => a + b,
       0,
     );
-    expect(totalQueries).toBe(RECORD_TYPES.length);
+    expect(totalQueries).toBe(2 * RECORD_TYPES.length);
     expect(
       stub.queryCountsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH) ?? 0,
-    ).toBe(RECORD_TYPES.length);
+    ).toBe(2 * RECORD_TYPES.length);
     const totalBodyQueries = Array.from(
       stub.bodyQueryCountsBySchema.values(),
     ).reduce((a, b) => a + b, 0);

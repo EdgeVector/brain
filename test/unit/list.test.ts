@@ -219,7 +219,8 @@ describe("listCmd — read-flake retry", () => {
     }
     // Index-first: 2 type-list partition reads (empty, then hit) + 1 product
     // point-get to hydrate the matched row's body.
-    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(4);
     expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("retry-target");
@@ -244,7 +245,8 @@ describe("listCmd — read-flake retry", () => {
       restore();
     }
     // Index-first: 1 type-list partition read + 1 product hydrate point-get.
-    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
     expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("first-try");
@@ -296,7 +298,8 @@ describe("listCmd — read-flake retry", () => {
       restore();
     }
     // Index-first tag path: 2 list-index reads (empty, then hit).
-    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(4);
     expect(lines[0]).toContain("tag-target");
     expect(lines[0]).toContain("dogfood");
   });
@@ -321,7 +324,8 @@ describe("listCmd — read-flake retry", () => {
     }
     // Index-first: one list-index read (no retry without a filter). Empty-brain
     // probe may still touch product schemas; list-index count is load-bearing.
-    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
     // Genuinely-empty brain → create-your-first hint.
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("no records");
@@ -356,7 +360,8 @@ describe("listCmd — read-flake retry", () => {
     }
     // Index-first: one list-index read hits; hydrate is not needed when the
     // filter excludes the only live row (or for empty user-visible results).
-    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
     // A live record exists but the filter excluded it → the filter hint, NOT
     // the create-your-first hint (the brain is not empty).
     expect(lines).toHaveLength(2);
@@ -544,7 +549,8 @@ describe("listCmd — read-flake retry", () => {
       restore();
     }
     // Index-first: 2 list-index reads + 1 product hydrate for "alive".
-    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(callsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(4);
     expect(callsBySchema.get(TEST_HASHES.spike)).toBe(1);
     expect(lines.length).toBe(1);
     expect(lines[0]).toContain("alive");
@@ -747,7 +753,8 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     expect(lines[0]).toContain(`slug-${String(matchIdx).padStart(4, "0")}`);
     // Index-first: the whole partition arrives in one list-index read; product
     // schema pagination is no longer on the product list path.
-    expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
   });
 
   test("--status finds a status-matched record in page 2", async () => {
@@ -803,7 +810,8 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     } finally {
       restore();
     }
-    expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(1);
+    // Each list-index read is a marker point-read + a partition read, so x2.
+    expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
     expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(20);
   });
 
