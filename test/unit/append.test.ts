@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { appendBody, appendCmd } from "../../src/commands/append.ts";
+import { appendBody, appendCmd, appendPersisted } from "../../src/commands/append.ts";
 import { FbrainError } from "../../src/client.ts";
 import { buildTestCfg, TEST_HASHES } from "../util.ts";
 import { PAPERCUT_STATUS_INDEX_SCHEMA_KEY } from "../../src/schemas.ts";
@@ -58,8 +58,48 @@ describe("appendBody (separator policy)", () => {
 });
 
 describe("appendCmd", () => {
+  // papercut-brain-append-papercut-truncates-body-at-2000-chars-20260922: the
+  // CLI printed "(1623 → 2000)" from COMPUTED lengths while the stored
+  // addendum ended mid-word. A write the node does not hold must fail.
+  test("a write the re-read does not hold is an error, not a success line", async () => {
+    globalThis.fetch = (async (input: unknown) => {
+      const url = typeof input === "string" ? input : (input as Request).url;
+      if (url.endsWith("/api/query")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            results: [{ fields: conceptRow("note"), key: { hash: "note", range: null } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const lines: string[] = [];
+    let err: unknown;
+    try {
+      await appendCmd({ cfg, slug: "note", chunk: "lost tail", type: "concept", print: (l) => lines.push(l) });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(FbrainError);
+    expect((err as FbrainError).code).toBe("append_not_persisted");
+    expect(lines).toEqual([]);
+  });
+
+  test("appendPersisted accepts an exact or later-grown body, rejects a cut one", () => {
+    expect(appendPersisted("a\n\nb", "a\n\nb", "b")).toBe(true);
+    expect(appendPersisted("a\n\nb\n\nc", "a\n\nb", "b")).toBe(true);
+    expect(appendPersisted("a\n\nthe queue need", "a\n\nthe queue needs 4h", "the queue needs 4h")).toBe(false);
+    expect(appendPersisted(undefined, "x", "x")).toBe(false);
+  });
+
   test("appends to the existing body and writes back preserving other fields", async () => {
     const captured: { update?: Record<string, unknown> } = {};
+    let storedBody = "existing body";
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
@@ -73,14 +113,20 @@ describe("appendCmd", () => {
         return new Response(
           JSON.stringify({
             ok: true,
-            results: [{ fields: conceptRow("note"), key: { hash: "note", range: null } }],
+            results: [
+              { fields: conceptRow("note", { body: storedBody }), key: { hash: "note", range: null } },
+            ],
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
       if (url.endsWith("/api/mutation")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
-        if (body.mutation_type === "update") captured.update = body;
+        if (body.mutation_type === "update") {
+          captured.update = body;
+          const f = (body.fields_and_values ?? body.fields) as Record<string, unknown>;
+          if (typeof f?.body === "string") storedBody = f.body;
+        }
         return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -131,6 +177,7 @@ describe("appendCmd", () => {
     // `updated_at` for exactly this reason, and append is the prescribed way
     // to grow a papercut.
     const mutations: Array<Record<string, unknown>> = [];
+    let storedBody = "existing body";
     const papercutCfg = buildTestCfg({
       userHash: "uh",
       schemaHashes: {
@@ -154,7 +201,7 @@ describe("appendCmd", () => {
             results: [
               {
                 fields: {
-                  ...conceptRow("pc-1"),
+                  ...conceptRow("pc-1", { body: storedBody }),
                   status: "open",
                   component: "brain",
                 },
@@ -165,8 +212,13 @@ describe("appendCmd", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      if (url.endsWith("/api/mutation"))
-        mutations.push(JSON.parse((init?.body as string) ?? "{}"));
+      if (url.endsWith("/api/mutation")) {
+        const m = JSON.parse((init?.body as string) ?? "{}");
+        mutations.push(m);
+        const f = (m.fields_and_values ?? m.fields) as Record<string, unknown>;
+        if (m.schema === papercutCfg.schemaHashes.papercut && typeof f?.body === "string")
+          storedBody = f.body;
+      }
       return new Response(JSON.stringify({ ok: true, success: true, mutation_id: "m-test" }), {
         status: 200,
         headers: { "content-type": "application/json" },

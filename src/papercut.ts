@@ -126,7 +126,9 @@ export function ensureComponent(value: string): string {
   const trimmed = value
     .trim()
     .toLowerCase()
-    .replace(/[_\s.]+/g, "-")
+    // `/` too: routines scope a label as `routines/kanban-validate`
+    // (papercut-brain-papercut-component-slash-rejected-20260923).
+    .replace(/[_\s./]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
   if (!/^[a-z][a-z0-9-]*$/.test(trimmed) || trimmed.length > COMPONENT_MAX_LENGTH) {
@@ -157,6 +159,22 @@ export function ensureComponent(value: string): string {
 // (and the reconciler snapshot) abort or quarantine anything that does not
 // start with `papercut-`. The file door is the producer; reject here so one
 // unprefixed filing cannot fail-close the whole ledger reader.
+//
+// The body after the prefix is [a-z0-9-] only. A `/` slipped through on
+// 2026-09-23 (`papercut-pipeline-stuck-merges-EdgeVector/fold`, four rows):
+// it collides with the `<type>/<slug>` form other tools parse and cannot map
+// to a one-file-per-record path (papercut-brain-papercut-file-accepts-slash-in-slug-20260923).
+export function suggestPapercutSlug(value: string): string {
+  const rest = value
+    .trim()
+    .toLowerCase()
+    .replace(/^papercut-/, "")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return rest ? `papercut-${rest}` : "papercut-<rest>";
+}
+
 export function ensurePapercutSlug(value: string): string {
   const slug = value.trim();
   if (!slug.startsWith("papercut-") || slug === "papercut-") {
@@ -167,6 +185,15 @@ export function ensurePapercutSlug(value: string): string {
         `Invalid slug: ${value}\n` +
         "Typed papercuts must start with `papercut-`.\n" +
         `Retry as ${suggested}.`,
+    });
+  }
+  if (!/^papercut-[a-z0-9][a-z0-9-]*$/.test(slug)) {
+    throw new FbrainError({
+      code: "invalid_papercut_field",
+      message:
+        `Invalid slug: ${value}\n` +
+        "A papercut slug is lowercase letters, digits and `-` only (no `/`, `_`, `.`, spaces or capitals).\n" +
+        `Retry as ${suggestPapercutSlug(slug)}.`,
     });
   }
   return slug;

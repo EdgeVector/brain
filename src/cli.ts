@@ -981,8 +981,9 @@ Example:
   papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B | --body-file PATH|-]
                        [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
                        [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
-                       [--not-duplicate-of-any]
+                       [--not-duplicate-of-any] [--reopen CANONICAL]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
+                        [--duplicate-of SLUG]   (required with --status duplicate)
 brain papercut census [<component>] [--point-read] [--json]
 brain papercut list [<component>] [--status S] [--severity p0|p1|p2|p3]
                     [--kind K] [--repo owner/name] [--tag T]...
@@ -995,10 +996,19 @@ was filed twice two hours apart by runs that could not see each other.
 
 file    Files a new papercut, AFTER a dedupe gate. The gate is two nets: an
         exact \`symptom_hash\` match over (component, normalized --symptom), and a
-        similarity check against every LIVE papercut in the same component.
+        similarity check against every LIVE papercut in the same component
+        (and near-identical live rows in any component).
         LIVE means open, partial, or fixed — \`fixed\` still gates, because the
         fix is not proven on any machine until the record reads \`verified\`.
-        A hit REFUSES the write and prints the candidates.
+        A hit REFUSES the write (exit 3) and prints the candidates.
+
+        RECURRENCE: a row CLOSED (verified/wontfix/duplicate) in the last 14
+        days that describes the same defect also refuses the write. The defect
+        came back, so do not file a fresh row: re-run the same command with
+        --reopen <canonical>. The filing becomes a \`reconfirmed\` evidence
+        block on that row and a closed row goes back to \`open\` — one row
+        carries the recurrence. --not-duplicate-of-any does not clear a
+        recurrence; --not-duplicate-of <slug> does.
 
         The refusal prints the COMPLETE candidate set, so clearing what it named
         cannot reveal a second page. Clear a false match with
@@ -1445,6 +1455,7 @@ export const PAPERCUT_OPTIONS = {
   tag: { type: "string", multiple: true },
   "not-duplicate-of": { type: "string", multiple: true },
   "not-duplicate-of-any": { type: "boolean" },
+  reopen: { type: "string" },
   // close
   status: { type: "string" },
   // census / list
@@ -4210,6 +4221,7 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "tag",
     "not-duplicate-of",
     "not-duplicate-of-any",
+    "reopen",
   ],
   close: [
     ...PAPERCUT_SHARED_FLAGS,
@@ -4345,11 +4357,25 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       opts.notDuplicateOf = values["not-duplicate-of"] as string[];
     }
     if (values["not-duplicate-of-any"]) opts.notDuplicateOfAny = true;
+    if (typeof values.reopen === "string") opts.reopen = values.reopen;
     const result = await papercutFileCmd(opts);
     // A blocked duplicate is a REFUSED write, and a routine that ignores the
     // exit code must not read it as "filed". Exit 3 distinguishes it from both
     // success (0) and a malformed invocation (2).
-    return result.action === "duplicate_blocked" ? 3 : 0;
+    if (result.action === "duplicate_blocked") {
+      // One stderr line too: callers that capture only stderr saw an empty
+      // stream on exit 3 and misread the refusal
+      // (papercut-brain-papercut-file-duplicate-exit). stdout keeps the full
+      // candidate list (or the --json object).
+      const next = result.reopen?.length
+        ? `re-run with --reopen ${result.reopen[0]}`
+        : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
+      console.error(
+        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) already describe this; ${next}. Candidates are on stdout.`,
+      );
+      return 3;
+    }
+    return 0;
   }
 
   if (sub === "close") {

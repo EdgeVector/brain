@@ -660,7 +660,11 @@ function timeoutError(
   const which = service === "node" ? "node" : "schema service";
   return new FbrainError({
     code: "service_timeout",
-    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) ${DOCTOR_TIP}.`,
+    // No DOCTOR_TIP here. A timeout means BUSY, not down, and the standing
+    // workspace rule is: do not run doctor/restart for a timeout — retry, and
+    // name the load with `lastdb ops`. The tip sent routines toward doctor on
+    // every busy read (papercut-fbrain-busy-timeout-suggests-doctor-20260922).
+    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) — busy, not down: retry with backoff; \`lastdb ops\` names the load. Do not run doctor or restart for a timeout.`,
     hint: timeoutHint(service),
     cause,
   });
