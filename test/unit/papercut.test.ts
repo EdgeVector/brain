@@ -36,6 +36,10 @@ import {
   papercutDedupeProbes,
   partitionWaivedCandidates,
   semanticDuplicateCandidates,
+  recurrenceCanonicals,
+  CROSS_COMPONENT_DUPLICATE_THRESHOLD,
+  RECURRENCE_THRESHOLD,
+  RECURRENCE_WINDOW_DAYS,
   SEMANTIC_DUPLICATE_FETCH_LIMIT,
   SEMANTIC_DUPLICATE_LIMIT,
   SEMANTIC_DUPLICATE_THRESHOLD,
@@ -138,24 +142,127 @@ describe("the dedupe gate", () => {
     expect(hits).toEqual([]);
   });
 
-  test("the same symptom in a different component does not block", () => {
-    const hits = semanticDuplicateCandidates([hit(existing, 0.99)], {
-      component: "kanban",
-    });
+  test("a merely similar symptom in a different component does not block", () => {
+    const hits = semanticDuplicateCandidates(
+      [hit(existing, CROSS_COMPONENT_DUPLICATE_THRESHOLD - 0.01)],
+      { component: "kanban" },
+    );
     expect(hits).toEqual([]);
   });
 
-  // A verified papercut coming back is a REGRESSION and deserves its own
-  // record. Folding it into the closed one would hide the regression inside a
-  // record whose status says the defect is gone.
-  test("a terminal papercut never blocks a new filing", () => {
-    for (const status of ["verified", "wontfix", "duplicate"]) {
-      const closed = rec({ ...existing, status } as Partial<FbrainRecord> & { slug: string });
-      const hits = semanticDuplicateCandidates([hit(closed, 0.99)], {
-        component: "lastgit",
+  // Measured 2026-09-23: one defect sat in 12 components at 0.74-0.86. A
+  // component-scoped gate saw none of them, so each new component name was a
+  // fresh row.
+  test("a near-identical live row in another component blocks, and names its component", () => {
+    const hits = semanticDuplicateCandidates([hit(existing, 0.9)], {
+      component: "kanban",
+    });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.component).toBe("lastgit");
+    expect(hits[0]!.recurrence).toBeUndefined();
+  });
+
+  describe("recurrence of a recently CLOSED row", () => {
+    const now = new Date("2026-09-23T12:00:00.000Z");
+    const closedAt = "2026-09-22T12:00:00.000Z";
+    const closedRow = (status: string, over: Partial<FbrainRecord> = {}) =>
+      rec({ ...existing, status, updated_at: closedAt, ...over } as Partial<FbrainRecord> & {
+        slug: string;
       });
-      expect(hits, `status ${status} should not gate`).toEqual([]);
-    }
+
+    // The inflow this closes: ~251 rows in ~11 h on 2026-09-23, most of them
+    // re-files of defects closed `verified` that day.
+    test("a verified or wontfix row closed inside the window gates the filing", () => {
+      for (const status of ["verified", "wontfix"]) {
+        const hits = semanticDuplicateCandidates([hit(closedRow(status), 0.9)], {
+          component: "lastgit",
+          now,
+        });
+        expect(hits, status).toHaveLength(1);
+        expect(hits[0]!.recurrence).toBe(true);
+        expect(hits[0]!.canonical).toBe(existing.slug);
+        expect(hits[0]!.closed_at).toBe(closedAt);
+      }
+    });
+
+    test("a duplicate row points the filer at its canonical target", () => {
+      const dup = closedRow("duplicate", { duplicate_of: "papercut-lastgit-canonical" });
+      const hits = semanticDuplicateCandidates([hit(dup, 0.9)], { component: "lastgit", now });
+      expect(hits[0]!.canonical).toBe("papercut-lastgit-canonical");
+      expect(recurrenceCanonicals(hits)).toEqual(["papercut-lastgit-canonical"]);
+    });
+
+    test("a row closed before the window does not gate", () => {
+      const old = closedRow("verified", {
+        updated_at: new Date(now.getTime() - (RECURRENCE_WINDOW_DAYS + 1) * 86_400_000).toISOString(),
+      });
+      expect(semanticDuplicateCandidates([hit(old, 0.95)], { component: "lastgit", now })).toEqual([]);
+    });
+
+    test("the recurrence floor is stricter than the live floor", () => {
+      expect(RECURRENCE_THRESHOLD).toBeGreaterThan(SEMANTIC_DUPLICATE_THRESHOLD);
+      const below = semanticDuplicateCandidates(
+        [hit(closedRow("verified"), RECURRENCE_THRESHOLD - 0.01)],
+        { component: "lastgit", now },
+      );
+      expect(below).toEqual([]);
+    });
+
+    test("another component needs the cross-component floor", () => {
+      const row = closedRow("verified");
+      expect(
+        semanticDuplicateCandidates([hit(row, CROSS_COMPONENT_DUPLICATE_THRESHOLD - 0.01)], {
+          component: "kanban",
+          now,
+        }),
+      ).toEqual([]);
+      expect(
+        semanticDuplicateCandidates([hit(row, CROSS_COMPONENT_DUPLICATE_THRESHOLD)], {
+          component: "kanban",
+          now,
+        }),
+      ).toHaveLength(1);
+    });
+
+    test("an exact slug on a closed row is left to papercut_exists (which names --reopen)", () => {
+      const hits = semanticDuplicateCandidates([hit(closedRow("verified"), 1)], {
+        component: "lastgit",
+        exactSlug: existing.slug,
+        now,
+      });
+      expect(hits).toEqual([]);
+      expect(papercutFileCmd.toString()).toContain("--reopen ${slug}");
+    });
+
+    // The bulk waiver would turn a recurrence straight back into a fresh row.
+    test("--not-duplicate-of-any does NOT waive a recurrence", () => {
+      const cands = [
+        { slug: "papercut-live", title: "l", status: "open", score: 0.8, exact: false },
+        {
+          slug: "papercut-closed",
+          title: "c",
+          status: "verified",
+          score: 0.9,
+          exact: false,
+          recurrence: true,
+          canonical: "papercut-closed",
+        },
+      ];
+      const { duplicates, waived } = partitionWaivedCandidates(cands, true);
+      expect(duplicates.map((d) => d.slug)).toEqual(["papercut-closed"]);
+      expect(waived).toEqual(["papercut-live"]);
+    });
+
+    test("a per-slug --not-duplicate-of clears a recurrence by its slug or its canonical", () => {
+      const src = papercutFileCmd.toString();
+      expect(src).toContain("cleared.has(c.canonical)");
+    });
+
+    test("the refusal tells the filer to --reopen the canonical row", () => {
+      const src = papercutFileCmd.toString();
+      expect(src).toContain("--reopen ${c}");
+      expect(src).toContain("reconfirmed");
+    });
   });
 
   test("title, symptom, and an optional error line become separate probes", () => {
@@ -330,7 +437,8 @@ describe("field validation", () => {
     expect(ensureComponent("lastdb_uds")).toBe("lastdb-uds");
     expect(ensureComponent("fold_db")).toBe("fold-db");
     expect(ensureComponent("last gitistan")).toBe("last-gitistan");
-    for (const bad of ["3lastgit", "papercut-lastgit-thing", "", "a/b"]) {
+    expect(ensureComponent("routines/kanban-validate")).toBe("routines-kanban-validate");
+    for (const bad of ["3lastgit", "papercut-lastgit-thing", "", "/", "a".repeat(40)]) {
       expect(() => ensureComponent(bad), `should reject: ${bad}`).toThrow(FbrainError);
     }
   });
@@ -342,6 +450,9 @@ describe("field validation", () => {
       "portal-wt-start-help-creates-a-worktree",
       "papercut-",
       "",
+      "papercut-pipeline-stuck-merges-EdgeVector/fold",
+      "papercut-has space",
+      "papercut-under_score",
     ]) {
       expect(() => ensurePapercutSlug(bad), `should reject: ${bad}`).toThrow(FbrainError);
     }

@@ -1148,6 +1148,9 @@ describe("SDK TransportError classification", () => {
     expect(fe.code).toBe("service_timeout");
     expect(fe.message).toContain("did not respond within 30000ms");
     expect(fe.message).not.toContain("socket not reachable");
+    // Busy, not down: the timeout must not send the operator to doctor.
+    expect(fe.message).not.toContain("run `fbrain doctor`");
+    expect(fe.message).toContain("lastdb ops");
     // The whole point: no error path may tell the operator to stop the node.
     expect(fe.hint ?? "").not.toContain("stop it before starting it again");
     expect(fe.code).not.toBe("service_unreachable");

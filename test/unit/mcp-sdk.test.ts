@@ -245,7 +245,13 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
       if (url.endsWith("/api/query")) {
         const body = parseBody(init);
         if (body.schema_name === TEST_HASHES.concept) {
-          return { status: 200, body: { ok: true, results: [conceptRow("c1", "head")] } };
+          return {
+            status: 200,
+            body: {
+              ok: true,
+              results: [conceptRow("c1", String(mutations.at(-1)?.fields_and_values?.body ?? "head"))],
+            },
+          };
         }
         return { status: 200, body: { ok: true, results: [] } };
       }

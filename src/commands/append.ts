@@ -14,11 +14,13 @@ import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
+  findBySlug,
   normalizeSlug,
   nowIso,
   resolveBySlug,
   schemaHashFor,
   updateFieldsFrom,
+  withReadRetry,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 
@@ -64,6 +66,21 @@ export function appendBody(oldBody: string, chunk: string, raw: boolean): string
   if (raw || oldBody.length === 0) return oldBody + chunk;
   const sep = /\n\n$/.test(oldBody) ? "" : oldBody.endsWith("\n") ? "\n" : "\n\n";
   return oldBody + sep + chunk;
+}
+
+/**
+ * Did the stored body keep the whole append? The re-read must hold the new
+ * body exactly, or at least end with the chunk (a concurrent append may have
+ * landed after ours). Anything else is a lost or cut write.
+ */
+export function appendPersisted(
+  stored: string | undefined,
+  newBody: string,
+  chunk: string,
+): boolean {
+  if (typeof stored !== "string") return false;
+  if (stored === newBody) return true;
+  return stored.startsWith(newBody) || stored.includes(chunk);
 }
 
 export async function appendCmd(opts: AppendOptions): Promise<void> {
@@ -130,6 +147,29 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
     preserveExistingFrontmatter: true,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+
+  // Read back before reporting success. The printed lengths used to be the
+  // COMPUTED ones, so a write the node cut or dropped still printed a full
+  // "(1623 → 2000)" success line while the stored addendum ended mid-word
+  // (papercut-brain-append-papercut-truncates-body-at-2000-chars-20260922).
+  // The line below now reports what the node holds, and a mismatch is an
+  // error, not a success.
+  const seen = await withReadRetry(
+    () => findBySlug(node, only.type, hash, slug),
+    (r) => r !== null && appendPersisted(r.body, newBody, opts.chunk),
+  );
+  if (!seen || !appendPersisted(seen.body, newBody, opts.chunk)) {
+    const storedLen = seen ? seen.body.length : 0;
+    throw new FbrainError({
+      code: "append_not_persisted",
+      message:
+        `append: the re-read of ${only.type} ${slug} does not hold the appended text ` +
+        `(expected ${newBody.length} chars ending with the chunk, stored ${storedLen}).`,
+      hint:
+        "Nothing was reported as appended. Re-read with `brain get <slug> --type <t>` " +
+        "and re-append only the missing tail.",
+    });
+  }
 
   const bytesAppended = newBody.length - oldBody.length;
   print(

@@ -86,7 +86,44 @@ export type DuplicateCandidate = {
   status: string;
   score: number;
   exact: boolean;
+  /** The candidate's component, when it differs from the filing's. */
+  component?: string;
+  /**
+   * True when the candidate is CLOSED (verified/wontfix/duplicate) inside the
+   * recurrence window. A recurrence is never cleared by the bulk
+   * `--not-duplicate-of-any` waiver; see RECURRENCE_WINDOW_DAYS.
+   */
+  recurrence?: boolean;
+  /** For a recurrence: the row to reopen (a `duplicate` row's target). */
+  canonical?: string;
+  /** For a recurrence: when the candidate was last written (its close time). */
+  closed_at?: string;
 };
+
+// A live papercut in ANOTHER component gates a filing only above this raw
+// cosine. Measured 2026-09-23 on the primary: one defect (the close-out
+// `rm -f` sample the shell guard rejects) sat in 12 components —
+// close-out-skill, routine, exec-guard, codex-exec, codex-exec-guard,
+// routinesd, last-stack, shell-safety-guard, routines-shell-guard, … — at
+// 0.74–0.86 against its own title, while the nearest unrelated row scored
+// 0.743. A component-scoped gate cannot see any of those siblings, so each
+// run that picked a new component name filed a fresh row.
+export const CROSS_COMPONENT_DUPLICATE_THRESHOLD = 0.83;
+
+// The recurrence gate. Only LIVE rows used to gate a filing, so the moment a
+// canonical row was closed `verified` the next run that hit the same defect
+// filed a fresh row — measured 2026-09-23: ~251 new rows in ~11 h, most of
+// them re-files of defects closed `verified` the same day (zsh `status`, jq
+// optional syntax, heredoc backticks, the rm guard). A recurrence must land as
+// ONE reopened canonical row, not N fresh ones, or the ledger can never reach
+// zero and the recurrence itself is invisible (it reads as new work).
+//
+// Same component: this floor (stricter than the live 0.5, because a closed row
+// refusing a genuinely new defect costs more than a live one; a distinct brain
+// append defect scored 0.769 against an unrelated closed append row on
+// 2026-09-23). Other components: CROSS_COMPONENT_DUPLICATE_THRESHOLD.
+export const RECURRENCE_THRESHOLD = 0.8;
+export const RECURRENCE_WINDOW_DAYS = 14;
 
 export function papercutDedupeProbes(opts: {
   title: string;
@@ -101,37 +138,96 @@ export function papercutDedupeProbes(opts: {
   ];
 }
 
+function closedWithinWindow(
+  updatedAt: unknown,
+  now: Date,
+  windowDays: number,
+): boolean {
+  if (typeof updatedAt !== "string") return false;
+  const t = Date.parse(updatedAt);
+  if (!Number.isFinite(t)) return false;
+  return now.getTime() - t <= windowDays * 86_400_000;
+}
+
 export function semanticDuplicateCandidates(
   hits: readonly FindHit[],
-  opts: { component: string; exactSlug?: string },
+  opts: {
+    component: string;
+    exactSlug?: string;
+    now?: Date;
+    recurrenceWindowDays?: number;
+  },
 ): DuplicateCandidate[] {
+  const now = opts.now ?? new Date();
+  const windowDays = opts.recurrenceWindowDays ?? RECURRENCE_WINDOW_DAYS;
   const candidates: DuplicateCandidate[] = [];
   for (const hit of hits) {
     const record = hit.record;
-    // Only live records gate a new filing. A `verified` papercut that comes
-    // back is a RECONFIRMATION and deserves its own record (kind:
-    // `reconfirmed`) — folding it into the closed one would hide a regression
-    // inside a record that says the defect is gone.
-    if (!isLivePapercutStatus(record.status)) continue;
-    if (
-      typeof record.component === "string" &&
-      record.component !== opts.component
-    ) {
-      continue;
-    }
     const exact = record.slug === opts.exactSlug;
     const score = exact ? 1 : hit.maxSimilarity;
-    if (exact || score >= SEMANTIC_DUPLICATE_THRESHOLD) {
-      candidates.push({
-        slug: record.slug,
-        title: record.title,
-        status: record.status,
-        score,
-        exact,
-      });
+    const sameComponent =
+      typeof record.component !== "string" ||
+      record.component === opts.component;
+    const otherComponent =
+      !sameComponent && typeof record.component === "string"
+        ? { component: record.component }
+        : {};
+    if (isLivePapercutStatus(record.status)) {
+      const floor = sameComponent
+        ? SEMANTIC_DUPLICATE_THRESHOLD
+        : CROSS_COMPONENT_DUPLICATE_THRESHOLD;
+      if (exact || score >= floor) {
+        candidates.push({
+          slug: record.slug,
+          title: record.title,
+          status: record.status,
+          score,
+          exact,
+          ...otherComponent,
+        });
+      }
+      continue;
     }
+    // A CLOSED row. The exact-slug case is answered by `papercut_exists`
+    // (which names --reopen), not here.
+    if (exact) continue;
+    if (!closedWithinWindow(record.updated_at, now, windowDays)) continue;
+    const floor = sameComponent
+      ? RECURRENCE_THRESHOLD
+      : CROSS_COMPONENT_DUPLICATE_THRESHOLD;
+    if (score < floor) continue;
+    const target =
+      record.status === "duplicate" &&
+      typeof record.duplicate_of === "string" &&
+      record.duplicate_of.trim() !== ""
+        ? normalizeSlug(record.duplicate_of)
+        : record.slug;
+    candidates.push({
+      slug: record.slug,
+      title: record.title,
+      status: record.status,
+      score,
+      exact: false,
+      ...otherComponent,
+      recurrence: true,
+      canonical: target,
+      closed_at: record.updated_at,
+    });
   }
   return candidates.sort((a, b) => b.score - a.score);
+}
+
+/** The distinct rows a recurrence refusal asks the filer to reopen. */
+export function recurrenceCanonicals(
+  candidates: readonly DuplicateCandidate[],
+): string[] {
+  return [
+    ...new Set(
+      candidates
+        .filter((c) => c.recurrence)
+        .map((c) => c.canonical ?? c.slug),
+    ),
+  ];
 }
 
 /**
@@ -147,9 +243,16 @@ export function partitionWaivedCandidates(
   waiveAll: boolean,
 ): { duplicates: DuplicateCandidate[]; waived: string[] } {
   if (!waiveAll) return { duplicates: [...candidates], waived: [] };
+  // A recurrence is not a similarity call about two live rows: it says a
+  // defect closed in the last RECURRENCE_WINDOW_DAYS came back. The bulk
+  // waiver would turn it straight back into a fresh row, which is the inflow
+  // this gate exists to stop. Only a per-slug --not-duplicate-of (a named
+  // judgement) or --reopen clears it.
   return {
-    duplicates: candidates.filter((c) => c.exact),
-    waived: candidates.filter((c) => !c.exact).map((c) => c.slug),
+    duplicates: candidates.filter((c) => c.exact || c.recurrence === true),
+    waived: candidates
+      .filter((c) => !c.exact && c.recurrence !== true)
+      .map((c) => c.slug),
   };
 }
 
@@ -179,13 +282,17 @@ export type PapercutFileOptions = {
   // --body re-sends per record is a standing incentive to skip filing — the
   // exact failure the typed ledger was built to prevent.
   notDuplicateOfAny?: boolean;
+  // Fold this filing into an existing row instead of writing a new one: the
+  // filing becomes a `reconfirmed` evidence block on <slug>, and a closed row
+  // is reopened. The answer to a recurrence refusal.
+  reopen?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
 };
 
 export type PapercutFileResult = {
-  action: "filed" | "duplicate_blocked";
+  action: "filed" | "duplicate_blocked" | "reopened";
   slug: string;
   component: string;
   symptom_hash: string;
@@ -198,7 +305,85 @@ export type PapercutFileResult = {
   // candidate at all. See `clearedDiagnostics`.
   cleared?: string[];
   cleared_unmatched?: string[];
+  // On a recurrence refusal: the canonical row(s) to pass to --reopen.
+  reopen?: string[];
+  // On `reopened`: the row the filing was folded into, and its status move.
+  reopened?: { slug: string; from: string; to: string };
 };
+
+/**
+ * `papercut file ... --reopen <canonical>`: fold the filing into the canonical
+ * row instead of writing a new one. One row carries the recurrence, its kind
+ * becomes `reconfirmed`, and a closed row goes back to `open` (a live row
+ * keeps its status, except `fixed`, which a recurrence disproves).
+ */
+async function papercutReopenFromFiling(
+  opts: PapercutFileOptions & { component: string; hash: string },
+): Promise<PapercutFileResult> {
+  const print = resolvePrintSink(opts);
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  let target = normalizeSlug(opts.reopen ?? "");
+  let only = await resolveBySlug({
+    node,
+    cfg: opts.cfg,
+    slug: target,
+    type: PAPERCUT,
+    recoveryVerb: "papercut close",
+  });
+  // A `duplicate` row is not the canonical; follow it once to its target.
+  const dupOf = only.record.duplicate_of;
+  if (
+    only.record.status === "duplicate" &&
+    typeof dupOf === "string" &&
+    dupOf.trim() !== ""
+  ) {
+    target = normalizeSlug(dupOf);
+    only = await resolveBySlug({
+      node,
+      cfg: opts.cfg,
+      slug: target,
+      type: PAPERCUT,
+      recoveryVerb: "papercut close",
+    });
+  }
+  const from = only.record.status;
+  const to = from === "open" || from === "partial" ? from : "open";
+  const filedAs = opts.slug === target ? "" : ` (filed as \`${opts.slug}\`)`;
+  const evidence = [
+    `Reconfirmed ${nowIso()}${filedAs}: the defect recurred after this row read \`${from}\`. component=${opts.component} severity=${opts.severity} symptom_hash=${opts.hash}`,
+    "",
+    `Title: ${opts.title.trim()}`,
+    `Symptom: ${opts.symptom.trim()}`,
+    "",
+    opts.body.trim(),
+  ]
+    .join("\n")
+    .trimEnd();
+  const closeOpts: PapercutCloseOptions = {
+    cfg: opts.cfg,
+    slug: target,
+    status: to,
+    evidence,
+    kind: "reconfirmed",
+    print: () => {},
+  };
+  if (opts.verbose) closeOpts.verbose = opts.verbose;
+  await papercutCloseCmd(closeOpts);
+  const result: PapercutFileResult = {
+    action: "reopened",
+    slug: target,
+    component: opts.component,
+    symptom_hash: opts.hash,
+    duplicates: [],
+    reopened: { slug: target, from, to },
+  };
+  if (opts.json) print(JSON.stringify(result));
+  else
+    print(
+      `reopened papercut ${target}: ${from} → ${to} (kind reconfirmed); this filing is its newest evidence block, no new row written`,
+    );
+  return result;
+}
 
 export type ClearedDiagnostics = {
   /** Given slugs that named a candidate and were removed. */
@@ -290,6 +475,10 @@ export async function papercutFileCmd(
     });
   }
   const hash = symptomHash(component, opts.symptom);
+
+  if (opts.reopen !== undefined && opts.reopen.trim() !== "") {
+    return papercutReopenFromFiling({ ...opts, slug, component, hash });
+  }
 
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
@@ -397,7 +586,12 @@ export async function papercutFileCmd(
     component,
     exactSlug: slug,
   });
-  const remaining = allCandidates.filter((c) => !cleared.has(c.slug));
+  // A recurrence is also cleared by naming its canonical row.
+  const remaining = allCandidates.filter(
+    (c) =>
+      !cleared.has(c.slug) &&
+      !(c.canonical !== undefined && cleared.has(c.canonical)),
+  );
   const clearing = clearedDiagnostics(allCandidates, cleared);
 
   const { duplicates, waived } = partitionWaivedCandidates(
@@ -406,12 +600,20 @@ export async function papercutFileCmd(
   );
 
   if (duplicates.length > 0) {
+    const canonicals = recurrenceCanonicals(duplicates);
+    const liveCount = duplicates.filter((d) => d.recurrence !== true).length;
     const lines = [
-      `Possible duplicate: ${duplicates.length} live papercut(s) in \`${component}\` may already describe this.`,
+      liveCount > 0
+        ? `Possible duplicate: ${liveCount} live papercut(s) may already describe this (component \`${component}\`, plus near-identical rows in other components).`
+        : `Recurrence: ${duplicates.length} papercut(s) CLOSED in the last ${RECURRENCE_WINDOW_DAYS} days already describe this.`,
       "",
       ...duplicates.map(
         (d) =>
-          `  ${d.exact ? "EXACT" : `${Math.round(d.score * 100)}%  `}  ${d.slug}  [${d.status}]\n         ${d.title}`,
+          `  ${d.exact ? "EXACT" : `${Math.round(d.score * 100)}%  `}  ${d.slug}  [${d.status}${d.component ? ` · ${d.component}` : ""}]` +
+          (d.recurrence && d.canonical && d.canonical !== d.slug
+            ? `  → canonical ${d.canonical}`
+            : "") +
+          `\n         ${d.title}`,
       ),
       "",
       "This is the COMPLETE candidate set for this filing, not a first page:",
@@ -420,6 +622,16 @@ export async function papercutFileCmd(
       "  * or, if yours is genuinely different:        --not-duplicate-of <slug> (repeatable)",
       "  * or, having read all of the above:           --not-duplicate-of-any",
     ];
+    if (canonicals.length > 0) {
+      lines.push(
+        "",
+        "A CLOSED row above means the defect came back: its fix did not stick, or is not",
+        "installed yet. Do not file a fresh row. Re-run this same command with",
+        ...canonicals.map((c) => `  --reopen ${c}`),
+        "to add this filing to that row as a `reconfirmed` evidence block and reopen it.",
+        "--not-duplicate-of-any does NOT clear a recurrence; only --not-duplicate-of <slug> does.",
+      );
+    }
     // A refusal that follows a `--not-duplicate-of` must say what the flags
     // DID. On 2026-09-06 a filer cleared all 10 named candidates and was
     // refused with the same 10, and the refusal text gave no way to tell "the
@@ -435,6 +647,7 @@ export async function papercutFileCmd(
           component,
           symptom_hash: hash,
           duplicates,
+          ...(canonicals.length > 0 ? { reopen: canonicals } : {}),
           ...(clearing ? { cleared: clearing.cleared, cleared_unmatched: clearing.unmatched } : {}),
         }),
       );
@@ -447,6 +660,7 @@ export async function papercutFileCmd(
       component,
       symptom_hash: hash,
       duplicates,
+      ...(canonicals.length > 0 ? { reopen: canonicals } : {}),
       ...(clearing ? { cleared: clearing.cleared, cleared_unmatched: clearing.unmatched } : {}),
     };
   }
@@ -455,7 +669,9 @@ export async function papercutFileCmd(
     throw new FbrainError({
       code: "papercut_exists",
       message: `papercut ${slug} already exists (status: ${prior.status}).`,
-      hint: "Use `brain append <slug> --type papercut` to add evidence, or pick a new slug.",
+      hint: isLivePapercutStatus(prior.status)
+        ? "Use `brain append <slug> --type papercut` to add evidence, or pick a new slug."
+        : `The row is closed. If the defect came back, re-run with \`--reopen ${slug}\` to add this filing as evidence and reopen it.`,
     });
   }
 
@@ -549,6 +765,8 @@ export type PapercutCloseOptions = {
   fixedBy?: string;
   verifiedBy?: string;
   duplicateOf?: string;
+  /** Internal: also set the row's kind (used by `file --reopen`). */
+  kind?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -726,6 +944,7 @@ export async function papercutCloseCmd(
   if (fixedBy) patch.fixed_by = fixedBy;
   if (verifiedBy) patch.verified_by = verifiedBy;
   if (duplicateOf) patch.duplicate_of = normalizeSlug(duplicateOf);
+  if (opts.kind) patch.kind = ensureKind(opts.kind);
 
   const transitioned = { ...record, ...patch } as FbrainRecord;
   const primaryFields = updateFieldsFrom(record, PAPERCUT, patch);
