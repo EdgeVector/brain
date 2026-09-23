@@ -71,13 +71,7 @@ jobs:
     name: publish host-track artifact
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: ci-required
-    # The `macos` lane (mac-forge-runner-host), not the macos-arm64 merge
-    # gate. Forgejo hands a job to a runner to evaluate its `if:`, so on every
-    # pull request this SKIPPED job still took a merge-gate slot and queued
-    # there behind 2-slot backlogs of 29-33 jobs (2026-09-22). Lane policy
-    # (~/.local/config/forge-runner-lanes.json) already routes release work to
-    # heavy|macos. papercut-fold-pr-ci-waits-behind-last-stack-on-shared-mac-lane-20260922
-    runs-on: macos
+    runs-on: macos-arm64
     timeout-minutes: 25
     env:
       FORGE_TOKEN: ${{ secrets.FORGEJO_TOKEN || github.token }}
