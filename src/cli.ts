@@ -1965,10 +1965,59 @@ function isParseArgsUsageError(err: unknown): boolean {
   );
 }
 
+// A free-text value that starts with `-` ("--help now prints ...") is refused
+// by strict parseArgs unless it is joined as `--flag=value`. A batch of
+// `papercut close --evidence "..."` calls lost a row that way on 2026-09-23
+// (papercut-brain-free-text-flag-value-starting-with-dash-rejected-20260923).
+// Join `--<string-option> <value>` when the value cannot itself be a flag:
+// it contains whitespace, or it is not shaped like `-x` / `--name[=...]`. A
+// real flag after a string option still reaches parseArgs unchanged, so a
+// forgotten value keeps its own error.
+const FLAG_SHAPED = /^-{1,2}[A-Za-z][A-Za-z0-9-]*(=.*)?$/s;
+export function joinDashLeadingValues(
+  args: readonly string[],
+  options: Record<string, { type?: string }> | undefined,
+): string[] {
+  if (!options) return [...args];
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i]!;
+    if (tok === "--") {
+      out.push(...args.slice(i));
+      break;
+    }
+    const next = args[i + 1];
+    const name = tok.startsWith("--") && !tok.includes("=") ? tok.slice(2) : "";
+    if (
+      name &&
+      options[name]?.type === "string" &&
+      next !== undefined &&
+      next.startsWith("-") &&
+      next !== "--" &&
+      (/\s/.test(next) || !FLAG_SHAPED.test(next))
+    ) {
+      out.push(`${tok}=${next}`);
+      i++;
+      continue;
+    }
+    out.push(tok);
+  }
+  return out;
+}
+
 function parseCommandArgs<T extends ParseArgsConfig>(
   config: T,
   commandName?: string,
 ) {
+  if (config.args) {
+    config = {
+      ...config,
+      args: joinDashLeadingValues(
+        config.args,
+        config.options as Record<string, { type?: string }> | undefined,
+      ),
+    };
+  }
   try {
     return parseArgs(config);
   } catch (err) {
