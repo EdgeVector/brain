@@ -20,6 +20,7 @@ import {
   bodyClaimOutranksStatus,
   bodyResolutionClaim,
   buildPapercutList,
+  extractFixedByFromBody,
   papercutListCmd,
   staleClosureClaim,
 } from "../../src/commands/papercut.ts";
@@ -262,5 +263,87 @@ describe("--body-resolved refuses the readings that cannot serve a body", () => 
     expect(LIST_METHOD_BODY_RESOLVED).toContain("CANDIDATES");
     expect(LIST_METHOD_BODY_RESOLVED).toContain("never writes");
     expect(LIST_METHOD_BODY_RESOLVED).toContain("point-read");
+  });
+});
+
+describe("extractFixedByFromBody", () => {
+  // The lifecycle-closer helper must only recognize explicit "Fixed-by:" lines
+  // as evidence of repair, not any merged PR URL cited anywhere in the body.
+
+  test("extracts explicit Fixed-by: with GitHub-style repo reference", () => {
+    expect(extractFixedByFromBody("Fixed-by: EdgeVector/brain #123")).toBe("EdgeVector/brain #123");
+    expect(extractFixedByFromBody("fixed-by: EdgeVector/lastgit #456")).toBe("EdgeVector/lastgit #456");
+  });
+
+  test("extracts explicit Fixed-by: with short repo names", () => {
+    expect(extractFixedByFromBody("Fixed-by: fold #1197")).toBe("fold #1197");
+    expect(extractFixedByFromBody("Fixed-by: lastdb #234")).toBe("lastdb #234");
+  });
+
+  test("ignores case variations of the marker", () => {
+    expect(extractFixedByFromBody("FIXED-BY: EdgeVector/brain #789")).toBe("EdgeVector/brain #789");
+    expect(extractFixedByFromBody("Fixed-By: fold #555")).toBe("fold #555");
+  });
+
+  test("handles Markdown formatting around the marker", () => {
+    expect(extractFixedByFromBody("- Fixed-by: EdgeVector/brain #111")).toBe("EdgeVector/brain #111");
+    expect(extractFixedByFromBody("> Fixed-by: fold #222")).toBe("fold #222");
+    expect(extractFixedByFromBody("## Fixed-by: lastgit #333")).toBe("lastgit #333");
+  });
+
+  test("does NOT extract PR references that are only mentioned as incident context", () => {
+    // Incident PRs mentioned elsewhere in the body should NOT be treated as fixes
+    expect(extractFixedByFromBody("This bug was exposed by EdgeVector/brain #456 when we refactored")).toBeNull();
+    expect(extractFixedByFromBody("The issue is similar to the one fixed in fold #789")).toBeNull();
+    expect(extractFixedByFromBody("Compare to lastgit PR #555 for similar logic")).toBeNull();
+  });
+
+  test("does NOT extract PR references from prose text", () => {
+    // PRs cited in prose context should NOT be treated as repairs
+    expect(extractFixedByFromBody("we had a similar issue in EdgeVector/brain #111 last month")).toBeNull();
+    expect(extractFixedByFromBody("fold #222 has a better implementation but we diverged")).toBeNull();
+  });
+
+  test("does NOT extract unmerged or draft PR references", () => {
+    // The function only looks for explicit Fixed-by lines, so it won't extract
+    // unmerged PRs mentioned elsewhere anyway, but let's verify it ignores them
+    expect(extractFixedByFromBody("This is waiting on EdgeVector/brain #999 to land")).toBeNull();
+    expect(extractFixedByFromBody("We're planning to backport fold #888 eventually")).toBeNull();
+  });
+
+  test("returns null for empty body", () => {
+    expect(extractFixedByFromBody("")).toBeNull();
+  });
+
+  test("returns null for non-string body", () => {
+    expect(extractFixedByFromBody(undefined)).toBeNull();
+    expect(extractFixedByFromBody(null as unknown)).toBeNull();
+    expect(extractFixedByFromBody(123 as unknown)).toBeNull();
+  });
+
+  test("returns null when there is no Fixed-by: line", () => {
+    expect(extractFixedByFromBody("Status: FIXED\nVerified: ran it live")).toBeNull();
+    expect(extractFixedByFromBody("Some prose about EdgeVector/brain #123")).toBeNull();
+  });
+
+  test("returns the first Fixed-by: when multiple lines exist", () => {
+    const body = `## Fixed\nFixed-by: fold #111\nFixed-by: lastgit #222`;
+    expect(extractFixedByFromBody(body)).toBe("fold #111");
+  });
+
+  test("extracts PR reference even if it appears late in the body", () => {
+    const body = `Symptom: something broken\nThis was exposed by comparison to EdgeVector/brain #555.\nFixed-by: fold #666\nVerified: ran it live`;
+    expect(extractFixedByFromBody(body)).toBe("fold #666");
+  });
+
+  test("handles whitespace around the PR reference", () => {
+    expect(extractFixedByFromBody("Fixed-by:   EdgeVector/brain #123  ")).toBe("EdgeVector/brain #123");
+    expect(extractFixedByFromBody("Fixed-by:\tEdgeVector/lastgit #456")).toBe("EdgeVector/lastgit #456");
+  });
+
+  test("returns empty string for Fixed-by: with no reference", () => {
+    // A Fixed-by: line with nothing after it should be treated as having no valid reference
+    expect(extractFixedByFromBody("Fixed-by:")).toBeNull();
+    expect(extractFixedByFromBody("Fixed-by:   \n")).toBeNull();
   });
 });

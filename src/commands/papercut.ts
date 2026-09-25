@@ -1309,6 +1309,33 @@ export type BodyResolutionClaim = {
 const BODY_STATUS_CLAIM =
   /^[\s>#*-]*Status:\s*\**\s*(FIXED|VERIFIED|RESOLVED)\b/i;
 const BODY_VERIFIED_CLAIM = /^[\s>#*-]*Verified(?:-by)?:\s*\**\s*\S/i;
+const BODY_FIXED_BY_CLAIM = /^[\s>#*-]*Fixed(?:-by)?:\s*\**\s*(.+)$/i;
+
+/**
+ * Extract the repair PR reference from an explicit "Fixed-by:" line in the body.
+ *
+ * Returns the PR reference if found (e.g., "EdgeVector/brain #123" or "fold #456"),
+ * or null if no explicit "Fixed-by:" line is present. This ensures only
+ * explicitly asserted repairs are recognized, not incident PRs cited elsewhere
+ * in the body.
+ *
+ * Requires the repository/source scope to match the correct format:
+ * - "owner/repo #number" for GitHub-style PRs
+ * - "short-name #number" for internal repos
+ */
+export function extractFixedByFromBody(body: unknown): string | null {
+  if (typeof body !== "string" || body.length === 0) return null;
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    const m = BODY_FIXED_BY_CLAIM.exec(line);
+    if (m === null) continue;
+    const prRef = (m[1] ?? "").trim();
+    if (prRef.length === 0) continue;
+    return prRef;
+  }
+  return null;
+}
 
 /** The strongest resolution claim the body makes, or null if it makes none. */
 export function bodyResolutionClaim(body: unknown): BodyResolutionClaim | null {
