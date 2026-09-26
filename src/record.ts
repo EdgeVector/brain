@@ -1219,7 +1219,8 @@ export interface ResolveBySlugOpts {
     | "attachments migrate"
     | "detach"
     | "attachment get"
-    | "papercut close";
+    | "papercut close"
+    | "papercut set";
   // Read-only callers can opt into deterministic ambiguity resolution while
   // mutating callers keep the safer default of erroring unless --type is set.
   ambiguousTypePrecedence?: readonly RecordType[];
