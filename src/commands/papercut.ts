@@ -1932,3 +1932,247 @@ export async function papercutListCmd(
   }
   print([header, ...lines, "", `${rows.length} row(s)`, method].join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// `papercut set` — amend a header column on an existing row.
+//
+// Before this verb the ledger had `file`, `close`, `census` and `list`, and no
+// way to correct a header column after the filing. `file` refuses a second call
+// on the same slug (the dedupe gate reports an EXACT self-match, which is
+// correct — the row IS a duplicate of itself), and `close` writes only status
+// columns. So a filing that omitted `--kind` kept `kind: complaint` forever.
+//
+// That is not cosmetic. `papercut list --status open --kind specified-fix` is
+// the documented cheapest triage query: a row whose remedy a prior run already
+// worked out. A record carrying a concrete remedy but reading `complaint` never
+// appears in it, and the prose correction in its body is invisible to every
+// filter. Measured 2026-09-26 on
+// papercut-brain-papercut-has-no-verb-to-amend-a-header-column-after-filing.
+
+/**
+ * The header columns `papercut set` may amend.
+ *
+ * `status`, `fixed_by`, `verified_by` and `duplicate_of` are deliberately
+ * absent: those are the closure columns and `papercut close` owns them,
+ * because a status move must carry evidence. `symptom_hash` is absent because
+ * it is the dedupe key — rewriting it would let one row impersonate another.
+ * `tags` are absent because `brain tag <slug> --type papercut` already writes
+ * them through the tag-membership index.
+ */
+export const PAPERCUT_HEADER_COLUMNS = [
+  "component",
+  "kind",
+  "repo",
+  "severity",
+] as const;
+
+export type PapercutHeaderColumn = (typeof PAPERCUT_HEADER_COLUMNS)[number];
+
+export type PapercutHeaderChange = {
+  field: PapercutHeaderColumn;
+  from: string;
+  to: string;
+};
+
+export type PapercutHeaderAmendPlan = {
+  changes: PapercutHeaderChange[];
+  /** Requested columns whose value already matched. */
+  unchanged: PapercutHeaderColumn[];
+};
+
+/** Normalise one requested header value the same way `papercut file` does. */
+export function normalizePapercutHeaderValue(
+  field: PapercutHeaderColumn,
+  value: string,
+): string {
+  if (field === "component") return ensureComponent(value);
+  if (field === "kind") return ensureKind(value);
+  if (field === "severity") return ensureSeverity(value);
+  // `repo` is a free-form `owner/name` scope and `papercut file` does not
+  // validate it. Validating it here only would mean the same string is
+  // accepted at filing time and refused at amend time, which is worse than
+  // either rule on its own.
+  return value.trim();
+}
+
+/**
+ * The whole decision of `papercut set`, as a pure function: which requested
+ * columns actually move, and which already hold the requested value.
+ *
+ * A column that already matches is reported as unchanged and is NOT written.
+ * That is not an optimisation. Every write bumps `updated_at`, and
+ * `papercut list` orders oldest-updated-first — so a no-op amend would move a
+ * row to the back of the triage queue without changing anything about it. A
+ * verb whose no-op reorders the queue it feeds is a verb nobody can run twice.
+ */
+export function planPapercutHeaderAmend(
+  record: FbrainRecord,
+  requested: Partial<Record<PapercutHeaderColumn, string>>,
+): PapercutHeaderAmendPlan {
+  const changes: PapercutHeaderChange[] = [];
+  const unchanged: PapercutHeaderColumn[] = [];
+  for (const field of PAPERCUT_HEADER_COLUMNS) {
+    const raw = requested[field];
+    if (raw === undefined) continue;
+    const to = normalizePapercutHeaderValue(field, raw);
+    const from = typeof record[field] === "string" ? (record[field] as string) : "";
+    if (from === to) {
+      unchanged.push(field);
+      continue;
+    }
+    changes.push({ field, from, to });
+  }
+  return { changes, unchanged };
+}
+
+/** `kind complaint → specified-fix` for the audit line and the printed diff. */
+export function renderPapercutHeaderChange(change: PapercutHeaderChange): string {
+  const from = change.from.length > 0 ? change.from : "(none)";
+  const to = change.to.length > 0 ? change.to : "(none)";
+  return `${change.field} ${from} → ${to}`;
+}
+
+/**
+ * One appended line recording what moved.
+ *
+ * A header rewrite is a durable change with no diff: the column simply reads
+ * differently and `updated_at` says only that something happened. Without this
+ * line a reader who finds `kind: specified-fix` on a row filed as `complaint`
+ * has no way to know it was amended, when, or from what.
+ */
+export function papercutHeaderAuditLine(
+  changes: readonly PapercutHeaderChange[],
+  now: string,
+): string {
+  return `Header-amended ${now}: ${changes.map(renderPapercutHeaderChange).join(", ")}`;
+}
+
+export type PapercutSetOptions = {
+  cfg: Config;
+  slug: string;
+  component?: string;
+  kind?: string;
+  repo?: string;
+  severity?: string;
+  verbose?: Verbose;
+  print?: (line: string) => void;
+  json?: boolean;
+};
+
+export type PapercutSetResult = {
+  action: "papercut_header_amended" | "papercut_header_unchanged";
+  slug: string;
+  changes: PapercutHeaderChange[];
+  unchanged: PapercutHeaderColumn[];
+};
+
+export async function papercutSetCmd(
+  opts: PapercutSetOptions,
+): Promise<PapercutSetResult> {
+  const print = resolvePrintSink(opts);
+  const slug = normalizeSlug(opts.slug);
+  const requested: Partial<Record<PapercutHeaderColumn, string>> = {};
+  if (opts.component !== undefined) requested.component = opts.component;
+  if (opts.kind !== undefined) requested.kind = opts.kind;
+  if (opts.repo !== undefined) requested.repo = opts.repo;
+  if (opts.severity !== undefined) requested.severity = opts.severity;
+  if (Object.keys(requested).length === 0) {
+    throw new FbrainError({
+      code: "invalid_papercut_field",
+      message: `papercut set requires at least one of ${PAPERCUT_HEADER_COLUMNS.map((f) => `--${f}`).join(" ")}.`,
+      hint: "To move a row's status use `brain papercut close <slug> --status S --evidence E`; to add a tag use `brain tag <slug> --type papercut`.",
+    });
+  }
+  // Validate every requested value BEFORE the node is touched. The planner
+  // validates too, but it runs after `resolveBySlug`, so a typo'd `--kind`
+  // would otherwise cost a point read and then report not_found for the SLUG
+  // — which reads as "the row is missing" rather than "the value is wrong".
+  for (const [field, value] of Object.entries(requested)) {
+    normalizePapercutHeaderValue(field as PapercutHeaderColumn, value as string);
+  }
+
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
+  const only = await resolveBySlug({
+    node,
+    cfg: opts.cfg,
+    slug,
+    type: PAPERCUT,
+    recoveryVerb: "papercut set",
+  });
+  const record = only.record;
+  const plan = planPapercutHeaderAmend(record, requested);
+
+  if (plan.changes.length === 0) {
+    if (opts.json) {
+      print(
+        JSON.stringify({
+          action: "papercut_header_unchanged",
+          slug,
+          changes: [],
+          unchanged: plan.unchanged,
+        }),
+      );
+    } else {
+      print(
+        `papercut ${slug}: unchanged — ${plan.unchanged.join(", ")} already ` +
+          `${plan.unchanged.length === 1 ? "holds" : "hold"} the requested value. ` +
+          `No write, so updated_at (which \`papercut list\` orders on) did not move.`,
+      );
+    }
+    return {
+      action: "papercut_header_unchanged",
+      slug,
+      changes: [],
+      unchanged: plan.unchanged,
+    };
+  }
+
+  const now = nowIso();
+  const patch: Record<string, unknown> = { updated_at: now };
+  for (const change of plan.changes) patch[change.field] = change.to;
+  patch.body = `${record.body.replace(/\s+$/, "")}\n\n${papercutHeaderAuditLine(plan.changes, now)}\n`;
+
+  const next = { ...record, ...patch } as FbrainRecord;
+  const primaryFields = updateFieldsFrom(record, PAPERCUT, patch);
+  // Through the shared write plan, not a bare mutation: `planPapercutStatusOps`
+  // rewrites this row's `psi_payload` from the record, and that snapshot is
+  // what `papercut list --kind …` pre-selects candidates on. An amend that did
+  // not refresh the index would leave the row absent from the very query this
+  // verb exists to make it appear in.
+  const writePlan = await buildResidentWritePlan({
+    node,
+    cfg: opts.cfg,
+    type: PAPERCUT,
+    schemaHash,
+    previous: record,
+    next,
+    primaryFields,
+    now,
+  });
+  await commitResidentWritePlan({ node, plan: writePlan, type: PAPERCUT, slug });
+
+  if (opts.json) {
+    print(
+      JSON.stringify({
+        action: "papercut_header_amended",
+        slug,
+        changes: plan.changes,
+        unchanged: plan.unchanged,
+      }),
+    );
+  } else {
+    print(
+      `papercut ${slug}: ${plan.changes.map(renderPapercutHeaderChange).join(", ")}`,
+    );
+    if (plan.unchanged.length > 0) {
+      print(`  unchanged: ${plan.unchanged.join(", ")}`);
+    }
+  }
+  return {
+    action: "papercut_header_amended",
+    slug,
+    changes: plan.changes,
+    unchanged: plan.unchanged,
+  };
+}

@@ -92,6 +92,7 @@ import {
   papercutCloseCmd,
   papercutFileCmd,
   papercutListCmd,
+  papercutSetCmd,
 } from "./commands/papercut.ts";
 import { consolidateCmd, PROVE_TOPIC } from "./commands/consolidate.ts";
 import {
@@ -278,7 +279,7 @@ ${RECORD_NEW_HELP_LINES}
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        re-put every live record so its current embedding is present (does not reduce pollution)
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
-  papercut       file/close/census the typed defect ledger (dedupe-gated; close is one write, not two)
+  papercut       file/close/set/census the typed defect ledger (dedupe-gated; close is one write, not two)
   consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
   mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
@@ -984,6 +985,8 @@ Example:
                        [--not-duplicate-of-any] [--reopen CANONICAL]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
                         [--duplicate-of SLUG]   (required with --status duplicate)
+brain papercut set <slug> [--kind K] [--repo owner/name] [--severity p0|p1|p2|p3]
+                      [--component C]
 brain papercut census [<component>] [--point-read] [--json]
 brain papercut list [<component>] [--status S] [--severity p0|p1|p2|p3]
                     [--kind K] [--repo owner/name] [--tag T]...
@@ -1022,6 +1025,30 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
         --verified-by naming the LIVE check you ran; a value that looks like a
         merge reference is rejected, because "merged" is a fact about a
         repository and not about anything running.
+
+set     Amends a header column on an existing row: --kind, --repo, --severity,
+        --component. Nothing else. No status transition (that is close, which
+        requires evidence), no body rewrite, no symptom_hash (the dedupe key).
+        Tags are brain tag <slug> --type papercut.
+
+        It exists because file REFUSES a second call on the same slug — the
+        dedupe gate reports an EXACT self-match, correctly, since the row is a
+        duplicate of itself — and close writes only the closure columns. So
+        before this verb a filing that omitted --kind kept kind=complaint
+        forever, and never appeared in
+        papercut list --status open --kind specified-fix, which is the
+        cheapest triage query there is. The correction had to live as prose in
+        the body, where no filter can see it.
+
+        A column that already holds the requested value is reported unchanged
+        and NOT written: a write bumps updated_at, list is ordered
+        oldest-updated-first, so a no-op amend would reorder the triage queue
+        it feeds.
+
+        The change is appended to the body as one Header-amended <ts>: line.
+        A header rewrite is durable and leaves no diff — without that line a
+        reader who finds kind=specified-fix on a row filed as complaint cannot
+        tell it was amended, when, or from what.
 
 census  Counts by component and status, and prints its own method line.
 
@@ -4182,7 +4209,7 @@ function requireGraphPositional(
   return positionals[0] as string;
 }
 
-export const PAPERCUT_SUBCOMMANDS = ["file", "close", "census", "list"] as const;
+export const PAPERCUT_SUBCOMMANDS = ["file", "close", "set", "census", "list"] as const;
 
 function requiredFlag(
   values: Record<string, unknown>,
@@ -4280,6 +4307,10 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "verified-by",
     "duplicate-of",
   ],
+  // `set` deliberately does NOT list `status`. A status move must carry
+  // evidence, and `close` is the verb that takes it; a header amender that
+  // could also flip status would be a status launderer with no evidence flag.
+  set: [...PAPERCUT_SHARED_FLAGS, "kind", "repo", "severity", "component"],
   census: [...PAPERCUT_SHARED_FLAGS, "fast", "point-read"],
   list: [
     ...PAPERCUT_SHARED_FLAGS,
@@ -4416,9 +4447,19 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       // stream on exit 3 and misread the refusal
       // (papercut-brain-papercut-file-duplicate-exit). stdout keeps the full
       // candidate list (or the --json object).
+      // An EXACT match is this slug against itself, so the caller is almost
+      // always re-filing to correct a header column they left off the first
+      // call. Sending them to `brain append` there is sending them to write
+      // prose no filter can read; `papercut set` is the verb that moves the
+      // column. Measured 2026-09-26: the omitted flag was `--kind`, and the
+      // row stayed absent from `--kind specified-fix` with the correction
+      // sitting in its body.
+      const exact = result.duplicates.find((d) => d.exact);
       const next = result.reopen?.length
         ? `re-run with --reopen ${result.reopen[0]}`
-        : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
+        : exact
+          ? `that is THIS slug: to correct a header column use \`brain papercut set ${exact.slug} [--kind K] [--repo owner/name] [--severity S] [--component C]\`, or append evidence with \`brain append ${exact.slug} --type papercut\``
+          : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
       console.error(
         `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) already describe this; ${next}. Candidates are on stdout.`,
       );
@@ -4451,6 +4492,24 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     if (typeof values["duplicate-of"] === "string")
       opts.duplicateOf = values["duplicate-of"];
     await papercutCloseCmd(opts);
+    return 0;
+  }
+
+  if (sub === "set") {
+    const slug = positionals[0];
+    if (!slug) {
+      throw new FbrainError({
+        code: "missing_slug",
+        message: "papercut set requires a slug.",
+        hint: "brain papercut set <slug> [--kind K] [--repo owner/name] [--severity S] [--component C]",
+      });
+    }
+    const sOpts: Parameters<typeof papercutSetCmd>[0] = { cfg, slug, verbose, json };
+    if (typeof values.kind === "string") sOpts.kind = values.kind;
+    if (typeof values.repo === "string") sOpts.repo = values.repo;
+    if (typeof values.severity === "string") sOpts.severity = values.severity;
+    if (typeof values.component === "string") sOpts.component = values.component;
+    await papercutSetCmd(sOpts);
     return 0;
   }
 
