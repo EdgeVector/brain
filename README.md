@@ -780,3 +780,5 @@ Until the readiness gate ships, both gbrain and fbrain coexist; the `gbrain put`
 - Not running new fold_db core code
 - No git-to-brain sync
 - No compiled standalone binaries — fbrain runs as a Bun-runtime CLI (`bun add -g github:EdgeVector/fbrain` today; `npm i -g fbrain` / `bunx fbrain` once published to npm)
+
+<!-- lastgit-era-3 cutover proof commit, lastgit-era-3-builder run 34, 2026-09-27 -->
