@@ -265,6 +265,68 @@ describe("the dedupe gate", () => {
     });
   });
 
+  // The bug: last-stack-pipeline-forge-pr-ledger files one row per PR with a
+  // templated title ("Pipeline: EdgeVector/fold PR <N> is stuck (red)"). Every
+  // such title paraphrases every other one at the embedding layer, so a new
+  // PR's first-ever filing kept getting refused as a "recurrence" of an
+  // unrelated, already-CLOSED PR's row — 8+ times over 2026-09-25/26
+  // (papercut-pipeline-ledger-dedupe-gate-blocks-new-pr-numbers). Two titles
+  // that each name a PR/issue number must disagree-proof the match.
+  describe("a hard-distinguishing PR number in the title", () => {
+    const now = new Date("2026-09-27T12:00:00.000Z");
+    const closedAt = "2026-09-26T12:00:00.000Z";
+    const otherPr = rec({
+      slug: "papercut-pipeline-forge-fold-pr-2174",
+      title: "Pipeline: EdgeVector/fold PR 2174 is stuck (red)",
+      status: "verified",
+      updated_at: closedAt,
+    });
+    const samePr = rec({
+      slug: "papercut-pipeline-forge-fold-pr-2223",
+      title: "Pipeline: EdgeVector/fold PR 2223 is stuck (red)",
+      status: "verified",
+      updated_at: closedAt,
+    });
+    const newTitle = "Pipeline: EdgeVector/fold PR 2223 is stuck (red)";
+
+    test("a closed row for a DIFFERENT PR number does not gate, even at high similarity", () => {
+      const hits = semanticDuplicateCandidates([hit(otherPr, 0.89)], {
+        component: "pipeline",
+        title: newTitle,
+        now,
+      });
+      expect(hits).toEqual([]);
+    });
+
+    test("a closed row for the SAME PR number still gates (recurrence detection survives)", () => {
+      const hits = semanticDuplicateCandidates([hit(samePr, 0.89)], {
+        component: "pipeline",
+        title: newTitle,
+        now,
+      });
+      expect(hits).toHaveLength(1);
+      expect(hits[0]!.recurrence).toBe(true);
+    });
+
+    test("a LIVE row for a different PR number does not block either", () => {
+      const otherPrOpen = rec({ ...otherPr, status: "open" } as Partial<FbrainRecord> & { slug: string });
+      const hits = semanticDuplicateCandidates([hit(otherPrOpen, 0.95)], {
+        component: "pipeline",
+        title: newTitle,
+      });
+      expect(hits).toEqual([]);
+    });
+
+    test("no identifying number in the new title falls back to plain similarity", () => {
+      const hits = semanticDuplicateCandidates([hit(otherPr, 0.89)], {
+        component: "pipeline",
+        title: "Pipeline: something unrelated is stuck",
+        now,
+      });
+      expect(hits).toHaveLength(1);
+    });
+  });
+
   test("title, symptom, and an optional error line become separate probes", () => {
     expect(
       papercutDedupeProbes({
