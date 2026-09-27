@@ -149,21 +149,46 @@ function closedWithinWindow(
   return now.getTime() - t <= windowDays * 86_400_000;
 }
 
+// A hard-distinguishing identifier embedded in a title: "PR 2223", "PR#2223",
+// or "#2223". Two titles that each carry one of these and disagree name
+// different work items regardless of how similar the surrounding text
+// reads — a templated title ("Pipeline: EdgeVector/fold PR <N> is stuck
+// (red)") makes every per-PR row look like a paraphrase of every other one
+// at the embedding layer, so the dedupe gate cited CLOSED/verified rows for
+// OTHER PR numbers 8+ times over 2026-09-25/26 and the new PR's row never
+// got filed (papercut-pipeline-ledger-dedupe-gate-blocks-new-pr-numbers).
+const IDENTIFYING_NUMBER_RE = /\bpr\s*#?(\d+)\b|#(\d+)\b/i;
+
+function identifyingNumber(title: string): string | null {
+  const m = IDENTIFYING_NUMBER_RE.exec(title);
+  if (!m) return null;
+  return m[1] ?? m[2] ?? null;
+}
+
 export function semanticDuplicateCandidates(
   hits: readonly FindHit[],
   opts: {
     component: string;
     exactSlug?: string;
+    title?: string;
     now?: Date;
     recurrenceWindowDays?: number;
   },
 ): DuplicateCandidate[] {
   const now = opts.now ?? new Date();
   const windowDays = opts.recurrenceWindowDays ?? RECURRENCE_WINDOW_DAYS;
+  const newNumber = opts.title ? identifyingNumber(opts.title) : null;
   const candidates: DuplicateCandidate[] = [];
   for (const hit of hits) {
     const record = hit.record;
     const exact = record.slug === opts.exactSlug;
+    // An exact slug always refers to the SAME identifier, so the veto only
+    // applies to the similarity judgement, never to the exact-restatement
+    // path (that is settled by `papercut_exists` / --reopen, not here).
+    if (!exact && newNumber) {
+      const candidateNumber = identifyingNumber(record.title);
+      if (candidateNumber && candidateNumber !== newNumber) continue;
+    }
     const score = exact ? 1 : hit.maxSimilarity;
     const sameComponent =
       typeof record.component !== "string" ||
@@ -585,6 +610,7 @@ export async function papercutFileCmd(
   const allCandidates = semanticDuplicateCandidates(semanticHits, {
     component,
     exactSlug: slug,
+    title: opts.title,
   });
   // A recurrence is also cleared by naming its canonical row.
   const remaining = allCandidates.filter(
