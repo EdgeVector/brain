@@ -14,7 +14,8 @@
         "src",
         "tsconfig.json",
         "vendor"
-      ]
+      ],
+      "platform": "darwin-arm64"
     }
   ]
 }
