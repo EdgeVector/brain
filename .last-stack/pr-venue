@@ -1,4 +1,3 @@
-lastgit
-# Gate of record for EdgeVector/brain: LastGit (lastdb:///brain), era-3 migration.
-# Migrated back from Forgejo on 2026-09-27 by lastgit-era-3-builder (run 34).
-# Decision: north-star-lastgit-era-3-primary-migration.
+github
+# Gate of record for EdgeVector/brain: GitHub (EdgeVector/brain), migrated 2026-09-30.
+# Decision: decision-2026-09-29-retire-lastgit-all-repos-to-github.
