@@ -79,10 +79,9 @@ describe("writeDurabilityWarning", () => {
     for (const state of ["queued", "unreported"] as const) {
       const w = writeDurabilityWarning(state, { verb: "brain status" });
       expect(w).toBeTruthy();
-      expect(w!).toContain("re-read");
-      expect(w!).toContain(
-        "papercut-brain-papercut-close-acks-a-status-transition-with-no-durability-and-the-write-can-revert-20261001",
-      );
+      expect(w!.toLowerCase()).toContain("re-read");
+      // The claim that matters: the caller's own verification is not evidence.
+      expect(w!).toContain("CANNOT confirm it persisted");
     }
   });
 
@@ -90,11 +89,24 @@ describe("writeDurabilityWarning", () => {
   // claim the node said something it did not.
   test("distinguishes a queued write from an unanswered one", () => {
     expect(writeDurabilityWarning("queued", { verb: "x" })!).toContain(
-      "has NOT flushed it to disk",
+      "not flushed to disk yet",
     );
     expect(writeDurabilityWarning("unreported", { verb: "x" })!).toContain(
       "did not report durability",
     );
+  });
+
+  // The live primary answers `queued` on an ordinary status write, so this
+  // warning fires on the normal case. A multi-line warning on every closure is
+  // how a true warning gets filtered out, so the line is pinned to one line.
+  test("is one line, so it survives being printed on every closure", () => {
+    for (const state of ["queued", "unreported"] as const) {
+      const w = writeDurabilityWarning(state, {
+        verb: "papercut close",
+        retryHint: "Re-run with --durable to demand a disk receipt.",
+      })!;
+      expect(w.split("\n")).toHaveLength(1);
+    }
   });
 
   test("offers the retry the caller can actually run, when given one", () => {

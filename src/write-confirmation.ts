@@ -100,13 +100,19 @@ export function writeDurabilityTokens(
 }
 
 /**
- * The warning that follows a status transition the node did not confirm on
- * disk, or `null` when it did.
+ * ONE line, or `null` when the node confirmed the flush.
  *
- * It names the one thing a caller cannot work out for itself: that the
+ * It names the single thing a caller cannot work out for itself: that the
  * re-read-after-write check every routine on this fleet uses — including the
  * papercut resolver's standing "re-read every brain write" protocol — cannot
- * detect this. That check passed on the measured revert and was wrong.
+ * detect this, because a queued write is served from the state it landed in.
+ * That check passed on the measured revert and was wrong.
+ *
+ * Kept to one line on purpose. The live primary answered `queued` on the first
+ * status write measured through this path, so this fires on the ordinary case,
+ * and a multi-line warning on every closure is how a true warning gets
+ * filtered out. The mechanism lives in `brain help papercut`; the line below
+ * only has to stop a caller believing its own re-read.
  */
 export function writeDurabilityWarning(
   state: WriteDurability,
@@ -115,15 +121,11 @@ export function writeDurabilityWarning(
   if (state === "durable") return null;
   const cause =
     state === "queued"
-      ? "the node accepted this write but has NOT flushed it to disk"
-      : "this node did not report durability, so the write cannot be assumed to be on disk";
+      ? "not flushed to disk yet"
+      : "this node did not report durability";
   const retry = opts.retryHint ? ` ${opts.retryHint}` : "";
   return (
-    `warning: ${cause}. An immediate re-read CANNOT tell a queued write from a ` +
-    `durable one — it is served from the state the write landed in — so ` +
-    `re-reading now proves nothing about persistence. A queued status write has ` +
-    `been observed to revert across a node restart ` +
-    `(papercut-brain-papercut-close-acks-a-status-transition-with-no-durability-and-the-write-can-revert-20261001).` +
-    `${retry} Otherwise re-read ${opts.verb}'s record again after the node flushes.`
+    `warning: ${opts.verb} wrote this transition but it is ${cause}; ` +
+    `re-reading it now CANNOT confirm it persisted.${retry}`
   );
 }
