@@ -2883,12 +2883,18 @@ describe("fbrain_status tool", () => {
     expect(fields.status).toBe("archived");
     expect(fields.body).toBe("the body");
     // Structured output + schema conformance.
+    // `durability` is part of the transition payload: the agent path needs the
+    // node's disk claim for the same reason the CLI ack does. This fixture's
+    // node omits the field from its receipt, so the honest reading is
+    // `unreported` — NOT `queued`, which would assert a claim the node never
+    // made.
     expect(res.structuredContent).toEqual({
       action: "status_changed",
       type: "concept",
       slug: "c1",
       from: "active",
       to: "archived",
+      durability: "unreported",
     });
     const schema = outputSchemaOf(server, "fbrain_status")!;
     expect(() => schema.parse(res.structuredContent)).not.toThrow();

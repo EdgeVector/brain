@@ -622,6 +622,19 @@ const statusOutputShape = {
     .string()
     .optional()
     .describe("The record's CURRENT status (status mode — slug-only read)."),
+  // What the node said about flushing the status write to disk. The agent path
+  // needs this for the same reason the CLI ack does: only `durable` means on
+  // disk, and a read-after-write cannot tell a `queued` write from a `durable`
+  // one because it is served from the state the write landed in. A queued
+  // status write has been observed to revert across a node restart
+  // (papercut-brain-papercut-close-acks-a-status-transition-with-no-durability-
+  // and-the-write-can-revert-20261001).
+  durability: z
+    .enum(["durable", "queued", "unreported"])
+    .optional()
+    .describe(
+      "Whether the node flushed this status write to disk (status_changed mode). `durable` = on disk. `queued` = accepted, not flushed; it can still be lost across a node restart, and a re-read CANNOT detect that. `unreported` = this node did not answer the question.",
+    ),
   // ── node_status (bare call) fields ──
   reachable: z.boolean().optional().describe("True when the node answered the status probe (node_status mode)."),
   provisioned: z

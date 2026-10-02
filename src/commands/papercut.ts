@@ -33,6 +33,12 @@ import {
 } from "../record.ts";
 import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
+import {
+  writeDurabilityOf,
+  writeDurabilityTokens,
+  writeDurabilityWarning,
+  type WriteDurability,
+} from "../write-confirmation.ts";
 import { recordListEntryHash } from "../record-list-index.ts";
 import {
   newPapercutReadStats,
@@ -334,6 +340,8 @@ export type PapercutFileResult = {
   reopen?: string[];
   // On `reopened`: the row the filing was folded into, and its status move.
   reopened?: { slug: string; from: string; to: string };
+  /** What the node said about flushing this filing to disk. */
+  durability?: WriteDurability;
 };
 
 /**
@@ -548,7 +556,7 @@ export async function papercutFileCmd(
       next: prior,
       primaryFields,
     });
-    await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+    const receipt = await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
     const result: PapercutFileResult = {
       action: "filed",
       slug,
@@ -556,9 +564,14 @@ export async function papercutFileCmd(
       symptom_hash: hash,
       duplicates: [],
       idempotent: true,
+      durability: writeDurabilityOf(receipt),
     };
     if (opts.json) print(JSON.stringify(result));
-    else print(`papercut ${slug} already filed; keyed membership verified`);
+    else
+      print(
+        `papercut ${slug} already filed; keyed membership verified ` +
+          writeDurabilityTokens(receipt).join(" "),
+      );
     return result;
   }
   let semanticHits: FindHit[];
@@ -722,7 +735,12 @@ export async function papercutFileCmd(
     primaryFields: materialized,
     now,
   });
-  await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+  const fileReceipt = await commitResidentWritePlan({
+    node,
+    plan,
+    type: PAPERCUT,
+    slug,
+  });
 
   // Same best-effort cross-type collision NOTE that `fbrain new` and
   // `fbrain put` emit on a create. `papercut file` did not, and that silence
@@ -755,11 +773,13 @@ export async function papercutFileCmd(
         duplicates: [],
         waived,
         list_index_failed: listIndexFailed,
+        durability: writeDurabilityOf(fileReceipt),
       }),
     );
   } else {
     print(
-      `filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash}`,
+      `filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash} ` +
+        writeDurabilityTokens(fileReceipt).join(" "),
     );
     if (waived.length > 0) {
       print(
@@ -780,6 +800,7 @@ export async function papercutFileCmd(
     symptom_hash: hash,
     duplicates: [],
     waived,
+    durability: writeDurabilityOf(fileReceipt),
   };
 }
 
@@ -793,6 +814,14 @@ export type PapercutCloseOptions = {
   duplicateOf?: string;
   /** Internal: also set the row's kind (used by `file --reopen`). */
   kind?: string;
+  /**
+   * Ask the node for an exact durable disk receipt for this one resident
+   * batch, and fail loudly when it does not confirm one. A status transition is
+   * four small fields and a stamp, so paying for durability on it is cheap —
+   * unlike on a large body append. Opt-in rather than default: the default path
+   * must keep working against a node that does not accept the durability field.
+   */
+  durable?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -805,6 +834,14 @@ export type PapercutCloseResult = {
   to: string;
   /** Present when the slug also exists as a `reference` record. */
   twin?: PapercutTwinResult;
+  /**
+   * What the node said about flushing the typed row's status write to disk.
+   * `unreported` means the node did not answer, which is not the same claim as
+   * `queued` — see `writeDurabilityOf`.
+   */
+  durability: WriteDurability;
+  /** The mutation id of the status write, when the receipt carried one. */
+  revision?: string;
 };
 
 /** What `papercut close` did to the reference twin of a dual-typed slug. */
@@ -820,6 +857,12 @@ export type PapercutTwinResult = {
   reread?: string;
   /** Set when the twin could not be read; nothing was written to it. */
   error?: string;
+  /**
+   * What the node said about flushing the twin's status write. The re-read
+   * above cannot distinguish a queued write from a durable one, so
+   * `persisted: true` is not a durability claim.
+   */
+  durability?: WriteDurability;
 };
 
 /** The `reference` status a typed close implies, or null when it implies none. */
@@ -888,7 +931,7 @@ async function closeReferenceTwin(opts: {
     primaryFields,
     now: opts.now,
   });
-  await commitResidentWritePlan({
+  const twinReceipt = await commitResidentWritePlan({
     node: opts.node,
     plan,
     type: "reference",
@@ -911,6 +954,7 @@ async function closeReferenceTwin(opts: {
     changed: true,
     persisted: reread === target,
     reread,
+    durability: writeDurabilityOf(twinReceipt),
   };
 }
 
@@ -984,7 +1028,19 @@ export async function papercutCloseCmd(
     primaryFields,
     now,
   });
-  await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+  // Read the receipt. The six non-`put` call sites of this helper all used a
+  // bare `await` and threw the node's durability claim away; this is the one
+  // whose loss was measured. See the block at the bottom of
+  // src/write-confirmation.ts.
+  const receipt = await commitResidentWritePlan({
+    node,
+    plan,
+    type: PAPERCUT,
+    slug,
+    ...(opts.durable ? { durable: true } : {}),
+  });
+  const durability = writeDurabilityOf(receipt);
+  const revision = receipt.mutationIds[0];
 
   // The reference twin, in the SAME verb. Measured 2026-08-18 on the
   // `papercut-lastdb-*` family: 3 of 84 dual-typed slugs read typed-CLOSED x
@@ -1004,6 +1060,12 @@ export async function papercutCloseCmd(
     verbose: opts.verbose,
   });
 
+  const durabilityWarning = writeDurabilityWarning(durability, {
+    verb: "papercut close",
+    retryHint:
+      `Re-run with \`--durable\` to require a disk receipt for the status write.`,
+  });
+
   if (opts.json) {
     print(
       JSON.stringify({
@@ -1012,10 +1074,15 @@ export async function papercutCloseCmd(
         from,
         to: status,
         ...(twin ? { twin } : {}),
+        durability,
+        ...(revision ? { revision } : {}),
       }),
     );
   } else {
-    print(`papercut ${slug}: ${from} → ${status}`);
+    print(
+      `papercut ${slug}: ${from} → ${status} ${writeDurabilityTokens(receipt).join(" ")}`,
+    );
+    if (durabilityWarning) print(durabilityWarning);
     if (twin && twin.changed) print(`reference ${slug}: ${twin.from} → ${twin.to}`);
     else if (twin) print(`reference ${slug}: already ${twin.to}, left as is`);
     if (twin && twin.changed && !twin.persisted) {
@@ -1037,6 +1104,8 @@ export async function papercutCloseCmd(
     from,
     to: status,
     ...(twin ? { twin } : {}),
+    durability,
+    ...(revision ? { revision } : {}),
   };
 }
 
@@ -2176,7 +2245,12 @@ export async function papercutSetCmd(
     primaryFields,
     now,
   });
-  await commitResidentWritePlan({ node, plan: writePlan, type: PAPERCUT, slug });
+  const setReceipt = await commitResidentWritePlan({
+    node,
+    plan: writePlan,
+    type: PAPERCUT,
+    slug,
+  });
 
   if (opts.json) {
     print(
@@ -2185,11 +2259,13 @@ export async function papercutSetCmd(
         slug,
         changes: plan.changes,
         unchanged: plan.unchanged,
+        durability: writeDurabilityOf(setReceipt),
       }),
     );
   } else {
     print(
-      `papercut ${slug}: ${plan.changes.map(renderPapercutHeaderChange).join(", ")}`,
+      `papercut ${slug}: ${plan.changes.map(renderPapercutHeaderChange).join(", ")} ` +
+        writeDurabilityTokens(setReceipt).join(" "),
     );
     if (plan.unchanged.length > 0) {
       print(`  unchanged: ${plan.unchanged.join(", ")}`);
