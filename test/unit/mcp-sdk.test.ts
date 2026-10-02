@@ -172,12 +172,16 @@ describe("MCP SDK round-trip (validateToolOutput-inclusive)", () => {
         (mutation) => mutation.schema === TEST_HASHES.concept,
       );
       expect(primary?.fields_and_values?.status).toBe("archived");
+      // Through the real SDK validator, so this also proves `durability` is
+      // declared on the tool's outputSchema: an undeclared field fails with
+      // `data must NOT have additional properties`.
       expect(res.structuredContent).toEqual({
         action: "status_changed",
         type: "concept",
         slug: "c1",
         from: "active",
         to: "archived",
+        durability: "unreported",
       });
     } finally {
       await close();

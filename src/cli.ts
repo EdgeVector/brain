@@ -985,6 +985,7 @@ Example:
                        [--not-duplicate-of-any] [--reopen CANONICAL]
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
                         [--duplicate-of SLUG]   (required with --status duplicate)
+                        [--durable]
 brain papercut set <slug> [--kind K] [--repo owner/name] [--severity p0|p1|p2|p3]
                       [--component C]
 brain papercut census [<component>] [--point-read] [--json]
@@ -1025,6 +1026,17 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
         --verified-by naming the LIVE check you ran; a value that looks like a
         merge reference is rejected, because "merged" is a fact about a
         repository and not about anything running.
+
+        The ack carries durability=durable|queued|unreported and the write's
+        revision. Only durable means on disk. queued means the node took the
+        write and has not flushed it, unreported means this node does not
+        answer the question at all; a queued status write has been observed to
+        revert across a node restart, taking the evidence stanza with it. A
+        re-read does NOT detect this -- a queued write is served from the state
+        it landed in, so the check reads exactly like a durable one. --durable
+        asks for an exact disk receipt for the one batch and fails loudly when
+        the node will not confirm it; a status transition is a handful of small
+        fields, so it is cheap to pay for there, unlike on a body append.
 
 set     Amends a header column on an existing row: --kind, --repo, --severity,
         --component. Nothing else. No status transition (that is close, which
@@ -1485,6 +1497,10 @@ export const PAPERCUT_OPTIONS = {
   reopen: { type: "string" },
   // close
   status: { type: "string" },
+  // `papercut close` only: require a durable disk receipt for the status write.
+  // Deliberately NOT shared with the other subcommands — the consumption table
+  // below refuses it on any verb that would ignore it.
+  durable: { type: "boolean" },
   // census / list
   "index-only": { type: "boolean" },
   fast: { type: "boolean" },
@@ -2429,7 +2445,7 @@ async function runRecordNew(
   // without widening the parseArgs return type.
   const designSlug = (values as { design?: string }).design;
   if (designSlug) opts.designSlug = designSlug;
-  const { indexPending, listIndexFailed } = await recordNew(opts);
+  const { indexPending, listIndexFailed, durability } = await recordNew(opts);
   // Under --json the structured success object is the stdout document; the
   // human line moves to stderr so `--json` stdout stays parseable (mirrors
   // the read verbs). The `indexPending` flag mirrors the MCP put's
@@ -2438,13 +2454,21 @@ async function runRecordNew(
   // permanent dual-write failure (ask/list won't see the row until reindex).
   const note =
     indexPendingNote(indexPending) + listIndexFailedNote(listIndexFailed);
+  const line = `created ${type} ${slug} durability=${durability}${note}`;
   if (values.json) {
-    console.error(`created ${type} ${slug}${note}`);
+    console.error(line);
     console.log(
-      JSON.stringify({ ok: true, type, slug, indexPending, listIndexFailed }),
+      JSON.stringify({
+        ok: true,
+        type,
+        slug,
+        indexPending,
+        listIndexFailed,
+        durability,
+      }),
     );
   } else {
-    console.log(`created ${type} ${slug}${note}`);
+    console.log(line);
   }
   return 0;
 }
@@ -4306,6 +4330,7 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "fixed-by",
     "verified-by",
     "duplicate-of",
+    "durable",
   ],
   // `set` deliberately does NOT list `status`. A status move must carry
   // evidence, and `close` is the verb that takes it; a header amender that
@@ -4491,6 +4516,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       opts.verifiedBy = values["verified-by"];
     if (typeof values["duplicate-of"] === "string")
       opts.duplicateOf = values["duplicate-of"];
+    if (values.durable === true) opts.durable = true;
     await papercutCloseCmd(opts);
     return 0;
   }

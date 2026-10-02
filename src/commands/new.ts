@@ -31,6 +31,10 @@ import {
   commitResidentWritePlan,
   recordFromPrimaryFields,
 } from "../resident-write-plan.ts";
+import {
+  writeDurabilityOf,
+  type WriteDurability,
+} from "../write-confirmation.ts";
 
 export type RecordNewOptions = {
   cfg: Config;
@@ -58,6 +62,9 @@ export type RecordNewResult = {
   // `PutResult.indexPending`; the CLI prints an honest "index still catching
   // up" note and surfaces it under `--json`.
   indexPending: boolean;
+  // What the node said about flushing this create to disk. Only `durable`
+  // means on disk; `unreported` means this node does not answer at all.
+  durability: WriteDurability;
   // The record persisted but its record-list index entry did not. Distinct from
   // `indexPending` (timing): this is permanent until the index is rebuilt,
   // because list/ask/BM25 read the type-list partition. Same field as put.
@@ -153,7 +160,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     next: record,
     primaryFields: fields,
   });
-  await commitResidentWritePlan({
+  const receipt = await commitResidentWritePlan({
     node,
     plan,
     type: opts.type,
@@ -162,5 +169,6 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   return {
     indexPending: true,
     listIndexFailed: recordListEntryHash(opts.cfg) === null,
+    durability: writeDurabilityOf(receipt),
   };
 }

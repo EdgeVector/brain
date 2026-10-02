@@ -19,6 +19,12 @@ import {
   commitResidentWritePlan,
   recordFromPrimaryFields,
 } from "../resident-write-plan.ts";
+import {
+  writeDurabilityOf,
+  writeDurabilityTokens,
+  writeDurabilityWarning,
+  type WriteDurability,
+} from "../write-confirmation.ts";
 
 export type StatusOptions = {
   cfg: Config;
@@ -55,6 +61,9 @@ export type StatusResult = {
   from: string;
   // The record's status AFTER this mutation (the value passed in).
   to: string;
+  // What the node said about flushing the write to disk. Only `durable` means
+  // on disk; `unreported` means this node does not answer the question.
+  durability: WriteDurability;
 };
 
 // The structured payload for SHOW mode (`slug` given, no new status): a plain
@@ -129,8 +138,27 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     primaryFields: fields,
     now,
   });
-  await commitResidentWritePlan({ node, plan, type: only.type, slug });
-  print(`${only.type} ${slug}: ${fromStatus} → ${opts.newStatus}`);
+  // Read the receipt rather than discarding it. This verb is what a run
+  // reaches for when `papercut close`'s reference twin could not be written,
+  // and a status write through it was already measured printing a transition
+  // that did not persist. The node's durability claim is the only signal
+  // available before the flush: a re-read is served from the state the write
+  // landed in and cannot tell a queued write from a durable one.
+  const receipt = await commitResidentWritePlan({
+    node,
+    plan,
+    type: only.type,
+    slug,
+  });
+  const durability = writeDurabilityOf(receipt);
+  print(
+    `${only.type} ${slug}: ${fromStatus} → ${opts.newStatus} ` +
+      writeDurabilityTokens(receipt).join(" "),
+  );
+  const durabilityWarning = writeDurabilityWarning(durability, {
+    verb: "brain status",
+  });
+  if (durabilityWarning) print(durabilityWarning);
   // Emit the structured payload from the SAME resolved type/slug/transition the
   // printed line uses (one source of truth — see the read/delete/link commands).
   opts.onResult?.({
@@ -139,5 +167,6 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     slug,
     from: fromStatus,
     to: opts.newStatus,
+    durability,
   });
 }
