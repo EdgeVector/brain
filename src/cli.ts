@@ -1033,7 +1033,8 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
         answer the question at all; a queued status write has been observed to
         revert across a node restart, taking the evidence stanza with it. A
         re-read does NOT detect this -- a queued write is served from the state
-        it landed in, so the check reads exactly like a durable one. --durable
+        it landed in, so the check reads exactly like a durable one, and the
+        ack prints one line saying so. --durable
         asks for an exact disk receipt for the one batch and fails loudly when
         the node will not confirm it; a status transition is a handful of small
         fields, so it is cheap to pay for there, unlike on a body append.

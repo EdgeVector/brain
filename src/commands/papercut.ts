@@ -1063,7 +1063,7 @@ export async function papercutCloseCmd(
   const durabilityWarning = writeDurabilityWarning(durability, {
     verb: "papercut close",
     retryHint:
-      `Re-run with \`--durable\` to require a disk receipt for the status write.`,
+      "Re-run with --durable to demand a disk receipt (it fails loudly if the node will not give one).",
   });
 
   if (opts.json) {
