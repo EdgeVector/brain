@@ -575,13 +575,13 @@ describe("findBySlug (keyed point-read: existence + dangling-ref checks)", () =>
 
 // hydrateSchemaBySlug is the batch hydrate behind `fbrain search`'s
 // fragment→record resolution. The caller already knows exactly which slugs
-// its ranked hits need, so this point-reads each one (`HashRangeKey`) instead
-// of scanning the whole schema partition. These tests pin: (1) one queryAll
-// PER REQUESTED SLUG, never a slug outside the requested set, (2) live rows
-// keyed by slug with tombstones dropped (a soft-deleted slug → undefined →
-// the search caller's stale skip), and (3) the same EMPTY-result flake
-// tolerance the old whole-page fetch had, now scoped to the one slug that hit
-// it instead of the whole schema.
+// its ranked hits need, so this reads those slugs in one `HashRangeKeys`
+// query instead of scanning the whole schema partition. These tests pin:
+// (1) one queryAll for the asked slugs, never a slug outside that set,
+// (2) live rows keyed by slug with tombstones dropped (a soft-deleted slug
+// → undefined → the search caller's stale skip), and (3) the same
+// EMPTY-result flake tolerance the old whole-page fetch had, now one retry
+// query for the slugs the first query missed.
 describe("hydrateSchemaBySlug (point-read search hydrate)", () => {
   // Each requested slug gets its own response schedule: `null` means an empty
   // /api/query slice (ambiguous — retries), a record shape means found
@@ -589,6 +589,7 @@ describe("hydrateSchemaBySlug (point-read search hydrate)", () => {
   // type-list index, never cold-seeds via admin scan.
   function slugNode(bySlug: Record<string, Array<{ slug: string; tags?: string[] } | null>>) {
     const callsPerSlug: Record<string, number> = {};
+    let queries = 0;
     const node = {
       baseUrl: "mock",
       userHash: "uh",
@@ -597,30 +598,44 @@ describe("hydrateSchemaBySlug (point-read search hydrate)", () => {
         filter?: {
           HashKey?: unknown;
           HashRangeKey?: { hash?: unknown; range?: unknown };
+          HashRangeKeys?: unknown;
         };
       }): Promise<QueryResponse> {
-        const range =
-          typeof args.filter?.HashRangeKey?.range === "string" ? args.filter.HashRangeKey.range : "";
-        const schedule = bySlug[range] ?? [];
-        const attempt = callsPerSlug[range] ?? 0;
-        callsPerSlug[range] = attempt + 1;
-        const outcome = schedule[Math.min(attempt, schedule.length - 1)] ?? null;
-        const productFields = outcome
-          ? [
-              {
-                slug: outcome.slug,
-                title: `T-${outcome.slug}`,
-                body: "B",
-                status: "draft",
-                tags: outcome.tags ?? [],
-                created_at: "2026-06-05T00:00:00Z",
-                updated_at: "2026-06-05T00:00:00Z",
-              },
-            ]
-          : [];
+        queries += 1;
+        const pairs: Array<[string, string]> = [];
+        if (Array.isArray(args.filter?.HashRangeKeys)) {
+          for (const pair of args.filter.HashRangeKeys) {
+            if (!Array.isArray(pair) || pair.length < 2) continue;
+            if (typeof pair[0] === "string" && typeof pair[1] === "string") {
+              pairs.push([pair[0], pair[1]]);
+            }
+          }
+        } else if (
+          typeof args.filter?.HashRangeKey?.hash === "string" &&
+          typeof args.filter.HashRangeKey.range === "string"
+        ) {
+          pairs.push([args.filter.HashRangeKey.hash, args.filter.HashRangeKey.range]);
+        }
+        const productFields: Array<Record<string, unknown>> = [];
+        for (const [, range] of pairs) {
+          const schedule = bySlug[range] ?? [];
+          const attempt = callsPerSlug[range] ?? 0;
+          callsPerSlug[range] = attempt + 1;
+          const outcome = schedule[Math.min(attempt, schedule.length - 1)] ?? null;
+          if (!outcome) continue;
+          productFields.push({
+            slug: outcome.slug,
+            title: `T-${outcome.slug}`,
+            body: "B",
+            status: "draft",
+            tags: outcome.tags ?? [],
+            created_at: "2026-06-05T00:00:00Z",
+            updated_at: "2026-06-05T00:00:00Z",
+          });
+        }
         const listIndex = answerTypeListIndexQuery({
           schemaHash: args.schemaHash,
-          filter: args.filter,
+          filter: pairs.length > 0 ? { HashRangeKeys: pairs } : args.filter,
           productRowsForType: () => productFields,
         });
         const results = listIndex ?? [];
@@ -630,21 +645,21 @@ describe("hydrateSchemaBySlug (point-read search hydrate)", () => {
     return {
       node,
       callsFor: (slug: string) => callsPerSlug[slug] ?? 0,
-      totalCalls: () => Object.values(callsPerSlug).reduce((a, b) => a + b, 0),
+      totalCalls: () => queries,
     };
   }
   const noSleep = { sleep: async () => {} };
   // Full cfg so the type-list entry schema hash is present (product path).
   const testCfg = buildTestCfg();
 
-  test("point-reads every requested slug — one queryAll per slug", async () => {
+  test("reads every requested slug in one queryAll", async () => {
     const { node, totalCalls } = slugNode({
       a: [{ slug: "a" }],
       b: [{ slug: "b" }],
       c: [{ slug: "c" }],
     });
     const map = await hydrateSchemaBySlug(node, "design", testCfg, ["a", "b", "c"], noSleep);
-    expect(totalCalls()).toBe(3);
+    expect(totalCalls()).toBe(1);
     expect(map.size).toBe(3);
     expect(map.get("a")?.slug).toBe("a");
     expect(map.get("b")?.title).toBe("T-b");

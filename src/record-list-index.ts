@@ -118,6 +118,41 @@ export async function readTypeListEntryBySlug(
 }
 
 /**
+ * One keyed read for the slugs this call names. Each pair is `(type, slug)`
+ * on the list index. A slug with no row is null. A tombstone stays in the
+ * map so the caller can tell "found and deleted" from "not found".
+ */
+export async function readTypeListEntriesBySlugs(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  type: RecordType,
+  slugs: readonly string[],
+): Promise<Map<string, FbrainRecord | null>> {
+  const out = new Map<string, FbrainRecord | null>();
+  if (slugs.length === 0) return out;
+  const hash = recordListEntryHash(cfg);
+  if (!hash) {
+    for (const slug of slugs) out.set(slug, null);
+    return out;
+  }
+  const res = await node.queryAll({
+    schemaHash: hash,
+    fields: [...RECORD_LIST_ENTRY_FIELDS],
+    filter: { HashRangeKeys: slugs.map((slug) => [type, slug]) },
+  });
+  const found = new Map<string, FbrainRecord>();
+  for (const row of res.results) {
+    const rec = recordFromEntryRow(row);
+    if (!rec) continue;
+    const range = row.key?.range;
+    if (typeof range === "string" && range.length > 0) found.set(range, rec);
+    if (rec.slug.length > 0) found.set(rec.slug, rec);
+  }
+  for (const slug of slugs) out.set(slug, found.get(slug) ?? null);
+  return out;
+}
+
+/**
  * Records of one type from the HashRange partition.
  *
  * Only a partition that carries the completeness marker is trusted. Unmarked

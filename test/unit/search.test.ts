@@ -862,17 +862,13 @@ describe("searchCmd", () => {
     expect(lines.join("\n")).not.toContain("flaky");
   }, 10_000);
 
-  test("hydrates exactly the slugs each hit needs, one point read per slug", async () => {
-    // The perf fix this card lands. Search used to hydrate a schema by
-    // fetching its WHOLE partition (`listRecords`) once per distinct schema,
-    // even though the caller already knows exactly which slugs its ranked
-    // hits need — a 5-hit Design page threw away every OTHER live Design
-    // record just to keep those 5. This replaces that with N point reads
-    // (`HashRangeKey: { hash: type, range: slug }`), so the fetch count
-    // tracks the hit count, not the partition size. Here: 5 Design hits + 3
-    // Task hits must issue exactly 5 + 3 = 8 keyed `/api/query` POSTs, one per
-    // slug — never a partition-wide `HashKey` scan. We count POSTs PER
-    // schema_name so the assertion pins both the per-schema and total counts.
+  test("hydrates the asked slugs in one query per schema", async () => {
+    // Search used to hydrate a schema by fetching its WHOLE partition, then
+    // by one point read per slug. The caller already knows the hit slugs, so
+    // one HashRangeKeys query per schema reads those slugs. Here: 5 Design
+    // hits + 3 Task hits are two queries, one per schema. The mock counts
+    // the product lookup each list-index query makes. A partition-wide
+    // HashKey is not that query.
     const mkRow = (slug: string, title: string) => ({
       fields: {
         slug,
@@ -915,12 +911,12 @@ describe("searchCmd", () => {
     // = 5) doesn't slice the output — this test asserts the hydration COUNT and
     // that all 8 hits resolve, both of which are independent of the display cap.
     await searchCmd({ cfg, query: "anything", limit: 100, print: (l) => lines.push(l) });
-    // One point-read fetch per requested slug — the whole point of the fix.
-    expect(queryCallsBySchema.get(DESIGN_HASH)).toBe(5);
-    expect(queryCallsBySchema.get(TASK_HASH)).toBe(3);
-    // 8 slugs, not 2 whole-partition scans.
+    // One list-index query per schema. The mock counts the product lookup
+    // that query makes, so each schema is one call, not one call per slug.
+    expect(queryCallsBySchema.get(DESIGN_HASH)).toBe(1);
+    expect(queryCallsBySchema.get(TASK_HASH)).toBe(1);
     const totalQueryCalls = [...queryCallsBySchema.values()].reduce((a, b) => a + b, 0);
-    expect(totalQueryCalls).toBe(8);
+    expect(totalQueryCalls).toBe(2);
     // …and all 8 hits still resolved + printed (no row lost to the point reads).
     const rows = rowsOf(lines);
     expect(rows.length).toBe(8);

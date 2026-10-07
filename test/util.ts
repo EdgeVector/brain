@@ -128,6 +128,7 @@ export function answerTypeListIndexQuery(opts: {
   filter?: {
     HashKey?: unknown;
     HashRangeKey?: { hash?: unknown; range?: unknown };
+    HashRangeKeys?: unknown;
   } | null;
   productRowsForType: (type: RecordType) => Array<Record<string, unknown>>;
   listEntryHash?: string;
@@ -136,6 +137,34 @@ export function answerTypeListIndexQuery(opts: {
   if (opts.schemaHash !== listEntryHash) return null;
 
   const filter = opts.filter ?? undefined;
+  if (Array.isArray(filter?.HashRangeKeys)) {
+    const out: TypeListIndexRow[] = [];
+    const byType = new Map<string, TypeListIndexRow[]>();
+    for (const pair of filter.HashRangeKeys) {
+      if (!Array.isArray(pair) || pair.length < 2) continue;
+      const hrHash = typeof pair[0] === "string" ? pair[0] : "";
+      const hrRange = typeof pair[1] === "string" ? pair[1] : "";
+      if (!hrHash || !hrRange) continue;
+      if (hrRange === RECORD_LIST_ENTRY_MIGRATED_RANGE) {
+        const marker = typeListIndexPartitionRows(hrHash as RecordType, []).find(
+          (r) => r.key.range === RECORD_LIST_ENTRY_MIGRATED_RANGE,
+        );
+        if (marker) out.push(marker);
+        continue;
+      }
+      let rows = byType.get(hrHash);
+      if (!rows) {
+        rows = typeListIndexPartitionRows(
+          hrHash as RecordType,
+          opts.productRowsForType(hrHash as RecordType),
+        );
+        byType.set(hrHash, rows);
+      }
+      const match = rows.find((r) => r.key.range === hrRange);
+      if (match) out.push(match);
+    }
+    return out;
+  }
   const hrk = filter?.HashRangeKey;
   const hrHash = typeof hrk?.hash === "string" ? hrk.hash : "";
   const hrRange = typeof hrk?.range === "string" ? hrk.range : "";
@@ -191,6 +220,7 @@ export function wrapFetchWithTypeListIndex(
           filter?: {
             HashKey?: unknown;
             HashRangeKey?: { hash?: unknown; range?: unknown };
+            HashRangeKeys?: unknown;
           };
         };
         if (String(body.schema_name ?? "") === listEntryHash) {

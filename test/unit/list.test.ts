@@ -13,7 +13,7 @@
 
 import { describe, expect, test } from "bun:test";
 
-import { LIST_HYDRATE_CONCURRENCY, listCmd } from "../../src/commands/list.ts";
+import { listCmd } from "../../src/commands/list.ts";
 import { TOMBSTONE_TAG } from "../../src/record.ts";
 import { tagIndexSlug } from "../../src/tag-index.ts";
 import {
@@ -788,9 +788,9 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
 
   test("a 1000-record bucket's KEY sweep resolves in a single page request (QUERY_PAGE_SIZE)", async () => {
     // Index-first: one type-list partition read for the key sweep, then the
-    // default-capped page (DEFAULT_LIST_LIMIT=20) costs 20 product point-gets
-    // to hydrate bodies — 1 list-index + 20 product = 21 total requests, of
-    // which 20 hit the product schema.
+    // default-capped page (DEFAULT_LIST_LIMIT=20) hydrates in one product
+    // HashRangeKeys query. The list index is still a marker read plus a
+    // partition read.
     const rows: Fields[] = Array.from({ length: 1000 }, (_, i) =>
       spikeRowAt(
         `slug-${String(i).padStart(4, "0")}`,
@@ -812,10 +812,10 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     }
     // Each list-index read is a marker point-read + a partition read, so x2.
     expect(pageRequestsBySchema.get(TEST_RECORD_LIST_ENTRY_HASH)).toBe(2);
-    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(20);
+    expect(pageRequestsBySchema.get(TEST_HASHES.spike)).toBe(1);
   });
 
-  test("large explicit list windows bound concurrent point-read hydration", async () => {
+  test("a large explicit list window hydrates in one product query", async () => {
     const rows: Fields[] = Array.from({ length: 700 }, (_, i) =>
       spikeRowAt(
         `slug-${String(i).padStart(4, "0")}`,
@@ -825,20 +825,52 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     const bySlug = new Map(rows.map((row) => [String(row.slug), row]));
     let activeHydrates = 0;
     let maxActiveHydrates = 0;
+    let keyBatchQueries = 0;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === "string" ? input : (input as Request).url;
       if (url.endsWith("/api/query")) {
         const body = JSON.parse((init?.body as string) ?? "{}");
-        const hashKey =
+        const schema = typeof body.schema_name === "string" ? body.schema_name : "";
+        const filter =
           body && typeof body === "object" && body.filter && typeof body.filter === "object"
-            ? (body.filter as Record<string, unknown>).HashKey
+            ? (body.filter as Record<string, unknown>)
             : undefined;
+        const hashKey = filter?.HashKey;
+        const keyPairs = filter?.HashRangeKeys;
+        if (Array.isArray(keyPairs)) {
+          keyBatchQueries += 1;
+          const wanted = new Set(
+            keyPairs
+              .filter((pair) => Array.isArray(pair) && typeof pair[0] === "string")
+              .map((pair) => String((pair as [string, string])[0])),
+          );
+          const picked = rows.filter((row) => wanted.has(String(row.slug)));
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              results: picked.map((fields) => ({
+                fields,
+                key: { hash: String(fields.slug), range: null },
+              })),
+              total_count: picked.length,
+              returned_count: picked.length,
+              limit: 1000,
+              offset: 0,
+              has_more: false,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
         if (typeof hashKey === "string") {
-          activeHydrates += 1;
-          maxActiveHydrates = Math.max(maxActiveHydrates, activeHydrates);
-          await new Promise((resolve) => setTimeout(resolve, 1));
-          activeHydrates -= 1;
+          // A list-index HashKey is the type name. Only a product HashKey is
+          // a one-key hydrate, and this window must not do one.
+          if (schema === TEST_HASHES.spike) {
+            activeHydrates += 1;
+            maxActiveHydrates = Math.max(maxActiveHydrates, activeHydrates);
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            activeHydrates -= 1;
+          }
           const row = bySlug.get(hashKey);
           return new Response(
             JSON.stringify({
@@ -895,7 +927,8 @@ describe("listCmd — pagination across the server's /api/query cap", () => {
     expect(page.items.length).toBe(rows.length);
     expect(page.total).toBe(rows.length);
     expect(page.truncated).toBe(false);
-    expect(maxActiveHydrates).toBeLessThanOrEqual(LIST_HYDRATE_CONCURRENCY);
+    expect(keyBatchQueries).toBe(1);
+    expect(maxActiveHydrates).toBe(0);
   });
 });
 

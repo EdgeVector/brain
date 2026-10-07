@@ -11,6 +11,7 @@ import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   hasAnyLiveRecord,
   findBySlug,
+  findBySlugs,
   isSchemaNotFoundReadError,
   isTombstoned,
   listRecordKeys,
@@ -30,7 +31,6 @@ import { resolveRecordsByTag } from "../tag-index.ts";
 // growing. A `-n N` flag overrides this; the truncation hint tells the
 // user what they're missing.
 export const DEFAULT_LIST_LIMIT = 20;
-export const LIST_HYDRATE_CONCURRENCY = 16;
 
 export type ListOptions = {
   cfg: Config;
@@ -325,25 +325,36 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   // it: repair the list partition and surface a stderr note so a short page
   // never looks like a complete sample with no signal.
   const unhydratable: Array<{ type: RecordType; slug: string }> = [];
-  const hydrated: ListEntry[] = (
-    await mapWithConcurrency(
-      trimmed,
-      LIST_HYDRATE_CONCURRENCY,
-      async (e): Promise<ListEntry | null> => {
-        const cached = hydratedByKey.get(recordKeyId(e.type, e.slug));
-        if (cached) return { type: e.type, record: cached };
-        const record = await findBySlug(
-          node,
-          e.type,
-          schemaHashFor(e.type, opts.cfg),
-          e.slug,
-        );
-        if (record) return { type: e.type, record };
-        unhydratable.push({ type: e.type, slug: e.slug });
-        return null;
-      },
-    )
-  ).filter((e): e is ListEntry => e !== null);
+  const needed = new Map<RecordType, string[]>();
+  for (const entry of trimmed) {
+    if (hydratedByKey.has(recordKeyId(entry.type, entry.slug))) continue;
+    const slugs = needed.get(entry.type) ?? [];
+    if (!slugs.includes(entry.slug)) slugs.push(entry.slug);
+    needed.set(entry.type, slugs);
+  }
+  const fetched = new Map<string, FbrainRecord | null>();
+  await Promise.all(
+    [...needed].map(async ([type, slugs]) => {
+      const found = await findBySlugs(node, type, schemaHashFor(type, opts.cfg), slugs);
+      for (const [slug, record] of found) {
+        fetched.set(recordKeyId(type, slug), record);
+      }
+    }),
+  );
+  const hydrated: ListEntry[] = [];
+  for (const entry of trimmed) {
+    const cached = hydratedByKey.get(recordKeyId(entry.type, entry.slug));
+    if (cached) {
+      hydrated.push({ type: entry.type, record: cached });
+      continue;
+    }
+    const record = fetched.get(recordKeyId(entry.type, entry.slug)) ?? null;
+    if (record) {
+      hydrated.push({ type: entry.type, record });
+      continue;
+    }
+    unhydratable.push({ type: entry.type, slug: entry.slug });
+  }
 
   if (unhydratable.length > 0) {
     try {
@@ -426,30 +437,6 @@ export async function listCmd(opts: ListOptions): Promise<void> {
       `… ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
     );
   }
-}
-
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  if (items.length === 0) return [];
-  const workerCount = Math.min(Math.max(1, Math.floor(limit)), items.length);
-  const results = new Array<R>(items.length);
-  let next = 0;
-
-  await Promise.all(
-    Array.from({ length: workerCount }, async () => {
-      for (;;) {
-        const index = next;
-        next += 1;
-        if (index >= items.length) return;
-        results[index] = await fn(items[index]!, index);
-      }
-    }),
-  );
-
-  return results;
 }
 
 export type RecordSummary = {

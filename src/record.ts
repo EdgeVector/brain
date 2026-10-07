@@ -667,6 +667,40 @@ export async function findBySlugRaw(
   return row === null ? null : rowToRecord(row, type);
 }
 
+// One keyed read for the slugs this call names. A node without `queryByKeys`
+// falls back to one `findBySlug` per slug. Tombstones come back as null, the
+// same as `findBySlug`. Slugs the read does not return are null.
+export async function findBySlugs(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slugs: readonly string[],
+): Promise<Map<string, FbrainRecord | null>> {
+  const out = new Map<string, FbrainRecord | null>();
+  if (slugs.length === 0) return out;
+  if (!node.queryByKeys) {
+    for (const slug of slugs) {
+      out.set(slug, await findBySlug(node, type, schemaHash, slug));
+    }
+    return out;
+  }
+  const rows = await node.queryByKeys({
+    schemaHash,
+    fields: fieldsFor(type),
+    keys: slugs.map((slug) => ({ hash: slug })),
+  });
+  const bySlug = new Map<string, FbrainRecord>();
+  for (const row of rows) {
+    const record = rowToRecord(row, type);
+    if (record.slug.length > 0) bySlug.set(record.slug, record);
+  }
+  for (const slug of slugs) {
+    const record = bySlug.get(slug) ?? null;
+    out.set(slug, record !== null && !isTombstoned(record) ? record : null);
+  }
+  return out;
+}
+
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
 // case). The same /api/query intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:
@@ -933,25 +967,20 @@ export async function confirmVectorIndexed(
 // A later pass replaced the per-hit `findBySlug` fetches with ONE whole-page
 // fetch per distinct schema, batching the N+1 into 1. But the caller already
 // knows exactly which slugs it wants — the ranked search hits — so even that
-// one page read pulls every OTHER row in the schema for nothing. This does N
-// point reads instead: `readTypeListEntryBySlug` resolves `{ HashRangeKey:
-// { hash: type, range: slug } }` as a single keyed lookup per slug, so the
-// fetch cost tracks the hit count, not the schema size.
+// one page read pulls every OTHER row in the schema for nothing. This sends
+// one `HashRangeKeys` query for those slugs. A miss retries once, as one
+// query for the slugs the first query did not return.
 //
 // Live (non-tombstoned) rows only — a tombstoned row is omitted from the map,
 // so a hit whose record was soft-deleted since indexing resolves to
 // `undefined` and the caller skips it as stale, exactly as a per-hit
 // `findBySlug` returning null did.
 //
-// Empty-result flake tolerance is preserved, just scoped to the slug that hit
-// it instead of the whole schema: the same EMPTY-page retry the list-scan
-// helpers apply (an empty `/api/query` slice on a saturated daemon is
-// ambiguous — flake vs. genuinely absent row — so retry that ONE slug up to
-// `EMPTY_PAGE_RETRY_ATTEMPTS`; a row found — live or tombstoned — is
-// authoritative and stops immediately). A slug never found after the retry
-// budget is an authoritative stale hit — identical observable behavior to the
-// old whole-page path, with the retry budget paid once per slug instead of
-// once per schema.
+// Empty-result flake tolerance is preserved, scoped to the slugs the query
+// missed: an empty slot on a saturated daemon is ambiguous, so those slugs
+// retry up to `EMPTY_PAGE_RETRY_ATTEMPTS`. A row found — live or tombstoned —
+// is authoritative and is not in the retry. A slug still missing after the
+// retry budget is an authoritative stale hit.
 export async function hydrateSchemaBySlug(
   node: NodeClient,
   type: RecordType,
@@ -959,26 +988,26 @@ export async function hydrateSchemaBySlug(
   slugs: readonly string[],
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
-  const { readTypeListEntryBySlug } = await import("./record-list-index.ts");
+  const { readTypeListEntriesBySlugs } = await import("./record-list-index.ts");
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
   const bySlug = new Map<string, FbrainRecord>();
-  for (const slug of slugs) {
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const wait = computeBackoffMs(attempt, ceilingMs);
-      if (wait > 0) await sleep(wait);
-      const record = await readTypeListEntryBySlug(node, cfg, type, slug);
+  let pending = [...slugs];
+  for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
+    const found = await readTypeListEntriesBySlugs(node, cfg, type, pending);
+    const missed: string[] = [];
+    for (const slug of pending) {
+      const record = found.get(slug) ?? null;
       if (record) {
-        // Drop tombstones so a soft-deleted slug resolves to `undefined`
-        // (stale skip), mirroring `findBySlug`. A found row — live or
-        // tombstoned — is authoritative, so stop retrying this slug.
         if (!isTombstoned(record)) bySlug.set(slug, record);
-        break;
+        continue;
       }
-      // Empty ⇒ ambiguous; retry this slug up to EMPTY_PAGE_RETRY_ATTEMPTS to
-      // ride out a single saturated-daemon flake before declaring it absent.
+      missed.push(slug);
     }
+    pending = missed;
   }
   return bySlug;
 }

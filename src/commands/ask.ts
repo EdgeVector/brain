@@ -43,7 +43,7 @@ import {
   resolveStdoutIsTty,
 } from "../format.ts";
 import {
-  findBySlug,
+  findBySlugs,
   hasAnyLiveRecord,
   missingSchemaHashReadNote,
   resolveTypeFilter,
@@ -510,52 +510,26 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     | { kind: "not-live" }
     | { kind: "busy" };
 
-  const resolveRecord = async (
-    id: string,
-    slug: string,
-    type: RecordType,
-  ): Promise<FbrainRecord | null> => {
+  const recordFromIndex = (id: string, slug: string): FbrainRecord | null => {
     const cached = liveById.get(id);
     if (cached) return cached;
-    if (index) {
-      if (!bm25CacheHit) return null; // cold path had the full map; miss is stale
-      const text = index.recordText(id);
-      if (!text) return null;
-      return {
-        slug,
-        title: text.title,
-        body: text.body,
-        status: "",
-        tags: [],
-        created_at: "",
-        updated_at: "",
-      };
-    }
-    // Plane-primary: keyed point-read for the hit only. A busy-node error
-    // propagates (see isBusyNodeError); any other failure reads as absent.
-    try {
-      return await findBySlug(node, type, schemaHashFor(type, opts.cfg), slug);
-    } catch (err) {
-      if (isBusyNodeError(err)) throw err;
-      return null;
-    }
+    if (!index) return null;
+    if (!bm25CacheHit) return null;
+    const text = index.recordText(id);
+    if (!text) return null;
+    return {
+      slug,
+      title: text.title,
+      body: text.body,
+      status: "",
+      tags: [],
+      created_at: "",
+      updated_at: "",
+    };
   };
 
-  const { liveIndexRegistered, membershipExists } = await import("../lifecycle-index.ts");
+  const { liveIndexRegistered, membershipExistsMany } = await import("../lifecycle-index.ts");
   const checkLive = liveIndexRegistered(opts.cfg);
-  const resolveOne = async (id: string, slug: string, type: RecordType): Promise<ResolveOutcome> => {
-    try {
-      const rec = await resolveRecord(id, slug, type);
-      if (!rec) return { kind: "stale" };
-      if (checkLive && !(await membershipExists(node, opts.cfg, "live", type, slug))) {
-        return { kind: "not-live" };
-      }
-      return { kind: "ok", rec };
-    } catch (err) {
-      if (isBusyNodeError(err)) return { kind: "busy" };
-      throw err;
-    }
-  };
 
   // Hydrate in rank order, a small window at a time, CONCURRENTLY within the
   // window. Measured 2026-09-22 under load 87: `ask --limit 5` hydrated 13
@@ -579,13 +553,79 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     }
     const window = fused.slice(i, i + Math.max(1, Math.min(HYDRATE_WINDOW, limit - resolved.length + 1)));
     i += window.length;
-    const outcomes = await Promise.all(
-      window.map(async (f) => {
-        const parsed = parseDocId(f.id);
-        if (!parsed) return null;
-        return { f, parsed, out: await resolveOne(f.id, parsed.slug, parsed.type) };
-      }),
-    );
+    type WindowSlot = {
+      f: (typeof window)[number];
+      parsed: { type: RecordType; slug: string };
+      out: ResolveOutcome;
+    };
+    const slots: WindowSlot[] = [];
+    const needFetch: WindowSlot[] = [];
+    for (const f of window) {
+      const parsed = parseDocId(f.id);
+      if (!parsed) continue;
+      if (index || liveById.has(f.id)) {
+        const rec = recordFromIndex(f.id, parsed.slug);
+        slots.push({
+          f,
+          parsed,
+          out: rec ? { kind: "ok", rec } : { kind: "stale" },
+        });
+        continue;
+      }
+      const slot: WindowSlot = { f, parsed, out: { kind: "stale" } };
+      slots.push(slot);
+      needFetch.push(slot);
+    }
+    if (needFetch.length > 0) {
+      const byType = new Map<RecordType, WindowSlot[]>();
+      for (const slot of needFetch) {
+        const group = byType.get(slot.parsed.type) ?? [];
+        group.push(slot);
+        byType.set(slot.parsed.type, group);
+      }
+      try {
+        await Promise.all(
+          [...byType].map(async ([type, group]) => {
+            const found = await findBySlugs(
+              node,
+              type,
+              schemaHashFor(type, opts.cfg),
+              group.map((slot) => slot.parsed.slug),
+            );
+            for (const slot of group) {
+              const rec = found.get(slot.parsed.slug) ?? null;
+              slot.out = rec ? { kind: "ok", rec } : { kind: "stale" };
+            }
+          }),
+        );
+      } catch (err) {
+        if (!isBusyNodeError(err)) throw err;
+        for (const slot of needFetch) slot.out = { kind: "busy" };
+      }
+    }
+    if (checkLive) {
+      const liveSlots = slots.filter((slot) => slot.out.kind === "ok");
+      if (liveSlots.length > 0) {
+        try {
+          const present = await membershipExistsMany(
+            node,
+            opts.cfg,
+            "live",
+            liveSlots.map((slot) => ({ hash: slot.parsed.type, range: slot.parsed.slug })),
+          );
+          for (const slot of liveSlots) {
+            const key = `${slot.parsed.type}\0${slot.parsed.slug}`;
+            if (!present.has(key) && slot.out.kind === "ok") {
+              slot.out = { kind: "not-live" };
+            }
+          }
+        } catch (err) {
+          if (!isBusyNodeError(err)) throw err;
+          for (const slot of liveSlots) slot.out = { kind: "busy" };
+        }
+      }
+    }
+    const outcomes = slots.map((slot) => slot);
     for (const o of outcomes) {
       if (!o || resolved.length >= limit) continue;
       const { f, parsed, out } = o;
