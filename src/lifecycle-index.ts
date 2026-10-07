@@ -186,6 +186,46 @@ export async function membershipExists(
   return rowExists(node, kind, entryHash, hash, range);
 }
 
+/** One keyed read for the membership pairs this call names. */
+export async function membershipExistsMany(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  kind: IndexKind,
+  pairs: ReadonlyArray<{ hash: string; range: string }>,
+): Promise<Set<string>> {
+  const present = new Set<string>();
+  if (pairs.length === 0) return present;
+  const entryHash = schemaHash(cfg, kind);
+  if (!entryHash) return present;
+  const spec = INDEX[kind];
+  const res = await node.queryAll({
+    schemaHash: entryHash,
+    fields: [spec.h, spec.r],
+    filter: {
+      HashRangeKeys: pairs.map((pair) => [pair.hash, pair.range]),
+    },
+  });
+  for (const row of res.results) {
+    const fields = (row.fields ?? {}) as Record<string, unknown>;
+    const fieldHash = fields[spec.h];
+    const fieldRange = fields[spec.r];
+    const hash =
+      typeof row.key?.hash === "string" && row.key.hash.length > 0
+        ? row.key.hash
+        : typeof fieldHash === "string"
+          ? fieldHash
+          : "";
+    const range =
+      typeof row.key?.range === "string"
+        ? row.key.range
+        : typeof fieldRange === "string"
+          ? fieldRange
+          : "";
+    if (hash.length > 0 && range.length > 0) present.add(`${hash}\0${range}`);
+  }
+  return present;
+}
+
 export async function listMembership(
   node: NodeClient,
   cfg: SchemaCfg,

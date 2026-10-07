@@ -856,6 +856,13 @@ export type NodeClient = {
     fields: string[];
     keyHash: string;
   }): Promise<QueryRow | null>;
+  // One keyed read for the keys the caller names. Optional so hand-built
+  // mocks keep compiling; callers fall back to queryByKey when it is absent.
+  queryByKeys?(opts: {
+    schemaHash: string;
+    fields: string[];
+    keys: Array<{ hash: string; range?: string }>;
+  }): Promise<QueryRow[]>;
   // Admin/offline membership primitive: GET /api/list returns storage keys
   // only, never atom bodies. Optional so legacy hand-built test doubles do not
   // all need to grow the newly-shipped Mini route at once.
@@ -1731,6 +1738,22 @@ export function newNodeClient(opts: {
       });
       const results = fromSdkRows(page.rows);
       return findQueryRowByKey(results, keyHash);
+    },
+    async queryByKeys({ schemaHash, fields, keys }) {
+      if (keys.length === 0) return [];
+      const rows: QueryRow[] = [];
+      for (let offset = 0; offset < keys.length; offset += QUERY_PAGE_SIZE) {
+        const slice = keys.slice(offset, offset + QUERY_PAGE_SIZE);
+        const page = await queryAllGuarded({
+          schemaHash,
+          fields,
+          filter: {
+            HashRangeKeys: slice.map((key) => [key.hash, key.range ?? ""]),
+          },
+        });
+        rows.push(...page.results);
+      }
+      return rows;
     },
     async listRecordKeys(schemaHash, listOpts = {}) {
       const params = new URLSearchParams({ schema: schemaHash });
