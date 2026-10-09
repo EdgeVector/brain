@@ -18,7 +18,7 @@
 
 import { FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
-import { resolvePrintSink } from "../format.ts";
+import { resolvePrintSink, resolvePrintSinks } from "../format.ts";
 import {
   crossTypeSlugNote,
   findBySlug,
@@ -58,6 +58,7 @@ import {
   ensureSeverity,
   ensureVerificationEvidence,
   isLivePapercutStatus,
+  prefixPapercutSlug,
   symptomHash,
 } from "../papercut.ts";
 
@@ -319,6 +320,7 @@ export type PapercutFileOptions = {
   reopen?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  printErr?: (line: string) => void;
   json?: boolean;
 };
 
@@ -494,8 +496,10 @@ export function isIdempotentPapercutFile(
 export async function papercutFileCmd(
   opts: PapercutFileOptions,
 ): Promise<PapercutFileResult> {
-  const print = resolvePrintSink(opts);
-  const slug = ensurePapercutSlug(normalizeSlug(opts.slug));
+  const { print, printErr } = resolvePrintSinks(opts);
+  const given = normalizeSlug(opts.slug);
+  const slug = ensurePapercutSlug(prefixPapercutSlug(given));
+  if (slug !== given) printErr(`papercut file: slug prefixed: ${slug}`);
   const component = ensureComponent(opts.component);
   const severity = ensureSeverity(opts.severity);
   const kind = ensureKind(opts.kind);
@@ -644,7 +648,7 @@ export async function papercutFileCmd(
     const lines = [
       liveCount > 0
         ? `Possible duplicate: ${liveCount} live papercut(s) may already describe this (component \`${component}\`, plus near-identical rows in other components).`
-        : `Recurrence: ${duplicates.length} papercut(s) CLOSED in the last ${RECURRENCE_WINDOW_DAYS} days already describe this.`,
+        : `Possible recurrence: ${duplicates.length} papercut(s) CLOSED in the last ${RECURRENCE_WINDOW_DAYS} days may already describe this.`,
       "",
       ...duplicates.map(
         (d) =>
@@ -655,8 +659,9 @@ export async function papercutFileCmd(
           `\n         ${d.title}`,
       ),
       "",
-      "This is the COMPLETE candidate set for this filing, not a first page:",
-      "clearing these cannot reveal more. Read them. Then either:",
+      "This is the complete SIMILARITY-ranked set for this filing, not a first page",
+      "(it does not follow citations, so a record that owns the class may be one hop",
+      "away): clearing these cannot reveal a second page. Read them. Then either:",
       "  * add your evidence to the existing record:  brain append <slug> --type papercut",
       "  * or, if yours is genuinely different:        --not-duplicate-of <slug> (repeatable)",
       "  * or, having read all of the above:           --not-duplicate-of-any",
@@ -664,10 +669,14 @@ export async function papercutFileCmd(
     if (canonicals.length > 0) {
       lines.push(
         "",
-        "A CLOSED row above means the defect came back: its fix did not stick, or is not",
-        "installed yet. Do not file a fresh row. Re-run this same command with",
-        ...canonicals.map((c) => `  --reopen ${c}`),
-        "to add this filing to that row as a `reconfirmed` evidence block and reopen it.",
+        "A CLOSED row above MAY mean the defect came back (its fix did not stick, or is not",
+        "installed yet). It may instead be a SIBLING defect that shares the words and the",
+        "component: similarity cannot tell the two apart. Read each CLOSED row's claim first.",
+        "  * Same defect, so do not file a fresh row. Re-run this same command with the",
+        "    row whose claim matches:",
+        ...canonicals.map((c) => `      --reopen ${c}`),
+        "    to add this filing to that row as a `reconfirmed` evidence block and reopen it.",
+        "  * Sibling defect: re-run with --not-duplicate-of <slug> for that CLOSED row.",
         "--not-duplicate-of-any does NOT clear a recurrence; only --not-duplicate-of <slug> does.",
       );
     }

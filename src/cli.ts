@@ -998,24 +998,30 @@ failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
 and closed at the bottom, 22 could not be counted at all, and the same defect
 was filed twice two hours apart by runs that could not see each other.
 
-file    Files a new papercut, AFTER a dedupe gate. The gate is two nets: an
-        exact \`symptom_hash\` match over (component, normalized --symptom), and a
-        similarity check against every LIVE papercut in the same component
-        (and near-identical live rows in any component).
+file    Files a new papercut, AFTER a dedupe gate. <slug> may leave out the
+        leading \`papercut-\`; it is added and one stderr line says so. Only
+        \`file\` does this: close, set and put take the full slug. The gate is two
+        nets: an exact \`symptom_hash\` match over (component, normalized
+        --symptom), and a similarity check against every LIVE papercut in the
+        same component (and near-identical live rows in any component).
         LIVE means open, partial, or fixed — \`fixed\` still gates, because the
         fix is not proven on any machine until the record reads \`verified\`.
         A hit REFUSES the write (exit 3) and prints the candidates.
 
         RECURRENCE: a row CLOSED (verified/wontfix/duplicate) in the last 14
-        days that describes the same defect also refuses the write. The defect
-        came back, so do not file a fresh row: re-run the same command with
-        --reopen <canonical>. The filing becomes a \`reconfirmed\` evidence
-        block on that row and a closed row goes back to \`open\` — one row
-        carries the recurrence. --not-duplicate-of-any does not clear a
-        recurrence; --not-duplicate-of <slug> does.
+        days that reads like the same defect also refuses the write. It may be
+        a recurrence or a SIBLING defect that shares the words, and similarity
+        cannot tell them apart: read its claim. If the defect came back, do
+        not file a fresh row: re-run the same command with --reopen <slug>.
+        The filing becomes a \`reconfirmed\` evidence block on that row and a
+        closed row goes back to \`open\` — one row carries the recurrence. If it
+        is a sibling, clear it with --not-duplicate-of <slug>.
+        --not-duplicate-of-any does not clear a recurrence.
 
-        The refusal prints the COMPLETE candidate set, so clearing what it named
-        cannot reveal a second page. Clear a false match with
+        The refusal prints the complete SIMILARITY-ranked set, so clearing what
+        it named cannot reveal a second page of it. It does not follow
+        citations: the record that owns the class can be one hop from a
+        candidate, so read each candidate's body. Clear a false match with
         --not-duplicate-of <slug>, or, once you have read them all,
         --not-duplicate-of-any. Both are recorded in the new record's body —
         the bulk form says so in its own words, so a reader can tell the two
@@ -2052,6 +2058,12 @@ export function joinDashLeadingValues(
 function parseCommandArgs<T extends ParseArgsConfig>(
   config: T,
   commandName?: string,
+  // When ONE option table serves several subcommands (papercut), the flags THIS
+  // invocation takes. The unknown-option hint lists these. Listing the shared
+  // table named flags the subcommand then refuses, which sent the caller into a
+  // second rejected command (papercut-brain-papercut-unknown-flag-hint-still-
+  // prints-the-shared-table-20261002).
+  subcommand?: { name: string; flags: readonly string[] },
 ) {
   if (config.args) {
     config = {
@@ -2125,12 +2137,15 @@ function parseCommandArgs<T extends ParseArgsConfig>(
           .map((k) => `--${k}`)
           .join(", ");
         const helpTarget = commandName ? ` ${commandName}` : "";
-        const optionsPart =
-          validOptions.length > 0 ? `Valid options: ${validOptions}. ` : "";
+        const optionsPart = subcommand
+          ? `Flags ${subcommand.name} uses: ${subcommand.flags.map((f) => `--${f}`).join(" ")}. `
+          : validOptions.length > 0
+            ? `Valid options: ${validOptions}. `
+            : "";
         throw new FbrainError({
           code: "unknown_option",
           message: `Unknown option \`--${unknown}\`.`,
-          hint: `${optionsPart}Run \`fbrain help${helpTarget}\` for usage.`,
+          hint: `${optionsPart}Run \`brain help${helpTarget}\` for usage.`,
         });
       }
     }
@@ -4252,6 +4267,25 @@ function requiredFlag(
   return raw;
 }
 
+// The flags `papercut close` still needs. `close` checked them one at a time
+// across two layers (--status/--evidence here, --verified-by and --duplicate-of
+// in papercutCloseCmd), so a caller who passed neither --evidence nor
+// --verified-by needed two failed commands to learn both
+// (papercut-brain-papercut-close-usage-omits-duplicate-of-20260923). The
+// per-status flags only count once --status says which status it is.
+export function missingPapercutCloseFlags(
+  values: Record<string, unknown>,
+): string[] {
+  const given = (flag: string) =>
+    typeof values[flag] === "string" && values[flag].trim().length > 0;
+  const missing = ["status", "evidence"].filter((f) => !given(f));
+  if (values.status === "verified" && !given("verified-by"))
+    missing.push("verified-by");
+  if (values.status === "duplicate" && !given("duplicate-of"))
+    missing.push("duplicate-of");
+  return missing;
+}
+
 async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parseCommandArgs(
     {
@@ -4431,6 +4465,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       options: PAPERCUT_OPTIONS,
     },
     "papercut",
+    { name: sub, flags: PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? [] },
   );
   assertPapercutFlagsConsumed(sub, values as Record<string, unknown>);
   const cfg = readConfig();
@@ -4481,13 +4516,20 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       // row stayed absent from `--kind specified-fix` with the correction
       // sitting in its body.
       const exact = result.duplicates.find((d) => d.exact);
+      // A recurrence refusal does NOT name a --reopen slug here. The top-scored
+      // CLOSED row is as likely to be a sibling defect as the recurrence, and a
+      // slug in the one line a caller reads invites a --reopen that flips a
+      // verified row back to open (papercut-papercut-dedupe-gate-surfaces-an-
+      // instance-and-calls-the-set-complete-while-the-class-owner-is-one-hop-
+      // away-20261004). Name the count and send the reader to the claims.
+      const closedCount = result.duplicates.filter((d) => d.recurrence === true).length;
       const next = result.reopen?.length
-        ? `re-run with --reopen ${result.reopen[0]}`
+        ? `${closedCount} of them CLOSED (a recurrence or a sibling defect): read their claims on stdout, then --reopen the row with the same defect or --not-duplicate-of a sibling`
         : exact
           ? `that is THIS slug: to correct a header column use \`brain papercut set ${exact.slug} [--kind K] [--repo owner/name] [--severity S] [--component C]\`, or append evidence with \`brain append ${exact.slug} --type papercut\``
           : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
       console.error(
-        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) already describe this; ${next}. Candidates are on stdout.`,
+        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) may already describe this; ${next}. Candidates are on stdout.`,
       );
       return 3;
     }
@@ -4501,6 +4543,18 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
         code: "missing_slug",
         message: "papercut close requires a slug.",
         hint: "brain papercut close <slug> --status S --evidence E",
+      });
+    }
+    // Two or more missing: say so once. A single missing flag keeps the message
+    // it always had (requiredFlag, or the richer verification text in
+    // papercutCloseCmd).
+    const missing = missingPapercutCloseFlags(values as Record<string, unknown>);
+    if (missing.length > 1) {
+      const status = typeof values.status === "string" ? ` --status ${values.status}` : "";
+      throw new FbrainError({
+        code: "invalid_papercut_field",
+        message: `papercut close${status} requires ${missing.map((f) => `--${f}`).join(" and ")}.`,
+        hint: `Run \`brain help papercut\` for the full form.`,
       });
     }
     const opts: Parameters<typeof papercutCloseCmd>[0] = {
