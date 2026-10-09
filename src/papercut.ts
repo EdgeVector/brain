@@ -175,6 +175,20 @@ export function suggestPapercutSlug(value: string): string {
   return rest ? `papercut-${rest}` : "papercut-<rest>";
 }
 
+// The FILE door only. The managed instructions spell the verb
+// `brain papercut file <slug>`, so agents drop the literal prefix and the
+// refusal below cost a wasted filing round trip: five sessions in two days
+// (papercut-brain-papercut-file-rejects-slug-missing-papercut-prefix-20260926).
+// The prefix is added, then ensurePapercutSlug still judges the result, so a
+// bad charset is refused as before. The readers (close, set, get) and
+// `put --type papercut` keep calling ensurePapercutSlug or resolve the slug
+// exactly: a reader that guessed a prefix could land on the wrong row.
+export function prefixPapercutSlug(value: string): string {
+  const slug = value.trim();
+  if (/^papercut-/i.test(slug)) return slug;
+  return `papercut-${slug}`;
+}
+
 export function ensurePapercutSlug(value: string): string {
   const slug = value.trim();
   if (!slug.startsWith("papercut-") || slug === "papercut-") {

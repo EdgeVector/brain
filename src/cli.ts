@@ -998,10 +998,12 @@ failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
 and closed at the bottom, 22 could not be counted at all, and the same defect
 was filed twice two hours apart by runs that could not see each other.
 
-file    Files a new papercut, AFTER a dedupe gate. The gate is two nets: an
-        exact \`symptom_hash\` match over (component, normalized --symptom), and a
-        similarity check against every LIVE papercut in the same component
-        (and near-identical live rows in any component).
+file    Files a new papercut, AFTER a dedupe gate. <slug> may leave out the
+        leading \`papercut-\`; it is added and one stderr line says so. Only
+        \`file\` does this: close, set and put take the full slug. The gate is two
+        nets: an exact \`symptom_hash\` match over (component, normalized
+        --symptom), and a similarity check against every LIVE papercut in the
+        same component (and near-identical live rows in any component).
         LIVE means open, partial, or fixed — \`fixed\` still gates, because the
         fix is not proven on any machine until the record reads \`verified\`.
         A hit REFUSES the write (exit 3) and prints the candidates.

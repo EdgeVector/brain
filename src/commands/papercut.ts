@@ -18,7 +18,7 @@
 
 import { FbrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
-import { resolvePrintSink } from "../format.ts";
+import { resolvePrintSink, resolvePrintSinks } from "../format.ts";
 import {
   crossTypeSlugNote,
   findBySlug,
@@ -58,6 +58,7 @@ import {
   ensureSeverity,
   ensureVerificationEvidence,
   isLivePapercutStatus,
+  prefixPapercutSlug,
   symptomHash,
 } from "../papercut.ts";
 
@@ -319,6 +320,7 @@ export type PapercutFileOptions = {
   reopen?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
+  printErr?: (line: string) => void;
   json?: boolean;
 };
 
@@ -494,8 +496,10 @@ export function isIdempotentPapercutFile(
 export async function papercutFileCmd(
   opts: PapercutFileOptions,
 ): Promise<PapercutFileResult> {
-  const print = resolvePrintSink(opts);
-  const slug = ensurePapercutSlug(normalizeSlug(opts.slug));
+  const { print, printErr } = resolvePrintSinks(opts);
+  const given = normalizeSlug(opts.slug);
+  const slug = ensurePapercutSlug(prefixPapercutSlug(given));
+  if (slug !== given) printErr(`papercut file: slug prefixed: ${slug}`);
   const component = ensureComponent(opts.component);
   const severity = ensureSeverity(opts.severity);
   const kind = ensureKind(opts.kind);
