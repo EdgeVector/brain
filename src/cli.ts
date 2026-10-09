@@ -4267,6 +4267,25 @@ function requiredFlag(
   return raw;
 }
 
+// The flags `papercut close` still needs. `close` checked them one at a time
+// across two layers (--status/--evidence here, --verified-by and --duplicate-of
+// in papercutCloseCmd), so a caller who passed neither --evidence nor
+// --verified-by needed two failed commands to learn both
+// (papercut-brain-papercut-close-usage-omits-duplicate-of-20260923). The
+// per-status flags only count once --status says which status it is.
+export function missingPapercutCloseFlags(
+  values: Record<string, unknown>,
+): string[] {
+  const given = (flag: string) =>
+    typeof values[flag] === "string" && values[flag].trim().length > 0;
+  const missing = ["status", "evidence"].filter((f) => !given(f));
+  if (values.status === "verified" && !given("verified-by"))
+    missing.push("verified-by");
+  if (values.status === "duplicate" && !given("duplicate-of"))
+    missing.push("duplicate-of");
+  return missing;
+}
+
 async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parseCommandArgs(
     {
@@ -4524,6 +4543,18 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
         code: "missing_slug",
         message: "papercut close requires a slug.",
         hint: "brain papercut close <slug> --status S --evidence E",
+      });
+    }
+    // Two or more missing: say so once. A single missing flag keeps the message
+    // it always had (requiredFlag, or the richer verification text in
+    // papercutCloseCmd).
+    const missing = missingPapercutCloseFlags(values as Record<string, unknown>);
+    if (missing.length > 1) {
+      const status = typeof values.status === "string" ? ` --status ${values.status}` : "";
+      throw new FbrainError({
+        code: "invalid_papercut_field",
+        message: `papercut close${status} requires ${missing.map((f) => `--${f}`).join(" and ")}.`,
+        hint: `Run \`brain help papercut\` for the full form.`,
       });
     }
     const opts: Parameters<typeof papercutCloseCmd>[0] = {
