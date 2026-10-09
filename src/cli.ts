@@ -1102,12 +1102,15 @@ list    The row-level view of the same partitions census counts (it also
         patching this index).
         One exception to the snapshot: a status partition of at most 150 rows
         (PAPERCUT_VERIFY_UP_TO; \`fixed\` held about 20 on 2026-10-09) is
-        re-read in ONE batched keyed query and each record's own status is
-        re-checked. A ghost entry, left behind when a record moved on, carries a
-        payload that still names the old status, and the snapshot cannot show
-        it: 5 of the 22 rows \`--status fixed\` returned read verified. A larger
-        partition (open, about 2200) stays on the snapshot. The method line
-        names the partitions it re-read and the ones it did not.
+        re-read, in keyed queries of 25 keys sent one after another, and each
+        record's own status is re-checked. The limit is on the rows the
+        partition holds, not on the rows a filter leaves: a narrowed list
+        (\`--severity p0\`) over a small partition re-reads only its candidates,
+        and over a larger one (open, about 2200) it re-reads nothing. A
+        ghost entry, left behind when a record moved on, carries a payload that
+        still names the old status, and the snapshot cannot show it: 5 of the
+        22 rows \`--status fixed\` returned read verified. The method line names
+        the partitions it re-read and the ones it did not.
         --point-read re-reads every record and re-checks it against its
         partition. That is the only reading that catches a record whose header
         moved without this index following, and it is an index audit rather

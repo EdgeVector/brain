@@ -42,6 +42,7 @@ import {
 import { recordListEntryHash } from "../record-list-index.ts";
 import {
   newPapercutReadStats,
+  PAPERCUT_VERIFY_BATCH_SIZE,
   PAPERCUT_VERIFY_UP_TO,
   readPapercutSlugsByStatus,
   readPapercutsByStatus,
@@ -1775,6 +1776,7 @@ export function listMethod(
     dropped: number;
     snapshotOnly: readonly string[];
     limit: number;
+    batch: number;
   },
 ): string {
   let line = (fast ? LIST_METHOD_FAST : LIST_METHOD).replace(
@@ -1785,11 +1787,16 @@ export function listMethod(
   // `verifyUpTo` re-read, and silent about one it left alone. Name both, so
   // `--status fixed` and `--status open` do not carry the same sentence for
   // two different readings.
+  //
+  // What is re-read is the partition's CANDIDATES: every row, or the rows a
+  // `--severity`/`--kind`/... narrowing kept. The narrowed clause below counts
+  // them, so this clause does not claim "every record".
   if (fast && verified) {
     if (verified.partitions.length > 0) {
       line +=
-        `; except ${verified.partitions.join("/")} (within the ${verified.limit}-row verify limit): ` +
-        `every record re-read in one batched keyed read and its status re-checked against the partition, ` +
+        `; except ${verified.partitions.join("/")} (a partition of at most ${verified.limit} rows): ` +
+        `each candidate record re-read in keyed reads of at most ${verified.batch} keys ` +
+        `and its status re-checked against the partition, ` +
         `${verified.dropped} dropped (record gone, deleted, or status moved)`;
     }
     if (verified.snapshotOnly.length > 0) {
@@ -2009,7 +2016,9 @@ export async function papercutListCmd(
     stats,
     // A small partition (`fixed`) is re-read, so a ghost entry cannot be
     // served under a status its record no longer has. `open` is over the
-    // limit and stays on the snapshot. See PAPERCUT_VERIFY_UP_TO.
+    // limit, by its row count and not by how many rows a filter leaves, so it
+    // stays on the snapshot and a narrowed list over it reads no record. See
+    // PAPERCUT_VERIFY_UP_TO.
     verifyUpTo: PAPERCUT_VERIFY_UP_TO,
   });
   const baseMethod = listMethod(
@@ -2028,6 +2037,7 @@ export async function papercutListCmd(
       dropped: stats.verifiedDropped,
       snapshotOnly: stats.unverifiedPartitions,
       limit: PAPERCUT_VERIFY_UP_TO,
+      batch: PAPERCUT_VERIFY_BATCH_SIZE,
     },
   );
   // `Closes-when:` children are point-read, in either ledger, only under
