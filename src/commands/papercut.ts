@@ -42,6 +42,7 @@ import {
 import { recordListEntryHash } from "../record-list-index.ts";
 import {
   newPapercutReadStats,
+  PAPERCUT_VERIFY_UP_TO,
   readPapercutSlugsByStatus,
   readPapercutsByStatus,
 } from "../papercut-status-index.ts";
@@ -1763,22 +1764,64 @@ export function listFilterClause(filters: PapercutListFilters): string {
 export function listMethod(
   fast: boolean,
   filters: PapercutListFilters = {},
-  narrowed?: { fields: readonly string[]; rows: number; pointReads: number },
+  narrowed?: {
+    fields: readonly string[];
+    rows: number;
+    narrowedOut: number;
+    pointReads: number;
+  },
+  verified?: {
+    partitions: readonly string[];
+    dropped: number;
+    snapshotOnly: readonly string[];
+    limit: number;
+  },
 ): string {
-  const base = (fast ? LIST_METHOD_FAST : LIST_METHOD).replace(
+  let line = (fast ? LIST_METHOD_FAST : LIST_METHOD).replace(
     "FILTERS",
     listFilterClause(filters),
   );
-  if (!narrowed) return base;
+  // The snapshot reading says "NOT point-read", which is wrong for a partition
+  // `verifyUpTo` re-read, and silent about one it left alone. Name both, so
+  // `--status fixed` and `--status open` do not carry the same sentence for
+  // two different readings.
+  if (fast && verified) {
+    if (verified.partitions.length > 0) {
+      line +=
+        `; except ${verified.partitions.join("/")} (within the ${verified.limit}-row verify limit): ` +
+        `every record re-read in one batched keyed read and its status re-checked against the partition, ` +
+        `${verified.dropped} dropped (record gone, deleted, or status moved)`;
+    }
+    if (verified.snapshotOnly.length > 0) {
+      line +=
+        `; ${verified.snapshotOnly.join("/")} (over ${verified.limit} rows) not re-verified, ` +
+        `so a ghost entry there is not caught`;
+    }
+  }
+  if (!narrowed) return line;
   // Say what was NOT read, and why that could be wrong. A reader who only
   // learns the command got faster cannot tell a narrowed answer from a
   // complete one, and this reader's whole contract is that it returns every
   // matching row.
-  return (
-    `${base}; candidates pre-selected from the index snapshot on ` +
-    `${narrowed.fields.join("/")} (${narrowed.pointReads} of ${narrowed.rows} ` +
-    `rows point-read) — a row whose snapshot disagrees on those fields is not read`
-  );
+  //
+  // The count is of CANDIDATES (rows the snapshot selected), then of rows read
+  // from the node. The old text printed only the second, against the whole
+  // partition, so "0 of 476 rows point-read" was both what a `--point-read`
+  // that matched nothing printed and what the snapshot reading printed for any
+  // narrowed list, and neither reads as a result.
+  const fields = narrowed.fields.join("/");
+  const candidates = narrowed.rows - narrowed.narrowedOut;
+  line +=
+    `; candidates pre-selected from the index snapshot on ${fields}: ` +
+    `${candidates} of ${narrowed.rows} partition rows matched, ` +
+    `${narrowed.narrowedOut} ruled out unread, ${narrowed.pointReads} read from the node — ` +
+    `a row whose snapshot disagrees on those fields is not read`;
+  if (candidates === 0 && narrowed.rows > 0) {
+    line +=
+      `; empty result rests on the snapshot's ${fields} alone: no row was read, ` +
+      `and --point-read cannot detect a wrongly excluded row`;
+  }
+  return line;
 }
 
 // The index-only projection has to say what it did NOT do: the row's `status`
@@ -1942,8 +1985,10 @@ export async function papercutListCmd(
     return;
   }
   // Read one status partition when the caller named one; the whole ledger
-  // otherwise. `readPapercutsByStatus` is the same complete reader `census`
-  // uses, so list and census are two views of ONE read and cannot disagree.
+  // otherwise. `readPapercutsByStatus` is the same reader `census` uses, so
+  // the two read the same partitions. They differ in one place: `list` also
+  // re-reads a small partition (`verifyUpTo`), so a ghost entry in `fixed` is
+  // still counted by `census` and no longer listed here.
   // See LIST_METHOD_FAST for why the snapshot is the default reading.
   const fast = listReadsSnapshot({ pointRead: opts.pointRead, bodyResolved });
   const filters: PapercutListFilters = {};
@@ -1962,6 +2007,10 @@ export async function papercutListCmd(
       ? (record) => matchesPapercutFilters(record, narrowBy)
       : undefined,
     stats,
+    // A small partition (`fixed`) is re-read, so a ghost entry cannot be
+    // served under a status its record no longer has. `open` is over the
+    // limit and stays on the snapshot. See PAPERCUT_VERIFY_UP_TO.
+    verifyUpTo: PAPERCUT_VERIFY_UP_TO,
   });
   const baseMethod = listMethod(
     fast,
@@ -1970,9 +2019,16 @@ export async function papercutListCmd(
       ? {
           fields: Object.keys(narrowBy),
           rows: stats.rows,
+          narrowedOut: stats.narrowedOut,
           pointReads: stats.pointReads,
         }
       : undefined,
+    {
+      partitions: stats.verifiedPartitions,
+      dropped: stats.verifiedDropped,
+      snapshotOnly: stats.unverifiedPartitions,
+      limit: PAPERCUT_VERIFY_UP_TO,
+    },
   );
   // `Closes-when:` children are point-read, in either ledger, only under
   // --body-resolved: that is the reading that already paid for every body.

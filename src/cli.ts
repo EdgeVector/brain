@@ -1083,22 +1083,31 @@ census  Counts by component and status, and prints its own method line.
         updated_at was the field the snapshot lagged on. Either way the method
         line says which reading produced the numbers.
 
-list    The row-level view of the SAME read census counts, so the two can never
-        disagree. Applies <component> and --status, returns every matching row
-        (no sample, no cap), and carries every stored header field —
+list    The row-level view of the same partitions census counts (it also
+        re-reads a small partition, see below). Applies <component> and
+        --status, returns every matching row (no sample, no cap), and carries
+        every stored header field —
         component/severity/kind/repo/fixed_by/verified_by/duplicate_of — because
         those are what a closure audit is made of. Ordered oldest-updated first,
         which is the order the reconcile loop actually consumes.
 
         Like census, it reads each row from the snapshot the index already
-        carries: one node query per status partition and ZERO point reads.
-        Measured on the primary 2026-09-06, unfiltered: 10 node requests and
+        carries: one node query per status partition and ZERO point reads
+        (before the exception below). Measured on the primary 2026-09-06, unfiltered: 10 node requests and
         21.7s of node service time, against 3404 requests and 2743.3s for the
         point read of the same ledger. In a controlled fast/point-read/fast
         sandwich over 274 rows, the 273 that did not change during the window
         agreed on EVERY stored field; updated_at disagreed on one row (0.37%,
         against 46.8% on 2026-09-04, before brain append and brain tag began
         patching this index).
+        One exception to the snapshot: a status partition of at most 150 rows
+        (PAPERCUT_VERIFY_UP_TO; \`fixed\` held about 20 on 2026-10-09) is
+        re-read in ONE batched keyed query and each record's own status is
+        re-checked. A ghost entry, left behind when a record moved on, carries a
+        payload that still names the old status, and the snapshot cannot show
+        it: 5 of the 22 rows \`--status fixed\` returned read verified. A larger
+        partition (open, about 2200) stays on the snapshot. The method line
+        names the partitions it re-read and the ones it did not.
         --point-read re-reads every record and re-checks it against its
         partition. That is the only reading that catches a record whose header
         moved without this index following, and it is an index audit rather

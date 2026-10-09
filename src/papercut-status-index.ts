@@ -379,17 +379,60 @@ export async function requireCompletePapercutStatusIndex(
  * What one `readPapercutsByStatus` call actually did, so a reader can say so
  * in its method line instead of asserting it. `rows` is what the partition
  * held, `narrowedOut` is what the snapshot ruled out unread, `pointReads` is
- * what it charged the node.
+ * what it charged the node (records read from the node, not the snapshot; the
+ * rows of a `verifyUpTo` partition count here too).
  */
 export type PapercutReadStats = {
   rows: number;
   pointReads: number;
   narrowedOut: number;
+  /** Partitions whose records `verifyUpTo` re-read instead of trusting the snapshot. */
+  verifiedPartitions: string[];
+  /** Rows that re-read dropped: record gone or deleted, or its status is not the partition. */
+  verifiedDropped: number;
+  /** Partitions over `verifyUpTo`, served from the snapshot unverified. */
+  unverifiedPartitions: string[];
 };
 
 export function newPapercutReadStats(): PapercutReadStats {
-  return { rows: 0, pointReads: 0, narrowedOut: 0 };
+  return {
+    rows: 0,
+    pointReads: 0,
+    narrowedOut: 0,
+    verifiedPartitions: [],
+    verifiedDropped: 0,
+    unverifiedPartitions: [],
+  };
 }
+
+/**
+ * A status partition with at most this many rows is re-read from the papercut
+ * schema by `papercut list`, instead of being served from its `psi_payload`
+ * snapshot.
+ *
+ * The snapshot cannot show a ghost. When a record leaves a partition and the
+ * old index entry survives (`planPapercutStatusOps` deletes the old entry only
+ * from `previous.status`, so a stale or raced `previous` leaves it), the ghost
+ * carries the payload written when it was placed, and that payload still names
+ * the old partition. On 2026-10-09 five of the 22 rows `papercut list --status
+ * fixed` returned read `verified` on `brain get`.
+ *
+ * Why 150:
+ *  - Ghosts collect in the partitions records leave, and the one a resolver
+ *    acts on, `fixed`, is small: about 20 rows on 2026-10-09. `open` holds
+ *    about 2200 and stays on the snapshot at any value near this one.
+ *  - The check is ONE keyed query (HashRangeKeys): 150 keys are under
+ *    QUERY_PAGE_SIZE (1000), so the node sees a single request per partition.
+ *    It still loads every record. The only figure measured for that is the
+ *    serial one, 2743.3s of node time for 3388 rows (0.81s per row, the
+ *    2026-09-06 table in commands/papercut.ts), which bounds 150 rows near two
+ *    minutes and 20 rows near 16 seconds. The same bound puts the 2200-row
+ *    `open` partition near 30 minutes, the cost the snapshot reading exists to
+ *    avoid. The batched read itself has not been timed.
+ *  - The method line names every partition left on the snapshot, so a larger
+ *    partition is a stated limit, not a silent one.
+ */
+export const PAPERCUT_VERIFY_UP_TO = 150;
 
 /**
  * Read one named status partition, or every fixed status partition.
@@ -421,6 +464,15 @@ export function newPapercutReadStats(): PapercutReadStats {
  * whose status moved without the index following; the payload cannot, because
  * a write that skipped the index also skipped the payload.
  *
+ * `verifyUpTo` (with `fast`): give a SMALL partition the point read's answer
+ * without the point read's cost. A partition with at most that many candidate
+ * rows ignores its snapshot and re-reads every record in one keyed query
+ * (`findBySlugs`), then keeps only a record whose own `status` is the
+ * partition. There is no fallback to the snapshot: a slug the query does not
+ * return is a ghost (or a deleted record) and drops, and a failed query throws
+ * rather than answering from the snapshot it was meant to check. A larger
+ * partition is served from the snapshot as before. See PAPERCUT_VERIFY_UP_TO.
+ *
  * `narrow`: a predicate over the payload snapshot that selects which rows are
  * worth point-reading at all. This is what makes a FILTERED list cost the size
  * of its answer instead of the size of the partition. `papercut list --status
@@ -449,16 +501,26 @@ export async function readPapercutsByStatus(
     fast?: boolean;
     narrow?: (record: FbrainRecord) => boolean;
     stats?: PapercutReadStats;
+    verifyUpTo?: number;
   },
 ): Promise<FbrainRecord[]> {
   const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
   const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
-  const { findBySlug, isTombstoned, schemaHashFor, fieldsFor, rowToRecord } =
-    await import("./record.ts");
+  const {
+    findBySlug,
+    findBySlugs,
+    isTombstoned,
+    schemaHashFor,
+    fieldsFor,
+    rowToRecord,
+  } = await import("./record.ts");
   const papercutHash = schemaHashFor("papercut", cfg);
   const fast = opts?.fast === true;
   const narrow = opts?.narrow;
   const stats = opts?.stats;
+  // Only the snapshot reading has anything to verify; the default reading
+  // already point-reads every record.
+  const verifyUpTo = fast ? opts?.verifyUpTo : undefined;
   const out: FbrainRecord[] = [];
   for (const partition of statuses) {
     const res = await node.queryAll({
@@ -482,6 +544,30 @@ export async function readPapercutsByStatus(
       }
       slugs.push(slug);
       if (fast && record) fromPayload.set(slug, record);
+    }
+    if (verifyUpTo !== undefined && slugs.length > 0) {
+      if (slugs.length > verifyUpTo) {
+        if (stats) stats.unverifiedPartitions.push(partition);
+      } else {
+        // ONE keyed query for the whole partition, and the record it returns
+        // is the answer: a payload that names this partition proves nothing,
+        // because a ghost carries exactly that payload.
+        const live = await findBySlugs(node, "papercut", papercutHash, slugs);
+        let kept = 0;
+        for (const slug of slugs) {
+          const record = live.get(slug);
+          if (record && record.status === partition) {
+            out.push(record);
+            kept += 1;
+          }
+        }
+        if (stats) {
+          stats.pointReads += slugs.length;
+          stats.verifiedPartitions.push(partition);
+          stats.verifiedDropped += slugs.length - kept;
+        }
+        continue;
+      }
     }
     // Point-read only what the payload could not answer: everything by
     // default, and under `fast` just the rows with no usable snapshot.
