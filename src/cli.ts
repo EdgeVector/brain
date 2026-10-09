@@ -1009,15 +1009,19 @@ file    Files a new papercut, AFTER a dedupe gate. <slug> may leave out the
         A hit REFUSES the write (exit 3) and prints the candidates.
 
         RECURRENCE: a row CLOSED (verified/wontfix/duplicate) in the last 14
-        days that describes the same defect also refuses the write. The defect
-        came back, so do not file a fresh row: re-run the same command with
-        --reopen <canonical>. The filing becomes a \`reconfirmed\` evidence
-        block on that row and a closed row goes back to \`open\` — one row
-        carries the recurrence. --not-duplicate-of-any does not clear a
-        recurrence; --not-duplicate-of <slug> does.
+        days that reads like the same defect also refuses the write. It may be
+        a recurrence or a SIBLING defect that shares the words, and similarity
+        cannot tell them apart: read its claim. If the defect came back, do
+        not file a fresh row: re-run the same command with --reopen <slug>.
+        The filing becomes a \`reconfirmed\` evidence block on that row and a
+        closed row goes back to \`open\` — one row carries the recurrence. If it
+        is a sibling, clear it with --not-duplicate-of <slug>.
+        --not-duplicate-of-any does not clear a recurrence.
 
-        The refusal prints the COMPLETE candidate set, so clearing what it named
-        cannot reveal a second page. Clear a false match with
+        The refusal prints the complete SIMILARITY-ranked set, so clearing what
+        it named cannot reveal a second page of it. It does not follow
+        citations: the record that owns the class can be one hop from a
+        candidate, so read each candidate's body. Clear a false match with
         --not-duplicate-of <slug>, or, once you have read them all,
         --not-duplicate-of-any. Both are recorded in the new record's body —
         the bulk form says so in its own words, so a reader can tell the two
@@ -4483,13 +4487,20 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       // row stayed absent from `--kind specified-fix` with the correction
       // sitting in its body.
       const exact = result.duplicates.find((d) => d.exact);
+      // A recurrence refusal does NOT name a --reopen slug here. The top-scored
+      // CLOSED row is as likely to be a sibling defect as the recurrence, and a
+      // slug in the one line a caller reads invites a --reopen that flips a
+      // verified row back to open (papercut-papercut-dedupe-gate-surfaces-an-
+      // instance-and-calls-the-set-complete-while-the-class-owner-is-one-hop-
+      // away-20261004). Name the count and send the reader to the claims.
+      const closedCount = result.duplicates.filter((d) => d.recurrence === true).length;
       const next = result.reopen?.length
-        ? `re-run with --reopen ${result.reopen[0]}`
+        ? `${closedCount} of them CLOSED (a recurrence or a sibling defect): read their claims on stdout, then --reopen the row with the same defect or --not-duplicate-of a sibling`
         : exact
           ? `that is THIS slug: to correct a header column use \`brain papercut set ${exact.slug} [--kind K] [--repo owner/name] [--severity S] [--component C]\`, or append evidence with \`brain append ${exact.slug} --type papercut\``
           : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
       console.error(
-        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) already describe this; ${next}. Candidates are on stdout.`,
+        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) may already describe this; ${next}. Candidates are on stdout.`,
       );
       return 3;
     }
