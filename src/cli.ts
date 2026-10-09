@@ -2058,6 +2058,12 @@ export function joinDashLeadingValues(
 function parseCommandArgs<T extends ParseArgsConfig>(
   config: T,
   commandName?: string,
+  // When ONE option table serves several subcommands (papercut), the flags THIS
+  // invocation takes. The unknown-option hint lists these. Listing the shared
+  // table named flags the subcommand then refuses, which sent the caller into a
+  // second rejected command (papercut-brain-papercut-unknown-flag-hint-still-
+  // prints-the-shared-table-20261002).
+  subcommand?: { name: string; flags: readonly string[] },
 ) {
   if (config.args) {
     config = {
@@ -2131,12 +2137,15 @@ function parseCommandArgs<T extends ParseArgsConfig>(
           .map((k) => `--${k}`)
           .join(", ");
         const helpTarget = commandName ? ` ${commandName}` : "";
-        const optionsPart =
-          validOptions.length > 0 ? `Valid options: ${validOptions}. ` : "";
+        const optionsPart = subcommand
+          ? `Flags ${subcommand.name} uses: ${subcommand.flags.map((f) => `--${f}`).join(" ")}. `
+          : validOptions.length > 0
+            ? `Valid options: ${validOptions}. `
+            : "";
         throw new FbrainError({
           code: "unknown_option",
           message: `Unknown option \`--${unknown}\`.`,
-          hint: `${optionsPart}Run \`fbrain help${helpTarget}\` for usage.`,
+          hint: `${optionsPart}Run \`brain help${helpTarget}\` for usage.`,
         });
       }
     }
@@ -4437,6 +4446,7 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       options: PAPERCUT_OPTIONS,
     },
     "papercut",
+    { name: sub, flags: PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? [] },
   );
   assertPapercutFlagsConsumed(sub, values as Record<string, unknown>);
   const cfg = readConfig();
