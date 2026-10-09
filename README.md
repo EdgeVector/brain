@@ -495,19 +495,6 @@ What it does **not** do:
 
 Per-record outcomes (`kept | reindexed | skipped-tombstone`) are printed with the global `--verbose` flag. Pollution-ratio measurement (before/after) is intentionally deferred to `fbrain doctor freshness` (G3a). For the full root-cause analysis and the chain of recommended follow-ups, see [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md).
 
-## Verifying
-
-`scripts/parity-smoketest.sh` is the one-command round-trip check that backs gate item #1 in [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md). It walks hand-picked fixtures from `test/fixtures/parity/` — covering record types with frontmatter-shape and body variety — `put`s each, `get`s each back, and diffs title/body/tags/status for identity. Exits 0 on full parity; non-zero with a count of mismatches otherwise.
-
-```bash
-./scripts/parity-smoketest.sh                 # uses `fbrain` on PATH
-FBRAIN="bun src/cli.ts" ./scripts/parity-smoketest.sh   # from a worktree
-```
-
-Re-running is idempotent — `fbrain put` upserts via Phase 4 semantics, so the second run re-asserts the same parity against records the first run created.
-
-The script retries each `get` up to five times (250 ms backoff) to ride out the polluted-daemon read flake documented in [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md) — same query, different result count run-to-run. That flake is a fold_db read-consistency concern; the smoketest is scoped to fbrain-side parity.
-
 ## MCP
 
 fbrain ships an MCP (Model Context Protocol) server so AI agents — Claude Code, Codex, and any other MCP client — can read **and write** the brain in-process without shelling out. Ten tools across G6 read + G6-write scope: `fbrain_search`, `fbrain_ask`, `fbrain_get`, `fbrain_list`, `fbrain_backlinks`, `fbrain_put`, `fbrain_status`, `fbrain_append`, `fbrain_delete`, `fbrain_link`.
@@ -669,12 +656,11 @@ When in doubt, `fbrain doctor` will tell you exactly which check is failing and 
 
 ## Tests
 
+The tests were deleted on 2026-10-09. The merge gate runs the shell syntax check, a frozen install, and the typecheck.
+
 ```bash
-bun test           # runs unit + integration tests
 bun run typecheck  # strict tsc --noEmit
 ```
-
-Integration tests spawn a real `fold_db_node` against a unique tmpdir and point it at the dev cloud schema-service Lambda (us-west-2). At test start the harness runs a one-shot bootability probe (cloud schema-service reachable + one real `run.sh` boot with early-child-exit detection) — if `FOLD_NODE_DIR` (defaults to `/Users/tomtang/code/edgevector/fold/fold_db_node`) isn't present, the cloud Lambda isn't reachable, or `run.sh` can't boot a node, every integration file skips cleanly in seconds with a single notice and only the unit subset runs. Set `FBRAIN_SKIP_INTEGRATION=1` to force-skip even when the node dir is present (offline dev). Override the dev Lambda URL via `FBRAIN_TEST_SCHEMA_URL` and the node URL via `FBRAIN_TEST_NODE_URL`.
 
 ## Quality / eval
 
@@ -745,11 +731,6 @@ and MRR for both arms **split by class**, because a lift on adjacency paid for
 by a regression on controls is not a lift, and one blended number hides
 exactly that trade. It exits 0 with no config or an unreachable node, so CI
 treats an unmeasured run as unmeasured rather than as a failure.
-
-`test/unit/graph-boost-eval.test.ts` runs the same fixture offline through the
-real BM25 ranker and the real boost, and fails if adjacency stops improving or
-controls start regressing — the live harness cannot run in CI, so without that
-test nothing would catch a change that makes the boost useless.
 
 Measured offline over the fixture (BM25-only retrieval, so a floor rather than
 the headline number):

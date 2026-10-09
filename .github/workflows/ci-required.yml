@@ -2,8 +2,8 @@ name: ci-required
 
 # Gate of record for EdgeVector/brain is GitHub (2026-09-30).
 # Brain: decision-2026-09-29-retire-lastgit-all-repos-to-github.
-# `test` runs .lastgit/ci.sh (shell syntax, frozen install, typecheck, bun test),
-# the same body that gated LastGit and Forgejo. The final job `ci-required`
+# `check` runs .lastgit/ci.sh (shell syntax, frozen install, typecheck). CI runs
+# no tests; the tests were deleted on 2026-10-09. The final job `ci-required`
 # is the protected status name. Keep the job name verbatim.
 
 on:
@@ -17,13 +17,10 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: test
+  check:
+    name: check
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      # Integration tests need a local LastDB node, which CI does not have.
-      FBRAIN_SKIP_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +29,7 @@ jobs:
           # Pin avoids setup-bun's GitHub API lookup for "latest".
           bun-version: "1.3.10"
 
-      - name: ci.sh (syntax, install, typecheck, tests)
+      - name: ci.sh (syntax, install, typecheck)
         run: bash .lastgit/ci.sh
 
       # Retrieval eval harness. Non-blocking: prints P@1/3/5+MRR to the log.
@@ -91,13 +88,13 @@ jobs:
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [test]
+    needs: [check]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every needed job to succeed
         run: |
-          echo "test=${{ needs.test.result }}"
-          test "${{ needs.test.result }}" = "success"
+          echo "check=${{ needs.check.result }}"
+          test "${{ needs.check.result }}" = "success"
 
   publish:
     name: publish
