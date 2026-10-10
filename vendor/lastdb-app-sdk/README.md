@@ -847,7 +847,6 @@ point; this just keeps the client's cache clean and fails fast.
 ```bash
 npm install
 npm run build        # tsc → dist/
-npm test             # vitest (mock-transport error mapping + capability store)
 npm run lint
 node e2e/roundtrip.mjs   # connect → mutate → query, against an ephemeral folddb dev node
 node e2e/search.mjs      # scoped search() contract + node-authoritative scope (see e2e/)

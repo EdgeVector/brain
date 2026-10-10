@@ -634,9 +634,8 @@ shows it as a debug column too).
                 so \`--explain\` alone exits 2.
   --graph-boost re-rank using the typed knowledge graph: a record adjacent to
                 one of the top hits gets a bounded score increment on the RRF
-                scale. OFF by default; the default changes only on measured
-                eval lift (\`bun scripts/eval-graph-boost.ts\`). Costs at most
-                two keyed range reads per seed and never adds a new candidate.
+                scale. OFF by default. Costs at most two keyed range reads
+                per seed and never adds a new candidate.
                 \`BRAIN_GRAPH_BOOST=1\` enables it for a whole shell.
   --graph-boost-seeds N
                 how many top hits seed adjacency (default 3, max 10).
@@ -1365,10 +1364,9 @@ const ASK_OPTIONS = {
   // changes nothing now. Accepted so existing scripts/agents don't break.
   "no-llm": { type: "boolean", default: false },
   explain: { type: "boolean", default: false },
-  // Phase-3 knowledge-graph adjacency boost. OFF by default — the design
-  // settled that a ranking default may change only on measured eval lift
-  // (`bun scripts/eval-graph-boost.ts`). `BRAIN_GRAPH_BOOST=1` turns it on
-  // for a whole shell without editing call sites; the flag still wins.
+  // Phase-3 knowledge-graph adjacency boost. OFF by default.
+  // `BRAIN_GRAPH_BOOST=1` turns it on for a whole shell without editing
+  // call sites; the flag still wins.
   "graph-boost": { type: "boolean", default: false },
   "graph-boost-seeds": { type: "string" },
   "graph-boost-weight": { type: "string" },

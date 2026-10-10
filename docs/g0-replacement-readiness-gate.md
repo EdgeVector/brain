@@ -1,5 +1,10 @@
 # G0 — fbrain replacement-readiness gate
 
+**Policy update (2026-10-09):** This document preserves historical rollout
+evidence. All test suites, expected-pair evaluations, and test thresholds below
+are retired. They are not current ship requirements. Do not restore or run
+them. Situation: `no-tests-all-repos-20261009`.
+
 **Last updated:** 2026-06-19
 **Status:** criteria defined; **9 of 10 acceptance items green; 1 in its final audit window** (#5). The #8 rollback rehearsal was performed 2026-06-19 (see §5 + §9). #5's reverse-mirror logging was instrumented 2026-06-19; the flip has run continuously since 2026-06-02 (17 days, `brain doctor` green throughout), and a clean-log audit window now accumulates evidence — closes 2026-06-26. The G5 `fbrain ask` ship (PR #23) flipped #3-ask and #10 green on 2026-05-25. Item **#6 (second-user dogfood) was retired 2026-06-06** as false-premise — see [`decisions/g14-second-user-identity-model.md`](decisions/g14-second-user-identity-model.md). Item numbers preserved for link integrity.
 **Owner:** Tom Tang.

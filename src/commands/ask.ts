@@ -101,10 +101,8 @@ export type AskOptions = {
   // so existing scripts/agents don't break. Ignored when `expand` is set.
   noLlm?: boolean;
   explain?: boolean;
-  // Phase-3 knowledge-graph adjacency boost. DEFAULT OFF — the design
-  // (`design-brain-knowledge-graph`, decision 4) settled that ranking changes
-  // are eval-gated, so this ships behind the flag and the default may change
-  // only on measured P@5 lift from `eval/graph/pairs.json`.
+  // Phase-3 knowledge-graph adjacency boost. DEFAULT OFF; callers opt in
+  // explicitly. The no-tests policy retired the synthetic evaluation gate.
   //
   // When false/undefined the ask pipeline is byte-identical to before: no
   // extra reads, no score change, no explain section.
