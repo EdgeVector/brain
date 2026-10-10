@@ -1,5 +1,9 @@
 # Phase 7 — G3 search-latency root-cause spike
 
+**Policy update (2026-10-09):** This report preserves historical evidence.
+The no-tests policy retires its synthetic evaluation and fixture requirements.
+Situation: `no-tests-all-repos-20261009`.
+
 - **Date:** 2026-05-24
 - **Spike duration:** ~90 min
 - **Author:** kanban-agent (worktree `fc482`)
@@ -118,9 +122,12 @@ A `fbrain doctor freshness` subcommand that:
 
 Surfaces both freshness regressions and H2 pollution to operators without requiring code reading. Cost: ~½ day.
 
-### G3b — Retrieval eval harness (`scripts/eval-retrieval.ts`)
+### G3b — Retrieval evaluation (retired 2026-10-09)
 
-20+ hand-labeled `(query, expected_slug)` pairs. CI runs them and fails the build if precision@1 drops below 0.8. **Hard prerequisite for G5 (`fbrain ask`)** — without a baseline, hybrid retrieval tuning is guesswork. Cost: ~½ day for the harness + 2-4 h for labelling.
+Tom retired tests and test coverage requirements on 2026-10-09. The synthetic
+retrieval evaluation scripts and expected-pair datasets were deleted. This
+proposal no longer requires a retrieval suite or a precision threshold for G5
+(`fbrain ask`). Situation: `no-tests-all-repos-20261009`.
 
 ### G3c — `fbrain reindex` workaround command (fbrain-layer)
 
@@ -147,11 +154,13 @@ Either (a) add a per-record `purge_embeddings(schema, key)` API and have fbrain 
 ## Why this is **not** a prototype ship-gate (but is a G5 ship-gate)
 
 - For the prototype/dogfood loop, the bug surfaces only **after** soft-deletes in the same node OR when a query collides semantically with non-fbrain schemas. New users running `fbrain put X && fbrain search X` on a fresh personal corpus will not hit it.
-- For **G5 `fbrain ask`** (hybrid retrieval over the same native index), every retrieval call is one of the queries that *will* collide. RRF + LLM expansion amplifies the top-K problem: if 8/10 candidates are phantoms, the LLM rewrites a bad context. **Do not ship G5 without G3a + G3b + G3d.**
+- For **G5 `fbrain ask`** (hybrid retrieval over the same native index), every retrieval call is one of the queries that *will* collide. RRF + LLM expansion amplifies the top-K problem: if 8/10 candidates are phantoms, the LLM rewrites a bad context. G3a and G3d address that product defect. The G3b evaluation requirement is retired.
 
 ## Repro script
 
-`scripts/g3-spike-repro.sh` (committed in this PR) — single-trial put→get→search loop. Invoke with `bash scripts/g3-spike-repro.sh <trial-id>`. CSV-ish output. Use it as the seed for the G3a doctor probe and the G3b eval harness.
+The historical `scripts/g3-spike-repro.sh` used a single-trial
+put→get→search loop. That script and the G3b evaluation harness were deleted
+under the no-tests policy. The functional G3a doctor command remains.
 
 ## References
 

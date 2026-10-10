@@ -662,31 +662,7 @@ The tests were deleted on 2026-10-09. The merge gate runs the shell syntax check
 bun run typecheck  # strict tsc --noEmit
 ```
 
-## Quality / eval
-
-`scripts/eval-retrieval.ts` is the retrieval eval harness — a hard prerequisite for shipping G5 (`fbrain ask`) per [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md) G3b. Without a baseline, every retrieval tuning change is guesswork.
-
-```bash
-bun scripts/eval-retrieval.ts                  # seed missing pairs, evaluate, soft-delete seeded
-bun scripts/eval-retrieval.ts --no-seed        # evaluate against the live corpus only
-bun scripts/eval-retrieval.ts --keep           # don't soft-delete after (debugging)
-bun scripts/eval-retrieval.ts --limit 5        # consider only the top-5 (default 10)
-bun scripts/eval-retrieval.ts --out report.json
-```
-
-The pair set lives at [`eval/retrieval/pairs.json`](eval/retrieval/pairs.json) — 20+ hand-labeled `(query, expected_slug, expected_type)` triples, each with a `seed` block so the harness can materialise the record on demand. Slugs are prefixed `eval-retrieval-` so seeding/teardown can't collide with real records. The runner:
-
-1. For each pair, checks whether the seeded record already exists. If not, `put`s it from the seed block.
-2. Issues the query through `searchCmd` programmatically (no shelling out) and captures the top-K slugs.
-3. Computes precision@1 / @3 / @5 and mean reciprocal rank across all pairs.
-4. Emits a JSON report (`schema_version: 1`) plus an optional human-readable table.
-5. Soft-deletes anything it seeded unless `--keep` is passed.
-
-CI runs the harness as a **non-blocking** step (`continue-on-error: true`) — the build logs the numbers but doesn't fail on them. The runner self-skips when `~/.fbrain/config.json` is absent or the node is unreachable, so CI prints "skipping" today; once an ephemeral node is wired into CI the numbers will start flowing. TODO: once we have ≥7 days of runs, gate on a P@1 floor (see the G3b plan).
-
-A typical baseline reading against a polluted homebrew daemon (the H2 case the Phase 7 spike documents) hovers around P@1 ≈ 0.4 — most queries either rank the seeded record first or get drowned by phantom/orphan-schema fragments. That number is the artifact this harness exists to track.
-
-### Graph adjacency boost (eval-gated)
+## Graph adjacency boost
 
 Phase 3 of the knowledge graph adds a second ranking signal to `brain ask`: a
 record adjacent in the typed edge graph to a record the text rankers already
@@ -695,9 +671,8 @@ hybrid ranker cannot — the decision a design settled, the proof a task
 produced — because those records answer a question about a topic while using
 almost none of that topic's words.
 
-It is **off by default** and stays off until the eval says otherwise
-([`design-brain-knowledge-graph`](https://thelastdb.com) decision 4: ranking
-changes are eval-gated).
+It is **off by default**. The synthetic evaluation scripts and datasets were
+deleted on 2026-10-09 under the no-tests policy. The default remains unchanged.
 
 ```bash
 brain ask "<query>" --graph-boost              # turn it on for one query
@@ -715,33 +690,6 @@ Cost and safety, by construction:
 - **A ceiling.** A boosted record is clamped to the score of the best-ranked
   seed that vouched for it, so the graph can lift a record to just under its
   seed but never above it.
-
-Measure it with:
-
-```bash
-bun scripts/eval-graph-boost.ts                # seed, measure both arms, teardown
-bun scripts/eval-graph-boost.ts --weight 0.75  # sweep the weight
-bun scripts/eval-graph-boost.ts --out report.json
-```
-
-The fixture is [`eval/graph/pairs.json`](eval/graph/pairs.json) — 34 labeled
-queries over a 34-record graph, split into `adjacency` pairs (the boost's
-target) and `control` pairs (must not move). The harness reports P@1/P@3/P@5
-and MRR for both arms **split by class**, because a lift on adjacency paid for
-by a regression on controls is not a lift, and one blended number hides
-exactly that trade. It exits 0 with no config or an unreachable node, so CI
-treats an unmeasured run as unmeasured rather than as a failure.
-
-Measured offline over the fixture (BM25-only retrieval, so a floor rather than
-the headline number):
-
-| class | arm | P@1 | P@3 | P@5 | MRR |
-|---|---|---|---|---|---|
-| adjacency (n=16) | baseline | 37.5% | 68.8% | 75.0% | 0.544 |
-| adjacency (n=16) | boosted | 37.5% | **81.3%** | **81.3%** | **0.583** |
-| control (n=18) | baseline | 94.4% | 100.0% | 100.0% | 0.972 |
-| control (n=18) | boosted | 94.4% | 100.0% | 100.0% | 0.972 |
-
 
 ## Project status
 

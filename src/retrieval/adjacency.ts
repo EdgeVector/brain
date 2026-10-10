@@ -1,6 +1,5 @@
 // Graph-adjacency ranking boost for `brain ask` — phase 3 of the knowledge
-// graph (design [[design-brain-knowledge-graph]], decision 4: "ranking is
-// eval-gated").
+// graph (design [[design-brain-knowledge-graph]]).
 //
 // WHAT IT DOES
 // The hybrid ranker (BM25 + vector, fused with RRF) scores each record on its
@@ -39,9 +38,8 @@
 // `graph query`, which reports its own truncation.
 //
 // DEFAULT OFF
-// Nothing here runs unless the caller passes the flag. The design settled that
-// the default may change only on measured P@5 lift from the graph eval fixture
-// (`eval/graph/pairs.json`, harness `scripts/eval-graph-boost.ts`).
+// Nothing here runs unless the caller passes the flag. The no-tests policy
+// retired the synthetic evaluation gate; the default remains unchanged.
 
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";

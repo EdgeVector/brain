@@ -32,13 +32,6 @@ jobs:
       - name: ci.sh (syntax, install, typecheck)
         run: bash .lastgit/ci.sh
 
-      # Retrieval eval harness. Non-blocking: prints P@1/3/5+MRR to the log.
-      # It self-skips when ~/.fbrain/config.json is absent (CI has no node).
-      - name: Retrieval eval (non-blocking)
-        if: always()
-        continue-on-error: true
-        run: bun scripts/eval-retrieval.ts --format table+json
-
   # Compile + sign the standalone brain-mcp binary and prove it boots the MCP
   # stdio surface. macOS only: codesign must match the folddb.toml
   # [code_signature] bundle id. Reports as its own check; it does not gate
