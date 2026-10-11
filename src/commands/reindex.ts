@@ -31,7 +31,7 @@ import {
 } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
-import { resolvePrintSink } from "../format.ts";
+import { resolvePrintSinks } from "../format.ts";
 import {
   isTombstoned,
   listRecords,
@@ -103,6 +103,7 @@ export type ReindexOptions = {
   graphMaxRecords?: number;
   verbose?: Verbose;
   print?: (line: string) => void;
+  printErr?: (line: string) => void;
 };
 
 export type ReindexResult = {
@@ -124,7 +125,7 @@ export type ReindexResult = {
 };
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
-  const print = resolvePrintSink(opts);
+  const { print, printErr } = resolvePrintSinks(opts);
 
   if (opts.bm25) {
     const result: ReindexResult = {
@@ -255,7 +256,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   }
 
   if (opts.papercutStatusIndex) {
-    return rebuildPapercutStatusIndex(opts, node, print);
+    return rebuildPapercutStatusIndex(opts, node, print, printErr);
   }
 
   if (opts.graphEdges) {
@@ -586,6 +587,7 @@ async function rebuildPapercutStatusIndex(
   opts: ReindexOptions,
   node: ReturnType<typeof newWriteClientFromCfg>["node"],
   print: (line: string) => void,
+  printErr: (line: string) => void,
 ): Promise<ReindexResult> {
   const result: ReindexResult = {
     scanned: 0,
@@ -607,6 +609,12 @@ async function rebuildPapercutStatusIndex(
   }
   const all = await listRecordsAdminScan(node, "papercut", schemaHash, {
     includeTombstones: true,
+    // This scan issues one point read per live papercut (thousands on the
+    // real corpus) with no other caller-visible output, so a legitimate
+    // multi-minute run under load reads identically to a hang. Report
+    // progress to stderr so a caller watching the command's own output can
+    // tell the two apart without reading source.
+    onProgress: (scanned) => printErr(`papercut-status-index: scanned ${scanned} record(s)...`),
   });
   const live = all.filter((record) => {
     if (isTombstoned(record)) {

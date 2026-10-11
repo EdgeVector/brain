@@ -400,6 +400,13 @@ export async function listRecords(
   });
 }
 
+// Progress-callback cadence for `listRecordsAdminScan`: report whichever
+// threshold is crossed first, so a fast healthy node (many keys, little
+// time) and a slow pressured one (few keys, lots of time) both get a
+// heartbeat instead of one going silent for the whole run.
+const PROGRESS_REPORT_EVERY_N = 250;
+const PROGRESS_REPORT_INTERVAL_MS = 5_000;
+
 /**
  * Explicit admin/offline schema drain. Mini enumerates live storage keys via
  * `GET /api/list`; brain then point-gets each slug. No atom body is read by the
@@ -409,7 +416,16 @@ export async function listRecordsAdminScan(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
-  opts?: { seedIndex?: (records: FbrainRecord[]) => Promise<void>; includeTombstones?: boolean },
+  opts?: {
+    seedIndex?: (records: FbrainRecord[]) => Promise<void>;
+    includeTombstones?: boolean;
+    // Called periodically (count- and time-gated; see PROGRESS_* below) with
+    // the number of keys point-read so far. This walk issues one request per
+    // live key — thousands on a large schema — with no caller-visible output
+    // otherwise, so a multi-minute run reads identically to a hang from
+    // outside the process. Optional; omit for silent callers.
+    onProgress?: (scanned: number) => void;
+  },
 ): Promise<FbrainRecord[]> {
   if (!node.listRecordKeys || !node.queryByKey) {
     throw new FbrainError({
@@ -423,6 +439,8 @@ export async function listRecordsAdminScan(
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   let complete = false;
+  let lastProgressCount = 0;
+  let lastProgressAt = Date.now();
   for (let pageNo = 0; pageNo < QUERY_PAGE_LIMIT; pageNo++) {
     const page = await node.listRecordKeys(schemaHash, {
       limit: QUERY_PAGE_SIZE,
@@ -441,6 +459,15 @@ export async function listRecordsAdminScan(
       // A delete can race between the membership page and its point-get. The
       // keyed miss is authoritative, so omit it from this drain.
       if (row !== null) rows.push(row);
+      if (
+        opts?.onProgress &&
+        (seenKeys.size - lastProgressCount >= PROGRESS_REPORT_EVERY_N ||
+          Date.now() - lastProgressAt >= PROGRESS_REPORT_INTERVAL_MS)
+      ) {
+        opts.onProgress(seenKeys.size);
+        lastProgressCount = seenKeys.size;
+        lastProgressAt = Date.now();
+      }
     }
     if (!page.hasMore) {
       complete = true;
@@ -462,6 +489,9 @@ export async function listRecordsAdminScan(
       message: `Node GET /api/list exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
       hint: "Retry with a healthy node; brain will not return a silently truncated admin drain.",
     });
+  }
+  if (opts?.onProgress && seenKeys.size > lastProgressCount) {
+    opts.onProgress(seenKeys.size);
   }
   const allRecords = rows.map((row) => rowToRecord(row, type));
   const records = opts?.includeTombstones === true
