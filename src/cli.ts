@@ -935,6 +935,14 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     global completeness marker. Dry-run censuses indexed
                     status/slug pairs vs SOT without writing. Standalone mode:
                     skips the embedding refresh.
+                    This scan issues one point read per live papercut
+                    (thousands on a real corpus) and has NO overall
+                    wall-clock deadline of its own — total run time scales
+                    with live corpus size and node load, from seconds to
+                    tens of minutes. It reports progress to stderr
+                    ("scanned N record(s)...") every ~250 records or ~5s,
+                    whichever comes first, so a long-but-healthy run does
+                    not read like a hang.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
