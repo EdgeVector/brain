@@ -53,6 +53,7 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
+  writeRecordFields,
   type FbrainRecord,
 } from "../record.ts";
 import {
@@ -411,9 +412,9 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
       // each update writes a new atom and rebinds the slug-key. On
       // resume, re-applying the same default-fill is idempotent in
       // value if not in atom count (a noop on read).
-      await node.updateRecord({ schemaHash: manifest.to_hash, fields, keyHash: record.slug });
+      await writeRecordFields({ node, cfg, type, slug: record.slug, schemaHash: manifest.to_hash, fields, verbose });
     } else {
-      await node.createRecord({ schemaHash: manifest.to_hash, fields, keyHash: record.slug });
+      await writeRecordFields({ node, cfg, type, slug: record.slug, schemaHash: manifest.to_hash, fields, create: true, verbose });
     }
     migrated++;
     writtenThisRun++;

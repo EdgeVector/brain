@@ -159,6 +159,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     previous: null,
     next: record,
     primaryFields: fields,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const receipt = await commitResidentWritePlan({
     node,

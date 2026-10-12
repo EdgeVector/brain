@@ -137,6 +137,7 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
     schemaHash: hash,
     primaryFields: fields,
     now,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   // Read the receipt rather than discarding it. This verb is what a run
   // reaches for when `papercut close`'s reference twin could not be written,

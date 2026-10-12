@@ -95,6 +95,7 @@ import {
   papercutSetCmd,
 } from "./commands/papercut.ts";
 import { consolidateCmd, PROVE_TOPIC } from "./commands/consolidate.ts";
+import { spillCmd } from "./commands/spill.ts";
 import {
   FBRAIN_MCP_READ_TOOL_NAMES,
   FBRAIN_MCP_TOOL_NAMES,
@@ -218,6 +219,7 @@ export const COMMANDS = [
   "migrate",
   "papercut",
   "consolidate",
+  "spill",
   "mcp",
   "hook",
   "help",
@@ -281,6 +283,7 @@ ${RECORD_NEW_HELP_LINES}
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   papercut       file/close/set/census the typed defect ledger (dedupe-gated; close is one write, not two)
   consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
+  spill          move one record's long text (above 32 KiB) to a local body file; the record keeps a bounded head
   mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
@@ -1137,6 +1140,24 @@ list    The row-level view of the SAME read census counts, so the two can never
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
 Kinds:    ${PAPERCUT_KINDS.join(" | ")}`,
+  spill: `brain spill <slug> [--type T] [--json]
+
+Move ONE record's long text to a local body file by hand. Reads the record
+(point read, no schema scan), writes the full text as a local blob
+(POST /api/db/put-blob-local), writes the BrainBodyFile pointer record, then
+rewrites the record with a bounded head (24 KiB) and a final marker line. Reads
+it back and proves the full text is byte-identical. A record with no field above
+32 KiB, or one that already keeps its text in a body file, is reported and left
+alone.
+
+Why: a legacy record above 64 KiB stays readable, but the node refuses to write
+a new atom above 64 KiB. Such a record spills on its next write anyway; this
+verb spills a known record now. Add --verbose to print the slug and size of
+every spill on stderr.
+
+  --type    ${RECORD_TYPE_LIST}
+            (omit to resolve across all types; errors on an ambiguous slug)
+  --json    emit {action, type, slug, fields} on stdout`,
   consolidate: `brain consolidate --topic T [--prove] [--json]
 
 Collapse one topic cluster to one live canonical slug.
@@ -1531,6 +1552,10 @@ const CONSOLIDATE_OPTIONS = {
   prove: { type: "boolean", default: false },
   json: { type: "boolean", default: false },
 } as const;
+const SPILL_OPTIONS = {
+  type: { type: "string" },
+  json: { type: "boolean", default: false },
+} as const;
 const EMPTY_OPTIONS = {} as const;
 
 // `fbrain mcp install` (alias `setup`) flags. The other mcp subcommands
@@ -1588,6 +1613,7 @@ export const CLI_SPEC = {
   migrate: MIGRATE_OPTIONS,
   papercut: PAPERCUT_OPTIONS,
   consolidate: CONSOLIDATE_OPTIONS,
+  spill: SPILL_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
   help: EMPTY_OPTIONS,
@@ -2251,6 +2277,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runPapercut(args, verboseFn);
     case "consolidate":
       return runConsolidate(args, verboseFn);
+    case "spill":
+      return runSpill(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "hook":
@@ -4290,6 +4318,37 @@ export function missingPapercutCloseFlags(
   if (values.status === "duplicate" && !given("duplicate-of"))
     missing.push("duplicate-of");
   return missing;
+}
+
+async function runSpill(args: Argv, verbose: Verbose): Promise<number> {
+  const { values, positionals } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: true,
+      options: SPILL_OPTIONS,
+    },
+    "spill",
+  );
+  const slug = positionals[0];
+  if (!slug) {
+    console.error(COMMAND_HELP.spill);
+    return USAGE_ERROR;
+  }
+  if (positionals.length > 1) {
+    throw new FbrainError({
+      code: "extra_positional_args",
+      message: `spill takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
+      hint: "Run `brain spill <slug>` once per record.",
+    });
+  }
+  const cfg = readConfig();
+  const type = parseRecordType(values.type);
+  const sOpts: Parameters<typeof spillCmd>[0] = { cfg, slug, verbose };
+  if (type) sOpts.type = type;
+  if (values.json) sOpts.json = true;
+  await withTypeAsPositionalHint(slug, () => spillCmd(sOpts));
+  return 0;
 }
 
 async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {

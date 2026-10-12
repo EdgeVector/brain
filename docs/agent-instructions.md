@@ -94,3 +94,11 @@ types* table and the bare `fbrain` help print).
 > Prefer the one-step on-ramp: `fbrain mcp instructions >> CLAUDE.md` (or
 > `| pbcopy`) appends just this block, no surrounding prose — no need to open
 > this file and hand-select the fenced lines.
+
+## Long record bodies
+
+A body above 32 KiB is stored in a local file blob. The record keeps its first
+24 KiB and a final `<!-- brain-body-file v1 ... -->` marker line.
+`fbrain_get`, `fbrain_append`, `fbrain_put` and `consolidate` read and write the
+FULL text. `fbrain_list`, `fbrain_search` and `fbrain_ask` see only the head.
+Never edit or copy a marker line. See [body-spill.md](body-spill.md).

@@ -21,6 +21,8 @@ import {
   schemaHashFor,
   updateFieldsFrom,
   withReadRetry,
+  writeRecordFields,
+  type FbrainRecord,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 
@@ -112,11 +114,19 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
     body: newBody,
     updated_at: now,
   });
-  await node.updateRecord({
+  // `only.record` holds the FULL text (the read funnel hydrates a spilled body),
+  // so `newBody` is the full new text. The write funnel spills it to a body
+  // file again when it is long. `sealed.fields` is the stored form.
+  const sealed = await writeRecordFields({
+    node,
+    cfg: opts.cfg,
+    type: only.type,
+    slug,
     schemaHash: hash,
-    keyHash: slug,
     fields,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+  const storedRecord = sealed.fields as FbrainRecord;
 
   // The status-keyed papercut index carries a snapshot of the whole record, so
   // a body/updated_at write that does not patch it leaves that snapshot stale.
@@ -131,7 +141,7 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
       node,
       opts.cfg,
       slug,
-      { ...only.record, body: newBody, updated_at: now },
+      { ...storedRecord, updated_at: now },
       only.record.status,
     );
   }
@@ -155,7 +165,7 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
   // The line below now reports what the node holds, and a mismatch is an
   // error, not a success.
   const seen = await withReadRetry(
-    () => findBySlug(node, only.type, hash, slug),
+    () => findBySlug(node, only.type, hash, slug, opts.cfg),
     (r) => r !== null && appendPersisted(r.body, newBody, opts.chunk),
   );
   if (!seen || !appendPersisted(seen.body, newBody, opts.chunk)) {

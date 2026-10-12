@@ -15,6 +15,7 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
+  writeRecordFields,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -60,7 +61,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   // A keyed point-read (`findBySlug`) is authoritative (found-or-not) without
   // scanning, so a real record on a >100-row schema is still found and a typo'd
   // <task-slug> errors in one query. Same point-read put.ts / new.ts use.
-  const source = await findBySlug(node, fromType, fromHash, fromSlug);
+  const source = await findBySlug(node, fromType, fromHash, fromSlug, opts.cfg);
   if (!source) {
     if (fromType !== "task" || toType !== "design") {
       throw new FbrainError({
@@ -135,11 +136,18 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   const now = nowIso();
   const fields = fieldsForLinkUpdate(source, fromType, toType, toSlug, now);
 
-  await node.updateRecord({
+  // `source` is hydrated, so `fields` holds the full text; the write funnel
+  // seals it (spills a long body) and returns the stored form.
+  const sealed = await writeRecordFields({
+    node,
+    cfg: opts.cfg,
+    type: fromType,
+    slug: fromSlug,
     schemaHash: fromHash,
-    keyHash: fromSlug,
     fields,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+  // Backlinks come from the full body, so they read `fields`, not `sealed.fields`.
   await reconcileBacklinkIndex(
     node,
     opts.cfg,
@@ -159,7 +167,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
       node,
       cfg: opts.cfg,
       taskSlug: fromSlug,
-      task: fields as FbrainRecord,
+      task: sealed.fields as FbrainRecord,
       previousDesignSlug: source.design_slug,
       verbose: opts.verbose,
     });

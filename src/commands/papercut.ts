@@ -548,7 +548,7 @@ export async function papercutFileCmd(
 
   // Preserve the cheap exact-restatement pre-filter as one point read. The
   // fuzzy tail is semantic `find`, never a papercut partition enumeration.
-  const prior = await findBySlug(node, PAPERCUT, schemaHash, slug);
+  const prior = await findBySlug(node, PAPERCUT, schemaHash, slug, opts.cfg);
   if (prior && isIdempotentPapercutFile(prior, materialized)) {
     const primaryFields = updateFieldsFrom(prior, PAPERCUT, {});
     const plan = await buildResidentWritePlan({
@@ -559,6 +559,7 @@ export async function papercutFileCmd(
       previous: prior,
       next: prior,
       primaryFields,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
     });
     const receipt = await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
     const result: PapercutFileResult = {
@@ -743,6 +744,7 @@ export async function papercutFileCmd(
     next: record,
     primaryFields: materialized,
     now,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const fileReceipt = await commitResidentWritePlan({
     node,
@@ -905,7 +907,7 @@ async function closeReferenceTwin(opts: {
   const refHash = schemaHashFor("reference", opts.cfg);
   let twin: FbrainRecord | null;
   try {
-    twin = await findBySlug(opts.node, "reference", refHash, opts.slug);
+    twin = await findBySlug(opts.node, "reference", refHash, opts.slug, opts.cfg);
   } catch (error) {
     // The typed close is already committed. A twin read that fails must not
     // turn a successful close into an error, but it must not be silent either:
@@ -939,6 +941,7 @@ async function closeReferenceTwin(opts: {
     next,
     primaryFields,
     now: opts.now,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const twinReceipt = await commitResidentWritePlan({
     node: opts.node,
@@ -1036,6 +1039,7 @@ export async function papercutCloseCmd(
     next: transitioned,
     primaryFields,
     now,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   // Read the receipt. The six non-`put` call sites of this helper all used a
   // bare `await` and threw the node's durability claim away; this is the one
@@ -2253,6 +2257,7 @@ export async function papercutSetCmd(
     next,
     primaryFields,
     now,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const setReceipt = await commitResidentWritePlan({
     node,

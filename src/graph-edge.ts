@@ -1,5 +1,6 @@
 import type { NodeClient, QueryRow } from "./client.ts";
 import type { Config } from "./config.ts";
+import { hasSpillMarker } from "./body-spill.ts";
 import { normalizeSlug } from "./record.ts";
 import {
   GRAPH_EDGE_IN_SCHEMA_KEY,
@@ -153,6 +154,12 @@ export async function reconcileGraphEdges(opts: {
   const existing = (await readGraphEdges(opts.node, opts.cfg, opts.sourceSlug, "out", {
     fields: GRAPH_EDGE_RECONCILE_FIELDS,
   })) ?? [];
+  // A body that ends in a body-file marker is only the inline HEAD of a long
+  // text (list and index rebuilds read the stored form). Links past the head
+  // are not in it, so it cannot justify deleting an edge. The write path always
+  // passes the full text and reconciles; a rebuild leaves such a record's
+  // existing edges as they are.
+  if (hasSpillMarker(opts.body)) return existing.length;
   const desired = extractGraphEdges(opts);
   if (opts.preserveExistingFrontmatter) {
     for (const edge of existing) {

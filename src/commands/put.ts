@@ -153,7 +153,26 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // resolves it as an indexed key lookup, so it is authoritative (found-or-not)
   // without scanning the schema — a genuinely-new slug returns absent in one
   // query, and an existing slug is never missed by a flaked empty page.
-  const existing = await findBySlug(node, type, hash, slug);
+  let existing: FbrainRecord | null;
+  try {
+    existing = await findBySlug(node, type, hash, slug, opts.cfg);
+  } catch (err) {
+    // A record whose body file is unreadable (blob missing, sidecar corrupt)
+    // must still be replaceable on purpose. `--allow-shrink` is that intent:
+    // read the stored inline head instead, then overwrite it.
+    if (
+      opts.allowShrink === true &&
+      err instanceof FbrainError &&
+      err.code.startsWith("body_spill_")
+    ) {
+      console.error(
+        `note: ${type} ${slug}: the long text is unreadable (${err.code}); replacing it because of --allow-shrink.`,
+      );
+      existing = await findBySlug(node, type, hash, slug, opts.cfg, { hydrate: false });
+    } else {
+      throw err;
+    }
+  }
   // The papercut file door rejects a slug without the `papercut-` prefix
   // (2026-08-17), because the fleet's queue readers quarantine one. `put` is
   // the documented fallback when the file door refuses, and it kept accepting
@@ -260,6 +279,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     primaryFields: fields,
     frontmatterEdges,
     now,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const receipt = await commitResidentWritePlan({
     node,

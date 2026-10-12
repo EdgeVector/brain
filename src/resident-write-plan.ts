@@ -3,6 +3,12 @@
 
 import { backlinkIndexTag, backlinkTargetSlugs } from "./backlink-index.ts";
 import {
+  assertOpsFitAtomBudget,
+  sealRecordFields,
+  storedFieldsOf,
+  type SpilledField,
+} from "./body-spill.ts";
+import {
   FbrainError,
   type BatchMutationResult,
   type NodeClient,
@@ -71,6 +77,8 @@ export type ResidentWritePlan = {
   action: "created" | "updated";
   ops: PlannedMutation[];
   counts: ExactProjectionCounts;
+  /** Long text fields that went to a body file (or already lived in one) for this write. */
+  spilled: SpilledField[];
 };
 
 function userTags(tags: readonly string[]): string[] {
@@ -360,6 +368,7 @@ export async function buildResidentWritePlan(opts: {
   primaryFields: Record<string, unknown>;
   frontmatterEdges?: readonly string[];
   now?: string;
+  verbose?: (msg: string) => void;
 }): Promise<ResidentWritePlan> {
   const action: "created" | "updated" = opts.previous ? "updated" : "created";
   const upsertType: "create" | "update" = action === "created" ? "create" : "update";
@@ -367,18 +376,33 @@ export async function buildResidentWritePlan(opts: {
   const ops: PlannedMutation[] = [];
   let noOp = 0;
 
+  // WRITE funnel for body spill. `opts.next` and `opts.previous` hold the FULL
+  // text: graph edges and backlinks come from the whole body. What the node
+  // stores (and what every index snapshot copies) is the sealed form: the head
+  // plus the marker line. Blob and sidecar are written here, before any op.
+  const sealed = await sealRecordFields({
+    node: opts.node,
+    cfg: opts.cfg,
+    type: opts.type,
+    slug: opts.next.slug,
+    fields: opts.primaryFields,
+    ...(opts.verbose !== undefined ? { verbose: opts.verbose } : {}),
+  });
+  const stored = recordFromPrimaryFields(sealed.fields);
+  const previousStored = opts.previous ? storedFieldsOf(opts.previous) : null;
+
   if (
-    opts.previous &&
-    sameStringRecord(opts.primaryFields, {
-      slug: opts.previous.slug,
-      title: opts.previous.title,
-      body: opts.previous.body,
-      status: opts.previous.status,
-      tags: opts.previous.tags,
-      created_at: opts.previous.created_at,
-      updated_at: opts.previous.updated_at,
-      ...(opts.previous.design_slug !== undefined
-        ? { design_slug: opts.previous.design_slug }
+    previousStored &&
+    sameStringRecord(sealed.fields, {
+      slug: previousStored.slug,
+      title: previousStored.title,
+      body: previousStored.body,
+      status: previousStored.status,
+      tags: previousStored.tags,
+      created_at: previousStored.created_at,
+      updated_at: previousStored.updated_at,
+      ...(previousStored.design_slug !== undefined
+        ? { design_slug: previousStored.design_slug }
         : {}),
     })
   ) {
@@ -388,7 +412,7 @@ export async function buildResidentWritePlan(opts: {
       mutationType: upsertType,
       schemaHash: opts.schemaHash,
       keyHash: opts.next.slug,
-      fields: opts.primaryFields,
+      fields: sealed.fields,
       projection: "primary",
     });
   }
@@ -397,7 +421,7 @@ export async function buildResidentWritePlan(opts: {
     node: opts.node,
     cfg: opts.cfg,
     type: opts.type,
-    record: opts.next,
+    record: stored,
   });
   if (listOp) ops.push(listOp);
 
@@ -405,7 +429,7 @@ export async function buildResidentWritePlan(opts: {
     cfg: opts.cfg,
     type: opts.type,
     slug: opts.next.slug,
-    record: opts.next,
+    record: stored,
     previous: opts.previous,
     upsertType,
   })) {
@@ -426,7 +450,7 @@ export async function buildResidentWritePlan(opts: {
     ...planChildTaskOps({
       cfg: opts.cfg,
       type: opts.type,
-      record: opts.next,
+      record: stored,
       previous: opts.previous,
       upsertType,
     }),
@@ -436,7 +460,7 @@ export async function buildResidentWritePlan(opts: {
       node: opts.node,
       cfg: opts.cfg,
       type: opts.type,
-      record: opts.next,
+      record: stored,
       previous: opts.previous,
     })),
   );
@@ -473,7 +497,7 @@ export async function buildResidentWritePlan(opts: {
   const unique = dedupeOps(ops);
   const counts = countOps(unique);
   counts.no_op = noOp;
-  return { action, ops: unique, counts };
+  return { action, ops: unique, counts, spilled: sealed.spilled };
 }
 
 export async function commitResidentWritePlan(opts: {
@@ -483,6 +507,9 @@ export async function commitResidentWritePlan(opts: {
   slug: string;
   durable?: boolean;
 }): Promise<BatchMutationResult> {
+  // No op may carry a field above the 48 KiB atom budget. Fail here with the
+  // field named, not later as a 413 from the node.
+  assertOpsFitAtomBudget(opts.type, opts.slug, opts.plan.ops);
   if (!opts.node.mutateBatch) {
     throw new FbrainError({
       code: "resident_commit_unavailable",

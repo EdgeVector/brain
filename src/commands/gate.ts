@@ -14,6 +14,7 @@ import {
   resolveBySlug,
   schemaHashFor,
   verifyRecordVisible,
+  writeRecordFields,
   type FbrainRecord,
 } from "../record.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
@@ -185,10 +186,14 @@ async function writeOpenDecisions(
     body,
     updated_at: nowIso(),
   };
-  await node.updateRecord({
+  await writeRecordFields({
+    node,
+    cfg,
+    type: OPEN_DECISIONS_TYPE,
+    slug: OPEN_DECISIONS_SLUG,
     schemaHash: hash,
-    keyHash: OPEN_DECISIONS_SLUG,
     fields,
+    ...(verbose ? { verbose } : {}),
   });
   const visible = await verifyRecordVisible(
     node,

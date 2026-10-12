@@ -3,6 +3,7 @@
 
 import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
+import { hydrateRecord } from "../body-spill.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
@@ -95,6 +96,14 @@ async function runConsolidate(
     }
     members.push({ type, slug: rec.slug, record: rec });
   }
+  // Membership rows hold the stored record, which keeps only the inline head of
+  // a long body. Merging needs the FULL text, so hydrate (no read when no member
+  // keeps its text in a body file).
+  await Promise.all(
+    members.map(async (m) => {
+      m.record = await hydrateRecord(node, opts.cfg, m.type, m.record);
+    }),
+  );
 
   const liveMembers = members.filter((m) => m.record.status !== "parked");
   const result: ConsolidateResult = {

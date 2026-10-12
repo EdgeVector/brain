@@ -15,6 +15,8 @@ import {
   resolveBySlug,
   schemaHashFor,
   updateFieldsFrom,
+  writeRecordFields,
+  type FbrainRecord,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 
@@ -107,10 +109,16 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
       tags: result.tags,
       updated_at: now,
     });
-    await node.updateRecord({
+    // The record read hydrated any spilled text. The write funnel seals it
+    // again; for an unchanged body that is one sidecar read and no blob write.
+    const sealed = await writeRecordFields({
+      node,
+      cfg: opts.cfg,
+      type: only.type,
+      slug,
       schemaHash: hash,
-      keyHash: slug,
       fields,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
     });
     // Same reason as `brain append`: the status-keyed papercut index stores a
     // snapshot of the whole record, so a write that skips it leaves that
@@ -124,7 +132,7 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
         node,
         opts.cfg,
         slug,
-        { ...only.record, tags: result.tags, updated_at: now },
+        { ...(sealed.fields as FbrainRecord), tags: result.tags, updated_at: now },
         only.record.status,
       );
     }

@@ -562,6 +562,10 @@ export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
 export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";
+// Long record text (body, papercut evidence) spills to a local CAS file blob.
+// One internal sidecar record per (record type, slug, field) holds the
+// `$lastdb_file` pointer. See docs/body-spill.md and src/body-spill.ts.
+export const BODY_FILE_SCHEMA_KEY = "__bodyfile__";
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
     name: "TagIndex",
@@ -843,6 +847,81 @@ export const attachmentFileSchema: AddSchemaRequest = {
       media_type: GENERAL,
       file: { sensitivity_level: 0, data_domain: "file-reference" },
       created_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+// Body spill sidecar: one BrainBodyFile record per (record type, slug, field)
+// whose text was too long to keep in one atom. The full text lives in a local
+// CAS file blob (`POST /api/db/put-blob-local`, no cloud); this record holds
+// the `$lastdb_file` pointer as the WHOLE value of `file` (type Any). A pointer
+// inside a JSON string is not a reference and `gc-file-blobs` would reclaim the
+// blob. The knowledge schemas gain NO field (that would re-hash every record):
+// the record keeps a bounded head plus a marker line that names this sidecar.
+export const bodyFileSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainBodyFile",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainBodyFile",
+    purpose_statement:
+      "Pointer to a local CAS file blob that holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
+    schema_type: "Hash",
+    key: { hash_field: "file_key" },
+    fields: [
+      "file_key",
+      "record_type",
+      "record_slug",
+      "record_field",
+      "content_hash",
+      "size",
+      "file",
+      "created_at",
+      "updated_at",
+    ],
+    field_types: {
+      file_key: "String",
+      record_type: "String",
+      record_slug: "String",
+      record_field: "String",
+      content_hash: "String",
+      size: "String",
+      file: "Any",
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      file_key: "__bodyfile__<sha256(record_type:record_slug:record_field)> (hash key)",
+      record_type: "owning record's type",
+      record_slug: "owning record's slug",
+      record_field: "which text field of the record was spilled (body, verified_by, fixed_by)",
+      content_hash: "SHA-256 hex of the full UTF-8 text",
+      size: "full text byte length",
+      file: "$lastdb_file pointer written by put-blob-local; the whole field value, never indexed",
+      created_at: "RFC 3339 timestamp",
+      updated_at: "RFC 3339 timestamp",
+    },
+    field_classifications: {
+      file_key: ["no_index", "metadata"],
+      record_type: ["no_index", "metadata"],
+      record_slug: ["no_index", "metadata"],
+      record_field: ["no_index", "metadata"],
+      content_hash: ["no_index", "metadata"],
+      size: ["no_index", "metadata"],
+      file: ["no_index", "metadata"],
+      created_at: ["no_index", "metadata"],
+      updated_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      file_key: GENERAL,
+      record_type: GENERAL,
+      record_slug: GENERAL,
+      record_field: GENERAL,
+      content_hash: GENERAL,
+      size: GENERAL,
+      file: { sensitivity_level: 0, data_domain: "file-reference" },
+      created_at: GENERAL,
+      updated_at: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -1505,6 +1584,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: attachmentFileSchema,
     types: [],
     extraKeys: [ATTACHMENT_FILE_SCHEMA_KEY],
+  },
+  {
+    key: BODY_FILE_SCHEMA_KEY,
+    schema: bodyFileSchema,
+    types: [],
+    extraKeys: [BODY_FILE_SCHEMA_KEY],
   },
   {
     key: RECORD_LIST_ENTRY_SCHEMA_KEY,
