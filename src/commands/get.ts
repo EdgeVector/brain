@@ -216,6 +216,12 @@ export type RecordJson = {
   created_at: string;
   updated_at: string;
   body: string;
+  // Each `extra_fields` entry is also copied onto the top level (see
+  // `recordToJson`), so `brain papercut list --json` and `brain get --json`
+  // agree on where a custom column lives — a naive `.fixed_by` read works on
+  // both instead of silently returning undefined on `get`
+  // (papercut-brain-papercut-list-json-envelope-not-documented-20261010).
+  [extraField: string]: unknown;
 };
 
 export function recordToJson(
@@ -252,6 +258,7 @@ export function recordToJson(
       extra[ef] = typeof value === "string" ? value : "";
     }
     out.extra_fields = extra;
+    Object.assign(out, extra);
   }
   if (type === "design" && childrenUnavailable !== undefined) {
     out.children_unavailable = childrenUnavailable;
