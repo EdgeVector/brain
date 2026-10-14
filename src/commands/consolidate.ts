@@ -11,10 +11,11 @@ import {
 import { deleteRecord } from "./delete.ts";
 import { putCmd } from "./put.ts";
 import { statusCmd } from "./status.ts";
+import { snapshotSummary } from "../index-payload.ts";
 import {
   findBySlug,
+  readFullRecords,
   schemaHashFor,
-  type FbrainRecord,
 } from "../record.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
 import {
@@ -78,13 +79,23 @@ async function runConsolidate(
   const rows = await listMembership(node, opts.cfg, "cluster", topic);
   const members: ClusterMember[] = [];
   let skipped = 0;
+  // The cluster index keeps a SNAPSHOT of each record, and a snapshot of a long
+  // record keeps only a head of its body (index-payload.ts). Everything below
+  // compares bodies and may DELETE a record whose body adds nothing, so it must
+  // never see a head: a loser whose 2 KiB head already appears in the canonical
+  // body would look redundant and be deleted with its unique tail. So the
+  // snapshot only names the members (slug, type). Every body compared here is
+  // point-read from the product schema, for every member and not only the cut
+  // ones (a whole snapshot can be stale too). If a body cannot be read this
+  // throws and nothing is changed.
+  const named: Array<{ type: RecordType; slug: string }> = [];
   for (const row of rows) {
-    const rec = row.record;
-    if (!rec) {
+    if (!row.snapshot) {
       skipped++;
       continue;
     }
-    const type = inferType(opts.cfg, rec);
+    const summary = snapshotSummary(row.snapshot);
+    const type = inferType(opts.cfg, summary);
     if (!type) {
       skipped++;
       continue;
@@ -93,7 +104,24 @@ async function runConsolidate(
       skipped++;
       continue;
     }
-    members.push({ type, slug: rec.slug, record: rec });
+    named.push({ type, slug: summary.slug });
+  }
+  const slugsByType = new Map<RecordType, string[]>();
+  for (const { type, slug } of named) {
+    slugsByType.set(type, [...(slugsByType.get(type) ?? []), slug]);
+  }
+  for (const [type, slugs] of slugsByType) {
+    // Consolidate deletes and rewrites from the bodies it reads: it must STOP
+    // (not skip) if one cannot be read.
+    const { records: full } = await readFullRecords(node, type, opts.cfg, slugs, "throw");
+    for (const slug of slugs) {
+      const record = full.get(slug);
+      if (!record) {
+        skipped++; // soft-deleted: not live
+        continue;
+      }
+      members.push({ type, slug, record });
+    }
   }
 
   const liveMembers = members.filter((m) => m.record.status !== "parked");
@@ -321,8 +349,10 @@ async function reapEphSeries(
     const hash = ephHash(series, day);
     const rows = await listMembership(node, opts.cfg, "eph", hash);
     for (const row of rows) {
-      const rec = row.record;
-      if (!rec) continue;
+      // Names only: the slug and type are keys a snapshot always keeps whole.
+      // No body is read, so a cut snapshot is enough here.
+      if (!row.snapshot) continue;
+      const rec = snapshotSummary(row.snapshot);
       const type = inferType(opts.cfg, rec);
       if (!type) continue;
       try {
@@ -408,7 +438,7 @@ ephemeral proof closeout
 /** Product type stamped on the membership payload. Missing type is not preference. */
 export function inferType(
   _cfg: { schemaHashes: Record<string, string> },
-  rec: FbrainRecord,
+  rec: { [field: string]: unknown },
 ): RecordType | null {
   const extra = rec.type;
   if (typeof extra === "string" && isRecordType(extra)) return extra;

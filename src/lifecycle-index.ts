@@ -18,6 +18,11 @@ import {
   PARKED_INDEX_SCHEMA_KEY,
   type RecordType,
 } from "./schemas.ts";
+import {
+  indexPayload,
+  snapshotFromParsed,
+  type IndexSnapshot,
+} from "./index-payload.ts";
 import type { FbrainRecord } from "./record.ts";
 import {
   ephDayFromTags,
@@ -105,7 +110,10 @@ function entryFields(
   return {
     [spec.h]: hash,
     [spec.r]: range,
-    [spec.payload]: record ? JSON.stringify(record) : "",
+    // A snapshot under the index payload rule (index-payload.ts): a long body is
+    // never copied. `listMembership` parses it back into an `IndexSnapshot` (a
+    // cut one has no body and is not a record); `brain consolidate` reads it.
+    [spec.payload]: record ? indexPayload(record) : "",
     [spec.markerField]: spec.marker,
   };
 }
@@ -231,7 +239,7 @@ export async function listMembership(
   cfg: SchemaCfg,
   kind: IndexKind,
   hash: string,
-): Promise<Array<{ range: string; record: FbrainRecord | null }>> {
+): Promise<Array<{ range: string; snapshot: IndexSnapshot | null }>> {
   const entryHash = schemaHash(cfg, kind);
   if (!entryHash) return [];
   const spec = INDEX[kind];
@@ -240,11 +248,11 @@ export async function listMembership(
     fields: [...spec.fields],
     filter: { HashKey: hash },
   });
-  const out: Array<{ range: string; record: FbrainRecord | null }> = [];
+  const out: Array<{ range: string; snapshot: IndexSnapshot | null }> = [];
   for (const row of res.results) {
     const range = rangeOf(row, spec.r);
     if (!range) continue;
-    out.push({ range, record: recordFromRow(row, spec.payload) });
+    out.push({ range, snapshot: snapshotFromRow(row, spec.payload) });
   }
   return out;
 }
@@ -255,14 +263,12 @@ function rangeOf(row: QueryRow, field: string): string | null {
   return typeof range === "string" && range.length > 0 ? range : null;
 }
 
-function recordFromRow(row: QueryRow, payloadField: string): FbrainRecord | null {
+function snapshotFromRow(row: QueryRow, payloadField: string): IndexSnapshot | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
   const raw = fields[payloadField];
   if (typeof raw !== "string" || raw.length === 0) return null;
   try {
-    const parsed = JSON.parse(raw) as FbrainRecord;
-    if (typeof parsed.slug !== "string") return null;
-    return parsed;
+    return snapshotFromParsed(JSON.parse(raw));
   } catch {
     return null;
   }

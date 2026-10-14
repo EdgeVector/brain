@@ -18,6 +18,14 @@ import {
   PAPERCUT_STATUS_INDEX_MIGRATED_RANGE,
   PAPERCUT_STATUS_INDEX_SCHEMA_KEY,
 } from "./schemas.ts";
+import {
+  indexPayload,
+  isPayloadTruncated,
+  snapshotFromParsed,
+  snapshotSummary,
+  type IndexSnapshot,
+  type SnapshotSummary,
+} from "./index-payload.ts";
 import type { FbrainRecord, ReadRetryOptions } from "./record.ts";
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
@@ -27,34 +35,78 @@ export function papercutStatusIndexHash(cfg: SchemaCfg): string | null {
   return h && h.length > 0 ? h : null;
 }
 
-function entryFieldsFor(
+/**
+ * Key a truncated payload carries: the names of the fields whose text was cut
+ * to a head. Absent means the payload is the whole record.
+ */
+export const PSI_TRUNCATED_KEY = "psi_truncated";
+
+/**
+ * The `psi_payload` value for one papercut row: a JSON snapshot of the record
+ * that never copies a large field into the index (atom contract P3, see
+ * index-payload.ts).
+ *
+ * The whole record when its atom fits in 8 KiB. Otherwise the record with its
+ * body cut to a head of at most 2 KiB (smaller if needed) plus `psi_truncated`
+ * naming the cut field. Only the body is cut: the title, the header fields
+ * (`component`, `severity`, `kind`, `repo`, `fixed_by`, `verified_by`,
+ * `duplicate_of`, `symptom_hash`), the status, the tags and the timestamps
+ * always stay whole, because `papercut list` and `papercut census` serve them
+ * from this snapshot. A record that cannot fit even with no body (huge tags or
+ * title) gets the empty payload, and every reader point-hydrates that row, the
+ * same as a row written before the payload existed.
+ *
+ * Deterministic in the record alone, so `entryPayloadMatches` compares the
+ * stored payload with this same form and a rebuild never rewrites a healthy
+ * row. A reader that needs a cut field must point-read the record.
+ */
+export function papercutStatusPayload(record: FbrainRecord): string {
+  return indexPayload(record, {
+    truncatedKey: PSI_TRUNCATED_KEY,
+    overflow: "empty",
+  });
+}
+
+/** True when the snapshot carries only heads of some long text fields. */
+export function payloadIsTruncated(record: FbrainRecord): boolean {
+  return isPayloadTruncated(record, PSI_TRUNCATED_KEY);
+}
+
+/** The four fields of one status-index row. */
+export function papercutStatusEntryFields(
   status: string,
   record: FbrainRecord,
 ): Record<string, string> {
   return {
     psi_h: status,
     psi_r: record.slug,
-    psi_payload: JSON.stringify(record),
+    psi_payload: papercutStatusPayload(record),
     psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
   };
 }
 
+
 /**
  * The papercut record the index row already carries.
  *
- * `psi_payload` is a JSON snapshot of the whole record, written by
- * `entryFieldsFor` / `planPapercutStatusOps` in the SAME mutation that places
- * the row in its status partition. It was stored from the first version of
- * this index and, until this function existed, never read: every ledger read
- * shipped the payload over the wire and then threw it away to point-get the
- * same record back one slug at a time.
+ * `psi_payload` is a JSON snapshot of the record (`papercutStatusPayload`: the
+ * whole record, or with its long text cut to heads and `psi_truncated` naming
+ * the cut fields, so the atom stays at most 8 KiB). It is written by
+ * `papercutStatusEntryFields` / `planPapercutStatusOps` in the SAME mutation
+ * that places the row in its status partition. A reader that needs a cut field
+ * (the body) must not serve it from the snapshot: see `payloadIsTruncated`.
+ *
+ * The payload was stored from the first version of this index and, until this
+ * function existed, never read: every ledger read shipped the payload over the
+ * wire and then threw it away to point-get the same record back one slug at a
+ * time.
  *
  * Returns null when the field is absent, unparseable, or carries a different
  * slug than the row it came from, so the caller can point-hydrate that one row
  * instead of dropping it. A payload that parses is still subject to the
  * caller's fail-closed checks (tombstone, and status-equals-partition).
  */
-export function recordFromEntryRow(row: QueryRow): FbrainRecord | null {
+export function recordFromEntryRow(row: QueryRow): IndexSnapshot | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
   const raw = fields.psi_payload;
   if (typeof raw !== "string" || raw.length === 0) return null;
@@ -64,23 +116,23 @@ export function recordFromEntryRow(row: QueryRow): FbrainRecord | null {
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-    return null;
-  const record = parsed as FbrainRecord;
-  if (typeof record.slug !== "string" || record.slug.length === 0) return null;
-  if (typeof record.status !== "string") return null;
-  if (!Array.isArray(record.tags)) return null;
+  const snapshot = snapshotFromParsed(parsed, PSI_TRUNCATED_KEY);
+  if (snapshot === null) return null;
+  const summary = snapshotSummary(snapshot);
+  if (typeof summary.status !== "string") return null;
+  if (!Array.isArray(summary.tags)) return null;
   const rowSlug = slugFromEntryRow(row);
-  if (rowSlug !== null && rowSlug !== record.slug) return null;
-  return record;
+  if (rowSlug !== null && rowSlug !== summary.slug) return null;
+  return snapshot;
 }
 
 /**
  * A key-order-independent serialization, used ONLY to compare a stored
  * `psi_payload` against the record it is supposed to mirror.
  *
- * `entryFieldsFor` writes `JSON.stringify(record)`, whose key order follows
- * the record object's own insertion order. A record rebuilt from an admin
+ * `papercutStatusEntryFields` writes `JSON.stringify(record)` (or its
+ * truncated form), whose key order follows the record object's own insertion
+ * order. A record rebuilt from an admin
  * scan need not carry its keys in the order they had when the payload was
  * written, so comparing the raw strings would call an identical payload stale
  * and rewrite every row on every rebuild. Sorting keys compares CONTENT.
@@ -110,9 +162,20 @@ export function entryPayloadMatches(
   row: QueryRow,
   record: FbrainRecord,
 ): boolean {
-  const stored = recordFromEntryRow(row);
-  if (stored === null) return false;
-  return stablePayload(stored) === stablePayload(record);
+  // Compare with the form a write would store NOW (possibly truncated), not
+  // with the whole record: a record over the budget never has a whole-record
+  // payload, and comparing with it would rewrite that row on every rebuild.
+  const expected = papercutStatusPayload(record);
+  if (expected === "") {
+    const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
+    return fields.psi_payload === "";
+  }
+  // Compare the stored payload as parsed JSON (cut or not) with the expected one.
+  const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
+  const raw = fields.psi_payload;
+  if (typeof raw !== "string" || raw.length === 0) return false;
+  if (recordFromEntryRow(row) === null) return false;
+  return stablePayload(JSON.parse(raw)) === stablePayload(JSON.parse(expected));
 }
 
 function slugFromEntryRow(row: QueryRow): string | null {
@@ -143,7 +206,7 @@ export async function upsertPapercutStatusEntry(
 ): Promise<boolean> {
   const entryHash = papercutStatusIndexHash(cfg);
   if (!entryHash || status.length === 0) return false;
-  const fields = entryFieldsFor(status, record);
+  const fields = papercutStatusEntryFields(status, record);
   const exists = await papercutStatusEntryExists(
     node,
     entryHash,
@@ -440,17 +503,48 @@ export function newPapercutReadStats(): PapercutReadStats {
  * `duplicate_of`, `symptom_hash`, `created_at` and `tags` agreed with the
  * point-read record on EVERY row; only `updated_at` disagreed, on 2. A row
  * with no usable snapshot is never narrowed out — it is point-read, as before.
+ *
+ * A snapshot can be TRUNCATED (`psi_truncated`, `payloadIsTruncated`): the row
+ * carries a head of the body, so the index atom stays small. Every header
+ * field a `fast` reader or a `narrow` filter uses is a short field and is
+ * carried whole. `needFields` names the record fields the caller will output:
+ * a truncated row whose cut fields include one of them is point-hydrated like a
+ * row with no snapshot, and the fail-closed checks below apply to the hydrated
+ * record. `needFullRecord: true` is the same for every field (the caller wants
+ * the body). `papercut list` and `papercut census` pass the fields they print.
  */
+export type PapercutReadOptions = {
+  fast?: boolean;
+  narrow?: (record: SnapshotSummary) => boolean;
+  stats?: PapercutReadStats;
+  /** Output fields the caller needs whole; see above. */
+  needFields?: readonly string[];
+  /** The caller needs every field whole, the body included. */
+  needFullRecord?: boolean;
+};
+
+// Typing. A `fast` read serves rows from the snapshot, and a snapshot may carry
+// only a head of the body, so its rows are `SnapshotSummary` (no `body`; not a
+// `FbrainRecord`, see index-payload.ts). A non-fast read point-reads every row,
+// so its rows are whole records.
+export async function readPapercutsByStatus(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  status: string | undefined,
+  opts?: PapercutReadOptions & { fast?: false },
+): Promise<FbrainRecord[]>;
+export async function readPapercutsByStatus(
+  node: NodeClient,
+  cfg: SchemaCfg,
+  status: string | undefined,
+  opts: PapercutReadOptions,
+): Promise<SnapshotSummary[]>;
 export async function readPapercutsByStatus(
   node: NodeClient,
   cfg: SchemaCfg,
   status?: string,
-  opts?: {
-    fast?: boolean;
-    narrow?: (record: FbrainRecord) => boolean;
-    stats?: PapercutReadStats;
-  },
-): Promise<FbrainRecord[]> {
+  opts?: PapercutReadOptions,
+): Promise<SnapshotSummary[]> {
   const entryHash = await requireCompletePapercutStatusIndex(node, cfg);
   const statuses = status === undefined ? PAPERCUT_STATUSES : [status];
   const { findBySlug, isTombstoned, schemaHashFor, fieldsFor, rowToRecord } =
@@ -459,7 +553,17 @@ export async function readPapercutsByStatus(
   const fast = opts?.fast === true;
   const narrow = opts?.narrow;
   const stats = opts?.stats;
-  const out: FbrainRecord[] = [];
+  const needFullRecord = opts?.needFullRecord === true;
+  const needFields = opts?.needFields;
+  const snapshotLacksNeededField = (snapshot: IndexSnapshot): boolean => {
+    if (!snapshot.cut) return false;
+    if (needFullRecord) return true;
+    return (
+      needFields !== undefined &&
+      snapshot.cutFields.some((f) => f === "*" || needFields.includes(f))
+    );
+  };
+  const out: SnapshotSummary[] = [];
   for (const partition of statuses) {
     const res = await node.queryAll({
       schemaHash: entryHash,
@@ -467,7 +571,7 @@ export async function readPapercutsByStatus(
       filter: { HashKey: partition },
     });
     const slugs: string[] = [];
-    const fromPayload = new Map<string, FbrainRecord>();
+    const fromPayload = new Map<string, SnapshotSummary>();
     for (const row of res.results) {
       const slug = slugFromEntryRow(row);
       if (!slug) continue;
@@ -475,13 +579,14 @@ export async function readPapercutsByStatus(
       // Parse the snapshot when EITHER reading needs it: `fast` serves from
       // it, `narrow` decides from it. A row it cannot parse falls through to
       // the point read in both cases.
-      const record = fast || narrow ? recordFromEntryRow(row) : null;
-      if (narrow && record && !narrow(record)) {
+      const snapshot = fast || narrow ? recordFromEntryRow(row) : null;
+      if (narrow && snapshot && !narrow(snapshotSummary(snapshot))) {
         if (stats) stats.narrowedOut += 1;
         continue;
       }
       slugs.push(slug);
-      if (fast && record) fromPayload.set(slug, record);
+      if (fast && snapshot && !snapshotLacksNeededField(snapshot))
+        fromPayload.set(slug, snapshotSummary(snapshot));
     }
     // Point-read only what the payload could not answer: everything by
     // default, and under `fast` just the rows with no usable snapshot.
@@ -776,7 +881,7 @@ export async function writePapercutStatusIndex(
         schemaHash: entryHash,
         keyHash: record.status,
         keyRange: record.slug,
-        fields: entryFieldsFor(record.status, record),
+        fields: papercutStatusEntryFields(record.status, record),
       });
       continue;
     }
@@ -785,7 +890,7 @@ export async function writePapercutStatusIndex(
       schemaHash: entryHash,
       keyHash: record.status,
       keyRange: record.slug,
-      fields: entryFieldsFor(record.status, record),
+      fields: papercutStatusEntryFields(record.status, record),
     });
   }
 

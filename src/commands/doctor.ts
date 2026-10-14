@@ -46,6 +46,7 @@ import {
   PAPERCUT_STATUS_INDEX_CHECK,
   runPapercutStatusIndexProbe,
 } from "./doctor/papercut-status-index.ts";
+import { runTagIndexProbe, TAG_INDEX_CHECK } from "./doctor/tag-index.ts";
 import {
   checkSchemaDrift,
   safeListManifests,
@@ -549,6 +550,17 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByNodeUnreachable(PAPERCUT_STATUS_INDEX_CHECK));
   } else {
     checks.push(skippedByPrereqs(PAPERCUT_STATUS_INDEX_CHECK));
+  }
+
+  // Tag and backlink membership: is the TagMembership schema registered, and is
+  // any legacy tag row newer than its copy stamp (an old binary wrote it)? A
+  // bounded sample over the keyed type-list index, never a scan.
+  if (provisioned && schemasLoadedOk) {
+    checks.push(await runTagIndexProbe(nodeClient, cfg, verbose));
+  } else if (!nodeReachable) {
+    checks.push(skippedByNodeUnreachable(TAG_INDEX_CHECK));
+  } else {
+    checks.push(skippedByPrereqs(TAG_INDEX_CHECK));
   }
 
   // Runtime probe — compare the running Bun against fbrain's documented

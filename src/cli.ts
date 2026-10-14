@@ -894,11 +894,17 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
   --dry-run         list records that would be reindexed; no writes
   --tags            rebuild the tag secondary index from a full corpus scan.
                     Repairs records written before the index existed or after
-                    a best-effort index update failed. Standalone mode: skips
-                    the embedding refresh.
+                    a best-effort index update failed, and members an old
+                    binary wrote to the legacy layout. Needs the TagMembership
+                    schema (\`brain init\` registers it; reindex never does).
+                    ADMIN operation for a quiet moment, one device at a time:
+                    it deletes rows no record backs, so a member another
+                    device adds meanwhile can be deleted. Standalone mode:
+                    skips the embedding refresh.
   --backlinks       rebuild the backlink secondary index from a full corpus scan.
                     Repairs records written before the index existed or after
-                    a best-effort backlink update failed. Standalone mode:
+                    a best-effort backlink update failed. Same schema need and
+                    same admin-operation rule as --tags. Standalone mode:
                     skips the embedding refresh.
   --graph-edges     rebuild typed graph edges for a bounded slice of the keyed
                     Brain list index. Preserves frontmatter-origin edges that

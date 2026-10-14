@@ -268,7 +268,7 @@ async function resolveNativeHits(
   }
   const hydrated = new Map<string, Map<string, FbrainRecord>>();
   for (const [schemaHash, { type, slugs }] of slugsBySchema) {
-    hydrated.set(schemaHash, await hydrateSchemaBySlug(node, type, opts.cfg, [...slugs]));
+    hydrated.set(schemaHash, await hydrateSchemaBySlug(node, type, opts.cfg, [...slugs], "skip"));
   }
 
   // Pass 2: resolve every candidate by map lookup (no further round-trips).

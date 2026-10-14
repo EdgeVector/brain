@@ -2,6 +2,7 @@
 // every exact projection. Search stays out of the default plan.
 
 import { backlinkIndexTag, backlinkTargetSlugs } from "./backlink-index.ts";
+import { indexPayload } from "./index-payload.ts";
 import {
   FbrainError,
   type BatchMutationResult,
@@ -11,7 +12,6 @@ import type { Config } from "./config.ts";
 import {
   CHILD_TASK_INDEX_MARKER,
   CHILD_TASK_INDEX_SCHEMA_KEY,
-  PAPERCUT_STATUS_INDEX_MARKER,
   type RecordType,
 } from "./schemas.ts";
 import {
@@ -31,14 +31,14 @@ import {
 } from "./record-list-index.ts";
 import {
   papercutStatusEntryExists,
+  papercutStatusEntryFields,
   papercutStatusIndexHash,
 } from "./papercut-status-index.ts";
 import {
   memberKey,
-  readTagIndex,
+  planTagMemberOps,
   tagIndexAvailable,
-  tagIndexSchemaHash,
-  tagIndexSlug,
+  type TagMemberChange,
 } from "./tag-index.ts";
 
 export type ProjectionKind =
@@ -241,7 +241,7 @@ function planChildTaskOps(opts: {
       fields: {
         ctd_h: nextDesign,
         ctd_r: opts.record.slug,
-        ctd_payload: JSON.stringify(opts.record),
+        ctd_payload: indexPayload(opts.record),
         ctd_marker: CHILD_TASK_INDEX_MARKER,
       },
       projection: "child-task",
@@ -285,18 +285,18 @@ async function planPapercutStatusOps(opts: {
       schemaHash,
       keyHash: nextStatus,
       keyRange: opts.record.slug,
-      fields: {
-        psi_h: nextStatus,
-        psi_r: opts.record.slug,
-        psi_payload: JSON.stringify(opts.record),
-        psi_marker: PAPERCUT_STATUS_INDEX_MARKER,
-      },
+      // Never the whole record: the payload keeps long text to a head so the
+      // index atom stays small (papercutStatusPayload).
+      fields: papercutStatusEntryFields(nextStatus, opts.record),
       projection: "papercut-status",
     });
   }
   return ops;
 }
 
+// Tag and backlink membership. One small create per added member and one
+// delete per removed member of an indexed tag, in the same batch as the record.
+// Never a read-modify-write of a member list (see tag-index.ts).
 async function planTagMembershipOps(opts: {
   node: NodeClient;
   cfg: Config;
@@ -307,47 +307,22 @@ async function planTagMembershipOps(opts: {
   projection: "tag" | "backlink";
 }): Promise<{ ops: PlannedMutation[]; noOp: number }> {
   if (!tagIndexAvailable(opts.cfg)) return { ops: [], noOp: 0 };
-  const schemaHash = tagIndexSchemaHash(opts.cfg);
-  if (!schemaHash) return { ops: [], noOp: 0 };
   const member = memberKey(opts.type, opts.slug);
   const oldSet = new Set(userTags(opts.oldTags));
   const newSet = new Set(userTags(opts.newTags));
-  const added = [...newSet].filter((tag) => !oldSet.has(tag));
-  const removed = [...oldSet].filter((tag) => !newSet.has(tag));
-  const touched = [...new Set([...added, ...removed])];
-  const ops: PlannedMutation[] = [];
-  let noOp = 0;
-  for (const tag of touched) {
-    const existing = await readTagIndex(opts.node, opts.cfg, tag);
-    const current = existing?.members ?? [];
-    let next: string[];
-    if (added.includes(tag)) {
-      next = current.includes(member) ? current : [...current, member];
-    } else {
-      next = current.filter((entry) => entry !== member);
-    }
-    if (sameMembers(current, next)) {
-      noOp += 1;
-      continue;
-    }
-    const now = new Date().toISOString();
-    const slug = tagIndexSlug(tag);
-    const fields = {
-      slug,
-      tag,
-      members: [...new Set(next)].sort(),
-      created_at: existing?.created_at ?? now,
-      updated_at: now,
-    };
-    ops.push({
-      mutationType: existing ? "update" : "create",
-      schemaHash,
-      keyHash: slug,
-      fields,
-      projection: opts.projection,
-    });
-  }
-  return { ops, noOp };
+  const changes: TagMemberChange[] = [
+    ...[...newSet]
+      .filter((tag) => !oldSet.has(tag))
+      .map((tag): TagMemberChange => ({ tag, member, op: "add" })),
+    ...[...oldSet]
+      .filter((tag) => !newSet.has(tag))
+      .map((tag): TagMemberChange => ({ tag, member, op: "remove" })),
+  ];
+  const planned = await planTagMemberOps(opts.node, opts.cfg, changes);
+  return {
+    ops: planned.ops.map((op) => ({ ...op, projection: opts.projection })),
+    noOp: planned.noOp,
+  };
 }
 
 export async function buildResidentWritePlan(opts: {

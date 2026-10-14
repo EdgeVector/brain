@@ -33,6 +33,7 @@ import { dirname, join } from "node:path";
 
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
 import { brainDataDir, type Config } from "../config.ts";
+import { snapshotSummary } from "../index-payload.ts";
 import { readTypeListEntryBySlug } from "../record-list-index.ts";
 import {
   isTombstoned,
@@ -645,7 +646,7 @@ export async function loadOrBuildBm25Index(
   opts.onRebuild?.({ types, keyCount: built.docs.length, reason });
   const index = BM25Index.build(built.docs, types);
   if (existing) {
-    await assertCandidateDidNotDropLiveRecords(node, cfg, types, existing.index, index);
+    await assertCandidateDidNotDropLiveRecords(node, cfg, types, existing.index, index, built.dangling);
   }
   saveCachedIndex(cfg.userHash, index, types);
   opts.verbose?.(
@@ -674,13 +675,19 @@ async function assertCandidateDidNotDropLiveRecords(
   types: readonly RecordType[],
   previous: BM25Index,
   candidate: BM25Index,
+  dangling: ReadonlySet<string>,
 ): Promise<void> {
   for (const type of types) {
     const candidateSlugs = new Set(candidate.slugsForType(type));
-    const disappeared = previous.slugsForType(type).filter((slug) => !candidateSlugs.has(slug));
+    // A stale list row with no record behind it was left out ON PURPOSE (and
+    // warned about); it is not a live record the corpus lost.
+    const disappeared = previous
+      .slugsForType(type)
+      .filter((slug) => !candidateSlugs.has(slug) && !dangling.has(`${type}::${slug}`));
     for (const slug of disappeared) {
-      const record = await readTypeListEntryBySlug(node, cfg, type, slug);
-      if (!record || isTombstoned(record)) continue;
+      // Liveness only: the summary (tags) is enough, no body is read.
+      const snapshot = await readTypeListEntryBySlug(node, cfg, type, slug);
+      if (!snapshot || isTombstoned(snapshotSummary(snapshot))) continue;
       throw new FbrainError({
         code: "bm25_candidate_dropped_live_record",
         message:
@@ -699,16 +706,30 @@ async function loadBm25Documents(
   cfg: Config,
   types: readonly RecordType[],
   opts: { seedListIndex: boolean; tolerateIncomplete?: boolean },
-): Promise<{ docs: BM25Document[]; liveById: Map<string, FbrainRecord>; skippedTypes: RecordType[] }> {
+): Promise<{
+  docs: BM25Document[];
+  liveById: Map<string, FbrainRecord>;
+  skippedTypes: RecordType[];
+  /** `type::slug` of stale list rows with no record behind them, left out of the corpus. */
+  dangling: Set<string>;
+}> {
   const docs: BM25Document[] = [];
   const liveById = new Map<string, FbrainRecord>();
   const skippedTypes: RecordType[] = [];
+  const dangling = new Set<string>();
   for (const t of types) {
     let records: FbrainRecord[];
     try {
-      records = opts.seedListIndex
-        ? await listRecords(node, t, cfg)
-        : await listRecordsAdminScan(node, t, schemaHashFor(t, cfg));
+      if (opts.seedListIndex) {
+        // The corpus feeds `search` and `ask` (read paths): a cut list row whose
+        // record is gone is a stale index row. It is left out, with one warning,
+        // and every other record is indexed.
+        const skipped: string[] = [];
+        records = await listRecords(node, t, cfg, { onMissing: "skip", skipped });
+        for (const slug of skipped) dangling.add(`${t}::${slug}`);
+      } else {
+        records = await listRecordsAdminScan(node, t, schemaHashFor(t, cfg));
+      }
     } catch (err) {
       if (
         opts.tolerateIncomplete &&
@@ -732,5 +753,5 @@ async function loadBm25Documents(
       liveById.set(`${t}::${r.slug}`, r);
     }
   }
-  return { docs, liveById, skippedTypes };
+  return { docs, liveById, skippedTypes, dangling };
 }

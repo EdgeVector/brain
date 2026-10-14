@@ -17,6 +17,7 @@
 // so a half-closure is not expressible.
 
 import { FbrainError, type Verbose } from "../client.ts";
+import type { SnapshotSummary } from "../index-payload.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink, resolvePrintSinks } from "../format.ts";
 import {
@@ -1151,7 +1152,7 @@ export type PapercutCensusRow = {
 };
 
 export function buildCensus(
-  records: readonly FbrainRecord[],
+  records: readonly SnapshotSummary[],
   component?: string,
 ): PapercutCensusRow[] {
   const byComponent = new Map<string, PapercutCensusRow>();
@@ -1247,6 +1248,9 @@ export async function papercutCensusCmd(
   const method = censusMethod(pointRead);
   const records = await readPapercutsByStatus(node, opts.cfg, undefined, {
     fast: !pointRead,
+    // The census prints two fields. A snapshot that carries only a head of
+    // some other field (the body) still answers it.
+    needFields: ["component", "status"],
   });
   const rows = buildCensus(records, opts.component);
 
@@ -1377,12 +1381,30 @@ export type PapercutListRow = {
   closes_when?: ClosesWhenClaim;
 };
 
-function str(record: FbrainRecord, field: string): string {
+/** The record fields one `papercut list` row prints. The body is not one of them. */
+const PAPERCUT_LIST_ROW_FIELDS: readonly string[] = [
+  "slug",
+  "title",
+  "status",
+  "component",
+  "severity",
+  "kind",
+  "repo",
+  "fixed_by",
+  "verified_by",
+  "duplicate_of",
+  "symptom_hash",
+  "tags",
+  "created_at",
+  "updated_at",
+];
+
+function str(record: { [field: string]: unknown }, field: string): string {
   const v = record[field];
   return typeof v === "string" ? v : "";
 }
 
-function componentOf(record: FbrainRecord): string {
+function componentOf(record: { [field: string]: unknown }): string {
   const c = str(record, "component");
   return c.length > 0 ? c : "(unset)";
 }
@@ -1613,7 +1635,7 @@ export function closesWhenClaim(
  * moved without the index following.
  */
 export function matchesPapercutFilters(
-  r: FbrainRecord,
+  r: SnapshotSummary,
   opts: PapercutListFilters = {},
 ): boolean {
   const tags = Array.isArray(r.tags) ? r.tags : [];
@@ -1632,8 +1654,22 @@ export function matchesPapercutFilters(
   return true;
 }
 
+// A row read from the index snapshot has no `body` (index-payload.ts). The
+// body-resolved filter reads the body, so it needs a whole record: a row that
+// is not one is refused here instead of being matched against a head.
+function wholeRecordOrThrow(r: SnapshotSummary): FbrainRecord {
+  if (typeof r.body !== "string") {
+    throw new FbrainError({
+      code: "papercut_body_unavailable",
+      message: `papercut ${r.slug} was read from the index snapshot, which keeps no body; the body-resolved filter needs the record.`,
+      hint: "Read it with --point-read (the body-resolved filter always does).",
+    });
+  }
+  return r as FbrainRecord;
+}
+
 export function buildPapercutList(
-  records: readonly FbrainRecord[],
+  records: readonly SnapshotSummary[],
   opts: PapercutListFilters = {},
   bodyResolved: boolean = false,
   /** Status of every `Closes-when:` child the caller could read, by slug. */
@@ -1648,8 +1684,9 @@ export function buildPapercutList(
     // one handed to the index reader to pre-select candidates from the payload
     // snapshot, and this claim is read off `body`, the field an append writes.
     // Narrowing on it would decide from the snapshot the caller was refused.
-    const claim = bodyResolved ? staleClosureClaim(r) : null;
-    const dependency = bodyResolved ? closesWhenClaim(r, childStatus) : null;
+    const full = bodyResolved ? wholeRecordOrThrow(r) : null;
+    const claim = full ? staleClosureClaim(full) : null;
+    const dependency = full ? closesWhenClaim(full, childStatus) : null;
     if (bodyResolved && claim === null && dependency === null) continue;
     rows.push({
       slug: r.slug,
@@ -1967,6 +2004,11 @@ export async function papercutListCmd(
   const stats = newPapercutReadStats();
   const records = await readPapercutsByStatus(node, opts.cfg, opts.status, {
     fast,
+    // `list` prints the header fields of each row. The index snapshot carries
+    // every one of them whole and cuts only the body, which `list` does not
+    // print. If a snapshot ever lacked one of these fields it would be
+    // point-read, never printed as a head.
+    needFields: PAPERCUT_LIST_ROW_FIELDS,
     narrow: narrowBy
       ? (record) => matchesPapercutFilters(record, narrowBy)
       : undefined,
@@ -1986,7 +2028,7 @@ export async function papercutListCmd(
   // `Closes-when:` children are point-read, in either ledger, only under
   // --body-resolved: that is the reading that already paid for every body.
   const childStatus = bodyResolved
-    ? await readClosesWhenChildren(node, opts.cfg, records)
+    ? await readClosesWhenChildren(node, opts.cfg, records.map(wholeRecordOrThrow))
     : new Map<string, string>();
   const rows = buildPapercutList(records, filters, bodyResolved, childStatus);
   const method = bodyResolved ? `${baseMethod}${LIST_METHOD_BODY_RESOLVED}` : baseMethod;
