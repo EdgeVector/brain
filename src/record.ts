@@ -1,5 +1,10 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
+import {
+  snapshotSummary,
+  type IndexSnapshot,
+  type SnapshotSummary,
+} from "./index-payload.ts";
 import { listIndexRepairHint } from "./primary-brain.ts";
 import type { NodeClient, QueryRow } from "./client.ts";
 import {
@@ -92,7 +97,7 @@ export function wikiLinkSlugs(body: string): string[] {
 // paths hide the row. Native LastDB Delete also converges tip absence.
 export const TOMBSTONE_TAG = "__fbrain_deleted__";
 
-export function isTombstoned(r: FbrainRecord): boolean {
+export function isTombstoned(r: { tags: readonly string[] }): boolean {
   return r.tags.includes(TOMBSTONE_TAG);
 }
 
@@ -385,11 +390,34 @@ export async function listRecords(
   node: NodeClient,
   type: RecordType,
   cfg: ListRecordsCfg,
-): Promise<FbrainRecord[]> {
+  opts: { summary: true },
+): Promise<SnapshotSummary[]>;
+export async function listRecords(
+  node: NodeClient,
+  type: RecordType,
+  cfg: ListRecordsCfg,
+  opts: CompleteOptions & { summary?: false },
+): Promise<FbrainRecord[]>;
+export async function listRecords(
+  node: NodeClient,
+  type: RecordType,
+  cfg: ListRecordsCfg,
+  opts: (CompleteOptions & { summary?: false }) | { summary: true },
+): Promise<FbrainRecord[] | SnapshotSummary[]> {
   const { readTypeListIndex } = await import("./record-list-index.ts");
   const indexed = await readTypeListIndex(node, cfg, type);
   if (indexed !== null) {
-    return indexed.filter((r) => !isTombstoned(r));
+    const live = indexed.filter((s) => !isTombstoned(snapshotSummary(s)));
+    // A list row keeps only a head of a long body (index-payload.ts), and a head
+    // is not a record. A caller that reads no body passes `summary: true` and
+    // gets summaries (no `body`, a type that is not a record). Every other
+    // caller gets whole records and MUST say what to do with a cut row whose
+    // product record cannot be read (`onMissing`, no default): "skip" for read
+    // and display paths (the row is a stale index row), "throw" for rebuild and
+    // delete paths. Either way the head is never returned as if it were the
+    // record.
+    if ("summary" in opts && opts.summary === true) return live.map(snapshotSummary);
+    return completeSnapshots(node, type, cfg, live, opts.onMissing, opts);
   }
   throw new FbrainError({
     code: "list_index_incomplete",
@@ -406,6 +434,138 @@ export async function listRecords(
 // heartbeat instead of one going silent for the whole run.
 const PROGRESS_REPORT_EVERY_N = 250;
 const PROGRESS_REPORT_INTERVAL_MS = 5_000;
+
+/**
+ * What to do with an index row whose product record cannot be read (after the
+ * retries). No default: a caller must choose.
+ *
+ * - `"skip"`: for READ and DISPLAY paths (`list`, `search`, `ask`, the BM25
+ *   build, `admin-snapshot`). Such a row is a stale index row (a native LastDB
+ *   delete leaves its list row behind), so it is left out, one warning per
+ *   command names the count and the first slug, and the other rows are served.
+ * - `"throw"`: for REBUILD and DESTRUCTIVE paths (`reindex --graph-edges`, the
+ *   backlink rebuild, `consolidate`, anything that deletes or rewrites from what
+ *   it read). They stop with `index_row_incomplete` and change nothing.
+ */
+export type OnMissing = "skip" | "throw";
+
+export type CompleteOptions = ReadRetryOptions & {
+  onMissing: OnMissing;
+  /** Slugs skipped under `onMissing: "skip"` are appended here. */
+  skipped?: string[];
+};
+
+let skippedRowsWarned = false;
+
+/**
+ * One stderr line per command for rows skipped under `onMissing: "skip"`: the
+ * count and the first slug, with the repair. Never silent.
+ */
+function warnSkippedRows(type: RecordType, slugs: readonly string[]): void {
+  if (slugs.length === 0 || skippedRowsWarned) return;
+  skippedRowsWarned = true;
+  process.stderr.write(
+    `warning: ${slugs.length} ${type} list row(s) have no record behind them and were skipped ` +
+      `(first: ${slugs[0]}). They are stale index rows; \`brain reindex --list-index --type ${type}\` ` +
+      "(admin) removes them. Other rows are unaffected.\n",
+  );
+}
+
+/**
+ * Whole, live records for `slugs`, read from the PRODUCT schema (never from an
+ * index snapshot), with ONE keyed read. A slug the read does not return is
+ * retried (bounded, with backoff: an empty read is a known flake of
+ * `/api/query`). If any is still missing, `onMissing: "throw"` THROWS
+ * `index_row_incomplete` (a caller about to compare, rebuild or delete on these
+ * bodies must not proceed on a partial answer) and `"skip"` returns them in
+ * `missing`. A record whose product row is soft-deleted maps to null (it is not
+ * live); it is a real answer, not a miss.
+ */
+export async function readFullRecords(
+  node: NodeClient,
+  type: RecordType,
+  cfg: ListRecordsCfg,
+  slugs: readonly string[],
+  onMissing: OnMissing,
+  options?: ReadRetryOptions,
+): Promise<{ records: Map<string, FbrainRecord | null>; missing: string[] }> {
+  const complete = new Map<string, FbrainRecord | null>();
+  let pending = [...new Set(slugs)];
+  if (pending.length === 0) return { records: complete, missing: [] };
+  const hash = schemaHashFor(type, cfg);
+  const maxAttempts = options?.emptyPageAttempts ?? READ_RETRY_ATTEMPTS;
+  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
+  const sleep = options?.sleep ?? defaultSleep;
+  for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
+    const wait = computeBackoffMs(attempt, ceilingMs);
+    if (wait > 0) await sleep(wait);
+    const found = await findBySlugsRaw(node, type, hash, pending);
+    const missed: string[] = [];
+    for (const slug of pending) {
+      const record = found.get(slug) ?? null;
+      if (record === null) missed.push(slug);
+      else complete.set(slug, isTombstoned(record) ? null : record);
+    }
+    pending = missed;
+  }
+  if (pending.length > 0 && onMissing === "throw") {
+    throw new FbrainError({
+      code: "index_row_incomplete",
+      message:
+        `${pending.length} ${type} record(s) could not be read from the product schema ` +
+        `(${pending.slice(0, 5).join(", ")}${pending.length > 5 ? ", ..." : ""}), ` +
+        "so nothing was returned: an index snapshot keeps only a head of a long body and a head is not the record.",
+      hint:
+        "Retry: an empty read is usually a flake. If it persists the index row has no record behind it: " +
+        `run \`brain reindex --list-index --type ${type}\` (admin).`,
+    });
+  }
+  return { records: complete, missing: pending };
+}
+
+/**
+ * Whole records for index snapshots, in the order given.
+ *
+ * A snapshot that was not cut is its own record. A cut one (index-payload.ts)
+ * is read from the product schema with ONE keyed read for all of them, retried
+ * on an empty answer. If a product record still cannot be read, `onMissing`
+ * decides (no default; see `OnMissing`): `"throw"` throws
+ * `index_row_incomplete`, `"skip"` leaves the row out and warns once. It never
+ * hands back the cut snapshot as a record. A record whose product row is
+ * soft-deleted is omitted (it is not live).
+ */
+export async function completeSnapshots(
+  node: NodeClient,
+  type: RecordType,
+  cfg: ListRecordsCfg,
+  snapshots: readonly IndexSnapshot[],
+  onMissing: OnMissing,
+  options?: ReadRetryOptions & { skipped?: string[] },
+): Promise<FbrainRecord[]> {
+  const cutSlugs = snapshots.flatMap((s) => (s.cut ? [s.summary.slug] : []));
+  const { records, missing } = await readFullRecords(
+    node,
+    type,
+    cfg,
+    cutSlugs,
+    onMissing,
+    options,
+  );
+  if (missing.length > 0) {
+    options?.skipped?.push(...missing);
+    warnSkippedRows(type, missing);
+  }
+  const out: FbrainRecord[] = [];
+  for (const snapshot of snapshots) {
+    if (!snapshot.cut) {
+      out.push(snapshot.record);
+      continue;
+    }
+    const record = records.get(snapshot.summary.slug);
+    if (record) out.push(record);
+  }
+  return out;
+}
 
 /**
  * Explicit admin/offline schema drain. Mini enumerates live storage keys via
@@ -511,7 +671,45 @@ export type RecordKey = {
   updatedAt: string;
   status: string;
   tags: string[];
+  /**
+   * True when `tags` is only a BOUNDED subset of the record's tags: the list row
+   * is the keys-only form (index-payload.ts) that keeps at most 2 KiB of short
+   * tags (the tombstone tag is always kept). A tag filter or count over such a
+   * key would undercount, so it must complete the key first
+   * (`completeKeyTags`); `matchesListKeyFilters` refuses to filter on one.
+   */
+  tagsCut?: boolean;
 };
+
+/**
+ * Give every key whose tags were cut (`tagsCut`) the record's WHOLE tags, from
+ * ONE batched read of the product schema per call. A key whose record cannot be
+ * read (a stale list row) is dropped, with the one-per-command warning. Keys
+ * that were not cut pass through untouched. Used before a `--tag` filter or
+ * count over keys.
+ */
+export async function completeKeyTags(
+  node: NodeClient,
+  type: RecordType,
+  cfg: ListRecordsCfg,
+  keys: readonly RecordKey[],
+): Promise<RecordKey[]> {
+  const cutSlugs = keys.filter((k) => k.tagsCut === true).map((k) => k.slug);
+  if (cutSlugs.length === 0) return [...keys];
+  const { records, missing } = await readFullRecords(node, type, cfg, cutSlugs, "skip");
+  warnSkippedRows(type, missing);
+  const out: RecordKey[] = [];
+  for (const key of keys) {
+    if (key.tagsCut !== true) {
+      out.push(key);
+      continue;
+    }
+    const record = records.get(key.slug);
+    if (!record) continue; // gone (stale list row) or soft-deleted
+    out.push({ ...key, tags: record.tags, tagsCut: false });
+  }
+  return out;
+}
 
 // The minimal `/api/query` projection that still answers "did the corpus
 // change?". `ask` runs this BEFORE deciding whether to do a full body fetch:
@@ -536,6 +734,7 @@ export async function listRecordKeys(
   const records = await readTypeListIndex(node, cfg, type);
   if (records !== null) {
     return records
+      .map((s) => ({ ...snapshotSummary(s), tagsCut: s.cut && s.cutFields.includes("*") }))
       .filter((r) => !isTombstoned(r))
       .map((r) => ({
         type,
@@ -543,6 +742,7 @@ export async function listRecordKeys(
         updatedAt: r.updated_at,
         status: r.status,
         tags: r.tags,
+        ...(r.tagsCut ? { tagsCut: true } : {}),
       }));
   }
   if (opts.seedOnMiss) {
@@ -706,11 +906,29 @@ export async function findBySlugs(
   schemaHash: string,
   slugs: readonly string[],
 ): Promise<Map<string, FbrainRecord | null>> {
+  const raw = await findBySlugsRaw(node, type, schemaHash, slugs);
+  const out = new Map<string, FbrainRecord | null>();
+  for (const slug of slugs) {
+    const record = raw.get(slug) ?? null;
+    out.set(slug, record !== null && !isTombstoned(record) ? record : null);
+  }
+  return out;
+}
+
+// Same read, but a soft-deleted (tombstoned) record is RETURNED, not mapped to
+// null. A caller that must tell "deleted" from "the read came back empty" (an
+// empty read is a known flake) needs the difference.
+export async function findBySlugsRaw(
+  node: NodeClient,
+  type: RecordType,
+  schemaHash: string,
+  slugs: readonly string[],
+): Promise<Map<string, FbrainRecord | null>> {
   const out = new Map<string, FbrainRecord | null>();
   if (slugs.length === 0) return out;
   if (!node.queryByKeys) {
     for (const slug of slugs) {
-      out.set(slug, await findBySlug(node, type, schemaHash, slug));
+      out.set(slug, await findBySlugRaw(node, type, schemaHash, slug));
     }
     return out;
   }
@@ -724,10 +942,7 @@ export async function findBySlugs(
     const record = rowToRecord(row, type);
     if (record.slug.length > 0) bySlug.set(record.slug, record);
   }
-  for (const slug of slugs) {
-    const record = bySlug.get(slug) ?? null;
-    out.set(slug, record !== null && !isTombstoned(record) ? record : null);
-  }
+  for (const slug of slugs) out.set(slug, bySlug.get(slug) ?? null);
   return out;
 }
 
@@ -1016,6 +1231,7 @@ export async function hydrateSchemaBySlug(
   type: RecordType,
   cfg: ListRecordsCfg,
   slugs: readonly string[],
+  onMissing: OnMissing,
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
   const { readTypeListEntriesBySlugs } = await import("./record-list-index.ts");
@@ -1023,6 +1239,7 @@ export async function hydrateSchemaBySlug(
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
   const bySlug = new Map<string, FbrainRecord>();
+  const cutRows: IndexSnapshot[] = [];
   let pending = [...slugs];
   for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
@@ -1030,14 +1247,21 @@ export async function hydrateSchemaBySlug(
     const found = await readTypeListEntriesBySlugs(node, cfg, type, pending);
     const missed: string[] = [];
     for (const slug of pending) {
-      const record = found.get(slug) ?? null;
-      if (record) {
-        if (!isTombstoned(record)) bySlug.set(slug, record);
+      const snapshot = found.get(slug) ?? null;
+      if (snapshot) {
+        if (isTombstoned(snapshotSummary(snapshot))) continue;
+        if (snapshot.cut) cutRows.push(snapshot);
+        else bySlug.set(slug, snapshot.record);
         continue;
       }
       missed.push(slug);
     }
     pending = missed;
+  }
+  // A list row that keeps only a head of a long body is completed from the
+  // product schema (retried; `onMissing` decides if the record cannot be read).
+  for (const record of await completeSnapshots(node, type, cfg, cutRows, onMissing, options)) {
+    bySlug.set(record.slug, record);
   }
   return bySlug;
 }
@@ -1121,7 +1345,8 @@ export async function findChildTasksByDesign(
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
     // Fallback path (index not yet registered): index-first via listRecords+cfg.
-    const list = await listRecords(node, "task", cfg);
+    // A display lookup: a stale list row with no task behind it is skipped.
+    const list = await listRecords(node, "task", cfg, { onMissing: "skip" });
     if (list.length > 0) {
       return list.filter(
         (r) => !isTombstoned(r) && r.design_slug === designSlug,

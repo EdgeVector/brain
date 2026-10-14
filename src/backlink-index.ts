@@ -1,21 +1,25 @@
-// Backlink secondary index: one internal membership record per target slug.
-// Reads point-read that index record, then point-read each candidate source
-// and re-validate the edge, so `get`/`backlinks` cost scales with inbound link
-// cardinality rather than total fbrain corpus size.
+// Backlink secondary index: one internal membership partition per target slug,
+// stored in the tag index layout (one small row per (target, source), see
+// tag-index.ts). Reads range-read that partition, then point-read each
+// candidate source and re-validate the edge, so `get`/`backlinks` cost scales
+// with inbound link cardinality rather than total fbrain corpus size.
 
 import type { NodeClient, Verbose } from "./client.ts";
 import type { Config } from "./config.ts";
 import {
-  addTagIndexMember,
+  applyTagMemberChanges,
   memberKey,
   parseMemberKey,
   readTagIndex,
-  removeTagIndexMember,
+  rebuildTagMemberPartitions,
+  requireTagMemberSchema,
   tagIndexAvailable,
-  writeTagIndex,
+  warnOnce,
+  type TagMemberChange,
 } from "./tag-index.ts";
 import {
   findBySlug,
+  findBySlugsRaw,
   isSchemaNotFoundReadError,
   isTombstoned,
   listRecords,
@@ -41,21 +45,25 @@ export function backlinkIndexTag(targetSlug: string): string {
   return `${BACKLINK_INDEX_TAG_PREFIX}${normalizeSlug(targetSlug)}`;
 }
 
-// Index-only backlink listing: ONE keyed read of the membership record, no
-// per-source hydration. This is what `fbrain get` renders as `linked_from`.
+// Backlink listing for `fbrain get` (`linked_from`): ONE range read of the
+// membership partition, then ONE keyed read of the product schema for each
+// record type among the sources, to re-check each source.
 //
 // Why a second reader exists: `findBacklinks` below point-reads every source
-// record to fetch its status and re-derive `via`, so a get of a record with
-// 23 inbound links cost 25 node requests — the dominant amplifier behind the
-// 18–45 s gets measured 2026-09-06 under node load
-// (papercut-brain-get-issues-33-node-requests-for-one-record). Every crawl
-// consumer of `linked_from` only walks the slugs; the decorated view (status,
-// via, dropped stale members) stays on `fbrain backlinks`.
+// record one by one to fetch its status and re-derive `via`, so a get of a
+// record with 23 inbound links cost 25 node requests — the dominant amplifier
+// behind the 18–45 s gets measured 2026-09-06 under node load
+// (papercut-brain-get-issues-33-node-requests-for-one-record). This reader
+// re-checks all sources of one type with a single keyed read, so a get costs
+// one request per source TYPE (one to three), not one per source. The decorated
+// view (status, via) stays on `fbrain backlinks`.
 //
-// Members are returned as stored: a source whose edge was removed but whose
-// membership row has not been reconciled yet is still listed. That is the
-// index's freshness, not a new inconsistency — `findBacklinks` filters those
-// by re-reading the source, which is exactly the cost this reader removes.
+// Why it re-checks at all: a remove is last-writer-wins against a concurrent add
+// (two devices, or a copy of the legacy members racing a removal), so a member
+// that was removed can come back to the partition. A source that no longer
+// exists, is deleted, or no longer links to the target is dropped here.
+// If the re-check cannot read, the members are returned as stored and the
+// failure is reported under --verbose.
 export async function listBacklinkMembers(
   node: NodeClient,
   cfg: Config,
@@ -69,7 +77,13 @@ export async function listBacklinkMembers(
     );
     return [];
   }
-  const index = await readTagIndex(node, cfg, backlinkIndexTag(normalizeSlug(targetSlug)));
+  const normalized = normalizeSlug(targetSlug);
+  const index = await readTagIndex(
+    node,
+    cfg,
+    backlinkIndexTag(normalized),
+    options?.verbose,
+  );
   if (index === null) return [];
 
   const seen = new Set<string>();
@@ -83,7 +97,78 @@ export async function listBacklinkMembers(
     refs.push({ type: parsed.type, slug: parsed.slug });
   }
   refs.sort((a, b) => a.type.localeCompare(b.type) || a.slug.localeCompare(b.slug));
-  return refs;
+
+  let checked: BacklinkRef[];
+  try {
+    checked = await recheckBacklinkSources(node, cfg, refs, normalized);
+  } catch (err) {
+    options?.verbose?.(
+      `backlinks: could not re-check the sources of ${normalized} (${errorMessage(err)}); returning the index members as stored`,
+    );
+    checked = refs;
+  }
+  return checked;
+}
+
+// Keep the sources that still exist, are live, and still link to the target.
+// One keyed read per record type (`findBySlugsRaw`).
+//
+// An EMPTY answer for a member the index names is not proof that the member is
+// gone: `/api/query` is known to return an empty page under load. So a member
+// the read does not return is retried (bounded, with backoff). One that is still
+// missing is left out, but not silently: a warning names it (once per command),
+// because dropping a real backlink on a flake is a wrong `linked_from`. A
+// source whose record is soft-deleted, or that no longer links to the target, is
+// a real answer and is dropped without a word.
+const RECHECK_ATTEMPTS = 3;
+const RECHECK_BACKOFF_MS = 250;
+
+async function recheckBacklinkSources(
+  node: NodeClient,
+  cfg: Config,
+  refs: readonly BacklinkRef[],
+  targetSlug: string,
+): Promise<BacklinkRef[]> {
+  const byType = new Map<RecordType, string[]>();
+  for (const ref of refs) {
+    const slugs = byType.get(ref.type) ?? [];
+    slugs.push(ref.slug);
+    byType.set(ref.type, slugs);
+  }
+  const live = new Set<string>();
+  const unreadable: string[] = [];
+  for (const [type, slugs] of byType) {
+    const hash = schemaHashFor(type, cfg);
+    let pending = [...slugs];
+    for (let attempt = 1; attempt <= RECHECK_ATTEMPTS && pending.length > 0; attempt++) {
+      if (attempt > 1) {
+        await new Promise((r) => setTimeout(r, RECHECK_BACKOFF_MS * (attempt - 1)));
+      }
+      const records = await findBySlugsRaw(node, type, hash, pending);
+      const missed: string[] = [];
+      for (const slug of pending) {
+        const record = records.get(slug) ?? null;
+        if (record === null) {
+          missed.push(slug);
+          continue;
+        }
+        if (isTombstoned(record)) continue;
+        if (backlinkVia(record, type, targetSlug, undefined).length === 0) continue;
+        live.add(`${type}:${slug}`);
+      }
+      pending = missed;
+    }
+    for (const slug of pending) unreadable.push(`${type}:${slug}`);
+  }
+  if (unreadable.length > 0) {
+    warnOnce(
+      `backlinks:${targetSlug}`,
+      `backlinks: ${unreadable.length} member(s) of "${targetSlug}" could not be read after ${RECHECK_ATTEMPTS} tries ` +
+        `and were left out of linked_from (${unreadable.slice(0, 5).join(", ")}${unreadable.length > 5 ? ", ..." : ""}). ` +
+        "Retry; if it persists the index names a record that is gone: `brain reindex --backlinks` (admin).",
+    );
+  }
+  return refs.filter((ref) => live.has(`${ref.type}:${ref.slug}`));
 }
 
 export async function findBacklinks(
@@ -157,26 +242,29 @@ export async function reconcileBacklinkIndex(
   const added = [...newSet].filter((target) => !oldSet.has(target));
   const removed = [...oldSet].filter((target) => !newSet.has(target));
 
-  const failures: string[] = [];
-  for (const target of added) {
-    try {
-      await addTagIndexMember(node, cfg, backlinkIndexTag(target), member);
-    } catch (err) {
-      failures.push(`add:${target}:${errorMessage(err)}`);
-    }
-  }
-  for (const target of removed) {
-    try {
-      await removeTagIndexMember(node, cfg, backlinkIndexTag(target), member);
-    } catch (err) {
-      failures.push(`remove:${target}:${errorMessage(err)}`);
-    }
-  }
-
-  if (failures.length > 0) {
+  const changes: TagMemberChange[] = [
+    ...added.map(
+      (target): TagMemberChange => ({
+        tag: backlinkIndexTag(target),
+        member,
+        op: "add",
+      }),
+    ),
+    ...removed.map(
+      (target): TagMemberChange => ({
+        tag: backlinkIndexTag(target),
+        member,
+        op: "remove",
+      }),
+    ),
+  ];
+  if (changes.length === 0) return;
+  try {
+    await applyTagMemberChanges(node, cfg, changes, verbose);
+  } catch (err) {
     verbose?.(
-      `backlink-index reconcile failed for ${member}: ${failures.length} target update(s) failed ` +
-        `(added=${added.join(",")} removed=${removed.join(",")} failed=${failures.join("; ")}); ` +
+      `backlink-index reconcile failed for ${member}: ${changes.length} target update(s) failed ` +
+        `(added=${added.join(",")} removed=${removed.join(",")} failed=${errorMessage(err)}); ` +
         "run `fbrain reindex --backlinks` to repair",
     );
   }
@@ -192,9 +280,14 @@ export async function rebuildBacklinkIndex(
   } = {},
 ): Promise<BacklinkIndexRebuildResult> {
   if (!tagIndexAvailable(cfg)) return { targetsIndexed: 0, membersIndexed: 0 };
+  // Fail before the corpus scan, not after it.
+  requireTagMemberSchema(cfg);
 
   const byTarget = new Map<string, Set<string>>();
-  const list = opts.listRecords ?? ((type: RecordType) => listRecords(node, type, cfg));
+  const list = opts.listRecords ?? ((type: RecordType) =>
+    // A rebuild writes (and deletes) from what it reads: a cut row whose record
+    // cannot be read must stop it, not be skipped.
+    listRecords(node, type, cfg, { onMissing: "throw" }));
   const hashFor = opts.schemaHashFor ?? ((type) => schemaHashFor(type, cfg));
 
   for (const type of RECORD_TYPES) {
@@ -222,17 +315,11 @@ export async function rebuildBacklinkIndex(
     }
   }
 
-  let membersIndexed = 0;
+  const byTag = new Map<string, Set<string>>();
   for (const [target, members] of byTarget) {
-    const tag = backlinkIndexTag(target);
-    const existing = await readTagIndex(node, cfg, tag);
-    const next = [...members].sort();
-    if (!sameMembers(existing?.members ?? [], next)) {
-      await writeTagIndex(node, cfg, tag, next, existing);
-    }
-    membersIndexed += next.length;
+    byTag.set(backlinkIndexTag(target), members);
   }
-
+  const membersIndexed = await rebuildTagMemberPartitions(node, cfg, byTag);
   return { targetsIndexed: byTarget.size, membersIndexed };
 }
 
@@ -298,13 +385,6 @@ function compareBacklinks(a: Backlink, b: Backlink): number {
   const byType = a.type.localeCompare(b.type);
   if (byType !== 0) return byType;
   return a.slug.localeCompare(b.slug);
-}
-
-function sameMembers(a: readonly string[], b: readonly string[]): boolean {
-  const left = [...new Set(a)].sort();
-  const right = [...new Set(b)].sort();
-  if (left.length !== right.length) return false;
-  return left.every((member, idx) => member === right[idx]);
 }
 
 function errorMessage(err: unknown): string {

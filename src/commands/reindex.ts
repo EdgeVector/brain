@@ -61,7 +61,7 @@ import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
   rebuildTagIndex,
-  tagIndexAvailable,
+  tagMemberSchemaHash,
   type TagIndexRebuildResult,
 } from "../tag-index.ts";
 import { graphEdgeHashes, reconcileGraphEdges } from "../graph-edge.ts";
@@ -169,16 +169,17 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       skippedTombstone: 0,
       byType: {},
     };
-    if (!tagIndexAvailable(opts.cfg)) {
+    if (tagMemberSchemaHash(opts.cfg) === null) {
       print(
-        "tag index not available in this config (re-run `fbrain init` to register the TagIndex schema) — nothing to rebuild",
+        "tag index not rebuilt: the TagMembership schema is not registered in this config. " +
+          "Run `brain init` (it registers the schema; reindex never does), then re-run.",
       );
       result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
       return result;
     }
     if (opts.dryRun) {
       print(
-        "dry-run: --tags would rebuild the tag secondary index from a full corpus scan",
+        "dry-run: --tags would rebuild the tag secondary index (TagMember rows, one per tag and member) from a full corpus scan",
       );
       result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
       return result;
@@ -213,16 +214,17 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       skippedTombstone: 0,
       byType: {},
     };
-    if (!tagIndexAvailable(opts.cfg)) {
+    if (tagMemberSchemaHash(opts.cfg) === null) {
       print(
-        "backlink index not available in this config (run `fbrain init` to register the internal index schema) — nothing to rebuild",
+        "backlink index not rebuilt: the TagMembership schema is not registered in this config. " +
+          "Run `brain init` (it registers the schema; reindex never does), then re-run.",
       );
       result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
       return result;
     }
     if (opts.dryRun) {
       print(
-        "dry-run: --backlinks would rebuild the backlink secondary index from a full corpus scan",
+        "dry-run: --backlinks would rebuild the backlink secondary index (TagMember rows, one per target and source) from a full corpus scan",
       );
       result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
       return result;
@@ -273,7 +275,9 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       return result;
     }
     outer: for (const type of opts.type ? [opts.type] : RECORD_TYPES) {
-      const records = await listRecords(node, type, opts.cfg);
+      // A rebuild writes edges from what it read: stop, do not skip, if a cut
+      // row's record cannot be read.
+      const records = await listRecords(node, type, opts.cfg, { onMissing: "throw" });
       for (const record of records) {
         if (result.scanned >= max) break outer;
         result.scanned++;

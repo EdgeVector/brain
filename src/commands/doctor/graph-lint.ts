@@ -20,6 +20,7 @@
 
 import type { NodeClient, Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
+import { snapshotSummary } from "../../index-payload.ts";
 import { readTypeListIndex } from "../../record-list-index.ts";
 import { RECORD_TYPES, type RecordType } from "../../schemas.ts";
 import {
@@ -74,7 +75,11 @@ export async function collectGraphLintSeeds(
     }
     if (records === null) continue;
     anyMarked = true;
-    perType.push(records.map((r) => r.slug).filter((s): s is string => typeof s === "string"));
+    perType.push(
+      records
+        .map((r) => snapshotSummary(r).slug)
+        .filter((s): s is string => typeof s === "string"),
+    );
   }
   if (!anyMarked) return null;
   for (let i = 0; seeds.length < maxSlugs; i += 1) {

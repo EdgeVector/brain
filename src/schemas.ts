@@ -629,6 +629,88 @@ export const tagIndexSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+/**
+ * Tag membership, one small HashRange row per (tag, member). Replaces the
+ * legacy `TagIndex` layout, whose single `members: string[]` field held EVERY
+ * member of a tag and was rewritten whole on each add (a 158 KB atom growing
+ * 65 bytes an hour on the primary, 2026-10-12). Atoms stay small: add or remove
+ * one member is one small write or one delete, never a read-modify-write of a
+ * list. Two devices that add different members of one tag write different
+ * rows, so nothing conflicts.
+ *
+ * hash `tmb_h` = `__tagidx__<sha256(tag)>` (the same key the legacy row used),
+ * range `tmb_r` = member key `type:slug`. Two reserved ranges sit under the
+ * same hash: `TAG_MEMBER_MIGRATED_RANGE` is the per-tag "legacy members were
+ * copied" marker and `TAG_MEMBER_COPYING_RANGE` is a short-lived claim that
+ * keeps two callers from copying one tag at once. Both carry a small JSON note
+ * in `tmb_copy`; see src/tag-index.ts for the dual-read. The legacy `TagIndex`
+ * schema stays registered so its rows stay readable; it is never written again.
+ *
+ * Field names and descriptions are specific on purpose. The schema service
+ * unifies fields by identity: a first draft of this schema had a generic
+ * "RFC 3339 timestamp" field, the service unified it with another app's
+ * `bge_created_at`, and the node then refused every write of the draft's own
+ * field name (2026-10-12, dev service). So there is no timestamp field, and no
+ * description repeats the wording of a sibling index or of the legacy TagIndex.
+ *
+ * Register this schema ONLY through `brain init`. The node registers a new
+ * schema in the Schema Service of its OWN environment, not the one brain's
+ * config names, so no write path may declare it.
+ */
+export const TAG_MEMBER_SCHEMA_KEY = "__tagmember__";
+export const TAG_MEMBER_MIGRATED_RANGE = "__tmb_migrated__";
+export const TAG_MEMBER_COPYING_RANGE = "__tmb_copying__";
+export const TAG_MEMBER_FIELDS = [
+  "tmb_h",
+  "tmb_r",
+  "tmb_tag",
+  "tmb_copy",
+] as const;
+
+export const tagMemberSchema: AddSchemaRequest = {
+  schema: {
+    name: "TagMembership",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "TagMembership_hashrange_v1",
+    purpose_statement:
+      "Per-member rows of the fbrain tag and backlink membership layout: one row names one record that carries one tag or links to one target, so adding or removing a member is a single small write and a read is a keyed partition read",
+    schema_type: "HashRange",
+    key: { hash_field: "tmb_h", range_field: "tmb_r" },
+    fields: [...TAG_MEMBER_FIELDS],
+    field_types: {
+      tmb_h: "String",
+      tmb_r: "String",
+      tmb_tag: "String",
+      tmb_copy: "String",
+    },
+    field_descriptions: {
+      tmb_h:
+        "partition key of a membership row: the text __tagidx__ followed by the lowercase hex sha-256 of one tag value or one link-target tag",
+      tmb_r:
+        "entry key inside a membership partition: the member record type, a colon, then the member slug; a reserved key that starts with two underscores marks a copy stamp or a copy claim",
+      tmb_tag:
+        "display copy of the tag text behind the partition key, cut to its first 1 KiB; informational and never used as a key",
+      tmb_copy:
+        "small JSON note set only on a reserved row of a partition: a legacy-copy stamp (members copied, digest, time) or a short-lived copy claim (owner id and expiry); never set on a member row",
+    },
+    // Not searchable, for the reason the legacy TagIndex gives: machine keys
+    // crowd the head of every unscoped search.
+    field_classifications: {
+      tmb_h: ["no_index", "metadata"],
+      tmb_r: ["no_index", "metadata"],
+      tmb_tag: ["no_index", "metadata"],
+      tmb_copy: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      tmb_h: GENERAL,
+      tmb_r: GENERAL,
+      tmb_tag: GENERAL,
+      tmb_copy: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
 export const adminSnapshotSchema: AddSchemaRequest = {
   schema: {
     name: "BrainAdminSnapshot",
@@ -1481,6 +1563,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: tagIndexSchema,
     types: [],
     extraKeys: [TAG_INDEX_SCHEMA_KEY],
+  },
+  {
+    key: TAG_MEMBER_SCHEMA_KEY,
+    schema: tagMemberSchema,
+    types: [],
+    extraKeys: [TAG_MEMBER_SCHEMA_KEY],
   },
   {
     key: ADMIN_SNAPSHOT_SCHEMA_KEY,

@@ -1,10 +1,55 @@
-// Tag secondary index: one internal TagIndex record per tag. Tag-filtered
-// reads point-read that tag record, then point-read each member, so hot-path
-// cost scales with tag cardinality instead of total corpus size.
+// Tag secondary index: one small HashRange row per (tag, member). Tag-filtered
+// reads range-read one tag's partition, then point-read each member, so
+// hot-path cost scales with tag cardinality instead of total corpus size.
+// Operator notes (rollout, admin reindex, multi-device): docs/tag-membership.md.
+//
+// Layout (TagMembership_hashrange_v1, schemas.ts): hash = `__tagidx__<sha256(tag)>`,
+// range = member key `type:slug`. Adding a member is ONE small create and
+// removing one is ONE delete. There is no list to read, merge and rewrite, and
+// two devices that add different members write different rows.
+//
+// The legacy layout (TagIndex, one row per tag holding `members: string[]`)
+// is the reason for the rewrite: one atom held every member of a tag and was
+// rewritten whole on each add (158 KB growing 65 bytes an hour on the primary,
+// 2026-10-12). The new code NEVER writes that layout. It only reads it, to copy
+// a tag's members across (lazy dual-read):
+//
+//   1. range-read the tag's partition in the new schema;
+//   2. a per-tag copy stamp (`TAG_MEMBER_MIGRATED_RANGE` under the same hash)
+//      says "the legacy members were copied": serve the partition;
+//   3. no stamp: read the legacy row (one keyed read). If the row EXISTS, copy
+//      its members into the partition in batches and write the stamp last, then
+//      serve the partition. The stamp carries a small note: how many members
+//      were copied, a digest of them, the time, and the legacy row's own
+//      `updated_at`. The member rows are the list of what was copied;
+//   4. no stamp and NO legacy row: the stamp is NOT written. A device that has
+//      not synced the legacy row yet reads an empty legacy row, and a stamp
+//      written on that read would hide the legacy row for good when it arrives.
+//      A read returns what the partition holds (null when empty); a first add
+//      writes only its member row. The cost is one extra keyed read (a miss) for
+//      tags that never had a legacy row.
+//
+// Legacy rows are never deleted or rewritten. No step scans a schema. A write
+// path copies a tag BEFORE it changes a member. Two callers do not copy one tag
+// at once: a copy first writes a short-lived claim row and backs off when
+// another live claim exists. A claim never blocks a read, and a failed or
+// skipped copy never aborts a record write (the record write wins; the copy is
+// retried on the next write or read of the tag).
+//
+// This module never registers a schema. A write path with no TagMembership hash
+// in the config skips the tag ops and says so once per command; reads fall back
+// to the legacy row. `brain init` is the only place that registers the schema.
 
-import type { NodeClient, Verbose } from "./client.ts";
+import {
+  FbrainError,
+  type BatchMutationOp,
+  type NodeClient,
+  type QueryRow,
+  type Verbose,
+} from "./client.ts";
 import type { Config } from "./config.ts";
 import { sha256Hex } from "./hash.ts";
+import { isUnsupportedHashKeysFilter } from "./papercut-status-index.ts";
 import {
   arrayStringField,
   isSchemaNotFoundReadError,
@@ -16,20 +61,54 @@ import {
 import {
   RECORD_TYPES,
   TAG_INDEX_SCHEMA_KEY,
+  TAG_MEMBER_COPYING_RANGE,
+  TAG_MEMBER_FIELDS,
+  TAG_MEMBER_MIGRATED_RANGE,
+  TAG_MEMBER_SCHEMA_KEY,
   type RecordType,
 } from "./schemas.ts";
 
 const TAG_INDEX_SLUG_PREFIX = "__tagidx__";
 
-const TAG_INDEX_FIELDS = ["slug", "tag", "members", "created_at", "updated_at"];
-const TAG_INDEX_WRITE_MAX_ATTEMPTS = 4;
+const LEGACY_MEMBER_FIELDS = ["members", "updated_at"];
+const LEGACY_UPDATED_FIELD = ["updated_at"];
+const TAG_MEMBER_RANGE_FIELD = ["tmb_r"];
+const TAG_MEMBER_COPY_FIELD = ["tmb_r", "tmb_copy"];
+// Every field the write path sets. A keyed read that names them all is answered
+// with HTTP 400 when the node's schema lacks one, BEFORE any write is sent.
+const TAG_MEMBER_ALL_FIELDS = [...TAG_MEMBER_FIELDS];
+
+/** Mutations per node batch when a tag's partition is copied or rebuilt. */
+export const TAG_MEMBER_BATCH_SIZE = 128;
+/** Tag partitions per read in the admin rebuild. */
+const TAG_PARTITION_READ_BATCH = 8;
+/** `tmb_tag` is informational; the hash is the identity. Keep the atom small. */
+const TAG_VALUE_MAX_BYTES = 1024;
+/** Default life of a copy claim between renewals. */
+export const TAG_COPY_CLAIM_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Life of a copy claim. `BRAIN_TAG_COPY_CLAIM_TTL_MS` shortens it (at least one
+ * second): an operator knob, and how the single-flight rules are proven on a
+ * synthetic home without waiting minutes.
+ */
+function claimTtlMs(): number {
+  const fromEnv = Number(process.env.BRAIN_TAG_COPY_CLAIM_TTL_MS);
+  return Number.isFinite(fromEnv) && fromEnv >= 1000 ? fromEnv : TAG_COPY_CLAIM_TTL_MS;
+}
+/** A claim counts as dead only this long AFTER it expired (clock skew between callers). */
+function claimMarginMs(): number {
+  return Math.min(30_000, Math.floor(claimTtlMs() / 4));
+}
+/** A copy renews its claim at least this often (every minute by default). */
+function claimRenewEveryMs(): number {
+  return Math.min(60_000, Math.floor(claimTtlMs() / 3));
+}
 
 export type TagIndexRecord = {
   slug: string;
   tag: string;
   members: string[];
-  created_at: string;
-  updated_at: string;
 };
 
 export type TaggedRecord = { type: RecordType; record: FbrainRecord };
@@ -37,6 +116,30 @@ export type TaggedRecord = { type: RecordType; record: FbrainRecord };
 export type TagIndexRebuildResult = {
   tagsIndexed: number;
   membersIndexed: number;
+};
+
+/** One membership change: add or remove `member` under `tag`. */
+export type TagMemberChange = {
+  tag: string;
+  member: string;
+  op: "add" | "remove";
+};
+
+/** The note a copy stamp carries in `tmb_copy`. */
+export type TagCopyNote = {
+  v: 1;
+  /** Members the stamp accounts for. */
+  n: number;
+  /** sha-256 of the sorted member keys it accounts for. */
+  digest?: string;
+  /** When the stamp was written (ISO 8601). */
+  at: string;
+  /** `updated_at` of the legacy row that was copied, when one was. */
+  legacy_updated_at?: string;
+  /** True when an admin rebuild from the records wrote the stamp. */
+  rebuilt?: boolean;
+  /** True when the legacy row exists with a real EMPTY member list (no members to copy). */
+  empty?: boolean;
 };
 
 export function tagIndexSlug(tag: string): string {
@@ -60,34 +163,911 @@ export function parseMemberKey(
   return { type: type as RecordType, slug };
 }
 
+/** Hash of the TagMembership schema (the layout every write uses), or null. */
+export function tagMemberSchemaHash(cfg: Config): string | null {
+  const hash = cfg.schemaHashes[TAG_MEMBER_SCHEMA_KEY];
+  return hash && hash.length > 0 ? hash : null;
+}
+
+/** Hash of the LEGACY TagIndex schema (read only, never written), or null. */
 export function tagIndexSchemaHash(cfg: Config): string | null {
   const hash = cfg.schemaHashes[TAG_INDEX_SCHEMA_KEY];
   return hash && hash.length > 0 ? hash : null;
 }
 
+/**
+ * Whether a tag read can be served: the TagMembership schema is pinned, or the
+ * legacy TagIndex is (a read of an old config falls back to the legacy row).
+ */
 export function tagIndexAvailable(cfg: Config): boolean {
-  return tagIndexSchemaHash(cfg) !== null;
+  return tagMemberSchemaHash(cfg) !== null || tagIndexSchemaHash(cfg) !== null;
 }
 
-export async function readTagIndex(
+/**
+ * The TagMembership hash for an ADMIN write, or an error naming the fix. Never
+ * declares the schema: the node registers a new schema in the Schema Service of
+ * its own environment (not the one this config names), so only `brain init`
+ * does it, on purpose.
+ */
+export function requireTagMemberSchema(cfg: Config): string {
+  const memberHash = tagMemberSchemaHash(cfg);
+  if (memberHash === null) {
+    throw new FbrainError({
+      code: "tag_member_schema_unavailable",
+      message:
+        "the TagMembership schema is not pinned in this install's config, so the tag index cannot be rebuilt.",
+      hint: "Run `brain init`, then retry.",
+    });
+  }
+  return memberHash;
+}
+
+/** One line, shown once per command, when the config has no TagMembership hash. */
+export const TAG_MEMBER_UNPINNED_MESSAGE =
+  "tag index: the TagMembership schema is not registered on this install, so tag and backlink " +
+  "membership is NOT written and reads use the legacy layout. Run `brain init`, then " +
+  "`brain reindex --tags` and `brain reindex --backlinks`.";
+
+const warned = new Set<string>();
+
+/** Print one warning line to stderr, once per process (one CLI command). */
+export function warnOnce(key: string, message: string): void {
+  if (warned.has(key)) return;
+  warned.add(key);
+  process.stderr.write(`warning: ${message}\n`);
+}
+
+function cutUtf8(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let used = 0;
+  let end = 0;
+  for (const ch of text) {
+    const next = used + Buffer.byteLength(ch);
+    if (next > maxBytes) break;
+    used = next;
+    end += ch.length;
+  }
+  return text.slice(0, end);
+}
+
+function memberOp(
+  schemaHash: string,
+  op: "create" | "delete",
+  tag: string,
+  member: string,
+  copyNote?: string,
+): BatchMutationOp {
+  const slug = tagIndexSlug(tag);
+  return {
+    mutationType: op,
+    schemaHash,
+    keyHash: slug,
+    keyRange: member,
+    fields:
+      op === "delete"
+        ? {}
+        : {
+            tmb_h: slug,
+            tmb_r: member,
+            tmb_tag: cutUtf8(tag, TAG_VALUE_MAX_BYTES),
+            ...(copyNote !== undefined ? { tmb_copy: copyNote } : {}),
+          },
+  };
+}
+
+function stampOp(schemaHash: string, tag: string, note: TagCopyNote): BatchMutationOp {
+  return memberOp(
+    schemaHash,
+    "create",
+    tag,
+    TAG_MEMBER_MIGRATED_RANGE,
+    JSON.stringify(note),
+  );
+}
+
+function digestOf(members: readonly string[]): string {
+  return sha256Hex([...members].sort().join("\n"));
+}
+
+function parseCopyNote(raw: unknown): TagCopyNote | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<TagCopyNote> | null;
+    if (parsed === null || typeof parsed !== "object") return null;
+    if (typeof parsed.at !== "string") return null;
+    return parsed as TagCopyNote;
+  } catch {
+    return null;
+  }
+}
+
+function rowRange(row: QueryRow): string | null {
+  const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
+  const range = row.key?.range ?? fields.tmb_r;
+  return typeof range === "string" && range.length > 0 ? range : null;
+}
+
+function rowHash(row: QueryRow): string | null {
+  const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
+  const hash = row.key?.hash ?? fields.tmb_h;
+  return typeof hash === "string" && hash.length > 0 ? hash : null;
+}
+
+/**
+ * What one tag's partition holds: the copy stamp (and its time, when the read
+ * asked for the note) and the member keys.
+ */
+type Partition = { marker: boolean; stampAt?: string; members: string[] };
+
+function partitionFromRows(rows: readonly QueryRow[]): Partition {
+  let marker = false;
+  let stampAt: string | undefined;
+  const members = new Set<string>();
+  for (const row of rows) {
+    const range = rowRange(row);
+    if (range === null) continue;
+    if (range === TAG_MEMBER_MIGRATED_RANGE) {
+      marker = true;
+      const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
+      stampAt = parseCopyNote(fields.tmb_copy)?.at;
+    } else if (range === TAG_MEMBER_COPYING_RANGE) continue;
+    else members.add(range);
+  }
+  return {
+    marker,
+    ...(stampAt !== undefined ? { stampAt } : {}),
+    members: [...members].sort(),
+  };
+}
+
+/**
+ * Range-read ONE tag's partition: one keyed query, paged by the client.
+ * `withNote` also reads the stamp's note (the admin rebuild needs its time).
+ */
+async function readPartition(
+  node: NodeClient,
+  memberHash: string,
+  tag: string,
+  withNote = false,
+): Promise<Partition> {
+  const res = await node.queryAll({
+    schemaHash: memberHash,
+    fields: withNote ? TAG_MEMBER_COPY_FIELD : TAG_MEMBER_RANGE_FIELD,
+    filter: { HashKey: tagIndexSlug(tag) },
+  });
+  return partitionFromRows(res.results);
+}
+
+/** Set once a node answered 400 to the `HashKeys` filter: use one read per tag. */
+let hashKeysUnsupported = false;
+
+/**
+ * Range-read several tags' partitions in ONE call (the `HashKeys` filter). A
+ * node that rejects that filter (Mini 0.23.3 answers 400) is read with one
+ * keyed read per tag, all issued together. Used by the admin rebuild, which
+ * reads every tag it will write.
+ */
+async function readPartitions(
+  node: NodeClient,
+  memberHash: string,
+  tags: readonly string[],
+): Promise<Map<string, Partition>> {
+  const out = new Map<string, Partition>();
+  if (tags.length === 0) return out;
+  if (!hashKeysUnsupported) {
+    try {
+      const res = await node.queryAll({
+        schemaHash: memberHash,
+        fields: ["tmb_h", ...TAG_MEMBER_COPY_FIELD],
+        filter: { HashKeys: tags.map(tagIndexSlug) },
+      });
+      const bySlug = new Map<string, QueryRow[]>();
+      for (const row of res.results) {
+        const hash = rowHash(row);
+        if (hash === null) continue;
+        const rows = bySlug.get(hash) ?? [];
+        rows.push(row);
+        bySlug.set(hash, rows);
+      }
+      for (const tag of tags) {
+        out.set(tag, partitionFromRows(bySlug.get(tagIndexSlug(tag)) ?? []));
+      }
+      return out;
+    } catch (err) {
+      if (!isUnsupportedHashKeysFilter(err)) throw err;
+      hashKeysUnsupported = true;
+    }
+  }
+  const parts = await Promise.all(
+    tags.map((tag) => readPartition(node, memberHash, tag, true)),
+  );
+  tags.forEach((tag, i) => out.set(tag, parts[i]!));
+  return out;
+}
+
+function presenceId(hash: string, range: string): string {
+  return `${hash}\u0000${range}`;
+}
+
+/**
+ * The rows that exist among `keys`: ONE keyed read for all of them, mapped from
+ * key id to the row's fields. The read names every field of the schema, so it
+ * also proves the node's schema accepts the fields a write sets (see
+ * `memberSchemaRejected`).
+ */
+async function readRowsByKey(
+  node: NodeClient,
+  memberHash: string,
+  keys: ReadonlyArray<{ hash: string; range: string }>,
+  fields: string[] = TAG_MEMBER_ALL_FIELDS,
+): Promise<Map<string, Record<string, unknown>>> {
+  const found = new Map<string, Record<string, unknown>>();
+  if (keys.length === 0) return found;
+  let rows: QueryRow[];
+  if (node.queryByKeys) {
+    rows = await node.queryByKeys({
+      schemaHash: memberHash,
+      fields,
+      keys: keys.map((key) => ({ hash: key.hash, range: key.range })),
+    });
+  } else {
+    const pages = await Promise.all(
+      keys.map((key) =>
+        node.queryAll({
+          schemaHash: memberHash,
+          fields,
+          filter: { HashRangeKey: { hash: key.hash, range: key.range } },
+        }),
+      ),
+    );
+    rows = pages.flatMap((page) => page.results);
+  }
+  for (const row of rows) {
+    const hash = rowHash(row);
+    const range = rowRange(row);
+    if (hash !== null && range !== null) {
+      found.set(
+        presenceId(hash, range),
+        (row.fields as Record<string, unknown> | undefined) ?? {},
+      );
+    }
+  }
+  return found;
+}
+
+/**
+ * Whether the node refused a keyed read of the TagMembership schema as a bad
+ * request. The schema service can unify a field of a registered schema with
+ * another app's field of the same meaning, and the node then answers 400 to a
+ * read, and 400 to a write, that names the field by its own name (seen
+ * 2026-10-12 on the dev service with a generic timestamp field). A write path
+ * that hits this skips its tag membership ops with a warning, instead of
+ * failing every record write.
+ */
+function memberSchemaRejected(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const e = err as { status?: unknown; httpStatus?: unknown; code?: unknown };
+  if (Number(e.status ?? e.httpStatus) === 400) return true;
+  if (e.code === "node_http_400") return true;
+  return /HTTP 400/.test(err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * A tag's legacy row: its members and its own `updated_at`. Null when absent.
+ *
+ * `state` tells apart three things a row can carry for `members`:
+ * - `"present"`: a non-empty list. Copy it, then stamp.
+ * - `"empty"`: a real EMPTY list (`[]`): a tag that had members and lost them
+ *   all. There is nothing to copy; this is recorded ONCE as a stamp with
+ *   `empty: true`, so the tag stops re-reading the legacy row and the doctor
+ *   shows it as migrated-empty.
+ * - `"missing"`: the row exists but has no `members` value at all. That can be a
+ *   row whose members atom has not synced from another device yet. It is "not
+ *   read": never copied, never stamped, and the next read or write looks again.
+ */
+type LegacyRow = {
+  members: string[];
+  updatedAt: string;
+  state: "present" | "empty" | "missing";
+};
+
+async function readLegacyRow(
   node: NodeClient,
   cfg: Config,
   tag: string,
-): Promise<TagIndexRecord | null> {
+  fields: string[] = LEGACY_MEMBER_FIELDS,
+): Promise<LegacyRow | null> {
   const schemaHash = tagIndexSchemaHash(cfg);
   if (schemaHash === null) return null;
   const slug = tagIndexSlug(tag);
   const row = node.queryByKey
-    ? await node.queryByKey({
-        schemaHash,
-        fields: TAG_INDEX_FIELDS,
-        keyHash: slug,
-      })
-    : (await node.queryAll({ schemaHash, fields: TAG_INDEX_FIELDS })).results.find(
-        (r) => r.key?.hash === slug || r.fields?.slug === slug,
-      ) ?? null;
+    ? await node.queryByKey({ schemaHash, fields, keyHash: slug })
+    : ((
+        await node.queryAll({
+          schemaHash,
+          fields,
+          filter: { HashKey: slug },
+        })
+      ).results.find((r) => r.key?.hash === slug || r.fields?.slug === slug) ??
+      null);
   if (row === null) return null;
-  return rowToTagIndex((row.fields ?? {}) as Record<string, unknown>);
+  const f = (row.fields ?? {}) as Record<string, unknown>;
+  const members = [...new Set(arrayStringField(f, "members"))];
+  return {
+    members,
+    updatedAt: typeof f.updated_at === "string" ? f.updated_at : "",
+    state: !Array.isArray(f.members)
+      ? "missing"
+      : members.length === 0
+        ? "empty"
+        : "present",
+  };
+}
+
+/** The stamp that records "this tag's legacy row is a real empty list". */
+function emptyLegacyStamp(memberHash: string, tag: string, legacy: LegacyRow): BatchMutationOp {
+  return stampOp(memberHash, tag, {
+    v: 1,
+    n: 0,
+    at: nowIso(),
+    empty: true,
+    ...(legacy.updatedAt.length > 0 ? { legacy_updated_at: legacy.updatedAt } : {}),
+  });
+}
+
+function isPersistQueueFull(error: unknown): boolean {
+  return (
+    error instanceof FbrainError &&
+    error.code === "node_http_503" &&
+    error.message.includes("persist_queue_full")
+  );
+}
+
+/**
+ * Send `ops` to the node in batches of `TAG_MEMBER_BATCH_SIZE`, in order (a
+ * stamp op placed last lands last). A node client with no batch call gets one
+ * write per op. A full persist queue is retried with a short backoff.
+ */
+async function commitOps(
+  node: NodeClient,
+  ops: readonly BatchMutationOp[],
+): Promise<void> {
+  if (ops.length === 0) return;
+  if (!node.mutateBatch) {
+    for (const op of ops) {
+      if (op.mutationType === "delete") {
+        await node.deleteRecord({
+          schemaHash: op.schemaHash,
+          keyHash: op.keyHash,
+          ...(op.keyRange !== undefined ? { keyRange: op.keyRange } : {}),
+        });
+      } else {
+        const write = {
+          schemaHash: op.schemaHash,
+          fields: op.fields,
+          keyHash: op.keyHash,
+          ...(op.keyRange !== undefined ? { keyRange: op.keyRange } : {}),
+        };
+        if (op.mutationType === "create") await node.createRecord(write);
+        else await node.updateRecord(write);
+      }
+    }
+    return;
+  }
+  for (let i = 0; i < ops.length; i += TAG_MEMBER_BATCH_SIZE) {
+    const batch = ops.slice(i, i + TAG_MEMBER_BATCH_SIZE);
+    let lastError: unknown;
+    let sent = false;
+    for (const delayMs of [0, 1000, 2000, 4000, 8000]) {
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        await node.mutateBatch([...batch]);
+        sent = true;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!isPersistQueueFull(err)) throw err;
+      }
+    }
+    if (!sent) throw lastError;
+  }
+}
+
+/** The raw `tmb_copy` note of a tag's copy claim row, or null when there is none. */
+async function readClaimNote(
+  node: NodeClient,
+  memberHash: string,
+  tag: string,
+): Promise<string | null> {
+  const rows = await readRowsByKey(
+    node,
+    memberHash,
+    [{ hash: tagIndexSlug(tag), range: TAG_MEMBER_COPYING_RANGE }],
+    TAG_MEMBER_COPY_FIELD,
+  );
+  const fields = rows.get(presenceId(tagIndexSlug(tag), TAG_MEMBER_COPYING_RANGE));
+  if (fields === undefined) return null;
+  return typeof fields.tmb_copy === "string" ? fields.tmb_copy : "";
+}
+
+type ClaimNote = { by: string; until: number; released?: boolean };
+
+function parseClaim(raw: string): ClaimNote | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<ClaimNote>;
+    if (typeof parsed.by !== "string" || typeof parsed.until !== "number") {
+      return null;
+    }
+    return { by: parsed.by, until: parsed.until, ...(parsed.released ? { released: true } : {}) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One copy claim. `token` is unique to this claim (not to the process), and
+ * `note` is the exact text now stored in the claim row: every later write is
+ * guarded by "the row still holds exactly this note".
+ */
+export type TagCopyClaim = {
+  tag: string;
+  token: string;
+  note: string;
+  renewedAt: number;
+};
+
+function claimFields(tag: string, note: string): Record<string, string> {
+  return {
+    tmb_h: tagIndexSlug(tag),
+    tmb_r: TAG_MEMBER_COPYING_RANGE,
+    tmb_tag: cutUtf8(tag, TAG_VALUE_MAX_BYTES),
+    tmb_copy: note,
+  };
+}
+
+function claimRow(memberHash: string, tag: string) {
+  return {
+    schemaHash: memberHash,
+    keyHash: tagIndexSlug(tag),
+    keyRange: TAG_MEMBER_COPYING_RANGE,
+  };
+}
+
+/**
+ * Single flight for the copy of one tag: take the claim, or null when another
+ * copier holds a live one. The caller copies only with a claim.
+ *
+ * The claim is a row under the tag's hash (token, expiry), written with the
+ * node's compare-and-set write: create only if the row is absent, or, to take
+ * over a dead claim, update only if the row still holds the exact old note. The
+ * node decides that atomically, so two processes on one node cannot both win.
+ * A claim is dead only `claimMarginMs()` after its expiry (clock skew), or when
+ * its holder released it. After a win the claim is read back, because an older
+ * node ignores the precondition. A claim never blocks a read.
+ *
+ * Scope: one node. The compare-and-set write cannot decide a race between two
+ * DEVICES; the copy is built to survive that (idempotent creates, the stamp
+ * last, readers re-check members).
+ */
+export async function claimTagCopy(
+  node: NodeClient,
+  memberHash: string,
+  tag: string,
+): Promise<TagCopyClaim | null> {
+  const existing = await readClaimNote(node, memberHash, tag);
+  if (existing !== null) {
+    const claim = parseClaim(existing);
+    const dead =
+      claim === null || claim.released === true || claim.until + claimMarginMs() < Date.now();
+    if (!dead) return null;
+  }
+  const token = crypto.randomUUID();
+  const note = JSON.stringify({ by: token, until: Date.now() + claimTtlMs() });
+  const row = claimRow(memberHash, tag);
+  if (node.mutateIfExpected) {
+    const res = await node.mutateIfExpected(
+      existing !== null
+        ? {
+            mutationType: "update",
+            ...row,
+            fields: claimFields(tag, note),
+            expected: { type: "value", field: "tmb_copy", value: existing },
+          }
+        : {
+            mutationType: "create",
+            ...row,
+            fields: claimFields(tag, note),
+            expected: { type: "absent", field: "tmb_copy" },
+          },
+    );
+    if (res === "conflict") return null;
+  } else if (existing !== null) {
+    await node.updateRecord({ ...row, fields: claimFields(tag, note) });
+  } else {
+    await node.createRecord({ ...row, fields: claimFields(tag, note) });
+  }
+  const after = await readClaimNote(node, memberHash, tag);
+  return after === note ? { tag, token, note, renewedAt: Date.now() } : null;
+}
+
+/**
+ * Extend a claim you hold. Compare-and-set on the exact note you wrote, so it
+ * succeeds only while the claim is still yours: false means it was taken over
+ * (after a long stall) and the copy must stop.
+ */
+export async function renewTagCopy(
+  node: NodeClient,
+  memberHash: string,
+  claim: TagCopyClaim,
+): Promise<boolean> {
+  const note = JSON.stringify({ by: claim.token, until: Date.now() + claimTtlMs() });
+  const row = claimRow(memberHash, claim.tag);
+  if (node.mutateIfExpected) {
+    const res = await node.mutateIfExpected({
+      mutationType: "update",
+      ...row,
+      fields: claimFields(claim.tag, note),
+      expected: { type: "value", field: "tmb_copy", value: claim.note },
+    });
+    if (res === "conflict") return false;
+  } else {
+    if ((await readClaimNote(node, memberHash, claim.tag)) !== claim.note) return false;
+    await node.updateRecord({ ...row, fields: claimFields(claim.tag, note) });
+  }
+  claim.note = note;
+  claim.renewedAt = Date.now();
+  return true;
+}
+
+/**
+ * Release a claim you hold: mark it released, only if the row still holds the
+ * exact note you last wrote (compare-and-set). A claim that was taken over
+ * carries another token and is left alone. It is never deleted, so there is no
+ * window in which a delete lands on somebody else's claim. Returns true when the
+ * claim was yours and is released.
+ */
+export async function releaseTagCopy(
+  node: NodeClient,
+  memberHash: string,
+  claim: TagCopyClaim,
+): Promise<boolean> {
+  const note = JSON.stringify({ by: claim.token, until: 0, released: true });
+  const row = claimRow(memberHash, claim.tag);
+  try {
+    if (node.mutateIfExpected) {
+      const res = await node.mutateIfExpected({
+        mutationType: "update",
+        ...row,
+        fields: claimFields(claim.tag, note),
+        expected: { type: "value", field: "tmb_copy", value: claim.note },
+      });
+      return res === "applied";
+    }
+    if ((await readClaimNote(node, memberHash, claim.tag)) !== claim.note) return false;
+    await node.updateRecord({ ...row, fields: claimFields(claim.tag, note) });
+    return true;
+  } catch {
+    return false; // the claim expires on its own
+  }
+}
+
+/**
+ * Keeps a claim alive while a copy runs, whatever one batch takes: a timer
+ * renews it (compare-and-set on the note this process last wrote) every
+ * `claimRenewEveryMs()`. A renewal the node refuses means the claim was taken
+ * over, and `lost()` turns true so the copy stops before its next batch. A
+ * renewal that fails for another reason (a transient error) is simply retried on
+ * the next tick: the claim stays valid until its expiry.
+ */
+function startClaimHeartbeat(
+  node: NodeClient,
+  memberHash: string,
+  claim: TagCopyClaim,
+): { lost: () => boolean; stop: () => Promise<void> } {
+  let lost = false;
+  let inflight: Promise<void> | null = null;
+  const timer = setInterval(() => {
+    if (inflight !== null || lost) return;
+    inflight = renewTagCopy(node, memberHash, claim)
+      .then((ok) => {
+        if (!ok) lost = true;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        inflight = null;
+      });
+  }, claimRenewEveryMs());
+  (timer as { unref?: () => void }).unref?.();
+  return {
+    lost: () => lost,
+    stop: async () => {
+      clearInterval(timer);
+      if (inflight !== null) await inflight;
+    },
+  };
+}
+
+/** The claim was taken over while this process copied: stop copying. */
+class CopyClaimLostError extends Error {
+  constructor(tag: string) {
+    super(`the copy claim on "${tag}" was taken over; stopping this copy`);
+    this.name = "CopyClaimLostError";
+  }
+}
+
+/**
+ * Copy one tag's legacy members into its partition and write the copy stamp.
+ * `part` is the partition as read just before, `legacy` the legacy row. Writes a
+ * create for each legacy member the partition lacks, then the stamp as the LAST
+ * op, with a note of what was copied. `heartbeat` keeps the claim alive while
+ * it runs; if the claim was taken over the copy stops with `CopyClaimLostError`
+ * before its next batch. Returns the partition after the copy.
+ */
+async function copyLegacyMembers(
+  node: NodeClient,
+  memberHash: string,
+  tag: string,
+  part: Partition,
+  legacy: LegacyRow,
+  heartbeat: { lost: () => boolean },
+): Promise<Partition> {
+  const have = new Set(part.members);
+  const ops: BatchMutationOp[] = [];
+  const members = new Set(part.members);
+  for (const member of legacy.members) {
+    if (member.length === 0 || have.has(member)) continue;
+    have.add(member);
+    members.add(member);
+    ops.push(memberOp(memberHash, "create", tag, member));
+  }
+  ops.push(
+    stampOp(memberHash, tag, {
+      v: 1,
+      n: legacy.members.length,
+      digest: digestOf(legacy.members),
+      at: nowIso(),
+      ...(legacy.updatedAt.length > 0
+        ? { legacy_updated_at: legacy.updatedAt }
+        : {}),
+    }),
+  );
+  for (let i = 0; i < ops.length; i += TAG_MEMBER_BATCH_SIZE) {
+    if (heartbeat.lost()) throw new CopyClaimLostError(tag);
+    await commitOps(node, ops.slice(i, i + TAG_MEMBER_BATCH_SIZE));
+  }
+  return { marker: true, members: [...members].sort() };
+}
+
+/**
+ * Copy under the single-flight claim. Returns the partition after the copy, or
+ * null when another process holds the claim, the claim was taken over mid-copy,
+ * or the stamp appeared meanwhile. The claim is released only if still ours.
+ */
+async function copyLegacyUnderClaim(
+  node: NodeClient,
+  memberHash: string,
+  tag: string,
+  legacy: LegacyRow,
+  verbose?: Verbose,
+): Promise<Partition | null> {
+  const claim = await claimTagCopy(node, memberHash, tag);
+  if (claim === null) {
+    verbose?.(
+      `tag-index: another process is copying the legacy members of "${tag}"; not copying here`,
+    );
+    return null;
+  }
+  const heartbeat = startClaimHeartbeat(node, memberHash, claim);
+  try {
+    const part = await readPartition(node, memberHash, tag);
+    if (part.marker) return part;
+    return await copyLegacyMembers(node, memberHash, tag, part, legacy, heartbeat);
+  } catch (err) {
+    if (err instanceof CopyClaimLostError) {
+      verbose?.(`tag-index: ${err.message}`);
+      return null;
+    }
+    throw err;
+  } finally {
+    await heartbeat.stop();
+    await releaseTagCopy(node, memberHash, claim);
+  }
+}
+
+/**
+ * Set after a copy write failed in a READ in this process (a read client with
+ * no write capability, a node refusing writes). A read then serves the union of
+ * the partition and the legacy row without trying the same write on every call.
+ */
+let readCopyFailed = false;
+
+function toRecord(tag: string, members: readonly string[]): TagIndexRecord {
+  return { slug: tagIndexSlug(tag), tag, members: [...members] };
+}
+
+/**
+ * The members of one tag, or null when the tag was never indexed.
+ *
+ * One range read of the tag's partition. A tag whose legacy members were not
+ * copied yet is copied now (see the header). The copy is best effort on a read:
+ * if it cannot be written, or another process holds the claim, the answer is
+ * the union of the partition and the legacy row, and a write path retries the
+ * copy. A config with no TagMembership hash reads the legacy row only.
+ */
+export async function readTagIndex(
+  node: NodeClient,
+  cfg: Config,
+  tag: string,
+  verbose?: Verbose,
+): Promise<TagIndexRecord | null> {
+  const memberHash = tagMemberSchemaHash(cfg);
+  if (memberHash === null) {
+    verbose?.(
+      "tag-index: the TagMembership schema is not registered on this install; reading the legacy layout (run `brain init`)",
+    );
+    const legacy = await readLegacyRow(node, cfg, tag);
+    return legacy === null ? null : toRecord(tag, [...legacy.members].sort());
+  }
+  const part = await readPartition(node, memberHash, tag);
+  if (part.marker) return toRecord(tag, part.members);
+
+  const legacy = await readLegacyRow(node, cfg, tag);
+  if (legacy === null || legacy.state === "missing") {
+    // No stamp, and no legacy row, or a legacy row with no members VALUE (maybe
+    // not synced yet): nothing to copy, and NO stamp is written (a stamp would
+    // hide the members when they arrive). The next read or write looks again.
+    return part.members.length === 0 ? null : toRecord(tag, part.members);
+  }
+  if (legacy.state === "empty") {
+    // A real empty list: record that once so this tag stops re-reading the
+    // legacy row. Best effort on a read (a read client may not be allowed to
+    // write); the answer is the partition either way.
+    if (!readCopyFailed) {
+      try {
+        await commitOps(node, [emptyLegacyStamp(memberHash, tag, legacy)]);
+      } catch (err) {
+        readCopyFailed = true;
+        verbose?.(
+          `tag-index: could not record the empty legacy row of "${tag}" (${errorMessage(err)})`,
+        );
+      }
+    }
+    return toRecord(tag, part.members);
+  }
+  let members = [...new Set([...part.members, ...legacy.members])].sort();
+  if (!readCopyFailed) {
+    try {
+      const after = await copyLegacyUnderClaim(node, memberHash, tag, legacy, verbose);
+      if (after !== null) members = after.members;
+    } catch (err) {
+      readCopyFailed = true;
+      verbose?.(
+        `tag-index: could not copy the legacy members of "${tag}" (${errorMessage(err)}); serving the legacy row, a write path retries the copy`,
+      );
+    }
+  }
+  return toRecord(tag, members);
+}
+
+/**
+ * Plan the mutations for a set of membership changes: one small create per add
+ * and one delete per remove of a member that exists. Reads with one keyed read
+ * for all tags (copy stamps and removed members). A tag with no stamp whose
+ * legacy row exists has its legacy members copied FIRST, under the single-flight
+ * claim, so a removal is not undone by a later copy. The copy never aborts the
+ * record write: a failed or skipped copy is reported (once per command) and the
+ * write goes ahead. No stamp is written for a tag with no legacy row.
+ *
+ * With no TagMembership hash in the config, nothing is planned and a warning
+ * says so. Never registers the schema.
+ *
+ * `noOp` counts removals of a member that was not indexed.
+ */
+export async function planTagMemberOps(
+  node: NodeClient,
+  cfg: Config,
+  changes: readonly TagMemberChange[],
+  verbose?: Verbose,
+): Promise<{ ops: BatchMutationOp[]; noOp: number }> {
+  if (changes.length === 0) return { ops: [], noOp: 0 };
+  const memberHash = tagMemberSchemaHash(cfg);
+  if (memberHash === null) {
+    verbose?.(TAG_MEMBER_UNPINNED_MESSAGE);
+    warnOnce("unpinned", TAG_MEMBER_UNPINNED_MESSAGE);
+    return { ops: [], noOp: 0 };
+  }
+
+  // Last change wins for one (tag, member).
+  const wanted = new Map<string, TagMemberChange>();
+  for (const change of changes) {
+    if (change.tag.length === 0 || change.member.length === 0) continue;
+    wanted.set(`${change.tag}\u0000${change.member}`, change);
+  }
+  const tags = [...new Set([...wanted.values()].map((c) => c.tag))];
+  if (tags.length === 0) return { ops: [], noOp: 0 };
+
+  const keys = tags.map((tag) => ({
+    hash: tagIndexSlug(tag),
+    range: TAG_MEMBER_MIGRATED_RANGE,
+  }));
+  for (const change of wanted.values()) {
+    if (change.op === "remove") {
+      keys.push({ hash: tagIndexSlug(change.tag), range: change.member });
+    }
+  }
+  let present: Map<string, Record<string, unknown>>;
+  try {
+    present = await readRowsByKey(node, memberHash, keys);
+  } catch (err) {
+    if (!memberSchemaRejected(err)) throw err;
+    const message =
+      `tag-index: the node rejected the TagMembership schema fields (${errorMessage(err)}); ` +
+      "tag and backlink membership is NOT written. Re-register the schema with `brain init`.";
+    verbose?.(message);
+    warnOnce("rejected", message);
+    return { ops: [], noOp: 0 };
+  }
+
+  // A tag with no stamp: copy its legacy members now, when a legacy row exists.
+  // `copied` holds the member set of every tag this pass copied, to decide its
+  // removals.
+  const copied = new Map<string, Set<string>>();
+  const stamps: BatchMutationOp[] = [];
+  for (const tag of tags) {
+    if (present.has(presenceId(tagIndexSlug(tag), TAG_MEMBER_MIGRATED_RANGE))) {
+      continue;
+    }
+    try {
+      const legacy = await readLegacyRow(node, cfg, tag);
+      // No row, or a row with no members VALUE (maybe not synced yet): stamp
+      // nothing.
+      if (legacy === null || legacy.state === "missing") continue;
+      // A real empty list: record it once, with this write (nothing to copy).
+      if (legacy.state === "empty") {
+        stamps.push(emptyLegacyStamp(memberHash, tag, legacy));
+        continue;
+      }
+      const after = await copyLegacyUnderClaim(node, memberHash, tag, legacy, verbose);
+      if (after !== null) copied.set(tag, new Set(after.members));
+    } catch (err) {
+      // The record write wins. The copy is retried on the next write or read.
+      const message =
+        `tag-index: could not copy the legacy members of "${tag}" (${errorMessage(err)}); ` +
+        "the write went ahead and the copy is retried on the next write of this tag";
+      verbose?.(message);
+      warnOnce(`copy:${tag}`, message);
+    }
+  }
+
+  const ops: BatchMutationOp[] = [...stamps];
+  let noOp = 0;
+  for (const change of wanted.values()) {
+    if (change.op === "add") {
+      ops.push(memberOp(memberHash, "create", change.tag, change.member));
+      continue;
+    }
+    const known = copied.get(change.tag);
+    const exists = known
+      ? known.has(change.member)
+      : present.has(presenceId(tagIndexSlug(change.tag), change.member));
+    if (!exists) {
+      noOp += 1;
+      continue;
+    }
+    ops.push(memberOp(memberHash, "delete", change.tag, change.member));
+  }
+  return { ops, noOp };
+}
+
+/** Plan and send a set of membership changes. Throws on a failed write. */
+export async function applyTagMemberChanges(
+  node: NodeClient,
+  cfg: Config,
+  changes: readonly TagMemberChange[],
+  verbose?: Verbose,
+): Promise<void> {
+  const { ops } = await planTagMemberOps(node, cfg, changes, verbose);
+  await commitOps(node, ops);
 }
 
 export async function reconcileTagIndex(
@@ -105,25 +1085,17 @@ export async function reconcileTagIndex(
   const newSet = new Set(userTags(newTags));
   const added = [...newSet].filter((tag) => !oldSet.has(tag));
   const removed = [...oldSet].filter((tag) => !newSet.has(tag));
-  const failures: string[] = [];
-  for (const tag of added) {
-    try {
-      await addTagIndexMember(node, cfg, tag, member);
-    } catch (err) {
-      failures.push(`add:${tag}:${errorMessage(err)}`);
-    }
-  }
-  for (const tag of removed) {
-    try {
-      await removeTagIndexMember(node, cfg, tag, member);
-    } catch (err) {
-      failures.push(`remove:${tag}:${errorMessage(err)}`);
-    }
-  }
-  if (failures.length > 0) {
+  const changes: TagMemberChange[] = [
+    ...added.map((tag): TagMemberChange => ({ tag, member, op: "add" })),
+    ...removed.map((tag): TagMemberChange => ({ tag, member, op: "remove" })),
+  ];
+  if (changes.length === 0) return;
+  try {
+    await applyTagMemberChanges(node, cfg, changes, verbose);
+  } catch (err) {
     verbose?.(
-      `tag-index reconcile failed for ${member}: ${failures.length} tag update(s) failed ` +
-        `(added=${added.join(",")} removed=${removed.join(",")} failed=${failures.join("; ")}); ` +
+      `tag-index reconcile failed for ${member}: ${changes.length} tag update(s) failed ` +
+        `(added=${added.join(",")} removed=${removed.join(",")} failed=${errorMessage(err)}); ` +
         "run `fbrain reindex --tags` to repair",
     );
   }
@@ -167,6 +1139,9 @@ export async function resolveRecordsByTag(
   const index = await readTagIndex(node, cfg, tag);
   if (index === null) return null;
 
+  // A remove is last-writer-wins against a concurrent add on another device, so
+  // a removed member can come back. Every member is re-checked against its
+  // record's own tags here, and a stale one is dropped.
   const out: TaggedRecord[] = [];
   const seen = new Set<string>();
   for (const member of index.members) {
@@ -192,6 +1167,84 @@ export async function resolveRecordsByTag(
   return out;
 }
 
+/**
+ * Admin rebuild: make each given tag's partition exactly `byTag` (creates for
+ * missing members, deletes for members no record carries, the stamp written).
+ * Reads partitions in batches and writes in batches. Tags absent from `byTag`
+ * are not touched: finding them would need a scan, which LastDB does not have.
+ * Returns the number of members indexed.
+ *
+ * An ADMIN operation for a quiet moment. It deletes rows no record backs, so a
+ * member another device added after this run read the records is deleted. Run
+ * it on one device at a time, with the other writers idle. It never registers
+ * the schema and never touches a legacy row.
+ */
+export async function rebuildTagMemberPartitions(
+  node: NodeClient,
+  cfg: Config,
+  byTag: ReadonlyMap<string, ReadonlySet<string>>,
+): Promise<number> {
+  const memberHash = requireTagMemberSchema(cfg);
+  const tags = [...byTag.keys()];
+  let pending: BatchMutationOp[] = [];
+  let membersIndexed = 0;
+  for (let i = 0; i < tags.length; i += TAG_PARTITION_READ_BATCH) {
+    const chunk = tags.slice(i, i + TAG_PARTITION_READ_BATCH);
+    const partitions = await readPartitions(node, memberHash, chunk);
+    // The age of each legacy row, to refresh a stamp an old binary outdated.
+    const legacy = await Promise.all(
+      chunk.map((tag) => readLegacyRow(node, cfg, tag)),
+    );
+    for (const [j, tag] of chunk.entries()) {
+      const want = byTag.get(tag) ?? new Set<string>();
+      const part = partitions.get(tag) ?? { marker: false, members: [] };
+      const have = new Set(part.members);
+      for (const member of [...want].sort()) {
+        if (!have.has(member)) {
+          pending.push(memberOp(memberHash, "create", tag, member));
+        }
+      }
+      for (const member of part.members) {
+        if (!want.has(member)) {
+          pending.push(memberOp(memberHash, "delete", tag, member));
+        }
+      }
+      // The stamp says "the layout is current up to this time": it is written
+      // only for a tag that HAS a legacy row, and only when the tag has no stamp
+      // or its legacy row is newer than the stamp (an old binary wrote it after
+      // the copy). A tag with no legacy row gets no stamp, for the same reason a
+      // read of an empty legacy row writes none. A rebuild of a current tag
+      // writes nothing.
+      const legacyAt = legacy[j]?.updatedAt;
+      // A legacy row whose members VALUE is missing may not have synced: no stamp.
+      const hasLegacy = legacy[j] != null && legacy[j]!.state !== "missing";
+      const stale =
+        hasLegacy &&
+        (!part.marker ||
+          part.stampAt === undefined ||
+          (legacyAt !== undefined && legacyAt > part.stampAt));
+      if (stale) {
+        pending.push(
+          stampOp(memberHash, tag, {
+            v: 1,
+            n: want.size,
+            digest: digestOf([...want]),
+            at: nowIso(),
+            rebuilt: true,
+          }),
+        );
+      }
+      membersIndexed += want.size;
+    }
+    if (pending.length >= TAG_MEMBER_BATCH_SIZE) {
+      await commitOps(node, pending);
+      pending = [];
+    }
+  }
+  await commitOps(node, pending);
+  return membersIndexed;
+}
+
 export async function rebuildTagIndex(
   node: NodeClient,
   cfg: Config,
@@ -201,7 +1254,8 @@ export async function rebuildTagIndex(
     onSkipUnavailableType?: (type: RecordType) => void;
   },
 ): Promise<TagIndexRebuildResult> {
-  if (!tagIndexAvailable(cfg)) return { tagsIndexed: 0, membersIndexed: 0 };
+  // Fail before the corpus scan, not after it.
+  requireTagMemberSchema(cfg);
 
   const map = new Map<string, Set<string>>();
   for (const type of RECORD_TYPES) {
@@ -229,25 +1283,8 @@ export async function rebuildTagIndex(
     }
   }
 
-  let membersIndexed = 0;
-  for (const [tag, members] of map) {
-    const existing = await readTagIndex(node, cfg, tag);
-    if (!sameMembers(existing?.members ?? [], [...members])) {
-      await writeTagIndex(node, cfg, tag, [...members], existing);
-    }
-    membersIndexed += members.size;
-  }
+  const membersIndexed = await rebuildTagMemberPartitions(node, cfg, map);
   return { tagsIndexed: map.size, membersIndexed };
-}
-
-function rowToTagIndex(fields: Record<string, unknown>): TagIndexRecord {
-  return {
-    slug: typeof fields.slug === "string" ? fields.slug : "",
-    tag: typeof fields.tag === "string" ? fields.tag : "",
-    members: arrayStringField(fields, "members"),
-    created_at: typeof fields.created_at === "string" ? fields.created_at : "",
-    updated_at: typeof fields.updated_at === "string" ? fields.updated_at : "",
-  };
 }
 
 export async function addTagIndexMember(
@@ -256,10 +1293,7 @@ export async function addTagIndexMember(
   tag: string,
   member: string,
 ): Promise<void> {
-  await mutateMember(node, cfg, tag, (members) => {
-    if (members.includes(member)) return members;
-    return [...members, member];
-  }, (members) => members.includes(member));
+  await applyTagMemberChanges(node, cfg, [{ tag, member, op: "add" }]);
 }
 
 export async function removeTagIndexMember(
@@ -268,91 +1302,84 @@ export async function removeTagIndexMember(
   tag: string,
   member: string,
 ): Promise<void> {
-  await mutateMember(node, cfg, tag, (members) => {
-    if (!members.includes(member)) return members;
-    return members.filter((m) => m !== member);
-  }, (members) => !members.includes(member));
+  await applyTagMemberChanges(node, cfg, [{ tag, member, op: "remove" }]);
 }
 
-async function mutateMember(
+/** What `brain doctor` reads for one tag: its copy stamp and its legacy row's age. */
+export type TagMigrationState = {
+  tag: string;
+  /** The tag has a copy stamp in the TagMembership partition. */
+  stamped: boolean;
+  note: TagCopyNote | null;
+  /** `updated_at` of the legacy row, or null when there is none. */
+  legacyUpdatedAt: string | null;
+};
+
+/**
+ * The copy state of several tags, for the doctor drift check: one keyed read
+ * for every stamp, and one small keyed read per legacy row (its `updated_at`
+ * only, never its member list). Bounded by the caller's tag list.
+ */
+export async function readTagMigrationStates(
   node: NodeClient,
   cfg: Config,
-  tag: string,
-  apply: (members: string[]) => string[],
-  converged: (members: string[]) => boolean,
-): Promise<void> {
-  for (let attempt = 1; attempt <= TAG_INDEX_WRITE_MAX_ATTEMPTS; attempt++) {
-    const existing = await readTagIndex(node, cfg, tag);
-    const current = existing?.members ?? [];
-    if (converged(current)) return;
-    const next = apply(current);
-    try {
-      await writeTagIndex(node, cfg, tag, next, existing);
-    } catch (err) {
-      if (attempt === TAG_INDEX_WRITE_MAX_ATTEMPTS || !isRetryableTagIndexWriteError(err)) {
-        throw err;
-      }
-      continue;
-    }
-    return;
+  tags: readonly string[],
+): Promise<TagMigrationState[]> {
+  const memberHash = tagMemberSchemaHash(cfg);
+  if (memberHash === null || tags.length === 0) return [];
+  const stamps = await readRowsByKey(
+    node,
+    memberHash,
+    tags.map((tag) => ({
+      hash: tagIndexSlug(tag),
+      range: TAG_MEMBER_MIGRATED_RANGE,
+    })),
+    TAG_MEMBER_COPY_FIELD,
+  );
+  const out: TagMigrationState[] = [];
+  for (let i = 0; i < tags.length; i += TAG_PARTITION_READ_BATCH) {
+    const chunk = tags.slice(i, i + TAG_PARTITION_READ_BATCH);
+    const legacy = await Promise.all(
+      chunk.map((tag) => readLegacyRow(node, cfg, tag, LEGACY_UPDATED_FIELD)),
+    );
+    chunk.forEach((tag, j) => {
+      const fields = stamps.get(presenceId(tagIndexSlug(tag), TAG_MEMBER_MIGRATED_RANGE));
+      const row = legacy[j] ?? null;
+      out.push({
+        tag,
+        stamped: fields !== undefined,
+        note: fields === undefined ? null : parseCopyNote(fields.tmb_copy),
+        legacyUpdatedAt: row === null ? null : row.updatedAt,
+      });
+    });
   }
-  throw new Error(`tag-index write for "${tag}" did not converge after bounded retry`);
+  return out;
 }
 
-export async function writeTagIndex(
-  node: NodeClient,
-  cfg: Config,
-  tag: string,
-  members: string[],
-  existing: TagIndexRecord | null,
-): Promise<void> {
-  const schemaHash = tagIndexSchemaHash(cfg);
-  if (schemaHash === null) return;
-  const slug = tagIndexSlug(tag);
-  const now = nowIso();
-  const fields = {
-    slug,
-    tag,
-    members: [...new Set(members)].sort(),
-    created_at: existing?.created_at ?? now,
-    updated_at: now,
-  };
-  if (existing) {
-    await node.updateRecord({ schemaHash, fields, keyHash: slug });
-  } else {
-    await node.createRecord({ schemaHash, fields, keyHash: slug });
-  }
+/**
+ * `none`: no legacy row, nothing to copy. `ok`: stamped, and the legacy row is
+ * no newer than the stamp. `empty`: stamped as a real empty legacy list
+ * (migrated-empty). `pending`: a legacy row exists and no copy ran yet (the lazy
+ * copy runs on the next read or write of the tag, or its members value has not
+ * synced yet). `drifted`: the
+ * legacy row is NEWER than the copy stamp, so an old binary, or a device that
+ * had not synced, wrote the legacy layout after the copy and the new layout
+ * lacks those members. `reindex --tags` and `--backlinks` repair a drift.
+ */
+export function tagCopyStatus(
+  state: TagMigrationState,
+): "none" | "ok" | "empty" | "pending" | "drifted" {
+  if (state.legacyUpdatedAt === null) return "none";
+  if (!state.stamped) return "pending";
+  const at = state.note?.at;
+  if (at === undefined || state.legacyUpdatedAt > at) return "drifted";
+  return state.note?.empty === true ? "empty" : "ok";
 }
 
 function userTags(tags: readonly string[]): string[] {
   return tags.filter((tag) => tag.length > 0 && tag !== TOMBSTONE_TAG);
 }
 
-function isRetryableTagIndexWriteError(err: unknown): boolean {
-  const code = typeof err === "object" && err !== null && "code" in err
-    ? String((err as { code?: unknown }).code ?? "")
-    : "";
-  const msg = errorMessage(err).toLowerCase();
-  const text = `${code.toLowerCase()} ${msg}`;
-  return (
-    text.includes("409") ||
-    text.includes("412") ||
-    text.includes("already exist") ||
-    text.includes("collision") ||
-    text.includes("conflict") ||
-    text.includes("duplicate") ||
-    text.includes("stale") ||
-    text.includes("version")
-  );
-}
-
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function sameMembers(a: readonly string[], b: readonly string[]): boolean {
-  const left = [...new Set(a)].sort();
-  const right = [...new Set(b)].sort();
-  if (left.length !== right.length) return false;
-  return left.every((member, idx) => member === right[idx]);
 }

@@ -11,6 +11,11 @@ import {
   RECORD_LIST_ENTRY_SCHEMA_KEY,
   type RecordType,
 } from "./schemas.ts";
+import {
+  indexPayload,
+  snapshotFromParsed,
+  type IndexSnapshot,
+} from "./index-payload.ts";
 import type { FbrainRecord } from "./record.ts";
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
@@ -33,21 +38,29 @@ export function entryFieldsFor(
   return {
     rle_h: type,
     rle_r: record.slug,
-    rle_payload: JSON.stringify(record),
+    // The whole record when it is small; a long body is cut to a head with
+    // `idx_truncated` naming it (index-payload.ts). Readers that print the body
+    // complete the record with a point read (`completeTruncatedRecords`).
+    rle_payload: indexPayload(record),
     rle_marker: RECORD_LIST_ENTRY_MARKER,
     layout: RECORD_LIST_ENTRY_LAYOUT,
   };
 }
 
-/** Parse one HashRange row back into a record. Null when the row is unusable. */
-export function recordFromEntryRow(row: QueryRow): FbrainRecord | null {
+/**
+ * Parse one HashRange row back into a SNAPSHOT: the whole record, or a summary
+ * with no body when the payload was cut (index-payload.ts). A summary is not a
+ * `FbrainRecord`; complete it with `completeSnapshots` (record.ts) before
+ * anything reads the body. Null when the row is unusable.
+ */
+export function recordFromEntryRow(row: QueryRow): IndexSnapshot | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
   const raw = fields.rle_payload;
   if (typeof raw !== "string" || raw.length === 0) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!isFbrainRecordLike(parsed)) return null;
-    return parsed;
+    return snapshotFromParsed(parsed);
   } catch {
     return null;
   }
@@ -63,7 +76,7 @@ async function readTypeListEntries(
   node: NodeClient,
   cfg: SchemaCfg,
   type: RecordType,
-): Promise<{ records: FbrainRecord[]; migrated: boolean } | null> {
+): Promise<{ records: IndexSnapshot[]; migrated: boolean } | null> {
   const hash = recordListEntryHash(cfg);
   if (!hash) return null;
   const res = await node.queryAll({
@@ -71,7 +84,7 @@ async function readTypeListEntries(
     fields: [...RECORD_LIST_ENTRY_FIELDS],
     filter: { HashKey: type },
   });
-  const out: FbrainRecord[] = [];
+  const out: IndexSnapshot[] = [];
   let migrated = false;
   for (const row of res.results) {
     // The completeness marker rides the same partition read; no extra round trip.
@@ -102,7 +115,7 @@ export async function readTypeListEntryBySlug(
   cfg: SchemaCfg,
   type: RecordType,
   slug: string,
-): Promise<FbrainRecord | null> {
+): Promise<IndexSnapshot | null> {
   const hash = recordListEntryHash(cfg);
   if (!hash) return null;
   const res = await node.queryAll({
@@ -127,8 +140,8 @@ export async function readTypeListEntriesBySlugs(
   cfg: SchemaCfg,
   type: RecordType,
   slugs: readonly string[],
-): Promise<Map<string, FbrainRecord | null>> {
-  const out = new Map<string, FbrainRecord | null>();
+): Promise<Map<string, IndexSnapshot | null>> {
+  const out = new Map<string, IndexSnapshot | null>();
   if (slugs.length === 0) return out;
   const hash = recordListEntryHash(cfg);
   if (!hash) {
@@ -140,13 +153,14 @@ export async function readTypeListEntriesBySlugs(
     fields: [...RECORD_LIST_ENTRY_FIELDS],
     filter: { HashRangeKeys: slugs.map((slug) => [type, slug]) },
   });
-  const found = new Map<string, FbrainRecord>();
+  const found = new Map<string, IndexSnapshot>();
   for (const row of res.results) {
     const rec = recordFromEntryRow(row);
     if (!rec) continue;
     const range = row.key?.range;
+    const recSlug = rec.cut ? rec.summary.slug : rec.record.slug;
     if (typeof range === "string" && range.length > 0) found.set(range, rec);
-    if (rec.slug.length > 0) found.set(rec.slug, rec);
+    if (recSlug.length > 0) found.set(recSlug, rec);
   }
   for (const slug of slugs) out.set(slug, found.get(slug) ?? null);
   return out;
@@ -166,7 +180,7 @@ export async function readTypeListIndex(
   node: NodeClient,
   cfg: SchemaCfg,
   type: RecordType,
-): Promise<FbrainRecord[] | null> {
+): Promise<IndexSnapshot[] | null> {
   // Point-read the completeness marker BEFORE the partition read. An unmarked
   // partition is refused anyway, so reading its rows first only burns node
   // work: a `design` list refused this way still cost 452 cold shard loads per
@@ -202,8 +216,9 @@ export async function writeTypeListIndex(
   const existing = await readTypeListEntries(node, cfg, type);
   if (existing) {
     for (const row of existing.records) {
-      if (!want.has(row.slug)) {
-        await deleteTypeListEntry(node, cfg, type, row.slug);
+      const rowSlug = row.cut ? row.summary.slug : row.record.slug;
+      if (!want.has(rowSlug)) {
+        await deleteTypeListEntry(node, cfg, type, rowSlug);
       }
     }
   }
@@ -364,7 +379,9 @@ export async function censusTypeListIndex(
 ): Promise<TypeListIndexCensus | null> {
   const entries = await readTypeListEntries(node, cfg, type);
   if (entries === null) return null;
-  const indexedSlugs = new Set(entries.records.map((r) => r.slug));
+  const indexedSlugs = new Set(
+    entries.records.map((r) => (r.cut ? r.summary.slug : r.record.slug)),
+  );
   const sotSet = new Set(sotLiveSlugs);
   const missingFromIndex: string[] = [];
   for (const s of sotSet) {

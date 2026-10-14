@@ -22,6 +22,7 @@ import { dirname, isAbsolute, join } from "node:path";
 
 import {
   CapabilityDeniedError,
+  CasConflictError,
   LastDbClient,
   PermissionDeniedError,
   RequestRejectedError,
@@ -37,6 +38,7 @@ import {
   ConsentRequestNotFoundError,
   capabilityStoreKey,
   type CapabilityStore as SdkCapabilityStore,
+  type CasExpectation as SdkCasExpectation,
   type ConsentScope,
   type JsonValue as SdkJsonValue,
   type KeyValue as SdkKeyValue,
@@ -831,6 +833,23 @@ export type NodeClient = {
     ops: BatchMutationOp[],
     options?: BatchMutationOptions,
   ): Promise<BatchMutationResult>;
+  // ONE row write guarded by a compare-and-set precondition the node checks
+  // atomically on its own state. `absent` = create only if the field has no
+  // value yet; `value` = update only if the field holds exactly that value.
+  // Returns "conflict" (HTTP 409 cas_conflict) when the precondition fails.
+  // Same-node atomicity only: it does not decide a race between two devices.
+  // Optional so hand-built clients stay small; an older node ignores the
+  // precondition and applies the write, so a caller that must know re-reads.
+  mutateIfExpected?(opts: {
+    mutationType: "create" | "update";
+    schemaHash: string;
+    fields: Record<string, unknown>;
+    keyHash: string;
+    keyRange?: string;
+    expected:
+      | { type: "absent"; field: string }
+      | { type: "value"; field: string; value: string };
+  }): Promise<"applied" | "conflict">;
   queryAll(opts: {
     schemaHash: string;
     fields: string[];
@@ -1210,6 +1229,7 @@ export function newNodeClient(opts: {
     fields: Record<string, unknown>,
     keyHash: string,
     keyRange?: string,
+    expected?: SdkCasExpectation,
   ): Promise<void> => {
     const blob = capability?.() ?? null;
     verbose(`→ NODE POST /api/mutation (sdk) schema=${schemaHash} type=${kind}`);
@@ -1217,6 +1237,7 @@ export function newNodeClient(opts: {
       await withSessionRepair(() =>
         sdkClient(blob).mutate(schemaHash, {
           mutationType: kind,
+          ...(expected !== undefined ? { expected } : {}),
           fields: fields as Record<string, SdkJsonValue>,
           // `range: null` is the Hash-schema key. A HashRange schema
           // (RecordListEntry) addresses ONE row as (hash, range), which is what
@@ -1226,6 +1247,13 @@ export function newNodeClient(opts: {
       );
       verbose(`← NODE POST /api/mutation status=200`);
     } catch (err) {
+      if (err instanceof CasConflictError) {
+        throw new FbrainError({
+          code: "cas_conflict",
+          message: `Node refused a guarded write on schema ${schemaHash.slice(0, 12)}…: the compare-and-set precondition did not hold.`,
+          cause: err,
+        });
+      }
       throw mapSdkDataError(err, url, "POST", "/api/mutation", socketPath);
     }
   };
@@ -1640,6 +1668,31 @@ export function newNodeClient(opts: {
       // smoketest passed `{slug: keyHash}` which has the side-effect of
       // writing a no-op atom rewriting the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash, keyRange);
+    },
+    async mutateIfExpected({
+      mutationType,
+      schemaHash,
+      fields,
+      keyHash,
+      keyRange,
+      expected,
+    }) {
+      try {
+        await mutate(
+          mutationType,
+          schemaHash,
+          fields,
+          keyHash,
+          keyRange,
+          expected as SdkCasExpectation,
+        );
+        return "applied";
+      } catch (err) {
+        if (err instanceof FbrainError && err.code === "cas_conflict") {
+          return "conflict";
+        }
+        throw err;
+      }
     },
     async mutateBatch(ops, options) {
       if (ops.length === 0) {

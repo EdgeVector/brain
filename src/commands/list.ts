@@ -1,6 +1,7 @@
 // `fbrain list [--type T] [--status S] [--tag T] [-n N]` — newest-first list with filters.
 
 import {
+  FbrainError,
   newReadClientFromCfg,
   type NodeClient,
   type Verbose,
@@ -10,6 +11,7 @@ import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import {
   hasAnyLiveRecord,
+  completeKeyTags,
   findBySlug,
   findBySlugs,
   isSchemaNotFoundReadError,
@@ -493,7 +495,9 @@ export async function resolveListEntries(
   for (const t of types) {
     let rs: FbrainRecord[];
     try {
-      rs = await listRecords(node, t, opts.cfg);
+      // A display path: a stale list row with no record behind it is skipped
+      // (one warning), the other rows are listed.
+      rs = await listRecords(node, t, opts.cfg, { onMissing: "skip" });
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) {
         opts.onSkippedTypes?.([t]);
@@ -534,7 +538,7 @@ export async function resolveListKeyEntries(
   node: NodeClient,
   opts: Pick<
     ListOptions,
-    "cfg" | "type" | "status" | "printErr" | "onSkippedTypes"
+    "cfg" | "type" | "status" | "tag" | "printErr" | "onSkippedTypes"
   >,
 ): Promise<Array<{ type: RecordType; key: RecordKey }>> {
   const { activeTypes: types } = resolveTypeFilter(
@@ -587,6 +591,10 @@ export async function resolveListKeyEntries(
       }
       throw err;
     }
+    // A `--tag` filter or count over keys needs each record's WHOLE tags, and a
+    // keys-only list row keeps only a bounded subset. Complete those keys first
+    // (one batched product read), so a count never excludes such a record.
+    if (opts.tag) keys = await completeKeyTags(node, t, opts.cfg, keys);
     for (const k of keys) acc.push({ type: t, key: k });
   }
   return acc;
@@ -603,7 +611,17 @@ export function matchesListKeyFilters(
   opts: Pick<ListOptions, "status" | "tag" | "updatedSinceMs">,
 ): boolean {
   if (opts.status && key.status !== opts.status) return false;
-  if (opts.tag && !key.tags.includes(opts.tag)) return false;
+  if (opts.tag) {
+    if (key.tagsCut === true) {
+      // Never answer from a bounded subset of the tags: that would undercount.
+      throw new FbrainError({
+        code: "list_tags_incomplete",
+        message: `the list row of ${key.type} ${key.slug} keeps only part of its tags, so it cannot be matched against --tag ${opts.tag}.`,
+        hint: "Complete the key first (completeKeyTags in record.ts); the list command does.",
+      });
+    }
+    if (!key.tags.includes(opts.tag)) return false;
+  }
   if (
     opts.updatedSinceMs !== undefined &&
     !(Date.parse(key.updatedAt) >= opts.updatedSinceMs)

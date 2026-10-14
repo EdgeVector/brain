@@ -38,7 +38,13 @@ export type BrainAdminSnapshot = {
   source_app: "fbrain";
   schema_version: string;
   captured_at: string;
-  type_counts: Record<RecordType, number>;
+  /**
+   * Live record count by type. `null` means the type could NOT be counted
+   * (named in `unavailable_types`); it is never reported as 0.
+   */
+  type_counts: Record<RecordType, number | null>;
+  /** Types whose count could not be read, with the reason. Empty when all were counted. */
+  unavailable_types: Array<{ type: RecordType; reason: string }>;
   /** Live open-decisions ledger lines: slug + short title only (no bodies). */
   open_decisions: Array<{ slug: string; title: string; status: string }>;
   active_programs_head: Array<{ slug: string; title: string; status: string; lines: string[] }>;
@@ -166,6 +172,13 @@ export async function publishAdminSnapshot(
         `fields: ${SNAPSHOT_FIELDS.join(",")}`,
         `hash_keys: ${slug}`,
         `type_counts: ${summarizeTypeCounts(snapshot.type_counts)}`,
+        ...(snapshot.unavailable_types.length > 0
+          ? [
+              `unavailable_types: ${snapshot.unavailable_types
+                .map((u) => `${u.type} (${u.reason})`)
+                .join("; ")}`,
+            ]
+          : []),
         `open_decisions: ${snapshot.open_decisions.length}`,
         `heartbeats: ${snapshot.recent_heartbeats.length}`,
       ].join("\n"),
@@ -276,14 +289,18 @@ export async function buildBrainAdminSnapshot(
 ): Promise<BrainAdminSnapshot> {
   const slug = opts.slug ?? ADMIN_SNAPSHOT_SLUG;
   const now = opts.now ?? new Date();
-  const byType = new Map<RecordType, FbrainRecord[]>();
+  const typeCounts = {} as Record<RecordType, number | null>;
+  const unavailable: BrainAdminSnapshot["unavailable_types"] = [];
   for (const type of RECORD_TYPES) {
-    byType.set(type, await safeListLiveRecords(node, cfg, type));
+    const counted = await countLiveRecords(node, cfg, type);
+    if ("count" in counted) {
+      typeCounts[type] = counted.count;
+    } else {
+      // Never a silent 0: the type is recorded as unavailable, by name.
+      typeCounts[type] = null;
+      unavailable.push({ type, reason: counted.unavailable });
+    }
   }
-
-  const typeCounts = Object.fromEntries(
-    RECORD_TYPES.map((type) => [type, byType.get(type)?.length ?? 0]),
-  ) as Record<RecordType, number>;
 
   return {
     slug,
@@ -291,6 +308,7 @@ export async function buildBrainAdminSnapshot(
     schema_version: ADMIN_SNAPSHOT_SCHEMA_VERSION,
     captured_at: now.toISOString(),
     type_counts: typeCounts,
+    unavailable_types: unavailable,
     open_decisions: await buildOpenDecisionLines(node, cfg),
     active_programs_head: await buildActiveProgramsHead(node, cfg),
     recent_heartbeats: await buildRecentHeartbeats(node, cfg),
@@ -442,16 +460,24 @@ async function findSnapshotRow(
   return res.results.find((row) => row.key?.hash === slug || row.fields.slug === slug) ?? null;
 }
 
-async function safeListLiveRecords(
+/**
+ * Live rows of one type, for the count. The snapshot never carries a body, so
+ * this reads summaries (no body, no completion of a cut list row). If the list
+ * cannot be read at all (an incomplete list index, a node error) the type is
+ * reported as unavailable, not as 0.
+ */
+async function countLiveRecords(
   node: NodeClient,
   cfg: Config,
   type: RecordType,
-): Promise<FbrainRecord[]> {
+): Promise<{ count: number } | { unavailable: string }> {
   try {
-    const records = await listRecords(node, type, cfg);
-    return records.filter((record) => !isTombstoned(record));
-  } catch {
-    return [];
+    const rows = await listRecords(node, type, cfg, { summary: true });
+    return { count: rows.filter((row) => !isTombstoned(row)).length };
+  } catch (err) {
+    const code = err instanceof FbrainError ? `${err.code}: ` : "";
+    const message = err instanceof Error ? err.message : String(err);
+    return { unavailable: `${code}${message}`.slice(0, 200) };
   }
 }
 
@@ -536,8 +562,8 @@ function headLines(body: string, maxLines: number, maxChars: number): string[] {
   return lines;
 }
 
-function summarizeTypeCounts(counts: Record<RecordType, number>): string {
-  return RECORD_TYPES.map((type) => `${type}=${counts[type] ?? 0}`).join(" ");
+function summarizeTypeCounts(counts: Record<RecordType, number | null>): string {
+  return RECORD_TYPES.map((type) => `${type}=${counts[type] ?? "unavailable"}`).join(" ");
 }
 
 function positiveInt(value: number | undefined, fallback: number): number {

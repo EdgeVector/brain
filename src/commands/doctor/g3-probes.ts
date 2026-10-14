@@ -368,7 +368,8 @@ export async function runPollutionProbe(
   const failedTypes = new Set<RecordType>();
   for (const type of typesToLoad) {
     try {
-      const records = await listRecords(node, type, cfg);
+      // Slugs and the tombstone tag only: skip body completion.
+      const records = await listRecords(node, type, cfg, { summary: true });
       liveSlugsByType.set(
         type,
         new Set(records.filter((r) => !r.tags.includes(TOMBSTONE_TAG)).map((r) => r.slug)),

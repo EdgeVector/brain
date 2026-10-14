@@ -22,7 +22,6 @@ import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
   buildRecordFields,
-  type FbrainRecord,
   findBySlugRaw,
   isTombstoned,
   listRecords,
@@ -91,10 +90,12 @@ async function findLinkedTaskSlugs(
     return indexed.map((r) => r.slug).sort();
   }
 
-  const isLinked = (r: FbrainRecord): boolean =>
+  // Summaries are enough: only design_slug and the tombstone tag are read.
+  const isLinked = (r: { tags: readonly string[]; design_slug?: string }): boolean =>
     !isTombstoned(r) && r.design_slug === designSlug;
   const tasks = await withReadRetry(
-    () => listRecords(node, "task", cfg),
+    // Only design_slug and the tombstone tag are read: skip body completion.
+    () => listRecords(node, "task", cfg, { summary: true }),
     (rows) => rows.some(isLinked),
   );
   return tasks

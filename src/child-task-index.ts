@@ -15,6 +15,7 @@ import {
   CHILD_TASK_INDEX_MIGRATED_RANGE,
   CHILD_TASK_INDEX_SCHEMA_KEY,
 } from "./schemas.ts";
+import { indexPayload } from "./index-payload.ts";
 import type { FbrainRecord } from "./record.ts";
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
@@ -56,7 +57,9 @@ function entryFieldsFor(designSlug: string, task: FbrainRecord): Record<string, 
   return {
     ctd_h: designSlug,
     ctd_r: task.slug,
-    ctd_payload: JSON.stringify(task),
+    // `readChildTasksByDesign` point-reads every task and never parses this
+    // snapshot. It follows the index payload rule anyway (index-payload.ts).
+    ctd_payload: indexPayload(task),
     ctd_marker: CHILD_TASK_INDEX_MARKER,
   };
 }

@@ -7,7 +7,9 @@ the **existing admin kanban-consumer** (no second enroll).
 
 The snapshot intentionally contains only:
 
-- live record counts by fbrain type (`type_counts_json`)
+- live record counts by fbrain type (`type_counts_json`). A type that could not
+  be counted is `null` there (never 0) and is named, with the reason, in the
+  `unavailable_types` field of the snapshot output
 - open-decisions **live** ledger lines — slug + short title only
 - the head of the `active-programs` rollup
 - recent heartbeats as `{slug, ts, ok}`
