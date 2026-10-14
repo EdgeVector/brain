@@ -907,7 +907,7 @@ export function printNextSteps(
   if (ctx.reinitialized) {
     print(``);
     print(
-      `Already initialized on ${formatNodeTarget(ctx.nodeUrl)} (config: ${ctx.configPath}) — try \`brain list\` to see your records, or \`brain doctor\` to re-check health.`,
+      `Already initialized on ${formatNodeTarget(ctx.nodeUrl)} (config: ${ctx.configPath}) — try \`brain ask "<question>"\` to find a record, or \`brain list\` for a sample of what's there.`,
     );
     return;
   }
@@ -916,9 +916,9 @@ export function printNextSteps(
   print(`You're ready. Next steps:`);
   print(`  1. Create your first record:  brain design new my-first-idea --title "My first idea" --body "what this idea is"`);
   print(`        (also: concept/preference/reference/agent/project/spike/sop new, or pipe markdown to \`brain put <slug>\`)`);
-  print(`  2. See what you've got:        brain list`);
+  print(`  2. See a sample of what's there: brain list   (a sample, not a full census — use \`brain search\`/\`brain ask\` to find a specific record)`);
   print(`  3. Find it again:              brain search "<term>"   ·   brain ask "<question>"`);
-  print(`  4. Re-check health anytime:    brain doctor`);
+  print(`  4. If something looks wrong:   brain doctor`);
   print(`  5. Connect it to your AI agent: brain mcp install`);
   print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; \`brain-mcp\` is already on your PATH from the global \`bun add -g\` install — from a contributor source checkout, run \`bun link\` first)`);
   print(`        → then \`brain doctor --mcp\` to confirm the agent surface boots and serves the fbrain_* tools. (Doing it by hand instead? \`claude mcp add brain brain-mcp\` then \`brain mcp instructions >> CLAUDE.md\`.)`);
