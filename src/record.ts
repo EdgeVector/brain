@@ -21,6 +21,7 @@ import {
   type SealResult,
 } from "./body-spill.ts";
 import {
+  BRAIN_TYPE_DIRECTORY_SCHEMA_KEY,
   RECORDS,
   RECORD_TYPES,
   isRecordType,
@@ -1571,10 +1572,139 @@ export interface ResolveBySlugOpts {
   // not_found: lowercase plus '-'/'_' folded variants. Ambiguous normalized
   // matches intentionally do not resolve.
   normalizedSlugFallback?: boolean;
+  // Untyped get. One directory key, then at most one product key.
+  // A typed lookup ignores this flag.
+  directory?: boolean;
+  // false keeps the stored field and does not fetch a spilled body.
+  // Omitted keeps the full-text read.
+  hydrate?: boolean;
   // Forwarded to the per-type lookup loop so tests can mock sleep / shrink
   // the budget without paying the real backoff schedule. Production callers
   // leave it unset and inherit the smoketest-tuned defaults.
   retryOptions?: ReadRetryOptions;
+}
+
+const DIRECTORY_RANGE = "__types__";
+
+function hasSchemaHash(
+  cfg: { schemaHashes: Record<string, string> },
+  key: string,
+): boolean {
+  const hash = cfg.schemaHashes[key];
+  return typeof hash === "string" && hash.length > 0;
+}
+
+function parseDirectoryTypeList(value: unknown): RecordType[] {
+  let items: unknown[] = [];
+  if (typeof value === "string") {
+    if (value.length === 0) return [];
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      items = parsed;
+    } catch {
+      return [];
+    }
+  } else if (Array.isArray(value)) {
+    items = value;
+  } else {
+    return [];
+  }
+  const out: RecordType[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (typeof item !== "string" || !isRecordType(item) || seen.has(item)) continue;
+    seen.add(item);
+    out.push(item);
+  }
+  return out;
+}
+
+function directoryBackfill(slug: string): string {
+  return `brain reindex --target <hash> --source-hash <type> --slug ${slug}`;
+}
+
+function throwDirectoryNotFound(opts: ResolveBySlugOpts): never {
+  const slug = opts.slug;
+  const verb = opts.recoveryVerb ?? "get";
+  const base = opts.notFoundMessage?.untyped?.(slug) ?? `No record with slug "${slug}".`;
+  const backfill = directoryBackfill(slug);
+  const memoryHint = memoryFilenameStemHint(slug);
+  throw new FbrainError({
+    code: "not_found",
+    message: `${base} Pass --type, or run \`${backfill}\`.`,
+    hint: appendHint(
+      `Pass --type (\`fbrain ${verb} ${slug} --type <type>\`), or run \`${backfill}\`.`,
+      memoryHint?.hint,
+    ),
+    agentHint: appendHint(
+      `Pass the type argument, or run \`${backfill}\`.`,
+      memoryHint?.agentHint,
+    ),
+  });
+}
+
+function throwDirectoryAmbiguous(
+  opts: ResolveBySlugOpts,
+  types: readonly RecordType[],
+): never {
+  const exampleType = types[0]!;
+  const verb = opts.recoveryVerb ?? "get";
+  throw new FbrainError({
+    code: "ambiguous_slug",
+    message: `Slug "${opts.slug}" exists in multiple schemas (${types.join(", ")}). Specify a \`type\`.`,
+    hint: `Re-run with --type, e.g. \`fbrain ${verb} ${opts.slug} --type ${exampleType}\`.`,
+    agentHint: `Pass the \`type\` argument, e.g. type: "${exampleType}".`,
+  });
+}
+
+async function readDirectoryTypeField(
+  node: NodeClient,
+  schemaHash: string,
+  slug: string,
+): Promise<unknown> {
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["btd_types"],
+    filter: { HashRangeKey: { hash: slug, range: DIRECTORY_RANGE } },
+  });
+  const row = res.results[0];
+  if (!row?.fields || !("btd_types" in row.fields)) return undefined;
+  return row.fields.btd_types;
+}
+
+async function resolveUntypedDirectory(
+  opts: ResolveBySlugOpts,
+  probeType: (type: RecordType) => Promise<ResolvedRecord | null>,
+): Promise<ResolvedRecord> {
+  let listed: RecordType[] = [];
+  if (hasSchemaHash(opts.cfg, BRAIN_TYPE_DIRECTORY_SCHEMA_KEY)) {
+    try {
+      const raw = await readDirectoryTypeField(
+        opts.node,
+        opts.cfg.schemaHashes[BRAIN_TYPE_DIRECTORY_SCHEMA_KEY]!,
+        opts.slug,
+      );
+      if (raw !== undefined) listed = parseDirectoryTypeList(raw);
+    } catch (err) {
+      if (!isSchemaNotFoundReadError(err)) throw err;
+    }
+  }
+  if (listed.length > 1) throwDirectoryAmbiguous(opts, listed);
+  if (listed.length === 1) {
+    const type = listed[0]!;
+    if (hasSchemaHash(opts.cfg, type)) {
+      const found = await probeType(type);
+      if (found !== null) return found;
+    }
+    throwDirectoryNotFound(opts);
+  }
+  const hint = typeHintFromSlug(opts.slug);
+  if (hint !== null && hasSchemaHash(opts.cfg, hint)) {
+    const found = await probeType(hint);
+    if (found !== null) return found;
+  }
+  throwDirectoryNotFound(opts);
 }
 
 // Centralized "find a record by slug across record types, retry on
@@ -1589,16 +1719,21 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   // Keyed point-read (found-or-not, no full scan) — `raw` mirrors
   // `findBySlugRaw` (tombstoned rows returned; only `delete`'s raw path
   // uses it) vs the tombstone-filtered `findBySlug`.
+  const readOpts = opts.hydrate === undefined ? undefined : { hydrate: opts.hydrate };
   const probeType = async (t: RecordType): Promise<ResolvedRecord | null> => {
     const hash = schemaHashFor(t, opts.cfg);
     const row = opts.raw === true
-      ? await findBySlugRaw(opts.node, t, hash, opts.slug, opts.cfg)
-      : await findBySlug(opts.node, t, hash, opts.slug, opts.cfg);
+      ? await findBySlugRaw(opts.node, t, hash, opts.slug, opts.cfg, readOpts)
+      : await findBySlug(opts.node, t, hash, opts.slug, opts.cfg, readOpts);
     if (row === null) return null;
     if (opts.raw && isTombstoned(row)) return null;
     if (opts.filter && !opts.filter(row, t)) return null;
     return { type: t, record: row };
   };
+
+  if (opts.directory === true && opts.type === undefined) {
+    return resolveUntypedDirectory(opts, probeType);
+  }
 
   // Untyped lookup: probe the type the slug PREFIX names first, with one
   // keyed read, and return on a hit. Most slugs carry their type as a prefix

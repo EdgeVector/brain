@@ -1,9 +1,8 @@
 // `fbrain get <slug> [--type T]` — print a record.
-// If --type is omitted, the type named by the slug prefix is probed first; on
-// a miss every registered schema is queried, and if the slug exists in
-// multiple schemas the match selected by GET_RECORD_TYPE_PRECEDENCE is
-// returned. `linked_from` is read from the backlink index only (slugs and
-// types, one request); `fbrain backlinks` is the hydrated view.
+// Untyped get reads the type directory, then at most one product key.
+// Typed get reads that product key and does not read the directory.
+// `linked_from` stays on the backlink index. Design children stay on the
+// child-task index.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import { listBacklinkMembers } from "../backlink-index.ts";
@@ -14,7 +13,6 @@ import {
   compareByUpdatedThenSlug,
   findBySlug,
   findChildTasksByDesignForDisplay,
-  GET_RECORD_TYPE_PRECEDENCE,
   NOT_FOUND_TYPED,
   normalizeSlug,
   resolveBySlug,
@@ -55,6 +53,11 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   const slug = normalizeSlug(opts.slug);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
+  const printsFullBody =
+    opts.bodyLimit === undefined &&
+    (opts.fields === undefined ||
+      opts.fields.length === 0 ||
+      opts.fields.includes("body"));
   const found = await resolveBySlug({
     node,
     cfg: opts.cfg,
@@ -62,9 +65,10 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     type: opts.type,
     notFoundMessage: NOT_FOUND_TYPED,
     recoveryVerb: "get",
-    ambiguousTypePrecedence:
-      opts.type === undefined ? GET_RECORD_TYPE_PRECEDENCE : undefined,
-    normalizedSlugFallback: true,
+    ...(opts.type === undefined
+      ? { directory: true }
+      : { normalizedSlugFallback: true }),
+    ...(printsFullBody ? {} : { hydrate: false }),
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on
