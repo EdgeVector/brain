@@ -992,11 +992,9 @@ Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
   papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B | --body-file PATH|-]
                        [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
-                       [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
-                       [--not-duplicate-of-any] [--reopen CANONICAL]
+                       [--repo owner/name] [--tag T]...
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
                         [--duplicate-of SLUG]   (required with --status duplicate)
-                        [--durable]
 brain papercut set <slug> [--kind K] [--repo owner/name] [--severity p0|p1|p2|p3]
                       [--component C]
 brain papercut census [<component>] [--point-read] [--json]
@@ -1009,34 +1007,15 @@ failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
 and closed at the bottom, 22 could not be counted at all, and the same defect
 was filed twice two hours apart by runs that could not see each other.
 
-file    Files a new papercut, AFTER a dedupe gate. <slug> may leave out the
-        leading \`papercut-\`; it is added and one stderr line says so. Only
-        \`file\` does this: close, set and put take the full slug. The gate is two
-        nets: an exact \`symptom_hash\` match over (component, normalized
-        --symptom), and a similarity check against every LIVE papercut in the
-        same component (and near-identical live rows in any component).
-        LIVE means open, partial, or fixed — \`fixed\` still gates, because the
-        fix is not proven on any machine until the record reads \`verified\`.
-        A hit REFUSES the write (exit 3) and prints the candidates.
+file    Files a new papercut. <slug> may leave out the leading \`papercut-\`; it
+        is added and one stderr line says so. Only \`file\` does this: close, set
+        and put take the full slug. The same slug is a refile when the filing
+        text matches. A different slug in the symptom head is a duplicate. The
+        command reads that one head. It does not rank the corpus. A duplicate
+        REFUSES the write (exit 3) and prints that slug. Nothing is written.
 
-        RECURRENCE: a row CLOSED (verified/wontfix/duplicate) in the last 14
-        days that reads like the same defect also refuses the write. It may be
-        a recurrence or a SIBLING defect that shares the words, and similarity
-        cannot tell them apart: read its claim. If the defect came back, do
-        not file a fresh row: re-run the same command with --reopen <slug>.
-        The filing becomes a \`reconfirmed\` evidence block on that row and a
-        closed row goes back to \`open\` — one row carries the recurrence. If it
-        is a sibling, clear it with --not-duplicate-of <slug>.
-        --not-duplicate-of-any does not clear a recurrence.
-
-        The refusal prints the complete SIMILARITY-ranked set, so clearing what
-        it named cannot reveal a second page of it. It does not follow
-        citations: the record that owns the class can be one hop from a
-        candidate, so read each candidate's body. Clear a false match with
-        --not-duplicate-of <slug>, or, once you have read them all,
-        --not-duplicate-of-any. Both are recorded in the new record's body —
-        the bulk form says so in its own words, so a reader can tell the two
-        apart. Neither can clear an EXACT slug match.
+        file and close both require a durable receipt. A queued receipt fails
+        the command. A partial index fails the command.
 
 close   Sets the status field AND appends the evidence block in ONE write, so a
         half-closure is not expressible. --status verified additionally requires
@@ -1044,17 +1023,9 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
         merge reference is rejected, because "merged" is a fact about a
         repository and not about anything running.
 
-        The ack carries durability=durable|queued|unreported and the write's
-        revision. Only durable means on disk. queued means the node took the
-        write and has not flushed it, unreported means this node does not
-        answer the question at all; a queued status write has been observed to
-        revert across a node restart, taking the evidence stanza with it. A
-        re-read does NOT detect this -- a queued write is served from the state
-        it landed in, so the check reads exactly like a durable one, and the
-        ack prints one line saying so. --durable
-        asks for an exact disk receipt for the one batch and fails loudly when
-        the node will not confirm it; a status transition is a handful of small
-        fields, so it is cheap to pay for there, unlike on a body append.
+        The ack carries durability=durable and the write's revision. Only
+        durable means on disk. A queued receipt fails the command. The status
+        move and the reference twin, when the twin changes, are one batch.
 
 set     Amends a header column on an existing row: --kind, --repo, --severity,
         --component. Nothing else. No status transition (that is close, which
@@ -1506,15 +1477,8 @@ export const PAPERCUT_OPTIONS = {
   kind: { type: "string" },
   repo: { type: "string" },
   tag: { type: "string", multiple: true },
-  "not-duplicate-of": { type: "string", multiple: true },
-  "not-duplicate-of-any": { type: "boolean" },
-  reopen: { type: "string" },
   // close
   status: { type: "string" },
-  // `papercut close` only: require a durable disk receipt for the status write.
-  // Deliberately NOT shared with the other subcommands — the consumption table
-  // below refuses it on any verb that would ignore it.
-  durable: { type: "boolean" },
   // census / list
   "index-only": { type: "boolean" },
   fast: { type: "boolean" },
@@ -4351,9 +4315,6 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "kind",
     "repo",
     "tag",
-    "not-duplicate-of",
-    "not-duplicate-of-any",
-    "reopen",
   ],
   close: [
     ...PAPERCUT_SHARED_FLAGS,
@@ -4362,7 +4323,6 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "fixed-by",
     "verified-by",
     "duplicate-of",
-    "durable",
   ],
   // `set` deliberately does NOT list `status`. A status move must carry
   // evidence, and `close` is the verb that takes it; a header amender that
@@ -4491,42 +4451,14 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     };
     if (typeof values.repo === "string") opts.repo = values.repo;
     if (values.tag) opts.tags = values.tag as string[];
-    if (values["not-duplicate-of"]) {
-      opts.notDuplicateOf = values["not-duplicate-of"] as string[];
-    }
-    if (values["not-duplicate-of-any"]) opts.notDuplicateOfAny = true;
-    if (typeof values.reopen === "string") opts.reopen = values.reopen;
     const result = await papercutFileCmd(opts);
     // A blocked duplicate is a REFUSED write, and a routine that ignores the
     // exit code must not read it as "filed". Exit 3 distinguishes it from both
     // success (0) and a malformed invocation (2).
     if (result.action === "duplicate_blocked") {
-      // One stderr line too: callers that capture only stderr saw an empty
-      // stream on exit 3 and misread the refusal
-      // (papercut-brain-papercut-file-duplicate-exit). stdout keeps the full
-      // candidate list (or the --json object).
-      // An EXACT match is this slug against itself, so the caller is almost
-      // always re-filing to correct a header column they left off the first
-      // call. Sending them to `brain append` there is sending them to write
-      // prose no filter can read; `papercut set` is the verb that moves the
-      // column. Measured 2026-09-26: the omitted flag was `--kind`, and the
-      // row stayed absent from `--kind specified-fix` with the correction
-      // sitting in its body.
-      const exact = result.duplicates.find((d) => d.exact);
-      // A recurrence refusal does NOT name a --reopen slug here. The top-scored
-      // CLOSED row is as likely to be a sibling defect as the recurrence, and a
-      // slug in the one line a caller reads invites a --reopen that flips a
-      // verified row back to open (papercut-papercut-dedupe-gate-surfaces-an-
-      // instance-and-calls-the-set-complete-while-the-class-owner-is-one-hop-
-      // away-20261004). Name the count and send the reader to the claims.
-      const closedCount = result.duplicates.filter((d) => d.recurrence === true).length;
-      const next = result.reopen?.length
-        ? `${closedCount} of them CLOSED (a recurrence or a sibling defect): read their claims on stdout, then --reopen the row with the same defect or --not-duplicate-of a sibling`
-        : exact
-          ? `that is THIS slug: to correct a header column use \`brain papercut set ${exact.slug} [--kind K] [--repo owner/name] [--severity S] [--component C]\`, or append evidence with \`brain append ${exact.slug} --type papercut\``
-          : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
+      const held = result.duplicates[0]?.slug ?? "<slug>";
       console.error(
-        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) may already describe this; ${next}. Candidates are on stdout.`,
+        `papercut file: NOT filed (exit 3) — the symptom head already names ${held}.`,
       );
       return 3;
     }
@@ -4568,7 +4500,6 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       opts.verifiedBy = values["verified-by"];
     if (typeof values["duplicate-of"] === "string")
       opts.duplicateOf = values["duplicate-of"];
-    if (values.durable === true) opts.durable = true;
     await papercutCloseCmd(opts);
     return 0;
   }

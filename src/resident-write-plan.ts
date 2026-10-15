@@ -41,11 +41,6 @@ import {
 } from "./list-page.ts";
 import { normalizeSlug, TOMBSTONE_TAG, type FbrainRecord } from "./record.ts";
 import {
-  papercutStatusEntryExists,
-  papercutStatusEntryFields,
-  papercutStatusIndexHash,
-} from "./papercut-status-index.ts";
-import {
   memberKey,
   planTagMemberOps,
   tagIndexAvailable,
@@ -239,50 +234,6 @@ function planChildTaskOps(opts: {
   return ops;
 }
 
-async function planPapercutStatusOps(opts: {
-  node: NodeClient;
-  cfg: Pick<Config, "schemaHashes">;
-  type: RecordType;
-  record: FbrainRecord;
-  previous: FbrainRecord | null;
-}): Promise<PlannedMutation[]> {
-  if (opts.type !== "papercut") return [];
-  const schemaHash = papercutStatusIndexHash(opts.cfg);
-  if (!schemaHash) return [];
-  const ops: PlannedMutation[] = [];
-  const previousStatus = opts.previous?.status ?? "";
-  const nextStatus = opts.record.status ?? "";
-  if (previousStatus.length > 0 && previousStatus !== nextStatus) {
-    ops.push({
-      mutationType: "delete",
-      schemaHash,
-      keyHash: previousStatus,
-      keyRange: opts.record.slug,
-      fields: {},
-      projection: "papercut-status",
-    });
-  }
-  if (nextStatus.length > 0) {
-    const exists = await papercutStatusEntryExists(
-      opts.node,
-      schemaHash,
-      nextStatus,
-      opts.record.slug,
-    );
-    ops.push({
-      mutationType: exists ? "update" : "create",
-      schemaHash,
-      keyHash: nextStatus,
-      keyRange: opts.record.slug,
-      // Never the whole record: the payload keeps long text to a head so the
-      // index atom stays small (papercutStatusPayload).
-      fields: papercutStatusEntryFields(nextStatus, opts.record),
-      projection: "papercut-status",
-    });
-  }
-  return ops;
-}
-
 // Tag and backlink membership. One small create per added member and one
 // delete per removed member of an indexed tag, in the same batch as the record.
 // Never a read-modify-write of a member list (see tag-index.ts).
@@ -453,15 +404,6 @@ export async function buildResidentWritePlan(opts: {
       upsertType,
     }),
   );
-  ops.push(
-    ...(await planPapercutStatusOps({
-      node: opts.node,
-      cfg: opts.cfg,
-      type: opts.type,
-      record: stored,
-      previous: opts.previous,
-    })),
-  );
 
   const tags = await planTagMembershipOps({
     node: opts.node,
@@ -513,6 +455,8 @@ export async function commitResidentWritePlan(opts: {
   type: RecordType;
   slug: string;
   durable?: boolean;
+  /** Papercut file and close refuse a short or partial index. Do not send. */
+  failOnIndexPartial?: boolean;
 }): Promise<ResidentCommitResult> {
   // Name the field here. A later 413 from the node does not.
   assertOpsFitAtomBudget(opts.type, opts.slug, opts.plan.ops);
@@ -526,6 +470,9 @@ export async function commitResidentWritePlan(opts: {
   const notes = [...opts.plan.indexNotes];
   const split = splitResidentBatches(opts.plan.ops, opts.plan.heads.length);
   if (split.trimmed) noteIndexPartial(notes, "batch cap");
+  if (opts.failOnIndexPartial && notes.includes(INDEX_PARTIAL)) {
+    throw indexPartialMiss(opts.type, opts.slug, notes);
+  }
   const durable = opts.durable ? { durability: "durable" as const } : undefined;
   let primary = emptyBatchResult();
   try {
@@ -569,6 +516,9 @@ export async function commitResidentWritePlan(opts: {
     if (count === "unconfirmed" && !notes.includes(COUNT_UNCONFIRMED)) {
       notes.push(COUNT_UNCONFIRMED);
     }
+  }
+  if (opts.failOnIndexPartial && notes.includes(INDEX_PARTIAL)) {
+    throw indexPartialMiss(opts.type, opts.slug, notes);
   }
   return {
     ...primary,
@@ -629,6 +579,23 @@ function emptyBatchResult(): BatchMutationResult {
     backgroundTasksDrained: true,
     convergencePending: false,
   };
+}
+
+function indexPartialMiss(
+  type: RecordType,
+  slug: string,
+  notes: readonly string[],
+): FbrainError {
+  const why = notes.filter((line) => line.length > 0 && line !== INDEX_PARTIAL);
+  return new FbrainError({
+    code: "index_partial",
+    message:
+      `index partial for ${type} ${slug}` +
+      (why.length > 0 ? ` (${why.join(", ")})` : ""),
+    hint: "The command does not report success. Read the record before a manual retry.",
+    agentHint:
+      "Do not retry automatically. Read the record before a manual retry.",
+  });
 }
 
 function durableMiss(
