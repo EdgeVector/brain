@@ -483,7 +483,8 @@ export async function resolveListEntries(
   );
   if (opts.tag) {
     const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
-      findBySlug: (type, hash, slug) => findBySlug(node, type, hash, slug),
+      findBySlug: (type, hash, slug) =>
+        findBySlug(node, type, hash, slug, opts.cfg, { hydrate: false }),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
     });
     if (indexed !== null) {

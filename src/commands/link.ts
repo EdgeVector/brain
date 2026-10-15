@@ -15,6 +15,7 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
+  writeRecordFields,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
@@ -60,7 +61,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   // A keyed point-read (`findBySlug`) is authoritative (found-or-not) without
   // scanning, so a real record on a >100-row schema is still found and a typo'd
   // <task-slug> errors in one query. Same point-read put.ts / new.ts use.
-  const source = await findBySlug(node, fromType, fromHash, fromSlug);
+  const source = await findBySlug(node, fromType, fromHash, fromSlug, opts.cfg, {
+    hydrate: false,
+  });
   if (!source) {
     if (fromType !== "task" || toType !== "design") {
       throw new FbrainError({
@@ -77,7 +80,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     // lookup: a flaky page miss just falls through to the generic hint.
     const designHash = schemaHashFor("design", opts.cfg);
     const taskHash = schemaHashFor("task", opts.cfg);
-    const asDesign = await findBySlug(node, "design", designHash, fromSlug);
+    const asDesign = await findBySlug(node, "design", designHash, fromSlug, opts.cfg, {
+      hydrate: false,
+    });
     let hint: string;
     if (asDesign) {
       // Only print the swap suggestion when the 2nd arg actually names a
@@ -92,7 +97,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
       const asTask =
         toSlug === fromSlug
           ? null
-          : await findBySlug(node, "task", taskHash, toSlug);
+          : await findBySlug(node, "task", taskHash, toSlug, opts.cfg, { hydrate: false });
       hint = asTask
         ? `'${fromSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${toSlug} ${fromSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
         : `'${fromSlug}' is a design, not a task — \`link\` takes a TASK first. Name a real task (\`fbrain list --type task\`), then the design (usage: \`fbrain link <task-slug> <design-slug>\`).`;
@@ -106,7 +111,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     });
   }
 
-  const target = await findBySlug(node, toType, toHash, toSlug);
+  const target = await findBySlug(node, toType, toHash, toSlug, opts.cfg, {
+    hydrate: false,
+  });
   if (!target) {
     // Wrong-type detection: if `designSlug` names a record of another type
     // (concept/reference/project/...), telling the user to "create the
@@ -135,18 +142,29 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   const now = nowIso();
   const fields = fieldsForLinkUpdate(source, fromType, toType, toSlug, now);
 
-  await node.updateRecord({
+  // The source read keeps the stored head. Seal so a full body cannot land again.
+  const sealed = await writeRecordFields({
+    node,
+    cfg: opts.cfg,
+    type: fromType,
+    slug: fromSlug,
     schemaHash: fromHash,
-    keyHash: fromSlug,
     fields,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
+  const storedRecord = sealed.fields as FbrainRecord;
+  // Reconcile reads wikilinks. A spill on this write must not drop a tail link.
+  const linkView: FbrainRecord =
+    sealed.spilled.length > 0 && typeof fields.body === "string"
+      ? { ...storedRecord, body: fields.body }
+      : storedRecord;
   await reconcileBacklinkIndex(
     node,
     opts.cfg,
     fromType,
     fromSlug,
     source,
-    fields as FbrainRecord,
+    linkView,
     opts.verbose,
   );
   // Keep the design->child-task index current (see child-task-index.ts). A
@@ -159,7 +177,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
       node,
       cfg: opts.cfg,
       taskSlug: fromSlug,
-      task: fields as FbrainRecord,
+      task: storedRecord,
       previousDesignSlug: source.design_slug,
       verbose: opts.verbose,
     });
@@ -243,7 +261,7 @@ async function findOtherTypeForSlug(
   }
   for (const [hash, t] of typesByHash) {
     try {
-      const row = await findBySlug(node, t, hash, slug);
+      const row = await findBySlug(node, t, hash, slug, cfg, { hydrate: false });
       if (row) return t;
     } catch {
       // Best-effort: a flaked probe falls through to the next hash.

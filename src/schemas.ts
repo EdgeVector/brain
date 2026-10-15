@@ -976,8 +976,8 @@ export const bodyFileSchema: AddSchemaRequest = {
       content_hash: "SHA-256 hex of the full UTF-8 text",
       size: "full text byte length",
       file: "$lastdb_file pointer written by put-blob-local; the whole field value, never indexed",
-      created_at: "RFC 3339 timestamp",
-      updated_at: "RFC 3339 timestamp",
+      created_at: "BrainBodyFile time this sidecar was first stored",
+      updated_at: "BrainBodyFile time this sidecar was last replaced",
     },
     field_classifications: {
       file_key: ["no_index", "metadata"],

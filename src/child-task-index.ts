@@ -244,7 +244,10 @@ export async function readChildTasksByDesign(
   for (const row of res.results) {
     const taskSlug = taskSlugFromEntryRow(row);
     if (!taskSlug) continue;
-    const task = await findBySlug(node, "task", taskHash, taskSlug);
+    // The print uses slug and status. The body stays in the file.
+    const task = await findBySlug(node, "task", taskHash, taskSlug, undefined, {
+      hydrate: false,
+    });
     // Defend against a stale old-parent row even if a process died in the
     // narrow primary-write -> projection-write window before it could clear
     // the marker. Never return a child under the wrong design.

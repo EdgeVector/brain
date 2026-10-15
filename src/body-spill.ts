@@ -1,33 +1,5 @@
-// Body spill: long record text lives in a local CAS file blob, never in one atom.
-//
-// Why: a LastDB atom is one field value of one record, and the node refuses an
-// atom above 64 KiB (`atom_content_too_large`, HTTP 413). Brain bodies reached
-// 334 KB, and a routine that appends to a log record rewrote the whole text on
-// every write. Long text now goes to the node's own file-blob plane; the record
-// keeps a bounded head so search and list still work.
-//
-// Layout (pattern P2 of the atom-size contract):
-//
-//   - `BrainBodyFile` sidecar record, one per (record type, slug, field), keyed
-//     `__bodyfile__<sha256(type:slug:field)>`. Its `file` field (type Any)
-//     holds the `$lastdb_file` pointer as the WHOLE value. A pointer inside a
-//     JSON string is not a reference; `gc-file-blobs` would reclaim the blob.
-//   - The knowledge record keeps `head + "\n\n" + marker`. The marker is the
-//     final line: `<!-- brain-body-file v1 field=body sha256=.. bytes=.. head=.. -->`.
-//     No field is added to the 11 knowledge schemas (that would re-hash every
-//     record). The marker names the sidecar and carries the full-text hash.
-//
-// Funnels (the only places that spill or hydrate):
-//
-//   - WRITE: `sealRecordFields`. Order: blob, sidecar, then the caller writes
-//     the record. `buildResidentWritePlan` (put/new/status/papercut) and
-//     `writeRecordFields` (append/tag/link/migrate/gate) both call it.
-//   - READ:  `hydrateRecord`. `findBySlugRaw` (and so `findBySlug` and
-//     `resolveBySlug`) calls it when the caller passes `cfg`. List, search, BM25
-//     and index snapshots read the inline head and never hydrate.
-//
-// Bytes use `POST /api/db/put-blob-local` (owner socket, no cloud) and
-// `POST /api/db/fetch-file-blob`. Every read verifies sha256 and size.
+// The node refuses an atom above 64 KiB.
+// Seal runs in `buildResidentWritePlan` and in `writeRecordFields` (append, tag, link, gate).
 
 import { createHash } from "node:crypto";
 

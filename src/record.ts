@@ -987,7 +987,7 @@ export async function findBySlugsRaw(
   if (slugs.length === 0) return out;
   if (!node.queryByKeys) {
     for (const slug of slugs) {
-      out.set(slug, await findBySlugRaw(node, type, schemaHash, slug));
+      out.set(slug, await findBySlugRaw(node, type, schemaHash, slug, undefined, { hydrate: false }));
     }
     return out;
   }

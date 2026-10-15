@@ -4,6 +4,7 @@
 // candidate source and re-validate the edge, so `get`/`backlinks` cost scales
 // with inbound link cardinality rather than total fbrain corpus size.
 
+import { hasSpillMarker } from "./body-spill.ts";
 import type { NodeClient, Verbose } from "./client.ts";
 import type { Config } from "./config.ts";
 import {
@@ -153,7 +154,13 @@ async function recheckBacklinkSources(
           continue;
         }
         if (isTombstoned(record)) continue;
-        if (backlinkVia(record, type, targetSlug, undefined).length === 0) continue;
+        // The tail lives in the file. A head with no wikilink is not proof the link is gone.
+        if (
+          backlinkVia(record, type, targetSlug, undefined).length === 0 &&
+          !hasSpillMarker(record.body)
+        ) {
+          continue;
+        }
         live.add(`${type}:${slug}`);
       }
       pending = missed;
