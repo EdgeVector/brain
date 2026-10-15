@@ -16,6 +16,11 @@ import {
 import { newSearchClientFromCfg } from "./write-context.ts";
 import type { Config } from "./config.ts";
 import {
+  hydrateRecord,
+  sealRecordFields,
+  type SealResult,
+} from "./body-spill.ts";
+import {
   RECORDS,
   RECORD_TYPES,
   isRecordType,
@@ -861,13 +866,17 @@ export async function hasAnyLiveRecord(
   return false;
 }
 
+// A single-record read returns the full text. `cfg` only saves a schema-hash
+// lookup. List pages use `findBySlugs` and keep the stored head.
 export async function findBySlug(
   node: NodeClient,
   type: RecordType,
   schemaHash: string,
   slug: string,
+  cfg?: ListRecordsCfg,
+  opts?: { hydrate?: boolean },
 ): Promise<FbrainRecord | null> {
-  const r = await findBySlugRaw(node, type, schemaHash, slug);
+  const r = await findBySlugRaw(node, type, schemaHash, slug, cfg, opts);
   if (r === null) return null;
   return isTombstoned(r) ? null : r;
 }
@@ -887,14 +896,64 @@ export async function findBySlugRaw(
   type: RecordType,
   schemaHash: string,
   slug: string,
+  cfg?: ListRecordsCfg,
+  // `hydrate: false` returns the stored head. Only a deliberate overwrite of a
+  // record whose body file is unreadable uses it (`put --allow-shrink`).
+  opts?: { hydrate?: boolean },
 ): Promise<FbrainRecord | null> {
   const fields = fieldsFor(type);
-  const row = node.queryByKey
-    ? await node.queryByKey({ schemaHash, fields, keyHash: slug })
-    : (await node.queryAll({ schemaHash, fields })).results.find(
-        (r) => r.key?.hash === slug || r.fields?.slug === slug,
-      ) ?? null;
-  return row === null ? null : rowToRecord(row, type);
+  const readRow = async (): Promise<QueryRow | null> =>
+    node.queryByKey
+      ? node.queryByKey({ schemaHash, fields, keyHash: slug })
+      : (await node.queryAll({ schemaHash, fields })).results.find(
+          (r) => r.key?.hash === slug || r.fields?.slug === slug,
+        ) ?? null;
+  const row = await readRow();
+  if (row === null) return null;
+  const record = rowToRecord(row, type);
+  if (opts?.hydrate === false) return record;
+  // The sidecar is written before the record. One re-read settles a reader
+  // that still holds the older record row.
+  try {
+    return await hydrateRecord(node, cfg ?? null, type, record);
+  } catch (err) {
+    if (!(err instanceof FbrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
+    const again = await readRow();
+    if (again === null) return null;
+    return hydrateRecord(node, cfg ?? null, type, rowToRecord(again, type), {
+      tolerateMismatch: true,
+      warn: (message) => console.error(message),
+    });
+  }
+}
+
+/**
+ * Seal long text, then write the record once. Callers that do not go through
+ * `buildResidentWritePlan` use this instead of `node.updateRecord`.
+ */
+export async function writeRecordFields(opts: {
+  node: NodeClient;
+  cfg: Config;
+  type: RecordType;
+  slug: string;
+  fields: Record<string, unknown>;
+  schemaHash?: string;
+  create?: boolean;
+  verbose?: (msg: string) => void;
+}): Promise<SealResult> {
+  const sealed = await sealRecordFields({
+    node: opts.node,
+    cfg: opts.cfg,
+    type: opts.type,
+    slug: opts.slug,
+    fields: opts.fields,
+    ...(opts.verbose !== undefined ? { verbose: opts.verbose } : {}),
+  });
+  const schemaHash = opts.schemaHash ?? schemaHashFor(opts.type, opts.cfg);
+  const write = { schemaHash, keyHash: opts.slug, fields: sealed.fields };
+  if (opts.create === true) await opts.node.createRecord(write);
+  else await opts.node.updateRecord(write);
+  return sealed;
 }
 
 // One keyed read for the slugs this call names. A node without `queryByKeys`
@@ -1533,8 +1592,8 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   const probeType = async (t: RecordType): Promise<ResolvedRecord | null> => {
     const hash = schemaHashFor(t, opts.cfg);
     const row = opts.raw === true
-      ? await findBySlugRaw(opts.node, t, hash, opts.slug)
-      : await findBySlug(opts.node, t, hash, opts.slug);
+      ? await findBySlugRaw(opts.node, t, hash, opts.slug, opts.cfg)
+      : await findBySlug(opts.node, t, hash, opts.slug, opts.cfg);
     if (row === null) return null;
     if (opts.raw && isTombstoned(row)) return null;
     if (opts.filter && !opts.filter(row, t)) return null;
@@ -1673,8 +1732,8 @@ async function findNormalizedSlugMatches(
     const hash = schemaHashFor(t, opts.cfg);
     for (const candidateSlug of candidateSlugs) {
       const row = opts.raw === true
-        ? await findBySlugRaw(opts.node, t, hash, candidateSlug)
-        : await findBySlug(opts.node, t, hash, candidateSlug);
+        ? await findBySlugRaw(opts.node, t, hash, candidateSlug, opts.cfg)
+        : await findBySlug(opts.node, t, hash, candidateSlug, opts.cfg);
       if (row === null) continue;
       if (opts.raw && isTombstoned(row)) continue;
       if (opts.filter && !opts.filter(row, t)) continue;
