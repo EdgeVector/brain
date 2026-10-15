@@ -1,4 +1,4 @@
-import type { NodeClient, QueryRow } from "./client.ts";
+import type { BatchMutationOp, NodeClient, QueryRow } from "./client.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
@@ -216,6 +216,34 @@ function parseKeywordCards(raw: string | null): KeywordCard[] {
   }
 }
 
+/** Rank insert shared by put, keyword commit, and named-slug backfill. */
+function nextKeywordCards(
+  cards: readonly KeywordCard[],
+  type: string,
+  slug: string,
+  weight: number | null,
+): KeywordCard[] | "full" | "same" {
+  if (weight === null) {
+    const filtered = cards.filter((card) => !(card.type === type && card.slug === slug));
+    if (filtered.length === cards.length) return "same";
+    return filtered;
+  }
+  const rest = cards.filter((card) => !(card.type === type && card.slug === slug));
+  const already = rest.length !== cards.length;
+  let next: KeywordCard[];
+  if (already || rest.length < RANKER_PAGE) {
+    next = sortKeyword([...rest, { type, slug, weight }]);
+  } else {
+    const sorted = sortKeyword(rest);
+    const lowest = sorted[sorted.length - 1];
+    if (!lowest || weight <= lowest.weight) return "full";
+    sorted[sorted.length - 1] = { type, slug, weight };
+    next = sortKeyword(sorted);
+  }
+  if (Buffer.byteLength(JSON.stringify({ cards: next })) > PAGE_BYTE_CAP) return "full";
+  return next;
+}
+
 function uniqueDests(ids: readonly string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -342,6 +370,55 @@ function rowRange(row: QueryRow): string {
   return row.key?.range ?? "";
 }
 
+function pageMemKey(hash: string, range: string): string {
+  return `${hash}\0${range}`;
+}
+
+function locMemKey(listHash: string, range: string): string {
+  return `${listHash}\0${range}`;
+}
+
+function ensureMemPage(
+  pages: Map<string, MemPage>,
+  hash: string,
+  range: string,
+  symptom: boolean,
+): MemPage {
+  const id = pageMemKey(hash, range);
+  const found = pages.get(id);
+  if (found) return found;
+  const created: MemPage = {
+    hash,
+    range,
+    cards: [],
+    older: "",
+    existed: false,
+    original: null,
+    touched: false,
+    symptom,
+  };
+  pages.set(id, created);
+  return created;
+}
+
+function installMemPage(
+  pages: Map<string, MemPage>,
+  hash: string,
+  range: string,
+  raw: string | null,
+  symptom: boolean,
+): MemPage {
+  const page = ensureMemPage(pages, hash, range, symptom);
+  if (raw === null) return page;
+  const parsed = parsePage(raw);
+  page.cards = parsed.cards;
+  page.older = parsed.older;
+  page.existed = true;
+  page.original = raw;
+  page.symptom = symptom;
+  return page;
+}
+
 async function readExact(
   node: NodeClient,
   schemaHash: string,
@@ -463,38 +540,12 @@ export async function planRecordListSide(opts: {
   let directoryRaw: string | null = null;
   let directoryExisted = false;
 
-  const pageKey = (hash: string, range: string) => `${hash}\0${range}`;
-  const locKey = (listHash: string, range: string) => `${listHash}\0${range}`;
-
-  const ensurePage = (hash: string, range: string, symptom: boolean): MemPage => {
-    const id = pageKey(hash, range);
-    const found = pages.get(id);
-    if (found) return found;
-    const created: MemPage = {
-      hash,
-      range,
-      cards: [],
-      older: "",
-      existed: false,
-      original: null,
-      touched: false,
-      symptom,
-    };
-    pages.set(id, created);
-    return created;
-  };
-
-  const installPage = (hash: string, range: string, raw: string | null, symptom: boolean) => {
-    const page = ensurePage(hash, range, symptom);
-    if (raw === null) return page;
-    const parsed = parsePage(raw);
-    page.cards = parsed.cards;
-    page.older = parsed.older;
-    page.existed = true;
-    page.original = raw;
-    page.symptom = symptom;
-    return page;
-  };
+  const pageKey = pageMemKey;
+  const locKey = locMemKey;
+  const ensurePage = (hash: string, range: string, symptom: boolean): MemPage =>
+    ensureMemPage(pages, hash, range, symptom);
+  const installPage = (hash: string, range: string, raw: string | null, symptom: boolean): MemPage =>
+    installMemPage(pages, hash, range, raw, symptom);
 
   if (pageSchema.length > 0 && locSchema.length > 0 && slug.length > 0) {
     const locatorKeys = knownOld
@@ -917,26 +968,13 @@ export async function planRecordListSide(opts: {
         const existed = prior !== undefined;
         const cards = parseKeywordCards(prior ?? null);
         const weight = weightByToken.get(token);
-        let nextCards: KeywordCard[];
-        if (weight === undefined) {
-          nextCards = cards.filter((card) => !(card.type === opts.type && card.slug === slug));
-          if (nextCards.length === cards.length) continue;
-        } else {
-          const rest = cards.filter((card) => !(card.type === opts.type && card.slug === slug));
-          const already = rest.length !== cards.length;
-          if (already || rest.length < RANKER_PAGE) {
-            nextCards = sortKeyword([...rest, { type: opts.type, slug, weight }]);
-          } else {
-            const sorted = sortKeyword(rest);
-            const lowest = sorted[sorted.length - 1];
-            if (!lowest || weight <= lowest.weight) {
-              notePartial(details, "keyword page");
-              continue;
-            }
-            sorted[sorted.length - 1] = { type: opts.type, slug, weight };
-            nextCards = sortKeyword(sorted);
-          }
+        const placed = nextKeywordCards(cards, opts.type, slug, weight ?? null);
+        if (placed === "same") continue;
+        if (placed === "full") {
+          notePartial(details, "keyword page");
+          continue;
         }
+        const nextCards = placed;
         const replay = {
           kind: "keyword" as const,
           type: opts.type,
@@ -1259,37 +1297,11 @@ export async function commitKeywordHeads(
       if (head.replay.kind === "keyword") {
         const replay = head.replay;
         const cards = parseKeywordCards(raw);
-        let nextCards: KeywordCard[] | null = null;
-        if (replay.weight === null) {
-          const filtered = cards.filter(
-            (card) => !(card.type === replay.type && card.slug === replay.slug),
-          );
-          if (filtered.length !== cards.length) nextCards = filtered;
-        } else {
-          const rest = cards.filter((card) => !(card.type === replay.type && card.slug === replay.slug));
-          const already = rest.length !== cards.length;
-          if (already || rest.length < RANKER_PAGE) {
-            nextCards = sortKeyword([
-              ...rest,
-              { type: replay.type, slug: replay.slug, weight: replay.weight },
-            ]);
-          } else {
-            const sorted = sortKeyword(rest);
-            const lowest = sorted[sorted.length - 1];
-            if (!lowest || replay.weight <= lowest.weight) {
-              note = "keyword page";
-            } else {
-              sorted[sorted.length - 1] = {
-                type: replay.type,
-                slug: replay.slug,
-                weight: replay.weight,
-              };
-              nextCards = sortKeyword(sorted);
-            }
-          }
-        }
-        if (note === null && nextCards !== null) {
-          if (nextCards.length === 0) {
+        const placed = nextKeywordCards(cards, replay.type, replay.slug, replay.weight);
+        if (placed === "full") {
+          note = "keyword page";
+        } else if (placed !== "same") {
+          if (placed.length === 0) {
             if (raw !== null) {
               write = {
                 ...head,
@@ -1298,21 +1310,17 @@ export async function commitKeywordHeads(
                 expected: { type: "value", field: "blp_page", value: raw },
               };
             }
-          } else {
-            const json = JSON.stringify({ cards: nextCards });
-            if (Buffer.byteLength(json) > PAGE_BYTE_CAP) {
-              note = "keyword page";
-            } else if (raw !== json) {
-              const existed = raw !== null;
-              write = {
-                ...head,
-                mutationType: existed ? "update" : "create",
-                fields: { blp_h: head.keyHash, blp_r: head.keyRange, blp_page: json },
-                expected: existed
-                  ? { type: "value", field: "blp_page", value: raw }
-                  : { type: "absent", field: "blp_page" },
-              };
-            }
+          } else if (raw !== JSON.stringify({ cards: placed })) {
+            const existed = raw !== null;
+            const json = JSON.stringify({ cards: placed });
+            write = {
+              ...head,
+              mutationType: existed ? "update" : "create",
+              fields: { blp_h: head.keyHash, blp_r: head.keyRange, blp_page: json },
+              expected: existed
+                ? { type: "value", field: "blp_page", value: raw }
+                : { type: "absent", field: "blp_page" },
+            };
           }
         }
       }
@@ -1489,7 +1497,7 @@ export async function commitHeadPages(
   return details;
 }
 
-async function readCount(
+export async function readCount(
   node: NodeClient,
   schemaHash: string,
   hash: string,
@@ -1504,7 +1512,7 @@ async function readCount(
   return rowField(row, "bln_n");
 }
 
-async function writeCount(
+export async function writeCount(
   node: NodeClient,
   schemaHash: string,
   hash: string,
@@ -1640,14 +1648,6 @@ export async function rankKeywordQuery(opts: {
   return sortKeyword([...best.values()]);
 }
 
-export type NamedBackfillOp = {
-  mutationType: "create" | "update";
-  schemaHash: string;
-  keyHash: string;
-  keyRange: string;
-  fields: Record<string, unknown>;
-};
-
 export type NamedPageTarget = {
   kind: "page";
   hash: string;
@@ -1665,7 +1665,7 @@ export type NamedBackfillTarget =
   | { kind: "keyword"; token: string | null };
 
 export type NamedBackfillPlan = {
-  ops: NamedBackfillOp[];
+  ops: BatchMutationOp[];
   added: number;
   /** Eligible slugs whose locator or head already held the card. */
   covered: number;
@@ -1734,102 +1734,196 @@ export async function planNamedSlugBackfill(opts: {
   }
 
   if (opts.target.kind === "keyword") {
-    return planKeywordBackfill({
-      node: opts.node,
-      cfg: opts.cfg,
-      sourceType: opts.sourceType,
-      token: opts.target.token,
-      slugOrder: opts.slugOrder,
-      bySlug,
-      pageSchema,
-      traces,
-      notes,
+    const token = opts.target.token;
+    const tokenSchema = schemaOf(opts.cfg, BRAIN_TOKEN_SET_SCHEMA_KEY);
+    const wanted = new Map<string, PostingToken[]>();
+    const tokens = new Set<string>();
+    for (const slug of opts.slugOrder) {
+      const record = bySlug.get(slug);
+      if (!record || isTombstoned(record)) continue;
+      let list = postingTokens(record.title, record.body).tokens;
+      if (token !== null) list = list.filter((item) => item.token === token);
+      wanted.set(slug, list);
+      for (const item of list) tokens.add(item.token);
+    }
+    if (tokens.size === 0) return blankPlan(lastSlug, traces, notes);
+
+    const tokenRows =
+      tokenSchema.length === 0
+        ? []
+        : await readKeyed(
+            opts.node,
+            tokenSchema,
+            ["bts_h", "bts_r", "bts_tokens"],
+            [...wanted.keys()].map((slug) => ({
+              hash: `ts#${opts.sourceType}#${slug}`,
+              range: HEAD_RANGE,
+            })),
+            "BrainTokenSet",
+            traces,
+          );
+    const storedTokens = new Map<string, string | null>();
+    const tokenPrefix = `ts#${opts.sourceType}#`;
+    for (const row of tokenRows) {
+      const hash = rowHash(row) || rowField(row, "bts_h") || "";
+      if (!hash.startsWith(tokenPrefix)) continue;
+      storedTokens.set(hash.slice(tokenPrefix.length), rowField(row, "bts_tokens"));
+    }
+
+    // readExact keeps 43 keys. A head this call did not read must not look empty.
+    type KeywordMem = {
+      existed: boolean;
+      original: string | null;
+      cards: KeywordCard[];
+      touched: boolean;
+    };
+    const pages = new Map<string, KeywordMem>();
+    const tokenList = [...tokens];
+    for (let offset = 0; offset < tokenList.length; offset += READ_KEY_CAP) {
+      const group = tokenList.slice(offset, offset + READ_KEY_CAP);
+      const rows = await readKeyed(
+        opts.node,
+        pageSchema,
+        ["blp_h", "blp_r", "blp_page"],
+        group.map((name) => ({ hash: keywordHash(name), range: HEAD_RANGE })),
+        "BrainListPage",
+        traces,
+      );
+      const found = new Map<string, string | null>();
+      for (const row of rows) {
+        const hash = rowHash(row) || rowField(row, "blp_h") || "";
+        const name = hash.startsWith("kw#") ? hash.slice(3) : "";
+        if (!group.includes(name)) continue;
+        found.set(name, rowField(row, "blp_page"));
+      }
+      for (const name of group) {
+        const existed = found.has(name);
+        const raw = existed ? (found.get(name) ?? null) : null;
+        pages.set(name, {
+          existed,
+          original: existed ? raw : null,
+          cards: existed ? parseKeywordCards(raw) : [],
+          touched: false,
+        });
+      }
+    }
+
+    const placed = new Set<string>();
+    const tokenWrites: Array<{
+      slug: string;
+      json: string;
+      existed: boolean;
+    }> = [];
+    let covered = 0;
+    for (const slug of opts.slugOrder) {
+      const list = wanted.get(slug) ?? [];
+      if (list.length === 0) continue;
+      const stored = storedTokens.has(slug) ? (storedTokens.get(slug) ?? null) : null;
+      const existed = storedTokens.has(slug);
+      let nextNames: string[];
+      if (token === null) {
+        nextNames = list.map((item) => item.token);
+      } else {
+        nextNames = [];
+        const seen = new Set<string>();
+        for (const name of parseStringList(stored)) {
+          if (name.length === 0 || seen.has(name)) continue;
+          seen.add(name);
+          nextNames.push(name);
+        }
+        if (!seen.has(token)) nextNames.push(token);
+        if (nextNames.length > POSTING_CAP) {
+          const kept = nextNames.filter((name) => name !== token).slice(0, POSTING_CAP - 1);
+          nextNames = [...kept, token];
+        }
+      }
+      const json = JSON.stringify(nextNames);
+      if (tokenSchema.length > 0 && !(existed && stored === json)) {
+        tokenWrites.push({ slug, json, existed });
+      }
+      const already = list.every((item) => {
+        const page = pages.get(item.token);
+        return (
+          page?.cards.some(
+            (card) =>
+              card.type === opts.sourceType && card.slug === slug && card.weight === item.weight,
+          ) === true
+        );
+      });
+      if (already) {
+        covered += 1;
+        continue;
+      }
+      let wrote = false;
+      for (const item of list) {
+        const page = pages.get(item.token);
+        if (!page) continue;
+        const nextCards = nextKeywordCards(page.cards, opts.sourceType, slug, item.weight);
+        if (nextCards === "same" || nextCards === "full") continue;
+        page.cards = nextCards;
+        page.touched = true;
+        wrote = true;
+      }
+      if (wrote) placed.add(slug);
+    }
+
+    const ops: BatchMutationOp[] = [];
+    for (const [name, page] of pages) {
+      if (!page.touched) continue;
+      const json = JSON.stringify({ cards: page.cards });
+      if (page.existed && page.original === json) continue;
+      const hash = keywordHash(name);
+      ops.push({
+        mutationType: page.existed ? "update" : "create",
+        schemaHash: pageSchema,
+        keyHash: hash,
+        keyRange: HEAD_RANGE,
+        fields: { blp_h: hash, blp_r: HEAD_RANGE, blp_page: json },
+      });
+    }
+    if (tokenSchema.length > 0) {
+      for (const write of tokenWrites) {
+        const hash = `ts#${opts.sourceType}#${write.slug}`;
+        ops.push({
+          mutationType: write.existed ? "update" : "create",
+          schemaHash: tokenSchema,
+          keyHash: hash,
+          keyRange: HEAD_RANGE,
+          fields: { bts_h: hash, bts_r: HEAD_RANGE, bts_tokens: write.json },
+        });
+      }
+    }
+    if (ops.length + 1 > WRITE_BATCH_MAX) {
+      return {
+        ...blankPlan(lastSlug, traces, notes),
+        blocked: "one batch cannot hold this backfill",
+      };
+    }
+    return {
+      ops,
+      added: placed.size,
+      covered,
       lastSlug,
-    });
+      lastAdded: placed.has(lastSlug) ? 1 : 0,
+      notes,
+      traces,
+      blocked: null,
+    };
   }
 
-  return planPageBackfill({
-    node: opts.node,
-    cfg: opts.cfg,
-    sourceType: opts.sourceType,
-    target: opts.target,
-    slugOrder: opts.slugOrder,
-    bySlug,
-    pageSchema,
-    traces,
-    notes,
-    lastSlug,
-  });
-}
-
-function pageHashFor(target: NamedPageTarget, record: FbrainRecord): string {
-  if (target.symptomFromField) return `symptom#${textField(record, "symptom_hash")}`;
-  return target.hash;
-}
-
-function pageEligible(
-  target: NamedPageTarget,
-  type: RecordType,
-  record: FbrainRecord,
-): boolean {
-  if (isTombstoned(record)) return false;
-  if (target.tag !== null && !record.tags.includes(target.tag)) return false;
-  if (target.status !== null && record.status !== target.status) return false;
-  if (target.childOf !== null) {
-    if (type !== "task" || record.design_slug !== target.childOf) return false;
-  }
-  if (target.symptom) {
-    const symptom = textField(record, "symptom_hash");
-    if (symptom.length === 0) return false;
-    if (!target.symptomFromField && target.hash !== `symptom#${symptom}`) return false;
-  }
-  return true;
-}
-
-async function planPageBackfill(opts: {
-  node: NodeClient;
-  cfg: SchemaCfg;
-  sourceType: RecordType;
-  target: NamedPageTarget;
-  slugOrder: readonly string[];
-  bySlug: Map<string, FbrainRecord>;
-  pageSchema: string;
-  traces: string[];
-  notes: string[];
-  lastSlug: string;
-}): Promise<NamedBackfillPlan> {
+  const target = opts.target;
   const locSchema = schemaOf(opts.cfg, BRAIN_LIST_LOCATOR_SCHEMA_KEY);
   const edgeSchema = schemaOf(opts.cfg, BRAIN_EDGE_SET_SCHEMA_KEY);
-  const useLocator = !opts.target.symptom;
+  const useLocator = !target.symptom;
   if (useLocator && locSchema.length === 0) {
-    return { ...blankPlan(opts.lastSlug, opts.traces, opts.notes), blocked: "list schema absent" };
+    return { ...blankPlan(lastSlug, traces, notes), blocked: "list schema absent" };
   }
-  if (opts.target.linkDest !== null && edgeSchema.length === 0) {
-    return { ...blankPlan(opts.lastSlug, opts.traces, opts.notes), blocked: "list schema absent" };
+  if (target.linkDest !== null && edgeSchema.length === 0) {
+    return { ...blankPlan(lastSlug, traces, notes), blocked: "list schema absent" };
   }
 
   const pages = new Map<string, MemPage>();
   const locs = new Map<string, MemLoc>();
-  const pageKey = (hash: string, range: string) => `${hash}\0${range}`;
-  const locKey = (listHash: string, range: string) => `${listHash}\0${range}`;
-  const ensurePage = (hash: string, range: string, symptom: boolean): MemPage => {
-    const id = pageKey(hash, range);
-    const found = pages.get(id);
-    if (found) return found;
-    const created: MemPage = {
-      hash,
-      range,
-      cards: [],
-      older: "",
-      existed: false,
-      original: null,
-      touched: false,
-      symptom,
-    };
-    pages.set(id, created);
-    return created;
-  };
-
   const located = new Set<string>();
   if (useLocator) {
     const prefix = `${opts.sourceType}#`;
@@ -1838,11 +1932,11 @@ async function planPageBackfill(opts: {
       locSchema,
       ["bll_h", "bll_r", "bll_page"],
       opts.slugOrder.map((slug) => ({
-        hash: `loc#${opts.target.hash}`,
+        hash: `loc#${target.hash}`,
         range: `${prefix}${slug}`,
       })),
       "BrainListLocator",
-      opts.traces,
+      traces,
     );
     for (const row of rows) {
       const range = rowRange(row) || rowField(row, "bll_r") || "";
@@ -1850,8 +1944,8 @@ async function planPageBackfill(opts: {
       if (!range.startsWith(prefix) || pageId.length === 0) continue;
       const slug = range.slice(prefix.length);
       located.add(slug);
-      locs.set(locKey(opts.target.hash, range), {
-        listHash: opts.target.hash,
+      locs.set(locMemKey(target.hash, range), {
+        listHash: target.hash,
         range,
         pageId,
         existed: true,
@@ -1861,20 +1955,37 @@ async function planPageBackfill(opts: {
     }
   }
 
+  const chosen = new Map<string, Slot>();
   let pending: FbrainRecord[] = [];
   let covered = 0;
   for (const slug of opts.slugOrder) {
-    const record = opts.bySlug.get(slug);
-    if (!record || !pageEligible(opts.target, opts.sourceType, record)) continue;
+    const record = bySlug.get(slug);
+    if (!record || isTombstoned(record)) continue;
+    if (target.linkDest !== null) {
+      if (located.has(slug)) {
+        covered += 1;
+        continue;
+      }
+      pending.push(record);
+      continue;
+    }
+    const hash = target.symptomFromField
+      ? `symptom#${textField(record, "symptom_hash")}`
+      : target.hash;
+    const slotNotes: string[] = [];
+    const slots = slotsFor(opts.sourceType, record, [], slotNotes);
+    const slot = slots.find((item) => item.hash === hash) ?? null;
+    if (!slot) continue;
     if (located.has(slug)) {
       covered += 1;
       continue;
     }
+    chosen.set(slug, slot);
     pending.push(record);
   }
 
-  if (opts.target.linkDest !== null && pending.length > 0) {
-    const dest = opts.target.linkDest;
+  if (target.linkDest !== null && pending.length > 0) {
+    const dest = target.linkDest;
     const rows = await readKeyed(
       opts.node,
       edgeSchema,
@@ -1884,7 +1995,7 @@ async function planPageBackfill(opts: {
         range: HEAD_RANGE,
       })),
       "BrainEdgeSet",
-      opts.traces,
+      traces,
     );
     const dests = new Map<string, string[]>();
     const prefix = `es#${opts.sourceType}#`;
@@ -1897,10 +2008,15 @@ async function planPageBackfill(opts: {
     for (const record of pending) {
       const found = dests.get(record.slug);
       if (!found) {
-        opts.notes.push("index record absent");
+        notes.push("index record absent");
         continue;
       }
       if (!found.includes(dest)) continue;
+      const slotNotes: string[] = [];
+      const slots = slotsFor(opts.sourceType, record, [dest], slotNotes);
+      const slot = slots.find((item) => item.hash === target.hash) ?? null;
+      if (!slot) continue;
+      chosen.set(record.slug, slot);
       kept.push(record);
     }
     pending = kept;
@@ -1908,47 +2024,45 @@ async function planPageBackfill(opts: {
 
   if (pending.length > 0) {
     const pageKeys: Array<{ hash: string; range: string }> = [];
-    const seen = new Set<string>();
+    const symptomByHash = new Map<string, boolean>();
     for (const record of pending) {
-      const hash = pageHashFor(opts.target, record);
-      if (hash.length === 0 || seen.has(hash)) continue;
-      seen.add(hash);
-      pageKeys.push({ hash, range: HEAD_RANGE });
+      const slot = chosen.get(record.slug);
+      if (!slot || symptomByHash.has(slot.hash)) continue;
+      symptomByHash.set(slot.hash, slot.kind === "symptom");
+      pageKeys.push({ hash: slot.hash, range: HEAD_RANGE });
     }
     const rows = await readKeyed(
       opts.node,
-      opts.pageSchema,
+      pageSchema,
       ["blp_h", "blp_r", "blp_page"],
       pageKeys,
       "BrainListPage",
-      opts.traces,
+      traces,
     );
-    const rawByHash = new Map<string, string | null>();
     const found = new Set<string>();
     for (const row of rows) {
       const hash = rowHash(row) || rowField(row, "blp_h") || "";
-      if (hash.length === 0) continue;
+      if (hash.length === 0 || !symptomByHash.has(hash)) continue;
       found.add(hash);
-      rawByHash.set(hash, rowField(row, "blp_page"));
+      installMemPage(
+        pages,
+        hash,
+        HEAD_RANGE,
+        rowField(row, "blp_page"),
+        symptomByHash.get(hash) === true,
+      );
     }
     for (const key of pageKeys) {
-      const page = ensurePage(key.hash, HEAD_RANGE, opts.target.symptom);
-      if (!found.has(key.hash)) continue;
-      const raw = rawByHash.get(key.hash) ?? null;
-      const parsed = parsePage(raw);
-      page.cards = parsed.cards;
-      page.older = parsed.older;
-      page.existed = true;
-      page.original = raw;
-      page.symptom = opts.target.symptom;
+      if (found.has(key.hash)) continue;
+      ensureMemPage(pages, key.hash, HEAD_RANGE, symptomByHash.get(key.hash) === true);
     }
 
-    const details: string[] = [];
     const still: FbrainRecord[] = [];
     for (const record of pending) {
-      const hash = pageHashFor(opts.target, record);
-      if (opts.target.symptom) {
-        const page = ensurePage(hash, HEAD_RANGE, true);
+      const slot = chosen.get(record.slug);
+      if (!slot) continue;
+      if (slot.kind === "symptom") {
+        const page = ensureMemPage(pages, slot.hash, HEAD_RANGE, true);
         const held = page.cards[0]?.slug ?? "";
         if (held === record.slug) {
           covered += 1;
@@ -1959,43 +2073,38 @@ async function planPageBackfill(opts: {
       still.push(record);
     }
     for (const record of still) {
-      const hash = pageHashFor(opts.target, record);
+      const slot = chosen.get(record.slug);
+      if (!slot) continue;
       applyMembership({
         type: opts.sourceType,
         slug: record.slug,
         previous: null,
         next: record,
         oldSlots: [],
-        newSlots: [
-          {
-            hash,
-            kind: opts.target.symptom ? "symptom" : "list",
-            bound: opts.target.bound,
-          },
-        ],
+        newSlots: [slot],
         pages,
         locs,
-        pageKey,
-        locKey,
-        ensurePage,
-        details,
+        pageKey: pageMemKey,
+        locKey: locMemKey,
+        ensurePage: (hash, range, symptom) => ensureMemPage(pages, hash, range, symptom),
+        details: notes,
       });
     }
     pending = still;
   }
 
-  const ops: NamedBackfillOp[] = [];
+  const ops: BatchMutationOp[] = [];
   const placed = new Set<string>();
   for (const page of pages.values()) {
     if (!page.touched) continue;
     const json = renderPage(page, page.symptom);
     if (json === null) {
-      return { ...blankPlan(opts.lastSlug, opts.traces, opts.notes), blocked: "page cap" };
+      return { ...blankPlan(lastSlug, traces, notes), blocked: "page cap" };
     }
     if (page.existed && page.original === json) continue;
     ops.push({
       mutationType: page.existed ? "update" : "create",
-      schemaHash: opts.pageSchema,
+      schemaHash: pageSchema,
       keyHash: page.hash,
       keyRange: page.range,
       fields: { blp_h: page.hash, blp_r: page.range, blp_page: json },
@@ -2021,10 +2130,11 @@ async function planPageBackfill(opts: {
       });
     }
   }
-  if (opts.target.symptom) {
+  if (target.symptom) {
     for (const record of pending) {
-      const hash = pageHashFor(opts.target, record);
-      const page = pages.get(pageKey(hash, HEAD_RANGE));
+      const slot = chosen.get(record.slug);
+      if (!slot) continue;
+      const page = pages.get(pageMemKey(slot.hash, HEAD_RANGE));
       if (page?.touched && page.cards.some((card) => card.slug === record.slug)) {
         placed.add(record.slug);
       }
@@ -2033,7 +2143,7 @@ async function planPageBackfill(opts: {
 
   if (ops.length + 1 > WRITE_BATCH_MAX) {
     return {
-      ...blankPlan(opts.lastSlug, opts.traces, opts.notes),
+      ...blankPlan(lastSlug, traces, notes),
       blocked: "one batch cannot hold this backfill",
     };
   }
@@ -2041,184 +2151,10 @@ async function planPageBackfill(opts: {
     ops,
     added: placed.size,
     covered,
-    lastSlug: opts.lastSlug,
-    lastAdded: placed.has(opts.lastSlug) ? 1 : 0,
-    notes: opts.notes,
-    traces: opts.traces,
-    blocked: null,
-  };
-}
-
-type KeywordMem = {
-  existed: boolean;
-  original: string | null;
-  cards: KeywordCard[];
-  touched: boolean;
-};
-
-function upsertKeyword(page: KeywordMem, type: string, slug: string, weight: number): boolean {
-  const rest = page.cards.filter((card) => !(card.type === type && card.slug === slug));
-  const already = rest.length !== page.cards.length;
-  let next: KeywordCard[] | null = null;
-  if (already || rest.length < RANKER_PAGE) {
-    next = sortKeyword([...rest, { type, slug, weight }]);
-  } else {
-    const sorted = sortKeyword(rest);
-    const lowest = sorted[sorted.length - 1];
-    if (!lowest || weight <= lowest.weight) return false;
-    sorted[sorted.length - 1] = { type, slug, weight };
-    next = sortKeyword(sorted);
-  }
-  const json = JSON.stringify({ cards: next });
-  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return false;
-  page.cards = next;
-  page.touched = true;
-  return true;
-}
-
-async function planKeywordBackfill(opts: {
-  node: NodeClient;
-  cfg: SchemaCfg;
-  sourceType: RecordType;
-  token: string | null;
-  slugOrder: readonly string[];
-  bySlug: Map<string, FbrainRecord>;
-  pageSchema: string;
-  traces: string[];
-  notes: string[];
-  lastSlug: string;
-}): Promise<NamedBackfillPlan> {
-  const tokenSchema = schemaOf(opts.cfg, BRAIN_TOKEN_SET_SCHEMA_KEY);
-  const wanted = new Map<string, PostingToken[]>();
-  const tokens = new Set<string>();
-  for (const slug of opts.slugOrder) {
-    const record = opts.bySlug.get(slug);
-    if (!record || isTombstoned(record)) continue;
-    let list = postingTokens(record.title, record.body).tokens;
-    if (opts.token !== null) list = list.filter((item) => item.token === opts.token);
-    wanted.set(slug, list);
-    for (const item of list) tokens.add(item.token);
-  }
-  if (tokens.size === 0) return blankPlan(opts.lastSlug, opts.traces, opts.notes);
-
-  const tokenRows =
-    tokenSchema.length === 0
-      ? []
-      : await readKeyed(
-          opts.node,
-          tokenSchema,
-          ["bts_h", "bts_r", "bts_tokens"],
-          [...wanted.keys()].map((slug) => ({
-            hash: `ts#${opts.sourceType}#${slug}`,
-            range: HEAD_RANGE,
-          })),
-          "BrainTokenSet",
-          opts.traces,
-        );
-  const storedTokens = new Map<string, string | null>();
-  const tokenPrefix = `ts#${opts.sourceType}#`;
-  for (const row of tokenRows) {
-    const hash = rowHash(row) || rowField(row, "bts_h") || "";
-    if (!hash.startsWith(tokenPrefix)) continue;
-    storedTokens.set(hash.slice(tokenPrefix.length), rowField(row, "bts_tokens"));
-  }
-
-  const headRows = await readKeyed(
-    opts.node,
-    opts.pageSchema,
-    ["blp_h", "blp_r", "blp_page"],
-    [...tokens].map((token) => ({ hash: keywordHash(token), range: HEAD_RANGE })),
-    "BrainListPage",
-    opts.traces,
-  );
-  const pages = new Map<string, KeywordMem>();
-  for (const token of tokens) {
-    pages.set(token, { existed: false, original: null, cards: [], touched: false });
-  }
-  for (const row of headRows) {
-    const hash = rowHash(row) || rowField(row, "blp_h") || "";
-    const token = hash.startsWith("kw#") ? hash.slice(3) : "";
-    const page = pages.get(token);
-    if (!page) continue;
-    const raw = rowField(row, "blp_page");
-    page.existed = true;
-    page.original = raw;
-    page.cards = parseKeywordCards(raw);
-  }
-
-  const placed = new Set<string>();
-  const names = new Map<string, string[]>();
-  let covered = 0;
-  for (const slug of opts.slugOrder) {
-    const list = wanted.get(slug) ?? [];
-    if (list.length === 0) continue;
-    const already = list.every((item) => {
-      const page = pages.get(item.token);
-      return (
-        page?.cards.some(
-          (card) => card.type === opts.sourceType && card.slug === slug && card.weight === item.weight,
-        ) === true
-      );
-    });
-    if (already) {
-      covered += 1;
-      continue;
-    }
-    const wrote: string[] = [];
-    for (const item of list) {
-      const page = pages.get(item.token);
-      if (!page) continue;
-      if (upsertKeyword(page, opts.sourceType, slug, item.weight)) wrote.push(item.token);
-    }
-    if (wrote.length === 0) continue;
-    placed.add(slug);
-    names.set(slug, wrote);
-  }
-
-  const ops: NamedBackfillOp[] = [];
-  for (const [token, page] of pages) {
-    if (!page.touched) continue;
-    const json = JSON.stringify({ cards: page.cards });
-    if (page.existed && page.original === json) continue;
-    const hash = keywordHash(token);
-    ops.push({
-      mutationType: page.existed ? "update" : "create",
-      schemaHash: opts.pageSchema,
-      keyHash: hash,
-      keyRange: HEAD_RANGE,
-      fields: { blp_h: hash, blp_r: HEAD_RANGE, blp_page: json },
-    });
-  }
-  if (tokenSchema.length > 0) {
-    for (const [slug, list] of names) {
-      const json = JSON.stringify(list);
-      const stored = storedTokens.get(slug);
-      const existed = storedTokens.has(slug);
-      if (existed && stored === json) continue;
-      const hash = `ts#${opts.sourceType}#${slug}`;
-      ops.push({
-        mutationType: existed ? "update" : "create",
-        schemaHash: tokenSchema,
-        keyHash: hash,
-        keyRange: HEAD_RANGE,
-        fields: { bts_h: hash, bts_r: HEAD_RANGE, bts_tokens: json },
-      });
-    }
-  }
-  if (ops.length + 1 > WRITE_BATCH_MAX) {
-    return {
-      ...blankPlan(opts.lastSlug, opts.traces, opts.notes),
-      blocked: "one batch cannot hold this backfill",
-    };
-  }
-  return {
-    ops,
-    added: placed.size,
-    covered,
-    lastSlug: opts.lastSlug,
-    lastAdded: placed.has(opts.lastSlug) ? 1 : 0,
-    notes: opts.notes,
-    traces: opts.traces,
+    lastSlug,
+    lastAdded: placed.has(lastSlug) ? 1 : 0,
+    notes,
+    traces,
     blocked: null,
   };
 }
