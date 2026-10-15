@@ -68,14 +68,8 @@ export type ListOptions = {
   // `FbrainError.agentHint` for the ERROR path. Default (undefined) keeps the
   // human CLI output byte-identical.
   agent?: boolean;
-  // Structured-result sink. When set, receives the SAME payload that
-  // `--json` mode serializes to stdout — one source of truth for both the
-  // JSON CLI surface and the MCP `structuredContent`. Fires once per call
-  // regardless of the `json` flag, so the MCP handler can run the command
-  // in human mode for `content` text AND capture the typed payload without
-  // re-parsing the printed line. In row mode the payload is the array of
-  // `RecordSummary` (`[]` on no records); in `count` mode it is a
-  // `{ count: number }` object.
+  // Same payload as `--json`. Row mode is the page envelope. Count mode is
+  // `{ count }` or `{ miss: true }`.
   onResult?: (payload: ListResult) => void;
   // Structured advisory sink for read-degraded configs. The human/CLI surface
   // still receives the existing note via printErr; MCP uses this to expose
@@ -107,41 +101,6 @@ export type ListEntry = { type: RecordType; record: FbrainRecord };
 const LIST_LIMIT_CAP = 100;
 const PAGE_ID = /^p\d{8}$/;
 
-type PageCard = {
-  type?: string;
-  slug: string;
-  status: string;
-  updatedAt: string;
-  title: string;
-};
-
-type PageAtom = { cards: PageCard[]; older: string };
-
-function listRange(page: string | undefined): string {
-  if (page === undefined || page.length === 0) return HEAD_RANGE;
-  if (page === HEAD_RANGE || PAGE_ID.test(page)) return page;
-  throw new FbrainError({
-    code: "invalid_page",
-    message: `page id ${page} is not a list page id`,
-    hint: "Use __head__ or a page id of p plus eight digits.",
-  });
-}
-
-function listHash(opts: Pick<ListOptions, "type" | "status" | "tag">): string {
-  if (opts.tag && opts.tag.length > 0) return `tag#${opts.tag}`;
-  if (opts.status && opts.status.length > 0) {
-    if (!opts.type) {
-      throw new FbrainError({
-        code: "status_needs_type",
-        message: "a status list needs --type",
-        hint: "Pass --type with --status.",
-      });
-    }
-    return `${opts.type}#${opts.status}`;
-  }
-  return opts.type ?? "all";
-}
-
 function backfillLine(hash: string, type: RecordType | undefined): string {
   const source = type ?? "<type>";
   return `brain reindex --target ${hash} --source-hash ${source} --slug <slug>`;
@@ -154,70 +113,6 @@ function textField(
   if (!row) return null;
   const value = row.fields[name];
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function parsePageAtom(raw: string): PageAtom | null {
-  try {
-    const value = JSON.parse(raw) as { cards?: unknown; older?: unknown };
-    if (!value || typeof value !== "object") return null;
-    const cards: PageCard[] = [];
-    if (Array.isArray(value.cards)) {
-      for (const item of value.cards) {
-        if (!item || typeof item !== "object") continue;
-        const card = item as Record<string, unknown>;
-        if (typeof card.slug !== "string" || card.slug.length === 0) continue;
-        const named = typeof card.type === "string" ? card.type : undefined;
-        cards.push({
-          ...(named !== undefined ? { type: named } : {}),
-          slug: card.slug,
-          status: typeof card.status === "string" ? card.status : "",
-          updatedAt: typeof card.updated_at === "string" ? card.updated_at : "",
-          title: typeof card.title === "string" ? card.title : "",
-        });
-      }
-    }
-    return {
-      cards,
-      older: typeof value.older === "string" ? value.older : "",
-    };
-  } catch {
-    return null;
-  }
-}
-
-function cardType(card: PageCard, fallback: RecordType | undefined): RecordType | null {
-  if (card.type && isRecordType(card.type)) return card.type;
-  return fallback ?? null;
-}
-
-function atOrAfter(updatedAt: string, since: number | undefined): boolean {
-  if (since === undefined) return true;
-  const parsed = Date.parse(updatedAt);
-  return Number.isFinite(parsed) && parsed >= since;
-}
-
-function keepCard(
-  card: PageCard,
-  opts: Pick<ListOptions, "type" | "status" | "updatedSinceMs">,
-): RecordType | null {
-  const type = cardType(card, opts.type);
-  if (!type) return null;
-  if (opts.type && type !== opts.type) return null;
-  if (opts.status && card.status !== opts.status) return null;
-  if (!atOrAfter(card.updatedAt, opts.updatedSinceMs)) return null;
-  return type;
-}
-
-function cardSummary(type: RecordType, card: PageCard): RecordSummary {
-  return {
-    type,
-    slug: card.slug,
-    title: card.title,
-    status: card.status,
-    tags: [],
-    created_at: "",
-    updated_at: card.updatedAt,
-  };
 }
 
 function emitLines(
@@ -336,14 +231,84 @@ async function printListPage(
   print: (line: string) => void,
   printErr: (line: string) => void,
 ): Promise<void> {
-  const hash = listHash(opts);
-  const range = listRange(opts.page);
+  let hash: string;
+  if (opts.tag && opts.tag.length > 0) {
+    hash = `tag#${opts.tag}`;
+  } else if (opts.status && opts.status.length > 0) {
+    if (!opts.type) {
+      throw new FbrainError({
+        code: "status_needs_type",
+        message: "a status list needs --type",
+        hint: "Pass --type with --status.",
+      });
+    }
+    hash = `${opts.type}#${opts.status}`;
+  } else {
+    hash = opts.type ?? "all";
+  }
+  const pageId = opts.page;
+  let range = HEAD_RANGE;
+  if (pageId !== undefined && pageId.length > 0) {
+    if (pageId === HEAD_RANGE || PAGE_ID.test(pageId)) range = pageId;
+    else {
+      throw new FbrainError({
+        code: "invalid_page",
+        message: `page id ${pageId} is not a list page id`,
+        hint: "Use __head__ or a page id of p plus eight digits.",
+      });
+    }
+  }
+
   const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+  const countable = hash === "all" || isRecordType(hash);
+
+  const finishEmpty = async (atomPresent: boolean, older: string): Promise<void> => {
+    let countKind: "zero" | "positive" | "absent" = "absent";
+    if (countable && countSchema.length > 0) {
+      const rawCount = await readCountAtom(node, countSchema, hash);
+      if (rawCount !== null && /^-?\d+$/.test(rawCount)) {
+        const n = Number(rawCount);
+        if (n === 0) countKind = "zero";
+        else if (n > 0) countKind = "positive";
+      }
+    }
+    const lines: string[] = [];
+    let truncated = true;
+    if (older.length > 0) {
+      lines.push(`sample ${older}`);
+      if (countable && countKind === "absent") {
+        lines.push("index record absent");
+        lines.push(backfillLine(hash, opts.type));
+      }
+    } else if (countKind === "zero" || (atomPresent && !countable)) {
+      truncated = false;
+      lines.push("no records");
+    } else if (countKind === "positive") {
+      lines.push("sample");
+      lines.push("index partial");
+      lines.push(backfillLine(hash, opts.type));
+    } else {
+      lines.push("sample");
+      lines.push("index record absent");
+      lines.push(backfillLine(hash, opts.type));
+    }
+    const emptyResult: ListPageResult = { items: [], total: 0, truncated };
+    opts.onResult?.(emptyResult);
+    emitLines(
+      opts,
+      print,
+      printErr,
+      lines,
+      opts.json ? JSON.stringify(emptyResult) : null,
+    );
+  };
+
   if (schemaHash.length === 0) {
-    emitAbsent(opts, print, printErr, hash);
+    await finishEmpty(false, "");
     return;
   }
-  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
   const res = await node.queryAll({
     schemaHash,
     fields: ["blp_page"],
@@ -351,11 +316,39 @@ async function printListPage(
   });
   const raw = textField(res.results[0], "blp_page");
   if (raw === null) {
-    emitAbsent(opts, print, printErr, hash);
+    await finishEmpty(false, "");
     return;
   }
-  const page = parsePageAtom(raw);
-  if (!page) {
+
+  type Card = { type?: string; slug: string; status: string; updatedAt: string; title: string };
+  let cards: Card[] | null = null;
+  let older = "";
+  try {
+    const value = JSON.parse(raw) as { cards?: unknown; older?: unknown };
+    if (value && typeof value === "object") {
+      const parsed: Card[] = [];
+      if (Array.isArray(value.cards)) {
+        for (const item of value.cards) {
+          if (!item || typeof item !== "object") continue;
+          const card = item as Record<string, unknown>;
+          if (typeof card.slug !== "string" || card.slug.length === 0) continue;
+          const named = typeof card.type === "string" ? card.type : undefined;
+          parsed.push({
+            ...(named !== undefined ? { type: named } : {}),
+            slug: card.slug,
+            status: typeof card.status === "string" ? card.status : "",
+            updatedAt: typeof card.updated_at === "string" ? card.updated_at : "",
+            title: typeof card.title === "string" ? card.title : "",
+          });
+        }
+      }
+      cards = parsed;
+      older = typeof value.older === "string" ? value.older : "";
+    }
+  } catch {
+    cards = null;
+  }
+  if (cards === null) {
     const partial: ListPageResult = { items: [], total: 0, truncated: true };
     opts.onResult?.(partial);
     emitLines(
@@ -367,61 +360,72 @@ async function printListPage(
     );
     return;
   }
+  if (cards.length === 0) {
+    await finishEmpty(true, older);
+    return;
+  }
+
   const cap =
     opts.limit === undefined ? DEFAULT_LIST_LIMIT : Math.min(opts.limit, LIST_LIMIT_CAP);
-  const matched: Array<{ type: RecordType; card: PageCard }> = [];
-  for (const card of page.cards) {
-    const type = keepCard(card, opts);
-    if (type) matched.push({ type, card });
+  const matched: Array<{ type: RecordType; slug: string; status: string; title: string; updatedAt: string }> = [];
+  for (const card of cards) {
+    const type = card.type && isRecordType(card.type) ? card.type : opts.type ?? null;
+    if (!type) continue;
+    if (opts.type && type !== opts.type) continue;
+    if (opts.status && card.status !== opts.status) continue;
+    if (opts.updatedSinceMs !== undefined) {
+      const updated = Date.parse(card.updatedAt);
+      if (!Number.isFinite(updated) || updated < opts.updatedSinceMs) continue;
+    }
+    matched.push({
+      type,
+      slug: card.slug,
+      status: card.status,
+      title: card.title,
+      updatedAt: card.updatedAt,
+    });
   }
-  const last = page.cards[page.cards.length - 1];
-  const showOlder =
-    page.older.length > 0 &&
-    (opts.updatedSinceMs === undefined ||
-      (last !== undefined && atOrAfter(last.updatedAt, opts.updatedSinceMs)));
+  const last = cards[cards.length - 1]!;
+  let showOlder = false;
+  if (older.length > 0) {
+    if (opts.updatedSinceMs === undefined) showOlder = true;
+    else {
+      const updated = Date.parse(last.updatedAt);
+      showOlder = !Number.isFinite(updated) || updated >= opts.updatedSinceMs;
+    }
+  }
   const shown = matched.slice(0, cap);
   const clipped = matched.length > shown.length;
-  const items = shown.map(({ type, card }) => cardSummary(type, card));
+  const items: RecordSummary[] = shown.map((card) => ({
+    type: card.type,
+    slug: card.slug,
+    title: card.title,
+    status: card.status,
+    updated_at: card.updatedAt,
+  }));
   const pageResult: ListPageResult = {
     items,
     total: matched.length,
     truncated: clipped || showOlder,
   };
   opts.onResult?.(pageResult);
-  const sample = showOlder ? `sample ${page.older}` : clipped ? "sample" : "";
+  const notes: string[] = [];
+  if (clipped) notes.push("the cap cut this page");
+  if (showOlder) notes.push(`sample ${older}`);
   if (opts.fields !== undefined && opts.fields.length > 0) {
     printFieldProjection(items, opts.fields, print);
-    if (sample.length > 0) printErr(sample);
+    for (const note of notes) printErr(note);
     return;
   }
   if (opts.json) {
     print(JSON.stringify(pageResult));
-    if (sample.length > 0) printErr(sample);
+    for (const note of notes) printErr(note);
     return;
   }
-  if (items.length === 0) print("no records");
-  const lines = formatTable(
-    shown.map(({ type, card }) => [type, card.slug, card.status, card.title]),
-  );
+  if (items.length === 0 && !showOlder) print("no records");
+  const lines = formatTable(shown.map((card) => [card.type, card.slug, card.status, card.title]));
   for (const line of lines) print(line);
-  if (sample.length > 0) print(sample);
-}
-
-function emitAbsent(
-  opts: ListOptions,
-  print: (line: string) => void,
-  printErr: (line: string) => void,
-  hash: string,
-): void {
-  const pageResult: ListPageResult = { items: [], total: 0, truncated: true };
-  opts.onResult?.(pageResult);
-  emitLines(
-    opts,
-    print,
-    printErr,
-    ["sample", "index record absent", backfillLine(hash, opts.type)],
-    opts.json ? JSON.stringify(pageResult) : null,
-  );
+  for (const note of notes) print(note);
 }
 
 
@@ -430,9 +434,11 @@ export type RecordSummary = {
   slug: string;
   title: string;
   status: string;
-  tags: string[];
+  // A page card omits this. The atom has no tag list.
+  tags?: string[];
   design_slug?: string;
-  created_at: string;
+  // A page card omits this. The atom has no create time.
+  created_at?: string;
   updated_at: string;
 };
 
@@ -498,13 +504,8 @@ export function matchesListFilters(
   return true;
 }
 
-// Key-only counterpart to `resolveListEntries`, for the `--count` fast path
-// in `listCmd`. Fetches slug + tombstone + updated_at per candidate
-// type via `listRecordKeys` (a skinny `/api/query` projection, no
-// title/body) instead of `listRecords`' full-field fetch — the fix for the
-// default `fbrain list` full-corpus body drain. Tombstones are already
-// dropped by `listRecordKeys`, mirroring `resolveListEntries`'s reliance on
-// `matchesListFilters`' `isTombstoned` check.
+// Key-only walk: slug, tombstone, and updated_at via `listRecordKeys`.
+// Tombstones are already dropped by that read.
 export async function resolveListKeyEntries(
   node: NodeClient,
   opts: Pick<

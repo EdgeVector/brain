@@ -201,8 +201,8 @@ export async function readTypeListIndex(
  * Replace the whole list for one type. Cold-seed and admin repair path only;
  * `patchTypeListIndex` is what the hot put/delete path uses.
  *
- * Upserts every live SOT record, deletes partition rows not in SOT (stale
- * dual-write residue), then stamps the completeness marker.
+ * Deletes partition rows that are not in the live set. An upsert that writes
+ * no row does not stamp the completeness marker.
  */
 export async function writeTypeListIndex(
   node: NodeClient,
@@ -222,10 +222,11 @@ export async function writeTypeListIndex(
       }
     }
   }
+  let wroteRow = false;
   for (const record of records) {
-    await upsertTypeListEntry(node, cfg, type, record);
+    if (await upsertTypeListEntry(node, cfg, type, record)) wroteRow = true;
   }
-  await markTypePartitionMigrated(node, cfg, type);
+  if (wroteRow) await markTypePartitionMigrated(node, cfg, type);
 }
 
 /** Point-read one HashRange row to decide create vs update. */

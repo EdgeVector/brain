@@ -408,12 +408,10 @@ const summarySchema = z.object({
   slug: z.string().describe("Record slug."),
   title: z.string().describe("Record title."),
   status: z.string().describe("Status enum value for the type."),
-  tags: z.array(z.string()).describe("Tag list."),
   design_slug: z
     .string()
     .optional()
     .describe("Parent design slug — only present on types that carry a design link."),
-  created_at: z.string().describe("ISO-8601 creation timestamp."),
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),
 });
 
@@ -1118,11 +1116,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "`updated_since` (cards on that page changed at or after an instant). " +
         "Pass `page` to read one older page id. Set `count: true` to read the " +
         "counter for all records or for one type. A status, a tag, or " +
-        "`updated_since` with `count` is a miss. Output: `type · slug · status · " +
-        "title` per line, or `N counter` in count mode. Always check " +
-        "`structuredContent.skipped_types`: non-empty means some requested/walked " +
-        "types were skipped because their schema hash is unavailable, so empty " +
-        "records/counts are degraded rather than definitive.",
+        "`updated_since` with `count` is a miss (`structuredContent.miss`). " +
+        "Output: `type · slug · status · title` per line, or `N counter` in " +
+        "count mode. A page card has no tag list and no create time. Always " +
+        "check `structuredContent.skipped_types`: non-empty means some " +
+        "requested/walked types were skipped because their schema hash is " +
+        "unavailable, so empty records/counts are degraded rather than definitive.",
       inputSchema: {
         type: typeEnum.optional().describe("Restrict to one record type."),
         status: z
@@ -1195,6 +1194,10 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .nonnegative()
           .optional()
           .describe("Number of matching records. Present only when `count` is set."),
+        miss: z
+          .boolean()
+          .optional()
+          .describe("True when the count read is a miss."),
         skipped_types: skippedTypesSchema,
       },
     },
@@ -1238,7 +1241,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               }
             : "count" in result
               ? { count: result.count, skipped_types: skippedTypes }
-              : { skipped_types: skippedTypes },
+              : { miss: true, skipped_types: skippedTypes },
       });
     },
   );
