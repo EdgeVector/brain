@@ -259,9 +259,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     null,
     opts.verbose,
   );
-  // Drop the per-type RecordListEntry row. Without this the pre-tombstone
-  // rle_payload snapshot survives, so list/--count/BM25 still surface the
-  // slug while get exit-1s (phantom index rows).
+  // Remove an old RecordListEntry row when that key exists.
   {
     const { maintainTypeListIndex } = await import("../record-list-index.ts");
     await maintainTypeListIndex({

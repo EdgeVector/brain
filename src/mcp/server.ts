@@ -1114,11 +1114,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     {
       title: "List fbrain records",
       description:
-        "List records (newest-first), optionally filtered by type/status/tag and " +
-        "`updated_since` (records changed at/after an instant). Page past `limit` " +
-        "with `offset`. Set `count: true` for a match count only (no bodies) — the " +
-        "cheap way to answer \"how many …\". Output: `type · slug · status · title " +
-        "[tags]` per line (or a bare number in count mode). Always check " +
+        "List one page of cards, optionally filtered by type, status, tag, and " +
+        "`updated_since` (cards on that page changed at or after an instant). " +
+        "Pass `page` to read one older page id. Set `count: true` to read the " +
+        "counter for all records or for one type. A status, a tag, or " +
+        "`updated_since` with `count` is a miss. Output: `type · slug · status · " +
+        "title` per line, or `N counter` in count mode. Always check " +
         "`structuredContent.skipped_types`: non-empty means some requested/walked " +
         "types were skipped because their schema hash is unavailable, so empty " +
         "records/counts are degraded rather than definitive.",
@@ -1137,27 +1138,25 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
               "timestamp (`2026-07-01T12:00:00Z`) or a relative window token " +
               "(`45s`, `30m`, `24h`, `7d`, `2w`).",
           ),
-        offset: z
-          .number()
-          .int()
-          .nonnegative()
+        page: z
+          .string()
           .optional()
           .describe(
-            "Skip the first N matches (after filter+sort) before `limit` applies — " +
-              "pages past `limit` (offset 50 + limit 50 → records 51–100).",
+            "Page id. The default is __head__. An older id is p plus eight digits.",
           ),
         limit: z
           .number()
           .int()
           .positive()
+          .max(100)
           .optional()
-          .describe("Max results."),
+          .describe("Max cards from that one page. The cap is 100."),
         count: z
           .boolean()
           .optional()
           .describe(
-            "Count-only mode: return just how many records match the filters " +
-              "(no bodies). Ignores offset/limit (a count is of the whole match set).",
+            "Read the counter for all records or for one type. A status, a tag, " +
+              "or updated_since returns a miss.",
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -1180,15 +1179,15 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .nonnegative()
           .optional()
           .describe(
-            "Index-level match count after filters, before offset/limit. " +
-              "Honesty signal only — not a complete-census promise.",
+            "Cards on this page after the page filter, before the limit. " +
+              "Not a complete-census promise.",
           ),
         truncated: z
           .boolean()
           .optional()
           .describe(
-            "True when this page is not the full match set (clipped or " +
-              "unhydratable rows repaired-out). Not a census completeness flag.",
+            "True when the print cut the page, the atom names an older page, " +
+              "or the page atom is absent.",
           ),
         count: z
           .number()
@@ -1215,7 +1214,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             type: args.type,
             status: args.status,
             tag: args.tag,
-            offset: args.offset,
+            page: args.page,
             limit: args.limit,
             count: args.count,
             onResult,
@@ -1237,7 +1236,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
                 truncated: result.truncated,
                 skipped_types: skippedTypes,
               }
-            : { count: result.count, skipped_types: skippedTypes },
+            : "count" in result
+              ? { count: result.count, skipped_types: skippedTypes }
+              : { skipped_types: skippedTypes },
       });
     },
   );

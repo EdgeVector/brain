@@ -128,7 +128,8 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_type",
   "invalid_min_score",
   "invalid_limit",
-  "invalid_offset",
+  "invalid_page",
+  "status_needs_type",
   "invalid_updated_since",
   "invalid_body_limit",
   "invalid_field",
@@ -429,30 +430,27 @@ exists in multiple types (specify --type to disambiguate).
                 is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
                 print to stderr) so \`--json\` stdout is always parseable.`,
   list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
-             [--offset N] [-n N | --limit N] [--count] [--field PATH]... [--json]
+             [--page ID] [-n N | --limit N] [--count] [--field PATH]... [--json]
 
   --type          ${RECORD_TYPE_LIST}
-                  (omit to list across all types)
-  --status        filter by status enum
-  --tag           filter by tag membership
-  --updated-since keep only records updated at/after WHEN — an ISO-8601
+                  (omit to list the \`all\` page)
+  --status        with --type, read the \`<type>#<status>\` page
+  --tag           read the \`tag#<tag>\` page
+  --updated-since keep cards on this page updated at/after WHEN — an ISO-8601
                   timestamp (\`2026-07-01\`, \`2026-07-01T12:00:00Z\`) or a
                   relative window: \`45s\` \`30m\` \`24h\` \`7d\` \`2w\`
-  --offset N      skip the first N matches (after filter+sort), then apply the
-                  limit — pages past \`--limit\` (\`--offset 50 -n 50\` → records
-                  51–100). Non-negative integer.
-  -n, --limit     max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
-  --count         print only how many records match the filters (no bodies);
-                  ignores --offset/--limit (a count is of the whole match set)
+  --page ID       read that page. The default is \`__head__\`. An older id is
+                  \`p\` plus eight digits.
+  -n, --limit     max cards from that one page (default 20, cap 100).
+                  \`-n\` and \`--limit\` are aliases; last wins
+  --count         print the counter for \`all\` or for --type, and the word
+                  \`counter\`. A status, a tag, or --updated-since returns a miss.
   --field         project one field path as plain output; repeat or comma-separate
                   for TSV rows (e.g. --field slug, or --field type,slug,status).
                   Supports dot paths and array indexes.
-  --json          emit a JSON array of record summaries on stdout
-                  ({type, slug, title, status, tags, design_slug?, created_at,
-                  updated_at}); truncation hint routes to stderr. With --count,
-                  emits \`{"count": N}\` instead. On failure, a \`{error, hint}\`
-                  JSON object is emitted to stdout too, so \`--json\` stdout is
-                  always parseable.`,
+  --json          emit one JSON object on stdout
+                  ({items, total, truncated}). With --count, emits
+                  \`{"count": N}\` or \`{"miss": true}\`. Notes go to stderr.`,
   which: `fbrain which [--json] [--check]
 
 Print the brain executable selected by this shell, the resolved source root,
@@ -1300,10 +1298,7 @@ const LIST_OPTIONS = {
   // `--limit` with `-n` short alias — mirrors SEARCH_OPTIONS / ASK_OPTIONS so a
   // user who learned `search --limit N` doesn't hit "Unknown option" on list.
   limit: { type: "string", short: "n" },
-  // `--offset N` — skip the first N matches (after filter+sort) before the
-  // limit applies. The paging companion to --limit: `--offset 50 -n 50`
-  // yields records 51–100. Non-negative integer; validated before parseArgs.
-  offset: { type: "string" },
+  page: { type: "string" },
   // `--updated-since <ISO|relative>` — keep only records whose updated_at is
   // at or after the given instant. Accepts an ISO-8601 timestamp or a
   // relative window token (`7d`, `24h`, `2w`, `30m`, `45s`).
@@ -1828,9 +1823,6 @@ const LIMIT_INT_FLAGS: readonly IntFlagSpec[] = [
 ];
 const BODY_LIMIT_INT_FLAGS: readonly IntFlagSpec[] = [
   { flag: "--body-limit", canonical: "--body-limit" },
-];
-const OFFSET_INT_FLAGS: readonly IntFlagSpec[] = [
-  { flag: "--offset", canonical: "--offset" },
 ];
 const USAGE_WINDOW_INT_FLAGS: readonly IntFlagSpec[] = [
   { flag: "--usage-window", canonical: "--usage-window" },
@@ -2887,10 +2879,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
-  const intArgs = normalizeNegativeIntFlagValues(args, [
-    ...LIMIT_INT_FLAGS,
-    ...OFFSET_INT_FLAGS,
-  ]);
+  const intArgs = normalizeNegativeIntFlagValues(args, [...LIMIT_INT_FLAGS]);
   let parsed;
   try {
     parsed = parseCommandArgs(
@@ -2932,19 +2921,14 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     min: 1,
     code: "invalid_limit",
   });
-  const offset = strictInt(values.offset, {
-    flag: lastIntFlagSpelling(args, OFFSET_INT_FLAGS),
-    min: 0,
-    code: "invalid_offset",
-  });
   const cfg = readConfig();
   const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose };
   if (type) lOpts.type = type;
   if (values.status) lOpts.status = values.status;
   if (values.tag) lOpts.tag = values.tag;
   if (typeof limit === "number" && Number.isFinite(limit)) lOpts.limit = limit;
-  if (typeof offset === "number" && Number.isFinite(offset))
-    lOpts.offset = offset;
+  if (typeof values.page === "string" && values.page.length > 0)
+    lOpts.page = values.page;
   if (values["updated-since"]) {
     lOpts.updatedSinceMs = parseUpdatedSince(values["updated-since"]);
   }

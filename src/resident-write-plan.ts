@@ -41,11 +41,6 @@ import {
 } from "./list-page.ts";
 import { normalizeSlug, TOMBSTONE_TAG, type FbrainRecord } from "./record.ts";
 import {
-  entryFieldsFor,
-  entryKeyFor,
-  recordListEntryHash,
-} from "./record-list-index.ts";
-import {
   papercutStatusEntryExists,
   papercutStatusEntryFields,
   papercutStatusIndexHash,
@@ -148,25 +143,6 @@ function countOps(ops: PlannedMutation[]): ExactProjectionCounts {
     else counts.deleted += 1;
   }
   return counts;
-}
-
-function planListOp(opts: {
-  cfg: Pick<Config, "schemaHashes">;
-  type: RecordType;
-  record: FbrainRecord;
-  upsertType: "create" | "update";
-}): PlannedMutation | null {
-  const schemaHash = recordListEntryHash(opts.cfg);
-  if (!schemaHash) return null;
-  const { hash, range } = entryKeyFor(opts.type, opts.record.slug);
-  return {
-    mutationType: opts.upsertType,
-    schemaHash,
-    keyHash: hash,
-    keyRange: range,
-    fields: entryFieldsFor(opts.type, opts.record),
-    projection: "list",
-  };
 }
 
 function planGraphOps(opts: {
@@ -396,14 +372,6 @@ export async function buildResidentWritePlan(opts: {
       projection: "primary",
     });
   }
-
-  const listOp = planListOp({
-    cfg: opts.cfg,
-    type: opts.type,
-    record: stored,
-    upsertType,
-  });
-  if (listOp) ops.push(listOp);
 
   const indexNotes: string[] = [];
   const bodyDesired = extractGraphEdges({

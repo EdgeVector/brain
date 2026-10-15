@@ -243,24 +243,18 @@ export async function typeListEntryExists(
   return res.results.length > 0;
 }
 
-/** Write ONE record's row. Returns false when the HashRange schema is absent. */
+/** A new payload is not written. `deleteTypeListEntry` still removes an old row. */
 export async function upsertTypeListEntry(
   node: NodeClient,
   cfg: SchemaCfg,
   type: RecordType,
   record: FbrainRecord,
 ): Promise<boolean> {
-  const entryHash = recordListEntryHash(cfg);
-  if (!entryHash) return false;
-  const { hash, range } = entryKeyFor(type, record.slug);
-  const fields = entryFieldsFor(type, record);
-  const exists = await typeListEntryExists(node, entryHash, type, record.slug);
-  if (exists) {
-    await node.updateRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
-  } else {
-    await node.createRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
-  }
-  return true;
+  void node;
+  void cfg;
+  void type;
+  void record;
+  return false;
 }
 
 /**
