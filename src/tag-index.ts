@@ -51,8 +51,6 @@ import type { Config } from "./config.ts";
 import { sha256Hex } from "./hash.ts";
 import {
   arrayStringField,
-  isSchemaNotFoundReadError,
-  isTombstoned,
   nowIso,
   TOMBSTONE_TAG,
   type FbrainRecord,
@@ -111,11 +109,6 @@ export type TagIndexRecord = {
 };
 
 export type TaggedRecord = { type: RecordType; record: FbrainRecord };
-
-export type TagIndexRebuildResult = {
-  tagsIndexed: number;
-  membersIndexed: number;
-};
 
 /** One membership change: add or remove `member` under `tag`. */
 export type TagMemberChange = {
@@ -180,25 +173,6 @@ export function tagIndexSchemaHash(cfg: Config): string | null {
  */
 export function tagIndexAvailable(cfg: Config): boolean {
   return tagMemberSchemaHash(cfg) !== null || tagIndexSchemaHash(cfg) !== null;
-}
-
-/**
- * The TagMembership hash for an ADMIN write, or an error naming the fix. Never
- * declares the schema: the node registers a new schema in the Schema Service of
- * its own environment (not the one this config names), so only `brain init`
- * does it, on purpose.
- */
-export function requireTagMemberSchema(cfg: Config): string {
-  const memberHash = tagMemberSchemaHash(cfg);
-  if (memberHash === null) {
-    throw new FbrainError({
-      code: "tag_member_schema_unavailable",
-      message:
-        "the TagMembership schema is not pinned in this install's config, so the tag index cannot be rebuilt.",
-      hint: "Run `brain init`, then retry.",
-    });
-  }
-  return memberHash;
 }
 
 /** One line, shown once per command, when the config has no TagMembership hash. */
@@ -1017,72 +991,6 @@ export async function resolveRecordsByTag(
     out.push({ type: parsed.type, record });
   }
   return out;
-}
-
-/**
- * Admin rebuild: make each given tag's partition exactly `byTag` (creates for
- * missing members, deletes for members no record carries, the stamp written).
- * Reads partitions in batches and writes in batches. Tags absent from `byTag`
- * are not touched: finding them would need a scan, which LastDB does not have.
- * Returns the number of members indexed.
- *
- * An ADMIN operation for a quiet moment. It deletes rows no record backs, so a
- * member another device added after this run read the records is deleted. Run
- * it on one device at a time, with the other writers idle. It never registers
- * the schema and never touches a legacy row.
- */
-export async function rebuildTagMemberPartitions(
-  node: NodeClient,
-  cfg: Config,
-  byTag: ReadonlyMap<string, ReadonlySet<string>>,
-): Promise<number> {
-  // Page atoms replaced this payload.
-  void node;
-  void cfg;
-  void byTag;
-  return 0;
-}
-
-export async function rebuildTagIndex(
-  node: NodeClient,
-  cfg: Config,
-  opts: {
-    listRecords: (type: RecordType, schemaHash: string) => Promise<FbrainRecord[]>;
-    schemaHashFor: (type: RecordType) => string;
-    onSkipUnavailableType?: (type: RecordType) => void;
-  },
-): Promise<TagIndexRebuildResult> {
-  // Fail before the corpus scan, not after it.
-  requireTagMemberSchema(cfg);
-
-  const map = new Map<string, Set<string>>();
-  for (const type of RECORD_TYPES) {
-    let records: FbrainRecord[];
-    try {
-      records = await opts.listRecords(type, opts.schemaHashFor(type));
-    } catch (err) {
-      if (isSchemaNotFoundReadError(err)) {
-        opts.onSkipUnavailableType?.(type);
-        continue;
-      }
-      throw err;
-    }
-    for (const record of records) {
-      if (isTombstoned(record)) continue;
-      const member = memberKey(type, record.slug);
-      for (const tag of userTags(record.tags)) {
-        let set = map.get(tag);
-        if (!set) {
-          set = new Set<string>();
-          map.set(tag, set);
-        }
-        set.add(member);
-      }
-    }
-  }
-
-  const membersIndexed = await rebuildTagMemberPartitions(node, cfg, map);
-  return { tagsIndexed: map.size, membersIndexed };
 }
 
 export async function addTagIndexMember(

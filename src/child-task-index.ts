@@ -5,7 +5,6 @@ import { FbrainError, type NodeClient, type QueryRow } from "./client.ts";
 import {
   CHILD_TASK_INDEX_FIELDS,
   CHILD_TASK_INDEX_GLOBAL_HASH,
-  CHILD_TASK_INDEX_MARKER,
   CHILD_TASK_INDEX_MIGRATED_RANGE,
   CHILD_TASK_INDEX_SCHEMA_KEY,
 } from "./schemas.ts";
@@ -61,74 +60,6 @@ async function entryRowExists(
     filter: { HashRangeKey: { hash, range } },
   });
   return res.results.length > 0;
-}
-
-/**
- * Stamp "this index reflects every live task's design_slug".
- * The old payload write stopped. A product path does not call this.
- */
-export async function markChildTaskIndexMigrated(
-  node: NodeClient,
-  cfg: SchemaCfg,
-): Promise<boolean> {
-  const entryHash = childTaskIndexHash(cfg);
-  if (!entryHash) return false;
-  const fields = {
-    ctd_h: CHILD_TASK_INDEX_GLOBAL_HASH,
-    ctd_r: CHILD_TASK_INDEX_MIGRATED_RANGE,
-    ctd_payload: "",
-    ctd_marker: CHILD_TASK_INDEX_MARKER,
-  };
-  const exists = await entryRowExists(
-    node,
-    entryHash,
-    CHILD_TASK_INDEX_GLOBAL_HASH,
-    CHILD_TASK_INDEX_MIGRATED_RANGE,
-  );
-  if (exists) {
-    await node.updateRecord({
-      schemaHash: entryHash,
-      fields,
-      keyHash: CHILD_TASK_INDEX_GLOBAL_HASH,
-      keyRange: CHILD_TASK_INDEX_MIGRATED_RANGE,
-    });
-  } else {
-    await node.createRecord({
-      schemaHash: entryHash,
-      fields,
-      keyHash: CHILD_TASK_INDEX_GLOBAL_HASH,
-      keyRange: CHILD_TASK_INDEX_MIGRATED_RANGE,
-    });
-  }
-  return true;
-}
-
-/**
- * Self-heal: drop the global marker so the next read errors loudly (naming
- * the repair) instead of silently trusting a partial index forever.
- */
-export async function unmarkChildTaskIndexMigrated(
-  node: NodeClient,
-  cfg: SchemaCfg,
-): Promise<boolean> {
-  const entryHash = childTaskIndexHash(cfg);
-  if (!entryHash) return false;
-  if (
-    !(await entryRowExists(
-      node,
-      entryHash,
-      CHILD_TASK_INDEX_GLOBAL_HASH,
-      CHILD_TASK_INDEX_MIGRATED_RANGE,
-    ))
-  ) {
-    return true;
-  }
-  await node.deleteRecord({
-    schemaHash: entryHash,
-    keyHash: CHILD_TASK_INDEX_GLOBAL_HASH,
-    keyRange: CHILD_TASK_INDEX_MIGRATED_RANGE,
-  });
-  return true;
 }
 
 /**
@@ -194,74 +125,4 @@ export async function readChildTasksByDesign(
     if (task?.design_slug === designSlug) out.push(task);
   }
   return out;
-}
-
-/**
- * The old ChildTaskIndex payload write stopped. This function does not write.
- */
-export async function writeChildTaskIndex(
-  node: NodeClient,
-  cfg: SchemaCfg,
-  liveTasks: readonly FbrainRecord[],
-): Promise<void> {
-  // Page atoms replaced this payload. A rebuild must not clear the marker.
-  void node;
-  void cfg;
-  void liveTasks;
-  return;
-}
-
-/** Census of the index vs an authoritative live (designSlug, taskSlug) set. */
-export type ChildTaskIndexCensus = {
-  indexed: number;
-  sot: number;
-  missingFromIndex: string[];
-  extraInIndex: string[];
-  migrated: boolean;
-  complete: boolean;
-};
-
-/**
- * Compare the keyed index against an authoritative live set of
- * `design_slug task_slug` pairs. The old payload write stopped.
- * This census is not a product read.
- */
-export async function censusChildTaskIndex(
-  node: NodeClient,
-  cfg: SchemaCfg,
-  sotPairs: readonly string[],
-): Promise<ChildTaskIndexCensus | null> {
-  const entryHash = childTaskIndexHash(cfg);
-  if (!entryHash) return null;
-  const migrated = await entryRowExists(
-    node,
-    entryHash,
-    CHILD_TASK_INDEX_GLOBAL_HASH,
-    CHILD_TASK_INDEX_MIGRATED_RANGE,
-  );
-  const res = await node.queryAll({
-    schemaHash: entryHash,
-    fields: [...CHILD_TASK_INDEX_FIELDS],
-    allowFullScan: true,
-  });
-  const indexedKeys = new Set<string>();
-  for (const row of res.results) {
-    const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
-    const h = row.key?.hash ?? fields.ctd_h;
-    const r = row.key?.range ?? fields.ctd_r;
-    if (typeof h !== "string" || typeof r !== "string") continue;
-    if (h === CHILD_TASK_INDEX_GLOBAL_HASH && r === CHILD_TASK_INDEX_MIGRATED_RANGE) continue;
-    indexedKeys.add(`${h} ${r}`);
-  }
-  const sotSet = new Set(sotPairs);
-  const missingFromIndex = [...sotSet].filter((k) => !indexedKeys.has(k)).sort();
-  const extraInIndex = [...indexedKeys].filter((k) => !sotSet.has(k)).sort();
-  return {
-    indexed: indexedKeys.size,
-    sot: sotSet.size,
-    missingFromIndex,
-    extraInIndex,
-    migrated,
-    complete: migrated && missingFromIndex.length === 0 && extraInIndex.length === 0,
-  };
 }

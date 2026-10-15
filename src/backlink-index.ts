@@ -2,25 +2,14 @@
 // backlinkIndexTag and backlinkTargetSlugs still name the old membership layout.
 
 import { FbrainError, type NodeClient } from "./client.ts";
-import type { Config } from "./config.ts";
 import { HEAD_RANGE } from "./list-page.ts";
 import {
-  memberKey,
-  rebuildTagMemberPartitions,
-  requireTagMemberSchema,
-  tagIndexAvailable,
-} from "./tag-index.ts";
-import {
-  isSchemaNotFoundReadError,
-  isTombstoned,
-  listRecords,
   normalizeSlug,
   parseGenericLinkTag,
-  schemaHashFor,
   wikiLinkSlugs,
   type FbrainRecord,
 } from "./record.ts";
-import { RECORD_TYPES, type RecordType } from "./schemas.ts";
+import { type RecordType } from "./schemas.ts";
 
 const BACKLINK_INDEX_TAG_PREFIX = "__fbrain_backlink__:";
 
@@ -118,66 +107,8 @@ export async function readStoredPage(
   };
 }
 
-export type BacklinkIndexRebuildResult = {
-  targetsIndexed: number;
-  membersIndexed: number;
-};
-
 export function backlinkIndexTag(targetSlug: string): string {
   return `${BACKLINK_INDEX_TAG_PREFIX}${normalizeSlug(targetSlug)}`;
-}
-
-export async function rebuildBacklinkIndex(
-  node: NodeClient,
-  cfg: Config,
-  opts: {
-    listRecords?: (type: RecordType, schemaHash: string) => Promise<FbrainRecord[]>;
-    schemaHashFor?: (type: RecordType) => string;
-    onSkipUnavailableType?: (type: RecordType) => void;
-  } = {},
-): Promise<BacklinkIndexRebuildResult> {
-  if (!tagIndexAvailable(cfg)) return { targetsIndexed: 0, membersIndexed: 0 };
-  // Fail before the corpus scan, not after it.
-  requireTagMemberSchema(cfg);
-
-  const byTarget = new Map<string, Set<string>>();
-  const list = opts.listRecords ?? ((type: RecordType) =>
-    // A rebuild writes (and deletes) from what it reads: a cut row whose record
-    // cannot be read must stop it, not be skipped.
-    listRecords(node, type, cfg, { onMissing: "throw" }));
-  const hashFor = opts.schemaHashFor ?? ((type) => schemaHashFor(type, cfg));
-
-  for (const type of RECORD_TYPES) {
-    let records: FbrainRecord[];
-    try {
-      records = await list(type, hashFor(type));
-    } catch (err) {
-      if (isSchemaNotFoundReadError(err)) {
-        opts.onSkipUnavailableType?.(type);
-        continue;
-      }
-      throw err;
-    }
-    for (const record of records) {
-      if (isTombstoned(record)) continue;
-      const member = memberKey(type, record.slug);
-      for (const target of backlinkTargetSlugs(record, type)) {
-        let members = byTarget.get(target);
-        if (!members) {
-          members = new Set<string>();
-          byTarget.set(target, members);
-        }
-        members.add(member);
-      }
-    }
-  }
-
-  const byTag = new Map<string, Set<string>>();
-  for (const [target, members] of byTarget) {
-    byTag.set(backlinkIndexTag(target), members);
-  }
-  const membersIndexed = await rebuildTagMemberPartitions(node, cfg, byTag);
-  return { targetsIndexed: byTarget.size, membersIndexed };
 }
 
 export function backlinkTargetSlugs(

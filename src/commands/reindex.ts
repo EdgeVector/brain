@@ -25,10 +25,7 @@
 // records reindexed.
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
-import {
-  pageBackfill,
-  type BacklinkIndexRebuildResult,
-} from "../backlink-index.ts";
+import { pageBackfill } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSinks } from "../format.ts";
@@ -47,11 +44,9 @@ import {
   writeTypeListIndex,
   type TypeListIndexCensus,
 } from "../record-list-index.ts";
-import { type ChildTaskIndexCensus } from "../child-task-index.ts";
 import { type PapercutStatusIndexCensus } from "../papercut-status-index.ts";
 import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
-import { type TagIndexRebuildResult } from "../tag-index.ts";
 import { graphEdgeHashes, reconcileGraphEdges } from "../graph-edge.ts";
 
 export const GRAPH_EDGE_BACKFILL_CAVEAT =
@@ -98,12 +93,8 @@ export type ReindexResult = {
   byType: Partial<
     Record<RecordType, { reindexed: number; skippedTombstone: number }>
   >;
-  tagIndex?: TagIndexRebuildResult;
-  backlinkIndex?: BacklinkIndexRebuildResult;
   /** Per-type census after `--list-index` (dry-run or repair). */
   listIndexCensus?: TypeListIndexCensus[];
-  /** Census after `--child-task-index` (dry-run or repair). */
-  childTaskIndexCensus?: ChildTaskIndexCensus;
   /** Census after `--papercut-status-index` (dry-run or repair). */
   papercutStatusIndexCensus?: PapercutStatusIndexCensus;
   graphEdgeRecords?: number;
