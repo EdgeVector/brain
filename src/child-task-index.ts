@@ -1,5 +1,6 @@
 // ChildTaskIndex helpers. Product paths no longer write ctd_payload.
 
+import { pageBackfill } from "./backlink-index.ts";
 import { FbrainError, type NodeClient, type QueryRow } from "./client.ts";
 import {
   CHILD_TASK_INDEX_FIELDS,
@@ -41,10 +42,6 @@ export function childTaskIndexHash(cfg: SchemaCfg): string | null {
   return h && h.length > 0 ? h : null;
 }
 
-function entryKeyFor(designSlug: string, taskSlug: string): { hash: string; range: string } {
-  return { hash: designSlug, range: taskSlug };
-}
-
 /** Resolve the child task slug from one HashRange index row. */
 function taskSlugFromEntryRow(row: QueryRow): string | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
@@ -66,41 +63,9 @@ async function entryRowExists(
   return res.results.length > 0;
 }
 
-/** Write ONE task's row under its design partition. False when schema absent. */
-export async function upsertChildTaskEntry(
-  node: NodeClient,
-  cfg: SchemaCfg,
-  designSlug: string,
-  task: FbrainRecord,
-): Promise<boolean> {
-  // Page atoms replaced this payload.
-  void node;
-  void cfg;
-  void designSlug;
-  void task;
-  return false;
-}
-
-/** Drop ONE task's row from its design partition. False when schema absent. */
-export async function deleteChildTaskEntry(
-  node: NodeClient,
-  cfg: SchemaCfg,
-  designSlug: string,
-  taskSlug: string,
-): Promise<boolean> {
-  const entryHash = childTaskIndexHash(cfg);
-  if (!entryHash || designSlug.length === 0) return false;
-  const { hash, range } = entryKeyFor(designSlug, taskSlug);
-  if (!(await entryRowExists(node, entryHash, hash, range))) return true;
-  await node.deleteRecord({ schemaHash: entryHash, keyHash: hash, keyRange: range });
-  return true;
-}
-
 /**
- * Stamp "this index reflects every live task's design_slug". Written ONLY by
- * the bulk admin rebuild (`writeChildTaskIndex` / `fbrain reindex
- * --child-task-index`) — an ordinary create/put/delete/link patches its own
- * row but never claims the whole index is complete.
+ * Stamp "this index reflects every live task's design_slug".
+ * The old payload write stopped. A product path does not call this.
  */
 export async function markChildTaskIndexMigrated(
   node: NodeClient,
@@ -201,8 +166,7 @@ export async function readChildTasksByDesign(
         "the design->child-task keyed index is registered but not marked complete, so child tasks " +
         "cannot be resolved from it without a full task-partition scan — which product read paths " +
         "must not do.",
-      hint:
-        "Run `fbrain reindex --child-task-index` (admin/offline) to rebuild the index from source of truth, then retry.",
+      hint: `The old payload write stopped. ${pageBackfill(`child#${designSlug}`, "task")}`,
     });
   }
   // The index is the relationship projection, not the task source of truth.
@@ -233,61 +197,7 @@ export async function readChildTasksByDesign(
 }
 
 /**
- * Reflect one task write into the index. `task` is the post-write record (or
- * `null`/tombstoned for a delete); `previousDesignSlug` is the design_slug
- * the SAME task slug carried before this write (`undefined` on create — the
- * task never had a prior row to clean up).
- *
- * Covers every way a task's design_slug can change: create (`task new
- * --design`), update (`put`, direct `design_slug` frontmatter edit), delete
- * (tombstone), and reparent (`fbrain link <task> <design>`) — the same
- * "every write path, not just the obvious ones" lesson `maintainTypeListIndex`
- * documents (a partially maintained index is worse than none).
- */
-export async function patchChildTaskIndex(
-  node: NodeClient,
-  cfg: SchemaCfg,
-  taskSlug: string,
-  task: FbrainRecord | null,
-  previousDesignSlug: string | undefined,
-): Promise<void> {
-  // Page atoms replaced this payload.
-  void node;
-  void cfg;
-  void taskSlug;
-  void task;
-  void previousDesignSlug;
-  return;
-}
-
-/**
- * Non-fatal wrapper for write-path callers, matching `maintainTypeListIndex`'s
- * contract: the task write has ALREADY landed, so a patch failure must not
- * throw and lose that. It self-heals by clearing the completeness marker —
- * the next design lookup errors loudly (per `readChildTasksByDesign`) naming
- * the repair, instead of quietly serving a partial index forever.
- */
-export async function maintainChildTaskIndex(opts: {
-  node: NodeClient;
-  cfg: SchemaCfg;
-  taskSlug: string;
-  task: FbrainRecord | null;
-  previousDesignSlug: string | undefined;
-  verbose?: (msg: string) => void;
-}): Promise<{ childTaskIndexFailed: boolean }> {
-  // Page atoms replaced this payload.
-  void opts;
-  return { childTaskIndexFailed: false };
-}
-
-/**
- * Bulk rebuild: given every live task record (admin SOT scan), replace the
- * whole keyed index — delete rows for tasks that no longer point at that
- * design (or were deleted), upsert current rows, stamp the completeness
- * marker. Admin/offline only (`fbrain reindex --child-task-index`); never
- * called from a product read/write path. The `allowFullScan` read here is of
- * the INDEX's own schema, not a product table — the same distinction
- * `writeTypeListIndex` draws for its existing-partition read.
+ * The old ChildTaskIndex payload write stopped. This function does not write.
  */
 export async function writeChildTaskIndex(
   node: NodeClient,
@@ -313,9 +223,8 @@ export type ChildTaskIndexCensus = {
 
 /**
  * Compare the keyed index against an authoritative live set of
- * `design_slug task_slug` pairs. Used by `fbrain reindex
- * --child-task-index` (repair) so "the index is complete" is proven, not
- * assumed.
+ * `design_slug task_slug` pairs. The old payload write stopped.
+ * This census is not a product read.
  */
 export async function censusChildTaskIndex(
   node: NodeClient,

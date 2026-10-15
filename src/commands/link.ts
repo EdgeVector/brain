@@ -3,7 +3,8 @@
 // compatibility; all other pairs store a link:<type>:<slug> tag on the
 // source record. Explicit edges reject missing targets.
 
-import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
+import { hasSpillMarker } from "../body-spill.ts";
+import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -52,6 +53,9 @@ export type LinkResult = {
   from_slug: string;
   to_type: RecordType;
   to_slug: string;
+  // False when a head write did not apply. A cap note can still be true.
+  index_applied: boolean;
+  index_notes?: string[];
 };
 
 export async function linkCmd(opts: LinkOptions): Promise<void> {
@@ -160,39 +164,29 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
   const storedRecord = sealed.fields as FbrainRecord;
-  // Reconcile reads wikilinks. A spill on this write must not drop a tail link.
+  // A spill on this write keeps the full body already in memory.
   const linkView: FbrainRecord =
     sealed.spilled.length > 0 && typeof fields.body === "string"
       ? { ...storedRecord, body: fields.body }
       : storedRecord;
-  const indexNote = await commitLinkPages(node, opts.cfg, fromType, source, linkView);
-
-  print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}${indexNote}`);
-  // Emit the structured payload from the SAME normalized slugs the printed
-  // line uses (one source of truth — see the read commands).
-  opts.onResult?.({
-    action: "linked",
-    from_type: fromType,
-    from_slug: fromSlug,
-    to_type: toType,
-    to_slug: toSlug,
+  // Wiki dests keep their slots. The explicit target is last, under LINK_CAP.
+  const edges = extractGraphEdges({ sourceSlug: fromSlug, body: linkView.body });
+  edges.push({
+    src: fromSlug.toLowerCase(),
+    dst: toSlug.toLowerCase(),
+    type: "mentions",
+    provenance: "explicit",
+    created_at: now,
   });
-}
-
-async function commitLinkPages(
-  node: NodeClient,
-  cfg: Config,
-  type: RecordType,
-  previous: FbrainRecord,
-  next: FbrainRecord,
-): Promise<string> {
   const side = await planRecordListSide({
     node,
-    cfg,
-    type,
-    previous,
-    next,
-    nextEdges: extractGraphEdges({ sourceSlug: next.slug, body: next.body }),
+    cfg: opts.cfg,
+    type: fromType,
+    previous: source,
+    next: linkView,
+    nextEdges: edges,
+    // The tail stays in the file. Keep stored edge ids that are not in the head.
+    ...(hasSpillMarker(linkView.body) ? { preserveStoredEdges: true } : {}),
   });
   const notes = [...side.details];
   let ops = side.ops;
@@ -211,7 +205,19 @@ async function commitLinkPages(
   for (const line of headNotes) {
     if (!notes.includes(line)) notes.push(line);
   }
-  return formatIndexNotes(notes);
+  const indexNote = formatIndexNotes(notes);
+  const indexApplied = headNotes.length === 0;
+
+  print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}${indexNote}`);
+  opts.onResult?.({
+    action: "linked",
+    from_type: fromType,
+    from_slug: fromSlug,
+    to_type: toType,
+    to_slug: toSlug,
+    index_applied: indexApplied,
+    ...(notes.length > 0 ? { index_notes: notes } : {}),
+  });
 }
 
 function fieldsForLinkUpdate(

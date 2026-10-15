@@ -3273,13 +3273,17 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     lOpts.onResult = (payload) =>
       console.log(
         JSON.stringify({
-          ok: true,
+          ok: payload.index_applied,
           task: payload.from_slug,
           design: payload.to_slug,
           from_type: payload.from_type,
           from_slug: payload.from_slug,
           to_type: payload.to_type,
           to_slug: payload.to_slug,
+          index_applied: payload.index_applied,
+          ...(payload.index_notes !== undefined
+            ? { index_notes: payload.index_notes }
+            : {}),
         }),
       );
   }

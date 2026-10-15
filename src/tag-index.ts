@@ -204,8 +204,9 @@ export function requireTagMemberSchema(cfg: Config): string {
 /** One line, shown once per command, when the config has no TagMembership hash. */
 export const TAG_MEMBER_UNPINNED_MESSAGE =
   "tag index: the TagMembership schema is not registered on this install, so tag and backlink " +
-  "membership is NOT written and reads use the legacy layout. Run `brain init`, then " +
-  "`brain reindex --tags` and `brain reindex --backlinks`.";
+  "membership is NOT written and reads use the legacy layout. The old payload write stopped. " +
+  "Run `brain init`, then `brain reindex --target tag#<tag> --source-hash <type> --slug <slug>` " +
+  "and `brain reindex --target link#<slug> --source-hash <type> --slug <slug>`.";
 
 const warned = new Set<string>();
 
@@ -947,7 +948,7 @@ export async function reconcileTagIndex(
     verbose?.(
       `tag-index reconcile failed for ${member}: ${changes.length} tag update(s) failed ` +
         `(added=${added.join(",")} removed=${removed.join(",")} failed=${errorMessage(err)}); ` +
-        "run `fbrain reindex --tags` to repair",
+        "The old payload write stopped. Run `brain reindex --target tag#<tag> --source-hash <type> --slug <slug>`.",
     );
   }
 }
@@ -1161,7 +1162,8 @@ export async function readTagMigrationStates(
  * synced yet). `drifted`: the
  * legacy row is NEWER than the copy stamp, so an old binary, or a device that
  * had not synced, wrote the legacy layout after the copy and the new layout
- * lacks those members. `reindex --tags` and `--backlinks` repair a drift.
+ * lacks those members. The old payload write stopped. A page backfill is
+ * `brain reindex --target tag#<tag> --source-hash <type> --slug <slug>`.
  */
 export function tagCopyStatus(
   state: TagMigrationState,

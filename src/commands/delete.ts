@@ -33,7 +33,7 @@ import {
   TOMBSTONE_TAG,
   withReadRetry,
 } from "../record.ts";
-import { BRAIN_LIST_PAGE_SCHEMA_KEY, type RecordType } from "../schemas.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
 import { matchesListFilters, resolveListEntries } from "./list.ts";
 import { removeResidentListSide } from "../resident-write-plan.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
@@ -325,26 +325,7 @@ export type DeleteByFilterOptions = {
   onResult?: (payload: DeleteBatchResult) => void;
 };
 
-// Resolve every LIVE record matching a list-style selector, exactly the way
-// `fbrain list --tag/--type/--status` does (sweep the selected schemas, drop
-// tombstones, apply the status/tag filters), so a user who previews with
-// `list` and deletes with `delete --tag` operates on the identical set.
-async function resolveFilterMatches(
-  node: NodeClient,
-  opts: DeleteByFilterOptions,
-): Promise<FilterMatch[]> {
-  const entries = await resolveListEntries(node, opts);
-  const matches: FilterMatch[] = entries
-    .filter(({ record }) => matchesListFilters(record, opts))
-    .map(({ type, record }) => ({
-      type,
-      slug: record.slug,
-      title: record.title,
-      created_at: record.created_at,
-    }));
-  // Stable, human-scannable order: type then slug. The node's row order is
-  // unstable (see list.ts), so without this the preview and the delete could
-  // print the same set in different orders across invocations.
+function sortFilterMatches(matches: FilterMatch[]): void {
   matches.sort((a, b) =>
     a.type !== b.type
       ? a.type < b.type
@@ -356,7 +337,60 @@ async function resolveFilterMatches(
           ? 1
           : 0,
   );
-  return matches;
+}
+
+// `--tag` walks tag# pages. One HashRangeKey per page. `--type` and `--status`
+// without a tag still use the list resolver.
+async function resolveFilterMatches(
+  node: NodeClient,
+  opts: DeleteByFilterOptions,
+): Promise<{ matches: FilterMatch[]; partial: boolean }> {
+  if (opts.tag) {
+    const hash = `tag#${opts.tag}`;
+    const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+    const seen = new Set<string>();
+    const matches: FilterMatch[] = [];
+    let range = HEAD_RANGE;
+    let partial = false;
+    for (;;) {
+      if (seen.has(range)) {
+        partial = true;
+        break;
+      }
+      seen.add(range);
+      const page = await readStoredPage(node, schemaHash, hash, range);
+      if (page.kind !== "page") {
+        partial = true;
+        break;
+      }
+      for (const card of page.cards) {
+        if (!isRecordType(card.type)) continue;
+        if (opts.type && card.type !== opts.type) continue;
+        if (opts.status && card.status !== opts.status) continue;
+        matches.push({
+          type: card.type,
+          slug: card.slug,
+          title: card.title,
+          created_at: "",
+        });
+      }
+      if (page.older.length === 0) break;
+      range = page.older;
+    }
+    sortFilterMatches(matches);
+    return { matches, partial };
+  }
+  const entries = await resolveListEntries(node, opts);
+  const matches: FilterMatch[] = entries
+    .filter(({ record }) => matchesListFilters(record, opts))
+    .map(({ type, record }) => ({
+      type,
+      slug: record.slug,
+      title: record.title,
+      created_at: record.created_at,
+    }));
+  sortFilterMatches(matches);
+  return { matches, partial: false };
 }
 
 // A short, human-readable description of the active selector, for the preview
@@ -409,10 +443,11 @@ export async function deleteByFilter(
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const selector = describeSelector(opts);
 
-  const matches = await resolveFilterMatches(node, opts);
+  const { matches, partial } = await resolveFilterMatches(node, opts);
+  if (partial) print("the delete is partial");
   if (matches.length === 0) {
-    print(`no live records match ${selector}`);
-    opts.onResult?.({ ok: true, deleted: [], failed: [], dryRun: !opts.yes });
+    if (!partial) print(`no live records match ${selector}`);
+    opts.onResult?.({ ok: !partial, deleted: [], failed: [], dryRun: !opts.yes });
     return;
   }
 
@@ -426,7 +461,7 @@ export async function deleteByFilter(
       `Re-run with --yes to delete ${matches.length === 1 ? "it" : "them"}.`,
     );
     opts.onResult?.({
-      ok: true,
+      ok: !partial,
       deleted: matches.map((m) => ({ type: m.type, slug: m.slug })),
       failed: [],
       dryRun: true,
@@ -534,7 +569,7 @@ export async function deleteByFilter(
   const noun = deleted.length === 1 ? "record" : "records";
   if (failed.length === 0) {
     print(`deleted ${deleted.length} ${noun} matching ${selector}.`);
-    opts.onResult?.({ ok: true, deleted, failed: [], dryRun: false });
+    opts.onResult?.({ ok: !partial, deleted, failed: [], dryRun: false });
     return;
   }
 

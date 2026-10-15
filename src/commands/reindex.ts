@@ -26,7 +26,7 @@
 
 import { newReadClientFromCfg, type Verbose } from "../client.ts";
 import {
-  rebuildBacklinkIndex,
+  pageBackfill,
   type BacklinkIndexRebuildResult,
 } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
@@ -47,19 +47,11 @@ import {
   writeTypeListIndex,
   type TypeListIndexCensus,
 } from "../record-list-index.ts";
-import {
-  censusChildTaskIndex,
-  writeChildTaskIndex,
-  type ChildTaskIndexCensus,
-} from "../child-task-index.ts";
+import { type ChildTaskIndexCensus } from "../child-task-index.ts";
 import { type PapercutStatusIndexCensus } from "../papercut-status-index.ts";
 import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
-import {
-  rebuildTagIndex,
-  tagMemberSchemaHash,
-  type TagIndexRebuildResult,
-} from "../tag-index.ts";
+import { type TagIndexRebuildResult } from "../tag-index.ts";
 import { graphEdgeHashes, reconcileGraphEdges } from "../graph-edge.ts";
 
 export const GRAPH_EDGE_BACKFILL_CAVEAT =
@@ -86,11 +78,8 @@ export type ReindexOptions = {
    */
   listIndex?: boolean;
   /**
-   * Rebuild the ChildTaskIndex keyed (design_slug x task slug) partition
-   * from an admin SOT scan of the task schema. Repairs the same class of gap
-   * `--list-index` repairs, one layer up: a dual-write patch that failed
-   * mid-write, or a historical backfill after the schema was first
-   * registered. Standalone mode.
+   * The old ChildTaskIndex payload write stopped. This flag does not scan
+   * and does not write. It names the page backfill.
    */
   childTaskIndex?: boolean;
   /** Rebuild the status x slug papercut ledger index from papercut SOT. */
@@ -154,103 +143,28 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     return result;
   }
 
+  if (opts.tags || opts.backlinks || opts.childTaskIndex) {
+    const result: ReindexResult = {
+      scanned: 0,
+      reindexed: 0,
+      skippedTombstone: 0,
+      byType: {},
+    };
+    const backfill = opts.tags
+      ? pageBackfill("tag#<tag>", "<type>")
+      : opts.backlinks
+        ? pageBackfill("link#<slug>", "<type>")
+        : pageBackfill("child#<designSlug>", "task");
+    print(`The old payload write stopped. ${backfill}`);
+    return result;
+  }
+
   // --dry-run issues no writes, so it never invokes the capability provider
   // and never triggers consent; a real reindex acquires on its first update.
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
 
-  if (opts.tags) {
-    const result: ReindexResult = {
-      scanned: 0,
-      reindexed: 0,
-      skippedTombstone: 0,
-      byType: {},
-    };
-    if (tagMemberSchemaHash(opts.cfg) === null) {
-      print(
-        "tag index not rebuilt: the TagMembership schema is not registered in this config. " +
-          "Run `brain init` (it registers the schema; reindex never does), then re-run.",
-      );
-      result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    if (opts.dryRun) {
-      print(
-        "dry-run: --tags would rebuild the tag secondary index (TagMember rows, one per tag and member) from a full corpus scan",
-      );
-      result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    const rebuilt = await rebuildTagIndex(node, opts.cfg, {
-      // SOT, not the product path. This is an admin repair — its own dry-run
-      // text says "from a full corpus scan" — and reading through `listRecords`
-      // would both depend on the very index this command exists to repair and
-      // push a full scan onto a path that must never issue one.
-      listRecords: (type, schemaHash) =>
-        listRecordsAdminScan(node, type, schemaHash),
-      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
-      onSkipUnavailableType: (type) =>
-        print(
-          missingSchemaHashReadNote(
-            [type],
-            "rebuilding the tag index from the rest",
-          ),
-        ),
-    });
-    result.tagIndex = rebuilt;
-    print(
-      `rebuilt tag index: ${rebuilt.tagsIndexed} tag(s), ${rebuilt.membersIndexed} membership(s)`,
-    );
-    return result;
-  }
-
-  if (opts.backlinks) {
-    const result: ReindexResult = {
-      scanned: 0,
-      reindexed: 0,
-      skippedTombstone: 0,
-      byType: {},
-    };
-    if (tagMemberSchemaHash(opts.cfg) === null) {
-      print(
-        "backlink index not rebuilt: the TagMembership schema is not registered in this config. " +
-          "Run `brain init` (it registers the schema; reindex never does), then re-run.",
-      );
-      result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    if (opts.dryRun) {
-      print(
-        "dry-run: --backlinks would rebuild the backlink secondary index (TagMember rows, one per target and source) from a full corpus scan",
-      );
-      result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    const rebuilt = await rebuildBacklinkIndex(node, opts.cfg, {
-      // SOT, not the product path — same reasoning as the tag rebuild above.
-      listRecords: (type, schemaHash) =>
-        listRecordsAdminScan(node, type, schemaHash),
-      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
-      onSkipUnavailableType: (type) =>
-        print(
-          missingSchemaHashReadNote(
-            [type],
-            "rebuilding the backlink index from the rest",
-          ),
-        ),
-    });
-    result.backlinkIndex = rebuilt;
-    print(
-      `rebuilt backlink index: ${rebuilt.targetsIndexed} target(s), ${rebuilt.membersIndexed} membership(s)`,
-    );
-    return result;
-  }
-
   if (opts.listIndex) {
     return rebuildListIndex(opts, node, print);
-  }
-
-  if (opts.childTaskIndex) {
-    return rebuildChildTaskIndex(opts, node, print);
   }
 
   if (opts.papercutStatusIndex) {
@@ -480,107 +394,6 @@ async function rebuildListIndex(
   return result;
 }
 
-/**
- * Rebuild the ChildTaskIndex (design_slug x task slug) partition from an
- * admin SOT scan of the task schema.
- *
- * Dry-run: census only (indexed set vs SOT `design_slug task_slug` pairs) —
- * no writes. Live: `writeChildTaskIndex` (upsert every live child-task row +
- * drop stale rows + stamp the global completeness marker), then re-census so
- * the operator sees `complete=true`.
- */
-async function rebuildChildTaskIndex(
-  opts: ReindexOptions,
-  node: ReturnType<typeof newWriteClientFromCfg>["node"],
-  print: (line: string) => void,
-): Promise<ReindexResult> {
-  const result: ReindexResult = {
-    scanned: 0,
-    reindexed: 0,
-    skippedTombstone: 0,
-    byType: {},
-  };
-
-  let schemaHash: string;
-  try {
-    schemaHash = schemaHashFor("task", opts.cfg);
-  } catch {
-    print(
-      missingSchemaHashReadNote(["task"], "skipping child-task-index rebuild"),
-    );
-    return result;
-  }
-
-  // Admin full scan is the SOT for this repair — never seed via the product
-  // `listRecords`/`findChildTasksByDesign` paths, which is what we're fixing.
-  const allTasks = await listRecordsAdminScan(node, "task", schemaHash, {
-    includeTombstones: true,
-  });
-  const liveTasks = allTasks.filter((t) => {
-    if (isTombstoned(t)) {
-      result.skippedTombstone++;
-      return false;
-    }
-    return true;
-  });
-  const sotPairs = liveTasks
-    .filter((t) => (t.design_slug ?? "").length > 0)
-    .map((t) => `${t.design_slug} ${t.slug}`);
-  result.scanned = allTasks.length;
-  result.byType.task = {
-    reindexed: liveTasks.length,
-    skippedTombstone: result.skippedTombstone,
-  };
-
-  const before = await censusChildTaskIndex(node, opts.cfg, sotPairs);
-  if (before) {
-    result.childTaskIndexCensus = before;
-    const gap =
-      before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
-        ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
-        : " complete";
-    print(
-      `child-task-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
-    );
-    if (
-      before.missingFromIndex.length > 0 &&
-      before.missingFromIndex.length <= 12
-    ) {
-      print(`  missing: ${before.missingFromIndex.join(", ")}`);
-    } else if (before.missingFromIndex.length > 12) {
-      print(
-        `  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`,
-      );
-    }
-  } else {
-    print("child-task-index: entry schema unavailable — cannot census");
-  }
-
-  if (opts.dryRun) {
-    result.reindexed = sotPairs.length;
-    print(
-      `dry-run: would rebuild child-task-index for ${sotPairs.length} linked task(s)` +
-        (before
-          ? before.complete
-            ? " — already complete"
-            : " — incomplete vs SOT"
-          : ""),
-    );
-    return result;
-  }
-
-  await writeChildTaskIndex(node, opts.cfg, liveTasks);
-  result.reindexed = sotPairs.length;
-  const after = await censusChildTaskIndex(node, opts.cfg, sotPairs);
-  if (after) {
-    result.childTaskIndexCensus = after;
-    print(
-      `child-task-index: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
-    );
-  }
-  print(`rebuilt child-task-index for ${sotPairs.length} linked task(s)`);
-  return result;
-}
 
 async function rebuildPapercutStatusIndex(
   _opts: ReindexOptions,

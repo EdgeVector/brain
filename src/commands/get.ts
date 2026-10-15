@@ -145,7 +145,11 @@ export async function getRecord(opts: GetOptions): Promise<void> {
         .map((card) => `${card.type} ${card.slug}`)
         .join(", "),
   });
-  const linkedFrom = linkRefs(linkView.shown);
+  const linkedFrom: BacklinkRef[] = [];
+  for (const card of linkView.shown) {
+    if (!isRecordType(card.type)) continue;
+    linkedFrom.push({ type: card.type, slug: card.slug });
+  }
 
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
@@ -302,11 +306,8 @@ export type RecordJson = {
   children_unavailable?: string;
   tasks_lines?: string[];
   linked_from_lines?: string[];
-  // Records that link to this slug, either through an explicit stored edge
-  // (`task.design_slug` or a generic `link:<type>:<slug>` tag) or through a
-  // `[[slug]]` body reference. `get` fills this from the backlink index only
-  // (type + slug); `status` and `via` are present only on the hydrated
-  // `fbrain backlinks` view, which point-reads every source.
+  // Cards on the one link# page for this slug. get maps that page
+  // (type and slug). backlinks reads one page, then one status and tags batch.
   linked_from?: Array<{
     type: RecordType;
     slug: string;
@@ -561,15 +562,6 @@ function memberLines(
   }
   if (partial) lines.push("index partial");
   return { lines, shown, provenEmpty };
-}
-
-function linkRefs(cards: readonly StoredCard[]): BacklinkRef[] {
-  const refs: BacklinkRef[] = [];
-  for (const card of cards) {
-    if (!isRecordType(card.type)) continue;
-    refs.push({ type: card.type, slug: card.slug });
-  }
-  return refs;
 }
 
 // `type slug` per entry; the `(via)` suffix only when a hydrated view supplied
