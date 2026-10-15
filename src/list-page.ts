@@ -419,6 +419,8 @@ export async function planRecordListSide(opts: {
   type: RecordType;
   previous: FbrainRecord | null;
   next: FbrainRecord | null;
+  /** Sealed product body. Keyword tokens must not see the pre-seal tail. */
+  sealedBody?: string;
   nextEdges: readonly GraphEdge[];
   /** Append keeps edge-set ids that are not in the body, so those graph rows stay. */
   preserveStoredEdges?: boolean;
@@ -872,7 +874,7 @@ export async function planRecordListSide(opts: {
   }
 
   const posted = opts.next
-    ? postingTokens(opts.next.title, opts.next.body)
+    ? postingTokens(opts.next.title, opts.sealedBody ?? "")
     : { tokens: [] as PostingToken[], dropped: false };
   if (opts.next && posted.dropped) notePartial(details, "token cap");
   const nextTokenNames = posted.tokens.map((item) => item.token);
@@ -1239,59 +1241,6 @@ function headWrite(head: HeadCommit, raw: string | null, page: PageBody, symptom
   };
 }
 
-function rebuildKeyword(
-  head: HeadCommit,
-  raw: string | null,
-): { write: HeadCommit | null; note: string | null } {
-  if (head.replay.kind !== "keyword") return { write: null, note: null };
-  const replay = head.replay;
-  const cards = parseKeywordCards(raw);
-  let nextCards: KeywordCard[];
-  if (replay.weight === null) {
-    nextCards = cards.filter((card) => !(card.type === replay.type && card.slug === replay.slug));
-    if (nextCards.length === cards.length) return { write: null, note: null };
-  } else {
-    const rest = cards.filter((card) => !(card.type === replay.type && card.slug === replay.slug));
-    const already = rest.length !== cards.length;
-    if (already || rest.length < RANKER_PAGE) {
-      nextCards = sortKeyword([...rest, { type: replay.type, slug: replay.slug, weight: replay.weight }]);
-    } else {
-      const sorted = sortKeyword(rest);
-      const lowest = sorted[sorted.length - 1];
-      if (!lowest || replay.weight <= lowest.weight) return { write: null, note: "keyword page" };
-      sorted[sorted.length - 1] = { type: replay.type, slug: replay.slug, weight: replay.weight };
-      nextCards = sortKeyword(sorted);
-    }
-  }
-  if (nextCards.length === 0) {
-    if (raw === null) return { write: null, note: null };
-    return {
-      write: {
-        ...head,
-        mutationType: "delete",
-        fields: {},
-        expected: { type: "value", field: "blp_page", value: raw },
-      },
-      note: null,
-    };
-  }
-  const json = JSON.stringify({ cards: nextCards });
-  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return { write: null, note: "keyword page" };
-  if (raw === json) return { write: null, note: null };
-  const existed = raw !== null;
-  return {
-    write: {
-      ...head,
-      mutationType: existed ? "update" : "create",
-      fields: { blp_h: head.keyHash, blp_r: head.keyRange, blp_page: json },
-      expected: existed
-        ? { type: "value", field: "blp_page", value: raw }
-        : { type: "absent", field: "blp_page" },
-    },
-    note: null,
-  };
-}
-
 export async function commitKeywordHeads(
   node: NodeClient,
   heads: readonly HeadCommit[],
@@ -1304,12 +1253,73 @@ export async function commitKeywordHeads(
     let applied = first === "applied";
     if (first === "conflict") {
       const raw = await readOnePage(node, head.schemaHash, head.keyHash, head.keyRange);
-      const rebuilt = rebuildKeyword(head, raw);
-      if (rebuilt.note) notePartial(details, rebuilt.note);
-      if (!rebuilt.write) {
-        applied = rebuilt.note === null;
+      let write: HeadCommit | null = null;
+      let note: string | null = null;
+      if (head.replay.kind === "keyword") {
+        const replay = head.replay;
+        const cards = parseKeywordCards(raw);
+        let nextCards: KeywordCard[] | null = null;
+        if (replay.weight === null) {
+          const filtered = cards.filter(
+            (card) => !(card.type === replay.type && card.slug === replay.slug),
+          );
+          if (filtered.length !== cards.length) nextCards = filtered;
+        } else {
+          const rest = cards.filter((card) => !(card.type === replay.type && card.slug === replay.slug));
+          const already = rest.length !== cards.length;
+          if (already || rest.length < RANKER_PAGE) {
+            nextCards = sortKeyword([
+              ...rest,
+              { type: replay.type, slug: replay.slug, weight: replay.weight },
+            ]);
+          } else {
+            const sorted = sortKeyword(rest);
+            const lowest = sorted[sorted.length - 1];
+            if (!lowest || replay.weight <= lowest.weight) {
+              note = "keyword page";
+            } else {
+              sorted[sorted.length - 1] = {
+                type: replay.type,
+                slug: replay.slug,
+                weight: replay.weight,
+              };
+              nextCards = sortKeyword(sorted);
+            }
+          }
+        }
+        if (note === null && nextCards !== null) {
+          if (nextCards.length === 0) {
+            if (raw !== null) {
+              write = {
+                ...head,
+                mutationType: "delete",
+                fields: {},
+                expected: { type: "value", field: "blp_page", value: raw },
+              };
+            }
+          } else {
+            const json = JSON.stringify({ cards: nextCards });
+            if (Buffer.byteLength(json) > PAGE_BYTE_CAP) {
+              note = "keyword page";
+            } else if (raw !== json) {
+              const existed = raw !== null;
+              write = {
+                ...head,
+                mutationType: existed ? "update" : "create",
+                fields: { blp_h: head.keyHash, blp_r: head.keyRange, blp_page: json },
+                expected: existed
+                  ? { type: "value", field: "blp_page", value: raw }
+                  : { type: "absent", field: "blp_page" },
+              };
+            }
+          }
+        }
+      }
+      if (note) notePartial(details, note);
+      if (!write) {
+        applied = note === null;
       } else {
-        const second = await casHead(node, rebuilt.write);
+        const second = await casHead(node, write);
         applied = second === "applied";
         if (!applied) notePartial(details, "keyword conflict");
       }
@@ -1369,7 +1379,6 @@ function rebuildHead(
   head: HeadCommit,
   raw: string | null,
 ): { write: HeadCommit | null; note: string | null } {
-  if (head.replay.kind === "keyword") return rebuildKeyword(head, raw);
   const fresh = parsePage(raw);
   if (head.replay.kind === "place") {
     const card = head.replay.card;

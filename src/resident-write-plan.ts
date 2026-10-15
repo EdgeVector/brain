@@ -290,6 +290,7 @@ export async function buildResidentWritePlan(opts: {
     type: opts.type,
     previous: opts.previous,
     next: opts.next,
+    sealedBody: stored.body,
     nextEdges: desiredForPages,
     preserveStoredEdges: opts.preserveStoredEdges === true,
   });

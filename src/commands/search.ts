@@ -27,7 +27,7 @@ import { isRecordType, type RecordType } from "../schemas.ts";
 
 export const SEARCH_DEFAULT_LIMIT = 5;
 
-const FALLBACK_CONFIDENCE = "fallback" as const;
+const SAMPLE_CONFIDENCE = "sample" as const;
 
 export type SearchOptions = {
   cfg: Config;
@@ -52,7 +52,7 @@ export type SearchHitJson = {
   type: RecordType;
   title: string;
   snippet: string;
-  confidence: "strong" | "weak" | "fallback";
+  confidence: "strong" | "weak" | "sample";
 };
 
 const STRONG_SCORE = 0.5;
@@ -201,7 +201,7 @@ export async function retrieveRankedPage(opts: {
       picked.push({ type: hit.type, slug: hit.slug, score: null });
     }
     const bodies = await readBodyHeads(opts.node, opts.cfg, picked, opts.verbose);
-    return { hits: keepLive(picked, bodies, FALLBACK_CONFIDENCE), sample: true };
+    return { hits: keepLive(picked, bodies, SAMPLE_CONFIDENCE), sample: true };
   }
 
   const matched: Array<{ type: RecordType; slug: string; score: number }> = [];
