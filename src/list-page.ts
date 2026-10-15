@@ -1078,17 +1078,14 @@ function rebuildHead(
     const card = head.replay.card;
     const cards = dropCard(fresh.cards, card.type ?? "", card.slug);
     cards.unshift(card);
+    // A full fresh head stays as the node has it. Do not pop, and do not
+    // point older at the overflow page: that page already holds the moved card.
     if (cards.length > head.replay.bound) {
-      const overflowId = head.replay.overflowId;
-      if (overflowId.length > 0 && fresh.older !== overflowId) {
-        const write = headWrite(
-          head,
-          raw,
-          { cards: fresh.cards, older: overflowId },
-          false,
-        );
-        return { write, note: write ? "head full" : "page cap" };
-      }
+      return { write: null, note: "head full" };
+    }
+    // The batch already wrote an overflow page. A clean insert would leave
+    // the moved card on this head and on that page.
+    if (head.replay.overflowId.length > 0) {
       return { write: null, note: "head full" };
     }
     const write = headWrite(head, raw, { cards, older: fresh.older }, false);
