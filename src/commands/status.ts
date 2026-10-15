@@ -20,6 +20,7 @@ import {
   recordFromPrimaryFields,
 } from "../resident-write-plan.ts";
 import {
+  formatIndexNotes,
   writeDurabilityOf,
   writeDurabilityTokens,
   writeDurabilityWarning,
@@ -153,7 +154,8 @@ export async function statusCmd(opts: StatusOptions): Promise<void> {
   const durability = writeDurabilityOf(receipt);
   print(
     `${only.type} ${slug}: ${fromStatus} → ${opts.newStatus} ` +
-      writeDurabilityTokens(receipt).join(" "),
+      writeDurabilityTokens(receipt).join(" ") +
+      formatIndexNotes(receipt.indexNotes),
   );
   const durabilityWarning = writeDurabilityWarning(durability, {
     verb: "brain status",

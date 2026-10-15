@@ -756,6 +756,8 @@ export type BatchMutationResult = {
   backgroundTasksDrained: boolean;
   convergencePending: boolean;
   durability?: "queued" | "durable";
+  /** Raw batch JSON. This node may omit keys_visited and report requested_keys on reads. */
+  receipt?: Record<string, unknown>;
 };
 
 export type BatchMutationOptions = {
@@ -1757,6 +1759,7 @@ export function newNodeClient(opts: {
         backgroundTasksDrained: body.background_tasks_drained === true,
         convergencePending: body.convergence_pending !== false,
         ...(durability ? { durability } : {}),
+        receipt: body,
       };
     },
     async queryAll({ schemaHash, fields, allowFullScan, filter }) {

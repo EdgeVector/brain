@@ -115,6 +115,14 @@ export type PutResult = {
     deleted: number;
     no_op: number;
   };
+  indexNotes?: string[];
+  batches?: {
+    logical1: number;
+    sent1: number;
+    heads: number;
+    sent2: number;
+  };
+  receipts?: Array<Record<string, unknown> | null>;
 };
 
 export async function putCmd(opts: PutOptions): Promise<PutResult> {
@@ -301,6 +309,9 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     durability,
     search,
     exactProjections: plan.counts,
+    indexNotes: receipt.indexNotes,
+    batches: receipt.batches,
+    receipts: receipt.receipts,
   };
 }
 

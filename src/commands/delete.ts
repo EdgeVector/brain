@@ -35,7 +35,10 @@ import {
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 import { matchesListFilters, resolveListEntries } from "./list.ts";
+import { removeResidentListSide } from "../resident-write-plan.ts";
 import { unindexRecordTags } from "../tag-index.ts";
+import { formatIndexNotes } from "../write-confirmation.ts";
+import type { FbrainRecord } from "../record.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -298,8 +301,9 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       verbose: opts.verbose,
     });
   }
+  const indexNote = await dropListSide(node, opts.cfg, type, record);
 
-  print(`deleted ${type} ${slug}`);
+  print(`deleted ${type} ${slug}${indexNote}`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
   // printed line uses (one source of truth — see the read commands).
   opts.onResult?.({ action: "deleted", type, slug, soft: true });
@@ -396,6 +400,16 @@ function describeSelector(opts: DeleteByFilterOptions): string {
   if (opts.status) parts.push(`--status ${opts.status}`);
   if (opts.tag) parts.push(`--tag ${opts.tag}`);
   return parts.join(" ");
+}
+
+async function dropListSide(
+  node: NodeClient,
+  cfg: Config,
+  type: RecordType,
+  record: FbrainRecord,
+): Promise<string> {
+  const removed = await removeResidentListSide({ node, cfg, type, record });
+  return formatIndexNotes(removed.indexNotes);
 }
 
 function isNotFound(err: unknown): boolean {
@@ -569,7 +583,13 @@ export async function deleteByFilter(
           verbose: opts.verbose,
         });
       }
-      print(`deleted ${m.type} ${slug}`);
+      const indexNote = await dropListSide(
+        node,
+        opts.cfg,
+        m.type,
+        resolved.record,
+      );
+      print(`deleted ${m.type} ${slug}${indexNote}`);
       deleted.push({ type: m.type, slug });
     } catch (err) {
       const error = formatBatchError(err);

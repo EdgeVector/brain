@@ -25,15 +25,25 @@ import {
   edgeRange,
   extractGraphEdges,
   graphEdgeHashes,
+  normalizeGraphEdgeType,
   type GraphEdge,
 } from "./graph-edge.ts";
 import { planLifecycleMembershipOps } from "./lifecycle-index.ts";
+import {
+  adjustListCounts,
+  commitHeadPages,
+  COUNT_UNCONFIRMED,
+  EDGE_CAP,
+  INDEX_PARTIAL,
+  planRecordListSide,
+  WRITE_BATCH_MAX,
+  type HeadCommit,
+} from "./list-page.ts";
 import { normalizeSlug, TOMBSTONE_TAG, type FbrainRecord } from "./record.ts";
 import {
   entryFieldsFor,
   entryKeyFor,
   recordListEntryHash,
-  typeListEntryExists,
 } from "./record-list-index.ts";
 import {
   papercutStatusEntryExists,
@@ -55,7 +65,12 @@ export type ProjectionKind =
   | "backlink"
   | "graph"
   | "child-task"
-  | "papercut-status";
+  | "papercut-status"
+  | "list-page"
+  | "list-locator"
+  | "directory"
+  | "edge-set"
+  | "token-set";
 
 export type PlannedMutation = {
   mutationType: "create" | "update" | "delete";
@@ -73,12 +88,31 @@ export type ExactProjectionCounts = {
   no_op: number;
 };
 
+export type BatchSizes = {
+  /** HTTP batch 1 plus the head compare-and-set writes. */
+  logical1: number;
+  sent1: number;
+  heads: number;
+  sent2: number;
+};
+
 export type ResidentWritePlan = {
   action: "created" | "updated";
   ops: PlannedMutation[];
   counts: ExactProjectionCounts;
   /** Long text fields that went to a body file for this write. */
   spilled: SpilledField[];
+  heads: HeadCommit[];
+  indexNotes: string[];
+  /** 1 on create. An update does not change the count. */
+  countDelta: 0 | 1;
+  cfg: Config;
+};
+
+export type ResidentCommitResult = BatchMutationResult & {
+  batches: BatchSizes;
+  indexNotes: string[];
+  receipts: Array<Record<string, unknown> | null>;
 };
 
 function userTags(tags: readonly string[]): string[] {
@@ -126,23 +160,17 @@ function countOps(ops: PlannedMutation[]): ExactProjectionCounts {
   return counts;
 }
 
-async function planListOp(opts: {
-  node: NodeClient;
+function planListOp(opts: {
   cfg: Pick<Config, "schemaHashes">;
   type: RecordType;
   record: FbrainRecord;
-}): Promise<PlannedMutation | null> {
+  upsertType: "create" | "update";
+}): PlannedMutation | null {
   const schemaHash = recordListEntryHash(opts.cfg);
   if (!schemaHash) return null;
   const { hash, range } = entryKeyFor(opts.type, opts.record.slug);
-  const exists = await typeListEntryExists(
-    opts.node,
-    schemaHash,
-    opts.type,
-    opts.record.slug,
-  );
   return {
-    mutationType: exists ? "update" : "create",
+    mutationType: opts.upsertType,
     schemaHash,
     keyHash: hash,
     keyRange: range,
@@ -154,33 +182,19 @@ async function planListOp(opts: {
 function planGraphOps(opts: {
   cfg: Pick<Config, "schemaHashes">;
   sourceSlug: string;
-  previous: FbrainRecord | null;
-  next: FbrainRecord;
-  frontmatterEdges: readonly string[];
-  now: string;
-}): PlannedMutation[] {
+  previousEdges: readonly GraphEdge[];
+  desiredEdges: readonly GraphEdge[];
+}): { ops: PlannedMutation[]; partial: boolean } {
   const hashes = graphEdgeHashes(opts.cfg);
-  if (!hashes) return [];
+  if (!hashes) return { ops: [], partial: false };
   const src = normalizeSlug(opts.sourceSlug).toLowerCase();
-  const previousEdges = opts.previous
-    ? extractGraphEdges({
-        sourceSlug: opts.sourceSlug,
-        body: opts.previous.body,
-        now: opts.now,
-      })
-    : [];
-  const desired = extractGraphEdges({
-    sourceSlug: opts.sourceSlug,
-    body: opts.next.body,
-    frontmatterEdges: opts.frontmatterEdges,
-    now: opts.now,
-  });
-  const current = new Map(previousEdges.map((edge) => [edgeRange(edge), edge]));
-  const wanted = new Map(desired.map((edge) => [edgeRange(edge), edge]));
-  const ops: PlannedMutation[] = [];
+  const current = new Map(opts.previousEdges.map((edge) => [edgeRange(edge), edge]));
+  const wanted = new Map(opts.desiredEdges.map((edge) => [edgeRange(edge), edge]));
+  const deletes: PlannedMutation[] = [];
+  const writes: PlannedMutation[] = [];
   for (const [range] of current) {
     if (wanted.has(range)) continue;
-    ops.push({
+    deletes.push({
       mutationType: "delete",
       schemaHash: hashes.out,
       keyHash: src,
@@ -196,7 +210,7 @@ function planGraphOps(opts: {
       ...edge,
       created_at: old?.created_at || edge.created_at,
     });
-    ops.push({
+    writes.push({
       mutationType: old ? "update" : "create",
       schemaHash: hashes.out,
       keyHash: edge.src,
@@ -205,7 +219,8 @@ function planGraphOps(opts: {
       projection: "graph",
     });
   }
-  return ops;
+  const partial = deletes.length > EDGE_CAP;
+  return { ops: [...deletes.slice(0, EDGE_CAP), ...writes], partial };
 }
 
 function graphEdgeUnchanged(old: GraphEdge, next: GraphEdge): boolean {
@@ -344,6 +359,8 @@ export async function buildResidentWritePlan(opts: {
   frontmatterEdges?: readonly string[];
   now?: string;
   verbose?: (msg: string) => void;
+  /** Keep edge-set ids that are absent from the body. Append uses this. */
+  preserveStoredEdges?: boolean;
 }): Promise<ResidentWritePlan> {
   const action: "created" | "updated" = opts.previous ? "updated" : "created";
   const upsertType: "create" | "update" = action === "created" ? "create" : "update";
@@ -390,13 +407,74 @@ export async function buildResidentWritePlan(opts: {
     });
   }
 
-  const listOp = await planListOp({
-    node: opts.node,
+  const listOp = planListOp({
     cfg: opts.cfg,
     type: opts.type,
     record: stored,
+    upsertType,
   });
   if (listOp) ops.push(listOp);
+
+  const indexNotes: string[] = [];
+  const bodyDesired = extractGraphEdges({
+    sourceSlug: opts.next.slug,
+    body: opts.next.body,
+    frontmatterEdges: opts.frontmatterEdges ?? [],
+    now,
+  });
+  const desiredForPages =
+    opts.preserveStoredEdges || bodyDesired.length <= EDGE_CAP
+      ? bodyDesired
+      : bodyDesired.slice(0, EDGE_CAP);
+  if (!opts.preserveStoredEdges && bodyDesired.length > EDGE_CAP) {
+    noteIndexPartial(indexNotes, "edge cap");
+  }
+  const side = await planRecordListSide({
+    node: opts.node,
+    cfg: opts.cfg,
+    type: opts.type,
+    previous: opts.previous,
+    next: opts.next,
+    nextEdges: desiredForPages,
+    preserveStoredEdges: opts.preserveStoredEdges === true,
+  });
+  for (const line of side.details) {
+    if (!indexNotes.includes(line)) indexNotes.push(line);
+  }
+  for (const op of side.ops) ops.push(op);
+
+  let graphDesired = desiredForPages;
+  let graphPrevious = opts.previous
+    ? extractGraphEdges({
+        sourceSlug: opts.next.slug,
+        body: opts.previous.body,
+        now,
+      })
+    : [];
+  if (opts.preserveStoredEdges) {
+    const kept = new Set(side.writtenEdgeIds);
+    const prevIds = new Set(graphPrevious.map((edge) => edgeRange(edge)));
+    graphDesired = [
+      ...bodyDesired.filter((edge) => kept.has(edgeRange(edge))),
+      ...edgesFromIds(opts.next.slug, side.preservedEdgeIds, now),
+    ];
+    graphPrevious = [
+      ...graphPrevious,
+      ...edgesFromIds(
+        opts.next.slug,
+        side.preservedEdgeIds.filter((id) => !prevIds.has(id)),
+        now,
+      ),
+    ];
+  }
+  const graph = planGraphOps({
+    cfg: opts.cfg,
+    sourceSlug: opts.next.slug,
+    previousEdges: graphPrevious,
+    desiredEdges: graphDesired,
+  });
+  if (graph.partial) noteIndexPartial(indexNotes, "edge cap");
+  ops.push(...graph.ops);
 
   for (const op of planLifecycleMembershipOps({
     cfg: opts.cfg,
@@ -408,17 +486,6 @@ export async function buildResidentWritePlan(opts: {
   })) {
     ops.push({ ...op, projection: "lifecycle" });
   }
-
-  ops.push(
-    ...planGraphOps({
-      cfg: opts.cfg,
-      sourceSlug: opts.next.slug,
-      previous: opts.previous,
-      next: opts.next,
-      frontmatterEdges: opts.frontmatterEdges ?? [],
-      now,
-    }),
-  );
   ops.push(
     ...planChildTaskOps({
       cfg: opts.cfg,
@@ -470,7 +537,16 @@ export async function buildResidentWritePlan(opts: {
   const unique = dedupeOps(ops);
   const counts = countOps(unique);
   counts.no_op = noOp;
-  return { action, ops: unique, counts, spilled: sealed.spilled };
+  return {
+    action,
+    ops: unique,
+    counts,
+    spilled: sealed.spilled,
+    heads: side.heads,
+    indexNotes,
+    countDelta: action === "created" ? 1 : 0,
+    cfg: opts.cfg,
+  };
 }
 
 export async function commitResidentWritePlan(opts: {
@@ -479,7 +555,7 @@ export async function commitResidentWritePlan(opts: {
   type: RecordType;
   slug: string;
   durable?: boolean;
-}): Promise<BatchMutationResult> {
+}): Promise<ResidentCommitResult> {
   // Name the field here. A later 413 from the node does not.
   assertOpsFitAtomBudget(opts.type, opts.slug, opts.plan.ops);
   if (!opts.node.mutateBatch) {
@@ -489,44 +565,220 @@ export async function commitResidentWritePlan(opts: {
       hint: "Upgrade brain so NodeClient.mutateBatch is present.",
     });
   }
+  const notes = [...opts.plan.indexNotes];
+  const split = splitResidentBatches(opts.plan.ops, opts.plan.heads.length);
+  if (split.trimmed) noteIndexPartial(notes, "batch cap");
+  const durable = opts.durable ? { durability: "durable" as const } : undefined;
+  const receipts: Array<Record<string, unknown> | null> = [];
+  let primary = emptyBatchResult();
   try {
-    const receipt = await opts.node.mutateBatch(
-      opts.plan.ops,
-      opts.durable ? { durability: "durable" } : undefined,
-    );
-    if (opts.durable && receipt.durability !== "durable") {
-      throw new FbrainError({
-        code: "durability_not_confirmed",
-        message:
-          `the node did not confirm durable storage for ${opts.type} ${opts.slug} ` +
-          `(receipt: ${receipt.durability ?? "missing"})`,
-        hint:
-          "The resident batch can already exist. Read the record before a manual retry.",
-        agentHint:
-          "Do not retry automatically. Read the record and inspect node health before a manual retry.",
-      });
+    if (split.batch1.length > 0) {
+      primary = await opts.node.mutateBatch(split.batch1, durable);
+      receipts.push(primary.receipt ?? null);
+      if (opts.durable && primary.durability !== "durable") {
+        throw durableMiss(opts.type, opts.slug, primary.durability);
+      }
+    } else {
+      receipts.push(null);
     }
-    return receipt;
   } catch (err) {
-    // Preserve typed transport and consent errors. Callers use their codes for
-    // recovery, including the MCP cold-capability self-warm path.
-    if (err instanceof FbrainError) throw err;
-    const detail = err instanceof Error ? err.message : String(err);
-    const projections = [
-      ...new Set(opts.plan.ops.map((op) => op.projection)),
-    ].join(", ");
-    throw new FbrainError({
-      code: "resident_commit_failed",
-      message:
-        `resident commit failed for ${opts.type} ${opts.slug} ` +
-        `(projections: ${projections || "none"}): ${detail}`,
-      hint:
-        "Retry the exact command. The resident batch commits the primary record and its exact projections as one operation.",
-      agentHint:
-        "Retry the exact command. Do not repair one projection separately from the primary record.",
-      cause: err,
+    throw wrapCommitError(err, opts.type, opts.slug, opts.plan.ops);
+  }
+  if (split.batch2.length > 0) {
+    try {
+      const second = await opts.node.mutateBatch(split.batch2, durable);
+      receipts.push(second.receipt ?? null);
+      if (opts.durable && second.durability !== "durable") {
+        throw durableMiss(opts.type, opts.slug, second.durability);
+      }
+      if (split.batch1.length === 0) primary = second;
+    } catch (err) {
+      if (
+        opts.durable ||
+        (err instanceof FbrainError && err.code === "durability_not_confirmed")
+      ) {
+        throw wrapCommitError(err, opts.type, opts.slug, opts.plan.ops);
+      }
+      noteIndexPartial(notes, "batch2 failed");
+    }
+  }
+  const headNotes = await commitHeadPages(opts.node, opts.plan.heads);
+  for (const line of headNotes) {
+    if (!notes.includes(line)) notes.push(line);
+  }
+  if (opts.plan.countDelta !== 0) {
+    const count = await adjustListCounts(
+      opts.node,
+      opts.plan.cfg,
+      opts.type,
+      opts.plan.countDelta,
+    );
+    if (count === "unconfirmed" && !notes.includes(COUNT_UNCONFIRMED)) {
+      notes.push(COUNT_UNCONFIRMED);
+    }
+  }
+  return {
+    ...primary,
+    batches: {
+      logical1: split.batch1.length + opts.plan.heads.length,
+      sent1: split.batch1.length,
+      heads: opts.plan.heads.length,
+      sent2: split.batch2.length,
+    },
+    indexNotes: notes,
+    receipts,
+  };
+}
+
+export async function removeResidentListSide(opts: {
+  node: NodeClient;
+  cfg: Config;
+  type: RecordType;
+  record: FbrainRecord;
+}): Promise<ResidentCommitResult> {
+  const side = await planRecordListSide({
+    node: opts.node,
+    cfg: opts.cfg,
+    type: opts.type,
+    previous: opts.record,
+    next: null,
+    nextEdges: [],
+  });
+  const notes = [...side.details];
+  let ops = side.ops;
+  if (ops.length > WRITE_BATCH_MAX) {
+    ops = ops.slice(0, WRITE_BATCH_MAX);
+    noteIndexPartial(notes, "batch cap");
+  }
+  const receipts: Array<Record<string, unknown> | null> = [];
+  let primary = emptyBatchResult();
+  if (ops.length > 0) {
+    if (!opts.node.mutateBatch) {
+      noteIndexPartial(notes, "batch unavailable");
+    } else {
+      try {
+        primary = await opts.node.mutateBatch(ops);
+        receipts.push(primary.receipt ?? null);
+      } catch {
+        noteIndexPartial(notes, "batch1 failed");
+      }
+    }
+  }
+  const headNotes = await commitHeadPages(opts.node, side.heads);
+  for (const line of headNotes) {
+    if (!notes.includes(line)) notes.push(line);
+  }
+  const count = await adjustListCounts(opts.node, opts.cfg, opts.type, -1);
+  if (count === "unconfirmed" && !notes.includes(COUNT_UNCONFIRMED)) {
+    notes.push(COUNT_UNCONFIRMED);
+  }
+  return {
+    ...primary,
+    batches: {
+      logical1: ops.length + side.heads.length,
+      sent1: ops.length,
+      heads: side.heads.length,
+      sent2: 0,
+    },
+    indexNotes: notes,
+    receipts,
+  };
+}
+
+function emptyBatchResult(): BatchMutationResult {
+  return {
+    mutationIds: [],
+    count: 0,
+    backgroundTasksDrained: true,
+    convergencePending: false,
+  };
+}
+
+function durableMiss(
+  type: RecordType,
+  slug: string,
+  reported: string | undefined,
+): FbrainError {
+  return new FbrainError({
+    code: "durability_not_confirmed",
+    message:
+      `the node did not confirm durable storage for ${type} ${slug} ` +
+      `(receipt: ${reported ?? "missing"})`,
+    hint: "The resident batch can already exist. Read the record before a manual retry.",
+    agentHint:
+      "Do not retry automatically. Read the record and inspect node health before a manual retry.",
+  });
+}
+
+function wrapCommitError(
+  err: unknown,
+  type: RecordType,
+  slug: string,
+  ops: readonly PlannedMutation[],
+): FbrainError {
+  if (err instanceof FbrainError) return err;
+  const detail = err instanceof Error ? err.message : String(err);
+  const projections = [...new Set(ops.map((op) => op.projection))].join(", ");
+  return new FbrainError({
+    code: "resident_commit_failed",
+    message:
+      `resident commit failed for ${type} ${slug} ` +
+      `(projections: ${projections || "none"}): ${detail}`,
+    hint:
+      "Retry the exact command. The resident batch commits the primary record and its exact projections as one operation.",
+    agentHint:
+      "Retry the exact command. Do not repair one projection separately from the primary record.",
+    cause: err,
+  });
+}
+
+function isBatch2(op: PlannedMutation): boolean {
+  return op.projection === "lifecycle" || op.projection === "graph";
+}
+
+function splitResidentBatches(
+  ops: readonly PlannedMutation[],
+  headCount: number,
+): { batch1: PlannedMutation[]; batch2: PlannedMutation[]; trimmed: boolean } {
+  let batch1 = ops.filter((op) => !isBatch2(op));
+  let batch2 = ops.filter((op) => isBatch2(op));
+  let trimmed = false;
+  const budget = Math.max(0, WRITE_BATCH_MAX - headCount);
+  if (batch1.length > budget) {
+    batch1 = batch1.slice(0, budget);
+    trimmed = true;
+  }
+  if (batch2.length > WRITE_BATCH_MAX) {
+    batch2 = batch2.slice(0, WRITE_BATCH_MAX);
+    trimmed = true;
+  }
+  return { batch1, batch2, trimmed };
+}
+
+function noteIndexPartial(details: string[], why: string): void {
+  if (!details.includes(INDEX_PARTIAL)) details.push(INDEX_PARTIAL);
+  if (why.length > 0 && why !== INDEX_PARTIAL && !details.includes(why)) {
+    details.push(why);
+  }
+}
+
+function edgesFromIds(sourceSlug: string, ids: readonly string[], now: string): GraphEdge[] {
+  const src = normalizeSlug(sourceSlug).toLowerCase();
+  const edges: GraphEdge[] = [];
+  for (const id of ids) {
+    const cut = id.indexOf("#");
+    if (cut <= 0) continue;
+    const dst = id.slice(cut + 1);
+    if (dst.length === 0) continue;
+    edges.push({
+      src,
+      dst,
+      type: normalizeGraphEdgeType(id.slice(0, cut)),
+      provenance: "frontmatter",
+      created_at: now,
     });
   }
+  return edges;
 }
 
 function dedupeOps(ops: PlannedMutation[]): PlannedMutation[] {

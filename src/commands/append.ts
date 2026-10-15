@@ -21,10 +21,14 @@ import {
   schemaHashFor,
   updateFieldsFrom,
   withReadRetry,
-  writeRecordFields,
-  type FbrainRecord,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
+import {
+  buildResidentWritePlan,
+  commitResidentWritePlan,
+  recordFromPrimaryFields,
+} from "../resident-write-plan.ts";
+import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type AppendOptions = {
   cfg: Config;
@@ -114,47 +118,28 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
     body: newBody,
     updated_at: now,
   });
-  // The read above returns the full text. Spill it again when the new body is long.
-  const sealed = await writeRecordFields({
+  // The read above returns the full text. The plan spills it again when the
+  // new body is long, and updates pages, the token set, and the edge set.
+  const desired = recordFromPrimaryFields(fields);
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: only.type,
-    slug,
     schemaHash: hash,
-    fields,
+    previous: only.record,
+    next: desired,
+    primaryFields: fields,
+    now,
+    preserveStoredEdges: true,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
-  const storedRecord = sealed.fields as FbrainRecord;
-
-  // The status-keyed papercut index carries a snapshot of the whole record, so
-  // a body/updated_at write that does not patch it leaves that snapshot stale.
-  // Measured on the primary 2026-09-03: 1028 of 2208 open rows (46.6%) carried
-  // a stale `updated_at` for exactly this reason, and `brain append` is the
-  // prescribed way to grow a papercut record.
-  if (only.type === "papercut") {
-    const { patchPapercutStatusIndex } = await import(
-      "../papercut-status-index.ts"
-    );
-    await patchPapercutStatusIndex(
-      node,
-      opts.cfg,
-      slug,
-      { ...storedRecord, updated_at: now },
-      only.record.status,
-    );
-  }
-
-  const { maintainGraphEdges } = await import("../graph-edge.ts");
-  await maintainGraphEdges({
+  const receipt = await commitResidentWritePlan({
     node,
-    cfg: opts.cfg,
-    sourceSlug: slug,
-    body: newBody,
-    // Append changes only the stored body; the prior put's frontmatter is not
-    // in that body, so preserve its frontmatter-origin edges.
-    preserveExistingFrontmatter: true,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    plan,
+    type: only.type,
+    slug,
   });
+  const indexNote = formatIndexNotes(receipt.indexNotes);
 
   // Read back before reporting success. The printed lengths used to be the
   // COMPUTED ones, so a write the node cut or dropped still printed a full
@@ -181,7 +166,7 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
 
   const bytesAppended = newBody.length - oldBody.length;
   print(
-    `appended ${bytesAppended} chars to ${only.type} ${slug} (${oldBody.length} → ${newBody.length})`,
+    `appended ${bytesAppended} chars to ${only.type} ${slug} (${oldBody.length} → ${newBody.length})${indexNote}`,
   );
   opts.onResult?.({
     action: "appended",
