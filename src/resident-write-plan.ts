@@ -88,14 +88,6 @@ export type ExactProjectionCounts = {
   no_op: number;
 };
 
-export type BatchSizes = {
-  /** HTTP batch 1 plus the head compare-and-set writes. */
-  logical1: number;
-  sent1: number;
-  heads: number;
-  sent2: number;
-};
-
 export type ResidentWritePlan = {
   action: "created" | "updated";
   ops: PlannedMutation[];
@@ -110,9 +102,7 @@ export type ResidentWritePlan = {
 };
 
 export type ResidentCommitResult = BatchMutationResult & {
-  batches: BatchSizes;
   indexNotes: string[];
-  receipts: Array<Record<string, unknown> | null>;
 };
 
 function userTags(tags: readonly string[]): string[] {
@@ -569,17 +559,13 @@ export async function commitResidentWritePlan(opts: {
   const split = splitResidentBatches(opts.plan.ops, opts.plan.heads.length);
   if (split.trimmed) noteIndexPartial(notes, "batch cap");
   const durable = opts.durable ? { durability: "durable" as const } : undefined;
-  const receipts: Array<Record<string, unknown> | null> = [];
   let primary = emptyBatchResult();
   try {
     if (split.batch1.length > 0) {
       primary = await opts.node.mutateBatch(split.batch1, durable);
-      receipts.push(primary.receipt ?? null);
       if (opts.durable && primary.durability !== "durable") {
         throw durableMiss(opts.type, opts.slug, primary.durability);
       }
-    } else {
-      receipts.push(null);
     }
   } catch (err) {
     throw wrapCommitError(err, opts.type, opts.slug, opts.plan.ops);
@@ -587,7 +573,6 @@ export async function commitResidentWritePlan(opts: {
   if (split.batch2.length > 0) {
     try {
       const second = await opts.node.mutateBatch(split.batch2, durable);
-      receipts.push(second.receipt ?? null);
       if (opts.durable && second.durability !== "durable") {
         throw durableMiss(opts.type, opts.slug, second.durability);
       }
@@ -619,14 +604,7 @@ export async function commitResidentWritePlan(opts: {
   }
   return {
     ...primary,
-    batches: {
-      logical1: split.batch1.length + opts.plan.heads.length,
-      sent1: split.batch1.length,
-      heads: opts.plan.heads.length,
-      sent2: split.batch2.length,
-    },
     indexNotes: notes,
-    receipts,
   };
 }
 
@@ -650,7 +628,6 @@ export async function removeResidentListSide(opts: {
     ops = ops.slice(0, WRITE_BATCH_MAX);
     noteIndexPartial(notes, "batch cap");
   }
-  const receipts: Array<Record<string, unknown> | null> = [];
   let primary = emptyBatchResult();
   if (ops.length > 0) {
     if (!opts.node.mutateBatch) {
@@ -658,7 +635,6 @@ export async function removeResidentListSide(opts: {
     } else {
       try {
         primary = await opts.node.mutateBatch(ops);
-        receipts.push(primary.receipt ?? null);
       } catch {
         noteIndexPartial(notes, "batch1 failed");
       }
@@ -674,14 +650,7 @@ export async function removeResidentListSide(opts: {
   }
   return {
     ...primary,
-    batches: {
-      logical1: ops.length + side.heads.length,
-      sent1: ops.length,
-      heads: side.heads.length,
-      sent2: 0,
-    },
     indexNotes: notes,
-    receipts,
   };
 }
 

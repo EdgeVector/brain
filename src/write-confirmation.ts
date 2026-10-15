@@ -13,12 +13,6 @@ type PutConfirmation = {
   durability?: "queued" | "durable";
   search?: "queued" | "ready";
   indexNotes?: readonly string[];
-  batches?: {
-    logical1: number;
-    sent1: number;
-    heads: number;
-    sent2: number;
-  };
 };
 
 /** The two phrases a caller can rely on. Other notes stay in the JSON array. */
@@ -49,12 +43,6 @@ export function formatPutConfirmation(result: PutConfirmation): string {
   if (result.revision) extras.push(`revision=${result.revision}`);
   if (result.durability) extras.push(`durability=${result.durability}`);
   if (result.search) extras.push(`search=${result.search}`);
-  if (result.batches) {
-    extras.push(`batch1=${result.batches.logical1}`);
-    extras.push(`sent1=${result.batches.sent1}`);
-    extras.push(`heads=${result.batches.heads}`);
-    extras.push(`sent2=${result.batches.sent2}`);
-  }
   return (
     `${result.action} ${result.type} ${result.slug}` +
     (extras.length > 0 ? ` ${extras.join(" ")}` : "") +

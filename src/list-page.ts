@@ -1,7 +1,3 @@
-// Thin list pages, locators, the type directory, edge set, and token set.
-// Keyword page atoms wait. A head insert does not walk the older chain.
-// The head atom is a compare-and-set write so a conflict retries that one key.
-
 import type { NodeClient, QueryRow } from "./client.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
@@ -65,7 +61,7 @@ export type SideOp = {
 };
 
 export type HeadReplay =
-  | { kind: "place"; card: ListCard; bound: number }
+  | { kind: "place"; card: ListCard; bound: number; overflowId: string }
   | { kind: "remove"; type: string; slug: string }
   | { kind: "symptom"; slug: string }
   | { kind: "clear"; slug: string };
@@ -243,7 +239,7 @@ function renderCard(
   return out;
 }
 
-function renderPage(page: PageBody, symptom: boolean): string {
+function renderPage(page: PageBody, symptom: boolean): string | null {
   const modes: Array<"full" | "tight" | "none"> = symptom
     ? ["none"]
     : ["full", "tight", "none"];
@@ -256,7 +252,8 @@ function renderPage(page: PageBody, symptom: boolean): string {
     last = json;
     if (Buffer.byteLength(json) <= PAGE_BYTE_CAP) return json;
   }
-  return last;
+  if (Buffer.byteLength(last) <= PAGE_BYTE_CAP) return last;
+  return null;
 }
 
 function subjectCard(type: RecordType, record: FbrainRecord): ListCard {
@@ -520,8 +517,6 @@ export async function planRecordListSide(opts: {
       directoryRaw = rowField(dirRow, "btd_types");
     }
 
-    // The page id lives in the locator atom, so name those pages only after
-    // that read. Still one exact key each. Do not follow `older`.
     const storedDests = edgeExisted ? uniqueDests(previousEdgeIds) : previousDests;
     const oldSlots = opts.previous
       ? slotsFor(opts.type, opts.previous, storedDests, details)
@@ -618,11 +613,19 @@ export async function planRecordListSide(opts: {
     const finalNew = opts.next
       ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details)
       : [];
-    // A preserved link can name a head the first wave did not read.
-    // Read that head by exact key. Do not follow `older`.
-    const unreadHeads = [...oldSlots, ...finalNew].filter(
-      (slot) => !queriedHeads.has(slot.hash),
-    );
+    const entering = new Set(finalNew.map((slot) => slot.hash));
+    const subjectRange = `${opts.type}#${slug}`;
+    const unreadByHash = new Map<string, Slot>();
+    for (const slot of [...finalNew, ...oldSlots]) {
+      if (queriedHeads.has(slot.hash) || unreadByHash.has(slot.hash)) continue;
+      if (entering.has(slot.hash)) {
+        unreadByHash.set(slot.hash, slot);
+        continue;
+      }
+      const loc = locs.get(locKey(slot.hash, subjectRange));
+      if (loc?.pageId === HEAD_RANGE) unreadByHash.set(slot.hash, slot);
+    }
+    const unreadHeads = [...unreadByHash.values()];
     if (unreadHeads.length > 0) {
       const extraHeads = await readExact(
         opts.node,
@@ -663,10 +666,14 @@ export async function planRecordListSide(opts: {
     for (const page of pages.values()) {
       if (!page.touched) continue;
       const json = renderPage(page, page.symptom);
+      if (json === null) {
+        notePartial(details, "page cap");
+        continue;
+      }
       if (page.existed && page.original === json) continue;
       const fields = { blp_h: page.hash, blp_r: page.range, blp_page: json };
       if (page.range === HEAD_RANGE) {
-        const replay = replayFor(page, opts.type, slug, opts.next);
+        const replay = actionFor(page, opts.type, slug, opts.next);
         if (!replay) continue;
         heads.push({
           schemaHash: pageSchema,
@@ -845,23 +852,33 @@ export async function planRecordListSide(opts: {
   };
 }
 
-function replayFor(
+function actionFor(
   page: MemPage,
   type: RecordType,
   slug: string,
   next: FbrainRecord | null,
 ): HeadReplay | null {
   if (page.symptom) {
-    if (!next) return { kind: "clear", slug };
-    return { kind: "symptom", slug };
+    const held = page.cards[0]?.slug ?? "";
+    if (held === slug) return { kind: "symptom", slug };
+    if (page.cards.length === 0) return { kind: "clear", slug };
+    return null;
   }
   const bound = page.hash.startsWith("link#")
     ? BACKLINK_PAGE
     : page.hash.startsWith("child#")
       ? CHILD_PAGE
       : LIST_PAGE;
-  if (!next) return { kind: "remove", type, slug };
-  return { kind: "place", card: subjectCard(type, next), bound };
+  const present = page.cards.some(
+    (card) => card.slug === slug && (card.type === undefined || card.type === type),
+  );
+  if (present) {
+    if (!next) return null;
+    const originalOlder = page.original ? parsePage(page.original).older : "";
+    const overflowId = page.older !== originalOlder ? page.older : "";
+    return { kind: "place", card: subjectCard(type, next), bound, overflowId };
+  }
+  return { kind: "remove", type, slug };
 }
 
 function applyMembership(opts: {
@@ -1038,44 +1055,71 @@ async function readOnePage(
   return rowField(row, "blp_page");
 }
 
-function rebuildHead(head: HeadCommit, raw: string | null): { commit: HeadCommit; trimmed: boolean } | null {
-  const page = parsePage(raw);
+function headWrite(head: HeadCommit, raw: string | null, page: PageBody, symptom: boolean): HeadCommit | null {
+  const json = renderPage(page, symptom);
+  if (json === null) return null;
   const existed = raw !== null;
-  let trimmed = false;
+  return {
+    ...head,
+    mutationType: existed ? "update" : "create",
+    fields: { ...head.fields, blp_page: json },
+    expected: existed
+      ? { type: "value", field: "blp_page", value: raw ?? "" }
+      : { type: "absent", field: "blp_page" },
+  };
+}
+
+function rebuildHead(
+  head: HeadCommit,
+  raw: string | null,
+): { write: HeadCommit | null; note: string | null } {
+  const fresh = parsePage(raw);
   if (head.replay.kind === "place") {
     const card = head.replay.card;
-    page.cards = dropCard(page.cards, card.type ?? "", card.slug);
-    page.cards.unshift(card);
-    while (page.cards.length > head.replay.bound) {
-      page.cards.pop();
-      trimmed = true;
+    const cards = dropCard(fresh.cards, card.type ?? "", card.slug);
+    cards.unshift(card);
+    if (cards.length > head.replay.bound) {
+      const overflowId = head.replay.overflowId;
+      if (overflowId.length > 0 && fresh.older !== overflowId) {
+        const write = headWrite(
+          head,
+          raw,
+          { cards: fresh.cards, older: overflowId },
+          false,
+        );
+        return { write, note: write ? "head full" : "page cap" };
+      }
+      return { write: null, note: "head full" };
     }
-  } else if (head.replay.kind === "remove") {
-    page.cards = dropCard(page.cards, head.replay.type, head.replay.slug);
-  } else if (head.replay.kind === "symptom") {
-    const held = page.cards[0]?.slug ?? "";
-    if (held.length > 0 && held !== head.replay.slug) return null;
-    page.cards = [{ slug: head.replay.slug }];
-    page.older = "";
-  } else {
-    const held = page.cards[0]?.slug ?? "";
-    if (held.length > 0 && held !== head.replay.slug) return { commit: head, trimmed: false };
-    page.cards = [];
-    page.older = "";
+    const write = headWrite(head, raw, { cards, older: fresh.older }, false);
+    return { write, note: write ? null : "page cap" };
   }
-  const symptom = head.replay.kind === "symptom" || head.replay.kind === "clear";
-  const json = renderPage(page, symptom);
-  return {
-    trimmed,
-    commit: {
-      ...head,
-      mutationType: existed ? "update" : "create",
-      fields: { ...head.fields, blp_page: json },
-      expected: existed
-        ? { type: "value", field: "blp_page", value: raw ?? "" }
-        : { type: "absent", field: "blp_page" },
-    },
-  };
+  if (head.replay.kind === "remove") {
+    const write = headWrite(
+      head,
+      raw,
+      {
+        cards: dropCard(fresh.cards, head.replay.type, head.replay.slug),
+        older: fresh.older,
+      },
+      false,
+    );
+    return { write, note: write ? null : "page cap" };
+  }
+  if (head.replay.kind === "symptom") {
+    const held = fresh.cards[0]?.slug ?? "";
+    if (held.length > 0 && held !== head.replay.slug) {
+      return { write: null, note: "symptom occupied" };
+    }
+    const write = headWrite(head, raw, { cards: [{ slug: head.replay.slug }], older: "" }, true);
+    return { write, note: write ? null : "page cap" };
+  }
+  const held = fresh.cards[0]?.slug ?? "";
+  if (held.length > 0 && held !== head.replay.slug) {
+    return { write: null, note: "symptom occupied" };
+  }
+  const write = headWrite(head, raw, { cards: [], older: "" }, true);
+  return { write, note: write ? null : "page cap" };
 }
 
 async function casHead(node: NodeClient, head: HeadCommit): Promise<"applied" | "conflict" | "error"> {
@@ -1127,12 +1171,9 @@ export async function commitHeadPages(
     }
     const raw = await readOnePage(node, head.schemaHash, head.keyHash, head.keyRange);
     const rebuilt = rebuildHead(head, raw);
-    if (!rebuilt) {
-      notePartial(details, "symptom occupied");
-      continue;
-    }
-    if (rebuilt.trimmed) notePartial(details, "head retry dropped a card");
-    const second = await casHead(node, rebuilt.commit);
+    if (rebuilt.note) notePartial(details, rebuilt.note);
+    if (!rebuilt.write) continue;
+    const second = await casHead(node, rebuilt.write);
     if (second !== "applied") notePartial(details, "head conflict");
   }
   return details;

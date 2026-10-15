@@ -2714,8 +2714,6 @@ export function putJsonPayload(result: PutResult): Record<string, unknown> {
     durability: result.durability ?? "queued",
     search: result.search ?? "queued",
     index_notes: result.indexNotes ?? [],
-    batches: result.batches ?? null,
-    receipts: result.receipts ?? [],
   };
 }
 
