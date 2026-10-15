@@ -13,12 +13,13 @@ import {
 } from "../format.ts";
 import {
   missingSchemaHashReadNote,
+  normalizeSlug,
   resolveTypeFilter,
 } from "../record.ts";
-import { isRecordType, type RecordType } from "../schemas.ts";
+import { BRAIN_EDGE_SET_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
 import { tokenize } from "../retrieval/bm25.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
-import { readBrainEdgeSet } from "../graph-edge.ts";
+import { normalizeGraphEdgeType } from "../graph-edge.ts";
 import {
   SEARCH_DEFAULT_LIMIT,
   retrieveRankedPage,
@@ -31,10 +32,14 @@ import {
   resolveAnthropicKey,
   type ExpansionResult,
 } from "../retrieval/expand.ts";
-import type { AdjacencyAttribution, AdjacencyOptions } from "../retrieval/adjacency.ts";
+import {
+  resolveAdjacencyWeight,
+  type AdjacencyAttribution,
+  type AdjacencyBoost,
+  type AdjacencyOptions,
+} from "../retrieval/adjacency.ts";
 
 export const DEFAULT_LIMIT = SEARCH_DEFAULT_LIMIT;
-export const RANKER_LIMIT = 25;
 
 export type AskOptions = {
   cfg: Config;
@@ -106,38 +111,16 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     },
   );
 
-  let expansions: string[] = [];
-  let expansion: ExpansionResult | null = null;
-  let expansionStatus: ExpansionStatus;
-  if (!opts.expand) {
-    expansionStatus = { kind: "disabled" };
-  } else {
-    const key = resolveAnthropicKey();
-    if (!key) {
-      printErr("note: ANTHROPIC_API_KEY not set; running ask on the original query only.");
-      expansionStatus = { kind: "no-key" };
-    } else {
-      try {
-        const exp: Parameters<typeof expandQuery>[0] = {
-          query: opts.query,
-          apiKey: key,
-        };
-        if (opts.fetchImpl) exp.fetchImpl = opts.fetchImpl;
-        expansion = await expandQuery(exp);
-        expansions = expansion.expansions;
-        expansionStatus = { kind: "ok" };
-        opts.verbose?.(
-          `expansion: ${expansion.expansions.length} phrasings, ${expansion.latencyMs.toFixed(0)}ms, ` +
-            `tokens in=${expansion.tokens.input} out=${expansion.tokens.output}, ` +
-            formatCost(estimateCostUsd(expansion.tokens, expansion.model), expansion.model),
-        );
-      } catch (err) {
-        const msg = err instanceof ExpansionError ? err.message : String(err);
-        printErr(`note: query expansion failed (${msg}); continuing without expansion.`);
-        expansionStatus = { kind: "failed", reason: msg };
-      }
-    }
-  }
+  // A LastSeek hit does not use the phrases, so the model stays idle.
+  const expansionRun: {
+    expansions: string[];
+    expansion: ExpansionResult | null;
+    status: ExpansionStatus;
+  } = {
+    expansions: [],
+    expansion: null,
+    status: opts.expand ? { kind: "ok" } : { kind: "disabled" },
+  };
 
   const node = newSearchClientFromCfg(opts.cfg, opts.verbose).node;
   const ranked = await retrieveRankedPage({
@@ -149,45 +132,143 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     activeTypes,
     caller: "brain/ask",
     verbose: opts.verbose,
+    keywordText: opts.expand
+      ? async () => {
+          const key = resolveAnthropicKey();
+          if (!key) {
+            printErr("note: ANTHROPIC_API_KEY not set; running ask on the original query only.");
+            expansionRun.status = { kind: "no-key" };
+            return [];
+          }
+          try {
+            const exp: Parameters<typeof expandQuery>[0] = {
+              query: opts.query,
+              apiKey: key,
+            };
+            if (opts.fetchImpl) exp.fetchImpl = opts.fetchImpl;
+            expansionRun.expansion = await expandQuery(exp);
+            expansionRun.expansions = expansionRun.expansion.expansions;
+            expansionRun.status = { kind: "ok" };
+            opts.verbose?.(
+              `expansion: ${expansionRun.expansion.expansions.length} phrasings, ${expansionRun.expansion.latencyMs.toFixed(0)}ms, ` +
+                `tokens in=${expansionRun.expansion.tokens.input} out=${expansionRun.expansion.tokens.output}, ` +
+                formatCost(
+                  estimateCostUsd(expansionRun.expansion.tokens, expansionRun.expansion.model),
+                  expansionRun.expansion.model,
+                ),
+            );
+            return expansionRun.expansions;
+          } catch (err) {
+            const msg = err instanceof ExpansionError ? err.message : String(err);
+            printErr(`note: query expansion failed (${msg}); continuing without expansion.`);
+            expansionRun.status = { kind: "failed", reason: msg };
+            return [];
+          }
+        }
+      : undefined,
   });
+  const expansions = expansionRun.expansions;
+  const expansion = expansionRun.expansion;
+  const expansionStatus = expansionRun.status;
   if (ranked.sample) printErr("sample");
   if (ranked.hits.length === 0 && tokenize(opts.query).length === 0) {
     printErr("note: query tokenized to zero terms (all stopwords or too short); try more specific words.");
   }
 
+  let pageHits = ranked.hits;
   let graphBoost: AdjacencyAttribution | null = null;
   if (opts.graphBoost) {
-    const seed = ranked.hits[0];
+    const seed = pageHits[0];
     if (!seed) {
       graphBoost = { seeds: [], boosts: [], reads: 0, skipped: "no-seeds" };
     } else {
-      const ids = await readBrainEdgeSet(node, opts.cfg, seed.type, seed.slug);
-      graphBoost =
-        ids === null
-          ? {
-              seeds: [{ slug: seed.slug, rank: 1 }],
-              boosts: [],
-              reads: 0,
-              skipped: "edges-unavailable",
+      const schemaHash = opts.cfg.schemaHashes[BRAIN_EDGE_SET_SCHEMA_KEY];
+      if (!schemaHash) {
+        graphBoost = {
+          seeds: [{ slug: seed.slug, rank: 1 }],
+          boosts: [],
+          reads: 0,
+          skipped: "edges-unavailable",
+        };
+        opts.verbose?.("graph boost: BrainEdgeSet schema absent");
+      } else {
+        const hash = `es#${seed.type}#${normalizeSlug(seed.slug).toLowerCase()}`;
+        const res = await node.queryAll({
+          schemaHash,
+          fields: ["bes_ids"],
+          filter: { HashRangeKey: { hash, range: "__head__" } },
+        });
+        const raw = (res.results[0]?.fields as Record<string, unknown> | undefined)?.bes_ids;
+        let ids: string[] = [];
+        if (typeof raw === "string" && raw.length > 0) {
+          try {
+            const value = JSON.parse(raw) as unknown;
+            if (Array.isArray(value)) {
+              ids = value.filter((item): item is string => typeof item === "string");
             }
-          : {
-              seeds: [{ slug: seed.slug, rank: 1 }],
-              boosts: [],
-              reads: 1,
-              skipped: null,
-            };
-      opts.verbose?.(
-        ids === null
-          ? "graph boost: BrainEdgeSet schema absent"
-          : `HashRangeKey BrainEdgeSet es#${seed.type}#${seed.slug} ids=${ids.length}`,
-      );
+          } catch {
+            ids = [];
+          }
+        }
+        const weight = resolveAdjacencyWeight(opts.graphBoostOptions?.weight);
+        const neighborSlugs = new Set<string>();
+        const edgeBySlug = new Map<string, ReturnType<typeof normalizeGraphEdgeType>>();
+        for (const id of ids) {
+          const cut = id.indexOf("#");
+          if (cut <= 0) continue;
+          const dst = normalizeSlug(id.slice(cut + 1)).toLowerCase();
+          if (dst.length === 0) continue;
+          neighborSlugs.add(dst);
+          if (!edgeBySlug.has(dst)) edgeBySlug.set(dst, normalizeGraphEdgeType(id.slice(0, cut)));
+        }
+        opts.verbose?.(`HashRangeKey BrainEdgeSet ${hash} ids=${ids.length}`);
+        if (weight > 0 && neighborSlugs.size > 0) {
+          const near: typeof pageHits = [];
+          const far: typeof pageHits = [];
+          for (const hit of pageHits.slice(1)) {
+            if (neighborSlugs.has(normalizeSlug(hit.slug).toLowerCase())) near.push(hit);
+            else far.push(hit);
+          }
+          pageHits = [pageHits[0]!, ...near, ...far];
+        }
+        const boosts: AdjacencyBoost[] = [];
+        if (weight > 0) {
+          for (const hit of pageHits.slice(1)) {
+            const edgeType = edgeBySlug.get(normalizeSlug(hit.slug).toLowerCase());
+            if (!edgeType) continue;
+            boosts.push({
+              id: `${hit.type}::${hit.slug}`,
+              slug: hit.slug,
+              total: weight,
+              rawTotal: weight,
+              clampedBy: null,
+              reasons: [
+                {
+                  seedSlug: seed.slug,
+                  seedRank: 1,
+                  edgeType,
+                  direction: "out",
+                  contribution: weight,
+                },
+              ],
+            });
+          }
+        }
+        graphBoost = {
+          seeds: [{ slug: seed.slug, rank: 1 }],
+          boosts,
+          reads: 1,
+          skipped: null,
+        };
+      }
     }
   }
 
-  const resolved: AskHit[] = ranked.hits.map((hit, index) => ({
+  const boostBySlug = new Map(graphBoost?.boosts.map((item) => [item.slug, item.total]) ?? []);
+  const resolved: AskHit[] = pageHits.map((hit, index) => ({
     type: hit.type,
     slug: hit.slug,
-    fusedScore: hit.score ?? 0,
+    fusedScore: (hit.score ?? 0) + (boostBySlug.get(hit.slug) ?? 0),
     bm25Rank: null,
     vectorRank: hit.score === null ? null : index + 1,
     vectorScore: hit.score,
@@ -233,9 +314,9 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
     }
   }
 
-  const weakMatch = resolved.some((_, index) => ranked.hits[index]?.confidence === "weak");
+  const weakMatch = pageHits.some((hit) => hit.confidence === "weak");
   const weakMatchNote = `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms.`;
-  const payload: SearchHitJson[] = ranked.hits.map((hit) => ({
+  const payload: SearchHitJson[] = pageHits.map((hit) => ({
     slug: hit.slug,
     score: hit.score == null ? null : Math.round(hit.score * 1e6) / 1e6,
     type: hit.type,

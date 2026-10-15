@@ -26,11 +26,13 @@ import {
 import {
   adjustListCounts,
   commitHeadPages,
+  commitKeywordHeads,
   COUNT_UNCONFIRMED,
   EDGE_CAP,
   INDEX_PARTIAL,
   planRecordListSide,
   WRITE_BATCH_MAX,
+  type DeferredTokenSet,
   type HeadCommit,
 } from "./list-page.ts";
 import { normalizeSlug, type FbrainRecord } from "./record.ts";
@@ -74,6 +76,8 @@ export type ResidentWritePlan = {
   /** Long text fields that went to a body file for this write. */
   spilled: SpilledField[];
   heads: HeadCommit[];
+  keywordHeads: HeadCommit[];
+  tokenSet: DeferredTokenSet | null;
   indexNotes: string[];
   /** 1 on create. An update does not change the count. */
   countDelta: 0 | 1;
@@ -375,6 +379,8 @@ export async function buildResidentWritePlan(opts: {
     counts,
     spilled: sealed.spilled,
     heads: side.heads,
+    keywordHeads: side.keywordHeads,
+    tokenSet: side.tokenSet,
     indexNotes,
     countDelta: action === "created" ? 1 : 0,
     cfg: opts.cfg,
@@ -434,6 +440,15 @@ export async function commitResidentWritePlan(opts: {
       noteIndexPartial(notes, "batch2 failed");
     }
   }
+  // Keyword heads ack before the token set changes, so a lost head keeps its old token.
+  const keywordNotes = await commitKeywordHeads(
+    opts.node,
+    opts.plan.keywordHeads,
+    opts.plan.tokenSet,
+  );
+  for (const line of keywordNotes) {
+    if (!notes.includes(line)) notes.push(line);
+  }
   const headNotes = await commitHeadPages(opts.node, opts.plan.heads);
   for (const line of headNotes) {
     if (!notes.includes(line)) notes.push(line);
@@ -474,34 +489,23 @@ export async function removeResidentListSide(opts: {
   });
   const notes = [...side.details];
   let rest = side.ops.filter((op) => op.projection !== "keyword");
-  let keyword = side.ops.filter((op) => op.projection === "keyword");
   if (rest.length > WRITE_BATCH_MAX) {
     rest = rest.slice(0, WRITE_BATCH_MAX);
     noteIndexPartial(notes, "batch cap");
   }
-  if (keyword.length > WRITE_BATCH_MAX) {
-    keyword = keyword.slice(0, WRITE_BATCH_MAX);
-    noteIndexPartial(notes, "batch cap");
-  }
   let primary = emptyBatchResult();
-  if (!opts.node.mutateBatch && (rest.length > 0 || keyword.length > 0)) {
+  if (!opts.node.mutateBatch && rest.length > 0) {
     noteIndexPartial(notes, "batch unavailable");
-  } else if (opts.node.mutateBatch) {
-    if (rest.length > 0) {
-      try {
-        primary = await opts.node.mutateBatch(rest);
-      } catch {
-        noteIndexPartial(notes, "batch1 failed");
-      }
+  } else if (opts.node.mutateBatch && rest.length > 0) {
+    try {
+      primary = await opts.node.mutateBatch(rest);
+    } catch {
+      noteIndexPartial(notes, "batch1 failed");
     }
-    if (keyword.length > 0) {
-      try {
-        const second = await opts.node.mutateBatch(keyword);
-        if (rest.length === 0) primary = second;
-      } catch {
-        noteIndexPartial(notes, "batch2 failed");
-      }
-    }
+  }
+  const keywordNotes = await commitKeywordHeads(opts.node, side.keywordHeads, side.tokenSet);
+  for (const line of keywordNotes) {
+    if (!notes.includes(line)) notes.push(line);
   }
   const headNotes = await commitHeadPages(opts.node, side.heads);
   for (const line of headNotes) {

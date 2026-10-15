@@ -94,18 +94,15 @@ function pageLimit(limit: number | undefined): number {
   return Math.min(SEARCH_DEFAULT_LIMIT, Math.max(1, requested));
 }
 
-function snippetSource(raw: string): string {
-  const marker = parseSpillMarker(raw);
-  return marker ? marker.head : raw;
-}
+type BodyHead = { title: string; body: string };
 
 async function readBodyHeads(
   node: NodeClient,
   cfg: Config,
   hits: ReadonlyArray<{ type: RecordType; slug: string }>,
   verbose?: Verbose,
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, BodyHead>> {
+  const out = new Map<string, BodyHead>();
   if (!node.queryByKeys || hits.length === 0) return out;
   const byType = new Map<RecordType, string[]>();
   for (const hit of hits) {
@@ -117,17 +114,22 @@ async function readBodyHeads(
     [...byType].map(async ([type, slugs]) => {
       const schemaHash = cfg.schemaHashes[type];
       if (!schemaHash) return;
-      verbose?.(`HashRangeKeys body keys=${slugs.length} field=body`);
+      verbose?.(`HashRangeKeys body keys=${slugs.length} field=body,title`);
       const rows = await node.queryByKeys!({
         schemaHash,
-        fields: ["body"],
+        fields: ["body", "title"],
         keys: slugs.map((slug) => ({ hash: slug })),
       });
       for (const row of rows) {
         const slug = row.key?.hash ?? "";
-        const body = (row.fields as Record<string, unknown> | undefined)?.body;
-        if (slug.length === 0 || typeof body !== "string") continue;
-        out.set(`${type}::${slug}`, snippetSource(body));
+        const fields = row.fields as Record<string, unknown> | undefined;
+        const rawBody = fields?.body;
+        if (slug.length === 0 || typeof rawBody !== "string") continue;
+        const marker = parseSpillMarker(rawBody);
+        out.set(`${type}::${slug}`, {
+          title: typeof fields?.title === "string" ? fields.title : "",
+          body: marker ? marker.head : rawBody,
+        });
       }
     }),
   );
@@ -136,20 +138,20 @@ async function readBodyHeads(
 
 function keepLive(
   picked: ReadonlyArray<{ type: RecordType; slug: string; score: number | null }>,
-  bodies: Map<string, string>,
+  bodies: Map<string, BodyHead>,
   confidence: SearchHitJson["confidence"],
 ): RetrievedHit[] {
   const hits: RetrievedHit[] = [];
   for (const hit of picked) {
-    const body = bodies.get(`${hit.type}::${hit.slug}`);
-    if (body === undefined) continue;
+    const row = bodies.get(`${hit.type}::${hit.slug}`);
+    if (row === undefined) continue;
     hits.push({
       type: hit.type,
       slug: hit.slug,
       score: hit.score,
       confidence,
-      title: "",
-      body,
+      title: row.title,
+      body: row.body,
     });
   }
   return hits;
@@ -166,6 +168,8 @@ export async function retrieveRankedPage(opts: {
   minScore?: number;
   caller?: string;
   verbose?: Verbose;
+  /** Called only on a LastSeek miss that uses keyword heads. */
+  keywordText?: () => Promise<readonly string[]>;
 }): Promise<{ hits: RetrievedHit[]; sample: boolean }> {
   const page = pageLimit(opts.limit);
   const active = new Set(opts.activeTypes);
@@ -181,10 +185,12 @@ export async function retrieveRankedPage(opts: {
   });
   if (seek === null) {
     if (opts.minScore !== undefined) return { hits: [], sample: false };
+    const extraText = opts.keywordText ? await opts.keywordText() : [];
     const ranked = await rankKeywordQuery({
       node: opts.node,
       cfg: opts.cfg,
       query: opts.query,
+      extraText,
       verbose: opts.verbose,
     });
     const picked: Array<{ type: RecordType; slug: string; score: number | null }> = [];

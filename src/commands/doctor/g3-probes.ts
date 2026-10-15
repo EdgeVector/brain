@@ -77,7 +77,7 @@ export async function runEmbeddingProbe(
   // No plane answered. Ask the node, purely to tell two very different causes
   // apart in the message.
   try {
-    const hits = await node.search("fbrain", { localFallback: false });
+    const hits = await node.search("fbrain");
     verbose?.(`embedding-runtime: node answered (${hits.length} hits)`);
     return {
       name: "embedding-runtime",

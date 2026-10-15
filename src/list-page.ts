@@ -1,7 +1,7 @@
 import type { NodeClient, QueryRow } from "./client.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
-import { SPILL_HEAD_BYTES, parseSpillMarker } from "./body-spill.ts";
+import { parseSpillMarker } from "./body-spill.ts";
 import { TOMBSTONE_TAG, type FbrainRecord } from "./record.ts";
 import { tokenize } from "./retrieval/bm25.ts";
 import {
@@ -66,13 +66,14 @@ export type HeadReplay =
   | { kind: "place"; card: ListCard; bound: number; overflowId: string }
   | { kind: "remove"; type: string; slug: string }
   | { kind: "symptom"; slug: string }
-  | { kind: "clear"; slug: string };
+  | { kind: "clear"; slug: string }
+  | { kind: "keyword"; type: string; slug: string; weight: number | null };
 
 export type HeadCommit = {
   schemaHash: string;
   keyHash: string;
   keyRange: string;
-  mutationType: "create" | "update";
+  mutationType: "create" | "update" | "delete";
   fields: Record<string, unknown>;
   expected:
     | { type: "absent"; field: "blp_page" }
@@ -80,9 +81,20 @@ export type HeadCommit = {
   replay: HeadReplay;
 };
 
+/** Written after keyword heads ack, so a failed head does not drop its token name. */
+export type DeferredTokenSet = {
+  schemaHash: string;
+  keyHash: string;
+  existed: boolean;
+  stored: string | null;
+  nextNames: string[];
+};
+
 export type ListSidePlan = {
   ops: SideOp[];
   heads: HeadCommit[];
+  keywordHeads: HeadCommit[];
+  tokenSet: DeferredTokenSet | null;
   partial: boolean;
   details: string[];
   previousEdgeIds: string[];
@@ -147,8 +159,9 @@ export function postingTokens(
   title: string,
   body: string,
 ): { tokens: PostingToken[]; dropped: boolean } {
+  // The seal already stored the head. A second cut would index the spilled tail.
   const marker = parseSpillMarker(body);
-  const head = marker ? marker.head : utf8Head(body, SPILL_HEAD_BYTES);
+  const head = marker ? marker.head : body;
   const titleTokens = new Set(tokenize(title));
   const seen = new Set<string>();
   const tokens: PostingToken[] = [];
@@ -200,34 +213,6 @@ function parseKeywordCards(raw: string | null): KeywordCard[] {
   } catch {
     return [];
   }
-}
-
-function renderKeyword(cards: KeywordCard[]): string | null {
-  const json = JSON.stringify({
-    cards: cards.map((card) => ({
-      type: card.type,
-      slug: card.slug,
-      weight: card.weight,
-    })),
-  });
-  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return null;
-  return json;
-}
-
-function placeKeyword(
-  cards: KeywordCard[],
-  next: KeywordCard,
-): { cards: KeywordCard[]; dropped: boolean } {
-  const rest = cards.filter((card) => !(card.type === next.type && card.slug === next.slug));
-  const existed = rest.length !== cards.length;
-  if (existed || rest.length < RANKER_PAGE) {
-    return { cards: sortKeyword([...rest, next]), dropped: false };
-  }
-  const sorted = sortKeyword(rest);
-  const lowest = sorted[sorted.length - 1];
-  if (!lowest || next.weight <= lowest.weight) return { cards, dropped: true };
-  sorted[sorted.length - 1] = next;
-  return { cards: sortKeyword(sorted), dropped: false };
 }
 
 function uniqueDests(ids: readonly string[]): string[] {
@@ -735,6 +720,7 @@ export async function planRecordListSide(opts: {
 
   const ops: SideOp[] = [];
   const heads: HeadCommit[] = [];
+  const keywordHeads: HeadCommit[] = [];
   if (pageSchema.length > 0) {
     for (const page of pages.values()) {
       if (!page.touched) continue;
@@ -888,33 +874,16 @@ export async function planRecordListSide(opts: {
   const posted = opts.next
     ? postingTokens(opts.next.title, opts.next.body)
     : { tokens: [] as PostingToken[], dropped: false };
-  if (opts.next && tokenSchema.length > 0) {
-    if (posted.dropped) notePartial(details, "token cap");
-    const json = JSON.stringify(posted.tokens.map((item) => item.token));
-    if (!tokenExisted || storedTokenJson !== json) {
-      ops.push({
-        mutationType: tokenExisted ? "update" : "create",
-        schemaHash: tokenSchema,
-        keyHash: `ts#${opts.type}#${slug}`,
-        keyRange: HEAD_RANGE,
-        fields: {
-          bts_h: `ts#${opts.type}#${slug}`,
-          bts_r: HEAD_RANGE,
-          bts_tokens: json,
-        },
-        projection: "token-set",
-      });
-    }
-  } else if (!opts.next && tokenExisted && tokenSchema.length > 0) {
-    ops.push({
-      mutationType: "delete",
-      schemaHash: tokenSchema,
-      keyHash: `ts#${opts.type}#${slug}`,
-      keyRange: HEAD_RANGE,
-      fields: {},
-      projection: "token-set",
-    });
-  }
+  if (opts.next && posted.dropped) notePartial(details, "token cap");
+  const nextTokenNames = posted.tokens.map((item) => item.token);
+  const tokenKey = `ts#${opts.type}#${slug}`;
+  const tokenJson = JSON.stringify(nextTokenNames);
+  const tokenChanged =
+    tokenSchema.length > 0 &&
+    slug.length > 0 &&
+    (opts.next
+      ? !tokenExisted || storedTokenJson !== tokenJson
+      : tokenExisted);
 
   if (pageSchema.length > 0 && slug.length > 0) {
     const oldNames = parseStringList(storedTokenJson).slice(0, POSTING_CAP);
@@ -950,44 +919,101 @@ export async function planRecordListSide(opts: {
           nextCards = cards.filter((card) => !(card.type === opts.type && card.slug === slug));
           if (nextCards.length === cards.length) continue;
         } else {
-          const placed = placeKeyword(cards, { type: opts.type, slug, weight });
-          if (placed.dropped) notePartial(details, "keyword page");
-          if (placed.dropped) continue;
-          nextCards = placed.cards;
+          const rest = cards.filter((card) => !(card.type === opts.type && card.slug === slug));
+          const already = rest.length !== cards.length;
+          if (already || rest.length < RANKER_PAGE) {
+            nextCards = sortKeyword([...rest, { type: opts.type, slug, weight }]);
+          } else {
+            const sorted = sortKeyword(rest);
+            const lowest = sorted[sorted.length - 1];
+            if (!lowest || weight <= lowest.weight) {
+              notePartial(details, "keyword page");
+              continue;
+            }
+            sorted[sorted.length - 1] = { type: opts.type, slug, weight };
+            nextCards = sortKeyword(sorted);
+          }
         }
+        const replay = {
+          kind: "keyword" as const,
+          type: opts.type,
+          slug,
+          weight: weight ?? null,
+        };
         if (nextCards.length === 0) {
           if (!existed) continue;
-          ops.push({
-            mutationType: "delete",
+          keywordHeads.push({
             schemaHash: pageSchema,
             keyHash: hash,
             keyRange: HEAD_RANGE,
+            mutationType: "delete",
             fields: {},
-            projection: "keyword",
+            expected: { type: "value", field: "blp_page", value: prior ?? "" },
+            replay,
           });
           continue;
         }
-        const json = renderKeyword(nextCards);
-        if (json === null) {
+        const json = JSON.stringify({ cards: nextCards });
+        if (Buffer.byteLength(json) > PAGE_BYTE_CAP) {
           notePartial(details, "keyword page");
           continue;
         }
         if (existed && prior === json) continue;
-        ops.push({
-          mutationType: existed ? "update" : "create",
+        keywordHeads.push({
           schemaHash: pageSchema,
           keyHash: hash,
           keyRange: HEAD_RANGE,
+          mutationType: existed ? "update" : "create",
           fields: { blp_h: hash, blp_r: HEAD_RANGE, blp_page: json },
-          projection: "keyword",
+          expected: existed
+            ? { type: "value", field: "blp_page", value: prior ?? "" }
+            : { type: "absent", field: "blp_page" },
+          replay,
         });
       }
+    }
+  }
+
+  let tokenSet: DeferredTokenSet | null = null;
+  if (tokenChanged && tokenSchema.length > 0) {
+    if (keywordHeads.length > 0) {
+      tokenSet = {
+        schemaHash: tokenSchema,
+        keyHash: tokenKey,
+        existed: tokenExisted,
+        stored: storedTokenJson,
+        nextNames: nextTokenNames,
+      };
+    } else if (!opts.next) {
+      ops.push({
+        mutationType: "delete",
+        schemaHash: tokenSchema,
+        keyHash: tokenKey,
+        keyRange: HEAD_RANGE,
+        fields: {},
+        projection: "token-set",
+      });
+    } else {
+      ops.push({
+        mutationType: tokenExisted ? "update" : "create",
+        schemaHash: tokenSchema,
+        keyHash: tokenKey,
+        keyRange: HEAD_RANGE,
+        fields: {
+          bts_h: tokenKey,
+          bts_r: HEAD_RANGE,
+          bts_tokens: tokenJson,
+        },
+        projection: "token-set",
+      });
     }
   }
 
   return {
     ops,
     heads,
+    keywordHeads,
+    tokenSet,
     partial: details.includes(INDEX_PARTIAL),
     details,
     previousEdgeIds,
@@ -1213,10 +1239,137 @@ function headWrite(head: HeadCommit, raw: string | null, page: PageBody, symptom
   };
 }
 
+function rebuildKeyword(
+  head: HeadCommit,
+  raw: string | null,
+): { write: HeadCommit | null; note: string | null } {
+  if (head.replay.kind !== "keyword") return { write: null, note: null };
+  const replay = head.replay;
+  const cards = parseKeywordCards(raw);
+  let nextCards: KeywordCard[];
+  if (replay.weight === null) {
+    nextCards = cards.filter((card) => !(card.type === replay.type && card.slug === replay.slug));
+    if (nextCards.length === cards.length) return { write: null, note: null };
+  } else {
+    const rest = cards.filter((card) => !(card.type === replay.type && card.slug === replay.slug));
+    const already = rest.length !== cards.length;
+    if (already || rest.length < RANKER_PAGE) {
+      nextCards = sortKeyword([...rest, { type: replay.type, slug: replay.slug, weight: replay.weight }]);
+    } else {
+      const sorted = sortKeyword(rest);
+      const lowest = sorted[sorted.length - 1];
+      if (!lowest || replay.weight <= lowest.weight) return { write: null, note: "keyword page" };
+      sorted[sorted.length - 1] = { type: replay.type, slug: replay.slug, weight: replay.weight };
+      nextCards = sortKeyword(sorted);
+    }
+  }
+  if (nextCards.length === 0) {
+    if (raw === null) return { write: null, note: null };
+    return {
+      write: {
+        ...head,
+        mutationType: "delete",
+        fields: {},
+        expected: { type: "value", field: "blp_page", value: raw },
+      },
+      note: null,
+    };
+  }
+  const json = JSON.stringify({ cards: nextCards });
+  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return { write: null, note: "keyword page" };
+  if (raw === json) return { write: null, note: null };
+  const existed = raw !== null;
+  return {
+    write: {
+      ...head,
+      mutationType: existed ? "update" : "create",
+      fields: { blp_h: head.keyHash, blp_r: head.keyRange, blp_page: json },
+      expected: existed
+        ? { type: "value", field: "blp_page", value: raw }
+        : { type: "absent", field: "blp_page" },
+    },
+    note: null,
+  };
+}
+
+export async function commitKeywordHeads(
+  node: NodeClient,
+  heads: readonly HeadCommit[],
+  tokenSet: DeferredTokenSet | null,
+): Promise<string[]> {
+  const details: string[] = [];
+  const failedRemove = new Set<string>();
+  for (const head of heads) {
+    const first = await casHead(node, head);
+    let applied = first === "applied";
+    if (first === "conflict") {
+      const raw = await readOnePage(node, head.schemaHash, head.keyHash, head.keyRange);
+      const rebuilt = rebuildKeyword(head, raw);
+      if (rebuilt.note) notePartial(details, rebuilt.note);
+      if (!rebuilt.write) {
+        applied = rebuilt.note === null;
+      } else {
+        const second = await casHead(node, rebuilt.write);
+        applied = second === "applied";
+        if (!applied) notePartial(details, "keyword conflict");
+      }
+    } else if (first === "error") {
+      notePartial(details, "keyword conflict");
+    }
+    if (!applied && head.replay.kind === "keyword" && head.replay.weight === null) {
+      const token = head.keyHash.startsWith("kw#") ? head.keyHash.slice(3) : "";
+      if (token.length > 0) failedRemove.add(token);
+    }
+  }
+  if (tokenSet) {
+    // A failed remove stays in the set. Put it first so a later cap keeps it.
+    const names = [...failedRemove];
+    for (const token of tokenSet.nextNames) {
+      if (!names.includes(token)) names.push(token);
+    }
+    if (names.length > POSTING_CAP) notePartial(details, "token cap");
+    try {
+      if (names.length === 0) {
+        if (tokenSet.existed) {
+          await node.deleteRecord({
+            schemaHash: tokenSet.schemaHash,
+            keyHash: tokenSet.keyHash,
+            keyRange: HEAD_RANGE,
+          });
+        }
+      } else {
+        const json = JSON.stringify(names);
+        if (!tokenSet.existed || tokenSet.stored !== json) {
+          const fields = { bts_h: tokenSet.keyHash, bts_r: HEAD_RANGE, bts_tokens: json };
+          if (tokenSet.existed) {
+            await node.updateRecord({
+              schemaHash: tokenSet.schemaHash,
+              fields,
+              keyHash: tokenSet.keyHash,
+              keyRange: HEAD_RANGE,
+            });
+          } else {
+            await node.createRecord({
+              schemaHash: tokenSet.schemaHash,
+              fields,
+              keyHash: tokenSet.keyHash,
+              keyRange: HEAD_RANGE,
+            });
+          }
+        }
+      }
+    } catch {
+      notePartial(details, "token set");
+    }
+  }
+  return details;
+}
+
 function rebuildHead(
   head: HeadCommit,
   raw: string | null,
 ): { write: HeadCommit | null; note: string | null } {
+  if (head.replay.kind === "keyword") return rebuildKeyword(head, raw);
   const fresh = parsePage(raw);
   if (head.replay.kind === "place") {
     const card = head.replay.card;
@@ -1279,6 +1432,12 @@ async function casHead(node: NodeClient, head: HeadCommit): Promise<"applied" | 
       await node.createRecord({
         schemaHash: head.schemaHash,
         fields: head.fields,
+        keyHash: head.keyHash,
+        keyRange: head.keyRange,
+      });
+    } else if (head.mutationType === "delete") {
+      await node.deleteRecord({
+        schemaHash: head.schemaHash,
         keyHash: head.keyHash,
         keyRange: head.keyRange,
       });
@@ -1424,23 +1583,31 @@ export async function adjustListCounts(
   return unconfirmed ? "unconfirmed" : "ok";
 }
 
-export type KeywordRankHit = { type: string; slug: string; weight: number };
-
 export async function rankKeywordQuery(opts: {
   node: NodeClient;
   cfg: SchemaCfg;
   query: string;
+  /** Phrases after the query. Tokens past the cap of 8 are dropped. */
+  extraText?: readonly string[];
   verbose?: (line: string) => void;
-}): Promise<KeywordRankHit[]> {
+}): Promise<KeywordCard[]> {
   const pageSchema = schemaOf(opts.cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
   if (pageSchema.length === 0) return [];
   const tokens: string[] = [];
   const seen = new Set<string>();
-  for (const token of tokenize(opts.query)) {
-    if (seen.has(token)) continue;
-    seen.add(token);
-    if (tokens.length >= POSTING_CAP) break;
-    tokens.push(token);
+  const texts = [opts.query, ...(opts.extraText ?? [])];
+  let full = false;
+  for (const text of texts) {
+    for (const token of tokenize(text)) {
+      if (seen.has(token)) continue;
+      if (tokens.length >= POSTING_CAP) {
+        full = true;
+        break;
+      }
+      seen.add(token);
+      tokens.push(token);
+    }
+    if (full) break;
   }
   if (tokens.length === 0) return [];
   opts.verbose?.(`HashRangeKeys keyword keys=${tokens.length} field=blp_page`);
@@ -1450,7 +1617,7 @@ export async function rankKeywordQuery(opts: {
     ["blp_page"],
     tokens.map((token) => ({ hash: keywordHash(token), range: HEAD_RANGE })),
   );
-  const best = new Map<string, KeywordRankHit>();
+  const best = new Map<string, KeywordCard>();
   for (const row of rows) {
     for (const card of parseKeywordCards(rowField(row, "blp_page"))) {
       const id = `${card.type}#${card.slug}`;

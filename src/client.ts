@@ -352,11 +352,6 @@ export type SearchOptions = {
   // the app-namespaced hash) and harmless, and it protects search quality
   // during the migration window before every node carries namespaced data.
   schemas?: string[];
-  // Internal escape hatch for dependency probes / write-path semantic-index
-  // confirmation: those callers must verify the Search app route itself, not
-  // satisfy themselves from the local `/api/query` fallback used by
-  // user-facing reads on nodes that do not serve `/api/app/search`.
-  localFallback?: boolean;
 };
 
 export type RegisteredSchema = {
@@ -823,7 +818,7 @@ export type NodeClient = {
   // Optional so hand-built clients stay small; an older node ignores the
   // precondition and applies the write, so a caller that must know re-reads.
   mutateIfExpected?(opts: {
-    mutationType: "create" | "update";
+    mutationType: "create" | "update" | "delete";
     schemaHash: string;
     fields: Record<string, unknown>;
     keyHash: string;

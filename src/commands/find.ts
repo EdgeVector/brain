@@ -49,7 +49,7 @@ import { docId, parseDocId } from "./ask.ts";
 
 export const DEFAULT_LIMIT = SEARCH_DEFAULT_LIMIT;
 // Per-probe breadth fed into RRF. Wider here gives RRF more material; the
-// final --limit slices the fused top. Same constant as ask.ts's RANKER_LIMIT.
+// final --limit slices the fused top.
 export const RANKER_LIMIT = 25;
 
 export type FindOptions = {
