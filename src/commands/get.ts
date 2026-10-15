@@ -163,14 +163,18 @@ function truncateBody(body: string, limit: number): string {
   return body.length > limit ? body.slice(0, limit) : body;
 }
 
-function printShowsField(fields: readonly string[] | undefined, name: string): boolean {
+function printShowsField(
+  fields: readonly string[] | undefined,
+  name: string,
+  extraFields: readonly string[],
+): boolean {
   if (fields === undefined || fields.length === 0) return true;
   for (const path of fields) {
     const top = path.split(".")[0] ?? path;
     const head = top.split("[")[0] ?? top;
     if (head === name) return true;
-    if (head !== "extra_fields") continue;
-    if (path === "extra_fields") return name !== "body";
+    if (head !== "extra_fields" || !extraFields.includes(name)) continue;
+    if (path === "extra_fields") return true;
     const bracket = /^extra_fields\[([^\]]+)\]/.exec(path);
     if (bracket?.[1] === name) return true;
     const rest = path.startsWith("extra_fields.") ? path.slice("extra_fields.".length) : path;
@@ -191,7 +195,7 @@ async function textForPrint(
   const output: FbrainRecord = { ...found.record };
   const toHydrate: string[] = [];
   for (const field of spillFieldsFor(found.type)) {
-    if (!printShowsField(opts.fields, field)) continue;
+    if (!printShowsField(opts.fields, field, RECORDS[found.type].extraStringFields ?? [])) continue;
     const value = found.record[field];
     if (typeof value !== "string") continue;
     const marker = parseSpillMarker(value);
@@ -208,11 +212,9 @@ async function textForPrint(
   }
   if (toHydrate.length === 0) return output;
 
-  const load = (source: FbrainRecord) =>
-    hydrateRecord(node, opts.cfg, found.type, source, { fields: toHydrate });
   let full: FbrainRecord;
   try {
-    full = await load(found.record);
+    full = await hydrateRecord(node, opts.cfg, found.type, found.record, { fields: toHydrate });
   } catch (err) {
     if (!(err instanceof FbrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
     const hash = schemaHashFor(found.type, opts.cfg);
