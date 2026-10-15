@@ -49,7 +49,6 @@ import {
 } from "./client.ts";
 import type { Config } from "./config.ts";
 import { sha256Hex } from "./hash.ts";
-import { isUnsupportedHashKeysFilter } from "./papercut-status-index.ts";
 import {
   arrayStringField,
   isSchemaNotFoundReadError,
@@ -338,62 +337,13 @@ async function readPartition(
   return partitionFromRows(res.results);
 }
 
-/** Set once a node answered 400 to the `HashKeys` filter: use one read per tag. */
-let hashKeysUnsupported = false;
-
-/**
- * Range-read several tags' partitions in ONE call (the `HashKeys` filter). A
- * node that rejects that filter (Mini 0.23.3 answers 400) is read with one
- * keyed read per tag, all issued together. Used by the admin rebuild, which
- * reads every tag it will write.
- */
-async function readPartitions(
-  node: NodeClient,
-  memberHash: string,
-  tags: readonly string[],
-): Promise<Map<string, Partition>> {
-  const out = new Map<string, Partition>();
-  if (tags.length === 0) return out;
-  if (!hashKeysUnsupported) {
-    try {
-      const res = await node.queryAll({
-        schemaHash: memberHash,
-        fields: ["tmb_h", ...TAG_MEMBER_COPY_FIELD],
-        filter: { HashKeys: tags.map(tagIndexSlug) },
-      });
-      const bySlug = new Map<string, QueryRow[]>();
-      for (const row of res.results) {
-        const hash = rowHash(row);
-        if (hash === null) continue;
-        const rows = bySlug.get(hash) ?? [];
-        rows.push(row);
-        bySlug.set(hash, rows);
-      }
-      for (const tag of tags) {
-        out.set(tag, partitionFromRows(bySlug.get(tagIndexSlug(tag)) ?? []));
-      }
-      return out;
-    } catch (err) {
-      if (!isUnsupportedHashKeysFilter(err)) throw err;
-      hashKeysUnsupported = true;
-    }
-  }
-  const parts = await Promise.all(
-    tags.map((tag) => readPartition(node, memberHash, tag, true)),
-  );
-  tags.forEach((tag, i) => out.set(tag, parts[i]!));
-  return out;
-}
-
 function presenceId(hash: string, range: string): string {
   return `${hash}\u0000${range}`;
 }
 
 /**
  * The rows that exist among `keys`: ONE keyed read for all of them, mapped from
- * key id to the row's fields. The read names every field of the schema, so it
- * also proves the node's schema accepts the fields a write sets (see
- * `memberSchemaRejected`).
+ * key id to the row's fields.
  */
 async function readRowsByKey(
   node: NodeClient,
@@ -433,23 +383,6 @@ async function readRowsByKey(
     }
   }
   return found;
-}
-
-/**
- * Whether the node refused a keyed read of the TagMembership schema as a bad
- * request. The schema service can unify a field of a registered schema with
- * another app's field of the same meaning, and the node then answers 400 to a
- * read, and 400 to a write, that names the field by its own name (seen
- * 2026-10-12 on the dev service with a generic timestamp field). A write path
- * that hits this skips its tag membership ops with a warning, instead of
- * failing every record write.
- */
-function memberSchemaRejected(err: unknown): boolean {
-  if (err === null || typeof err !== "object") return false;
-  const e = err as { status?: unknown; httpStatus?: unknown; code?: unknown };
-  if (Number(e.status ?? e.httpStatus) === 400) return true;
-  if (e.code === "node_http_400") return true;
-  return /HTTP 400/.test(err instanceof Error ? err.message : String(err));
 }
 
 /**
@@ -969,94 +902,12 @@ export async function planTagMemberOps(
   changes: readonly TagMemberChange[],
   verbose?: Verbose,
 ): Promise<{ ops: BatchMutationOp[]; noOp: number }> {
-  if (changes.length === 0) return { ops: [], noOp: 0 };
-  const memberHash = tagMemberSchemaHash(cfg);
-  if (memberHash === null) {
-    verbose?.(TAG_MEMBER_UNPINNED_MESSAGE);
-    warnOnce("unpinned", TAG_MEMBER_UNPINNED_MESSAGE);
-    return { ops: [], noOp: 0 };
-  }
-
-  // Last change wins for one (tag, member).
-  const wanted = new Map<string, TagMemberChange>();
-  for (const change of changes) {
-    if (change.tag.length === 0 || change.member.length === 0) continue;
-    wanted.set(`${change.tag}\u0000${change.member}`, change);
-  }
-  const tags = [...new Set([...wanted.values()].map((c) => c.tag))];
-  if (tags.length === 0) return { ops: [], noOp: 0 };
-
-  const keys = tags.map((tag) => ({
-    hash: tagIndexSlug(tag),
-    range: TAG_MEMBER_MIGRATED_RANGE,
-  }));
-  for (const change of wanted.values()) {
-    if (change.op === "remove") {
-      keys.push({ hash: tagIndexSlug(change.tag), range: change.member });
-    }
-  }
-  let present: Map<string, Record<string, unknown>>;
-  try {
-    present = await readRowsByKey(node, memberHash, keys);
-  } catch (err) {
-    if (!memberSchemaRejected(err)) throw err;
-    const message =
-      `tag-index: the node rejected the TagMembership schema fields (${errorMessage(err)}); ` +
-      "tag and backlink membership is NOT written. Re-register the schema with `brain init`.";
-    verbose?.(message);
-    warnOnce("rejected", message);
-    return { ops: [], noOp: 0 };
-  }
-
-  // A tag with no stamp: copy its legacy members now, when a legacy row exists.
-  // `copied` holds the member set of every tag this pass copied, to decide its
-  // removals.
-  const copied = new Map<string, Set<string>>();
-  const stamps: BatchMutationOp[] = [];
-  for (const tag of tags) {
-    if (present.has(presenceId(tagIndexSlug(tag), TAG_MEMBER_MIGRATED_RANGE))) {
-      continue;
-    }
-    try {
-      const legacy = await readLegacyRow(node, cfg, tag);
-      // No row, or a row with no members VALUE (maybe not synced yet): stamp
-      // nothing.
-      if (legacy === null || legacy.state === "missing") continue;
-      // A real empty list: record it once, with this write (nothing to copy).
-      if (legacy.state === "empty") {
-        stamps.push(emptyLegacyStamp(memberHash, tag, legacy));
-        continue;
-      }
-      const after = await copyLegacyUnderClaim(node, memberHash, tag, legacy, verbose);
-      if (after !== null) copied.set(tag, new Set(after.members));
-    } catch (err) {
-      // The record write wins. The copy is retried on the next write or read.
-      const message =
-        `tag-index: could not copy the legacy members of "${tag}" (${errorMessage(err)}); ` +
-        "the write went ahead and the copy is retried on the next write of this tag";
-      verbose?.(message);
-      warnOnce(`copy:${tag}`, message);
-    }
-  }
-
-  const ops: BatchMutationOp[] = [...stamps];
-  let noOp = 0;
-  for (const change of wanted.values()) {
-    if (change.op === "add") {
-      ops.push(memberOp(memberHash, "create", change.tag, change.member));
-      continue;
-    }
-    const known = copied.get(change.tag);
-    const exists = known
-      ? known.has(change.member)
-      : present.has(presenceId(tagIndexSlug(change.tag), change.member));
-    if (!exists) {
-      noOp += 1;
-      continue;
-    }
-    ops.push(memberOp(memberHash, "delete", change.tag, change.member));
-  }
-  return { ops, noOp };
+  // Page atoms replaced this payload.
+  void node;
+  void cfg;
+  void changes;
+  void verbose;
+  return { ops: [], noOp: 0 };
 }
 
 /** Plan and send a set of membership changes. Throws on a failed write. */
@@ -1184,65 +1035,11 @@ export async function rebuildTagMemberPartitions(
   cfg: Config,
   byTag: ReadonlyMap<string, ReadonlySet<string>>,
 ): Promise<number> {
-  const memberHash = requireTagMemberSchema(cfg);
-  const tags = [...byTag.keys()];
-  let pending: BatchMutationOp[] = [];
-  let membersIndexed = 0;
-  for (let i = 0; i < tags.length; i += TAG_PARTITION_READ_BATCH) {
-    const chunk = tags.slice(i, i + TAG_PARTITION_READ_BATCH);
-    const partitions = await readPartitions(node, memberHash, chunk);
-    // The age of each legacy row, to refresh a stamp an old binary outdated.
-    const legacy = await Promise.all(
-      chunk.map((tag) => readLegacyRow(node, cfg, tag)),
-    );
-    for (const [j, tag] of chunk.entries()) {
-      const want = byTag.get(tag) ?? new Set<string>();
-      const part = partitions.get(tag) ?? { marker: false, members: [] };
-      const have = new Set(part.members);
-      for (const member of [...want].sort()) {
-        if (!have.has(member)) {
-          pending.push(memberOp(memberHash, "create", tag, member));
-        }
-      }
-      for (const member of part.members) {
-        if (!want.has(member)) {
-          pending.push(memberOp(memberHash, "delete", tag, member));
-        }
-      }
-      // The stamp says "the layout is current up to this time": it is written
-      // only for a tag that HAS a legacy row, and only when the tag has no stamp
-      // or its legacy row is newer than the stamp (an old binary wrote it after
-      // the copy). A tag with no legacy row gets no stamp, for the same reason a
-      // read of an empty legacy row writes none. A rebuild of a current tag
-      // writes nothing.
-      const legacyAt = legacy[j]?.updatedAt;
-      // A legacy row whose members VALUE is missing may not have synced: no stamp.
-      const hasLegacy = legacy[j] != null && legacy[j]!.state !== "missing";
-      const stale =
-        hasLegacy &&
-        (!part.marker ||
-          part.stampAt === undefined ||
-          (legacyAt !== undefined && legacyAt > part.stampAt));
-      if (stale) {
-        pending.push(
-          stampOp(memberHash, tag, {
-            v: 1,
-            n: want.size,
-            digest: digestOf([...want]),
-            at: nowIso(),
-            rebuilt: true,
-          }),
-        );
-      }
-      membersIndexed += want.size;
-    }
-    if (pending.length >= TAG_MEMBER_BATCH_SIZE) {
-      await commitOps(node, pending);
-      pending = [];
-    }
-  }
-  await commitOps(node, pending);
-  return membersIndexed;
+  // Page atoms replaced this payload.
+  void node;
+  void cfg;
+  void byTag;
+  return 0;
 }
 
 export async function rebuildTagIndex(

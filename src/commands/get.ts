@@ -1,19 +1,24 @@
-// `fbrain get <slug> [--type T]` — print a record.
+// `fbrain get <slug> [--type T]` — print one record.
 // Untyped get reads the type directory, then at most one product key.
 // Typed get reads that product key and does not read the directory.
-// `linked_from` stays on the backlink index. Design children stay on the
-// child-task index.
+// A design child list reads one child page. `linked_from` reads one link page.
 
-import { FbrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
-import { listBacklinkMembers } from "../backlink-index.ts";
+import {
+  displayCap,
+  pageBackfill,
+  pageRangeOrThrow,
+  readStoredPage,
+  type StoredCard,
+  type StoredPage,
+} from "../backlink-index.ts";
 import { hydrateRecord, parseSpillMarker, spillFieldsFor } from "../body-spill.ts";
+import { FbrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
+import { BACKLINK_PAGE, CHILD_PAGE, HEAD_RANGE } from "../list-page.ts";
 import {
-  compareByUpdatedThenSlug,
   findBySlug,
-  findChildTasksByDesignForDisplay,
   NOT_FOUND_TYPED,
   normalizeSlug,
   resolveBySlug,
@@ -22,7 +27,7 @@ import {
   type FbrainRecord,
   type SlugTwin,
 } from "../record.ts";
-import { RECORDS, type RecordType } from "../schemas.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, RECORDS, type RecordType } from "../schemas.ts";
 
 export type GetOptions = {
   cfg: Config;
@@ -47,11 +52,25 @@ export type GetOptions = {
   // surface; when set, both human output and --json use the same truncated
   // body string.
   bodyLimit?: number;
+  // Child page id. Valid only with --type design. linked_from stays on __head__.
+  page?: string;
+  limit?: number;
 };
 
 export async function getRecord(opts: GetOptions): Promise<void> {
   const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
+  let childRange = HEAD_RANGE;
+  if (opts.page !== undefined && opts.page.length > 0) {
+    if (opts.type !== "design") {
+      throw new FbrainError({
+        code: "page_needs_design",
+        message: "--page is valid only when --type is design",
+        hint: "Pass --type design with --page.",
+      });
+    }
+    childRange = pageRangeOrThrow(opts.page);
+  }
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
   // Stored text first. A shown spill loads its blob only when the print
@@ -87,39 +106,46 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     designMissing = parent === null;
   }
 
-  // Reverse direction of the same link: when the record IS a design, list its
-  // child tasks so the parent ↔ child relationship is visible both ways. Gated
-  // on `found.type === "design"` so the other 7 record types pay zero
-  // additional cost; the lookup shares the empty-page cap with the forward
-  // dangling-ref probe above, so a childless design on a fresh node stays cheap
-  // (no full 5× retry burn).
-  //
-  // Uses the *ForDisplay* variant: a design's body is a point get on its
-  // primary key and must not be gated on this projection. When the index is
-  // registered-but-unmigrated we still render the record and mark `tasks:`
-  // UNAVAILABLE — never `(none)`, which would be a confident wrong answer. The
-  // delete cascade guard deliberately keeps the throwing form. See
-  // `papercut-brain-get-fails-for-every-design-record-child-task-index-not-marked-complete`.
-  let designChildren: FbrainRecord[] | undefined;
-  let childrenUnavailable: string | undefined;
+  const pageSchema = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  let designChildren: Array<{ slug: string; status: string }> | undefined;
+  let tasksLines: string[] | undefined;
   if (found.type === "design") {
-    const lookup = await findChildTasksByDesignForDisplay(
-      node,
-      found.record.slug,
-      opts.cfg,
-    );
-    if (lookup.status === "ok") {
-      designChildren = lookup.tasks;
-    } else {
-      childrenUnavailable = lookup.hint ?? lookup.reason;
+    const childHash = `child#${found.record.slug}`;
+    const childPage = await readStoredPage(node, pageSchema, childHash, childRange);
+    const childView = memberLines(`tasks:`.padEnd(12), childPage, {
+      limit: opts.limit,
+      named: CHILD_PAGE,
+      absentLines: [
+        `${"tasks:".padEnd(12)}child page absent`,
+        "sample",
+        pageBackfill(childHash, "task"),
+      ],
+      render: (cards) => cards.map((card) => `${card.slug} (${card.status})`).join(", "),
+    });
+    tasksLines = childView.lines;
+    if (childPage.kind === "page" && childView.provenEmpty) {
+      designChildren = [];
+    } else if (childView.shown.length > 0) {
+      designChildren = childView.shown.map((card) => ({ slug: card.slug, status: card.status }));
     }
   }
 
-  // Index-only: one keyed read, no per-source hydration. See
-  // `listBacklinkMembers` for why `get` stopped point-reading every source.
-  const linkedFrom = await listBacklinkMembers(node, opts.cfg, found.record.slug, {
-    verbose: opts.verbose,
+  const linkHash = `link#${found.record.slug}`;
+  const linkPage = await readStoredPage(node, pageSchema, linkHash, HEAD_RANGE);
+  const linkView = memberLines("linked_from: ", linkPage, {
+    named: BACKLINK_PAGE,
+    absentLines: [
+      "linked_from: sample",
+      "index record absent",
+      pageBackfill(linkHash, "<type>"),
+    ],
+    render: (cards) =>
+      cards
+        .filter((card) => card.type.length > 0)
+        .map((card) => `${card.type} ${card.slug}`)
+        .join(", "),
   });
+  const linkedFrom = linkRefs(linkView.shown);
 
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
@@ -130,9 +156,10 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     found.type,
     designMissing,
     designChildren,
-    linkedFrom,
-    childrenUnavailable,
+    linkPage.kind === "page" ? linkedFrom : undefined,
+    undefined,
     found.also_types,
+    { tasks: tasksLines, linkedFrom: linkView.lines },
   );
   opts.onResult?.(json);
 
@@ -153,8 +180,10 @@ export async function getRecord(opts: GetOptions): Promise<void> {
       designMissing,
       designChildren,
       linkedFrom,
-      childrenUnavailable,
+      undefined,
       found.also_types,
+      tasksLines,
+      linkView.lines,
     ),
   );
 }
@@ -271,6 +300,8 @@ export type RecordJson = {
   // read — the design's own body is still returned. Distinct from
   // `children: []`, which asserts the design genuinely has no children.
   children_unavailable?: string;
+  tasks_lines?: string[];
+  linked_from_lines?: string[];
   // Records that link to this slug, either through an explicit stored edge
   // (`task.design_slug` or a generic `link:<type>:<slug>` tag) or through a
   // `[[slug]]` body reference. `get` fills this from the backlink index only
@@ -301,10 +332,11 @@ export function recordToJson(
   r: FbrainRecord,
   type: RecordType,
   designMissing = false,
-  children?: ReadonlyArray<FbrainRecord>,
+  children?: ReadonlyArray<{ slug: string; status: string }>,
   linkedFrom?: ReadonlyArray<BacklinkRef>,
   childrenUnavailable?: string,
   alsoTypes?: readonly SlugTwin[],
+  pageLines?: { tasks?: readonly string[]; linkedFrom?: readonly string[] },
 ): RecordJson {
   const out: RecordJson = {
     type,
@@ -333,11 +365,12 @@ export function recordToJson(
     out.extra_fields = extra;
     Object.assign(out, extra);
   }
+  if (pageLines?.tasks !== undefined) out.tasks_lines = [...pageLines.tasks];
+  if (pageLines?.linkedFrom !== undefined) out.linked_from_lines = [...pageLines.linkedFrom];
   if (type === "design" && childrenUnavailable !== undefined) {
     out.children_unavailable = childrenUnavailable;
   } else if (type === "design" && children !== undefined) {
-    const sorted = sortChildrenByUpdated(children);
-    out.children = sorted.map((t) => ({ slug: t.slug, status: t.status }));
+    out.children = children.map((t) => ({ slug: t.slug, status: t.status }));
   }
   if (linkedFrom !== undefined) {
     out.linked_from = linkedFrom.map((link) => ({
@@ -350,20 +383,16 @@ export function recordToJson(
   return out;
 }
 
-function sortChildrenByUpdated(
-  children: ReadonlyArray<FbrainRecord>,
-): FbrainRecord[] {
-  return [...children].sort(compareByUpdatedThenSlug);
-}
-
 export function formatRecord(
   r: FbrainRecord,
   type: RecordType,
   designMissing = false,
-  children?: ReadonlyArray<FbrainRecord>,
+  children?: ReadonlyArray<{ slug: string; status: string }>,
   linkedFrom?: ReadonlyArray<BacklinkRef>,
   childrenUnavailable?: string,
   alsoTypes?: readonly SlugTwin[],
+  tasksLines?: readonly string[],
+  linkLines?: readonly string[],
 ): string {
   const lines = [
     `[${type}] ${r.slug}`,
@@ -390,20 +419,21 @@ export function formatRecord(
     const rendered = typeof value === "string" && value.length > 0 ? value : "(none)";
     lines.push(`${padLabel(ef)}${rendered}`);
   }
-  if (type === "design" && childrenUnavailable !== undefined) {
+  if (tasksLines !== undefined) {
+    for (const line of tasksLines) lines.push(line);
+  } else if (type === "design" && childrenUnavailable !== undefined) {
     lines.push(`tasks:      (unavailable — ${childrenUnavailable})`);
   } else if (type === "design" && children !== undefined) {
     if (children.length === 0) {
       lines.push("tasks:      (none)");
     } else {
-      const sorted = sortChildrenByUpdated(children);
-      const rendered = sorted
-        .map((t) => `${t.slug} (${t.status})`)
-        .join(", ");
+      const rendered = children.map((t) => `${t.slug} (${t.status})`).join(", ");
       lines.push(`tasks:      ${rendered}`);
     }
   }
-  if (linkedFrom !== undefined) {
+  if (linkLines !== undefined) {
+    for (const line of linkLines) lines.push(line);
+  } else if (linkedFrom !== undefined) {
     lines.push(`linked_from: ${formatLinkedFrom(linkedFrom)}`);
   }
   lines.push(`created_at: ${r.created_at}`);
@@ -452,17 +482,21 @@ export function formatRecordJsonWindow(
       lines.push(`${padLabel(ef)}${rendered}`);
     }
   }
-  if (json.type === "design" && json.children !== undefined) {
+  if (json.tasks_lines !== undefined) {
+    for (const line of json.tasks_lines) lines.push(line);
+  } else if (json.type === "design" && json.children_unavailable !== undefined) {
+    lines.push(`tasks:      (unavailable — ${json.children_unavailable})`);
+  } else if (json.type === "design" && json.children !== undefined) {
     if (json.children.length === 0) {
       lines.push("tasks:      (none)");
     } else {
-      const rendered = json.children
-        .map((t) => `${t.slug} (${t.status})`)
-        .join(", ");
+      const rendered = json.children.map((t) => `${t.slug} (${t.status})`).join(", ");
       lines.push(`tasks:      ${rendered}`);
     }
   }
-  if (json.linked_from !== undefined) {
+  if (json.linked_from_lines !== undefined) {
+    for (const line of json.linked_from_lines) lines.push(line);
+  } else if (json.linked_from !== undefined) {
     lines.push(`linked_from: ${formatLinkedFrom(json.linked_from)}`);
   }
   lines.push(`created_at: ${json.created_at}`);
@@ -497,6 +531,45 @@ function formatAlsoTypes(
     .join(", ");
   const example = twins[0]!.type;
   return `${rendered} — read with \`fbrain get ${slug} --type ${example}\``;
+}
+
+function memberLines(
+  label: string,
+  page: StoredPage,
+  opts: {
+    limit?: number;
+    named: number;
+    absentLines: string[];
+    render: (cards: StoredCard[]) => string;
+  },
+): { lines: string[]; shown: StoredCard[]; provenEmpty: boolean } {
+  if (page.kind === "absent") return { lines: opts.absentLines, shown: [], provenEmpty: false };
+  if (page.kind === "bad") {
+    return { lines: [`${label}sample`, "index partial"], shown: [], provenEmpty: false };
+  }
+  const { cap, partial } = displayCap(opts.limit, opts.named, page.bytes);
+  const shown = page.cards.slice(0, cap);
+  const clipped = page.cards.length > shown.length;
+  const lines: string[] = [];
+  const provenEmpty = shown.length === 0 && page.older.length === 0;
+  if (provenEmpty) lines.push(`${label}(none)`);
+  else if (shown.length === 0) lines.push(`${label}sample ${page.older}`);
+  else {
+    lines.push(`${label}${opts.render(shown)}`);
+    if (clipped) lines.push("the cap cut this page");
+    if (page.older.length > 0) lines.push(`sample ${page.older}`);
+  }
+  if (partial) lines.push("index partial");
+  return { lines, shown, provenEmpty };
+}
+
+function linkRefs(cards: readonly StoredCard[]): BacklinkRef[] {
+  const refs: BacklinkRef[] = [];
+  for (const card of cards) {
+    if (!isRecordType(card.type)) continue;
+    refs.push({ type: card.type, slug: card.slug });
+  }
+  return refs;
 }
 
 // `type slug` per entry; the `(via)` suffix only when a hydrated view supplied

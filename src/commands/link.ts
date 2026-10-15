@@ -3,11 +3,17 @@
 // compatibility; all other pairs store a link:<type>:<slug> tag on the
 // source record. Explicit edges reject missing targets.
 
-import { FbrainError, type Verbose } from "../client.ts";
-import { reconcileBacklinkIndex } from "../backlink-index.ts";
+import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
+import { extractGraphEdges } from "../graph-edge.ts";
+import {
+  commitHeadPages,
+  INDEX_PARTIAL,
+  planRecordListSide,
+  WRITE_BATCH_MAX,
+} from "../list-page.ts";
 import {
   findBySlug,
   genericLinkTag,
@@ -19,6 +25,7 @@ import {
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type LinkOptions = {
   cfg: Config;
@@ -158,32 +165,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     sealed.spilled.length > 0 && typeof fields.body === "string"
       ? { ...storedRecord, body: fields.body }
       : storedRecord;
-  await reconcileBacklinkIndex(
-    node,
-    opts.cfg,
-    fromType,
-    fromSlug,
-    source,
-    linkView,
-    opts.verbose,
-  );
-  // Keep the design->child-task index current (see child-task-index.ts). A
-  // task<->design `link` reparents the task exactly like a `put` that edits
-  // `design_slug` would — the "any task reparent" write path the index must
-  // cover, not just create/put/delete.
-  if (fromType === "task") {
-    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
-    await maintainChildTaskIndex({
-      node,
-      cfg: opts.cfg,
-      taskSlug: fromSlug,
-      task: storedRecord,
-      previousDesignSlug: source.design_slug,
-      verbose: opts.verbose,
-    });
-  }
+  const indexNote = await commitLinkPages(node, opts.cfg, fromType, source, linkView);
 
-  print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}`);
+  print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}${indexNote}`);
   // Emit the structured payload from the SAME normalized slugs the printed
   // line uses (one source of truth — see the read commands).
   opts.onResult?.({
@@ -193,6 +177,41 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     to_type: toType,
     to_slug: toSlug,
   });
+}
+
+async function commitLinkPages(
+  node: NodeClient,
+  cfg: Config,
+  type: RecordType,
+  previous: FbrainRecord,
+  next: FbrainRecord,
+): Promise<string> {
+  const side = await planRecordListSide({
+    node,
+    cfg,
+    type,
+    previous,
+    next,
+    nextEdges: extractGraphEdges({ sourceSlug: next.slug, body: next.body }),
+  });
+  const notes = [...side.details];
+  let ops = side.ops;
+  if (ops.length > WRITE_BATCH_MAX) {
+    ops = ops.slice(0, WRITE_BATCH_MAX);
+    if (!notes.includes(INDEX_PARTIAL)) notes.push(INDEX_PARTIAL);
+  }
+  if (ops.length > 0) {
+    if (!node.mutateBatch) {
+      if (!notes.includes(INDEX_PARTIAL)) notes.push(INDEX_PARTIAL);
+    } else {
+      await node.mutateBatch(ops);
+    }
+  }
+  const headNotes = await commitHeadPages(node, side.heads);
+  for (const line of headNotes) {
+    if (!notes.includes(line)) notes.push(line);
+  }
+  return formatIndexNotes(notes);
 }
 
 function fieldsForLinkUpdate(

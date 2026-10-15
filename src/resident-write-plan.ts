@@ -8,18 +8,13 @@ import {
   storedFieldsOf,
   type SpilledField,
 } from "./body-spill.ts";
-import { indexPayload } from "./index-payload.ts";
 import {
   FbrainError,
   type BatchMutationResult,
   type NodeClient,
 } from "./client.ts";
 import type { Config } from "./config.ts";
-import {
-  CHILD_TASK_INDEX_MARKER,
-  CHILD_TASK_INDEX_SCHEMA_KEY,
-  type RecordType,
-} from "./schemas.ts";
+import { type RecordType } from "./schemas.ts";
 import {
   edgeFields,
   edgeRange,
@@ -39,13 +34,7 @@ import {
   WRITE_BATCH_MAX,
   type HeadCommit,
 } from "./list-page.ts";
-import { normalizeSlug, TOMBSTONE_TAG, type FbrainRecord } from "./record.ts";
-import {
-  memberKey,
-  planTagMemberOps,
-  tagIndexAvailable,
-  type TagMemberChange,
-} from "./tag-index.ts";
+import { normalizeSlug, type FbrainRecord } from "./record.ts";
 
 export type ProjectionKind =
   | "primary"
@@ -94,10 +83,6 @@ export type ResidentWritePlan = {
 export type ResidentCommitResult = BatchMutationResult & {
   indexNotes: string[];
 };
-
-function userTags(tags: readonly string[]): string[] {
-  return tags.filter((tag) => tag.length > 0 && tag !== TOMBSTONE_TAG);
-}
 
 function sameMembers(a: readonly string[], b: readonly string[]): boolean {
   const left = [...new Set(a)].sort();
@@ -200,38 +185,9 @@ function planChildTaskOps(opts: {
   previous: FbrainRecord | null;
   upsertType: "create" | "update";
 }): PlannedMutation[] {
-  if (opts.type !== "task") return [];
-  const schemaHash = opts.cfg.schemaHashes[CHILD_TASK_INDEX_SCHEMA_KEY];
-  if (!schemaHash) return [];
-  const ops: PlannedMutation[] = [];
-  const previousDesign = opts.previous?.design_slug ?? "";
-  const nextDesign = opts.record.design_slug ?? "";
-  if (previousDesign.length > 0 && previousDesign !== nextDesign) {
-    ops.push({
-      mutationType: "delete",
-      schemaHash,
-      keyHash: previousDesign,
-      keyRange: opts.record.slug,
-      fields: {},
-      projection: "child-task",
-    });
-  }
-  if (nextDesign.length > 0) {
-    ops.push({
-      mutationType: opts.upsertType,
-      schemaHash,
-      keyHash: nextDesign,
-      keyRange: opts.record.slug,
-      fields: {
-        ctd_h: nextDesign,
-        ctd_r: opts.record.slug,
-        ctd_payload: indexPayload(opts.record),
-        ctd_marker: CHILD_TASK_INDEX_MARKER,
-      },
-      projection: "child-task",
-    });
-  }
-  return ops;
+  // Page atoms replaced this payload.
+  void opts;
+  return [];
 }
 
 // Tag and backlink membership. One small create per added member and one
@@ -246,23 +202,9 @@ async function planTagMembershipOps(opts: {
   newTags: readonly string[];
   projection: "tag" | "backlink";
 }): Promise<{ ops: PlannedMutation[]; noOp: number }> {
-  if (!tagIndexAvailable(opts.cfg)) return { ops: [], noOp: 0 };
-  const member = memberKey(opts.type, opts.slug);
-  const oldSet = new Set(userTags(opts.oldTags));
-  const newSet = new Set(userTags(opts.newTags));
-  const changes: TagMemberChange[] = [
-    ...[...newSet]
-      .filter((tag) => !oldSet.has(tag))
-      .map((tag): TagMemberChange => ({ tag, member, op: "add" })),
-    ...[...oldSet]
-      .filter((tag) => !newSet.has(tag))
-      .map((tag): TagMemberChange => ({ tag, member, op: "remove" })),
-  ];
-  const planned = await planTagMemberOps(opts.node, opts.cfg, changes);
-  return {
-    ops: planned.ops.map((op) => ({ ...op, projection: opts.projection })),
-    noOp: planned.noOp,
-  };
+  // Page atoms replaced this payload.
+  void opts;
+  return { ops: [], noOp: 0 };
 }
 
 export async function buildResidentWritePlan(opts: {

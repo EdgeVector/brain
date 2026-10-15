@@ -415,12 +415,16 @@ server-side, not through a windowed get).
 Examples:
   echo "- new bullet" | fbrain append my-tracker --type project
   fbrain append design-notes --type design < addendum.md`,
-  get: `fbrain get <slug> [--type T] [--body-limit N] [--field PATH]... [--json]
+  get: `fbrain get <slug> [--type T] [--page ID] [--limit N] [--body-limit N] [--field PATH]... [--json]
 
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
   --type        ${RECORD_TYPE_LIST}
+  --page ID     with --type design, read that child page. The default is
+                \`__head__\`. An older id is \`p\` plus eight digits.
+                \`linked_from\` stays on \`__head__\`.
+  --limit       max child cards from that one page (default 20, cap 100)
   --body-limit  truncate body output to N chars (default: full body)
   --field       project one field path as plain output; repeat or comma-separate
                 for TSV rows (e.g. --field status, or --field slug,status).
@@ -542,13 +546,17 @@ store a generic explicit link tag on the source record.
   --json       emit \`{ok, from_type, from_slug, to_type, to_slug}\` on stdout; the human \`linked …\` line
             moves to stderr so \`--json\` stdout is always parseable. On failure
             a \`{error, hint}\` JSON object is emitted to stdout too.`,
-  backlinks: `fbrain backlinks <slug> [--type T] [--json]
+  backlinks: `fbrain backlinks <slug> [--type T] [--page ID] [--limit N] [--json]
 
 Lists records that link to <slug> through explicit stored edges or mention it
 with a body \`[[slug]]\` reference. Does not require the target slug to exist,
 so dangling wiki-link intent remains queryable.
 
-  --type    target type for typed explicit edges (body refs are slug-only)
+  --type    target type for typed explicit edges (body refs are slug-only).
+            It does not change the page key.
+  --page ID read that link page. The default is \`__head__\`. An older id is
+            \`p\` plus eight digits.
+  --limit   max cards from that one page (default 50, cap 100)
   --json    emit \`{slug, type?, linked_from:[...]}\` on stdout.`,
   graph: `fbrain graph <neighbors|path|query> [...] [--json]
 
@@ -1206,6 +1214,8 @@ const APPEND_OPTIONS = {
 } as const;
 const GET_OPTIONS = {
   type: { type: "string" },
+  page: { type: "string" },
+  limit: { type: "string", short: "n" },
   "body-limit": { type: "string" },
   field: { type: "string", multiple: true },
   // Machine-readable mode: emit the resolved record as a single JSON
@@ -1384,6 +1394,8 @@ const LINK_OPTIONS = {
 } as const;
 const BACKLINKS_OPTIONS = {
   type: { type: "string" },
+  page: { type: "string" },
+  limit: { type: "string", short: "n" },
   json: { type: "boolean", default: false },
 } as const;
 const GRAPH_OPTIONS = {
@@ -2713,7 +2725,10 @@ export async function withTypeAsPositionalHint<T>(
 }
 
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
-  const intArgs = normalizeNegativeIntFlagValues(args, BODY_LIMIT_INT_FLAGS);
+  const intArgs = normalizeNegativeIntFlagValues(args, [
+    ...BODY_LIMIT_INT_FLAGS,
+    ...LIMIT_INT_FLAGS,
+  ]);
   const { values, positionals } = parseCommandArgs(
     {
       args: intArgs,
@@ -2759,9 +2774,16 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     min: 1,
     code: "invalid_body_limit",
   });
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
+  if (typeof values.page === "string" && values.page.length > 0) getOpts.page = values.page;
+  if (limit !== undefined) getOpts.limit = limit;
   if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
   if (fields.length > 0) getOpts.fields = fields;
   if (values.json) getOpts.json = true;
@@ -3266,9 +3288,10 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
+  const intArgs = normalizeNegativeIntFlagValues(args, LIMIT_INT_FLAGS);
   const { values, positionals } = parseCommandArgs(
     {
-      args,
+      args: intArgs,
       strict: true,
       allowPositionals: true,
       options: BACKLINKS_OPTIONS,
@@ -3289,7 +3312,20 @@ async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
   }
   const cfg = readConfig();
   const type = parseRecordType(values.type);
-  await backlinksCmd({ cfg, slug, type, json: values.json, verbose });
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
+  await backlinksCmd({
+    cfg,
+    slug,
+    type,
+    json: values.json,
+    verbose,
+    ...(typeof values.page === "string" && values.page.length > 0 ? { page: values.page } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+  });
   return 0;
 }
 

@@ -1,11 +1,4 @@
-// Design -> child-task keyed index. One HashRange row per live task that
-// carries a non-empty `design_slug`, addressed by (design_slug, task slug).
-// Lets `findChildTasksByDesign` (record.ts) and the delete cascade guard
-// (`findLinkedTaskSlugs`, commands/delete.ts) point-read one design's
-// children instead of reading the WHOLE task partition and filtering by
-// `design_slug` in the client. Shape mirrors `record-list-index.ts`
-// (RecordListEntry) — read its header comment first; this file follows the
-// same self-healing, non-fatal-write / loud-read contract.
+// ChildTaskIndex helpers. Product paths no longer write ctd_payload.
 
 import { FbrainError, type NodeClient, type QueryRow } from "./client.ts";
 import {
@@ -15,7 +8,6 @@ import {
   CHILD_TASK_INDEX_MIGRATED_RANGE,
   CHILD_TASK_INDEX_SCHEMA_KEY,
 } from "./schemas.ts";
-import { indexPayload } from "./index-payload.ts";
 import type { FbrainRecord } from "./record.ts";
 
 type SchemaCfg = { schemaHashes: Record<string, string> };
@@ -53,17 +45,6 @@ function entryKeyFor(designSlug: string, taskSlug: string): { hash: string; rang
   return { hash: designSlug, range: taskSlug };
 }
 
-function entryFieldsFor(designSlug: string, task: FbrainRecord): Record<string, string> {
-  return {
-    ctd_h: designSlug,
-    ctd_r: task.slug,
-    // `readChildTasksByDesign` point-reads every task and never parses this
-    // snapshot. It follows the index payload rule anyway (index-payload.ts).
-    ctd_payload: indexPayload(task),
-    ctd_marker: CHILD_TASK_INDEX_MARKER,
-  };
-}
-
 /** Resolve the child task slug from one HashRange index row. */
 function taskSlugFromEntryRow(row: QueryRow): string | null {
   const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
@@ -92,17 +73,12 @@ export async function upsertChildTaskEntry(
   designSlug: string,
   task: FbrainRecord,
 ): Promise<boolean> {
-  const entryHash = childTaskIndexHash(cfg);
-  if (!entryHash || designSlug.length === 0) return false;
-  const { hash, range } = entryKeyFor(designSlug, task.slug);
-  const fields = entryFieldsFor(designSlug, task);
-  const exists = await entryRowExists(node, entryHash, hash, range);
-  if (exists) {
-    await node.updateRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
-  } else {
-    await node.createRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
-  }
-  return true;
+  // Page atoms replaced this payload.
+  void node;
+  void cfg;
+  void designSlug;
+  void task;
+  return false;
 }
 
 /** Drop ONE task's row from its design partition. False when schema absent. */
@@ -275,19 +251,13 @@ export async function patchChildTaskIndex(
   task: FbrainRecord | null,
   previousDesignSlug: string | undefined,
 ): Promise<void> {
-  if (!childTaskIndexHash(cfg)) return;
-  const { isTombstoned } = await import("./record.ts");
-  const nextDesignSlug = task && !isTombstoned(task) ? (task.design_slug ?? "") : "";
-  if (
-    previousDesignSlug !== undefined &&
-    previousDesignSlug.length > 0 &&
-    previousDesignSlug !== nextDesignSlug
-  ) {
-    await deleteChildTaskEntry(node, cfg, previousDesignSlug, taskSlug);
-  }
-  if (nextDesignSlug.length > 0 && task) {
-    await upsertChildTaskEntry(node, cfg, nextDesignSlug, task);
-  }
+  // Page atoms replaced this payload.
+  void node;
+  void cfg;
+  void taskSlug;
+  void task;
+  void previousDesignSlug;
+  return;
 }
 
 /**
@@ -305,32 +275,9 @@ export async function maintainChildTaskIndex(opts: {
   previousDesignSlug: string | undefined;
   verbose?: (msg: string) => void;
 }): Promise<{ childTaskIndexFailed: boolean }> {
-  try {
-    await patchChildTaskIndex(
-      opts.node,
-      opts.cfg,
-      opts.taskSlug,
-      opts.task,
-      opts.previousDesignSlug,
-    );
-    return { childTaskIndexFailed: false };
-  } catch (err) {
-    try {
-      await unmarkChildTaskIndexMigrated(opts.node, opts.cfg);
-      opts.verbose?.(
-        `child-task index patch FAILED for task/${opts.taskSlug}: ` +
-          `${err instanceof Error ? err.message : String(err)}; record persisted — cleared the ` +
-          "completeness marker so the next design lookup errors loudly (or run `fbrain reindex --child-task-index`).",
-      );
-    } catch (unmarkErr) {
-      opts.verbose?.(
-        `child-task index patch FAILED for task/${opts.taskSlug}: ` +
-          `${err instanceof Error ? err.message : String(err)}; unmark also failed: ` +
-          `${unmarkErr instanceof Error ? unmarkErr.message : String(unmarkErr)} — run \`fbrain reindex --child-task-index\` to repair.`,
-      );
-    }
-    return { childTaskIndexFailed: true };
-  }
+  // Page atoms replaced this payload.
+  void opts;
+  return { childTaskIndexFailed: false };
 }
 
 /**
@@ -347,37 +294,11 @@ export async function writeChildTaskIndex(
   cfg: SchemaCfg,
   liveTasks: readonly FbrainRecord[],
 ): Promise<void> {
-  const entryHash = childTaskIndexHash(cfg);
-  if (!entryHash) return;
-  // Rebuild is multi-write. Clear the authoritative marker before touching
-  // rows so an interrupted repair can never leave a partial projection marked
-  // complete. The marker is restored only after every delete/upsert succeeds.
-  await unmarkChildTaskIndexMigrated(node, cfg);
-  const existing = await node.queryAll({
-    schemaHash: entryHash,
-    fields: [...CHILD_TASK_INDEX_FIELDS],
-    allowFullScan: true,
-  });
-  const want = new Set<string>();
-  for (const t of liveTasks) {
-    const d = t.design_slug ?? "";
-    if (d.length > 0) want.add(`${d} ${t.slug}`);
-  }
-  for (const row of existing.results) {
-    const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
-    const h = row.key?.hash ?? fields.ctd_h;
-    const r = row.key?.range ?? fields.ctd_r;
-    if (typeof h !== "string" || typeof r !== "string") continue;
-    if (h === CHILD_TASK_INDEX_GLOBAL_HASH && r === CHILD_TASK_INDEX_MIGRATED_RANGE) continue;
-    if (!want.has(`${h} ${r}`)) {
-      await node.deleteRecord({ schemaHash: entryHash, keyHash: h, keyRange: r });
-    }
-  }
-  for (const t of liveTasks) {
-    const d = t.design_slug ?? "";
-    if (d.length > 0) await upsertChildTaskEntry(node, cfg, d, t);
-  }
-  await markChildTaskIndexMigrated(node, cfg);
+  // Page atoms replaced this payload. A rebuild must not clear the marker.
+  void node;
+  void cfg;
+  void liveTasks;
+  return;
 }
 
 /** Census of the index vs an authoritative live (designSlug, taskSlug) set. */

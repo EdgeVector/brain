@@ -16,15 +16,15 @@
 // old probe, not for live product truth.
 
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
-import { reconcileBacklinkIndex } from "../backlink-index.ts";
+import { pageBackfill, readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
+import { HEAD_RANGE } from "../list-page.ts";
 import {
   buildRecordFields,
   findBySlugRaw,
   isTombstoned,
-  listRecords,
   normalizeSlug,
   nowIso,
   NOT_FOUND_TYPED,
@@ -33,10 +33,9 @@ import {
   TOMBSTONE_TAG,
   withReadRetry,
 } from "../record.ts";
-import { type RecordType } from "../schemas.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY, type RecordType } from "../schemas.ts";
 import { matchesListFilters, resolveListEntries } from "./list.ts";
 import { removeResidentListSide } from "../resident-write-plan.ts";
-import { unindexRecordTags } from "../tag-index.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 import type { FbrainRecord } from "../record.ts";
 
@@ -69,42 +68,44 @@ export type DeleteResult = {
   soft: true;
 };
 
-// Live (non-tombstoned) tasks whose design_slug points at `designSlug`.
-// fold_db has no server-side field filter (see client.ts queryAll), so we
-// list every task and match in-memory. Retry-hedged for the same transient
-// empty-page flake task-new's parent lookup guards against: without the
-// hedge a flake hides a linked task, the design deletes, and we re-introduce
-// exactly the orphaning this guard exists to prevent. `isHit` fires as soon
-// as one match surfaces; a design with genuinely zero linked tasks spends
-// the full retry budget before proceeding — the same negative-case cost the
-// create-side guards accept to stay correct under flake.
+// A child page is one HashRangeKey. Do not list every task.
 async function findLinkedTaskSlugs(
   node: NodeClient,
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
-  // Keyed path first (child-task-index.ts): one design's children via
-  // partition read instead of listing every task. `null` = index not
-  // registered yet, fall through unchanged; a registered-but-unmigrated
-  // index throws loudly (same contract as `listRecords`).
-  const { readChildTasksByDesign } = await import("../child-task-index.ts");
-  const indexed = await readChildTasksByDesign(node, cfg, designSlug);
-  if (indexed !== null) {
-    return indexed.map((r) => r.slug).sort();
+  const hash = `child#${designSlug}`;
+  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  const seen = new Set<string>();
+  let range = HEAD_RANGE;
+  for (;;) {
+    if (seen.has(range)) {
+      throw new FbrainError({
+        code: "child_page_unproven",
+        message: `Cannot delete design "${designSlug}" — child page repeats.`,
+        hint: pageBackfill(hash, "task"),
+      });
+    }
+    seen.add(range);
+    const page = await readStoredPage(node, schemaHash, hash, range);
+    if (page.kind === "absent") {
+      throw new FbrainError({
+        code: "child_page_unproven",
+        message: `Cannot delete design "${designSlug}" — child page absent.`,
+        hint: pageBackfill(hash, "task"),
+      });
+    }
+    if (page.kind === "bad") {
+      throw new FbrainError({
+        code: "child_page_unproven",
+        message: `Cannot delete design "${designSlug}" — child page is partial.`,
+        hint: pageBackfill(hash, "task"),
+      });
+    }
+    if (page.cards.length > 0) return page.cards.map((card) => card.slug);
+    if (page.older.length === 0) return [];
+    range = page.older;
   }
-
-  // Summaries are enough: only design_slug and the tombstone tag are read.
-  const isLinked = (r: { tags: readonly string[]; design_slug?: string }): boolean =>
-    !isTombstoned(r) && r.design_slug === designSlug;
-  const tasks = await withReadRetry(
-    // Only design_slug and the tombstone tag are read: skip body completion.
-    () => listRecords(node, "task", cfg, { summary: true }),
-    (rows) => rows.some(isLinked),
-  );
-  return tasks
-    .filter(isLinked)
-    .map((r) => r.slug)
-    .sort();
 }
 
 // Tombstone status per type — pick a value from each type's status enum
@@ -242,23 +243,6 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   }
 
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
-  await unindexRecordTags(
-    node,
-    opts.cfg,
-    type,
-    slug,
-    record.tags,
-    opts.verbose,
-  );
-  await reconcileBacklinkIndex(
-    node,
-    opts.cfg,
-    type,
-    slug,
-    record,
-    null,
-    opts.verbose,
-  );
   // Remove an old RecordListEntry row when that key exists.
   {
     const { maintainTypeListIndex } = await import("../record-list-index.ts");
@@ -268,21 +252,6 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       type,
       record: null,
       slug,
-      verbose: opts.verbose,
-    });
-  }
-  // Drop the design->child-task index row (see child-task-index.ts). Without
-  // this, deleting a task leaves a stale pre-tombstone snapshot in its old
-  // design's partition — the same phantom-row bug the RecordListEntry drop
-  // above exists to prevent, one layer up.
-  if (type === "task" && record.design_slug && record.design_slug.length > 0) {
-    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
-    await maintainChildTaskIndex({
-      node,
-      cfg: opts.cfg,
-      taskSlug: slug,
-      task: null,
-      previousDesignSlug: record.design_slug,
       verbose: opts.verbose,
     });
   }
@@ -521,23 +490,6 @@ export async function deleteByFilter(
         slug,
         resolved.record.created_at,
       );
-      await unindexRecordTags(
-        node,
-        opts.cfg,
-        m.type,
-        slug,
-        resolved.record.tags,
-        opts.verbose,
-      );
-      await reconcileBacklinkIndex(
-        node,
-        opts.cfg,
-        m.type,
-        slug,
-        resolved.record,
-        null,
-        opts.verbose,
-      );
       {
         const { maintainTypeListIndex } = await import(
           "../record-list-index.ts"
@@ -548,23 +500,6 @@ export async function deleteByFilter(
           type: m.type,
           record: null,
           slug,
-          verbose: opts.verbose,
-        });
-      }
-      if (
-        m.type === "task" &&
-        resolved.record.design_slug &&
-        resolved.record.design_slug.length > 0
-      ) {
-        const { maintainChildTaskIndex } = await import(
-          "../child-task-index.ts"
-        );
-        await maintainChildTaskIndex({
-          node,
-          cfg: opts.cfg,
-          taskSlug: slug,
-          task: null,
-          previousDesignSlug: resolved.record.design_slug,
           verbose: opts.verbose,
         });
       }
