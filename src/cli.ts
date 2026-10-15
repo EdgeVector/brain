@@ -933,20 +933,8 @@ upstream fold_db work (G3d/G3e), not available at the fbrain layer.
                     it is registered and complete. Dry-run censuses the
                     indexed set vs SOT without writing. Standalone mode:
                     skips the embedding refresh.
-  --papercut-status-index rebuild the status->papercut keyed ledger index
-                    from an admin SOT scan of the papercut schema. Repairs
-                    missing, duplicate, or old-status rows and stamps the
-                    global completeness marker. Dry-run censuses indexed
-                    status/slug pairs vs SOT without writing. Standalone mode:
-                    skips the embedding refresh.
-                    This scan issues one point read per live papercut
-                    (thousands on a real corpus) and has NO overall
-                    wall-clock deadline of its own — total run time scales
-                    with live corpus size and node load, from seconds to
-                    tens of minutes. It reports progress to stderr
-                    ("scanned N record(s)...") every ~250 records or ~5s,
-                    whichever comes first, so a long-but-healthy run does
-                    not read like a hang.
+  --papercut-status-index does not write PapercutStatusIndex.
+                    papercut list and papercut census read the list page.
 
 Run with the global --verbose to print per-record outcome
 (kept | reindexed | skipped-tombstone).`,
@@ -1051,63 +1039,25 @@ set     Amends a header column on an existing row: --kind, --repo, --severity,
         reader who finds kind=specified-fix on a row filed as complaint cannot
         tell it was amended, when, or from what.
 
-census  Counts by component and status, and prints its own method line.
+census  Counts the cards on one list page and prints its method line.
 
-        It counts from the snapshot the index already carries: one node query
-        per status partition and ZERO point reads. It reads exactly two fields,
-        component and status, and both are written only by verbs that go
-        through the resident write plan, which patches this index in the same
-        write — so neither can lag. Measured on the primary over all 2230
-        common open rows (2026-09-04), snapshot against point read: component
-        and status disagreed on ZERO rows.
-        --point-read re-reads every record and re-checks it against its
-        partition. That is the only reading that catches a record whose status
-        moved without this index following, and it is an index audit rather
-        than a counting method: 2977 node requests and 141.8s, against 3.3s for
-        the same ledger the same hour. Reach for it when you suspect the index,
-        or after brain reindex --papercut-status-index.
-        list reads the same snapshot by default as of 2026-09-06; it kept the
-        point read until then, because list is ordered oldest-updated-first and
-        updated_at was the field the snapshot lagged on. Either way the method
-        line says which reading produced the numbers.
+        The read is one HashRangeKey. Hash \`papercut\`. Range \`__head__\`.
+        Field \`blp_page\`. A card carries slug, status, title, and updated_at.
+        The page does not carry component. When older is set, the line says sample.
+        --point-read reads those slugs from the product records.
+        A component argument needs --point-read.
 
-list    The row-level view of the SAME read census counts, so the two can never
-        disagree. Applies <component> and --status, returns every matching row
-        (no sample, no cap), and carries every stored header field —
-        component/severity/kind/repo/fixed_by/verified_by/duplicate_of — because
-        those are what a closure audit is made of. Ordered oldest-updated first,
-        which is the order the reconcile loop actually consumes.
+list    Prints the cards on that page. \`--status S\` uses hash \`papercut#S\`.
+        The read is one HashRangeKey. Range \`__head__\`. Field \`blp_page\`.
+        The command does not read PapercutStatusIndex.
 
-        Like census, it reads each row from the snapshot the index already
-        carries: one node query per status partition and ZERO point reads.
-        Measured on the primary 2026-09-06, unfiltered: 10 node requests and
-        21.7s of node service time, against 3404 requests and 2743.3s for the
-        point read of the same ledger. In a controlled fast/point-read/fast
-        sandwich over 274 rows, the 273 that did not change during the window
-        agreed on EVERY stored field; updated_at disagreed on one row (0.37%,
-        against 46.8% on 2026-09-04, before brain append and brain tag began
-        patching this index).
-        --point-read re-reads every record and re-checks it against its
-        partition. That is the only reading that catches a record whose header
-        moved without this index following, and it is an index audit rather
-        than a listing method. Reach for it when you suspect the index, or
-        after brain reindex --papercut-status-index.
-        --index-only returns slug + status partition straight from the keyed
-        index, without even parsing the payload. The status is the partition
-        key, not re-verified per record, and there is no component filter —
-        queue consumers point-get what they act on.
-        --body-resolved keeps only the rows whose BODY claims a resolution the
-        typed status does not carry: status open with a Status: FIXED/RESOLVED
-        or Verified: line, or status fixed carrying a live-check line. The
-        ledger predates the typed status column, so runs wrote their verdict as
-        prose and left the header alone — 11 of the 16 open rows with a
-        fixed_by header read that way on 2026-09-05, the oldest since
-        2026-08-05, and every reader that ranks by status counted them as
-        outstanding. These are CANDIDATES for a live re-check, not closures: a
-        body claiming verified is a hypothesis until someone re-measures, so
-        this is a reader with no write path. Refuses --fast and --index-only,
-        because body is the field it matches and neither reading can be trusted
-        for it.
+        The page does not carry component, severity, kind, repo, or tags.
+        Those filters need --point-read. --point-read reads the product
+        records for the slugs on the page.
+        --index-only prints slug and status from the card.
+        --body-resolved reads the body of those slugs. It keeps a row whose
+        body claims a resolution the status does not carry. It refuses
+        --fast and --index-only.
 
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}

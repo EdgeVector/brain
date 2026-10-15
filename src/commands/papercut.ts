@@ -23,6 +23,7 @@ import { resolvePrintSink, resolvePrintSinks } from "../format.ts";
 import {
   crossTypeSlugNote,
   findBySlug,
+  findBySlugs,
   findCrossTypeSlugCollisions,
   normalizeSlug,
   nowIso,
@@ -38,12 +39,7 @@ import {
   writeDurabilityTokens,
   type WriteDurability,
 } from "../write-confirmation.ts";
-import {
-  newPapercutReadStats,
-  readPapercutSlugsByStatus,
-  readPapercutsByStatus,
-} from "../papercut-status-index.ts";
-import { sealRecordFields } from "../body-spill.ts";
+import { hydrateRecord, parseSpillMarker, sealRecordFields } from "../body-spill.ts";
 import { HEAD_RANGE, INDEX_PARTIAL } from "../list-page.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY } from "../schemas.ts";
 import {
@@ -140,7 +136,23 @@ export function isIdempotentPapercutFile(
   );
 }
 
-function otherSymptomSlug(raw: string, slug: string): string | null {
+async function readOtherSymptomSlug(
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  cfg: Config,
+  symptomHashValue: string,
+  slug: string,
+): Promise<string | null> {
+  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  if (schemaHash.length === 0) return null;
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["blp_page"],
+    filter: {
+      HashRangeKey: { hash: `symptom#${symptomHashValue}`, range: HEAD_RANGE },
+    },
+  });
+  const raw = res.results[0]?.fields?.blp_page;
+  if (typeof raw !== "string" || raw.length === 0) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -159,24 +171,105 @@ function otherSymptomSlug(raw: string, slug: string): string | null {
   return null;
 }
 
-async function readOtherSymptomSlug(
+type PapercutPageCard = {
+  slug: string;
+  status: string;
+  title: string;
+  updated_at: string;
+};
+
+type PapercutPage = { cards: PapercutPageCard[]; older: string };
+
+function papercutPageHash(status?: string): string {
+  return status && status.length > 0 ? `papercut#${status}` : "papercut";
+}
+
+async function readPapercutPage(
   node: ReturnType<typeof newWriteClientFromCfg>["node"],
   cfg: Config,
-  symptomHashValue: string,
-  slug: string,
-): Promise<string | null> {
+  hash: string,
+  verbose?: Verbose,
+): Promise<PapercutPage> {
+  const empty: PapercutPage = { cards: [], older: "" };
   const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
-  if (schemaHash.length === 0) return null;
+  if (schemaHash.length === 0) return empty;
+  verbose?.(`query HashRangeKey hash=${hash} range=${HEAD_RANGE} field=blp_page`);
   const res = await node.queryAll({
     schemaHash,
     fields: ["blp_page"],
-    filter: {
-      HashRangeKey: { hash: `symptom#${symptomHashValue}`, range: HEAD_RANGE },
-    },
+    filter: { HashRangeKey: { hash, range: HEAD_RANGE } },
   });
   const raw = res.results[0]?.fields?.blp_page;
-  if (typeof raw !== "string" || raw.length === 0) return null;
-  return otherSymptomSlug(raw, slug);
+  if (typeof raw !== "string" || raw.length === 0) return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return empty;
+  }
+  if (!parsed || typeof parsed !== "object") return empty;
+  const body = parsed as { cards?: unknown; older?: unknown };
+  const cards: PapercutPageCard[] = [];
+  if (Array.isArray(body.cards)) {
+    for (const item of body.cards) {
+      if (!item || typeof item !== "object") continue;
+      const card = item as {
+        slug?: unknown;
+        status?: unknown;
+        title?: unknown;
+        updated_at?: unknown;
+      };
+      if (typeof card.slug !== "string" || card.slug.length === 0) continue;
+      cards.push({
+        slug: card.slug,
+        status: typeof card.status === "string" ? card.status : "",
+        title: typeof card.title === "string" ? card.title : "",
+        updated_at: typeof card.updated_at === "string" ? card.updated_at : "",
+      });
+    }
+  }
+  return {
+    cards,
+    older: typeof body.older === "string" ? body.older : "",
+  };
+}
+
+function pageSummaries(cards: readonly PapercutPageCard[]): SnapshotSummary[] {
+  return cards.map((card) => ({
+    slug: card.slug,
+    title: card.title,
+    status: card.status,
+    tags: [],
+    created_at: "",
+    updated_at: card.updated_at,
+  }));
+}
+
+async function productRecordsOnPage(
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  cfg: Config,
+  slugs: readonly string[],
+  hydrate: boolean,
+): Promise<FbrainRecord[]> {
+  if (slugs.length === 0) return [];
+  const schemaHash = schemaHashFor(PAPERCUT, cfg);
+  const found = await findBySlugs(node, PAPERCUT, schemaHash, slugs);
+  const out: FbrainRecord[] = [];
+  for (const slug of slugs) {
+    const row = found.get(slug) ?? null;
+    if (row === null) continue;
+    if (hydrate && parseSpillMarker(row.body)) {
+      out.push(await hydrateRecord(node, cfg, PAPERCUT, row));
+      continue;
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+function pageMethod(base: string, hash: string, older: string): string {
+  const sample = older.length > 0 ? ` sample ${older}` : "";
+  return `${base}; hash ${hash}; range ${HEAD_RANGE}${sample}`;
 }
 
 export async function papercutFileCmd(
@@ -729,41 +822,17 @@ export function buildCensus(
   );
 }
 
-// Every count prints its method. This is a rule the corpus paid for: an
-// instrument that reports a number without saying how it got it is how a
-// 44.5% win got reported as a 2.2% regression, and how a truncated
-// enumeration got copied into durable memory as a fact.
-//
-// `buildCensus` reads exactly two fields off each record: `component` and
-// `status`. Both are written only by verbs that go through the resident write
-// plan (`papercut file`, `papercut close`, `put`, `status`), and that plan
-// patches this index in the same write. So the snapshot cannot lag on either
-// one, and the census does not need a point read to be correct. Measured on
-// the primary over all 2230 common open rows on 2026-09-04, snapshot against
-// point read: `component` and `status` disagreed on ZERO rows, while
-// `updated_at` disagreed on 1044 (46.8%) and `tags` on 5 — the two fields
-// `brain append` and `brain tag` used to write without patching the index, and
-// the two fields the census never reads.
-//
-// The point read remains available as `--point-read`, because it is the only
-// reading that can catch a record whose status moved WITHOUT this index
-// following. That is a repair-detection check, not a counting method, and it
-// costs one node request per row: 2977 requests and 141.8s against 3.3s for
-// the same ledger on the same primary. Charging every caller of `census` that
-// price to run an index audit made the ledger's own sizing instrument more
-// expensive than the thing it sizes — `Papercut` is a top-five lifetime
-// consumer on the node — so the audit is opt-in and the count is not.
+// The count names its read. The page carries slug, status, title, and updated_at.
 export const CENSUS_METHOD =
-  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
-  "component and status read from the index payload snapshot, which the resident write plan " +
-  "patches on every write of either field (no point reads); " +
-  "run --point-read to re-read every record and catch a status the index did not follow; " +
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "counts from the cards on that page, the page does not carry component, " +
+  "run --point-read to read those slugs from the product records; " +
   "live = open+partial+fixed";
 
-/** The audit reading: every record point-read and re-checked against its partition. */
+/** The same page, then the product records for the slugs on it. */
 export const CENSUS_METHOD_POINT_READ =
-  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
-  "every record point-read and re-checked against its partition (--point-read); " +
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "then the product records for the slugs on that page (--point-read); " +
   "live = open+partial+fixed";
 
 /**
@@ -777,18 +846,26 @@ export async function papercutCensusCmd(
   opts: PapercutCensusOptions,
 ): Promise<void> {
   const print = resolvePrintSink(opts);
-  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  // The count is served from the index snapshot unless the caller asks for the
-  // audit reading. `opts.fast` stays accepted so existing callers that opted
-  // in to the snapshot keep working; it now names the default.
   const pointRead = opts.pointRead === true;
-  const method = censusMethod(pointRead);
-  const records = await readPapercutsByStatus(node, opts.cfg, undefined, {
-    fast: !pointRead,
-    // The census prints two fields. A snapshot that carries only a head of
-    // some other field (the body) still answers it.
-    needFields: ["component", "status"],
-  });
+  if (opts.component && !pointRead) {
+    throw new FbrainError({
+      code: "papercut_census_page_field",
+      message: "The list page does not carry component.",
+      hint: "Pass --point-read to read component from the product records on the page.",
+    });
+  }
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const hash = papercutPageHash();
+  const page = await readPapercutPage(node, opts.cfg, hash, opts.verbose);
+  const records = pointRead
+    ? await productRecordsOnPage(
+        node,
+        opts.cfg,
+        page.cards.map((card) => card.slug),
+        false,
+      )
+    : pageSummaries(page.cards);
+  const method = pageMethod(censusMethod(pointRead), hash, page.older);
   const rows = buildCensus(records, opts.component);
 
   if (opts.json) {
@@ -917,24 +994,6 @@ export type PapercutListRow = {
    */
   closes_when?: ClosesWhenClaim;
 };
-
-/** The record fields one `papercut list` row prints. The body is not one of them. */
-const PAPERCUT_LIST_ROW_FIELDS: readonly string[] = [
-  "slug",
-  "title",
-  "status",
-  "component",
-  "severity",
-  "kind",
-  "repo",
-  "fixed_by",
-  "verified_by",
-  "duplicate_of",
-  "symptom_hash",
-  "tags",
-  "created_at",
-  "updated_at",
-];
 
 function str(record: { [field: string]: unknown }, field: string): string {
   const v = record[field];
@@ -1256,51 +1315,15 @@ export function buildPapercutList(
 // dropped its `<component>` positional, so the promise that the filter was
 // actually applied is the load-bearing half of the line.
 export const LIST_METHOD =
-  "method: status-keyed papercut index (same read as `papercut census`), " +
-  "every record point-read and re-checked against its partition (--point-read), " +
-  "FILTERS, every matching row returned, oldest-updated first";
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "then the product records for the slugs on that page (--point-read), " +
+  "FILTERS, oldest updated_at first";
 
-/**
- * The default listing, served from the snapshot the index already carries.
- *
- * `census` flipped to this reading on 2026-09-04 and `list` deliberately did
- * not, on one measured objection: `list` is ordered oldest-updated-first
- * because the reconcile loop consumes it in that order, and `updated_at` was
- * stale on 1044 of 2230 rows (46.8%) — it was the one field `brain append` and
- * `brain tag` wrote without patching this index.
- *
- * Those two verbs patch the index now, and the objection was re-measured on
- * the primary 2026-09-06 rather than assumed to still hold. Two readings, one
- * unfiltered pair and one controlled sandwich (fast, point-read, fast, so a
- * row written mid-window is excluded rather than counted as lag):
- *
- * | reading | rows | node requests | node service time |
- * |---|---|---|---|
- * | point-read, unfiltered | 3388 | 3404 | 2743.3s (199.4s wall) |
- * | snapshot, unfiltered   | 3389 |   10 |   21.7s (21.9s wall)  |
- * | point-read, --severity p0 | 274 | 290 | 369.8s |
- * | snapshot,   --severity p0 | 274 |  10 |  32.1s |
- *
- * Agreement, snapshot against point read, on the 273 of 274 sandwich rows that
- * did not change during the window: every stored field agreed — status,
- * severity, kind, component, repo, fixed_by, verified_by, duplicate_of, title,
- * tags, created_at, symptom_hash — and `updated_at` disagreed on ONE row
- * (0.37%, against 46.8% two days earlier). On the unfiltered pair, 2 of 3388
- * rows carried a snapshot `updated_at` older than the point read, both last
- * written 2026-09-04, i.e. residue from before the patch rather than new drift.
- *
- * So the ordering objection now costs the reconcile loop at most a couple of
- * positions, and the reading it was protecting cost 340x the node requests of
- * the one it rejected. `--point-read` keeps the audit reading, which is still
- * the only one that catches a header the index did not follow.
- */
 export const LIST_METHOD_FAST =
-  "method: status-keyed papercut index (same read as `papercut census`), " +
-  "records read from the index payload snapshot, NOT point-read, " +
-  "FILTERS, every matching row returned, " +
-  "ordered by a possibly-stale updated_at — the header fields are current, " +
-  "updated_at and tags can lag a write made before this index was last rebuilt; " +
-  "run --point-read to re-read every record and catch a header the index did not follow";
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "same page as papercut census, cards on that page, " +
+  "the page carries slug, status, title, and updated_at, " +
+  "FILTERS, oldest updated_at on the card first";
 
 // The old line said "component/status filters applied" as a fixed string, and
 // that was accurate only for as long as those were the only two filters the
@@ -1370,9 +1393,8 @@ export function listMethod(
 // consumer that reads this as the hydrated ledger would treat a missing field
 // as an empty one — the exact defect the hydrated row type exists to prevent.
 export const LIST_INDEX_ONLY_METHOD =
-  "method: status-keyed papercut index, index-only projection (slug + status partition; " +
-  "records not hydrated, status not re-verified per record, no component filter), " +
-  "status filter applied, every matching row returned, slug order";
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "slug and status from the card, product records not read, slug order";
 
 /**
  * What `--body-resolved` did, appended to whichever method line applies.
@@ -1461,109 +1483,75 @@ export async function papercutListCmd(
   // this reader cannot serve is a usage error, and it should not need a
   // reachable node to say so.
   const bodyResolved = opts.bodyResolved === true;
-  // Refuse rather than silently degrade, the same way `--index-only` refuses a
-  // filter it cannot serve. `--fast` CAN reach a body — `psi_payload` is a
-  // snapshot of the whole record — which is exactly why this has to be an
-  // explicit refusal instead of an absence: the snapshot lags `brain append`
-  // for any row written before appends began patching this index, and an
-  // append is precisely the write that puts a closing block into a body. The
-  // rows a stale snapshot would drop are the newest and most interesting ones,
-  // and dropping them is silent.
   if (bodyResolved && opts.fast === true) {
     throw new FbrainError({
       code: "papercut_list_body_resolved_needs_point_read",
-      message:
-        "`--body-resolved` matches the record body, and `--fast` serves bodies from the index payload snapshot, which lags exactly the appends this filter looks for.",
-      hint: "Drop --fast. A row whose closing block was appended after the last index rebuild would be missed, and missing it is silent.",
+      message: "`--body-resolved` reads the product body. `--fast` reads the page only.",
+      hint: "Drop --fast.",
     });
   }
   if (bodyResolved && opts.indexOnly === true) {
     throw new FbrainError({
       code: "papercut_list_index_only_no_body",
-      message:
-        "`--index-only` reads the status-keyed index without hydrating records, and `body` is a record field that projection does not carry.",
-      hint: "Drop --index-only to get the hydrated ledger that --body-resolved can filter.",
+      message: "`--index-only` reads the card. The card does not carry body.",
+      hint: "Drop --index-only.",
     });
   }
   const print = resolvePrintSink(opts);
-  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const status = opts.status ? ensurePapercutStatus(opts.status) : undefined;
+  const hash = papercutPageHash(status);
   if (opts.indexOnly) {
-    // One keyed partition read, and not even a payload parse: this projection
-    // is the slug/status pair a queue consumer re-verifies on its own point
-    // get.
-    // `--index-only` reads slug + status partition and nothing else, so every
-    // other filter names a record field that is not present to filter on.
-    // Refusing is the point: the previous release refused `component` here and
-    // silently ignored the rest, which is the same accepted-and-dropped shape
-    // this change exists to remove.
     const unservable = PAPERCUT_LIST_FILTERS.filter(
       (f) => f !== "status" && opts[f] !== undefined,
     );
     if (unservable.length > 0) {
       throw new FbrainError({
         code: "papercut_list_index_only_no_component",
-        message: `\`--index-only\` reads the status-keyed index without hydrating records, and ${unservable.join(", ")} ${unservable.length === 1 ? "is a record field" : "are record fields"} the index does not carry.`,
-        hint: "Drop --index-only to get the hydrated, filtered ledger, or drop the filter it cannot serve.",
+        message: `\`--index-only\` reads the card, and ${unservable.join(", ")} ${unservable.length === 1 ? "is" : "are"} not on that card.`,
+        hint: "Drop --index-only, or drop the filter.",
       });
     }
-    const rows = (
-      await readPapercutSlugsByStatus(node, opts.cfg, opts.status)
-    ).sort((a, b) => a.slug.localeCompare(b.slug));
-    if (opts.json) {
-      print(
-        JSON.stringify({
-          rows,
-          total: rows.length,
-          method: LIST_INDEX_ONLY_METHOD,
-        }),
-      );
-      return;
-    }
-    for (const r of rows) print(`${r.status.padEnd(9)} ${r.slug}`);
-    print(`${rows.length} row(s)`);
-    print(LIST_INDEX_ONLY_METHOD);
-    return;
   }
-  // Read one status partition when the caller named one; the whole ledger
-  // otherwise. `readPapercutsByStatus` is the same complete reader `census`
-  // uses, so list and census are two views of ONE read and cannot disagree.
-  // See LIST_METHOD_FAST for why the snapshot is the default reading.
   const fast = listReadsSnapshot({ pointRead: opts.pointRead, bodyResolved });
   const filters: PapercutListFilters = {};
   for (const f of PAPERCUT_LIST_FILTERS) {
     const v = opts[f];
     if (v !== undefined) Object.assign(filters, { [f]: v });
   }
-  // Narrow on the record-field filters, then filter AGAIN on what came back.
-  // The second pass is what makes a wrongly-including snapshot harmless: it
-  // costs one point read, not a wrong row.
+  if (status) filters.status = status;
   const narrowBy = narrowingFilters(filters);
-  const stats = newPapercutReadStats();
-  const records = await readPapercutsByStatus(node, opts.cfg, opts.status, {
-    fast,
-    // `list` prints the header fields of each row. The index snapshot carries
-    // every one of them whole and cuts only the body, which `list` does not
-    // print. If a snapshot ever lacked one of these fields it would be
-    // point-read, never printed as a head.
-    needFields: PAPERCUT_LIST_ROW_FIELDS,
-    narrow: narrowBy
-      ? (record) => matchesPapercutFilters(record, narrowBy)
-      : undefined,
-    stats,
-  });
-  const baseMethod = listMethod(
-    fast,
-    filters,
-    narrowBy
-      ? {
-          fields: Object.keys(narrowBy),
-          rows: stats.rows,
-          pointReads: stats.pointReads,
-        }
-      : undefined,
-  );
-  // `Closes-when:` children are point-read, in either ledger, only under
-  // --body-resolved: that is the reading that already paid for every body.
+  if (!opts.indexOnly && fast && narrowBy) {
+    throw new FbrainError({
+      code: "papercut_list_page_field",
+      message: "The list page does not carry component, severity, kind, repo, or tags.",
+      hint: "Pass --point-read to read those fields from the product records on the page.",
+    });
+  }
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const page = await readPapercutPage(node, opts.cfg, hash, opts.verbose);
+  if (opts.indexOnly) {
+    const rows = page.cards
+      .map((card) => ({ slug: card.slug, status: card.status }))
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+    const method = pageMethod(LIST_INDEX_ONLY_METHOD, hash, page.older);
+    if (opts.json) {
+      print(JSON.stringify({ rows, total: rows.length, method }));
+      return;
+    }
+    for (const r of rows) print(`${r.status.padEnd(9)} ${r.slug}`);
+    print(`${rows.length} row(s)`);
+    print(method);
+    return;
+  }
+  const records = fast
+    ? pageSummaries(page.cards)
+    : await productRecordsOnPage(
+        node,
+        opts.cfg,
+        page.cards.map((card) => card.slug),
+        bodyResolved,
+      );
+  const baseMethod = pageMethod(listMethod(fast, filters), hash, page.older);
   const childStatus = bodyResolved
     ? await readClosesWhenChildren(node, opts.cfg, records.map(wholeRecordOrThrow))
     : new Map<string, string>();

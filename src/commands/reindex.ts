@@ -52,11 +52,7 @@ import {
   writeChildTaskIndex,
   type ChildTaskIndexCensus,
 } from "../child-task-index.ts";
-import {
-  censusPapercutStatusIndex,
-  writePapercutStatusIndex,
-  type PapercutStatusIndexCensus,
-} from "../papercut-status-index.ts";
+import { type PapercutStatusIndexCensus } from "../papercut-status-index.ts";
 import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
@@ -586,96 +582,19 @@ async function rebuildChildTaskIndex(
   return result;
 }
 
-/** Rebuild the PapercutStatusIndex (status x slug) from papercut SOT. */
 async function rebuildPapercutStatusIndex(
-  opts: ReindexOptions,
-  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  _opts: ReindexOptions,
+  _node: ReturnType<typeof newWriteClientFromCfg>["node"],
   print: (line: string) => void,
-  printErr: (line: string) => void,
+  _printErr: (line: string) => void,
 ): Promise<ReindexResult> {
-  const result: ReindexResult = {
+  print(
+    "papercut-status-index: this command does not write PapercutStatusIndex. papercut list reads the list page.",
+  );
+  return {
     scanned: 0,
     reindexed: 0,
     skippedTombstone: 0,
     byType: {},
   };
-  let schemaHash: string;
-  try {
-    schemaHash = schemaHashFor("papercut", opts.cfg);
-  } catch {
-    print(
-      missingSchemaHashReadNote(
-        ["papercut"],
-        "skipping papercut-status-index rebuild",
-      ),
-    );
-    return result;
-  }
-  const all = await listRecordsAdminScan(node, "papercut", schemaHash, {
-    includeTombstones: true,
-    // This scan issues one point read per live papercut (thousands on the
-    // real corpus) with no other caller-visible output, so a legitimate
-    // multi-minute run under load reads identically to a hang. Report
-    // progress to stderr so a caller watching the command's own output can
-    // tell the two apart without reading source.
-    onProgress: (scanned) => printErr(`papercut-status-index: scanned ${scanned} record(s)...`),
-  });
-  const live = all.filter((record) => {
-    if (isTombstoned(record)) {
-      result.skippedTombstone++;
-      return false;
-    }
-    return true;
-  });
-  result.scanned = all.length;
-  result.byType.papercut = {
-    reindexed: live.length,
-    skippedTombstone: result.skippedTombstone,
-  };
-
-  const before = await censusPapercutStatusIndex(node, opts.cfg, live);
-  if (before) {
-    result.papercutStatusIndexCensus = before;
-    // `stale` is counted separately from `missing`/`extra` because it is a
-    // different failure: the row is in the right partition and its snapshot
-    // disagrees with the record. Printing only membership is how this index
-    // reported `complete` while 46.6% of its payloads were out of date.
-    const gap = before.complete
-      ? " complete"
-      : ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}` +
-        ` stale=${before.stalePayload.length}`;
-    print(
-      `papercut-status-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
-    );
-  } else {
-    print(
-      "papercut-status-index: entry schema unavailable — run `brain init` first",
-    );
-  }
-
-  if (opts.dryRun) {
-    result.reindexed = live.length;
-    print(
-      `dry-run: would rebuild papercut-status-index for ${live.length} papercut(s)` +
-        (before
-          ? before.complete
-            ? " — already complete"
-            : " — incomplete vs SOT"
-          : ""),
-    );
-    return result;
-  }
-
-  await writePapercutStatusIndex(node, opts.cfg, live);
-  result.reindexed = live.length;
-  const after = await censusPapercutStatusIndex(node, opts.cfg, live);
-  if (after) {
-    result.papercutStatusIndexCensus = after;
-    print(
-      `papercut-status-index: rebuilt — indexed=${after.indexed} sot=${after.sot}` +
-        ` stale=${after.stalePayload.length} complete=${after.complete}`,
-    );
-  }
-  print(`rebuilt papercut-status-index for ${live.length} papercut(s)`);
-  return result;
 }

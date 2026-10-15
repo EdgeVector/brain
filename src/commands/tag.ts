@@ -16,7 +16,6 @@ import {
   schemaHashFor,
   updateFieldsFrom,
   writeRecordFields,
-  type FbrainRecord,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 
@@ -110,7 +109,7 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
       updated_at: now,
     });
     // The read returns the full text. Store the sealed head, not that text.
-    const sealed = await writeRecordFields({
+    await writeRecordFields({
       node,
       cfg: opts.cfg,
       type: only.type,
@@ -119,23 +118,6 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
       fields,
       ...(opts.verbose ? { verbose: opts.verbose } : {}),
     });
-    const storedRecord = sealed.fields as FbrainRecord;
-    // Same reason as `brain append`: the status-keyed papercut index stores a
-    // snapshot of the whole record, so a write that skips it leaves that
-    // snapshot stale. Measured on the primary 2026-09-03: 5 open rows carried
-    // stale `tags` for exactly this reason.
-    if (only.type === "papercut") {
-      const { patchPapercutStatusIndex } = await import(
-        "../papercut-status-index.ts"
-      );
-      await patchPapercutStatusIndex(
-        node,
-        opts.cfg,
-        slug,
-        storedRecord,
-        only.record.status,
-      );
-    }
   }
 
   const parts = [
