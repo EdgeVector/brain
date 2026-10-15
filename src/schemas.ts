@@ -1624,6 +1624,7 @@ export const BRAIN_TYPE_DIRECTORY_SCHEMA_KEY = "__braintypedirectory__";
 export const BRAIN_LIST_COUNT_SCHEMA_KEY = "__brainlistcount__";
 export const BRAIN_EDGE_SET_SCHEMA_KEY = "__brainedgeset__";
 export const BRAIN_TOKEN_SET_SCHEMA_KEY = "__braintokenset__";
+export const BRAIN_BACKFILL_CURSOR_SCHEMA_KEY = "__brainbackfillcursor__";
 
 function supportSchema(opts: {
   name: string;
@@ -1802,6 +1803,31 @@ export const brainTokenSetSchema = supportSchema({
   ],
 });
 
+export const brainBackfillCursorSchema = supportSchema({
+  name: "BrainBackfillCursor",
+  purpose:
+    "One cursor for a named-slug list backfill. The atom stores the last source slug and the count added for that slug",
+  schemaType: "HashRange",
+  hashField: "bfc_h",
+  rangeField: "bfc_r",
+  fields: [
+    {
+      name: "bfc_h",
+      description:
+        "BrainBackfillCursor hash token: bf# plus the target list hash and the source type",
+    },
+    {
+      name: "bfc_r",
+      description: "BrainBackfillCursor range token: the fixed marker __cursor__",
+    },
+    {
+      name: "bfc_state",
+      description:
+        "BrainBackfillCursor JSON atom with the last source slug and the count added for that slug",
+    },
+  ],
+});
+
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
 // entry binds a config-key (where `init` writes the canonical hash) to
 // the AddSchemaRequest. One entry per RecordType — no legacy alias.
@@ -1951,6 +1977,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: brainTokenSetSchema,
     types: [],
     extraKeys: [BRAIN_TOKEN_SET_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_BACKFILL_CURSOR_SCHEMA_KEY,
+    schema: brainBackfillCursorSchema,
+    types: [],
+    extraKeys: [BRAIN_BACKFILL_CURSOR_SCHEMA_KEY],
   },
 ];
 

@@ -137,6 +137,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "doctor_mode_conflict",
   "doctor_flag_requires_usage",
   "migrate_mode_conflict",
+  "reindex_refused",
   "migrate_flag_requires_add_field",
   // Bad invocation surfaced inside the command modules (put / new / raw):
   // missing or contradictory slug/type, a misapplied --design, an
@@ -882,70 +883,25 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges] [--max-records N] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
+  reindex: `brain reindex --target <hash> --source-hash <type> --slug <slug> [--slug <slug> ...]
 
-Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
-present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
-purged on tombstone or re-put.
+One call names one target hash, one source type, and at most 25 slugs.
+It reads those RecordListEntry keys and writes one batch.
+It prints wrote N and the cursor key. It does not loop.
 
-NOTE: fold_db's index is append-only. Re-issuing the update does NOT
-replace the prior embedding in place — it APPENDS a fresh one and the
-previous entry persists as stale. So reindex does NOT de-duplicate the
-index and does NOT reduce pollution (it adds one stale entry per record).
-It is not a fix for high \`doctor --freshness\` pollution; that purge is
-upstream fold_db work (G3d/G3e), not available at the fbrain layer.
-
-  --type            narrow to one of: ${RECORD_TYPE_LIST}
-                    (default: all ${RECORD_TYPE_COUNT})
-  --dry-run         list records that would be reindexed; no writes
-  --tags            rebuild the tag secondary index from a full corpus scan.
-                    Repairs records written before the index existed or after
-                    a best-effort index update failed, and members an old
-                    binary wrote to the legacy layout. Needs the TagMembership
-                    schema (\`brain init\` registers it; reindex never does).
-                    ADMIN operation for a quiet moment, one device at a time:
-                    it deletes rows no record backs, so a member another
-                    device adds meanwhile can be deleted. Standalone mode:
-                    skips the embedding refresh.
-  --backlinks       rebuild the backlink secondary index from a full corpus scan.
-                    Repairs records written before the index existed or after
-                    a best-effort backlink update failed. Same schema need and
-                    same admin-operation rule as --tags. Standalone mode:
-                    skips the embedding refresh.
-  --graph-edges     rebuild typed graph edges for a bounded slice of the keyed
-                    Brain list index. Preserves frontmatter-origin edges that
-                    cannot be reconstructed from stored bodies and prints the
-                    known enumeration-under-report caveat. Standalone mode.
-  --max-records N   cap --graph-edges work (default: 100; positive integer).
-  --bm25            pre-warm the client-side BM25 search cache \`ask\`/\`search\`
-                    read on every call, from a full corpus scan. Read-only
-                    (no mutation, no --type narrowing — the cache is keyed by
-                    the same type set ask/search request). Run this after a
-                    bulk edit so the next \`ask\` hits a warm cache instead of
-                    paying for (and visibly noting) a live rebuild.
-                    Standalone mode: skips the embedding refresh.
-  --list-index      rebuild the RecordListEntry keyed list partition from an
-                    admin SOT scan of each product schema (and re-stamp the
-                    completeness marker). Repairs persistent under-report when
-                    dual-write patches failed while the marker stayed set —
-                    the case where \`brain get\` still resolves rows that
-                    \`brain list\` / \`brain search\` miss. Dry-run censuses
-                    listed-set vs SOT without writing. Standalone mode: skips
-                    the embedding refresh.
-  --child-task-index rebuild the design->child-task keyed index (see
-                    src/child-task-index.ts) from an admin SOT scan of the
-                    task schema (and re-stamp the completeness marker).
-                    Repairs the same class of under-report as --list-index,
-                    one layer up: \`brain get <design>\` / \`brain delete
-                    <design>\` resolve child tasks through this index once
-                    it is registered and complete. Dry-run censuses the
-                    indexed set vs SOT without writing. Standalone mode:
-                    skips the embedding refresh.
+  --target          list hash. all is valid. A type, type#status, tag#, link#,
+                    child#, symptom, symptom#, keyword, or kw# are valid.
+  --source-hash     one record type. all is refused.
+  --slug            repeat up to 25. A call with no slug is refused.
+  --tags            the old payload write stopped. No scan.
+  --backlinks       the old payload write stopped. No scan.
+  --child-task-index the old payload write stopped. No scan.
   --papercut-status-index does not write PapercutStatusIndex.
-                    papercut list and papercut census read the list page.
+  --bm25            refused.
+  --list-index      refused. This command does not walk every record.
+  --graph-edges     refused. This command does not walk every record.
 
-Run with the global --verbose to print per-record outcome
-(kept | reindexed | skipped-tombstone).`,
+Run with the global --verbose to print node calls.`,
   migrate: `fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
 fbrain migrate --status
 fbrain migrate --resume <manifest-id>
@@ -1407,6 +1363,9 @@ const GRAPH_OPTIONS = {
 } as const;
 const REINDEX_OPTIONS = {
   type: { type: "string" },
+  target: { type: "string" },
+  "source-hash": { type: "string" },
+  slug: { type: "string", multiple: true },
   "dry-run": { type: "boolean", default: false },
   tags: { type: "boolean", default: false },
   backlinks: { type: "boolean", default: false },
@@ -4057,6 +4016,14 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
       });
     }
     rOpts.graphMaxRecords = max;
+  }
+  if (typeof values.target === "string") rOpts.target = values.target;
+  if (typeof values["source-hash"] === "string") rOpts.sourceHash = values["source-hash"];
+  if (values.slug !== undefined) {
+    const raw = values.slug;
+    rOpts.slugs = (Array.isArray(raw) ? raw : [raw]).filter(
+      (slug): slug is string => typeof slug === "string" && slug.length > 0,
+    );
   }
   await reindexCmd(rOpts);
   return 0;
