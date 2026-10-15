@@ -18,6 +18,7 @@ export const TAG_CAP = 2;
 export const LINK_CAP = 2;
 export const EDGE_CAP = 16;
 export const POSTING_CAP = 8;
+export const RANKER_PAGE = 25;
 export const LIST_PAGE = 20;
 export const CHILD_PAGE = 20;
 export const BACKLINK_PAGE = 50;
@@ -49,7 +50,8 @@ export type SideProjection =
   | "list-locator"
   | "directory"
   | "edge-set"
-  | "token-set";
+  | "token-set"
+  | "keyword";
 
 export type SideOp = {
   mutationType: "create" | "update" | "delete";
@@ -136,14 +138,20 @@ function textField(record: FbrainRecord, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+export type PostingToken = { token: string; weight: number };
+
+const TITLE_WEIGHT = 3;
+const BODY_WEIGHT = 1;
+
 export function postingTokens(
   title: string,
   body: string,
-): { tokens: string[]; dropped: boolean } {
+): { tokens: PostingToken[]; dropped: boolean } {
   const marker = parseSpillMarker(body);
   const head = marker ? marker.head : utf8Head(body, SPILL_HEAD_BYTES);
+  const titleTokens = new Set(tokenize(title));
   const seen = new Set<string>();
-  const tokens: string[] = [];
+  const tokens: PostingToken[] = [];
   let dropped = false;
   for (const token of [...tokenize(title), ...tokenize(head)]) {
     if (seen.has(token)) continue;
@@ -152,9 +160,74 @@ export function postingTokens(
       dropped = true;
       break;
     }
-    tokens.push(token);
+    tokens.push({ token, weight: titleTokens.has(token) ? TITLE_WEIGHT : BODY_WEIGHT });
   }
   return { tokens, dropped };
+}
+
+type KeywordCard = { type: string; slug: string; weight: number };
+
+function keywordHash(token: string): string {
+  return `kw#${token}`;
+}
+
+function sortKeyword(cards: KeywordCard[]): KeywordCard[] {
+  return [...cards].sort((a, b) => {
+    if (a.weight !== b.weight) return b.weight - a.weight;
+    if (a.slug < b.slug) return -1;
+    if (a.slug > b.slug) return 1;
+    if (a.type < b.type) return -1;
+    if (a.type > b.type) return 1;
+    return 0;
+  });
+}
+
+function parseKeywordCards(raw: string | null): KeywordCard[] {
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw) as { cards?: unknown };
+    if (!Array.isArray(value.cards)) return [];
+    const cards: KeywordCard[] = [];
+    for (const item of value.cards) {
+      if (!item || typeof item !== "object") continue;
+      const card = item as Record<string, unknown>;
+      if (typeof card.type !== "string" || card.type.length === 0) continue;
+      if (typeof card.slug !== "string" || card.slug.length === 0) continue;
+      if (typeof card.weight !== "number" || !Number.isFinite(card.weight)) continue;
+      cards.push({ type: card.type, slug: card.slug, weight: card.weight });
+    }
+    return cards;
+  } catch {
+    return [];
+  }
+}
+
+function renderKeyword(cards: KeywordCard[]): string | null {
+  const json = JSON.stringify({
+    cards: cards.map((card) => ({
+      type: card.type,
+      slug: card.slug,
+      weight: card.weight,
+    })),
+  });
+  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return null;
+  return json;
+}
+
+function placeKeyword(
+  cards: KeywordCard[],
+  next: KeywordCard,
+): { cards: KeywordCard[]; dropped: boolean } {
+  const rest = cards.filter((card) => !(card.type === next.type && card.slug === next.slug));
+  const existed = rest.length !== cards.length;
+  if (existed || rest.length < RANKER_PAGE) {
+    return { cards: sortKeyword([...rest, next]), dropped: false };
+  }
+  const sorted = sortKeyword(rest);
+  const lowest = sorted[sorted.length - 1];
+  if (!lowest || next.weight <= lowest.weight) return { cards, dropped: true };
+  sorted[sorted.length - 1] = next;
+  return { cards: sortKeyword(sorted), dropped: false };
 }
 
 function uniqueDests(ids: readonly string[]): string[] {
@@ -812,10 +885,12 @@ export async function planRecordListSide(opts: {
     });
   }
 
+  const posted = opts.next
+    ? postingTokens(opts.next.title, opts.next.body)
+    : { tokens: [] as PostingToken[], dropped: false };
   if (opts.next && tokenSchema.length > 0) {
-    const posted = postingTokens(opts.next.title, opts.next.body);
     if (posted.dropped) notePartial(details, "token cap");
-    const json = JSON.stringify(posted.tokens);
+    const json = JSON.stringify(posted.tokens.map((item) => item.token));
     if (!tokenExisted || storedTokenJson !== json) {
       ops.push({
         mutationType: tokenExisted ? "update" : "create",
@@ -839,6 +914,75 @@ export async function planRecordListSide(opts: {
       fields: {},
       projection: "token-set",
     });
+  }
+
+  if (pageSchema.length > 0 && slug.length > 0) {
+    const oldNames = parseStringList(storedTokenJson).slice(0, POSTING_CAP);
+    const weightByToken = new Map(posted.tokens.map((item) => [item.token, item.weight]));
+    const names: string[] = [];
+    const seenTokens = new Set<string>();
+    for (const token of [...oldNames, ...posted.tokens.map((item) => item.token)]) {
+      if (token.length === 0 || seenTokens.has(token)) continue;
+      seenTokens.add(token);
+      names.push(token);
+    }
+    if (names.length > 0) {
+      const rows = await readExact(
+        opts.node,
+        pageSchema,
+        ["blp_h", "blp_r", "blp_page"],
+        names.map((token) => ({ hash: keywordHash(token), range: HEAD_RANGE })),
+      );
+      const byHash = new Map<string, string>();
+      for (const row of rows) {
+        const hash = rowHash(row) || rowField(row, "blp_h") || "";
+        if (hash.length === 0) continue;
+        byHash.set(hash, rowField(row, "blp_page") ?? "");
+      }
+      for (const token of names) {
+        const hash = keywordHash(token);
+        const prior = byHash.get(hash);
+        const existed = prior !== undefined;
+        const cards = parseKeywordCards(prior ?? null);
+        const weight = weightByToken.get(token);
+        let nextCards: KeywordCard[];
+        if (weight === undefined) {
+          nextCards = cards.filter((card) => !(card.type === opts.type && card.slug === slug));
+          if (nextCards.length === cards.length) continue;
+        } else {
+          const placed = placeKeyword(cards, { type: opts.type, slug, weight });
+          if (placed.dropped) notePartial(details, "keyword page");
+          if (placed.dropped) continue;
+          nextCards = placed.cards;
+        }
+        if (nextCards.length === 0) {
+          if (!existed) continue;
+          ops.push({
+            mutationType: "delete",
+            schemaHash: pageSchema,
+            keyHash: hash,
+            keyRange: HEAD_RANGE,
+            fields: {},
+            projection: "keyword",
+          });
+          continue;
+        }
+        const json = renderKeyword(nextCards);
+        if (json === null) {
+          notePartial(details, "keyword page");
+          continue;
+        }
+        if (existed && prior === json) continue;
+        ops.push({
+          mutationType: existed ? "update" : "create",
+          schemaHash: pageSchema,
+          keyHash: hash,
+          keyRange: HEAD_RANGE,
+          fields: { blp_h: hash, blp_r: HEAD_RANGE, blp_page: json },
+          projection: "keyword",
+        });
+      }
+    }
   }
 
   return {
@@ -1278,4 +1422,43 @@ export async function adjustListCounts(
     if (!applied) unconfirmed = true;
   }
   return unconfirmed ? "unconfirmed" : "ok";
+}
+
+export type KeywordRankHit = { type: string; slug: string; weight: number };
+
+export async function rankKeywordQuery(opts: {
+  node: NodeClient;
+  cfg: SchemaCfg;
+  query: string;
+  verbose?: (line: string) => void;
+}): Promise<KeywordRankHit[]> {
+  const pageSchema = schemaOf(opts.cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
+  if (pageSchema.length === 0) return [];
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const token of tokenize(opts.query)) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    if (tokens.length >= POSTING_CAP) break;
+    tokens.push(token);
+  }
+  if (tokens.length === 0) return [];
+  opts.verbose?.(`HashRangeKeys keyword keys=${tokens.length} field=blp_page`);
+  const rows = await readExact(
+    opts.node,
+    pageSchema,
+    ["blp_page"],
+    tokens.map((token) => ({ hash: keywordHash(token), range: HEAD_RANGE })),
+  );
+  const best = new Map<string, KeywordRankHit>();
+  for (const row of rows) {
+    for (const card of parseKeywordCards(rowField(row, "blp_page"))) {
+      const id = `${card.type}#${card.slug}`;
+      const prior = best.get(id);
+      if (!prior || card.weight > prior.weight) {
+        best.set(id, { type: card.type, slug: card.slug, weight: card.weight });
+      }
+    }
+  }
+  return sortKeyword([...best.values()]);
 }

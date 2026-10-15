@@ -23,7 +23,6 @@ import {
   normalizeGraphEdgeType,
   type GraphEdge,
 } from "./graph-edge.ts";
-import { planLifecycleMembershipOps } from "./lifecycle-index.ts";
 import {
   adjustListCounts,
   commitHeadPages,
@@ -49,7 +48,8 @@ export type ProjectionKind =
   | "list-locator"
   | "directory"
   | "edge-set"
-  | "token-set";
+  | "token-set"
+  | "keyword";
 
 export type PlannedMutation = {
   mutationType: "create" | "update" | "delete";
@@ -327,16 +327,6 @@ export async function buildResidentWritePlan(opts: {
   if (graph.partial) noteIndexPartial(indexNotes, "edge cap");
   ops.push(...graph.ops);
 
-  for (const op of planLifecycleMembershipOps({
-    cfg: opts.cfg,
-    type: opts.type,
-    slug: opts.next.slug,
-    record: stored,
-    previous: opts.previous,
-    upsertType,
-  })) {
-    ops.push({ ...op, projection: "lifecycle" });
-  }
   ops.push(
     ...planChildTaskOps({
       cfg: opts.cfg,
@@ -483,20 +473,33 @@ export async function removeResidentListSide(opts: {
     nextEdges: [],
   });
   const notes = [...side.details];
-  let ops = side.ops;
-  if (ops.length > WRITE_BATCH_MAX) {
-    ops = ops.slice(0, WRITE_BATCH_MAX);
+  let rest = side.ops.filter((op) => op.projection !== "keyword");
+  let keyword = side.ops.filter((op) => op.projection === "keyword");
+  if (rest.length > WRITE_BATCH_MAX) {
+    rest = rest.slice(0, WRITE_BATCH_MAX);
+    noteIndexPartial(notes, "batch cap");
+  }
+  if (keyword.length > WRITE_BATCH_MAX) {
+    keyword = keyword.slice(0, WRITE_BATCH_MAX);
     noteIndexPartial(notes, "batch cap");
   }
   let primary = emptyBatchResult();
-  if (ops.length > 0) {
-    if (!opts.node.mutateBatch) {
-      noteIndexPartial(notes, "batch unavailable");
-    } else {
+  if (!opts.node.mutateBatch && (rest.length > 0 || keyword.length > 0)) {
+    noteIndexPartial(notes, "batch unavailable");
+  } else if (opts.node.mutateBatch) {
+    if (rest.length > 0) {
       try {
-        primary = await opts.node.mutateBatch(ops);
+        primary = await opts.node.mutateBatch(rest);
       } catch {
         noteIndexPartial(notes, "batch1 failed");
+      }
+    }
+    if (keyword.length > 0) {
+      try {
+        const second = await opts.node.mutateBatch(keyword);
+        if (rest.length === 0) primary = second;
+      } catch {
+        noteIndexPartial(notes, "batch2 failed");
       }
     }
   }
@@ -579,7 +582,7 @@ function wrapCommitError(
 }
 
 function isBatch2(op: PlannedMutation): boolean {
-  return op.projection === "lifecycle" || op.projection === "graph";
+  return op.projection === "keyword" || op.projection === "graph";
 }
 
 function splitResidentBatches(

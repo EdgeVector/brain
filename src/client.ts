@@ -359,24 +359,6 @@ export type SearchOptions = {
   localFallback?: boolean;
 };
 
-const LOCAL_SEARCH_FIELDS = [
-  "slug",
-  "title",
-  "body",
-  "status",
-  "tags",
-  "created_at",
-  "updated_at",
-];
-
-type LocalSearchDoc = {
-  schemaName: string;
-  key: { hash: string | null; range: string | null };
-  title: string;
-  body: string;
-  score: number;
-};
-
 export type RegisteredSchema = {
   name: string;
   descriptive_name: string;
@@ -1871,22 +1853,6 @@ export function newNodeClient(opts: {
           schemaTargets,
         );
       } catch (err) {
-        if (
-          err instanceof UnexpectedResponseError &&
-          err.status === 404 &&
-          searchOpts?.localFallback !== false
-        ) {
-          verbose(
-            "app search endpoint missing; falling back to local keyword search over SDK query",
-          );
-          return localSearchFallback(query, searchOpts, queryPageSdk, verbose);
-        }
-        if (searchOpts?.localFallback !== false && isSdkMissingAppSearch(err)) {
-          verbose(
-            "app search endpoint missing; falling back to local keyword search over SDK query",
-          );
-          return localSearchFallback(query, searchOpts, queryPageSdk, verbose);
-        }
         throw mapSdkDataError(err, url, "POST", "/api/app/search", socketPath);
       }
     },
@@ -1937,10 +1903,6 @@ function searchHitText(hit: SdkSearchHit): string {
   return value.length > 0 ? value : JSON.stringify(hit.fields);
 }
 
-function isSdkMissingAppSearch(err: unknown): boolean {
-  return err instanceof FbrainError && err.code === "node_http_404";
-}
-
 function fromSdkRows(rows: readonly SdkQueryRow[]): QueryRow[] {
   return rows.map((row) => ({
     fields: row.fields as Record<string, unknown>,
@@ -1959,110 +1921,8 @@ function sdkKeyToFbrainKey(
   return { hash: renderedKey.length > 0 ? renderedKey : null, range: null };
 }
 
-async function localSearchFallback(
-  query: string,
-  searchOpts: SearchOptions | undefined,
-  queryPage: (
-    schemaHash: string,
-    filter: SdkQueryFilter,
-    opts?: { allowFullScan?: boolean },
-  ) => Promise<SdkQueryResult>,
-  verbose: Verbose,
-): Promise<NativeIndexHit[]> {
-  const schemas = uniqueStrings(searchOpts?.schemas ?? []);
-  if (schemas.length === 0) {
-    verbose("local search fallback: no schema scope supplied; returning no hits");
-    return [];
-  }
-
-  const docs: LocalSearchDoc[] = [];
-  for (const schemaName of schemas) {
-    // Unfiltered page sample for local keyword fallback — admin full-scan header
-    // required (Mini refuses bare product scans; /api/app/search is preferred).
-    const page = await queryPage(
-      schemaName,
-      {
-        fields: LOCAL_SEARCH_FIELDS,
-        limit: QUERY_PAGE_SIZE,
-        offset: 0,
-      },
-      { allowFullScan: true },
-    );
-    for (const row of fromSdkRows(page.rows)) {
-      const fields = row.fields ?? {};
-      const title = stringValue(fields.title);
-      const bodyText = stringValue(fields.body);
-      if (stringValue(fields.status) === "deleted") continue;
-      const key = row.key ?? { hash: stringValue(fields.slug) || null, range: null };
-      if (!key.hash) continue;
-      const text = `${title}\n${bodyText}\n${arrayText(fields.tags)}`;
-      if (searchOpts?.exact && !text.toLowerCase().includes(query.toLowerCase())) {
-        continue;
-      }
-      const score = localTextScore(query, text);
-      if (score <= 0) continue;
-      docs.push({ schemaName, key, title, body: bodyText, score });
-    }
-  }
-
-  if (docs.length === 0) return [];
-  const topScore = Math.max(...docs.map((d) => d.score));
-  return docs
-    .map((d) => ({ ...d, score: topScore > 0 ? d.score / topScore : d.score }))
-    .filter((d) => searchOpts?.minScore === undefined || d.score >= searchOpts.minScore)
-    .sort(
-      (a, b) =>
-        b.score - a.score ||
-        `${a.schemaName}:${a.key.hash}`.localeCompare(`${b.schemaName}:${b.key.hash}`),
-    )
-    .slice(0, 50)
-    .map((d): NativeIndexHit => ({
-      schema_name: d.schemaName,
-      schema_display_name: null,
-      field: "body",
-      key_value: d.key,
-      value: `${d.title}\n${d.body}`.trim(),
-      metadata: {
-        score: d.score,
-        match_type: "local_keyword_fallback",
-      },
-    }));
-}
-
-function localTextScore(query: string, text: string): number {
-  const queryTerms = tokenizeForLocalSearch(query);
-  if (queryTerms.length === 0) return 0;
-  const haystack = tokenizeForLocalSearch(text);
-  if (haystack.length === 0) return 0;
-  const frequencies = new Map<string, number>();
-  for (const token of haystack) frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
-  let score = 0;
-  for (const term of new Set(queryTerms)) {
-    const count = frequencies.get(term) ?? 0;
-    if (count > 0) score += 1 + Math.log(count);
-  }
-  return score;
-}
-
-function tokenizeForLocalSearch(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/g)
-    .filter((s) => s.length >= 2);
-}
-
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values.filter((s) => typeof s === "string" && s.length > 0)));
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function arrayText(value: unknown): string {
-  return Array.isArray(value)
-    ? value.filter((v): v is string => typeof v === "string").join(" ")
-    : "";
 }
 
 // Thin convenience wrapper mirroring `newWriteClientFromCfg`: every plain

@@ -127,7 +127,7 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
   const verbose = opts.verbose ?? (() => {});
   if (process.env.LASTSEEK_DISABLE === "1") return null;
 
-  const args = ["query", opts.query, "--k", String(opts.k ?? 50)];
+  const args = ["query", opts.query, "--k", String(opts.k ?? 25)];
   for (const s of opts.schemas ?? []) args.push("--schema", s);
   if (opts.exact) args.push("--exact");
   if (opts.min_score !== undefined) {

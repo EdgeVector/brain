@@ -2,6 +2,7 @@ import type { NodeClient, QueryRow } from "./client.ts";
 import type { Config } from "./config.ts";
 import { normalizeSlug } from "./record.ts";
 import {
+  BRAIN_EDGE_SET_SCHEMA_KEY,
   GRAPH_EDGE_IN_SCHEMA_KEY,
   GRAPH_EDGE_NEIGHBOR_FIELDS,
   GRAPH_EDGE_OUT_SCHEMA_KEY,
@@ -120,6 +121,33 @@ export async function readGraphEdgesDetailed(
     .filter((edge): edge is GraphEdge => edge !== null);
   const kept = mapped.filter(owns).sort(compareEdges);
   return { edges: kept, droppedOwns: mapped.length - kept.length };
+}
+
+export async function readBrainEdgeSet(
+  node: NodeClient,
+  cfg: Pick<Config, "schemaHashes">,
+  type: string,
+  slug: string,
+): Promise<string[] | null> {
+  const schemaHash = cfg.schemaHashes[BRAIN_EDGE_SET_SCHEMA_KEY];
+  if (!schemaHash) return null;
+  const hash = `es#${type}#${normalizeSlug(slug).toLowerCase()}`;
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["bes_ids"],
+    filter: { HashRangeKey: { hash, range: "__head__" } },
+  });
+  const row = res.results[0];
+  if (!row) return [];
+  const raw = (row.fields as Record<string, unknown> | undefined)?.bes_ids;
+  if (typeof raw !== "string" || raw.length === 0) return [];
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is string => typeof item === "string");
+  } catch {
+    return [];
+  }
 }
 
 export async function readGraphEdges(
