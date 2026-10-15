@@ -1774,7 +1774,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
 
   if (matches.length === 0) {
     if (opts.normalizedSlugFallback === true) {
-      const normalizedMatches = await findNormalizedSlugMatches(opts, types);
+      const normalizedMatches = await findNormalizedSlugMatches(opts, types, readOpts);
       if (normalizedMatches.length === 1) return normalizedMatches[0]!;
     }
 
@@ -1857,6 +1857,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
 async function findNormalizedSlugMatches(
   opts: ResolveBySlugOpts,
   types: readonly RecordType[],
+  readOpts: { hydrate?: boolean } | undefined,
 ): Promise<ResolvedRecord[]> {
   const candidateSlugs = normalizedSlugLookupVariants(opts.slug);
   if (candidateSlugs.length === 0) return [];
@@ -1867,8 +1868,8 @@ async function findNormalizedSlugMatches(
     const hash = schemaHashFor(t, opts.cfg);
     for (const candidateSlug of candidateSlugs) {
       const row = opts.raw === true
-        ? await findBySlugRaw(opts.node, t, hash, candidateSlug, opts.cfg)
-        : await findBySlug(opts.node, t, hash, candidateSlug, opts.cfg);
+        ? await findBySlugRaw(opts.node, t, hash, candidateSlug, opts.cfg, readOpts)
+        : await findBySlug(opts.node, t, hash, candidateSlug, opts.cfg, readOpts);
       if (row === null) continue;
       if (opts.raw && isTombstoned(row)) continue;
       if (opts.filter && !opts.filter(row, t)) continue;

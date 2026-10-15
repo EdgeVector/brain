@@ -345,6 +345,8 @@ export type HydrateOptions = {
    */
   tolerateMismatch?: boolean;
   warn?: (message: string) => void;
+  // Load only these spilled fields. Omitted loads every spilled field.
+  fields?: readonly string[];
 };
 
 async function resolveSpilledField(
@@ -409,7 +411,9 @@ export async function hydrateRecord(
   opts?: HydrateOptions,
 ): Promise<FbrainRecord> {
   const pending: Array<{ field: string; marker: SpillMarker; stored: string }> = [];
+  const only = opts?.fields;
   for (const field of spillFieldsFor(type)) {
+    if (only !== undefined && !only.includes(field)) continue;
     const value = record[field];
     if (typeof value !== "string") continue;
     const marker = parseSpillMarker(value);

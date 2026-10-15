@@ -4,8 +4,9 @@
 // `linked_from` stays on the backlink index. Design children stay on the
 // child-task index.
 
-import { newReadClientFromCfg, type Verbose } from "../client.ts";
+import { FbrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
 import { listBacklinkMembers } from "../backlink-index.ts";
+import { hydrateRecord, parseSpillMarker, spillFieldsFor } from "../body-spill.ts";
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -53,11 +54,8 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   const slug = normalizeSlug(opts.slug);
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
-  const printsFullBody =
-    opts.bodyLimit === undefined &&
-    (opts.fields === undefined ||
-      opts.fields.length === 0 ||
-      opts.fields.includes("body"));
+  // Stored text first. A shown spill loads its blob only when the print
+  // passes the inline head.
   const found = await resolveBySlug({
     node,
     cfg: opts.cfg,
@@ -65,10 +63,10 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     type: opts.type,
     notFoundMessage: NOT_FOUND_TYPED,
     recoveryVerb: "get",
+    hydrate: false,
     ...(opts.type === undefined
       ? { directory: true }
       : { normalizedSlugFallback: true }),
-    ...(printsFullBody ? {} : { hydrate: false }),
   });
 
   // Flag a dangling design reference. A task's design_slug is validated on
@@ -126,10 +124,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   // Built unconditionally (not just under --json) so the `onResult`
   // structured sink and the `--json` stdout document are the SAME value
   // — the MCP `structuredContent` can't drift from the CLI JSON shape.
-  const recordForOutput =
-    opts.bodyLimit === undefined
-      ? found.record
-      : { ...found.record, body: truncateBody(found.record.body, opts.bodyLimit) };
+  const recordForOutput = await textForPrint(node, opts, found);
   const json = recordToJson(
     recordForOutput,
     found.type,
@@ -166,6 +161,78 @@ export async function getRecord(opts: GetOptions): Promise<void> {
 
 function truncateBody(body: string, limit: number): string {
   return body.length > limit ? body.slice(0, limit) : body;
+}
+
+function printShowsField(fields: readonly string[] | undefined, name: string): boolean {
+  if (fields === undefined || fields.length === 0) return true;
+  for (const path of fields) {
+    const top = path.split(".")[0] ?? path;
+    const head = top.split("[")[0] ?? top;
+    if (head === name) return true;
+    if (head !== "extra_fields") continue;
+    if (path === "extra_fields") return name !== "body";
+    const bracket = /^extra_fields\[([^\]]+)\]/.exec(path);
+    if (bracket?.[1] === name) return true;
+    const rest = path.startsWith("extra_fields.") ? path.slice("extra_fields.".length) : path;
+    const extraTop = rest.split(".")[0] ?? rest;
+    const extraHead = extraTop.split("[")[0] ?? extraTop;
+    if (extraHead === name) return true;
+  }
+  return false;
+}
+
+// A shown spilled field prints text, never the marker. A limit that stays
+// inside the inline head prints that head. A wider print loads the blob.
+async function textForPrint(
+  node: ReturnType<typeof newReadClientFromCfg>,
+  opts: GetOptions,
+  found: { type: RecordType; record: FbrainRecord },
+): Promise<FbrainRecord> {
+  const output: FbrainRecord = { ...found.record };
+  const toHydrate: string[] = [];
+  for (const field of spillFieldsFor(found.type)) {
+    if (!printShowsField(opts.fields, field)) continue;
+    const value = found.record[field];
+    if (typeof value !== "string") continue;
+    const marker = parseSpillMarker(value);
+    const limit = field === "body" ? opts.bodyLimit : undefined;
+    if (marker === null) {
+      if (limit !== undefined) output[field] = truncateBody(value, limit);
+      continue;
+    }
+    if (limit !== undefined && marker.head.length >= limit) {
+      output[field] = marker.head.slice(0, limit);
+      continue;
+    }
+    toHydrate.push(field);
+  }
+  if (toHydrate.length === 0) return output;
+
+  const load = (source: FbrainRecord) =>
+    hydrateRecord(node, opts.cfg, found.type, source, { fields: toHydrate });
+  let full: FbrainRecord;
+  try {
+    full = await load(found.record);
+  } catch (err) {
+    if (!(err instanceof FbrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
+    const hash = schemaHashFor(found.type, opts.cfg);
+    const again = await findBySlug(node, found.type, hash, found.record.slug, opts.cfg, {
+      hydrate: false,
+    });
+    if (again === null) throw err;
+    full = await hydrateRecord(node, opts.cfg, found.type, again, {
+      fields: toHydrate,
+      tolerateMismatch: true,
+      warn: (message) => console.error(message),
+    });
+  }
+  for (const field of toHydrate) {
+    const text = full[field];
+    if (typeof text !== "string") continue;
+    output[field] =
+      field === "body" && opts.bodyLimit !== undefined ? truncateBody(text, opts.bodyLimit) : text;
+  }
+  return output;
 }
 
 // Render a `field:` label padded to the same fixed column the built-in
@@ -213,11 +280,9 @@ export type RecordJson = {
     status?: string;
     via?: Array<"explicit" | "body">;
   }>;
-  // Other schemas that ALSO hold this slug. Present only on an untyped lookup
-  // that matched more than one type, where GET_RECORD_TYPE_PRECEDENCE picked
-  // the one returned above. Without this the caller cannot tell a
-  // one-record slug from a chosen-among-several slug, and the twin's `status`
-  // is the field most likely to disagree.
+  // Other schemas that ALSO hold this slug. A sweep sets this when a
+  // precedence list picks one type among several. Untyped get reads the type
+  // directory. Two directory types raise `ambiguous_slug` and leave this unset.
   also_types?: Array<{ type: RecordType; status: string }>;
   created_at: string;
   updated_at: string;
