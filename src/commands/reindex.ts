@@ -1,13 +1,15 @@
 // `brain reindex --target H --source-hash T --slug S` repairs the named keys.
 // Page heads commit conditionally. The command does not walk the corpus.
 
-import { FbrainError, type BatchMutationOp, type Verbose } from "../client.ts";
+import { FbrainError, type BatchMutationOp, type NodeClient, type Verbose } from "../client.ts";
 import { pageBackfill } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
+import { parseListCount, serializeListCount } from "../count-state.ts";
 import { resolvePrintSinks } from "../format.ts";
 import {
   fieldsFor,
+  isTombstoned,
   rowToRecord,
   schemaHashFor,
   type FbrainRecord,
@@ -16,7 +18,6 @@ import {
   BACKFILL_PAGE,
   BACKLINK_PAGE,
   CHILD_PAGE,
-  COUNT_UNCONFIRMED,
   INDEX_PARTIAL,
   LIST_PAGE,
   SYMPTOM_PAGE,
@@ -36,6 +37,218 @@ import {
 } from "../schemas.ts";
 
 const CURSOR_RANGE = "__cursor__";
+
+type CountedSubject = {
+  slug: string;
+  createdAt: string | null;
+  state: "absent" | "live" | "tombstone";
+};
+
+type CountedCursor = {
+  version: 1;
+  phase: "pending" | "complete";
+  sequence: number;
+  slugs: string[];
+  subjects: CountedSubject[];
+  delta: number;
+  slug: string;
+  added: number;
+};
+
+function sameSlugs(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((slug) => right.includes(slug));
+}
+
+function validSubject(raw: unknown): raw is CountedSubject {
+  if (raw === null || typeof raw !== "object") return false;
+  const value = raw as Partial<CountedSubject>;
+  return typeof value.slug === "string" && value.slug.length > 0 &&
+    (value.state === "absent" ? value.createdAt === null :
+      (value.state === "live" || value.state === "tombstone") &&
+      typeof value.createdAt === "string" && value.createdAt.length > 0);
+}
+
+function subjectSnapshot(slugs: readonly string[], records: ReadonlyMap<string, FbrainRecord>): CountedSubject[] {
+  return slugs.map((slug) => {
+    const record = records.get(slug);
+    if (record && record.created_at.length === 0) {
+      refuse(`reindex cannot identify ${slug}: its created_at field is empty.`);
+    }
+    return {
+      slug, createdAt: record?.created_at ?? null,
+      state: record ? isTombstoned(record) ? "tombstone" : "live" : "absent",
+    };
+  });
+}
+
+function sameSubjects(left: readonly CountedSubject[], right: readonly CountedSubject[]): boolean {
+  return left.length === right.length && left.every((item) => right.some((other) =>
+    item.slug === other.slug && item.createdAt === other.createdAt && item.state === other.state));
+}
+
+function countedCursor(raw: string | null): CountedCursor | null {
+  if (raw === null) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<CountedCursor>;
+    // Accept the cursor format from installations before recoverable counts.
+    if (value.version === undefined && typeof value.slug === "string" &&
+      typeof value.added === "number" &&
+      Object.keys(value).every((key) => key === "slug" || key === "added")) return null;
+    if (value.version !== 1 || (value.phase !== "pending" && value.phase !== "complete") ||
+      !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 1 ||
+      !Number.isSafeInteger(value.delta) || Number(value.delta) < 0 || Number(value.delta) > BACKFILL_PAGE ||
+      !Array.isArray(value.slugs) || value.slugs.length === 0 || value.slugs.length > BACKFILL_PAGE ||
+      !value.slugs.every((slug) => typeof slug === "string" && slug.length > 0) ||
+      new Set(value.slugs).size !== value.slugs.length ||
+      Number(value.delta) > value.slugs.length ||
+      !Array.isArray(value.subjects) || !value.subjects.every(validSubject) ||
+      !sameSlugs(value.slugs, value.subjects.map((subject) => subject.slug)) ||
+      value.slug !== value.slugs[value.slugs.length - 1] ||
+      (value.added !== 0 && value.added !== 1) || Number(value.delta) < value.added) throw new Error();
+    return value as CountedCursor;
+  } catch {
+    refuse("reindex cursor state is invalid. Repair the named cursor before a retry.");
+  }
+}
+
+async function readCursor(node: NodeClient, schemaHash: string, hash: string): Promise<string | null> {
+  const rows = await node.queryAll({
+    schemaHash, fields: ["bfc_state"],
+    filter: { HashRangeKey: { hash, range: CURSOR_RANGE } },
+  });
+  const raw = rows.results[0]?.fields?.bfc_state;
+  if (rows.results[0] && typeof raw !== "string") refuse("reindex cursor state is invalid.");
+  return typeof raw === "string" ? raw : null;
+}
+
+async function casCursor(
+  node: NodeClient, schemaHash: string, hash: string, previous: string | null, next: CountedCursor,
+): Promise<boolean> {
+  if (!node.mutateIfExpected) refuse("reindex requires a compare-and-set cursor.");
+  try {
+    return await node.mutateIfExpected({
+      mutationType: previous === null ? "create" : "update",
+      schemaHash, keyHash: hash, keyRange: CURSOR_RANGE,
+      fields: { bfc_h: hash, bfc_r: CURSOR_RANGE, bfc_state: JSON.stringify(next) },
+      expected: previous === null
+        ? { type: "absent", field: "bfc_state" }
+        : { type: "value", field: "bfc_state", value: previous },
+    }) === "applied";
+  } catch {
+    // The next read decides whether an interrupted acknowledgement committed.
+    return false;
+  }
+}
+
+async function beginCountedBackfill(opts: {
+  node: NodeClient; cursorSchema: string; cursorHash: string; previousRaw: string | null;
+  countSchema: string; countHash: string; source: RecordType;
+  slugs: string[]; subjects: CountedSubject[]; delta: number; lastSlug: string; lastAdded: number; traces: string[];
+}): Promise<CountedCursor> {
+  const previous = countedCursor(opts.previousRaw);
+  opts.traces.push("HashRangeKey BrainListCount keys_visited=1");
+  const rawCount = await readCount(opts.node, opts.countSchema, opts.countHash);
+  const count = parseListCount(rawCount);
+  if (rawCount !== null && count === null) refuse("reindex count state is invalid.");
+  if (previous?.phase === "pending") {
+    if (!sameSlugs(previous.slugs, opts.slugs)) {
+      refuse(`reindex must finish pending sequence ${previous.sequence} for these slugs first: ${previous.slugs.join(", ")}.`);
+    }
+    if ((count?.receipts[opts.source] ?? 0) >= previous.sequence) {
+      // Only cursor completion remains. Do not replay an old page plan after
+      // another record create/delete changes the count or its membership.
+      return { ...previous, phase: "complete" };
+    }
+    if (!sameSubjects(previous.subjects, opts.subjects)) {
+      refuse("reindex pending records changed identity or deletion state. Repair the named pending operation before another count addition.");
+    }
+    return previous;
+  }
+  const sequence = Math.max(previous?.sequence ?? 0, count?.receipts[opts.source] ?? 0) + 1;
+  if (!Number.isSafeInteger(sequence)) refuse("reindex count sequence is exhausted.");
+  const pending: CountedCursor = {
+    version: 1, phase: "pending", sequence, slugs: opts.slugs, subjects: opts.subjects,
+    delta: opts.delta, slug: opts.lastSlug, added: opts.lastAdded,
+  };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    opts.traces.push("mutateIfExpected BrainBackfillCursor pending");
+    if (await casCursor(opts.node, opts.cursorSchema, opts.cursorHash, opts.previousRaw, pending)) return pending;
+    opts.traces.push("HashRangeKey BrainBackfillCursor keys_visited=1");
+    const raw = await readCursor(opts.node, opts.cursorSchema, opts.cursorHash);
+    const concurrent = countedCursor(raw);
+    if (concurrent && concurrent.sequence >= sequence && sameSlugs(concurrent.slugs, opts.slugs)) {
+      if (concurrent.phase === "complete") return concurrent;
+      if (!sameSubjects(concurrent.subjects, opts.subjects)) {
+        refuse("reindex concurrent pending records changed identity or deletion state.");
+      }
+      return concurrent;
+    }
+    if (raw !== opts.previousRaw) refuse("reindex cursor changed. Retry the named slugs after its pending operation completes.");
+  }
+  refuse("reindex pending cursor did not confirm. Retry the same named slugs.");
+}
+
+async function finishCountedBackfill(opts: {
+  node: NodeClient; cursorSchema: string; cursorHash: string; countSchema: string;
+  countHash: string; source: RecordType; sourceSchema: string; operation: CountedCursor; traces: string[];
+}): Promise<void> {
+  const { operation } = opts;
+  let counted = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    opts.traces.push("HashRangeKey BrainListCount keys_visited=1");
+    const raw = await readCount(opts.node, opts.countSchema, opts.countHash);
+    const state = parseListCount(raw);
+    if (raw !== null && state === null) refuse("reindex count state is invalid. Retry after the named count is repaired.");
+    if (raw === null && operation.delta === 0) {
+      // A zero addition cannot establish a missing count. Complete only the
+      // cursor; a replay remains harmless without a counter receipt.
+      counted = true;
+      break;
+    }
+    if ((state?.receipts[opts.source] ?? 0) >= operation.sequence) {
+      counted = true;
+      break;
+    }
+    if (!opts.node.queryByKeys) refuse("reindex requires a key read.");
+    opts.traces.push(`HashRangeKeys ${opts.source} identity keys_visited=${operation.slugs.length}`);
+    const rows = await opts.node.queryByKeys({
+      schemaHash: opts.sourceSchema, fields: ["slug", "created_at", "tags"],
+      keys: operation.slugs.map((slug) => ({ hash: slug })),
+    });
+    const records = new Map(rows.map((row) => {
+      const record = rowToRecord(row, opts.source);
+      return [record.slug, record] as const;
+    }));
+    if (!sameSubjects(operation.subjects, subjectSnapshot(operation.slugs, records))) {
+      refuse("reindex pending records changed identity or deletion state. Its count did not change; repair the named pending operation.");
+    }
+    const current = state ?? { count: 0, receipts: {} };
+    const next = current.count + operation.delta;
+    if (!Number.isSafeInteger(next)) refuse("reindex count exceeds the integer limit.");
+    opts.traces.push(`mutateIfExpected BrainListCount hash=${opts.countHash}`);
+    if (await writeCount(opts.node, opts.countSchema, opts.countHash, raw, serializeListCount({
+      count: next,
+      receipts: { ...current.receipts, [opts.source]: operation.sequence },
+    }))) {
+      counted = true;
+      break;
+    }
+  }
+  if (!counted) refuse("reindex count did not confirm. Its pending cursor remains. Retry the same named slugs.");
+  for (let attempt = 0; attempt < 4; attempt++) {
+    opts.traces.push("HashRangeKey BrainBackfillCursor keys_visited=1");
+    const raw = await readCursor(opts.node, opts.cursorSchema, opts.cursorHash);
+    const current = countedCursor(raw);
+    if (current && current.sequence > operation.sequence) return;
+    if (!current || current.sequence !== operation.sequence || !sameSlugs(current.slugs, operation.slugs)) {
+      refuse("reindex cursor changed before completion. The count receipt remains.");
+    }
+    if (current.phase === "complete") return;
+    opts.traces.push("mutateIfExpected BrainBackfillCursor complete");
+    if (await casCursor(opts.node, opts.cursorSchema, opts.cursorHash, raw, { ...operation, phase: "complete" })) return;
+  }
+  refuse("reindex cursor completion did not confirm. Retry the same named slugs; its count receipt prevents a second addition.");
+}
 
 export type ReindexOptions = {
   cfg: Config;
@@ -177,6 +390,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     seenSlug.add(slug);
     slugs.push(slug);
   }
+  if (slugs.length === 0) refuse("reindex requires at least one nonempty slug.");
   const target = parseTarget(targetRaw);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const cursorSchema = opts.cfg.schemaHashes[BRAIN_BACKFILL_CURSOR_SCHEMA_KEY] ?? "";
@@ -214,6 +428,20 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       ? cursorRow.fields.bfc_state
       : null;
   const cursorExisted = cursorRow !== undefined;
+  const countHash = targetRaw === "all" || isRecordType(targetRaw) ? targetRaw : null;
+  const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+  if (countHash) {
+    if (cursorExisted && typeof cursorRow.fields?.bfc_state !== "string") {
+      refuse("reindex cursor state is invalid.");
+    }
+    // Validate pending state before any membership mutation or cursor change.
+    const pending = countedCursor(previousRaw);
+    if (pending?.phase === "pending" && !sameSlugs(pending.slugs, slugs)) {
+      refuse(`reindex must finish pending sequence ${pending.sequence} for these slugs first: ${pending.slugs.join(", ")}.`);
+    }
+    if (countSchema.length === 0) refuse("reindex requires BrainListCount. Run brain init.");
+    if (!node.mutateIfExpected) refuse("reindex requires compare-and-set counts and cursors.");
+  }
 
   const plan = await planNamedSlugBackfill({
     node,
@@ -237,23 +465,21 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     }
     : null;
   const ops = [...plan.ops];
-  if (plan.heads.length === 0 && cursorOp) ops.push(cursorOp);
+  if (!countHash && plan.heads.length === 0 && cursorOp) ops.push(cursorOp);
   if (ops.length > WRITE_BATCH_MAX) {
     refuse("reindex one batch cannot hold this backfill.");
   }
-  const countHash =
-    targetRaw === "all" || targetRaw === source || isRecordType(targetRaw) ? targetRaw : null;
-  const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
-  if (countHash && plan.added > 0) {
-    if (countSchema.length === 0) refuse("reindex requires BrainListCount. Run brain init.");
-    if (!node.mutateIfExpected) refuse("reindex requires a compare-and-set count.");
-  }
   if (!node.mutateBatch) refuse("reindex requires a batch write.");
-  if (ops.length > 0) {
+  const counted = countHash ? await beginCountedBackfill({
+    node, cursorSchema, cursorHash, previousRaw, countSchema, countHash, source,
+    slugs, subjects: subjectSnapshot(slugs, bySlug), delta: plan.added,
+    lastSlug: plan.lastSlug, lastAdded: plan.lastAdded, traces,
+  }) : null;
+  if (ops.length > 0 && counted?.phase !== "complete") {
     traces.push(`mutateBatch count=${ops.length}`);
     await node.mutateBatch(ops);
   }
-  if (plan.heads.length > 0) {
+  if (plan.heads.length > 0 && counted?.phase !== "complete") {
     traces.push(`mutateIfExpected BrainListPage count=${plan.heads.length}`);
     const headNotes = await commitHeadPages(node, plan.heads);
     for (const note of headNotes) if (!plan.notes.includes(note)) plan.notes.push(note);
@@ -261,40 +487,23 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
       throw new FbrainError({
         code: "index_partial",
         message: `reindex index partial (${headNotes.filter((note) => note !== INDEX_PARTIAL).join(", ")}).`,
-        hint: "The cursor and count did not change. Retry the same named slugs.",
+        hint: counted
+          ? "The count did not change. The pending cursor remains. Retry the same named slugs."
+          : "The cursor did not change. Retry the same named slugs.",
       });
     }
-    if (cursorOp) {
+    if (!countHash && cursorOp) {
       traces.push("mutateBatch count=1");
       await node.mutateBatch([cursorOp]);
     }
   }
 
-  const wrote = plan.added;
-  // Locators decide what this batch added. Two different batches can end at
-  // the same slug; the cursor is not evidence that their additions are equal.
-  if (countHash && plan.added > 0) {
-    traces.push("HashRangeKey BrainListCount keys_visited=1");
-    const raw = await readCount(node, countSchema, countHash);
-    const numeric = raw !== null && /^-?\d+$/.test(raw);
-    const next = String((numeric ? Number(raw) : 0) + plan.added);
-    traces.push(`mutateIfExpected BrainListCount hash=${countHash}`);
-    let applied = await writeCount(node, countSchema, countHash, numeric ? raw : null, next);
-    if (!applied) {
-      traces.push("HashRangeKey BrainListCount keys_visited=1");
-      const again = await readCount(node, countSchema, countHash);
-      const againNumeric = again !== null && /^-?\d+$/.test(again);
-      const retry = String((againNumeric ? Number(again) : 0) + plan.added);
-      traces.push(`mutateIfExpected BrainListCount hash=${countHash}`);
-      applied = await writeCount(
-        node,
-        countSchema,
-        countHash,
-        againNumeric ? again : null,
-        retry,
-      );
-    }
-    if (!applied) print(COUNT_UNCONFIRMED);
+  const wrote = counted?.delta ?? plan.added;
+  if (countHash && counted) {
+    await finishCountedBackfill({
+      node, cursorSchema, cursorHash, countSchema, countHash, source, operation: counted, traces,
+      sourceSchema: schemaHashFor(source, opts.cfg),
+    });
   }
 
   print("reindex");

@@ -7,6 +7,7 @@ import {
   type Verbose,
 } from "../client.ts";
 import type { Config } from "../config.ts";
+import { parseListCount } from "../count-state.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import { HEAD_RANGE } from "../list-page.ts";
@@ -175,11 +176,12 @@ async function printListCount(
   }
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
   const raw = await readCountAtom(node, schemaHash, hash);
-  if (raw === null || !/^-?\d+$/.test(raw)) {
+  const state = parseListCount(raw);
+  if (state === null) {
     missCount(opts, print, printErr, hash);
     return;
   }
-  const count = Number(raw);
+  const count = state.count;
   opts.onResult?.({ count });
   if (opts.json) {
     print(JSON.stringify({ count }));
@@ -268,8 +270,9 @@ async function printListPage(
     let countKind: "zero" | "positive" | "absent" = "absent";
     if (countable && countSchema.length > 0) {
       const rawCount = await readCountAtom(node, countSchema, hash);
-      if (rawCount !== null && /^-?\d+$/.test(rawCount)) {
-        const n = Number(rawCount);
+      const state = parseListCount(rawCount);
+      if (state !== null) {
+        const n = state.count;
         if (n === 0) countKind = "zero";
         else if (n > 0) countKind = "positive";
       }

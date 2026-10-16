@@ -1,4 +1,5 @@
 import { FbrainError, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
+import { countAfterDelta, parseListCount } from "./count-state.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
@@ -27,6 +28,7 @@ export const SYMPTOM_PAGE = 1;
 export const WRITE_BATCH_MAX = 64;
 export const READ_KEY_CAP = 43;
 export const HEAD_RANGE = "__head__";
+export const FRONTMATTER_RANGE = "__frontmatter__";
 export const DIRECTORY_RANGE = "__types__";
 const PAGE_BYTE_CAP = 8 * 1024;
 const TITLE_BYTES = 64;
@@ -106,7 +108,7 @@ export type ListSidePlan = {
   previousEdgeIds: string[];
   /** Edge ids actually stored, after the cap and any preserved frontmatter ids. */
   writtenEdgeIds: string[];
-  /** Stored ids that were not in the previous body and survived the cap. */
+  /** Retained ids absent from the supplied edges, after the cap. */
   preservedEdgeIds: string[];
 };
 
@@ -201,23 +203,39 @@ function sortKeyword(cards: KeywordCard[]): KeywordCard[] {
   });
 }
 
-function parseKeywordCards(raw: string | null): KeywordCard[] {
-  if (!raw) return [];
+function parseKeywordCards(raw: string | null, strict = false): KeywordCard[] {
+  if (raw === null) return [];
+  const invalid = (): KeywordCard[] => {
+    if (strict) {
+      throw new FbrainError({
+        code: "keyword_page_invalid",
+        message: "Cannot update a malformed keyword page.",
+        hint: "Repair the named keyword page before a manual retry.",
+      });
+    }
+    return [];
+  };
   try {
-    const value = JSON.parse(raw) as { cards?: unknown };
-    if (!Array.isArray(value.cards)) return [];
+    const value = JSON.parse(raw) as { cards?: unknown } | null;
+    if (!value || !Array.isArray(value.cards)) return invalid();
     const cards: KeywordCard[] = [];
     for (const item of value.cards) {
-      if (!item || typeof item !== "object") continue;
+      if (!item || typeof item !== "object") {
+        if (strict) return invalid();
+        continue;
+      }
       const card = item as Record<string, unknown>;
-      if (typeof card.type !== "string" || card.type.length === 0) continue;
-      if (typeof card.slug !== "string" || card.slug.length === 0) continue;
-      if (typeof card.weight !== "number" || !Number.isFinite(card.weight)) continue;
+      if (typeof card.type !== "string" || card.type.length === 0 ||
+          typeof card.slug !== "string" || card.slug.length === 0 ||
+          typeof card.weight !== "number" || !Number.isFinite(card.weight)) {
+        if (strict) return invalid();
+        continue;
+      }
       cards.push({ type: card.type, slug: card.slug, weight: card.weight });
     }
     return cards;
   } catch {
-    return [];
+    return invalid();
   }
 }
 
@@ -227,7 +245,7 @@ function nextKeywordCards(
   type: string,
   slug: string,
   weight: number | null,
-): KeywordCard[] | "full" | "same" {
+): KeywordCard[] | "saturated" | "full" | "same" {
   if (weight === null) {
     const filtered = cards.filter((card) => !(card.type === type && card.slug === slug));
     if (filtered.length === cards.length) return "same";
@@ -241,7 +259,7 @@ function nextKeywordCards(
   } else {
     const sorted = sortKeyword(rest);
     const lowest = sorted[sorted.length - 1];
-    if (!lowest || weight <= lowest.weight) return "full";
+    if (!lowest || weight <= lowest.weight) return "saturated";
     sorted[sorted.length - 1] = { type, slug, weight };
     next = sortKeyword(sorted);
   }
@@ -533,6 +551,8 @@ export async function planRecordListSide(opts: {
   /** Sealed product body. Keyword tokens must not see the pre-seal tail. */
   sealedBody?: string;
   nextEdges: readonly GraphEdge[];
+  /** A supplied list replaces the typed frontmatter metadata, including []. */
+  frontmatterEdges?: readonly string[];
   /** Append keeps edge-set ids that are not in the body, so those graph rows stay. */
   preserveStoredEdges?: boolean;
 }): Promise<ListSidePlan> {
@@ -567,6 +587,14 @@ export async function planRecordListSide(opts: {
   const pages = new Map<string, MemPage>();
   const locs = new Map<string, MemLoc>();
   let previousEdgeIds: string[] = [];
+  let previousFrontmatterIds: string[] = [];
+  let frontmatterJson: string | null = null;
+  let frontmatterExisted = false;
+  let nextFrontmatterIds = opts.next && opts.frontmatterEdges !== undefined
+    ? edgeIdsOf(extractGraphEdges({ sourceSlug: slug, body: "", frontmatterEdges: opts.frontmatterEdges }))
+    : [];
+  if (nextFrontmatterIds.length > EDGE_CAP) notePartial(details, "edge cap");
+  nextFrontmatterIds = nextFrontmatterIds.slice(0, EDGE_CAP);
   let storedTokenJson: string | null = null;
   let tokenExisted = false;
   let edgeExisted = false;
@@ -610,6 +638,7 @@ export async function planRecordListSide(opts: {
       edgeSchema.length > 0
         ? readExact(opts.node, edgeSchema, ["bes_h", "bes_r", "bes_ids"], [
             { hash: `es#${opts.type}#${slug}`, range: HEAD_RANGE },
+            { hash: `es#${opts.type}#${slug}`, range: FRONTMATTER_RANGE },
           ])
         : Promise.resolve([]),
       tokenSchema.length > 0
@@ -646,10 +675,37 @@ export async function planRecordListSide(opts: {
       const slot = headKeys.get(hash);
       installPage(hash, range, rowField(row, "blp_page"), slot?.kind === "symptom");
     }
-    const edgeRow = edgeRows[0];
+    const edgeRow = edgeRows.find((row) =>
+      (rowRange(row) || rowField(row, "bes_r") || HEAD_RANGE) === HEAD_RANGE,
+    );
     if (edgeRow) {
       edgeExisted = true;
       previousEdgeIds = parseStringList(rowField(edgeRow, "bes_ids"));
+    }
+    const frontmatterRow = edgeRows.find((row) =>
+      (rowRange(row) || rowField(row, "bes_r")) === FRONTMATTER_RANGE,
+    );
+    if (frontmatterRow) {
+      frontmatterExisted = true;
+      frontmatterJson = rowField(frontmatterRow, "bes_ids");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(frontmatterJson ?? "");
+      } catch {
+        parsed = null;
+      }
+      if (!Array.isArray(parsed) || parsed.some((id) => typeof id !== "string")) {
+        throw new FbrainError({
+          code: "frontmatter_edges_invalid",
+          message: `Cannot update malformed frontmatter edges for ${opts.type} ${slug}.`,
+        });
+      }
+      previousFrontmatterIds = parsed;
+    }
+    if (opts.next) {
+      if (opts.frontmatterEdges === undefined && opts.previous !== null) nextFrontmatterIds = previousFrontmatterIds;
+      if (nextFrontmatterIds.length > EDGE_CAP) notePartial(details, "edge cap");
+      nextFrontmatterIds = nextFrontmatterIds.slice(0, EDGE_CAP);
     }
     const tokenRow = tokenRows[0];
     if (tokenRow) {
@@ -662,7 +718,9 @@ export async function planRecordListSide(opts: {
       directoryRaw = rowField(dirRow, "btd_types");
     }
 
-    const storedDests = edgeExisted ? uniqueDests(previousEdgeIds) : previousDests;
+    const storedDests = edgeExisted || frontmatterExisted
+      ? uniqueDests([...previousEdgeIds, ...previousFrontmatterIds])
+      : previousDests;
     const oldSlots = opts.previous
       ? slotsFor(opts.type, opts.previous, storedDests, details)
       : knownOld;
@@ -729,11 +787,14 @@ export async function planRecordListSide(opts: {
       }
     }
 
+    const suppliedIds = new Set(nextIds);
+    nextIds = [...new Set([...nextIds, ...nextFrontmatterIds])];
     if (opts.preserveStoredEdges && opts.previous) {
       // Known old explicit relationships must disappear when their tag or
       // design field disappears. Unknown frontmatter/tail ids can stay.
       const prevBodyIds = new Set(edgeIdsOf(recordGraphEdges(opts.type, opts.previous)));
-      const extras = previousEdgeIds.filter((id) => !prevBodyIds.has(id));
+      const frontmatterIds = new Set(nextFrontmatterIds);
+      const extras = previousEdgeIds.filter((id) => !prevBodyIds.has(id) || frontmatterIds.has(id));
       const merged: string[] = [];
       const seenIds = new Set<string>();
       for (const id of [...nextIds, ...extras]) {
@@ -743,12 +804,11 @@ export async function planRecordListSide(opts: {
       }
       if (merged.length > EDGE_CAP) notePartial(details, "edge cap");
       nextIds = merged.slice(0, EDGE_CAP);
-      const keptIds = new Set(nextIds);
-      preservedEdgeIds = extras.filter((id) => keptIds.has(id));
     } else if (nextIds.length > EDGE_CAP) {
       notePartial(details, "edge cap");
       nextIds = nextIds.slice(0, EDGE_CAP);
     }
+    preservedEdgeIds = nextIds.filter((id) => !suppliedIds.has(id));
 
     const finalNew = opts.next
       ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details)
@@ -964,6 +1024,29 @@ export async function planRecordListSide(opts: {
       projection: "edge-set",
     });
   }
+  if (edgeSchema.length > 0 && opts.next &&
+      (opts.frontmatterEdges !== undefined || opts.previous === null)) {
+    const json = JSON.stringify(nextFrontmatterIds);
+    if (!frontmatterExisted || frontmatterJson !== json) {
+      ops.push({
+        mutationType: frontmatterExisted ? "update" : "create",
+        schemaHash: edgeSchema,
+        keyHash: `es#${opts.type}#${slug}`,
+        keyRange: FRONTMATTER_RANGE,
+        fields: { bes_h: `es#${opts.type}#${slug}`, bes_r: FRONTMATTER_RANGE, bes_ids: json },
+        projection: "edge-set",
+      });
+    }
+  } else if (!opts.next && frontmatterExisted && edgeSchema.length > 0) {
+    ops.push({
+      mutationType: "delete",
+      schemaHash: edgeSchema,
+      keyHash: `es#${opts.type}#${slug}`,
+      keyRange: FRONTMATTER_RANGE,
+      fields: {},
+      projection: "edge-set",
+    });
+  }
 
   const posted = opts.next
     ? postingTokens(opts.next.title, opts.sealedBody ?? "")
@@ -1007,10 +1090,14 @@ export async function planRecordListSide(opts: {
         const hash = keywordHash(token);
         const prior = byHash.get(hash);
         const existed = prior !== undefined;
-        const cards = parseKeywordCards(prior ?? null);
+        const cards = parseKeywordCards(prior ?? null, true);
         const weight = weightByToken.get(token);
         const placed = nextKeywordCards(cards, opts.type, slug, weight ?? null);
         if (placed === "same") continue;
+        if (placed === "saturated") {
+          if (!details.includes("keyword cap")) details.push("keyword cap");
+          continue;
+        }
         if (placed === "full") {
           notePartial(details, "keyword page");
           continue;
@@ -1433,9 +1520,11 @@ export async function commitKeywordHeads(
       let note: string | null = null;
       if (head.replay.kind === "keyword") {
         const replay = head.replay;
-        const cards = parseKeywordCards(raw);
+        const cards = parseKeywordCards(raw, true);
         const placed = nextKeywordCards(cards, replay.type, replay.slug, replay.weight);
-        if (placed === "full") {
+        if (placed === "saturated") {
+          if (!details.includes("keyword cap")) details.push("keyword cap");
+        } else if (placed === "full") {
           note = "keyword page";
         } else if (placed !== "same") {
           if (placed.length === 0) {
@@ -1752,7 +1841,15 @@ export async function readCount(
   });
   const row = res.results.find((item) => (item.key?.hash ?? rowField(item, "bln_h")) === hash);
   if (!row) return null;
-  return rowField(row, "bln_n");
+  const raw = row.fields?.bln_n;
+  if (typeof raw !== "string") {
+    throw new FbrainError({
+      code: "invalid_list_count",
+      message: `The count for ${hash} has an invalid value.`,
+      hint: "Repair the named count before another count change.",
+    });
+  }
+  return raw;
 }
 
 export async function writeCount(
@@ -1821,21 +1918,46 @@ export async function adjustListCounts(
   let unconfirmed = false;
   for (const hash of hashes) {
     const row = rows.find((item) => (item.key?.hash ?? rowField(item, "bln_h")) === hash);
+    if (row && typeof row.fields?.bln_n !== "string") {
+      unconfirmed = true;
+      continue;
+    }
     const raw = row ? rowField(row, "bln_n") : null;
-    const existed = raw !== null && /^-?\d+$/.test(raw);
+    const state = parseListCount(raw);
+    if (raw !== null && state === null) {
+      unconfirmed = true;
+      continue;
+    }
+    const existed = state !== null;
     if (!existed && delta < 0) continue;
-    const current = existed ? Number(raw) : 0;
-    const next = String(Math.max(0, current + delta));
+    const next = countAfterDelta(raw, delta);
+    if (next === null) {
+      unconfirmed = true;
+      continue;
+    }
     let applied = await writeCount(node, schemaHash, hash, existed ? raw : null, next);
     if (!applied) {
-      const again = await readCount(node, schemaHash, hash).catch(() => null);
-      const againNum = again !== null && /^-?\d+$/.test(again) ? Number(again) : 0;
-      const retry = String(Math.max(0, againNum + delta));
+      let again: string | null;
+      try {
+        again = await readCount(node, schemaHash, hash);
+      } catch {
+        unconfirmed = true;
+        continue;
+      }
+      if (again !== null && parseListCount(again) === null) {
+        unconfirmed = true;
+        continue;
+      }
+      const retry = countAfterDelta(again, delta);
+      if (retry === null) {
+        unconfirmed = true;
+        continue;
+      }
       applied = await writeCount(
         node,
         schemaHash,
         hash,
-        again !== null && /^-?\d+$/.test(again) ? again : null,
+        again,
         retry,
       );
     }
@@ -2087,7 +2209,7 @@ export async function planNamedSlugBackfill(opts: {
         pages.set(name, {
           existed,
           original: existed ? raw : null,
-          cards: existed ? parseKeywordCards(raw) : [],
+          cards: existed ? parseKeywordCards(raw ?? "", true) : [],
           touched: false,
         });
       }
@@ -2144,7 +2266,15 @@ export async function planNamedSlugBackfill(opts: {
         const page = pages.get(item.token);
         if (!page) continue;
         const nextCards = nextKeywordCards(page.cards, opts.sourceType, slug, item.weight);
-        if (nextCards === "same" || nextCards === "full") continue;
+        if (nextCards === "saturated") {
+          if (!notes.includes("keyword cap")) notes.push("keyword cap");
+          continue;
+        }
+        if (nextCards === "full") {
+          notePartial(notes, "keyword page");
+          continue;
+        }
+        if (nextCards === "same") continue;
         page.cards = nextCards;
         page.touched = true;
         wrote = true;
