@@ -802,7 +802,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         exact: z
           .boolean()
           .optional()
-          .describe("Exact-match mode (server-side ?exact=true)."),
+          .describe("Verify a case-insensitive title/body phrase in a bounded sample of ranked candidates."),
         min_score: z
           .number()
           .optional()

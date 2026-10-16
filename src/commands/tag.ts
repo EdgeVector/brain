@@ -15,9 +15,14 @@ import {
   resolveBySlug,
   schemaHashFor,
   updateFieldsFrom,
-  writeRecordFields,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
+import {
+  buildResidentWritePlan,
+  commitResidentWritePlan,
+  recordFromPrimaryFields,
+} from "../resident-write-plan.ts";
+import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type TagOptions = {
   cfg: Config;
@@ -101,6 +106,7 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
   });
 
   const result = applyTagMutation(only.record.tags, add, rm);
+  let indexNote = "";
   if (result.added.length > 0 || result.removed.length > 0) {
     const hash = schemaHashFor(only.type, opts.cfg);
     const now = nowIso();
@@ -108,16 +114,21 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
       tags: result.tags,
       updated_at: now,
     });
-    // The read returns the full text. Store the sealed head, not that text.
-    await writeRecordFields({
+    const plan = await buildResidentWritePlan({
       node,
       cfg: opts.cfg,
       type: only.type,
-      slug,
+      previous: only.record,
+      next: recordFromPrimaryFields(fields),
       schemaHash: hash,
-      fields,
+      primaryFields: fields,
+      now,
+      // The body does not change, including any stored frontmatter edges.
+      preserveStoredEdges: true,
       ...(opts.verbose ? { verbose: opts.verbose } : {}),
     });
+    const receipt = await commitResidentWritePlan({ node, plan, type: only.type, slug });
+    indexNote = formatIndexNotes(receipt.indexNotes);
   }
 
   const parts = [
@@ -127,7 +138,7 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
   print(
     parts.length === 0
       ? `tags unchanged for ${only.type} ${slug}`
-      : `tags changed for ${only.type} ${slug}: ${parts.join(" ")}`,
+      : `tags changed for ${only.type} ${slug}: ${parts.join(" ")}${indexNote}`,
   );
   opts.onResult?.({
     action: "tags_changed",

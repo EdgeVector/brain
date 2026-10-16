@@ -259,8 +259,6 @@ async function textForPrint(
     if (again === null) throw err;
     full = await hydrateRecord(node, opts.cfg, found.type, again, {
       fields: toHydrate,
-      tolerateMismatch: true,
-      warn: (message) => console.error(message),
     });
   }
   for (const field of toHydrate) {

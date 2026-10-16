@@ -279,7 +279,7 @@ ${RECORD_NEW_HELP_LINES}
   share          (placeholder) — team sync is not wired up yet
   delete         delete a record (native LastDB Delete; also stamps a tombstone tag)
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
-  reindex        re-put every live record so its current embedding is present (does not reduce pollution)
+  reindex        backfill named record keys into one list, keyword page, or type directory
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   papercut       file/close/set/census the typed defect ledger (dedupe-gated; close is one write, not two)
   consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
@@ -598,7 +598,8 @@ indented under each row — so the answer is visible without a follow-up
 human outputs no longer invite a misleading score comparison.
 
   -n, --limit   max results (\`-n\` and \`--limit\` are aliases; last wins)
-  --exact       exact-match mode (passes ?exact=true to the index)
+  --exact       verify a case-insensitive phrase in the title or body.
+                The result is a bounded sample of ranked candidates.
   --min-score   server-side score floor (passes ?min_score=F)
   --type        restrict results to a record type; repeat to allow several
                 (e.g. \`--type design --type task\`).
@@ -885,12 +886,13 @@ deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
   reindex: `brain reindex --target <hash> --source-hash <type> --slug <slug> [--slug <slug> ...]
 
-One call names one target hash, one source type, and at most 25 slugs.
-It reads those RecordListEntry keys and writes one batch.
-It prints wrote N and the cursor key. It does not loop.
+One call names one target, one source type, and at most 25 slugs.
+It reads the current product records by their keys.
+Page updates use conditional writes. The cursor advances after they succeed.
+It prints wrote N and the cursor key. It does not walk the corpus.
 
   --target          list hash. all is valid. A type, type#status, tag#, link#,
-                    child#, symptom, symptom#, keyword, or kw# are valid.
+                    child#, symptom, symptom#, keyword, kw#, or directory are valid.
   --source-hash     one record type. all is refused.
   --slug            repeat up to 25. A call with no slug is refused.
   --tags            the old payload write stopped. No scan.

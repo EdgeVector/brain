@@ -1,8 +1,8 @@
-import type { BatchMutationOp, NodeClient, QueryRow } from "./client.ts";
+import { FbrainError, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
-import { TOMBSTONE_TAG, isTombstoned, type FbrainRecord } from "./record.ts";
+import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type FbrainRecord } from "./record.ts";
 import { tokenize } from "./retrieval/bm25.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
@@ -44,7 +44,9 @@ export type ListCard = {
   title?: string;
 };
 
-type PageBody = { cards: ListCard[]; older: string };
+// Once a page is linked, no mutation removes it from the older chain. This
+// proof lets a writer distinguish a reachable page from a staged orphan.
+type PageBody = { cards: ListCard[]; older: string; linked?: boolean };
 
 export type SideProjection =
   | "list-page"
@@ -68,6 +70,9 @@ export type HeadReplay =
   | { kind: "remove"; type: string; slug: string }
   | { kind: "symptom"; slug: string }
   | { kind: "clear"; slug: string }
+  | { kind: "ensure-empty" }
+  | { kind: "backfill" }
+  | { kind: "stage-overflow" }
   | { kind: "keyword"; type: string; slug: string; weight: number | null };
 
 export type HeadCommit = {
@@ -283,7 +288,7 @@ function parseStringList(raw: string | null): string[] {
 function parsePage(raw: string | null): PageBody {
   if (!raw) return { cards: [], older: "" };
   try {
-    const value = JSON.parse(raw) as { cards?: unknown; older?: unknown };
+    const value = JSON.parse(raw) as { cards?: unknown; older?: unknown; linked?: unknown };
     const cards: ListCard[] = [];
     if (Array.isArray(value.cards)) {
       for (const item of value.cards) {
@@ -301,6 +306,7 @@ function parsePage(raw: string | null): PageBody {
     return {
       cards,
       older: typeof value.older === "string" ? value.older : "",
+      ...(typeof value.linked === "boolean" ? { linked: value.linked } : {}),
     };
   } catch {
     return { cards: [], older: "" };
@@ -335,6 +341,7 @@ function renderPage(page: PageBody, symptom: boolean): string | null {
     const json = JSON.stringify({
       cards: page.cards.map((card) => renderCard(card, mode, symptom)),
       older: page.older,
+      ...(page.linked !== undefined ? { linked: page.linked } : {}),
     });
     last = json;
     if (Buffer.byteLength(json) <= PAGE_BYTE_CAP) return json;
@@ -413,6 +420,7 @@ function installMemPage(
   const parsed = parsePage(raw);
   page.cards = parsed.cards;
   page.older = parsed.older;
+  page.linked = parsed.linked;
   page.existed = true;
   page.original = raw;
   page.symptom = symptom;
@@ -479,16 +487,41 @@ function slotsFor(
   return slots;
 }
 
-function linkDestsFromBody(record: FbrainRecord | null): string[] {
-  if (!record) return [];
-  return uniqueDests(
-    edgeIdsOf(
-      extractGraphEdges({
-        sourceSlug: record.slug,
-        body: record.body,
-      }),
-    ),
+/** Explicit record relationships belong to the same graph as body links. */
+export function recordGraphEdges(
+  type: RecordType,
+  record: FbrainRecord,
+  frontmatterEdges: readonly string[] = [],
+  now?: string,
+): GraphEdge[] {
+  const edges = new Map(
+    extractGraphEdges({ sourceSlug: record.slug, body: record.body, frontmatterEdges, now })
+      .map((edge) => [edgeRange(edge), edge]),
   );
+  const destinations: string[] = [];
+  for (const tag of record.tags) {
+    const link = parseGenericLinkTag(tag);
+    if (link) destinations.push(link.to_slug);
+  }
+  if (type === "task" && record.design_slug) destinations.push(record.design_slug);
+  for (const destination of destinations) {
+    const dst = normalizeSlug(destination).toLowerCase();
+    if (dst.length === 0) continue;
+    const edge: GraphEdge = {
+      src: normalizeSlug(record.slug).toLowerCase(),
+      dst,
+      type: "mentions",
+      provenance: "explicit",
+      created_at: now ?? record.updated_at,
+    };
+    edges.set(edgeRange(edge), edge);
+  }
+  return [...edges.values()];
+}
+
+function linkDestsFromRecord(type: RecordType, record: FbrainRecord | null): string[] {
+  if (!record) return [];
+  return uniqueDests(edgeIdsOf(recordGraphEdges(type, record)));
 }
 
 export async function planRecordListSide(opts: {
@@ -523,7 +556,7 @@ export async function planRecordListSide(opts: {
   let nextIds = edgeIdsOf(opts.nextEdges);
   let preservedEdgeIds: string[] = [];
   const nextDests = uniqueDests(nextIds);
-  const previousDests = linkDestsFromBody(opts.previous);
+  const previousDests = linkDestsFromRecord(opts.type, opts.previous);
   const knownOld = opts.previous
     ? slotsFor(opts.type, opts.previous, previousDests, details)
     : [];
@@ -584,7 +617,7 @@ export async function planRecordListSide(opts: {
             { hash: `ts#${opts.type}#${slug}`, range: HEAD_RANGE },
           ])
         : Promise.resolve([]),
-      dirSchema.length > 0 && opts.previous === null && opts.next !== null
+      dirSchema.length > 0 && opts.next !== null
         ? readExact(opts.node, dirSchema, ["btd_h", "btd_r", "btd_types"], [
             { hash: slug, range: DIRECTORY_RANGE },
           ])
@@ -697,14 +730,9 @@ export async function planRecordListSide(opts: {
     }
 
     if (opts.preserveStoredEdges && opts.previous) {
-      const prevBodyIds = new Set(
-        edgeIdsOf(
-          extractGraphEdges({
-            sourceSlug: slug,
-            body: opts.previous.body,
-          }),
-        ),
-      );
+      // Known old explicit relationships must disappear when their tag or
+      // design field disappears. Unknown frontmatter/tail ids can stay.
+      const prevBodyIds = new Set(edgeIdsOf(recordGraphEdges(opts.type, opts.previous)));
       const extras = previousEdgeIds.filter((id) => !prevBodyIds.has(id));
       const merged: string[] = [];
       const seenIds = new Set<string>();
@@ -725,17 +753,10 @@ export async function planRecordListSide(opts: {
     const finalNew = opts.next
       ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details)
       : [];
-    const entering = new Set(finalNew.map((slot) => slot.hash));
-    const subjectRange = `${opts.type}#${slug}`;
     const unreadByHash = new Map<string, Slot>();
     for (const slot of [...finalNew, ...oldSlots]) {
       if (queriedHeads.has(slot.hash) || unreadByHash.has(slot.hash)) continue;
-      if (entering.has(slot.hash)) {
-        unreadByHash.set(slot.hash, slot);
-        continue;
-      }
-      const loc = locs.get(locKey(slot.hash, subjectRange));
-      if (loc?.pageId === HEAD_RANGE) unreadByHash.set(slot.hash, slot);
+      unreadByHash.set(slot.hash, slot);
     }
     const unreadHeads = [...unreadByHash.values()];
     if (unreadHeads.length > 0) {
@@ -753,6 +774,10 @@ export async function planRecordListSide(opts: {
         installPage(hash, range, rowField(row, "blp_page"), slot?.kind === "symptom");
       }
     }
+
+    await validatePageLocators({
+      node: opts.node, pageSchema, type: opts.type, slug, oldSlots, pages, locs,
+    });
 
     const oldForApply = oldSlots;
     const newForApply = finalNew;
@@ -785,8 +810,10 @@ export async function planRecordListSide(opts: {
       }
       if (page.existed && page.original === json) continue;
       const fields = { blp_h: page.hash, blp_r: page.range, blp_page: json };
-      if (page.range === HEAD_RANGE) {
-        const replay = actionFor(page, opts.type, slug, opts.next);
+      if (page.range === HEAD_RANGE || page.existed) {
+        const replay = page.range === HEAD_RANGE
+          ? actionFor(page, opts.type, slug, opts.next)
+          : { kind: "remove" as const, type: opts.type, slug };
         if (!replay) continue;
         heads.push({
           schemaHash: pageSchema,
@@ -802,13 +829,14 @@ export async function planRecordListSide(opts: {
         continue;
       }
       if (!page.existed && page.cards.length === 0) continue;
-      ops.push({
-        mutationType: page.existed ? "update" : "create",
+      heads.push({
+        mutationType: "create",
         schemaHash: pageSchema,
         keyHash: page.hash,
         keyRange: page.range,
         fields,
-        projection: "list-page",
+        expected: { type: "absent", field: "blp_page" },
+        replay: { kind: "stage-overflow" },
       });
     }
   }
@@ -842,7 +870,8 @@ export async function planRecordListSide(opts: {
     }
   }
 
-  if (opts.next && dirSchema.length > 0 && opts.previous === null) {
+  // A write also repairs a directory that predates the list-page migration.
+  if (opts.next && dirSchema.length > 0) {
     const types = parseStringList(directoryRaw);
     if (!types.includes(opts.type)) types.push(opts.type);
     types.sort();
@@ -857,6 +886,17 @@ export async function planRecordListSide(opts: {
         projection: "directory",
       });
     }
+  }
+
+  if (opts.type === "design" && opts.next && opts.previous === null && pageSchema.length > 0) {
+    const hash = `child#${slug}`;
+    heads.push({
+      schemaHash: pageSchema, keyHash: hash, keyRange: HEAD_RANGE,
+      mutationType: "create",
+      fields: { blp_h: hash, blp_r: HEAD_RANGE, blp_page: JSON.stringify({ cards: [], older: "" }) },
+      expected: { type: "absent", field: "blp_page" },
+      replay: { kind: "ensure-empty" },
+    });
   }
   if (!opts.next && opts.previous && dirSchema.length > 0) {
     const dirRows = await readExact(opts.node, dirSchema, ["btd_h", "btd_r", "btd_types"], [
@@ -928,7 +968,8 @@ export async function planRecordListSide(opts: {
   const posted = opts.next
     ? postingTokens(opts.next.title, opts.sealedBody ?? "")
     : { tokens: [] as PostingToken[], dropped: false };
-  if (opts.next && posted.dropped) notePartial(details, "token cap");
+  // The token bound is the normal search shape, not a failed record index.
+  if (opts.next && posted.dropped) details.push("token cap");
   const nextTokenNames = posted.tokens.map((item) => item.token);
   const tokenKey = `ts#${opts.type}#${slug}`;
   const tokenJson = JSON.stringify(nextTokenNames);
@@ -1092,6 +1133,101 @@ function actionFor(
   return { kind: "remove", type, slug };
 }
 
+// Legacy locators and a failed head CAS can name an unreachable staged page.
+// Only linked:true proves reachability without a walk. Follow the older keys
+// for every unproven hint, batching independent lists at each depth.
+async function validatePageLocators(opts: {
+  node: NodeClient;
+  pageSchema: string;
+  type: RecordType;
+  slug: string;
+  oldSlots: readonly Slot[];
+  pages: Map<string, MemPage>;
+  locs: Map<string, MemLoc>;
+}): Promise<void> {
+  return validatePageLocatorSubjects({ ...opts, subjects: [{ slug: opts.slug, oldSlots: opts.oldSlots }] });
+}
+
+async function validatePageLocatorSubjects(opts: {
+  node: NodeClient;
+  pageSchema: string;
+  type: RecordType;
+  subjects: readonly { slug: string; oldSlots: readonly Slot[] }[];
+  pages: Map<string, MemPage>;
+  locs: Map<string, MemLoc>;
+}): Promise<void> {
+  const holds = (page: MemPage, slug: string): boolean => page.cards.some(
+    (card) => card.slug === slug && (card.type === undefined || card.type === opts.type),
+  );
+  const locate = (hash: string, pageId: string, slug: string): void => {
+    const subjectRange = `${opts.type}#${slug}`;
+    const id = locMemKey(hash, subjectRange);
+    const old = opts.locs.get(id);
+    opts.locs.set(id, {
+      listHash: hash, range: subjectRange, pageId,
+      existed: old?.existed ?? false, touched: false, deleted: false,
+    });
+  };
+  type Walk = { hash: string; range: string; slug: string; seen: Set<string> };
+  let pending: Walk[] = [];
+  for (const { slug, oldSlots } of opts.subjects) {
+    for (const slot of oldSlots) {
+    if (slot.kind !== "list") continue;
+    const head = ensureMemPage(opts.pages, slot.hash, HEAD_RANGE, false);
+    if (holds(head, slug)) {
+      locate(slot.hash, HEAD_RANGE, slug);
+      continue;
+    }
+    const hint = opts.locs.get(locMemKey(slot.hash, `${opts.type}#${slug}`));
+    const page = hint ? opts.pages.get(pageMemKey(slot.hash, hint.pageId)) : undefined;
+    if (page?.linked === true && holds(page, slug)) continue;
+    if (head.older.length === 0) {
+      locate(slot.hash, HEAD_RANGE, slug);
+      continue;
+    }
+    pending.push({ hash: slot.hash, range: head.older, slug, seen: new Set([HEAD_RANGE]) });
+    }
+  }
+  const refuse = (hash: string, slug: string): never => {
+    throw new FbrainError({
+      code: "list_membership_unproven",
+      message: `Cannot prove list membership for ${opts.type} ${slug} in ${hash}.`,
+      hint: "The list update was not sent. Read the product record and repair the named list before a manual retry.",
+    });
+  };
+  for (let depth = 0; pending.length > 0; depth++) {
+    if (depth >= 1000) refuse(pending[0]!.hash, pending[0]!.slug);
+    const missing = new Map(pending
+      .filter((walk) => !opts.pages.has(pageMemKey(walk.hash, walk.range)))
+      .map((walk) => [pageMemKey(walk.hash, walk.range), walk]));
+    const rows = await readExact(
+      opts.node, opts.pageSchema, ["blp_h", "blp_r", "blp_page"],
+      [...missing.values()].map((walk) => ({ hash: walk.hash, range: walk.range })),
+    );
+    for (const row of rows) {
+      const hash = rowHash(row) || rowField(row, "blp_h") || "";
+      const range = rowRange(row) || rowField(row, "blp_r") || "";
+      installMemPage(opts.pages, hash, range, rowField(row, "blp_page"), false);
+    }
+    const next: Walk[] = [];
+    for (const walk of pending) {
+      if (walk.seen.has(walk.range)) refuse(walk.hash, walk.slug);
+      walk.seen.add(walk.range);
+      const page = opts.pages.get(pageMemKey(walk.hash, walk.range)) ?? refuse(walk.hash, walk.slug);
+      if (!page.existed) refuse(walk.hash, walk.slug);
+      if (holds(page, walk.slug)) {
+        page.linked = true;
+        locate(walk.hash, walk.range, walk.slug);
+      } else if (page.older.length > 0) {
+        next.push({ ...walk, range: page.older });
+      } else {
+        locate(walk.hash, HEAD_RANGE, walk.slug);
+      }
+    }
+    pending = next;
+  }
+}
+
 function applyMembership(opts: {
   type: RecordType;
   slug: string;
@@ -1185,6 +1321,7 @@ function applyMembership(opts: {
       const page = opts.ensurePage(head.hash, id, false);
       page.cards = [moved];
       page.older = previousOlder;
+      page.linked = false;
       page.touched = true;
       head.older = id;
       head.touched = true;
@@ -1229,7 +1366,7 @@ function applyMembership(opts: {
     }
     const loc = locator(hash);
     if (previousSlot && nextSlot) {
-      if (loc?.existed && loc.pageId !== HEAD_RANGE) {
+      if (loc && loc.pageId !== HEAD_RANGE) {
         const oldPage = opts.ensurePage(hash, loc.pageId, false);
         oldPage.cards = dropCard(oldPage.cards, opts.type, opts.slug);
         oldPage.touched = true;
@@ -1238,7 +1375,7 @@ function applyMembership(opts: {
       continue;
     }
     if (previousSlot) {
-      if (loc?.existed) {
+      if (loc) {
         const oldPage = opts.ensurePage(hash, loc.pageId, false);
         oldPage.cards = dropCard(oldPage.cards, opts.type, opts.slug);
         oldPage.touched = true;
@@ -1287,7 +1424,7 @@ export async function commitKeywordHeads(
 ): Promise<string[]> {
   const details: string[] = [];
   const failedRemove = new Set<string>();
-  for (const head of heads) {
+  await Promise.all(heads.map(async (head) => {
     const first = await casHead(node, head);
     let applied = first === "applied";
     if (first === "conflict") {
@@ -1339,7 +1476,7 @@ export async function commitKeywordHeads(
       const token = head.keyHash.startsWith("kw#") ? head.keyHash.slice(3) : "";
       if (token.length > 0) failedRemove.add(token);
     }
-  }
+  }));
   if (tokenSet) {
     // A failed remove stays in the set. Put it first so a later cap keeps it.
     const names = [...failedRemove];
@@ -1389,6 +1526,11 @@ function rebuildHead(
   raw: string | null,
 ): { write: HeadCommit | null; note: string | null } {
   const fresh = parsePage(raw);
+  // Another task can create the first child page while the design is created.
+  // Its existing contents prove initialization and must never be cleared.
+  if (head.replay.kind === "ensure-empty") return { write: null, note: null };
+  if (head.replay.kind === "backfill") return { write: null, note: "backfill head conflict" };
+  if (head.replay.kind === "stage-overflow") return { write: null, note: "page allocation conflict" };
   if (head.replay.kind === "place") {
     const card = head.replay.card;
     const cards = dropCard(fresh.cards, card.type ?? "", card.slug);
@@ -1407,10 +1549,12 @@ function rebuildHead(
     return { write, note: write ? null : "page cap" };
   }
   if (head.replay.kind === "remove") {
+    if (head.keyRange !== HEAD_RANGE && raw === null) return { write: null, note: "page absent" };
     const write = headWrite(
       head,
       raw,
       {
+        ...fresh,
         cards: dropCard(fresh.cards, head.replay.type, head.replay.slug),
         older: fresh.older,
       },
@@ -1446,28 +1590,8 @@ async function casHead(node: NodeClient, head: HeadCommit): Promise<"applied" | 
         expected: head.expected,
       });
     }
-    if (head.mutationType === "create") {
-      await node.createRecord({
-        schemaHash: head.schemaHash,
-        fields: head.fields,
-        keyHash: head.keyHash,
-        keyRange: head.keyRange,
-      });
-    } else if (head.mutationType === "delete") {
-      await node.deleteRecord({
-        schemaHash: head.schemaHash,
-        keyHash: head.keyHash,
-        keyRange: head.keyRange,
-      });
-    } else {
-      await node.updateRecord({
-        schemaHash: head.schemaHash,
-        fields: head.fields,
-        keyHash: head.keyHash,
-        keyRange: head.keyRange,
-      });
-    }
-    return "applied";
+    // An unconditional fallback can restore a deleted card from an old page.
+    return "error";
   } catch (err) {
     const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
     if (code === "cas_conflict") return "conflict";
@@ -1475,24 +1599,143 @@ async function casHead(node: NodeClient, head: HeadCommit): Promise<"applied" | 
   }
 }
 
+async function confirmOverflowLinked(node: NodeClient, head: HeadCommit): Promise<boolean> {
+  if (head.replay.kind !== "place" || head.replay.overflowId.length === 0) return true;
+  const range = head.replay.overflowId;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const raw = await readOnePage(node, head.schemaHash, head.keyHash, range).catch(() => null);
+    if (raw === null) return false;
+    const page = parsePage(raw);
+    if (page.linked === true) return true;
+    const json = renderPage({ ...page, linked: true }, false);
+    if (json === null) return false;
+    const result = await casHead(node, {
+      ...head,
+      mutationType: "update",
+      keyRange: range,
+      fields: { blp_h: head.keyHash, blp_r: range, blp_page: json },
+      expected: { type: "value", field: "blp_page", value: raw },
+    });
+    if (result === "applied") return true;
+    if (result === "error") return false;
+  }
+  return false;
+}
+
+// A competing insert can move the removed head card into an overflow page.
+// After the head removal CAS, an older snapshot cannot link that card again.
+// Follow that successful head's older chain and remove any displaced copy.
+async function removeOlderCopies(node: NodeClient, head: HeadCommit): Promise<boolean> {
+  if (head.replay.kind !== "remove" || head.keyRange !== HEAD_RANGE) return true;
+  const replay = head.replay;
+  const current = typeof head.fields.blp_page === "string" ? head.fields.blp_page : null;
+  let range = parsePage(current).older;
+  const seen = new Set<string>([HEAD_RANGE]);
+  for (let depth = 0; range.length > 0; depth++) {
+    if (depth >= 1000 || seen.has(range)) return false;
+    seen.add(range);
+    let done = false;
+    let older = "";
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const raw = await readOnePage(node, head.schemaHash, head.keyHash, range).catch(() => null);
+      if (raw === null) return false;
+      const page = parsePage(raw);
+      older = page.older;
+      const cards = dropCard(page.cards, replay.type, replay.slug);
+      if (cards.length === page.cards.length) {
+        done = true;
+        break;
+      }
+      const json = renderPage({ ...page, cards, linked: true }, false);
+      if (json === null) return false;
+      const result = await casHead(node, {
+        ...head, keyRange: range, mutationType: "update",
+        fields: { blp_h: head.keyHash, blp_r: range, blp_page: json },
+        expected: { type: "value", field: "blp_page", value: raw },
+      });
+      if (result === "applied") {
+        done = true;
+        break;
+      }
+      if (result === "error") return false;
+    }
+    if (!done) return false;
+    range = older;
+  }
+  return true;
+}
+
 export async function commitHeadPages(
   node: NodeClient,
   heads: readonly HeadCommit[],
 ): Promise<string[]> {
-  const details: string[] = [];
+  const byHash = new Map<string, HeadCommit[]>();
   for (const head of heads) {
-    const first = await casHead(node, head);
-    if (first === "applied") continue;
-    if (first === "error") {
-      notePartial(details, "head write failed");
+    const id = `${head.schemaHash}\0${head.keyHash}`;
+    const group = byHash.get(id) ?? [];
+    group.push(head);
+    byHash.set(id, group);
+  }
+  const results = await Promise.all([...byHash.values()].map((group) => commitHeadPageGroup(node, group)));
+  return [...new Set(results.flat())];
+}
+
+async function commitHeadPageGroup(
+  node: NodeClient,
+  heads: readonly HeadCommit[],
+): Promise<string[]> {
+  const details: string[] = [];
+  const failedPlaces = new Set<string>();
+  let failedStage = false;
+  const placeId = (head: HeadCommit): string => {
+    const replay = head.replay;
+    const subject = replay.kind === "place"
+      ? `${replay.card.type ?? ""}#${replay.card.slug}`
+      : replay.kind === "remove" ? `${replay.type}#${replay.slug}` : "";
+    return `${head.schemaHash}\0${head.keyHash}\0${subject}`;
+  };
+  // A source page stays intact if its replacement head cannot accept the card.
+  const ordered = [
+    ...heads.filter((head) => head.replay.kind === "stage-overflow"),
+    ...heads.filter((head) => head.keyRange === HEAD_RANGE),
+    ...heads.filter((head) => head.keyRange !== HEAD_RANGE && head.replay.kind !== "stage-overflow"),
+  ];
+  for (const head of ordered) {
+    if (failedStage && head.replay.kind !== "stage-overflow") {
+      if (head.replay.kind === "place") failedPlaces.add(placeId(head));
       continue;
     }
+    if (head.keyRange !== HEAD_RANGE && failedPlaces.has(placeId(head))) continue;
+    const first = await casHead(node, head);
+    if (first === "applied") {
+      if (!(await confirmOverflowLinked(node, head))) details.push("page reachability unconfirmed");
+      continue;
+    }
+    if (first === "error") {
+      notePartial(details, "head write failed");
+      if (head.replay.kind === "stage-overflow") failedStage = true;
+      if (head.replay.kind === "place") failedPlaces.add(placeId(head));
+      continue;
+    }
+    if (head.replay.kind === "ensure-empty") continue;
     const raw = await readOnePage(node, head.schemaHash, head.keyHash, head.keyRange);
     const rebuilt = rebuildHead(head, raw);
     if (rebuilt.note) notePartial(details, rebuilt.note);
-    if (!rebuilt.write) continue;
+    if (!rebuilt.write) {
+      if (head.replay.kind === "stage-overflow") failedStage = true;
+      if (head.replay.kind === "place") failedPlaces.add(placeId(head));
+      continue;
+    }
     const second = await casHead(node, rebuilt.write);
-    if (second !== "applied") notePartial(details, "head conflict");
+    if (second !== "applied") {
+      notePartial(details, "head conflict");
+      if (head.replay.kind === "place") failedPlaces.add(placeId(head));
+    } else if (!(await confirmOverflowLinked(node, rebuilt.write))) {
+      details.push("page reachability unconfirmed");
+    }
+    if (second === "applied" && !(await removeOlderCopies(node, rebuilt.write))) {
+      notePartial(details, "older page removal unconfirmed");
+    }
   }
   return details;
 }
@@ -1662,10 +1905,12 @@ export type NamedPageTarget = {
 
 export type NamedBackfillTarget =
   | NamedPageTarget
+  | { kind: "directory" }
   | { kind: "keyword"; token: string | null };
 
 export type NamedBackfillPlan = {
   ops: BatchMutationOp[];
+  heads: HeadCommit[];
   added: number;
   /** Eligible slugs whose locator or head already held the card. */
   covered: number;
@@ -1702,6 +1947,7 @@ async function readKeyed(
 function blankPlan(lastSlug: string, traces: string[], notes: string[]): NamedBackfillPlan {
   return {
     ops: [],
+    heads: [],
     added: 0,
     covered: 0,
     lastSlug,
@@ -1729,6 +1975,45 @@ export async function planNamedSlugBackfill(opts: {
     if (record.slug.length > 0) bySlug.set(record.slug, record);
   }
   const pageSchema = schemaOf(opts.cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
+  if (opts.target.kind === "directory") {
+    const schemaHash = schemaOf(opts.cfg, BRAIN_TYPE_DIRECTORY_SCHEMA_KEY);
+    if (schemaHash.length === 0) {
+      return { ...blankPlan(lastSlug, traces, notes), blocked: "directory schema absent" };
+    }
+    const live = opts.slugOrder.filter((slug) => {
+      const record = bySlug.get(slug);
+      return record !== undefined && !isTombstoned(record);
+    });
+    const rows = await readKeyed(
+      opts.node, schemaHash, ["btd_h", "btd_r", "btd_types"],
+      live.map((slug) => ({ hash: slug, range: DIRECTORY_RANGE })),
+      "BrainTypeDirectory", traces,
+    );
+    const existing = new Map(rows.map((row) => [
+      rowHash(row) || rowField(row, "btd_h") || "", rowField(row, "btd_types"),
+    ]));
+    const ops: BatchMutationOp[] = [];
+    let covered = 0;
+    for (const slug of live) {
+      const raw = existing.get(slug);
+      const types = parseStringList(raw ?? null);
+      if (types.includes(opts.sourceType)) {
+        covered++;
+        continue;
+      }
+      types.push(opts.sourceType);
+      types.sort();
+      ops.push({
+        mutationType: existing.has(slug) ? "update" : "create",
+        schemaHash, keyHash: slug, keyRange: DIRECTORY_RANGE,
+        fields: { btd_h: slug, btd_r: DIRECTORY_RANGE, btd_types: JSON.stringify(types) },
+      });
+    }
+    return {
+      ...blankPlan(lastSlug, traces, notes), ops, added: ops.length, covered,
+      lastAdded: ops.some((op) => op.keyHash === lastSlug) ? 1 : 0,
+    };
+  }
   if (pageSchema.length === 0) {
     return { ...blankPlan(lastSlug, traces, notes), blocked: "list schema absent" };
   }
@@ -1901,6 +2186,7 @@ export async function planNamedSlugBackfill(opts: {
     }
     return {
       ops,
+      heads: [],
       added: placed.size,
       covered,
       lastSlug,
@@ -1952,6 +2238,33 @@ export async function planNamedSlugBackfill(opts: {
         touched: false,
         deleted: false,
       });
+    }
+    if (located.size > 0) {
+      const ranges = new Set([HEAD_RANGE, ...[...locs.values()].map((loc) => loc.pageId)]);
+      const rows = await readKeyed(
+        opts.node, pageSchema, ["blp_h", "blp_r", "blp_page"],
+        [...ranges].map((range) => ({ hash: target.hash, range })),
+        "BrainListPage locator proof", traces,
+      );
+      for (const row of rows) {
+        const hash = rowHash(row) || rowField(row, "blp_h") || "";
+        const range = rowRange(row) || rowField(row, "blp_r") || "";
+        installMemPage(pages, hash, range, rowField(row, "blp_page"), false);
+      }
+      await validatePageLocatorSubjects({
+        node: opts.node, pageSchema, type: opts.sourceType, pages, locs,
+        subjects: opts.slugOrder.filter((slug) => located.has(slug)).map((slug) => ({
+          slug, oldSlots: [{ hash: target.hash, kind: "list", bound: target.bound }],
+        })),
+      });
+      for (const slug of opts.slugOrder) {
+        if (!located.has(slug)) continue;
+        const loc = locs.get(locMemKey(target.hash, `${opts.sourceType}#${slug}`));
+        const page = loc ? pages.get(pageMemKey(target.hash, loc.pageId)) : undefined;
+        if (!page?.cards.some((card) => card.slug === slug && card.type === opts.sourceType)) {
+          located.delete(slug);
+        }
+      }
     }
   }
 
@@ -2094,7 +2407,9 @@ export async function planNamedSlugBackfill(opts: {
   }
 
   const ops: BatchMutationOp[] = [];
+  const heads: HeadCommit[] = [];
   const placed = new Set<string>();
+  const newlyEligible = new Set(pending.map((record) => record.slug));
   for (const page of pages.values()) {
     if (!page.touched) continue;
     const json = renderPage(page, page.symptom);
@@ -2102,12 +2417,26 @@ export async function planNamedSlugBackfill(opts: {
       return { ...blankPlan(lastSlug, traces, notes), blocked: "page cap" };
     }
     if (page.existed && page.original === json) continue;
-    ops.push({
-      mutationType: page.existed ? "update" : "create",
+    if (page.range === HEAD_RANGE) {
+      heads.push({
+        mutationType: page.existed ? "update" : "create",
+        schemaHash: pageSchema, keyHash: page.hash, keyRange: page.range,
+        fields: { blp_h: page.hash, blp_r: page.range, blp_page: json },
+        expected: page.existed
+          ? { type: "value", field: "blp_page", value: page.original ?? "" }
+          : { type: "absent", field: "blp_page" },
+        replay: { kind: "backfill" },
+      });
+      continue;
+    }
+    heads.push({
+      mutationType: "create",
       schemaHash: pageSchema,
       keyHash: page.hash,
       keyRange: page.range,
       fields: { blp_h: page.hash, blp_r: page.range, blp_page: json },
+      expected: { type: "absent", field: "blp_page" },
+      replay: { kind: "stage-overflow" },
     });
   }
   if (locSchema.length > 0) {
@@ -2116,7 +2445,7 @@ export async function planNamedSlugBackfill(opts: {
       const slug = loc.range.startsWith(`${opts.sourceType}#`)
         ? loc.range.slice(opts.sourceType.length + 1)
         : "";
-      if (slug.length > 0) placed.add(slug);
+      if (newlyEligible.has(slug) && !located.has(slug)) placed.add(slug);
       ops.push({
         mutationType: loc.existed ? "update" : "create",
         schemaHash: locSchema,
@@ -2149,6 +2478,7 @@ export async function planNamedSlugBackfill(opts: {
   }
   return {
     ops,
+    heads,
     added: placed.size,
     covered,
     lastSlug,

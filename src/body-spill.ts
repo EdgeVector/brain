@@ -125,8 +125,11 @@ export function cutHead(text: string, maxBytes: number): string {
 
 // ── sidecar ─────────────────────────────────────────────────────────────────
 
-export function bodyFileKey(type: RecordType, slug: string, field: string): string {
-  return `${SPILL_FILE_KEY_PREFIX}${sha256Hex(`${type}:${slug}:${field}`)}`;
+export function bodyFileKey(type: RecordType, slug: string, field: string, contentHash?: string): string {
+  const identity = `${type}:${slug}:${field}`;
+  // New sidecars are immutable versions. A failed primary write must not
+  // replace the sidecar still named by the old primary marker.
+  return `${SPILL_FILE_KEY_PREFIX}${sha256Hex(contentHash ? `${identity}:${contentHash}` : identity)}`;
 }
 
 type SpillCfg = Pick<Config, "schemaHashes">;
@@ -181,6 +184,10 @@ async function readSidecar(
   key: string,
 ): Promise<SidecarRow | null> {
   const row = await queryRowByKey(node, schemaHash, FILE_FIELDS, key);
+  return sidecarFromRow(row);
+}
+
+function sidecarFromRow(row: QueryRow | null): SidecarRow | null {
   if (row === null) return null;
   const f = (row.fields ?? {}) as Record<string, unknown>;
   return {
@@ -189,6 +196,34 @@ async function readSidecar(
     createdAt: stringOf(f, "created_at"),
     pointer: pointerOf(f.file),
   };
+}
+
+async function readMarkerSidecar(
+  node: NodeClient,
+  schemaHash: string,
+  type: RecordType,
+  slug: string,
+  field: string,
+  contentHash: string,
+): Promise<SidecarRow | null> {
+  const versioned = bodyFileKey(type, slug, field, contentHash);
+  const legacy = bodyFileKey(type, slug, field);
+  // Read both known keys together for compatibility with the original layout.
+  // New writes never overwrite the legacy key.
+  if (node.queryByKeys) {
+    const rows = await node.queryByKeys({
+      schemaHash,
+      fields: FILE_FIELDS,
+      keys: [{ hash: versioned }, { hash: legacy }],
+    });
+    const byKey = new Map(rows.map((row) => [row.key?.hash ?? stringOf(row.fields ?? {}, "file_key"), row]));
+    return sidecarFromRow(byKey.get(versioned) ?? byKey.get(legacy) ?? null);
+  }
+  const [current, previous] = await Promise.all([
+    readSidecar(node, schemaHash, versioned),
+    readSidecar(node, schemaHash, legacy),
+  ]);
+  return current ?? previous;
 }
 
 // Lazy schema declare, the same pattern as `ensureAttachmentSchemas`: an
@@ -335,16 +370,6 @@ async function bodyFileSchemaHash(node: NodeClient, cfg: SpillCfg | null): Promi
 }
 
 export type HydrateOptions = {
-  /**
-   * Serve the body file's text when the record row names an older text than the
-   * body file record holds. A writer updates the body file record first and the
-   * record second, so two concurrent writers can leave the record naming the
-   * loser's text while the body file record holds the winner's. The text is
-   * still whole and verified against the body file record's own hash; the next
-   * write of the record heals the mismatch.
-   */
-  tolerateMismatch?: boolean;
-  warn?: (message: string) => void;
   // Load only these spilled fields. Omitted loads every spilled field.
   fields?: readonly string[];
 };
@@ -356,11 +381,10 @@ async function resolveSpilledField(
   slug: string,
   field: string,
   marker: SpillMarker,
-  opts?: HydrateOptions,
 ): Promise<string> {
   const schemaHash = await bodyFileSchemaHash(node, cfg);
-  const key = bodyFileKey(type, slug, marker.field || field);
-  const sidecar = await readSidecar(node, schemaHash, key);
+  const key = bodyFileKey(type, slug, marker.field || field, marker.sha256);
+  const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, marker.field || field, marker.sha256);
   if (sidecar === null) {
     throw new FbrainError({
       code: "body_spill_sidecar_missing",
@@ -368,22 +392,15 @@ async function resolveSpilledField(
       hint: "The record may have synced before its sidecar. Retry; if it stays, write the record again with its full text.",
     });
   }
-  let expectHash = marker.sha256;
-  let expectBytes = marker.bytes;
-  if (sidecar.contentHash !== marker.sha256) {
+  if (sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
     const message =
       `${type} ${slug}: field ${field} names text ${marker.sha256.slice(0, 12)}, ` +
       `but the body file record holds ${sidecar.contentHash.slice(0, 12)}.`;
-    if (opts?.tolerateMismatch !== true) {
-      throw new FbrainError({
-        code: "body_spill_sidecar_mismatch",
-        message,
-        hint: "A concurrent write changed the text. Read the record again.",
-      });
-    }
-    opts.warn?.(`warning: ${message} Serving the body file text; the next write of this record heals it.`);
-    expectHash = sidecar.contentHash;
-    expectBytes = sidecar.size;
+    throw new FbrainError({
+      code: "body_spill_sidecar_mismatch",
+      message,
+      hint: "The stored text reference does not match this record revision. Read the record again or restore its full text.",
+    });
   }
   if (sidecar.pointer === null) {
     throw new FbrainError({
@@ -393,7 +410,7 @@ async function resolveSpilledField(
     });
   }
   const bytes = await fetchBlob(node, sidecar.pointer);
-  verifyBytes(bytes, expectHash, expectBytes, `${type} ${slug} field ${field}`);
+  verifyBytes(bytes, marker.sha256, marker.bytes, `${type} ${slug} field ${field}`);
   return Buffer.from(bytes).toString("utf8");
 }
 
@@ -421,7 +438,7 @@ export async function hydrateRecord(
   }
   if (pending.length === 0) return record;
   const texts = await Promise.all(
-    pending.map((p) => resolveSpilledField(node, cfg, type, record.slug, p.field, p.marker, opts)),
+    pending.map((p) => resolveSpilledField(node, cfg, type, record.slug, p.field, p.marker)),
   );
   const out: HydratedRecord = { ...record };
   const stored: Record<string, string> = {};
@@ -584,7 +601,7 @@ async function commitSidecar(opts: {
       hint: "Split the text across records.",
     });
   }
-  const key = bodyFileKey(type, slug, field);
+  const key = bodyFileKey(type, slug, field, full.sha256);
   const existing = await readSidecar(node, schemaHash, key);
   if (
     existing !== null &&
@@ -633,6 +650,8 @@ export async function sealRecordFields(opts: {
 }): Promise<SealResult> {
   const { node, cfg, type, slug } = opts;
   const plan = planSeal(type, slug, opts.fields);
+  // Reject invalid fields before schema declarations or blob/sidecar writes.
+  assertFieldBudget(type, slug, plan.stored);
   const spilled: SpilledField[] = [];
 
   if (plan.spill.length > 0 || plan.pass.length > 0) {
@@ -654,8 +673,8 @@ export async function sealRecordFields(opts: {
     // A pass-through marker must still point at a real sidecar with that text.
     await Promise.all(
       plan.pass.map(async ({ field, marker }) => {
-        const sidecar = await readSidecar(node, schemaHash, bodyFileKey(type, slug, field));
-        if (sidecar === null || sidecar.pointer === null || sidecar.contentHash !== marker.sha256) {
+        const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, field, marker.sha256);
+        if (sidecar === null || sidecar.pointer === null || sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
           throw new FbrainError({
             code: "body_spill_sidecar_mismatch",
             message: `${type} ${slug}: field ${field} carries a marker with no matching body file record.`,
@@ -672,7 +691,6 @@ export async function sealRecordFields(opts: {
     }
   }
 
-  assertFieldBudget(type, slug, plan.stored);
   return { fields: plan.stored, spilled };
 }
 

@@ -39,13 +39,14 @@ import {
   writeDurabilityTokens,
   type WriteDurability,
 } from "../write-confirmation.ts";
-import { hydrateRecord, parseSpillMarker, sealRecordFields } from "../body-spill.ts";
+import { hydrateRecord, parseSpillMarker } from "../body-spill.ts";
 import { HEAD_RANGE, INDEX_PARTIAL } from "../list-page.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY } from "../schemas.ts";
 import {
   buildResidentWritePlan,
   commitResidentWritePlan,
-  type PlannedMutation,
+  commitResidentWritePlans,
+  type ResidentWritePlan,
 } from "../resident-write-plan.ts";
 import {
   ensureComponent,
@@ -516,14 +517,14 @@ async function planReferenceTwin(opts: {
   verbose?: Verbose;
 }): Promise<{
   prior: PapercutTwinResult | null;
-  op: PlannedMutation | null;
+  plan: ResidentWritePlan | null;
   from: string | null;
   to: string | null;
 }> {
   const target = referenceTwinStatusFor(opts.status);
-  if (target === null) return { prior: null, op: null, from: null, to: null };
+  if (target === null) return { prior: null, plan: null, from: null, to: null };
   if (opts.cfg.schemaHashes.reference === undefined) {
-    return { prior: null, op: null, from: null, to: null };
+    return { prior: null, plan: null, from: null, to: null };
   }
   const refHash = schemaHashFor("reference", opts.cfg);
   let twin: FbrainRecord | null;
@@ -539,12 +540,12 @@ async function planReferenceTwin(opts: {
         persisted: false,
         error: error instanceof Error ? error.message : String(error),
       },
-      op: null,
+      plan: null,
       from: null,
       to: null,
     };
   }
-  if (twin === null) return { prior: null, op: null, from: null, to: null };
+  if (twin === null) return { prior: null, plan: null, from: null, to: null };
   if (twin.status === target) {
     return {
       prior: {
@@ -554,7 +555,7 @@ async function planReferenceTwin(opts: {
         changed: false,
         persisted: true,
       },
-      op: null,
+      plan: null,
       from: null,
       to: null,
     };
@@ -565,30 +566,28 @@ async function planReferenceTwin(opts: {
     updated_at: opts.now,
   };
   const primaryFields = updateFieldsFrom(twin, "reference", patch);
-  const sealed = await sealRecordFields({
+  const plan = await buildResidentWritePlan({
     node: opts.node,
     cfg: opts.cfg,
     type: "reference",
-    slug: opts.slug,
-    fields: primaryFields,
+    schemaHash: refHash,
+    previous: twin,
+    next: { ...twin, ...patch },
+    primaryFields,
+    now: opts.now,
+    preserveStoredEdges: true,
     ...(opts.verbose !== undefined ? { verbose: opts.verbose } : {}),
   });
   return {
     prior: null,
-    op: {
-      mutationType: "update",
-      schemaHash: refHash,
-      keyHash: opts.slug,
-      fields: sealed.fields,
-      projection: "primary",
-    },
+    plan,
     from: twin.status,
     to: target,
   };
 }
 
 // One call writes the status field and the evidence block. The reference twin,
-// when it changes, is one mutation in that same batch.
+// when it changes, uses the same primary batch and keeps its related pages current.
 export async function papercutCloseCmd(
   opts: PapercutCloseOptions,
 ): Promise<PapercutCloseResult> {
@@ -674,12 +673,13 @@ export async function papercutCloseCmd(
     now,
     verbose: opts.verbose,
   });
-  if (twinPlan.op) plan.ops.push(twinPlan.op);
-  const receipt = await commitResidentWritePlan({
+  const writes = [
+    { plan, type: PAPERCUT, slug },
+    ...(twinPlan.plan ? [{ plan: twinPlan.plan, type: "reference" as const, slug }] : []),
+  ];
+  const receipt = await commitResidentWritePlans({
     node,
-    plan,
-    type: PAPERCUT,
-    slug,
+    writes,
     durable: true,
     failOnIndexPartial: true,
   });
@@ -687,7 +687,7 @@ export async function papercutCloseCmd(
   const revision = receipt.mutationIds[0];
 
   let twin = twinPlan.prior;
-  if (twinPlan.op && twinPlan.from && twinPlan.to) {
+  if (twinPlan.plan && twinPlan.from && twinPlan.to) {
     const refHash = schemaHashFor("reference", opts.cfg);
     const target = twinPlan.to;
     const seen = await withReadRetry(

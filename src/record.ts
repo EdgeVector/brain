@@ -913,18 +913,15 @@ export async function findBySlugRaw(
   if (row === null) return null;
   const record = rowToRecord(row, type);
   if (opts?.hydrate === false) return record;
-  // The sidecar is written before the record. One re-read settles a reader
-  // that still holds the older record row.
+  // Retry an older primary row once. A second mismatch remains an error;
+  // never substitute the body of another revision for the marker's body.
   try {
     return await hydrateRecord(node, cfg ?? null, type, record);
   } catch (err) {
     if (!(err instanceof FbrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
     const again = await readRow();
     if (again === null) return null;
-    return hydrateRecord(node, cfg ?? null, type, rowToRecord(again, type), {
-      tolerateMismatch: true,
-      warn: (message) => console.error(message),
-    });
+    return hydrateRecord(node, cfg ?? null, type, rowToRecord(again, type));
   }
 }
 
@@ -1621,7 +1618,7 @@ function parseDirectoryTypeList(value: unknown): RecordType[] {
 }
 
 function directoryBackfill(slug: string): string {
-  return `brain reindex --target <hash> --source-hash <type> --slug ${slug}`;
+  return `brain reindex --target directory --source-hash <type> --slug ${slug}`;
 }
 
 function throwDirectoryNotFound(opts: ResolveBySlugOpts): never {

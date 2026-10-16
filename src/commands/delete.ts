@@ -20,7 +20,7 @@ import { pageBackfill, readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
-import { HEAD_RANGE } from "../list-page.ts";
+import { HEAD_RANGE, planRecordListSide, type ListSidePlan } from "../list-page.ts";
 import {
   buildRecordFields,
   findBySlugRaw,
@@ -105,6 +105,24 @@ async function findLinkedTaskSlugs(
     if (page.cards.length > 0) return page.cards.map((card) => card.slug);
     if (page.older.length === 0) return [];
     range = page.older;
+  }
+}
+
+async function linkedTasksForDelete(
+  node: NodeClient,
+  cfg: Config,
+  designSlug: string,
+  force: boolean | undefined,
+  print: (line: string) => void,
+): Promise<string[]> {
+  try {
+    return await findLinkedTaskSlugs(node, cfg, designSlug);
+  } catch (err) {
+    if (!(force && err instanceof FbrainError && err.code === "child_page_unproven")) throw err;
+    // Force explicitly permits dangling references. Do not claim the absent
+    // or damaged child page proves that the design has no linked tasks.
+    print(`warning: child references for design "${designSlug}" are unknown; --force permits dangling references.`);
+    return [];
   }
 }
 
@@ -224,7 +242,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // this is a design-only concern. Runs before any mutation: a blocked delete
   // leaves the design untouched.
   if (type === "design") {
-    const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
+    const linked = await linkedTasksForDelete(node, opts.cfg, slug, opts.force, print);
     if (linked.length > 0) {
       const n = linked.length;
       const noun = n === 1 ? "task" : "tasks";
@@ -242,6 +260,9 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     }
   }
 
+  const listSide = await planRecordListSide({
+    node, cfg: opts.cfg, type, previous: record, next: null, nextEdges: [],
+  });
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
   // Remove an old RecordListEntry row when that key exists.
   {
@@ -268,7 +289,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       verbose: opts.verbose,
     });
   }
-  const indexNote = await dropListSide(node, opts.cfg, type, record);
+  const indexNote = await dropListSide(node, opts.cfg, type, record, listSide);
 
   print(`deleted ${type} ${slug}${indexNote}`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
@@ -408,8 +429,9 @@ async function dropListSide(
   cfg: Config,
   type: RecordType,
   record: FbrainRecord,
+  side: ListSidePlan,
 ): Promise<string> {
-  const removed = await removeResidentListSide({ node, cfg, type, record });
+  const removed = await removeResidentListSide({ node, cfg, type, record, side });
   return formatIndexNotes(removed.indexNotes);
 }
 
@@ -482,7 +504,7 @@ export async function deleteByFilter(
 
     try {
       if (m.type === "design") {
-        const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
+        const linked = await linkedTasksForDelete(node, opts.cfg, slug, opts.force, print);
         if (linked.length > 0) {
           const n = linked.length;
           const lnoun = n === 1 ? "task" : "tasks";
@@ -518,6 +540,9 @@ export async function deleteByFilter(
         throw err;
       }
 
+      const listSide = await planRecordListSide({
+        node, cfg: opts.cfg, type: m.type, previous: resolved.record, next: null, nextEdges: [],
+      });
       await tombstoneOne(
         node,
         opts.cfg,
@@ -556,6 +581,7 @@ export async function deleteByFilter(
         opts.cfg,
         m.type,
         resolved.record,
+        listSide,
       );
       print(`deleted ${m.type} ${slug}${indexNote}`);
       deleted.push({ type: m.type, slug });
