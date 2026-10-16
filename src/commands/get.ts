@@ -1,7 +1,9 @@
-// `fbrain get <slug> [--type T]` — print one record.
+// `brain get <slug> [--type T]` — print one record.
 // Untyped get reads the type directory, then at most one product key.
 // Typed get reads that product key and does not read the directory.
-// A design child list reads one child page. `linked_from` reads one link page.
+// A design get reads child# as one HashRangeKey.
+// linked_from reads link# as one HashRangeKey.
+// A print that omits the body does not fetch the blob.
 
 import {
   displayCap,

@@ -548,6 +548,7 @@ async function readPapercutTypePageKeys(
 
 // Key-only walk: slug, tombstone, and updated_at via `listRecordKeys`.
 // Tombstones are already dropped by that read.
+// An explicit papercut type reads the status page and does not read PapercutStatusIndex.
 export async function resolveListKeyEntries(
   node: NodeClient,
   opts: Pick<
