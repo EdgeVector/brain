@@ -932,7 +932,8 @@ export const attachmentFileSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
-// One BrainBodyFile per spilled field. The full text is a local file blob.
+// One immutable BrainBodyFile per spilled field and content hash. The full text
+// is a local file blob. Reads also accept the original per-field sidecar key.
 // `file` is type Any and holds the `$lastdb_file` pointer as the whole value.
 // A pointer inside a JSON string is not a reference. Knowledge schemas gain no
 // field: a new field would re-hash every record. The record keeps a head and a

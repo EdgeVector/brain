@@ -3,18 +3,11 @@
 // compatibility; all other pairs store a link:<type>:<slug> tag on the
 // source record. Explicit edges reject missing targets.
 
-import { hasSpillMarker } from "../body-spill.ts";
 import { FbrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
-import { extractGraphEdges } from "../graph-edge.ts";
-import {
-  commitHeadPages,
-  INDEX_PARTIAL,
-  planRecordListSide,
-  WRITE_BATCH_MAX,
-} from "../list-page.ts";
+import { INDEX_PARTIAL } from "../list-page.ts";
 import {
   findBySlug,
   genericLinkTag,
@@ -22,10 +15,14 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
-  writeRecordFields,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import {
+  buildResidentWritePlan,
+  commitResidentWritePlan,
+  recordFromPrimaryFields,
+} from "../resident-write-plan.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type LinkOptions = {
@@ -153,60 +150,23 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   const now = nowIso();
   const fields = fieldsForLinkUpdate(source, fromType, toType, toSlug, now);
 
-  // The source read keeps the stored head. Seal so a full body cannot land again.
-  const sealed = await writeRecordFields({
+  const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: fromType,
-    slug: fromSlug,
     schemaHash: fromHash,
-    fields,
+    previous: source,
+    next: recordFromPrimaryFields(fields),
+    primaryFields: fields,
+    now,
+    // Keep the unchanged body tail and frontmatter edges without fetching it.
+    preserveStoredEdges: true,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });
-  const storedRecord = sealed.fields as FbrainRecord;
-  // A spill on this write keeps the full body already in memory.
-  const linkView: FbrainRecord =
-    sealed.spilled.length > 0 && typeof fields.body === "string"
-      ? { ...storedRecord, body: fields.body }
-      : storedRecord;
-  // Wiki dests keep their slots. The explicit target is last, under LINK_CAP.
-  const edges = extractGraphEdges({ sourceSlug: fromSlug, body: linkView.body });
-  edges.push({
-    src: fromSlug.toLowerCase(),
-    dst: toSlug.toLowerCase(),
-    type: "mentions",
-    provenance: "explicit",
-    created_at: now,
-  });
-  const side = await planRecordListSide({
-    node,
-    cfg: opts.cfg,
-    type: fromType,
-    previous: source,
-    next: linkView,
-    nextEdges: edges,
-    // The tail stays in the file. Keep stored edge ids that are not in the head.
-    ...(hasSpillMarker(linkView.body) ? { preserveStoredEdges: true } : {}),
-  });
-  const notes = [...side.details];
-  let ops = side.ops;
-  if (ops.length > WRITE_BATCH_MAX) {
-    ops = ops.slice(0, WRITE_BATCH_MAX);
-    if (!notes.includes(INDEX_PARTIAL)) notes.push(INDEX_PARTIAL);
-  }
-  if (ops.length > 0) {
-    if (!node.mutateBatch) {
-      if (!notes.includes(INDEX_PARTIAL)) notes.push(INDEX_PARTIAL);
-    } else {
-      await node.mutateBatch(ops);
-    }
-  }
-  const headNotes = await commitHeadPages(node, side.heads);
-  for (const line of headNotes) {
-    if (!notes.includes(line)) notes.push(line);
-  }
+  const receipt = await commitResidentWritePlan({ node, plan, type: fromType, slug: fromSlug });
+  const notes = receipt.indexNotes;
   const indexNote = formatIndexNotes(notes);
-  const indexApplied = headNotes.length === 0;
+  const indexApplied = !notes.includes(INDEX_PARTIAL);
 
   print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}${indexNote}`);
   opts.onResult?.({

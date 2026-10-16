@@ -1,5 +1,5 @@
-// `brain reindex --target H --source-hash T --slug S` writes one batch for
-// the named slugs. It does not walk the corpus.
+// `brain reindex --target H --source-hash T --slug S` repairs the named keys.
+// Page heads commit conditionally. The command does not walk the corpus.
 
 import { FbrainError, type BatchMutationOp, type Verbose } from "../client.ts";
 import { pageBackfill } from "../backlink-index.ts";
@@ -12,15 +12,16 @@ import {
   schemaHashFor,
   type FbrainRecord,
 } from "../record.ts";
-import { readTypeListEntriesBySlugs, recordListEntryHash } from "../record-list-index.ts";
 import {
   BACKFILL_PAGE,
   BACKLINK_PAGE,
   CHILD_PAGE,
   COUNT_UNCONFIRMED,
+  INDEX_PARTIAL,
   LIST_PAGE,
   SYMPTOM_PAGE,
   WRITE_BATCH_MAX,
+  commitHeadPages,
   planNamedSlugBackfill,
   readCount,
   writeCount,
@@ -30,7 +31,6 @@ import {
 import {
   BRAIN_BACKFILL_CURSOR_SCHEMA_KEY,
   BRAIN_LIST_COUNT_SCHEMA_KEY,
-  RECORD_LIST_ENTRY_FIELDS,
   isRecordType,
   type RecordType,
 } from "../schemas.ts";
@@ -69,6 +69,7 @@ function refuse(message: string): never {
 }
 
 function parseTarget(raw: string): NamedBackfillTarget {
+  if (raw === "directory") return { kind: "directory" };
   if (raw === "keyword" || raw === "kw") return { kind: "keyword", token: null };
   if (raw.startsWith("kw#") && raw.length > 3) {
     return { kind: "keyword", token: raw.slice(3) };
@@ -178,73 +179,26 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   }
   const target = parseTarget(targetRaw);
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  const entrySchema = recordListEntryHash(opts.cfg);
-  if (!entrySchema) refuse("reindex requires RecordListEntry. Run brain init.");
   const cursorSchema = opts.cfg.schemaHashes[BRAIN_BACKFILL_CURSOR_SCHEMA_KEY] ?? "";
   if (cursorSchema.length === 0) {
     refuse("reindex requires BrainBackfillCursor. Run brain init.");
   }
 
   const traces: string[] = [];
-  traces.push(
-    `HashRangeKeys RecordListEntry hash=${source} keys_visited=${slugs.length} fields=${RECORD_LIST_ENTRY_FIELDS.join(",")}`,
-  );
-  const entries = await readTypeListEntriesBySlugs(node, opts.cfg, source, slugs);
+  const queryByKeys = node.queryByKeys;
+  if (!queryByKeys) refuse("reindex requires a key read.");
+  // Retired list payloads are snapshots. Only the named product keys can
+  // supply the current status, tags, title, and sealed body for this repair.
+  traces.push(`HashRangeKeys ${source} keys_visited=${slugs.length}`);
+  const rows = await queryByKeys({
+    schemaHash: schemaHashFor(source, opts.cfg),
+    fields: fieldsFor(source),
+    keys: slugs.map((slug) => ({ hash: slug })),
+  });
   const bySlug = new Map<string, FbrainRecord>();
-  for (const slug of slugs) {
-    const snap = entries.get(slug) ?? null;
-    if (!snap) continue;
-    if (!snap.cut) {
-      bySlug.set(slug, snap.record);
-      continue;
-    }
-    const summary = snap.summary;
-    const record: FbrainRecord = {
-      slug: summary.slug,
-      title: summary.title,
-      body: "",
-      status: summary.status,
-      tags: [...summary.tags],
-      created_at: summary.created_at,
-      updated_at: summary.updated_at,
-    };
-    if (typeof summary.design_slug === "string" && summary.design_slug.length > 0) {
-      record.design_slug = summary.design_slug;
-    }
-    for (const [key, value] of Object.entries(summary)) {
-      if (typeof value === "string") record[key] = value;
-    }
-    bySlug.set(slug, record);
-  }
-
-  const need: string[] = [];
-  for (const slug of slugs) {
-    const have = bySlug.get(slug);
-    const needBody = target.kind === "keyword" && (have === undefined || have.body.length === 0);
-    if (have && !needBody) continue;
-    need.push(slug);
-  }
-  if (need.length > 0) {
-    const queryByKeys = node.queryByKeys;
-    if (!queryByKeys) refuse("reindex requires a key read.");
-    traces.push(`HashRangeKeys ${source} keys_visited=${need.length}`);
-    const rows = await queryByKeys({
-      schemaHash: schemaHashFor(source, opts.cfg),
-      fields: fieldsFor(source),
-      keys: need.map((slug) => ({ hash: slug })),
-    });
-    const got = new Set<string>();
-    for (const row of rows) {
-      const record = rowToRecord(row, source);
-      if (record.slug.length === 0) continue;
-      got.add(record.slug);
-      bySlug.set(record.slug, record);
-    }
-    if (target.kind === "keyword") {
-      for (const slug of need) {
-        if (!got.has(slug)) bySlug.delete(slug);
-      }
-    }
+  for (const row of rows) {
+    const record = rowToRecord(row, source);
+    if (record.slug.length > 0) bySlug.set(record.slug, record);
   }
 
   const cursorHash = `bf#${targetRaw}#${source}`;
@@ -259,20 +213,6 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     cursorRow && typeof cursorRow.fields?.bfc_state === "string"
       ? cursorRow.fields.bfc_state
       : null;
-  let previous: { slug: string; added: number } | null = null;
-  if (previousRaw !== null && previousRaw.length > 0) {
-    try {
-      const value = JSON.parse(previousRaw) as { slug?: unknown; added?: unknown };
-      if (typeof value.slug === "string") {
-        previous = {
-          slug: value.slug,
-          added: typeof value.added === "number" ? value.added : 0,
-        };
-      }
-    } catch {
-      previous = null;
-    }
-  }
   const cursorExisted = cursorRow !== undefined;
 
   const plan = await planNamedSlugBackfill({
@@ -287,38 +227,53 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   for (const line of plan.traces) traces.push(line);
 
   const state = JSON.stringify({ slug: plan.lastSlug, added: plan.lastAdded });
-  const ops: BatchMutationOp[] = plan.ops;
-  if (!cursorExisted || previousRaw !== state) {
-    ops.push({
+  const cursorOp: BatchMutationOp | null = !cursorExisted || previousRaw !== state
+    ? {
       mutationType: cursorExisted ? "update" : "create",
       schemaHash: cursorSchema,
       keyHash: cursorHash,
       keyRange: CURSOR_RANGE,
       fields: { bfc_h: cursorHash, bfc_r: CURSOR_RANGE, bfc_state: state },
-    });
-  }
+    }
+    : null;
+  const ops = [...plan.ops];
+  if (plan.heads.length === 0 && cursorOp) ops.push(cursorOp);
   if (ops.length > WRITE_BATCH_MAX) {
     refuse("reindex one batch cannot hold this backfill.");
+  }
+  const countHash =
+    targetRaw === "all" || targetRaw === source || isRecordType(targetRaw) ? targetRaw : null;
+  const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+  if (countHash && plan.added > 0) {
+    if (countSchema.length === 0) refuse("reindex requires BrainListCount. Run brain init.");
+    if (!node.mutateIfExpected) refuse("reindex requires a compare-and-set count.");
   }
   if (!node.mutateBatch) refuse("reindex requires a batch write.");
   if (ops.length > 0) {
     traces.push(`mutateBatch count=${ops.length}`);
     await node.mutateBatch(ops);
   }
-
-  const countHash =
-    targetRaw === "all" || targetRaw === source || isRecordType(targetRaw) ? targetRaw : null;
-  const cursorChanged = (previous?.slug ?? "") !== plan.lastSlug;
-  // A put may already hold the locator. The first cursor advance still
-  // reports those slugs. The counter moves only for a new card.
-  let wrote = plan.added;
-  if (wrote === 0 && cursorChanged && plan.covered === slugs.length && slugs.length > 0) {
-    wrote = plan.covered;
+  if (plan.heads.length > 0) {
+    traces.push(`mutateIfExpected BrainListPage count=${plan.heads.length}`);
+    const headNotes = await commitHeadPages(node, plan.heads);
+    for (const note of headNotes) if (!plan.notes.includes(note)) plan.notes.push(note);
+    if (headNotes.includes(INDEX_PARTIAL)) {
+      throw new FbrainError({
+        code: "index_partial",
+        message: `reindex index partial (${headNotes.filter((note) => note !== INDEX_PARTIAL).join(", ")}).`,
+        hint: "The cursor and count did not change. Retry the same named slugs.",
+      });
+    }
+    if (cursorOp) {
+      traces.push("mutateBatch count=1");
+      await node.mutateBatch([cursorOp]);
+    }
   }
-  if (countHash && cursorChanged && plan.added > 0) {
-    const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
-    if (countSchema.length === 0) refuse("reindex requires BrainListCount. Run brain init.");
-    if (!node.mutateIfExpected) refuse("reindex requires a compare-and-set count.");
+
+  const wrote = plan.added;
+  // Locators decide what this batch added. Two different batches can end at
+  // the same slug; the cursor is not evidence that their additions are equal.
+  if (countHash && plan.added > 0) {
     traces.push("HashRangeKey BrainListCount keys_visited=1");
     const raw = await readCount(node, countSchema, countHash);
     const numeric = raw !== null && /^-?\d+$/.test(raw);

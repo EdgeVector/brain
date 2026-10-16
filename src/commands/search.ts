@@ -8,7 +8,7 @@ import {
 import { newSearchClientFromCfg } from "../write-context.ts";
 import { queryLastSeek } from "../lastseek-plane.ts";
 import type { Config } from "../config.ts";
-import { parseSpillMarker } from "../body-spill.ts";
+import { hydrateRecord, parseSpillMarker } from "../body-spill.ts";
 import {
   capitalize,
   formatTable,
@@ -19,9 +19,10 @@ import {
 import {
   missingSchemaHashReadNote,
   resolveTypeFilter,
+  TOMBSTONE_TAG,
   uniqueSchemaHashes,
 } from "../record.ts";
-import { RANKER_PAGE, rankKeywordQuery } from "../list-page.ts";
+import { RANKER_PAGE, READ_KEY_CAP, rankKeywordQuery } from "../list-page.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
 
@@ -96,11 +97,16 @@ function pageLimit(limit: number | undefined): number {
 
 type BodyHead = { title: string; body: string };
 
+function matchesExact(row: BodyHead, query: string): boolean {
+  return `${row.title}\n${row.body}`.toLowerCase().includes(query.toLowerCase());
+}
+
 async function readBodyHeads(
   node: NodeClient,
   cfg: Config,
   hits: ReadonlyArray<{ type: RecordType; slug: string }>,
   verbose?: Verbose,
+  exactQuery?: string,
 ): Promise<Map<string, BodyHead>> {
   const out = new Map<string, BodyHead>();
   if (!node.queryByKeys || hits.length === 0) return out;
@@ -115,22 +121,43 @@ async function readBodyHeads(
       const schemaHash = cfg.schemaHashes[type];
       if (!schemaHash) return;
       verbose?.(`HashRangeKeys body keys=${slugs.length} field=body,title`);
-      const rows = await node.queryByKeys!({
+      const chunks: string[][] = [];
+      for (let i = 0; i < slugs.length; i += READ_KEY_CAP) {
+        chunks.push(slugs.slice(i, i + READ_KEY_CAP));
+      }
+      const rows = (await Promise.all(chunks.map((chunk) => node.queryByKeys!({
         schemaHash,
-        fields: ["body", "title"],
-        keys: slugs.map((slug) => ({ hash: slug })),
-      });
-      for (const row of rows) {
+        fields: ["body", "title", "tags"],
+        keys: chunk.map((slug) => ({ hash: slug })),
+      })))).flat();
+      await Promise.all(rows.map(async (row) => {
         const slug = row.key?.hash ?? "";
         const fields = row.fields as Record<string, unknown> | undefined;
         const rawBody = fields?.body;
-        if (slug.length === 0 || typeof rawBody !== "string") continue;
+        if (slug.length === 0 || typeof rawBody !== "string") return;
+        if (Array.isArray(fields?.tags) && fields.tags.includes(TOMBSTONE_TAG)) return;
         const marker = parseSpillMarker(rawBody);
-        out.set(`${type}::${slug}`, {
+        const head: BodyHead = {
           title: typeof fields?.title === "string" ? fields.title : "",
           body: marker ? marker.head : rawBody,
-        });
-      }
+        };
+        // A phrase absent from the head can still occur in the stored tail.
+        if (exactQuery !== undefined && marker && !matchesExact(head, exactQuery)) {
+          const full = await hydrateRecord(node, cfg, type, {
+            slug,
+            title: head.title,
+            body: rawBody,
+            status: "",
+            tags: [],
+            created_at: "",
+            updated_at: "",
+          }, { fields: ["body"] });
+          head.body = full.body;
+        }
+        if (exactQuery === undefined || matchesExact(head, exactQuery)) {
+          out.set(`${type}::${slug}`, head);
+        }
+      }));
     }),
   );
   return out;
@@ -179,14 +206,14 @@ export async function retrieveRankedPage(opts: {
     k: RANKER_PAGE,
     caller: opts.caller ?? "brain/search",
     schemas: schemas.length > 0 ? schemas : undefined,
-    exact: opts.exact,
+    // LastSeek retains no text and refuses --exact. Verify the ranked keys below.
     min_score: opts.minScore,
     verbose: opts.verbose,
   });
-  if (seek === null) {
-    if (opts.minScore !== undefined) return { hits: [], sample: false };
-    const extraText = opts.keywordText ? await opts.keywordText() : [];
-    const ranked = await rankKeywordQuery({
+  if (seek === null || opts.exact) {
+    if (seek === null && opts.minScore !== undefined) return { hits: [], sample: false };
+    const extraText = opts.minScore === undefined && opts.keywordText ? await opts.keywordText() : [];
+    const ranked = opts.minScore !== undefined ? [] : await rankKeywordQuery({
       node: opts.node,
       cfg: opts.cfg,
       query: opts.query,
@@ -194,14 +221,31 @@ export async function retrieveRankedPage(opts: {
       verbose: opts.verbose,
     });
     const picked: Array<{ type: RecordType; slug: string; score: number | null }> = [];
+    const seen = new Set<string>();
+    if (opts.exact && seek !== null) {
+      for (const hit of seek) {
+        const slug = hit.key_hash;
+        const type = recordTypeForHash(hit.schema_identity, opts.cfg.schemaHashes);
+        if (!slug || !type || !active.has(type) || (opts.typeFilter && !opts.typeFilter.has(type))) continue;
+        seen.add(`${type}::${slug}`);
+        picked.push({ type, slug, score: hit.score });
+      }
+    }
+    let keywordPicked = 0;
     for (const hit of ranked) {
-      if (picked.length >= page) break;
+      if (opts.exact ? keywordPicked >= RANKER_PAGE : picked.length >= page) break;
       if (!isRecordType(hit.type) || !active.has(hit.type)) continue;
       if (opts.typeFilter && !opts.typeFilter.has(hit.type)) continue;
+      const id = `${hit.type}::${hit.slug}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
       picked.push({ type: hit.type, slug: hit.slug, score: null });
+      keywordPicked += 1;
     }
-    const bodies = await readBodyHeads(opts.node, opts.cfg, picked, opts.verbose);
-    return { hits: keepLive(picked, bodies, SAMPLE_CONFIDENCE), sample: true };
+    const bodies = await readBodyHeads(
+      opts.node, opts.cfg, picked, opts.verbose, opts.exact ? opts.query : undefined,
+    );
+    return { hits: keepLive(picked, bodies, SAMPLE_CONFIDENCE).slice(0, page), sample: true };
   }
 
   const matched: Array<{ type: RecordType; slug: string; score: number }> = [];

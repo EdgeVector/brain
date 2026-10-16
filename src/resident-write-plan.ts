@@ -18,7 +18,6 @@ import { type RecordType } from "./schemas.ts";
 import {
   edgeFields,
   edgeRange,
-  extractGraphEdges,
   graphEdgeHashes,
   normalizeGraphEdgeType,
   type GraphEdge,
@@ -31,9 +30,11 @@ import {
   EDGE_CAP,
   INDEX_PARTIAL,
   planRecordListSide,
+  recordGraphEdges,
   WRITE_BATCH_MAX,
   type DeferredTokenSet,
   type HeadCommit,
+  type ListSidePlan,
 } from "./list-page.ts";
 import { normalizeSlug, type FbrainRecord } from "./record.ts";
 
@@ -82,6 +83,8 @@ export type ResidentWritePlan = {
   /** 1 on create. An update does not change the count. */
   countDelta: 0 | 1;
   cfg: Config;
+  /** Replan related records sequentially after their shared primary batch. */
+  listSideInput: Parameters<typeof planRecordListSide>[0];
 };
 
 export type ResidentCommitResult = BatchMutationResult & {
@@ -271,20 +274,18 @@ export async function buildResidentWritePlan(opts: {
   }
 
   const indexNotes: string[] = [];
-  const bodyDesired = extractGraphEdges({
-    sourceSlug: opts.next.slug,
-    body: opts.next.body,
-    frontmatterEdges: opts.frontmatterEdges ?? [],
-    now,
-  });
+  const preserveStoredEdges = opts.preserveStoredEdges ?? (
+    opts.previous !== null && opts.frontmatterEdges === undefined && opts.next.body === opts.previous.body
+  );
+  const bodyDesired = recordGraphEdges(opts.type, opts.next, opts.frontmatterEdges, now);
   const desiredForPages =
-    opts.preserveStoredEdges || bodyDesired.length <= EDGE_CAP
+    preserveStoredEdges || bodyDesired.length <= EDGE_CAP
       ? bodyDesired
       : bodyDesired.slice(0, EDGE_CAP);
-  if (!opts.preserveStoredEdges && bodyDesired.length > EDGE_CAP) {
+  if (!preserveStoredEdges && bodyDesired.length > EDGE_CAP) {
     noteIndexPartial(indexNotes, "edge cap");
   }
-  const side = await planRecordListSide({
+  const listSideInput: Parameters<typeof planRecordListSide>[0] = {
     node: opts.node,
     cfg: opts.cfg,
     type: opts.type,
@@ -292,22 +293,21 @@ export async function buildResidentWritePlan(opts: {
     next: opts.next,
     sealedBody: stored.body,
     nextEdges: desiredForPages,
-    preserveStoredEdges: opts.preserveStoredEdges === true,
-  });
+    preserveStoredEdges,
+  };
+  const side = await planRecordListSide(listSideInput);
   for (const line of side.details) {
     if (!indexNotes.includes(line)) indexNotes.push(line);
   }
   for (const op of side.ops) ops.push(op);
 
   let graphDesired = desiredForPages;
-  let graphPrevious = opts.previous
-    ? extractGraphEdges({
-        sourceSlug: opts.next.slug,
-        body: opts.previous.body,
-        now,
-      })
-    : [];
-  if (opts.preserveStoredEdges) {
+  let graphPrevious = opts.previous ? recordGraphEdges(opts.type, opts.previous, [], now) : [];
+  const knownPreviousIds = new Set(graphPrevious.map(edgeRange));
+  graphPrevious.push(...edgesFromIds(
+    opts.next.slug, side.previousEdgeIds.filter((id) => !knownPreviousIds.has(id)), now,
+  ));
+  if (preserveStoredEdges) {
     const kept = new Set(side.writtenEdgeIds);
     const prevIds = new Set(graphPrevious.map((edge) => edgeRange(edge)));
     graphDesired = [
@@ -385,6 +385,7 @@ export async function buildResidentWritePlan(opts: {
     indexNotes,
     countDelta: action === "created" ? 1 : 0,
     cfg: opts.cfg,
+    listSideInput,
   };
 }
 
@@ -397,8 +398,24 @@ export async function commitResidentWritePlan(opts: {
   /** Papercut file and close refuse a short or partial index. Do not send. */
   failOnIndexPartial?: boolean;
 }): Promise<ResidentCommitResult> {
-  // Name the field here. A later 413 from the node does not.
-  assertOpsFitAtomBudget(opts.type, opts.slug, opts.plan.ops);
+  return commitResidentWritePlans({
+    node: opts.node,
+    writes: [{ plan: opts.plan, type: opts.type, slug: opts.slug }],
+    durable: opts.durable,
+    failOnIndexPartial: opts.failOnIndexPartial,
+  });
+}
+
+/** Related records share their primary batch (for example a papercut twin). */
+export async function commitResidentWritePlans(opts: {
+  node: NodeClient;
+  writes: readonly { plan: ResidentWritePlan; type: RecordType; slug: string }[];
+  durable?: boolean;
+  failOnIndexPartial?: boolean;
+}): Promise<ResidentCommitResult> {
+  const first = opts.writes[0];
+  if (!first) return { ...emptyBatchResult(), indexNotes: [] };
+  for (const write of opts.writes) assertOpsFitAtomBudget(write.type, write.slug, write.plan.ops);
   if (!opts.node.mutateBatch) {
     throw new FbrainError({
       code: "resident_commit_unavailable",
@@ -406,11 +423,24 @@ export async function commitResidentWritePlan(opts: {
       hint: "Upgrade brain so NodeClient.mutateBatch is present.",
     });
   }
-  const notes = [...opts.plan.indexNotes];
-  const split = splitResidentBatches(opts.plan.ops, opts.plan.heads.length);
+  const notes = [...new Set(opts.writes.flatMap((write) => write.plan.indexNotes))];
+  const related = opts.writes.length > 1;
+  const isListSide = (op: PlannedMutation): boolean => [
+    "list-page", "list-locator", "directory", "edge-set", "token-set", "keyword",
+  ].includes(op.projection);
+  const allOps = dedupeOps(opts.writes.flatMap((write) =>
+    related ? write.plan.ops.filter((op) => !isListSide(op)) : write.plan.ops,
+  ));
+  // Put every primary first, so a projection cap cannot split the record pair.
+  const ops = [...allOps.filter((op) => op.projection === "primary"),
+    ...allOps.filter((op) => op.projection !== "primary")];
+  if (ops.filter((op) => op.projection === "primary").length > WRITE_BATCH_MAX) {
+    throw new FbrainError({ code: "resident_batch_too_large", message: "Related records exceed one primary batch." });
+  }
+  const split = splitResidentBatches(ops, 0);
   if (split.trimmed) noteIndexPartial(notes, "batch cap");
   if (opts.failOnIndexPartial && notes.includes(INDEX_PARTIAL)) {
-    throw indexPartialMiss(opts.type, opts.slug, notes);
+    throw indexPartialMiss(first.type, first.slug, notes);
   }
   const durable = opts.durable ? { durability: "durable" as const } : undefined;
   let primary = emptyBatchResult();
@@ -418,17 +448,17 @@ export async function commitResidentWritePlan(opts: {
     if (split.batch1.length > 0) {
       primary = await opts.node.mutateBatch(split.batch1, durable);
       if (opts.durable && primary.durability !== "durable") {
-        throw durableMiss(opts.type, opts.slug, primary.durability);
+        throw durableMiss(first.type, first.slug, primary.durability);
       }
     }
   } catch (err) {
-    throw wrapCommitError(err, opts.type, opts.slug, opts.plan.ops);
+    throw wrapCommitError(err, first.type, first.slug, ops);
   }
   if (split.batch2.length > 0) {
     try {
       const second = await opts.node.mutateBatch(split.batch2, durable);
       if (opts.durable && second.durability !== "durable") {
-        throw durableMiss(opts.type, opts.slug, second.durability);
+        throw durableMiss(first.type, first.slug, second.durability);
       }
       if (split.batch1.length === 0) primary = second;
     } catch (err) {
@@ -436,37 +466,49 @@ export async function commitResidentWritePlan(opts: {
         opts.durable ||
         (err instanceof FbrainError && err.code === "durability_not_confirmed")
       ) {
-        throw wrapCommitError(err, opts.type, opts.slug, opts.plan.ops);
+        throw wrapCommitError(err, first.type, first.slug, ops);
       }
       noteIndexPartial(notes, "batch2 failed");
     }
   }
   // Keyword heads ack before the token set changes, so a lost head keeps its old token.
-  const keywordNotes = await commitKeywordHeads(
-    opts.node,
-    opts.plan.keywordHeads,
-    opts.plan.tokenSet,
-  );
-  for (const line of keywordNotes) {
-    if (!notes.includes(line)) notes.push(line);
+  for (const write of opts.writes) {
+    // Both primaries already exist. Refresh one record's side only after the
+    // previous side ack, so related writes do not compete for the same head.
+    const side = related ? await planRecordListSide(write.plan.listSideInput) : null;
+    if (side) {
+      for (const line of side.details) if (!notes.includes(line)) notes.push(line);
+      if (side.ops.length > WRITE_BATCH_MAX) {
+        noteIndexPartial(notes, "batch cap");
+      } else if (side.ops.length > 0) {
+        const receipt = await opts.node.mutateBatch(side.ops, durable);
+        if (opts.durable && receipt.durability !== "durable") {
+          throw durableMiss(write.type, write.slug, receipt.durability);
+        }
+      }
+    }
+    const keywordNotes = await commitKeywordHeads(
+      opts.node, side ? side.keywordHeads : write.plan.keywordHeads,
+      side ? side.tokenSet : write.plan.tokenSet,
+    );
+    for (const line of keywordNotes) if (!notes.includes(line)) notes.push(line);
+    const headNotes = await commitHeadPages(opts.node, side?.heads ?? write.plan.heads);
+    for (const line of headNotes) if (!notes.includes(line)) notes.push(line);
   }
-  const headNotes = await commitHeadPages(opts.node, opts.plan.heads);
-  for (const line of headNotes) {
-    if (!notes.includes(line)) notes.push(line);
-  }
-  if (opts.plan.countDelta !== 0) {
+  for (const write of opts.writes) {
+    if (write.plan.countDelta === 0) continue;
     const count = await adjustListCounts(
       opts.node,
-      opts.plan.cfg,
-      opts.type,
-      opts.plan.countDelta,
+      write.plan.cfg,
+      write.type,
+      write.plan.countDelta,
     );
     if (count === "unconfirmed" && !notes.includes(COUNT_UNCONFIRMED)) {
       notes.push(COUNT_UNCONFIRMED);
     }
   }
   if (opts.failOnIndexPartial && notes.includes(INDEX_PARTIAL)) {
-    throw indexPartialMiss(opts.type, opts.slug, notes);
+    throw indexPartialMiss(first.type, first.slug, notes);
   }
   return {
     ...primary,
@@ -479,8 +521,10 @@ export async function removeResidentListSide(opts: {
   cfg: Config;
   type: RecordType;
   record: FbrainRecord;
+  /** The delete command can prove page membership before the primary delete. */
+  side?: ListSidePlan;
 }): Promise<ResidentCommitResult> {
-  const side = await planRecordListSide({
+  const side = opts.side ?? await planRecordListSide({
     node: opts.node,
     cfg: opts.cfg,
     type: opts.type,
