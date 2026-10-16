@@ -199,6 +199,12 @@ async function finishCountedBackfill(opts: {
     const raw = await readCount(opts.node, opts.countSchema, opts.countHash);
     const state = parseListCount(raw);
     if (raw !== null && state === null) refuse("reindex count state is invalid. Retry after the named count is repaired.");
+    if (raw === null && operation.delta === 0) {
+      // A zero addition cannot establish a missing count. Complete only the
+      // cursor; a replay remains harmless without a counter receipt.
+      counted = true;
+      break;
+    }
     if ((state?.receipts[opts.source] ?? 0) >= operation.sequence) {
       counted = true;
       break;
