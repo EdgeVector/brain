@@ -4,6 +4,7 @@
 // source record. Explicit edges reject missing targets.
 
 import { FbrainError, type Verbose } from "../client.ts";
+import { hydrateRecord } from "../body-spill.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -148,18 +149,23 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   }
 
   const now = nowIso();
-  const fields = fieldsForLinkUpdate(source, fromType, toType, toSlug, now);
+  // A task reparent can remove an explicit edge that also occurs in its tail.
+  // Read that body before the plan decides which old relationships disappear.
+  const linkSource = fromType === "task" && toType === "design" && source.design_slug !== toSlug
+    ? await hydrateRecord(node, opts.cfg, fromType, source, { fields: ["body"] })
+    : source;
+  const fields = fieldsForLinkUpdate(linkSource, fromType, toType, toSlug, now);
 
   const plan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,
     type: fromType,
     schemaHash: fromHash,
-    previous: source,
+    previous: linkSource,
     next: recordFromPrimaryFields(fields),
     primaryFields: fields,
     now,
-    // Keep the unchanged body tail and frontmatter edges without fetching it.
+    // Keep frontmatter and any unchanged tail that this operation did not fetch.
     preserveStoredEdges: true,
     ...(opts.verbose ? { verbose: opts.verbose } : {}),
   });

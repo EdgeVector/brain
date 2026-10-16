@@ -14,7 +14,7 @@ import {
   type NodeClient,
 } from "./client.ts";
 import type { Config } from "./config.ts";
-import { type RecordType } from "./schemas.ts";
+import { GRAPH_EDGE_RECONCILE_FIELDS, type RecordType } from "./schemas.ts";
 import {
   edgeFields,
   edgeRange,
@@ -185,6 +185,45 @@ function graphEdgeUnchanged(old: GraphEdge, next: GraphEdge): boolean {
   );
 }
 
+async function readCurrentGraphEdges(opts: {
+  node: NodeClient;
+  cfg: Config;
+  sourceSlug: string;
+  ids: readonly string[];
+}): Promise<{ ids: Set<string>; edges: GraphEdge[] }> {
+  const hashes = graphEdgeHashes(opts.cfg);
+  const ids = new Set([...new Set(opts.ids)].slice(0, EDGE_CAP * 2));
+  if (!hashes || ids.size === 0) return { ids: new Set(), edges: [] };
+  const src = normalizeSlug(opts.sourceSlug).toLowerCase();
+  const keys = [...ids].map((range) => ({ hash: src, range }));
+  const fields = [...GRAPH_EDGE_RECONCILE_FIELDS];
+  const rows = opts.node.queryByKeys
+    ? await opts.node.queryByKeys({ schemaHash: hashes.out, fields, keys })
+    : (await opts.node.queryAll({
+      schemaHash: hashes.out, fields,
+      filter: { HashRangeKeys: keys.map((key) => [key.hash, key.range]) },
+    })).results;
+  const edges: GraphEdge[] = [];
+  for (const row of rows) {
+    const field = row.fields;
+    // Some nodes return the inbound sibling from the shared graph fields.
+    if (typeof field.bge_src === "string" && field.bge_src.length > 0 && field.bge_src !== src) continue;
+    const rawType = field.bge_type;
+    const provenance = field.bge_provenance;
+    if (field.bge_src !== src || typeof field.bge_dst !== "string" ||
+        typeof rawType !== "string" || normalizeGraphEdgeType(rawType) !== rawType ||
+        (provenance !== "explicit" && provenance !== "wikilink" && provenance !== "frontmatter")) {
+      throw new FbrainError({ code: "graph_edge_invalid", message: `Cannot update malformed graph edges for ${src}.` });
+    }
+    const edge: GraphEdge = {
+      src, dst: field.bge_dst, type: normalizeGraphEdgeType(rawType), provenance,
+      created_at: typeof field.bge_created_at === "string" ? field.bge_created_at : "",
+    };
+    if (ids.has(edgeRange(edge))) edges.push(edge);
+  }
+  return { ids, edges };
+}
+
 function planChildTaskOps(opts: {
   cfg: Pick<Config, "schemaHashes">;
   type: RecordType;
@@ -293,6 +332,7 @@ export async function buildResidentWritePlan(opts: {
     next: opts.next,
     sealedBody: stored.body,
     nextEdges: desiredForPages,
+    frontmatterEdges: opts.frontmatterEdges,
     preserveStoredEdges,
   };
   const side = await planRecordListSide(listSideInput);
@@ -307,7 +347,7 @@ export async function buildResidentWritePlan(opts: {
   graphPrevious.push(...edgesFromIds(
     opts.next.slug, side.previousEdgeIds.filter((id) => !knownPreviousIds.has(id)), now,
   ));
-  if (preserveStoredEdges) {
+  if (preserveStoredEdges || side.preservedEdgeIds.length > 0) {
     const kept = new Set(side.writtenEdgeIds);
     const prevIds = new Set(graphPrevious.map((edge) => edgeRange(edge)));
     graphDesired = [
@@ -323,6 +363,16 @@ export async function buildResidentWritePlan(opts: {
       ),
     ];
   }
+  // A prior metadata-only update can change an edge's provenance without
+  // changing its id. Compare the actual keyed graph fields before a no-op.
+  const currentGraph = await readCurrentGraphEdges({
+    node: opts.node, cfg: opts.cfg, sourceSlug: opts.next.slug,
+    ids: [...side.previousEdgeIds, ...graphDesired.map(edgeRange)],
+  });
+  graphPrevious = [
+    ...graphPrevious.filter((edge) => !currentGraph.ids.has(edgeRange(edge))),
+    ...currentGraph.edges,
+  ];
   const graph = planGraphOps({
     cfg: opts.cfg,
     sourceSlug: opts.next.slug,

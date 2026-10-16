@@ -1,5 +1,5 @@
 // `brain backlinks <slug>` — one link page, then live source fields.
-// A target-type filter verifies body references, including a stored tail.
+// A target-type filter verifies body and stored frontmatter references.
 
 import {
   displayCap,
@@ -14,7 +14,7 @@ import { hydrateRecord, parseSpillMarker } from "../body-spill.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import { extractGraphEdges } from "../graph-edge.ts";
-import { BACKLINK_PAGE, HEAD_RANGE } from "../list-page.ts";
+import { BACKLINK_PAGE, DIRECTORY_RANGE, EDGE_CAP, FRONTMATTER_RANGE, HEAD_RANGE } from "../list-page.ts";
 import {
   arrayStringField,
   normalizeSlug,
@@ -24,7 +24,14 @@ import {
   TOMBSTONE_TAG,
 } from "../record.ts";
 import { recordFromPrimaryFields } from "../resident-write-plan.ts";
-import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
+import {
+  BRAIN_EDGE_SET_SCHEMA_KEY,
+  BRAIN_LIST_PAGE_SCHEMA_KEY,
+  BRAIN_TYPE_DIRECTORY_SCHEMA_KEY,
+  GRAPH_EDGE_OUT_SCHEMA_KEY,
+  isRecordType,
+  type RecordType,
+} from "../schemas.ts";
 
 export type BacklinksJson = {
   slug: string;
@@ -55,7 +62,13 @@ export type BacklinksOptions = {
 };
 
 type ShownLink = BacklinksJson["linked_from"][number];
-type LinkSource = { status: string; tags: string[]; designSlug: string; body?: string };
+type LinkSource = {
+  status: string;
+  tags: string[];
+  designSlug: string;
+  body?: string;
+  frontmatterLink?: boolean;
+};
 
 export async function backlinksCmd(opts: BacklinksOptions): Promise<void> {
   const print = resolvePrintSink(opts);
@@ -104,10 +117,11 @@ async function decoratePage(
       clipped: false,
     };
   }
-  const { cap, partial } = displayCap(limit, BACKLINK_PAGE, page.bytes);
+  const { cap, partial: capped } = displayCap(limit, BACKLINK_PAGE, page.bytes);
   const shown = page.cards.slice(0, cap);
   const clipped = page.cards.length > shown.length;
-  const live = await readLinkSources(node, cfg, shown, target, targetType);
+  const { sources: live, partial: unproven } = await readLinkSources(node, cfg, shown, target, targetType);
+  const partial = capped || unproven;
   const links: ShownLink[] = [];
   for (const card of shown) {
     if (!isRecordType(card.type)) continue;
@@ -143,7 +157,7 @@ async function readLinkSources(
   cards: readonly StoredCard[],
   target: string,
   targetType: RecordType | undefined,
-): Promise<Map<string, LinkSource>> {
+): Promise<{ sources: Map<string, LinkSource>; partial: boolean }> {
   const byType = new Map<RecordType, string[]>();
   for (const card of cards) {
     if (!isRecordType(card.type)) continue;
@@ -152,7 +166,7 @@ async function readLinkSources(
     byType.set(card.type, slugs);
   }
   const out = new Map<string, LinkSource>();
-  if (!node.queryByKeys) return out;
+  if (!node.queryByKeys) return { sources: out, partial: cards.length > 0 };
   await Promise.all([...byType].map(async ([type, slugs]) => {
     let schemaHash: string;
     try {
@@ -192,7 +206,131 @@ async function readLinkSources(
       out.set(`${type}\0${hash}`, source);
     }));
   }));
-  return out;
+  const partial = targetType !== undefined
+    ? await markFrontmatterLinks(node, cfg, cards, out, target, targetType)
+    : false;
+  return { sources: out, partial };
+}
+
+function storedStringList(raw: string): string[] | null {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Typed metadata proves frontmatter links; legacy graph rows need a unique source type. */
+async function markFrontmatterLinks(
+  node: ReturnType<typeof newReadClientFromCfg>,
+  cfg: Config,
+  cards: readonly StoredCard[],
+  sources: Map<string, LinkSource>,
+  target: string,
+  targetType: RecordType,
+): Promise<boolean> {
+  const setSchema = cfg.schemaHashes[BRAIN_EDGE_SET_SCHEMA_KEY] ?? "";
+  const graphSchema = cfg.schemaHashes[GRAPH_EDGE_OUT_SCHEMA_KEY] ?? "";
+  const candidates = new Map<string, { slug: string; type: RecordType; source: LinkSource }>();
+  for (const card of cards) {
+    if (!isRecordType(card.type)) continue;
+    const key = `${card.type}\0${card.slug}`;
+    const source = sources.get(key);
+    if (!source || source.tags.includes(TOMBSTONE_TAG) ||
+        hasExplicitLink(source, card.type, target, targetType) ||
+        bodyLinksTo(card.slug, source.body ?? "", target)) continue;
+    candidates.set(`es#${card.type}#${card.slug}`, { slug: card.slug, type: card.type, source });
+  }
+  if (candidates.size === 0) return false;
+  if (!node.queryByKeys || setSchema.length === 0) return true;
+  const rows = await node.queryByKeys({
+    schemaHash: setSchema,
+    fields: ["bes_h", "bes_r", "bes_ids"],
+    keys: [...candidates.keys()].flatMap((hash) => [
+      { hash, range: HEAD_RANGE }, { hash, range: FRONTMATTER_RANGE },
+    ]),
+  });
+  const destination = target.toLowerCase();
+  const headIds = new Map<string, string[] | null>();
+  const frontmatterIds = new Map<string, string[] | null>();
+  for (const row of rows) {
+    const hash = row.key?.hash || stringField(row.fields, "bes_h");
+    const range = row.key?.range || stringField(row.fields, "bes_r");
+    if (!candidates.has(hash)) continue;
+    const ids = storedStringList(stringField(row.fields, "bes_ids"));
+    if (range === HEAD_RANGE) headIds.set(hash, ids);
+    if (range === FRONTMATTER_RANGE) frontmatterIds.set(hash, ids);
+  }
+  const matchesDestination = (id: string): boolean => {
+    const cut = id.indexOf("#");
+    return cut > 0 && id.slice(cut + 1) === destination;
+  };
+  let partial = false;
+  const legacy = new Map<string, { slug: string; type: RecordType; source: LinkSource; ids: string[] }>();
+  for (const [hash, candidate] of candidates) {
+    const ids = headIds.get(hash);
+    if (frontmatterIds.has(hash)) {
+      const frontmatter = frontmatterIds.get(hash);
+      if (!frontmatter || frontmatter.length > EDGE_CAP) {
+        partial = true;
+      } else if (frontmatter.length > 0) {
+        if (!ids || ids.length > EDGE_CAP) partial = true;
+        else candidate.source.frontmatterLink = frontmatter.some((id) =>
+          matchesDestination(id) && ids.includes(id));
+      }
+      continue;
+    }
+    if (!ids || ids.length > EDGE_CAP) {
+      partial = true;
+      continue;
+    }
+    const matching = ids.filter(matchesDestination);
+    if (matching.length > 0) legacy.set(hash, { ...candidate, ids: matching });
+  }
+  if (legacy.size === 0) return partial;
+  const directorySchema = cfg.schemaHashes[BRAIN_TYPE_DIRECTORY_SCHEMA_KEY] ?? "";
+  if (directorySchema.length === 0 || graphSchema.length === 0) return true;
+  const directory = await node.queryByKeys({
+    schemaHash: directorySchema,
+    fields: ["btd_h", "btd_types"],
+    keys: [...new Set([...legacy.values()].map(({ slug }) => slug))]
+      .map((hash) => ({ hash, range: DIRECTORY_RANGE })),
+  });
+  const sourceTypes = new Map(directory.map((row) => [
+    row.key?.hash || stringField(row.fields, "btd_h"),
+    storedStringList(stringField(row.fields, "btd_types")),
+  ]));
+  const graphKeys = new Map<string, { hash: string; range: string; sources: LinkSource[] }>();
+  for (const candidate of legacy.values()) {
+    const types = sourceTypes.get(candidate.slug);
+    if (!types || types.length !== 1 || types[0] !== candidate.type) {
+      partial = true;
+      continue;
+    }
+    for (const id of candidate.ids) {
+      const hash = normalizeSlug(candidate.slug).toLowerCase();
+      const key = `${hash}\0${id}`;
+      const graph = graphKeys.get(key) ?? { hash, range: id, sources: [] };
+      graph.sources.push(candidate.source);
+      graphKeys.set(key, graph);
+    }
+  }
+  if (graphKeys.size === 0) return partial;
+  const edges = await node.queryByKeys({
+    schemaHash: graphSchema,
+    fields: ["bge_src", "bge_dst", "bge_type", "bge_provenance"],
+    keys: [...graphKeys.values()].map(({ hash, range }) => ({ hash, range })),
+  });
+  for (const row of edges) {
+    if (stringField(row.fields, "bge_provenance") !== "frontmatter") continue;
+    const src = stringField(row.fields, "bge_src");
+    const dst = stringField(row.fields, "bge_dst");
+    if (dst !== destination) continue;
+    const graph = graphKeys.get(`${src}\0${stringField(row.fields, "bge_type")}#${dst}`);
+    for (const source of graph?.sources ?? []) source.frontmatterLink = true;
+  }
+  return partial;
 }
 
 function hasExplicitLink(
@@ -225,7 +363,8 @@ function linkVia(
 ): Array<"explicit" | "body"> {
   const via: Array<"explicit" | "body"> = [];
   if (hasExplicitLink(source, sourceType, target, targetType)) via.push("explicit");
-  if (source.body !== undefined && bodyLinksTo("backlink-source", source.body, target)) {
+  if (source.frontmatterLink ||
+      (source.body !== undefined && bodyLinksTo("backlink-source", source.body, target))) {
     via.push("body");
   } else if (targetType === undefined && via.length === 0) {
     // The page establishes the body edge when no typed filter needs proof.
