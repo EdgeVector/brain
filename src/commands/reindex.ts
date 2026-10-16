@@ -1,74 +1,41 @@
-// `fbrain reindex [--type T] [--dry-run] [--verbose]` — refresh embeddings
-// for every live fbrain record.
-//
-// Related to the H2a finding in docs/phase-7-search-latency-spike.md:
-// `fbrain delete` is soft (tombstone tag) and does NOT purge the
-// corresponding entries from fold_db's `EmbeddingIndex`. Over time, the
-// native-index top-50 fills with stale embeddings + entries from other
-// schemas, drowning out fresh records. This command iterates every live
-// record and re-issues an update mutation, which re-runs fold_db's
-// `index_record`. IMPORTANT: fold_db's index is append-only — re-issuing
-// the update does NOT replace the prior embedding in place; it APPENDS a
-// fresh embedding and the previous entry persists as stale. So reindex
-// only guarantees each live record's CURRENT embedding is present; it does
-// NOT de-duplicate the index and it does NOT reduce pollution (it actually
-// adds one stale entry per record re-put). The true purge of stale and
-// tombstoned embeddings is upstream fold_db work, deferred (G3e
-// tombstone-purge / G3d schema-scoped search) and not available at the
-// fbrain layer. See `fbrain doctor --freshness` pollution-probe.
-//
-// Iterates all record types by default; --type narrows. Tombstoned records
-// (those carrying TOMBSTONE_TAG) are skipped, NOT reindexed.
-//
-// Per Step 6 of the G3c task: pollution-ratio reporting is deferred to
-// G3a (`fbrain doctor freshness`). This command reports the count of
-// records reindexed.
+// `brain reindex --target H --source-hash T --slug S` writes one batch for
+// the named slugs. It does not walk the corpus.
 
-import { newReadClientFromCfg, type Verbose } from "../client.ts";
-import {
-  rebuildBacklinkIndex,
-  type BacklinkIndexRebuildResult,
-} from "../backlink-index.ts";
+import { FbrainError, type BatchMutationOp, type Verbose } from "../client.ts";
+import { pageBackfill } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSinks } from "../format.ts";
 import {
-  isTombstoned,
-  listRecords,
-  listRecordsAdminScan,
-  missingSchemaHashReadNote,
-  nowIso,
+  fieldsFor,
+  rowToRecord,
   schemaHashFor,
-  updateFieldsFrom,
   type FbrainRecord,
 } from "../record.ts";
+import { readTypeListEntriesBySlugs, recordListEntryHash } from "../record-list-index.ts";
 import {
-  censusTypeListIndex,
-  writeTypeListIndex,
-  type TypeListIndexCensus,
-} from "../record-list-index.ts";
+  BACKFILL_PAGE,
+  BACKLINK_PAGE,
+  CHILD_PAGE,
+  COUNT_UNCONFIRMED,
+  LIST_PAGE,
+  SYMPTOM_PAGE,
+  WRITE_BATCH_MAX,
+  planNamedSlugBackfill,
+  readCount,
+  writeCount,
+  type NamedBackfillTarget,
+  type NamedPageTarget,
+} from "../list-page.ts";
 import {
-  censusChildTaskIndex,
-  writeChildTaskIndex,
-  type ChildTaskIndexCensus,
-} from "../child-task-index.ts";
-import {
-  censusPapercutStatusIndex,
-  writePapercutStatusIndex,
-  type PapercutStatusIndexCensus,
-} from "../papercut-status-index.ts";
-import { loadOrBuildBm25Index } from "../retrieval/bm25.ts";
-import { RECORD_TYPES, type RecordType } from "../schemas.ts";
-import {
-  rebuildTagIndex,
-  tagMemberSchemaHash,
-  type TagIndexRebuildResult,
-} from "../tag-index.ts";
-import { graphEdgeHashes, reconcileGraphEdges } from "../graph-edge.ts";
+  BRAIN_BACKFILL_CURSOR_SCHEMA_KEY,
+  BRAIN_LIST_COUNT_SCHEMA_KEY,
+  RECORD_LIST_ENTRY_FIELDS,
+  isRecordType,
+  type RecordType,
+} from "../schemas.ts";
 
-export const GRAPH_EDGE_BACKFILL_CAVEAT =
-  "WARNING: source enumeration uses Brain's keyed list index, which is known to under-report; " +
-  "this is a bounded repair, not proof of complete corpus coverage.";
+const CURSOR_RANGE = "__cursor__";
 
 export type ReindexOptions = {
   cfg: Config;
@@ -76,606 +43,310 @@ export type ReindexOptions = {
   dryRun?: boolean;
   tags?: boolean;
   backlinks?: boolean;
-  // Offline pre-warm for the client-side BM25 search cache `ask`/`search`
-  // read on every call (see ../retrieval/bm25.ts). This is the explicit,
-  // off-the-request-path counterpart to the inline rebuild `ask` does on a
-  // cold/stale cache — running this after a bulk edit means the next `ask`
-  // hits warm instead of paying for (and now visibly noting) a live rebuild.
   bm25?: boolean;
-  /**
-   * Rebuild the RecordListEntry keyed list partition from an admin SOT scan
-   * of each product schema. Repairs persistent under-report when dual-write
-   * patches failed while the completeness marker stayed set (list/search miss
-   * rows that `brain get` still resolves). Standalone mode.
-   */
   listIndex?: boolean;
-  /**
-   * Rebuild the ChildTaskIndex keyed (design_slug x task slug) partition
-   * from an admin SOT scan of the task schema. Repairs the same class of gap
-   * `--list-index` repairs, one layer up: a dual-write patch that failed
-   * mid-write, or a historical backfill after the schema was first
-   * registered. Standalone mode.
-   */
   childTaskIndex?: boolean;
-  /** Rebuild the status x slug papercut ledger index from papercut SOT. */
   papercutStatusIndex?: boolean;
   graphEdges?: boolean;
   graphMaxRecords?: number;
+  target?: string;
+  sourceHash?: string;
+  slugs?: string[];
   verbose?: Verbose;
   print?: (line: string) => void;
   printErr?: (line: string) => void;
 };
 
 export type ReindexResult = {
-  scanned: number;
-  reindexed: number;
-  skippedTombstone: number;
-  byType: Partial<
-    Record<RecordType, { reindexed: number; skippedTombstone: number }>
-  >;
-  tagIndex?: TagIndexRebuildResult;
-  backlinkIndex?: BacklinkIndexRebuildResult;
-  /** Per-type census after `--list-index` (dry-run or repair). */
-  listIndexCensus?: TypeListIndexCensus[];
-  /** Census after `--child-task-index` (dry-run or repair). */
-  childTaskIndexCensus?: ChildTaskIndexCensus;
-  /** Census after `--papercut-status-index` (dry-run or repair). */
-  papercutStatusIndexCensus?: PapercutStatusIndexCensus;
-  graphEdgeRecords?: number;
+  wrote: number;
 };
 
+function refuse(message: string): never {
+  throw new FbrainError({
+    code: "reindex_refused",
+    message,
+  });
+}
+
+function parseTarget(raw: string): NamedBackfillTarget {
+  if (raw === "keyword" || raw === "kw") return { kind: "keyword", token: null };
+  if (raw.startsWith("kw#") && raw.length > 3) {
+    return { kind: "keyword", token: raw.slice(3) };
+  }
+  let hash = raw;
+  let symptomFromField = false;
+  let bound = LIST_PAGE;
+  let symptom = false;
+  let tag: string | null = null;
+  let childOf: string | null = null;
+  let linkDest: string | null = null;
+  let status: string | null = null;
+  let known = raw === "all" || isRecordType(raw);
+  if (raw.startsWith("tag#") && raw.length > 4) {
+    tag = raw.slice(4);
+    known = true;
+  } else if (raw.startsWith("link#") && raw.length > 5) {
+    linkDest = raw.slice(5);
+    bound = BACKLINK_PAGE;
+    known = true;
+  } else if (raw.startsWith("child#") && raw.length > 6) {
+    childOf = raw.slice(6);
+    bound = CHILD_PAGE;
+    known = true;
+  } else if (raw === "symptom") {
+    hash = "";
+    symptom = true;
+    symptomFromField = true;
+    bound = SYMPTOM_PAGE;
+    known = true;
+  } else if (raw.startsWith("symptom#") && raw.length > 8) {
+    symptom = true;
+    bound = SYMPTOM_PAGE;
+    known = true;
+  } else if (!known) {
+    const cut = raw.indexOf("#");
+    if (cut > 0) {
+      const typeName = raw.slice(0, cut);
+      const typeStatus = raw.slice(cut + 1);
+      if (isRecordType(typeName) && typeStatus.length > 0) {
+        status = typeStatus;
+        known = true;
+      }
+    }
+  }
+  if (!known) refuse(`reindex does not know target ${raw}.`);
+  const page: NamedPageTarget = {
+    kind: "page",
+    hash,
+    symptomFromField,
+    bound,
+    symptom,
+    tag,
+    childOf,
+    linkDest,
+    status,
+  };
+  return page;
+}
+
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
-  const { print, printErr } = resolvePrintSinks(opts);
+  const { print } = resolvePrintSinks(opts);
 
-  if (opts.bm25) {
-    const result: ReindexResult = {
-      scanned: 0,
-      reindexed: 0,
-      skippedTombstone: 0,
-      byType: {},
-    };
-    if (opts.dryRun) {
-      print(
-        "dry-run: --bm25 would rebuild the client-side BM25 search cache (read by `ask`/`search`) from a full corpus scan",
-      );
-      return result;
-    }
-    // Read-only: no mutation, so no capability/consent flow — same client
-    // `ask`/`search` already use for this cache.
-    const node = newReadClientFromCfg(opts.cfg, opts.verbose);
-    const loaded = await loadOrBuildBm25Index(node, opts.cfg, RECORD_TYPES, {
-      verbose: opts.verbose,
-      seedListIndex: false,
-      forceRebuild: true,
-    });
-    result.scanned = loaded.corpusSize;
-    result.reindexed = loaded.corpusSize;
-    print(
-      loaded.cacheHit
-        ? `bm25 cache already warm (${loaded.corpusSize} record(s)) — nothing to rebuild`
-        : `rebuilt bm25 cache (${loaded.corpusSize} record(s)) — the next \`ask\`/\`search\` call hits it warm`,
-    );
-    return result;
-  }
-
-  // --dry-run issues no writes, so it never invokes the capability provider
-  // and never triggers consent; a real reindex acquires on its first update.
-  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-
-  if (opts.tags) {
-    const result: ReindexResult = {
-      scanned: 0,
-      reindexed: 0,
-      skippedTombstone: 0,
-      byType: {},
-    };
-    if (tagMemberSchemaHash(opts.cfg) === null) {
-      print(
-        "tag index not rebuilt: the TagMembership schema is not registered in this config. " +
-          "Run `brain init` (it registers the schema; reindex never does), then re-run.",
-      );
-      result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    if (opts.dryRun) {
-      print(
-        "dry-run: --tags would rebuild the tag secondary index (TagMember rows, one per tag and member) from a full corpus scan",
-      );
-      result.tagIndex = { tagsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    const rebuilt = await rebuildTagIndex(node, opts.cfg, {
-      // SOT, not the product path. This is an admin repair — its own dry-run
-      // text says "from a full corpus scan" — and reading through `listRecords`
-      // would both depend on the very index this command exists to repair and
-      // push a full scan onto a path that must never issue one.
-      listRecords: (type, schemaHash) =>
-        listRecordsAdminScan(node, type, schemaHash),
-      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
-      onSkipUnavailableType: (type) =>
-        print(
-          missingSchemaHashReadNote(
-            [type],
-            "rebuilding the tag index from the rest",
-          ),
-        ),
-    });
-    result.tagIndex = rebuilt;
-    print(
-      `rebuilt tag index: ${rebuilt.tagsIndexed} tag(s), ${rebuilt.membersIndexed} membership(s)`,
-    );
-    return result;
-  }
-
-  if (opts.backlinks) {
-    const result: ReindexResult = {
-      scanned: 0,
-      reindexed: 0,
-      skippedTombstone: 0,
-      byType: {},
-    };
-    if (tagMemberSchemaHash(opts.cfg) === null) {
-      print(
-        "backlink index not rebuilt: the TagMembership schema is not registered in this config. " +
-          "Run `brain init` (it registers the schema; reindex never does), then re-run.",
-      );
-      result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    if (opts.dryRun) {
-      print(
-        "dry-run: --backlinks would rebuild the backlink secondary index (TagMember rows, one per target and source) from a full corpus scan",
-      );
-      result.backlinkIndex = { targetsIndexed: 0, membersIndexed: 0 };
-      return result;
-    }
-    const rebuilt = await rebuildBacklinkIndex(node, opts.cfg, {
-      // SOT, not the product path — same reasoning as the tag rebuild above.
-      listRecords: (type, schemaHash) =>
-        listRecordsAdminScan(node, type, schemaHash),
-      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
-      onSkipUnavailableType: (type) =>
-        print(
-          missingSchemaHashReadNote(
-            [type],
-            "rebuilding the backlink index from the rest",
-          ),
-        ),
-    });
-    result.backlinkIndex = rebuilt;
-    print(
-      `rebuilt backlink index: ${rebuilt.targetsIndexed} target(s), ${rebuilt.membersIndexed} membership(s)`,
-    );
-    return result;
-  }
-
-  if (opts.listIndex) {
-    return rebuildListIndex(opts, node, print);
-  }
-
-  if (opts.childTaskIndex) {
-    return rebuildChildTaskIndex(opts, node, print);
+  if (opts.tags || opts.backlinks || opts.childTaskIndex) {
+    const backfill = opts.tags
+      ? pageBackfill("tag#<tag>", "<type>")
+      : opts.backlinks
+        ? pageBackfill("link#<slug>", "<type>")
+        : pageBackfill("child#<designSlug>", "task");
+    print(`The old payload write stopped. ${backfill}`);
+    return { wrote: 0 };
   }
 
   if (opts.papercutStatusIndex) {
-    return rebuildPapercutStatusIndex(opts, node, print, printErr);
+    print(
+      "papercut-status-index: this command does not write PapercutStatusIndex. papercut list reads the list page.",
+    );
+    return { wrote: 0 };
   }
 
-  if (opts.graphEdges) {
-    const result: ReindexResult = {
-      scanned: 0,
-      reindexed: 0,
-      skippedTombstone: 0,
-      byType: {},
-      graphEdgeRecords: 0,
+  if (opts.bm25) refuse("reindex refuses --bm25.");
+  if (opts.listIndex || opts.graphEdges || opts.dryRun) {
+    refuse("reindex refuses the walk that writes every record again.");
+  }
+
+  const rawSlugs = opts.slugs ?? [];
+  if (!opts.target || !opts.sourceHash || rawSlugs.length === 0) {
+    if (!opts.target && !opts.sourceHash && rawSlugs.length === 0) {
+      refuse("reindex refuses the walk that writes every record again.");
+    }
+    refuse("reindex requires --target, --source-hash, and --slug.");
+  }
+  if (opts.sourceHash === "all") refuse("reindex refuses a source hash of all.");
+  if (!isRecordType(opts.sourceHash)) {
+    refuse("reindex source hash must be one record type.");
+  }
+  if (rawSlugs.length > BACKFILL_PAGE) refuse("reindex refuses more than 25 slugs.");
+
+  const source = opts.sourceHash;
+  const targetRaw = opts.target;
+  const slugs: string[] = [];
+  const seenSlug = new Set<string>();
+  for (const slug of rawSlugs) {
+    if (slug.length === 0 || seenSlug.has(slug)) continue;
+    seenSlug.add(slug);
+    slugs.push(slug);
+  }
+  const target = parseTarget(targetRaw);
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const entrySchema = recordListEntryHash(opts.cfg);
+  if (!entrySchema) refuse("reindex requires RecordListEntry. Run brain init.");
+  const cursorSchema = opts.cfg.schemaHashes[BRAIN_BACKFILL_CURSOR_SCHEMA_KEY] ?? "";
+  if (cursorSchema.length === 0) {
+    refuse("reindex requires BrainBackfillCursor. Run brain init.");
+  }
+
+  const traces: string[] = [];
+  traces.push(
+    `HashRangeKeys RecordListEntry hash=${source} keys_visited=${slugs.length} fields=${RECORD_LIST_ENTRY_FIELDS.join(",")}`,
+  );
+  const entries = await readTypeListEntriesBySlugs(node, opts.cfg, source, slugs);
+  const bySlug = new Map<string, FbrainRecord>();
+  for (const slug of slugs) {
+    const snap = entries.get(slug) ?? null;
+    if (!snap) continue;
+    if (!snap.cut) {
+      bySlug.set(slug, snap.record);
+      continue;
+    }
+    const summary = snap.summary;
+    const record: FbrainRecord = {
+      slug: summary.slug,
+      title: summary.title,
+      body: "",
+      status: summary.status,
+      tags: [...summary.tags],
+      created_at: summary.created_at,
+      updated_at: summary.updated_at,
     };
-    const max = opts.graphMaxRecords ?? 100;
-    if (!graphEdgeHashes(opts.cfg)) {
-      print("graph edge schemas are unavailable (run `fbrain init`); nothing to rebuild");
-      return result;
+    if (typeof summary.design_slug === "string" && summary.design_slug.length > 0) {
+      record.design_slug = summary.design_slug;
     }
-    outer: for (const type of opts.type ? [opts.type] : RECORD_TYPES) {
-      // A rebuild writes edges from what it read: stop, do not skip, if a cut
-      // row's record cannot be read.
-      const records = await listRecords(node, type, opts.cfg, { onMissing: "throw" });
-      for (const record of records) {
-        if (result.scanned >= max) break outer;
-        result.scanned++;
-        if (isTombstoned(record)) {
-          result.skippedTombstone++;
-          continue;
-        }
-        if (!opts.dryRun) {
-          await reconcileGraphEdges({
-            node,
-            cfg: opts.cfg,
-            sourceSlug: record.slug,
-            body: record.body,
-            preserveExistingFrontmatter: true,
-          });
-        }
-        result.reindexed++;
-      }
+    for (const [key, value] of Object.entries(summary)) {
+      if (typeof value === "string") record[key] = value;
     }
-    result.graphEdgeRecords = result.reindexed;
-    const prefix = opts.dryRun ? "dry-run: would rebuild" : "rebuilt";
-    print(
-      `${prefix} graph edges for ${result.reindexed} record(s) (bounded max=${max}). ` +
-        GRAPH_EDGE_BACKFILL_CAVEAT,
-    );
-    return result;
+    bySlug.set(slug, record);
   }
 
-  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const result: ReindexResult = {
-    scanned: 0,
-    reindexed: 0,
-    skippedTombstone: 0,
-    byType: {},
-  };
-
-  for (const type of types) {
-    const schemaHash = schemaHashFor(type, opts.cfg);
-    const records = await listRecordsAdminScan(node, type, schemaHash, {
-      includeTombstones: true,
+  const need: string[] = [];
+  for (const slug of slugs) {
+    const have = bySlug.get(slug);
+    const needBody = target.kind === "keyword" && (have === undefined || have.body.length === 0);
+    if (have && !needBody) continue;
+    need.push(slug);
+  }
+  if (need.length > 0) {
+    const queryByKeys = node.queryByKeys;
+    if (!queryByKeys) refuse("reindex requires a key read.");
+    traces.push(`HashRangeKeys ${source} keys_visited=${need.length}`);
+    const rows = await queryByKeys({
+      schemaHash: schemaHashFor(source, opts.cfg),
+      fields: fieldsFor(source),
+      keys: need.map((slug) => ({ hash: slug })),
     });
-    const counts = { reindexed: 0, skippedTombstone: 0 };
-    result.byType[type] = counts;
-
-    for (const record of records) {
-      result.scanned++;
-      if (isTombstoned(record)) {
-        result.skippedTombstone++;
-        counts.skippedTombstone++;
-        opts.verbose?.(`skipped-tombstone ${type}/${record.slug}`);
-        continue;
+    const got = new Set<string>();
+    for (const row of rows) {
+      const record = rowToRecord(row, source);
+      if (record.slug.length === 0) continue;
+      got.add(record.slug);
+      bySlug.set(record.slug, record);
+    }
+    if (target.kind === "keyword") {
+      for (const slug of need) {
+        if (!got.has(slug)) bySlug.delete(slug);
       }
-
-      if (opts.dryRun) {
-        result.reindexed++;
-        counts.reindexed++;
-        opts.verbose?.(`kept ${type}/${record.slug}`);
-        continue;
-      }
-
-      const fields = buildReindexFields(type, record, nowIso());
-      await node.updateRecord({ schemaHash, fields, keyHash: record.slug });
-      result.reindexed++;
-      counts.reindexed++;
-      opts.verbose?.(`reindexed ${type}/${record.slug}`);
     }
   }
 
-  const prefix = opts.dryRun ? "dry-run: would reindex" : "reindexed";
-  const typeScope = opts.type ? ` (type=${opts.type})` : "";
-  print(
-    `${prefix} ${result.reindexed} record(s)${typeScope}, skipped ${result.skippedTombstone} tombstoned`,
-  );
-  // Pollution-ratio reporting is deferred to G3a — see
-  // docs/phase-7-search-latency-spike.md G3a row.
-
-  return result;
-}
-
-// Build the field payload for a re-issued update mutation. Mirrors
-// put.ts's buildFields but takes a FbrainRecord directly: preserves every
-// user-meaningful field (slug, title, body, status, tags, created_at,
-// design_slug) and only refreshes updated_at. The point is to
-// re-trigger fold_db's `index_record` without changing semantics.
-export function buildReindexFields(
-  type: RecordType,
-  record: FbrainRecord,
-  now: string,
-): Record<string, unknown> {
-  return updateFieldsFrom(record, type, {
-    updated_at: now,
+  const cursorHash = `bf#${targetRaw}#${source}`;
+  traces.push("HashRangeKey BrainBackfillCursor keys_visited=1");
+  const cursorRows = await node.queryAll({
+    schemaHash: cursorSchema,
+    fields: ["bfc_h", "bfc_r", "bfc_state"],
+    filter: { HashRangeKey: { hash: cursorHash, range: CURSOR_RANGE } },
   });
-}
-
-/**
- * Rebuild RecordListEntry partitions from admin SOT scans.
- *
- * Dry-run: census only (listed set vs SOT) — no writes.
- * Live: writeTypeListIndex per type (upsert every live row + stamp migrated),
- * then re-census so the operator sees complete=true.
- */
-async function rebuildListIndex(
-  opts: ReindexOptions,
-  node: ReturnType<typeof newWriteClientFromCfg>["node"],
-  print: (line: string) => void,
-): Promise<ReindexResult> {
-  const types: readonly RecordType[] = opts.type ? [opts.type] : RECORD_TYPES;
-  const result: ReindexResult = {
-    scanned: 0,
-    reindexed: 0,
-    skippedTombstone: 0,
-    byType: {},
-    listIndexCensus: [],
-  };
-
-  for (const type of types) {
-    let schemaHash: string;
+  const cursorRow = cursorRows.results[0];
+  const previousRaw =
+    cursorRow && typeof cursorRow.fields?.bfc_state === "string"
+      ? cursorRow.fields.bfc_state
+      : null;
+  let previous: { slug: string; added: number } | null = null;
+  if (previousRaw !== null && previousRaw.length > 0) {
     try {
-      schemaHash = schemaHashFor(type, opts.cfg);
-    } catch {
-      print(
-        missingSchemaHashReadNote(
-          [type],
-          "skipping list-index rebuild for that type",
-        ),
-      );
-      continue;
-    }
-    // Admin full scan is the SOT for this repair — never seed via product
-    // listRecords (that would re-read the incomplete partition we're fixing).
-    const sot = await listRecordsAdminScan(node, type, schemaHash);
-    result.scanned += sot.length;
-    result.byType[type] = { reindexed: sot.length, skippedTombstone: 0 };
-
-    const before = await censusTypeListIndex(
-      node,
-      opts.cfg,
-      type,
-      sot.map((r) => r.slug),
-    );
-    if (before) {
-      result.listIndexCensus!.push(before);
-      const gap =
-        before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
-          ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
-          : " complete";
-      print(
-        `list-index ${type}: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
-      );
-      if (
-        before.missingFromIndex.length > 0 &&
-        before.missingFromIndex.length <= 12
-      ) {
-        print(`  missing: ${before.missingFromIndex.join(", ")}`);
-      } else if (before.missingFromIndex.length > 12) {
-        print(
-          `  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`,
-        );
+      const value = JSON.parse(previousRaw) as { slug?: unknown; added?: unknown };
+      if (typeof value.slug === "string") {
+        previous = {
+          slug: value.slug,
+          added: typeof value.added === "number" ? value.added : 0,
+        };
       }
-    } else {
-      print(`list-index ${type}: entry schema unavailable — cannot census`);
+    } catch {
+      previous = null;
     }
+  }
+  const cursorExisted = cursorRow !== undefined;
 
-    if (opts.dryRun) {
-      result.reindexed += sot.length;
-      continue;
-    }
+  const plan = await planNamedSlugBackfill({
+    node,
+    cfg: opts.cfg,
+    sourceType: source,
+    target,
+    slugOrder: slugs,
+    records: [...bySlug.values()],
+  });
+  if (plan.blocked) refuse(`reindex ${plan.blocked}.`);
+  for (const line of plan.traces) traces.push(line);
 
-    await writeTypeListIndex(node, opts.cfg, type, sot);
-    result.reindexed += sot.length;
-    const after = await censusTypeListIndex(
-      node,
-      opts.cfg,
-      type,
-      sot.map((r) => r.slug),
-    );
-    if (after) {
-      // Replace the pre-repair census with the post-repair truth for this type.
-      const censuses = result.listIndexCensus!;
-      const idx = censuses.findIndex((c) => c.type === type);
-      if (idx >= 0) censuses[idx] = after;
-      else censuses.push(after);
-      print(
-        `list-index ${type}: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
+  const state = JSON.stringify({ slug: plan.lastSlug, added: plan.lastAdded });
+  const ops: BatchMutationOp[] = plan.ops;
+  if (!cursorExisted || previousRaw !== state) {
+    ops.push({
+      mutationType: cursorExisted ? "update" : "create",
+      schemaHash: cursorSchema,
+      keyHash: cursorHash,
+      keyRange: CURSOR_RANGE,
+      fields: { bfc_h: cursorHash, bfc_r: CURSOR_RANGE, bfc_state: state },
+    });
+  }
+  if (ops.length > WRITE_BATCH_MAX) {
+    refuse("reindex one batch cannot hold this backfill.");
+  }
+  if (!node.mutateBatch) refuse("reindex requires a batch write.");
+  if (ops.length > 0) {
+    traces.push(`mutateBatch count=${ops.length}`);
+    await node.mutateBatch(ops);
+  }
+
+  const countHash =
+    targetRaw === "all" || targetRaw === source || isRecordType(targetRaw) ? targetRaw : null;
+  const cursorChanged = (previous?.slug ?? "") !== plan.lastSlug;
+  // A put may already hold the locator. The first cursor advance still
+  // reports those slugs. The counter moves only for a new card.
+  let wrote = plan.added;
+  if (wrote === 0 && cursorChanged && plan.covered === slugs.length && slugs.length > 0) {
+    wrote = plan.covered;
+  }
+  if (countHash && cursorChanged && plan.added > 0) {
+    const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+    if (countSchema.length === 0) refuse("reindex requires BrainListCount. Run brain init.");
+    if (!node.mutateIfExpected) refuse("reindex requires a compare-and-set count.");
+    traces.push("HashRangeKey BrainListCount keys_visited=1");
+    const raw = await readCount(node, countSchema, countHash);
+    const numeric = raw !== null && /^-?\d+$/.test(raw);
+    const next = String((numeric ? Number(raw) : 0) + plan.added);
+    traces.push(`mutateIfExpected BrainListCount hash=${countHash}`);
+    let applied = await writeCount(node, countSchema, countHash, numeric ? raw : null, next);
+    if (!applied) {
+      traces.push("HashRangeKey BrainListCount keys_visited=1");
+      const again = await readCount(node, countSchema, countHash);
+      const againNumeric = again !== null && /^-?\d+$/.test(again);
+      const retry = String((againNumeric ? Number(again) : 0) + plan.added);
+      traces.push(`mutateIfExpected BrainListCount hash=${countHash}`);
+      applied = await writeCount(
+        node,
+        countSchema,
+        countHash,
+        againNumeric ? again : null,
+        retry,
       );
     }
+    if (!applied) print(COUNT_UNCONFIRMED);
   }
 
-  const prefix = opts.dryRun
-    ? "dry-run: would rebuild list-index for"
-    : "rebuilt list-index for";
-  const typeScope = opts.type ? ` type=${opts.type}` : "";
-  const incomplete = (result.listIndexCensus ?? []).filter(
-    (c) => !c.complete,
-  ).length;
-  print(
-    `${prefix} ${result.reindexed} live record(s)${typeScope}` +
-      (opts.dryRun && incomplete > 0
-        ? ` — ${incomplete} type(s) incomplete vs SOT`
-        : opts.dryRun
-          ? " — all censused types complete"
-          : ""),
-  );
-  return result;
-}
-
-/**
- * Rebuild the ChildTaskIndex (design_slug x task slug) partition from an
- * admin SOT scan of the task schema.
- *
- * Dry-run: census only (indexed set vs SOT `design_slug task_slug` pairs) —
- * no writes. Live: `writeChildTaskIndex` (upsert every live child-task row +
- * drop stale rows + stamp the global completeness marker), then re-census so
- * the operator sees `complete=true`.
- */
-async function rebuildChildTaskIndex(
-  opts: ReindexOptions,
-  node: ReturnType<typeof newWriteClientFromCfg>["node"],
-  print: (line: string) => void,
-): Promise<ReindexResult> {
-  const result: ReindexResult = {
-    scanned: 0,
-    reindexed: 0,
-    skippedTombstone: 0,
-    byType: {},
-  };
-
-  let schemaHash: string;
-  try {
-    schemaHash = schemaHashFor("task", opts.cfg);
-  } catch {
-    print(
-      missingSchemaHashReadNote(["task"], "skipping child-task-index rebuild"),
-    );
-    return result;
-  }
-
-  // Admin full scan is the SOT for this repair — never seed via the product
-  // `listRecords`/`findChildTasksByDesign` paths, which is what we're fixing.
-  const allTasks = await listRecordsAdminScan(node, "task", schemaHash, {
-    includeTombstones: true,
-  });
-  const liveTasks = allTasks.filter((t) => {
-    if (isTombstoned(t)) {
-      result.skippedTombstone++;
-      return false;
-    }
-    return true;
-  });
-  const sotPairs = liveTasks
-    .filter((t) => (t.design_slug ?? "").length > 0)
-    .map((t) => `${t.design_slug} ${t.slug}`);
-  result.scanned = allTasks.length;
-  result.byType.task = {
-    reindexed: liveTasks.length,
-    skippedTombstone: result.skippedTombstone,
-  };
-
-  const before = await censusChildTaskIndex(node, opts.cfg, sotPairs);
-  if (before) {
-    result.childTaskIndexCensus = before;
-    const gap =
-      before.missingFromIndex.length > 0 || before.extraInIndex.length > 0
-        ? ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}`
-        : " complete";
-    print(
-      `child-task-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
-    );
-    if (
-      before.missingFromIndex.length > 0 &&
-      before.missingFromIndex.length <= 12
-    ) {
-      print(`  missing: ${before.missingFromIndex.join(", ")}`);
-    } else if (before.missingFromIndex.length > 12) {
-      print(
-        `  missing (first 12): ${before.missingFromIndex.slice(0, 12).join(", ")} …`,
-      );
-    }
-  } else {
-    print("child-task-index: entry schema unavailable — cannot census");
-  }
-
-  if (opts.dryRun) {
-    result.reindexed = sotPairs.length;
-    print(
-      `dry-run: would rebuild child-task-index for ${sotPairs.length} linked task(s)` +
-        (before
-          ? before.complete
-            ? " — already complete"
-            : " — incomplete vs SOT"
-          : ""),
-    );
-    return result;
-  }
-
-  await writeChildTaskIndex(node, opts.cfg, liveTasks);
-  result.reindexed = sotPairs.length;
-  const after = await censusChildTaskIndex(node, opts.cfg, sotPairs);
-  if (after) {
-    result.childTaskIndexCensus = after;
-    print(
-      `child-task-index: rebuilt — indexed=${after.indexed} sot=${after.sot} complete=${after.complete}`,
-    );
-  }
-  print(`rebuilt child-task-index for ${sotPairs.length} linked task(s)`);
-  return result;
-}
-
-/** Rebuild the PapercutStatusIndex (status x slug) from papercut SOT. */
-async function rebuildPapercutStatusIndex(
-  opts: ReindexOptions,
-  node: ReturnType<typeof newWriteClientFromCfg>["node"],
-  print: (line: string) => void,
-  printErr: (line: string) => void,
-): Promise<ReindexResult> {
-  const result: ReindexResult = {
-    scanned: 0,
-    reindexed: 0,
-    skippedTombstone: 0,
-    byType: {},
-  };
-  let schemaHash: string;
-  try {
-    schemaHash = schemaHashFor("papercut", opts.cfg);
-  } catch {
-    print(
-      missingSchemaHashReadNote(
-        ["papercut"],
-        "skipping papercut-status-index rebuild",
-      ),
-    );
-    return result;
-  }
-  const all = await listRecordsAdminScan(node, "papercut", schemaHash, {
-    includeTombstones: true,
-    // This scan issues one point read per live papercut (thousands on the
-    // real corpus) with no other caller-visible output, so a legitimate
-    // multi-minute run under load reads identically to a hang. Report
-    // progress to stderr so a caller watching the command's own output can
-    // tell the two apart without reading source.
-    onProgress: (scanned) => printErr(`papercut-status-index: scanned ${scanned} record(s)...`),
-  });
-  const live = all.filter((record) => {
-    if (isTombstoned(record)) {
-      result.skippedTombstone++;
-      return false;
-    }
-    return true;
-  });
-  result.scanned = all.length;
-  result.byType.papercut = {
-    reindexed: live.length,
-    skippedTombstone: result.skippedTombstone,
-  };
-
-  const before = await censusPapercutStatusIndex(node, opts.cfg, live);
-  if (before) {
-    result.papercutStatusIndexCensus = before;
-    // `stale` is counted separately from `missing`/`extra` because it is a
-    // different failure: the row is in the right partition and its snapshot
-    // disagrees with the record. Printing only membership is how this index
-    // reported `complete` while 46.6% of its payloads were out of date.
-    const gap = before.complete
-      ? " complete"
-      : ` missing=${before.missingFromIndex.length} extra=${before.extraInIndex.length}` +
-        ` stale=${before.stalePayload.length}`;
-    print(
-      `papercut-status-index: indexed=${before.indexed} sot=${before.sot} migrated=${before.migrated}${gap}`,
-    );
-  } else {
-    print(
-      "papercut-status-index: entry schema unavailable — run `brain init` first",
-    );
-  }
-
-  if (opts.dryRun) {
-    result.reindexed = live.length;
-    print(
-      `dry-run: would rebuild papercut-status-index for ${live.length} papercut(s)` +
-        (before
-          ? before.complete
-            ? " — already complete"
-            : " — incomplete vs SOT"
-          : ""),
-    );
-    return result;
-  }
-
-  await writePapercutStatusIndex(node, opts.cfg, live);
-  result.reindexed = live.length;
-  const after = await censusPapercutStatusIndex(node, opts.cfg, live);
-  if (after) {
-    result.papercutStatusIndexCensus = after;
-    print(
-      `papercut-status-index: rebuilt — indexed=${after.indexed} sot=${after.sot}` +
-        ` stale=${after.stalePayload.length} complete=${after.complete}`,
-    );
-  }
-  print(`rebuilt papercut-status-index for ${live.length} papercut(s)`);
-  return result;
+  print("reindex");
+  print(`calls ${traces.length}`);
+  for (const line of traces) print(line);
+  for (const note of plan.notes) print(note);
+  print(`wrote ${wrote}`);
+  print(`${cursorHash} ${CURSOR_RANGE}`);
+  return { wrote };
 }

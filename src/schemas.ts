@@ -562,6 +562,8 @@ export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
 export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";
+// One sidecar per (record type, slug, field). The pointer is the whole `file` value.
+export const BODY_FILE_SCHEMA_KEY = "__bodyfile__";
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
     name: "TagIndex",
@@ -925,6 +927,79 @@ export const attachmentFileSchema: AddSchemaRequest = {
       media_type: GENERAL,
       file: { sensitivity_level: 0, data_domain: "file-reference" },
       created_at: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
+
+// One BrainBodyFile per spilled field. The full text is a local file blob.
+// `file` is type Any and holds the `$lastdb_file` pointer as the whole value.
+// A pointer inside a JSON string is not a reference. Knowledge schemas gain no
+// field: a new field would re-hash every record. The record keeps a head and a
+// marker line that names this sidecar.
+export const bodyFileSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainBodyFile",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainBodyFile",
+    purpose_statement:
+      "Pointer to a local CAS file blob that holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
+    schema_type: "Hash",
+    key: { hash_field: "file_key" },
+    fields: [
+      "file_key",
+      "record_type",
+      "record_slug",
+      "record_field",
+      "content_hash",
+      "size",
+      "file",
+      "created_at",
+      "updated_at",
+    ],
+    field_types: {
+      file_key: "String",
+      record_type: "String",
+      record_slug: "String",
+      record_field: "String",
+      content_hash: "String",
+      size: "String",
+      file: "Any",
+      created_at: "String",
+      updated_at: "String",
+    },
+    field_descriptions: {
+      file_key: "__bodyfile__<sha256(record_type:record_slug:record_field)> (hash key)",
+      record_type: "owning record's type",
+      record_slug: "owning record's slug",
+      record_field: "which text field of the record was spilled (body, verified_by, fixed_by)",
+      content_hash: "SHA-256 hex of the full UTF-8 text",
+      size: "full text byte length",
+      file: "$lastdb_file pointer written by put-blob-local; the whole field value, never indexed",
+      created_at: "BrainBodyFile time this sidecar was first stored",
+      updated_at: "BrainBodyFile time this sidecar was last replaced",
+    },
+    field_classifications: {
+      file_key: ["no_index", "metadata"],
+      record_type: ["no_index", "metadata"],
+      record_slug: ["no_index", "metadata"],
+      record_field: ["no_index", "metadata"],
+      content_hash: ["no_index", "metadata"],
+      size: ["no_index", "metadata"],
+      file: ["no_index", "metadata"],
+      created_at: ["no_index", "metadata"],
+      updated_at: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      file_key: GENERAL,
+      record_type: GENERAL,
+      record_slug: GENERAL,
+      record_field: GENERAL,
+      content_hash: GENERAL,
+      size: GENERAL,
+      file: { sensitivity_level: 0, data_domain: "file-reference" },
+      created_at: GENERAL,
+      updated_at: GENERAL,
     },
   },
   mutation_mappers: {},
@@ -1540,6 +1615,219 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
   },
 };
 
+// Thin list plane. `brain init` is the only registrar. A write path must not
+// declare these. Field names stay opaque so a shared description cannot bind
+// them to an older field (the 2026-10-12 `bge_created_at` refusal).
+export const BRAIN_LIST_PAGE_SCHEMA_KEY = "__brainlistpage__";
+export const BRAIN_LIST_LOCATOR_SCHEMA_KEY = "__brainlistlocator__";
+export const BRAIN_TYPE_DIRECTORY_SCHEMA_KEY = "__braintypedirectory__";
+export const BRAIN_LIST_COUNT_SCHEMA_KEY = "__brainlistcount__";
+export const BRAIN_EDGE_SET_SCHEMA_KEY = "__brainedgeset__";
+export const BRAIN_TOKEN_SET_SCHEMA_KEY = "__braintokenset__";
+export const BRAIN_BACKFILL_CURSOR_SCHEMA_KEY = "__brainbackfillcursor__";
+
+function supportSchema(opts: {
+  name: string;
+  purpose: string;
+  schemaType: "Hash" | "HashRange";
+  hashField: string;
+  rangeField?: string;
+  fields: ReadonlyArray<{ name: string; description: string }>;
+}): AddSchemaRequest {
+  const field_types: Record<string, FieldType> = {};
+  const field_descriptions: Record<string, string> = {};
+  const field_classifications: Record<string, string[]> = {};
+  const field_data_classifications: SchemaDefinition["field_data_classifications"] = {};
+  for (const field of opts.fields) {
+    field_types[field.name] = "String";
+    field_descriptions[field.name] = field.description;
+    field_classifications[field.name] = ["no_index", "metadata"];
+    field_data_classifications[field.name] = GENERAL;
+  }
+  return {
+    schema: {
+      name: opts.name,
+      owner_app_id: OWNER_APP_ID,
+      descriptive_name: opts.name,
+      purpose_statement: opts.purpose,
+      schema_type: opts.schemaType,
+      key: opts.rangeField
+        ? { hash_field: opts.hashField, range_field: opts.rangeField }
+        : { hash_field: opts.hashField },
+      fields: opts.fields.map((field) => field.name),
+      field_types,
+      field_descriptions,
+      field_classifications,
+      field_data_classifications,
+    },
+    mutation_mappers: {},
+  };
+}
+
+export const brainListPageSchema = supportSchema({
+  name: "BrainListPage",
+  purpose:
+    "One thin list page for brain list, addressed by a list hash and a page id, holding card ids and a short title and no body",
+  schemaType: "HashRange",
+  hashField: "blp_h",
+  rangeField: "blp_r",
+  fields: [
+    {
+      name: "blp_h",
+      description:
+        "BrainListPage hash token: all, a type name, a type and status, a tag, a child design, a link target, or a symptom",
+    },
+    {
+      name: "blp_r",
+      description:
+        "BrainListPage range token: the head marker __head__ or a page id of p plus eight digits, never a time",
+    },
+    {
+      name: "blp_page",
+      description:
+        "BrainListPage JSON atom: a card list and the older page id, with no record body",
+    },
+  ],
+});
+
+export const brainListLocatorSchema = supportSchema({
+  name: "BrainListLocator",
+  purpose:
+    "One locator that names the single list page holding one brain card, so a put rewrites that page without walking the chain",
+  schemaType: "HashRange",
+  hashField: "bll_h",
+  rangeField: "bll_r",
+  fields: [
+    {
+      name: "bll_h",
+      description: "BrainListLocator hash token: loc# plus the list hash",
+    },
+    {
+      name: "bll_r",
+      description: "BrainListLocator range token: type#slug of the card",
+    },
+    {
+      name: "bll_page",
+      description:
+        "BrainListLocator atom: the page id of the card, either __head__ or p plus eight digits",
+    },
+  ],
+});
+
+export const brainTypeDirectorySchema = supportSchema({
+  name: "BrainTypeDirectory",
+  purpose:
+    "One directory atom per slug that lists which brain record types use that slug",
+  schemaType: "HashRange",
+  hashField: "btd_h",
+  rangeField: "btd_r",
+  fields: [
+    {
+      name: "btd_h",
+      description: "BrainTypeDirectory hash token: the record slug",
+    },
+    {
+      name: "btd_r",
+      description: "BrainTypeDirectory range token: the fixed marker __types__",
+    },
+    {
+      name: "btd_types",
+      description: "BrainTypeDirectory JSON list of type names for that slug",
+    },
+  ],
+});
+
+export const brainListCountSchema = supportSchema({
+  name: "BrainListCount",
+  purpose:
+    "One decimal counter for the whole brain list or for one record type, not for a status, a tag, or a time window",
+  schemaType: "Hash",
+  hashField: "bln_h",
+  fields: [
+    {
+      name: "bln_h",
+      description: "BrainListCount hash token: all, or one type name",
+    },
+    {
+      name: "bln_n",
+      description: "BrainListCount decimal text for that hash",
+    },
+  ],
+});
+
+export const brainEdgeSetSchema = supportSchema({
+  name: "BrainEdgeSet",
+  purpose:
+    "One capped set of graph-edge ids for a brain record, so a neighbor read does not range-read the out edge schema",
+  schemaType: "HashRange",
+  hashField: "bes_h",
+  rangeField: "bes_r",
+  fields: [
+    {
+      name: "bes_h",
+      description: "BrainEdgeSet hash token: es# plus the record type and slug",
+    },
+    {
+      name: "bes_r",
+      description: "BrainEdgeSet range token: the fixed marker __head__",
+    },
+    {
+      name: "bes_ids",
+      description:
+        "BrainEdgeSet JSON list of type#destination values, at most sixteen",
+    },
+  ],
+});
+
+export const brainTokenSetSchema = supportSchema({
+  name: "BrainTokenSet",
+  purpose:
+    "One capped token list for a brain record. An absent atom reads as an empty token list. Keyword pages are a later write",
+  schemaType: "HashRange",
+  hashField: "bts_h",
+  rangeField: "bts_r",
+  fields: [
+    {
+      name: "bts_h",
+      description: "BrainTokenSet hash token: ts# plus the record type and slug",
+    },
+    {
+      name: "bts_r",
+      description: "BrainTokenSet range token: the fixed marker __head__",
+    },
+    {
+      name: "bts_tokens",
+      description:
+        "BrainTokenSet JSON list of tokens this record wrote, at most eight",
+    },
+  ],
+});
+
+export const brainBackfillCursorSchema = supportSchema({
+  name: "BrainBackfillCursor",
+  purpose:
+    "One cursor for a named-slug list backfill. The atom stores the last source slug and the count added for that slug",
+  schemaType: "HashRange",
+  hashField: "bfc_h",
+  rangeField: "bfc_r",
+  fields: [
+    {
+      name: "bfc_h",
+      description:
+        "BrainBackfillCursor hash token: bf# plus the target list hash and the source type",
+    },
+    {
+      name: "bfc_r",
+      description: "BrainBackfillCursor range token: the fixed marker __cursor__",
+    },
+    {
+      name: "bfc_state",
+      description:
+        "BrainBackfillCursor JSON atom with the last source slug and the count added for that slug",
+    },
+  ],
+});
+
 // UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
 // entry binds a config-key (where `init` writes the canonical hash) to
 // the AddSchemaRequest. One entry per RecordType — no legacy alias.
@@ -1595,6 +1883,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     extraKeys: [ATTACHMENT_FILE_SCHEMA_KEY],
   },
   {
+    key: BODY_FILE_SCHEMA_KEY,
+    schema: bodyFileSchema,
+    types: [],
+    extraKeys: [BODY_FILE_SCHEMA_KEY],
+  },
+  {
     key: RECORD_LIST_ENTRY_SCHEMA_KEY,
     schema: recordListEntrySchema,
     types: [],
@@ -1647,6 +1941,48 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: graphEdgeInSchema,
     types: [],
     extraKeys: [GRAPH_EDGE_IN_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_LIST_PAGE_SCHEMA_KEY,
+    schema: brainListPageSchema,
+    types: [],
+    extraKeys: [BRAIN_LIST_PAGE_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_LIST_LOCATOR_SCHEMA_KEY,
+    schema: brainListLocatorSchema,
+    types: [],
+    extraKeys: [BRAIN_LIST_LOCATOR_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_TYPE_DIRECTORY_SCHEMA_KEY,
+    schema: brainTypeDirectorySchema,
+    types: [],
+    extraKeys: [BRAIN_TYPE_DIRECTORY_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_LIST_COUNT_SCHEMA_KEY,
+    schema: brainListCountSchema,
+    types: [],
+    extraKeys: [BRAIN_LIST_COUNT_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_EDGE_SET_SCHEMA_KEY,
+    schema: brainEdgeSetSchema,
+    types: [],
+    extraKeys: [BRAIN_EDGE_SET_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_TOKEN_SET_SCHEMA_KEY,
+    schema: brainTokenSetSchema,
+    types: [],
+    extraKeys: [BRAIN_TOKEN_SET_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_BACKFILL_CURSOR_SCHEMA_KEY,
+    schema: brainBackfillCursorSchema,
+    types: [],
+    extraKeys: [BRAIN_BACKFILL_CURSOR_SCHEMA_KEY],
   },
 ];
 

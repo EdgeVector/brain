@@ -1,8 +1,8 @@
 // `fbrain tag <slug> --add T[,T] --rm T[,T]` — mutate only a record's tags.
 //
 // This is the tag-side sibling of `status`: resolve the live record, apply a
-// set add/remove to `tags`, and write back through updateRecord while
-// preserving body/title/status/created_at byte-for-byte. Re-adding an existing
+// set add/remove to `tags`, then seal and write the stored fields. A hydrated
+// body must not replace the short field. Re-adding an existing
 // tag or removing an absent one is a no-op success.
 
 import { FbrainError, type Verbose } from "../client.ts";
@@ -15,6 +15,7 @@ import {
   resolveBySlug,
   schemaHashFor,
   updateFieldsFrom,
+  writeRecordFields,
 } from "../record.ts";
 import { type RecordType } from "../schemas.ts";
 
@@ -107,27 +108,16 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
       tags: result.tags,
       updated_at: now,
     });
-    await node.updateRecord({
+    // The read returns the full text. Store the sealed head, not that text.
+    await writeRecordFields({
+      node,
+      cfg: opts.cfg,
+      type: only.type,
+      slug,
       schemaHash: hash,
-      keyHash: slug,
       fields,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
     });
-    // Same reason as `brain append`: the status-keyed papercut index stores a
-    // snapshot of the whole record, so a write that skips it leaves that
-    // snapshot stale. Measured on the primary 2026-09-03: 5 open rows carried
-    // stale `tags` for exactly this reason.
-    if (only.type === "papercut") {
-      const { patchPapercutStatusIndex } = await import(
-        "../papercut-status-index.ts"
-      );
-      await patchPapercutStatusIndex(
-        node,
-        opts.cfg,
-        slug,
-        { ...only.record, tags: result.tags, updated_at: now },
-        only.record.status,
-      );
-    }
   }
 
   const parts = [

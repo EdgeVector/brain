@@ -16,15 +16,15 @@
 // old probe, not for live product truth.
 
 import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
-import { reconcileBacklinkIndex } from "../backlink-index.ts";
+import { pageBackfill, readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
+import { HEAD_RANGE } from "../list-page.ts";
 import {
   buildRecordFields,
   findBySlugRaw,
   isTombstoned,
-  listRecords,
   normalizeSlug,
   nowIso,
   NOT_FOUND_TYPED,
@@ -33,9 +33,11 @@ import {
   TOMBSTONE_TAG,
   withReadRetry,
 } from "../record.ts";
-import { type RecordType } from "../schemas.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
 import { matchesListFilters, resolveListEntries } from "./list.ts";
-import { unindexRecordTags } from "../tag-index.ts";
+import { removeResidentListSide } from "../resident-write-plan.ts";
+import { formatIndexNotes } from "../write-confirmation.ts";
+import type { FbrainRecord } from "../record.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -66,42 +68,44 @@ export type DeleteResult = {
   soft: true;
 };
 
-// Live (non-tombstoned) tasks whose design_slug points at `designSlug`.
-// fold_db has no server-side field filter (see client.ts queryAll), so we
-// list every task and match in-memory. Retry-hedged for the same transient
-// empty-page flake task-new's parent lookup guards against: without the
-// hedge a flake hides a linked task, the design deletes, and we re-introduce
-// exactly the orphaning this guard exists to prevent. `isHit` fires as soon
-// as one match surfaces; a design with genuinely zero linked tasks spends
-// the full retry budget before proceeding — the same negative-case cost the
-// create-side guards accept to stay correct under flake.
+// A child page is one HashRangeKey. Do not list every task.
 async function findLinkedTaskSlugs(
   node: NodeClient,
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
-  // Keyed path first (child-task-index.ts): one design's children via
-  // partition read instead of listing every task. `null` = index not
-  // registered yet, fall through unchanged; a registered-but-unmigrated
-  // index throws loudly (same contract as `listRecords`).
-  const { readChildTasksByDesign } = await import("../child-task-index.ts");
-  const indexed = await readChildTasksByDesign(node, cfg, designSlug);
-  if (indexed !== null) {
-    return indexed.map((r) => r.slug).sort();
+  const hash = `child#${designSlug}`;
+  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  const seen = new Set<string>();
+  let range = HEAD_RANGE;
+  for (;;) {
+    if (seen.has(range)) {
+      throw new FbrainError({
+        code: "child_page_unproven",
+        message: `Cannot delete design "${designSlug}" — child page repeats.`,
+        hint: pageBackfill(hash, "task"),
+      });
+    }
+    seen.add(range);
+    const page = await readStoredPage(node, schemaHash, hash, range);
+    if (page.kind === "absent") {
+      throw new FbrainError({
+        code: "child_page_unproven",
+        message: `Cannot delete design "${designSlug}" — child page absent.`,
+        hint: pageBackfill(hash, "task"),
+      });
+    }
+    if (page.kind === "bad") {
+      throw new FbrainError({
+        code: "child_page_unproven",
+        message: `Cannot delete design "${designSlug}" — child page is partial.`,
+        hint: pageBackfill(hash, "task"),
+      });
+    }
+    if (page.cards.length > 0) return page.cards.map((card) => card.slug);
+    if (page.older.length === 0) return [];
+    range = page.older;
   }
-
-  // Summaries are enough: only design_slug and the tombstone tag are read.
-  const isLinked = (r: { tags: readonly string[]; design_slug?: string }): boolean =>
-    !isTombstoned(r) && r.design_slug === designSlug;
-  const tasks = await withReadRetry(
-    // Only design_slug and the tombstone tag are read: skip body completion.
-    () => listRecords(node, "task", cfg, { summary: true }),
-    (rows) => rows.some(isLinked),
-  );
-  return tasks
-    .filter(isLinked)
-    .map((r) => r.slug)
-    .sort();
 }
 
 // Tombstone status per type — pick a value from each type's status enum
@@ -239,26 +243,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   }
 
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
-  await unindexRecordTags(
-    node,
-    opts.cfg,
-    type,
-    slug,
-    record.tags,
-    opts.verbose,
-  );
-  await reconcileBacklinkIndex(
-    node,
-    opts.cfg,
-    type,
-    slug,
-    record,
-    null,
-    opts.verbose,
-  );
-  // Drop the per-type RecordListEntry row. Without this the pre-tombstone
-  // rle_payload snapshot survives, so list/--count/BM25 still surface the
-  // slug while get exit-1s (phantom index rows).
+  // Remove an old RecordListEntry row when that key exists.
   {
     const { maintainTypeListIndex } = await import("../record-list-index.ts");
     await maintainTypeListIndex({
@@ -267,21 +252,6 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       type,
       record: null,
       slug,
-      verbose: opts.verbose,
-    });
-  }
-  // Drop the design->child-task index row (see child-task-index.ts). Without
-  // this, deleting a task leaves a stale pre-tombstone snapshot in its old
-  // design's partition — the same phantom-row bug the RecordListEntry drop
-  // above exists to prevent, one layer up.
-  if (type === "task" && record.design_slug && record.design_slug.length > 0) {
-    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
-    await maintainChildTaskIndex({
-      node,
-      cfg: opts.cfg,
-      taskSlug: slug,
-      task: null,
-      previousDesignSlug: record.design_slug,
       verbose: opts.verbose,
     });
   }
@@ -298,8 +268,9 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       verbose: opts.verbose,
     });
   }
+  const indexNote = await dropListSide(node, opts.cfg, type, record);
 
-  print(`deleted ${type} ${slug}`);
+  print(`deleted ${type} ${slug}${indexNote}`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
   // printed line uses (one source of truth — see the read commands).
   opts.onResult?.({ action: "deleted", type, slug, soft: true });
@@ -354,26 +325,7 @@ export type DeleteByFilterOptions = {
   onResult?: (payload: DeleteBatchResult) => void;
 };
 
-// Resolve every LIVE record matching a list-style selector, exactly the way
-// `fbrain list --tag/--type/--status` does (sweep the selected schemas, drop
-// tombstones, apply the status/tag filters), so a user who previews with
-// `list` and deletes with `delete --tag` operates on the identical set.
-async function resolveFilterMatches(
-  node: NodeClient,
-  opts: DeleteByFilterOptions,
-): Promise<FilterMatch[]> {
-  const entries = await resolveListEntries(node, opts);
-  const matches: FilterMatch[] = entries
-    .filter(({ record }) => matchesListFilters(record, opts))
-    .map(({ type, record }) => ({
-      type,
-      slug: record.slug,
-      title: record.title,
-      created_at: record.created_at,
-    }));
-  // Stable, human-scannable order: type then slug. The node's row order is
-  // unstable (see list.ts), so without this the preview and the delete could
-  // print the same set in different orders across invocations.
+function sortFilterMatches(matches: FilterMatch[]): void {
   matches.sort((a, b) =>
     a.type !== b.type
       ? a.type < b.type
@@ -385,7 +337,60 @@ async function resolveFilterMatches(
           ? 1
           : 0,
   );
-  return matches;
+}
+
+// `--tag` walks tag# pages. One HashRangeKey per page. `--type` and `--status`
+// without a tag still use the list resolver.
+async function resolveFilterMatches(
+  node: NodeClient,
+  opts: DeleteByFilterOptions,
+): Promise<{ matches: FilterMatch[]; partial: boolean }> {
+  if (opts.tag) {
+    const hash = `tag#${opts.tag}`;
+    const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+    const seen = new Set<string>();
+    const matches: FilterMatch[] = [];
+    let range = HEAD_RANGE;
+    let partial = false;
+    for (;;) {
+      if (seen.has(range)) {
+        partial = true;
+        break;
+      }
+      seen.add(range);
+      const page = await readStoredPage(node, schemaHash, hash, range);
+      if (page.kind !== "page") {
+        partial = true;
+        break;
+      }
+      for (const card of page.cards) {
+        if (!isRecordType(card.type)) continue;
+        if (opts.type && card.type !== opts.type) continue;
+        if (opts.status && card.status !== opts.status) continue;
+        matches.push({
+          type: card.type,
+          slug: card.slug,
+          title: card.title,
+          created_at: "",
+        });
+      }
+      if (page.older.length === 0) break;
+      range = page.older;
+    }
+    sortFilterMatches(matches);
+    return { matches, partial };
+  }
+  const entries = await resolveListEntries(node, opts);
+  const matches: FilterMatch[] = entries
+    .filter(({ record }) => matchesListFilters(record, opts))
+    .map(({ type, record }) => ({
+      type,
+      slug: record.slug,
+      title: record.title,
+      created_at: record.created_at,
+    }));
+  sortFilterMatches(matches);
+  return { matches, partial: false };
 }
 
 // A short, human-readable description of the active selector, for the preview
@@ -396,6 +401,16 @@ function describeSelector(opts: DeleteByFilterOptions): string {
   if (opts.status) parts.push(`--status ${opts.status}`);
   if (opts.tag) parts.push(`--tag ${opts.tag}`);
   return parts.join(" ");
+}
+
+async function dropListSide(
+  node: NodeClient,
+  cfg: Config,
+  type: RecordType,
+  record: FbrainRecord,
+): Promise<string> {
+  const removed = await removeResidentListSide({ node, cfg, type, record });
+  return formatIndexNotes(removed.indexNotes);
 }
 
 function isNotFound(err: unknown): boolean {
@@ -428,10 +443,11 @@ export async function deleteByFilter(
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const selector = describeSelector(opts);
 
-  const matches = await resolveFilterMatches(node, opts);
+  const { matches, partial } = await resolveFilterMatches(node, opts);
+  if (partial) print("the delete is partial");
   if (matches.length === 0) {
-    print(`no live records match ${selector}`);
-    opts.onResult?.({ ok: true, deleted: [], failed: [], dryRun: !opts.yes });
+    if (!partial) print(`no live records match ${selector}`);
+    opts.onResult?.({ ok: !partial, deleted: [], failed: [], dryRun: !opts.yes });
     return;
   }
 
@@ -445,7 +461,7 @@ export async function deleteByFilter(
       `Re-run with --yes to delete ${matches.length === 1 ? "it" : "them"}.`,
     );
     opts.onResult?.({
-      ok: true,
+      ok: !partial,
       deleted: matches.map((m) => ({ type: m.type, slug: m.slug })),
       failed: [],
       dryRun: true,
@@ -509,23 +525,6 @@ export async function deleteByFilter(
         slug,
         resolved.record.created_at,
       );
-      await unindexRecordTags(
-        node,
-        opts.cfg,
-        m.type,
-        slug,
-        resolved.record.tags,
-        opts.verbose,
-      );
-      await reconcileBacklinkIndex(
-        node,
-        opts.cfg,
-        m.type,
-        slug,
-        resolved.record,
-        null,
-        opts.verbose,
-      );
       {
         const { maintainTypeListIndex } = await import(
           "../record-list-index.ts"
@@ -536,23 +535,6 @@ export async function deleteByFilter(
           type: m.type,
           record: null,
           slug,
-          verbose: opts.verbose,
-        });
-      }
-      if (
-        m.type === "task" &&
-        resolved.record.design_slug &&
-        resolved.record.design_slug.length > 0
-      ) {
-        const { maintainChildTaskIndex } = await import(
-          "../child-task-index.ts"
-        );
-        await maintainChildTaskIndex({
-          node,
-          cfg: opts.cfg,
-          taskSlug: slug,
-          task: null,
-          previousDesignSlug: resolved.record.design_slug,
           verbose: opts.verbose,
         });
       }
@@ -569,7 +551,13 @@ export async function deleteByFilter(
           verbose: opts.verbose,
         });
       }
-      print(`deleted ${m.type} ${slug}`);
+      const indexNote = await dropListSide(
+        node,
+        opts.cfg,
+        m.type,
+        resolved.record,
+      );
+      print(`deleted ${m.type} ${slug}${indexNote}`);
       deleted.push({ type: m.type, slug });
     } catch (err) {
       const error = formatBatchError(err);
@@ -581,7 +569,7 @@ export async function deleteByFilter(
   const noun = deleted.length === 1 ? "record" : "records";
   if (failed.length === 0) {
     print(`deleted ${deleted.length} ${noun} matching ${selector}.`);
-    opts.onResult?.({ ok: true, deleted, failed: [], dryRun: false });
+    opts.onResult?.({ ok: !partial, deleted, failed: [], dryRun: false });
     return;
   }
 

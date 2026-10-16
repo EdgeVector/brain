@@ -23,6 +23,7 @@ import { resolvePrintSink, resolvePrintSinks } from "../format.ts";
 import {
   crossTypeSlugNote,
   findBySlug,
+  findBySlugs,
   findCrossTypeSlugCollisions,
   normalizeSlug,
   nowIso,
@@ -32,23 +33,19 @@ import {
   withReadRetry,
   type FbrainRecord,
 } from "../record.ts";
-import { findCmd, type FindHit } from "./find.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import {
   writeDurabilityOf,
   writeDurabilityTokens,
-  writeDurabilityWarning,
   type WriteDurability,
 } from "../write-confirmation.ts";
-import { recordListEntryHash } from "../record-list-index.ts";
-import {
-  newPapercutReadStats,
-  readPapercutSlugsByStatus,
-  readPapercutsByStatus,
-} from "../papercut-status-index.ts";
+import { hydrateRecord, parseSpillMarker, sealRecordFields } from "../body-spill.ts";
+import { HEAD_RANGE, INDEX_PARTIAL } from "../list-page.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY } from "../schemas.ts";
 import {
   buildResidentWritePlan,
   commitResidentWritePlan,
+  type PlannedMutation,
 } from "../resident-write-plan.ts";
 import {
   ensureComponent,
@@ -65,229 +62,13 @@ import {
 
 const PAPERCUT: "papercut" = "papercut";
 
-// Raw cosine floor for semantic duplicate candidates. `find` orders with RRF,
-// whose scores are intentionally tiny and rank-relative; dedupe needs the
-// strongest absolute similarity returned by any individual probe.
-export const SEMANTIC_DUPLICATE_THRESHOLD = 0.5;
-export const SEMANTIC_DUPLICATE_LIMIT = 10;
-
-// How many papercuts to RETRIEVE before the component / live-status / cleared
-// filters run. This is deliberately much larger than SEMANTIC_DUPLICATE_LIMIT,
-// which bounds what is DISPLAYED.
-//
-// The bug this closes (measured 2026-08-17 → 2026-09-03, 15+ recurrences on
-// papercut-brain-papercut-file-token-overlap-refuses-unrelated-claims): `find`
-// sliced to 10 hits across EVERY component, and only then did we drop
-// out-of-component records, terminal records, and the caller's
-// --not-duplicate-of set. So a disclaimed candidate still occupied a retrieval
-// slot: clearing it did not widen the view, it just revealed whatever the slice
-// had been hiding. One filing cost five full re-sends of the whole --body, and
-// the round-trip count had no upper bound.
-//
-// Retrieving wide and filtering after makes an exclusion actually free a slot,
-// so the candidate set SHRINKS monotonically across attempts instead of moving.
-export const SEMANTIC_DUPLICATE_FETCH_LIMIT = 60;
-
 export type DuplicateCandidate = {
   slug: string;
   title: string;
   status: string;
   score: number;
   exact: boolean;
-  /** The candidate's component, when it differs from the filing's. */
-  component?: string;
-  /**
-   * True when the candidate is CLOSED (verified/wontfix/duplicate) inside the
-   * recurrence window. A recurrence is never cleared by the bulk
-   * `--not-duplicate-of-any` waiver; see RECURRENCE_WINDOW_DAYS.
-   */
-  recurrence?: boolean;
-  /** For a recurrence: the row to reopen (a `duplicate` row's target). */
-  canonical?: string;
-  /** For a recurrence: when the candidate was last written (its close time). */
-  closed_at?: string;
 };
-
-// A live papercut in ANOTHER component gates a filing only above this raw
-// cosine. Measured 2026-09-23 on the primary: one defect (the close-out
-// `rm -f` sample the shell guard rejects) sat in 12 components —
-// close-out-skill, routine, exec-guard, codex-exec, codex-exec-guard,
-// routinesd, last-stack, shell-safety-guard, routines-shell-guard, … — at
-// 0.74–0.86 against its own title, while the nearest unrelated row scored
-// 0.743. A component-scoped gate cannot see any of those siblings, so each
-// run that picked a new component name filed a fresh row.
-export const CROSS_COMPONENT_DUPLICATE_THRESHOLD = 0.83;
-
-// The recurrence gate. Only LIVE rows used to gate a filing, so the moment a
-// canonical row was closed `verified` the next run that hit the same defect
-// filed a fresh row — measured 2026-09-23: ~251 new rows in ~11 h, most of
-// them re-files of defects closed `verified` the same day (zsh `status`, jq
-// optional syntax, heredoc backticks, the rm guard). A recurrence must land as
-// ONE reopened canonical row, not N fresh ones, or the ledger can never reach
-// zero and the recurrence itself is invisible (it reads as new work).
-//
-// Same component: this floor (stricter than the live 0.5, because a closed row
-// refusing a genuinely new defect costs more than a live one; a distinct brain
-// append defect scored 0.769 against an unrelated closed append row on
-// 2026-09-23). Other components: CROSS_COMPONENT_DUPLICATE_THRESHOLD.
-export const RECURRENCE_THRESHOLD = 0.8;
-export const RECURRENCE_WINDOW_DAYS = 14;
-
-export function papercutDedupeProbes(opts: {
-  title: string;
-  symptom: string;
-  body: string;
-}): string[] {
-  const error = /^(?:error|exception):\s*(.+)$/im.exec(opts.body)?.[1]?.trim();
-  return [
-    ...new Set(
-      [opts.title.trim(), opts.symptom.trim(), error ?? ""].filter(Boolean),
-    ),
-  ];
-}
-
-function closedWithinWindow(
-  updatedAt: unknown,
-  now: Date,
-  windowDays: number,
-): boolean {
-  if (typeof updatedAt !== "string") return false;
-  const t = Date.parse(updatedAt);
-  if (!Number.isFinite(t)) return false;
-  return now.getTime() - t <= windowDays * 86_400_000;
-}
-
-// A hard-distinguishing identifier embedded in a title: "PR 2223", "PR#2223",
-// or "#2223". Two titles that each carry one of these and disagree name
-// different work items regardless of how similar the surrounding text
-// reads — a templated title ("Pipeline: EdgeVector/fold PR <N> is stuck
-// (red)") makes every per-PR row look like a paraphrase of every other one
-// at the embedding layer, so the dedupe gate cited CLOSED/verified rows for
-// OTHER PR numbers 8+ times over 2026-09-25/26 and the new PR's row never
-// got filed (papercut-pipeline-ledger-dedupe-gate-blocks-new-pr-numbers).
-const IDENTIFYING_NUMBER_RE = /\bpr\s*#?(\d+)\b|#(\d+)\b/i;
-
-function identifyingNumber(title: string): string | null {
-  const m = IDENTIFYING_NUMBER_RE.exec(title);
-  if (!m) return null;
-  return m[1] ?? m[2] ?? null;
-}
-
-export function semanticDuplicateCandidates(
-  hits: readonly FindHit[],
-  opts: {
-    component: string;
-    exactSlug?: string;
-    title?: string;
-    now?: Date;
-    recurrenceWindowDays?: number;
-  },
-): DuplicateCandidate[] {
-  const now = opts.now ?? new Date();
-  const windowDays = opts.recurrenceWindowDays ?? RECURRENCE_WINDOW_DAYS;
-  const newNumber = opts.title ? identifyingNumber(opts.title) : null;
-  const candidates: DuplicateCandidate[] = [];
-  for (const hit of hits) {
-    const record = hit.record;
-    const exact = record.slug === opts.exactSlug;
-    // An exact slug always refers to the SAME identifier, so the veto only
-    // applies to the similarity judgement, never to the exact-restatement
-    // path (that is settled by `papercut_exists` / --reopen, not here).
-    if (!exact && newNumber) {
-      const candidateNumber = identifyingNumber(record.title);
-      if (candidateNumber && candidateNumber !== newNumber) continue;
-    }
-    const score = exact ? 1 : hit.maxSimilarity;
-    const sameComponent =
-      typeof record.component !== "string" ||
-      record.component === opts.component;
-    const otherComponent =
-      !sameComponent && typeof record.component === "string"
-        ? { component: record.component }
-        : {};
-    if (isLivePapercutStatus(record.status)) {
-      const floor = sameComponent
-        ? SEMANTIC_DUPLICATE_THRESHOLD
-        : CROSS_COMPONENT_DUPLICATE_THRESHOLD;
-      if (exact || score >= floor) {
-        candidates.push({
-          slug: record.slug,
-          title: record.title,
-          status: record.status,
-          score,
-          exact,
-          ...otherComponent,
-        });
-      }
-      continue;
-    }
-    // A CLOSED row. The exact-slug case is answered by `papercut_exists`
-    // (which names --reopen), not here.
-    if (exact) continue;
-    if (!closedWithinWindow(record.updated_at, now, windowDays)) continue;
-    const floor = sameComponent
-      ? RECURRENCE_THRESHOLD
-      : CROSS_COMPONENT_DUPLICATE_THRESHOLD;
-    if (score < floor) continue;
-    const target =
-      record.status === "duplicate" &&
-      typeof record.duplicate_of === "string" &&
-      record.duplicate_of.trim() !== ""
-        ? normalizeSlug(record.duplicate_of)
-        : record.slug;
-    candidates.push({
-      slug: record.slug,
-      title: record.title,
-      status: record.status,
-      score,
-      exact: false,
-      ...otherComponent,
-      recurrence: true,
-      canonical: target,
-      closed_at: record.updated_at,
-    });
-  }
-  return candidates.sort((a, b) => b.score - a.score);
-}
-
-/** The distinct rows a recurrence refusal asks the filer to reopen. */
-export function recurrenceCanonicals(
-  candidates: readonly DuplicateCandidate[],
-): string[] {
-  return [
-    ...new Set(
-      candidates
-        .filter((c) => c.recurrence)
-        .map((c) => c.canonical ?? c.slug),
-    ),
-  ];
-}
-
-/**
- * Split the surviving candidates into the ones that still REFUSE the filing and
- * the ones a bulk `--not-duplicate-of-any` waiver clears.
- *
- * An EXACT slug match is never waivable. It is not a similarity judgement the
- * filer can overrule — it says the record already exists, and the correct
- * answer is `papercut_exists` (or the idempotent replay), not a second row.
- */
-export function partitionWaivedCandidates(
-  candidates: readonly DuplicateCandidate[],
-  waiveAll: boolean,
-): { duplicates: DuplicateCandidate[]; waived: string[] } {
-  if (!waiveAll) return { duplicates: [...candidates], waived: [] };
-  // A recurrence is not a similarity call about two live rows: it says a
-  // defect closed in the last RECURRENCE_WINDOW_DAYS came back. The bulk
-  // waiver would turn it straight back into a fresh row, which is the inflow
-  // this gate exists to stop. Only a per-slug --not-duplicate-of (a named
-  // judgement) or --reopen clears it.
-  return {
-    duplicates: candidates.filter((c) => c.exact || c.recurrence === true),
-    waived: candidates
-      .filter((c) => !c.exact && c.recurrence !== true)
-      .map((c) => c.slug),
-  };
-}
 
 export type PapercutFileOptions = {
   cfg: Config;
@@ -300,25 +81,6 @@ export type PapercutFileOptions = {
   kind: string;
   repo?: string;
   tags?: string[];
-  // Escape hatch for a real non-duplicate that trips the near gate. Records the
-  // slug it was compared against so the judgement is auditable rather than a
-  // silent `--force`.
-  notDuplicateOf?: string[];
-  // Bulk form of the escape hatch: clear EVERY candidate the gate raises, in
-  // one call. Still auditable — each cleared slug is written into the new
-  // record's body, and the note says the waiver was the bulk one, so a reader
-  // can tell "I read seven records and judged each distinct" apart from "I
-  // waived whatever came back".
-  //
-  // Exists because the per-slug form made the cost of filing unbounded: the
-  // standing rule is ALWAYS file papercuts, and a gate that charges five full
-  // --body re-sends per record is a standing incentive to skip filing — the
-  // exact failure the typed ledger was built to prevent.
-  notDuplicateOfAny?: boolean;
-  // Fold this filing into an existing row instead of writing a new one: the
-  // filing becomes a `reconfirmed` evidence block on <slug>, and a closed row
-  // is reopened. The answer to a recurrence refusal.
-  reopen?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
   printErr?: (line: string) => void;
@@ -326,135 +88,15 @@ export type PapercutFileOptions = {
 };
 
 export type PapercutFileResult = {
-  action: "filed" | "duplicate_blocked" | "reopened";
+  action: "filed" | "duplicate_blocked";
   slug: string;
   component: string;
   symptom_hash: string;
   duplicates: DuplicateCandidate[];
   idempotent?: boolean;
-  // Candidates cleared by --not-duplicate-of-any on THIS call, when it fired.
-  waived?: string[];
-  // On a refusal that followed `--not-duplicate-of`: the slugs the flag
-  // removed from the candidate set, and the ones it named that matched no
-  // candidate at all. See `clearedDiagnostics`.
-  cleared?: string[];
-  cleared_unmatched?: string[];
-  // On a recurrence refusal: the canonical row(s) to pass to --reopen.
-  reopen?: string[];
-  // On `reopened`: the row the filing was folded into, and its status move.
-  reopened?: { slug: string; from: string; to: string };
   /** What the node said about flushing this filing to disk. */
   durability?: WriteDurability;
 };
-
-/**
- * `papercut file ... --reopen <canonical>`: fold the filing into the canonical
- * row instead of writing a new one. One row carries the recurrence, its kind
- * becomes `reconfirmed`, and a closed row goes back to `open` (a live row
- * keeps its status, except `fixed`, which a recurrence disproves).
- */
-async function papercutReopenFromFiling(
-  opts: PapercutFileOptions & { component: string; hash: string },
-): Promise<PapercutFileResult> {
-  const print = resolvePrintSink(opts);
-  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  let target = normalizeSlug(opts.reopen ?? "");
-  let only = await resolveBySlug({
-    node,
-    cfg: opts.cfg,
-    slug: target,
-    type: PAPERCUT,
-    recoveryVerb: "papercut close",
-  });
-  // A `duplicate` row is not the canonical; follow it once to its target.
-  const dupOf = only.record.duplicate_of;
-  if (
-    only.record.status === "duplicate" &&
-    typeof dupOf === "string" &&
-    dupOf.trim() !== ""
-  ) {
-    target = normalizeSlug(dupOf);
-    only = await resolveBySlug({
-      node,
-      cfg: opts.cfg,
-      slug: target,
-      type: PAPERCUT,
-      recoveryVerb: "papercut close",
-    });
-  }
-  const from = only.record.status;
-  const to = from === "open" || from === "partial" ? from : "open";
-  const filedAs = opts.slug === target ? "" : ` (filed as \`${opts.slug}\`)`;
-  const evidence = [
-    `Reconfirmed ${nowIso()}${filedAs}: the defect recurred after this row read \`${from}\`. component=${opts.component} severity=${opts.severity} symptom_hash=${opts.hash}`,
-    "",
-    `Title: ${opts.title.trim()}`,
-    `Symptom: ${opts.symptom.trim()}`,
-    "",
-    opts.body.trim(),
-  ]
-    .join("\n")
-    .trimEnd();
-  const closeOpts: PapercutCloseOptions = {
-    cfg: opts.cfg,
-    slug: target,
-    status: to,
-    evidence,
-    kind: "reconfirmed",
-    print: () => {},
-  };
-  if (opts.verbose) closeOpts.verbose = opts.verbose;
-  await papercutCloseCmd(closeOpts);
-  const result: PapercutFileResult = {
-    action: "reopened",
-    slug: target,
-    component: opts.component,
-    symptom_hash: opts.hash,
-    duplicates: [],
-    reopened: { slug: target, from, to },
-  };
-  if (opts.json) print(JSON.stringify(result));
-  else
-    print(
-      `reopened papercut ${target}: ${from} → ${to} (kind reconfirmed); this filing is its newest evidence block, no new row written`,
-    );
-  return result;
-}
-
-export type ClearedDiagnostics = {
-  /** Given slugs that named a candidate and were removed. */
-  cleared: string[];
-  /** Given slugs that matched NO candidate — a typo, an elided slug, a stale copy. */
-  unmatched: string[];
-  /** One human line stating both, for the refusal text. */
-  line: string;
-};
-
-/**
- * What `--not-duplicate-of` actually did against THIS candidate set.
- *
- * Null when no slug was given, so a first refusal prints nothing extra. When
- * slugs were given, the line says how many named a candidate and lists every
- * one that did not — because a refusal that repeats the same wall after the
- * filer cleared it by name is indistinguishable from an ignored flag unless
- * the command says which slugs it recognised.
- */
-export function clearedDiagnostics(
-  candidates: readonly DuplicateCandidate[],
-  cleared: ReadonlySet<string>,
-): ClearedDiagnostics | null {
-  if (cleared.size === 0) return null;
-  const candidateSlugs = new Set(candidates.map((c) => c.slug));
-  const matched: string[] = [];
-  const unmatched: string[] = [];
-  for (const s of cleared) (candidateSlugs.has(s) ? matched : unmatched).push(s);
-  const head = `--not-duplicate-of: ${matched.length} of ${cleared.size} given slug(s) named a candidate and were cleared`;
-  const tail =
-    unmatched.length === 0
-      ? "; the rows above are the candidates that remain."
-      : `; ${unmatched.length} matched NO candidate (check the exact slug text, it must equal the slug column above): ${unmatched.join(", ")}`;
-  return { cleared: matched, unmatched, line: head + tail };
-}
 
 type PapercutFileMaterialized = Pick<
   FbrainRecord,
@@ -494,6 +136,142 @@ export function isIdempotentPapercutFile(
   );
 }
 
+async function readOtherSymptomSlug(
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  cfg: Config,
+  symptomHashValue: string,
+  slug: string,
+): Promise<string | null> {
+  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  if (schemaHash.length === 0) return null;
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["blp_page"],
+    filter: {
+      HashRangeKey: { hash: `symptom#${symptomHashValue}`, range: HEAD_RANGE },
+    },
+  });
+  const raw = res.results[0]?.fields?.blp_page;
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const cards = (parsed as { cards?: unknown }).cards;
+  if (!Array.isArray(cards)) return null;
+  for (const card of cards) {
+    if (!card || typeof card !== "object") continue;
+    const held = (card as { slug?: unknown }).slug;
+    if (typeof held !== "string" || held.length === 0 || held === slug) continue;
+    return held;
+  }
+  return null;
+}
+
+type PapercutPageCard = {
+  slug: string;
+  status: string;
+  title: string;
+  updated_at: string;
+};
+
+type PapercutPage = { cards: PapercutPageCard[]; older: string };
+
+function papercutPageHash(status?: string): string {
+  return status && status.length > 0 ? `papercut#${status}` : "papercut";
+}
+
+async function readPapercutPage(
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  cfg: Config,
+  hash: string,
+  verbose?: Verbose,
+): Promise<PapercutPage> {
+  const empty: PapercutPage = { cards: [], older: "" };
+  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  if (schemaHash.length === 0) return empty;
+  verbose?.(`query HashRangeKey hash=${hash} range=${HEAD_RANGE} field=blp_page`);
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["blp_page"],
+    filter: { HashRangeKey: { hash, range: HEAD_RANGE } },
+  });
+  const raw = res.results[0]?.fields?.blp_page;
+  if (typeof raw !== "string" || raw.length === 0) return empty;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return empty;
+  }
+  if (!parsed || typeof parsed !== "object") return empty;
+  const body = parsed as { cards?: unknown; older?: unknown };
+  const cards: PapercutPageCard[] = [];
+  if (Array.isArray(body.cards)) {
+    for (const item of body.cards) {
+      if (!item || typeof item !== "object") continue;
+      const card = item as {
+        slug?: unknown;
+        status?: unknown;
+        title?: unknown;
+        updated_at?: unknown;
+      };
+      if (typeof card.slug !== "string" || card.slug.length === 0) continue;
+      cards.push({
+        slug: card.slug,
+        status: typeof card.status === "string" ? card.status : "",
+        title: typeof card.title === "string" ? card.title : "",
+        updated_at: typeof card.updated_at === "string" ? card.updated_at : "",
+      });
+    }
+  }
+  return {
+    cards,
+    older: typeof body.older === "string" ? body.older : "",
+  };
+}
+
+function pageSummaries(cards: readonly PapercutPageCard[]): SnapshotSummary[] {
+  return cards.map((card) => ({
+    slug: card.slug,
+    title: card.title,
+    status: card.status,
+    tags: [],
+    created_at: "",
+    updated_at: card.updated_at,
+  }));
+}
+
+async function productRecordsOnPage(
+  node: ReturnType<typeof newWriteClientFromCfg>["node"],
+  cfg: Config,
+  slugs: readonly string[],
+  hydrate: boolean,
+): Promise<FbrainRecord[]> {
+  if (slugs.length === 0) return [];
+  const schemaHash = schemaHashFor(PAPERCUT, cfg);
+  const found = await findBySlugs(node, PAPERCUT, schemaHash, slugs);
+  const out: FbrainRecord[] = [];
+  for (const slug of slugs) {
+    const row = found.get(slug) ?? null;
+    if (row === null) continue;
+    if (hydrate && parseSpillMarker(row.body)) {
+      out.push(await hydrateRecord(node, cfg, PAPERCUT, row));
+      continue;
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+function pageMethod(base: string, hash: string, older: string): string {
+  const sample = older.length > 0 ? ` sample ${older}` : "";
+  return `${base}; hash ${hash}; range ${HEAD_RANGE}${sample}`;
+}
+
 export async function papercutFileCmd(
   opts: PapercutFileOptions,
 ): Promise<PapercutFileResult> {
@@ -513,22 +291,10 @@ export async function papercutFileCmd(
     });
   }
   const hash = symptomHash(component, opts.symptom);
-
-  if (opts.reopen !== undefined && opts.reopen.trim() !== "") {
-    return papercutReopenFromFiling({ ...opts, slug, component, hash });
-  }
-
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
   const schemaHash = schemaHashFor(PAPERCUT, opts.cfg);
-  const cleared = new Set((opts.notDuplicateOf ?? []).map(normalizeSlug));
   const now = nowIso();
-  const clearedNote =
-    cleared.size > 0
-      ? `\n\nCompared against and judged distinct from: ${[...cleared]
-          .map((s) => `[[${s}]]`)
-          .join(", ")}.`
-      : "";
-  const body = `Symptom: ${opts.symptom.trim()}\n\n${opts.body.trim()}${clearedNote}\n`;
+  const body = `Symptom: ${opts.symptom.trim()}\n\n${opts.body.trim()}\n`;
   const materialized: PapercutFileMaterialized = {
     slug,
     title: opts.title,
@@ -547,9 +313,7 @@ export async function papercutFileCmd(
     updated_at: now,
   };
 
-  // Preserve the cheap exact-restatement pre-filter as one point read. The
-  // fuzzy tail is semantic `find`, never a papercut partition enumeration.
-  const prior = await findBySlug(node, PAPERCUT, schemaHash, slug);
+  const prior = await findBySlug(node, PAPERCUT, schemaHash, slug, opts.cfg);
   if (prior && isIdempotentPapercutFile(prior, materialized)) {
     const primaryFields = updateFieldsFrom(prior, PAPERCUT, {});
     const plan = await buildResidentWritePlan({
@@ -561,7 +325,14 @@ export async function papercutFileCmd(
       next: prior,
       primaryFields,
     });
-    const receipt = await commitResidentWritePlan({ node, plan, type: PAPERCUT, slug });
+    const receipt = await commitResidentWritePlan({
+      node,
+      plan,
+      type: PAPERCUT,
+      slug,
+      durable: true,
+      failOnIndexPartial: true,
+    });
     const result: PapercutFileResult = {
       action: "filed",
       slug,
@@ -579,159 +350,34 @@ export async function papercutFileCmd(
       );
     return result;
   }
-  let semanticHits: FindHit[];
-  if (prior) {
-    // An exact slug settles the pre-filter without paying for vector search.
-    semanticHits = [
-      {
-        type: PAPERCUT,
-        slug: prior.slug,
-        fusedScore: 0,
-        maxSimilarity: 1,
-        matchHits: [],
-        record: prior,
-      },
-    ];
-  } else {
-    const probes = papercutDedupeProbes({
-      title: opts.title,
-      symptom: opts.symptom,
-      body: opts.body,
-    });
-    try {
-      semanticHits = (
-        await findCmd({
-          cfg: opts.cfg,
-          matches: probes,
-          types: [PAPERCUT],
-          // Retrieve wide, filter after — see SEMANTIC_DUPLICATE_FETCH_LIMIT.
-          // Every already-cleared slug is additional headroom, so disclaiming
-          // one candidate cannot push an unseen one out of the result set.
-          limit: SEMANTIC_DUPLICATE_FETCH_LIMIT + cleared.size,
-          verbose: opts.verbose,
-          print: () => {},
-          printErr: () => {},
-        })
-      ).hits;
-    } catch (error) {
-      semanticHits = [];
-      opts.verbose?.(
-        `papercut dedupe: semantic probe unavailable; exact-slug pre-filter only (${error instanceof Error ? error.message : String(error)})`,
-      );
-    }
-  }
-  // Every in-component live candidate over the floor, not a top-k page of them.
-  // The refusal used to report a slice while reading as a complete count
-  // ("Possible duplicate: 2 live papercut(s) ..."), so clearing the named two
-  // surfaced two more and the filer had no way to learn the whole set in one
-  // call.
-  const allCandidates = semanticDuplicateCandidates(semanticHits, {
-    component,
-    exactSlug: slug,
-    title: opts.title,
-  });
-  // A recurrence is also cleared by naming its canonical row.
-  const remaining = allCandidates.filter(
-    (c) =>
-      !cleared.has(c.slug) &&
-      !(c.canonical !== undefined && cleared.has(c.canonical)),
-  );
-  const clearing = clearedDiagnostics(allCandidates, cleared);
-
-  const { duplicates, waived } = partitionWaivedCandidates(
-    remaining,
-    opts.notDuplicateOfAny === true,
-  );
-
-  if (duplicates.length > 0) {
-    const canonicals = recurrenceCanonicals(duplicates);
-    const liveCount = duplicates.filter((d) => d.recurrence !== true).length;
-    const lines = [
-      liveCount > 0
-        ? `Possible duplicate: ${liveCount} live papercut(s) may already describe this (component \`${component}\`, plus near-identical rows in other components).`
-        : `Possible recurrence: ${duplicates.length} papercut(s) CLOSED in the last ${RECURRENCE_WINDOW_DAYS} days may already describe this.`,
-      "",
-      ...duplicates.map(
-        (d) =>
-          `  ${d.exact ? "EXACT" : `${Math.round(d.score * 100)}%  `}  ${d.slug}  [${d.status}${d.component ? ` · ${d.component}` : ""}]` +
-          (d.recurrence && d.canonical && d.canonical !== d.slug
-            ? `  → canonical ${d.canonical}`
-            : "") +
-          `\n         ${d.title}`,
-      ),
-      "",
-      "This is the complete SIMILARITY-ranked set for this filing, not a first page",
-      "(it does not follow citations, so a record that owns the class may be one hop",
-      "away): clearing these cannot reveal a second page. Read them. Then either:",
-      "  * add your evidence to the existing record:  brain append <slug> --type papercut",
-      "  * or, if yours is genuinely different:        --not-duplicate-of <slug> (repeatable)",
-      "  * or, having read all of the above:           --not-duplicate-of-any",
-    ];
-    if (canonicals.length > 0) {
-      lines.push(
-        "",
-        "A CLOSED row above MAY mean the defect came back (its fix did not stick, or is not",
-        "installed yet). It may instead be a SIBLING defect that shares the words and the",
-        "component: similarity cannot tell the two apart. Read each CLOSED row's claim first.",
-        "  * Same defect, so do not file a fresh row. Re-run this same command with the",
-        "    row whose claim matches:",
-        ...canonicals.map((c) => `      --reopen ${c}`),
-        "    to add this filing to that row as a `reconfirmed` evidence block and reopen it.",
-        "  * Sibling defect: re-run with --not-duplicate-of <slug> for that CLOSED row.",
-        "--not-duplicate-of-any does NOT clear a recurrence; only --not-duplicate-of <slug> does.",
-      );
-    }
-    // A refusal that follows a `--not-duplicate-of` must say what the flags
-    // DID. On 2026-09-06 a filer cleared all 10 named candidates and was
-    // refused with the same 10, and the refusal text gave no way to tell "the
-    // flag was ignored" from "the slugs did not match": both read as the
-    // identical wall. Naming the cleared count and the unmatched slugs makes
-    // the next occurrence self-diagnosing.
-    if (clearing) lines.push("", clearing.line);
-    if (opts.json) {
-      print(
-        JSON.stringify({
-          action: "duplicate_blocked",
-          slug,
-          component,
-          symptom_hash: hash,
-          duplicates,
-          ...(canonicals.length > 0 ? { reopen: canonicals } : {}),
-          ...(clearing ? { cleared: clearing.cleared, cleared_unmatched: clearing.unmatched } : {}),
-        }),
-      );
-    } else {
-      print(lines.join("\n"));
-    }
-    return {
-      action: "duplicate_blocked",
-      slug,
-      component,
-      symptom_hash: hash,
-      duplicates,
-      ...(canonicals.length > 0 ? { reopen: canonicals } : {}),
-      ...(clearing ? { cleared: clearing.cleared, cleared_unmatched: clearing.unmatched } : {}),
-    };
-  }
-
   if (prior) {
     throw new FbrainError({
       code: "papercut_exists",
       message: `papercut ${slug} already exists (status: ${prior.status}).`,
       hint: isLivePapercutStatus(prior.status)
-        ? "Use `brain append <slug> --type papercut` to add evidence, or pick a new slug."
-        : `The row is closed. If the defect came back, re-run with \`--reopen ${slug}\` to add this filing as evidence and reopen it.`,
+        ? "Use `brain append <slug> --type papercut` to add evidence, or `brain papercut set` to change a header."
+        : "The row is closed. Add evidence with `brain append <slug> --type papercut`.",
     });
   }
 
-  // Write the bulk waiver into the record itself. `--force` would leave no
-  // trace; this leaves the exact slugs, and wording a reader can distinguish
-  // from the per-slug form above, so a later reconcile can re-judge the call.
-  if (waived.length > 0) {
-    materialized.body =
-      `${materialized.body.trimEnd()}\n\nFiled with --not-duplicate-of-any after the gate raised ` +
-      `${waived.length} candidate(s) in \`${component}\`, cleared as a set rather than ` +
-      `individually: ${waived.map((s) => `[[${s}]]`).join(", ")}.\n`;
+  const held = await readOtherSymptomSlug(node, opts.cfg, hash, slug);
+  if (held) {
+    const duplicates: DuplicateCandidate[] = [
+      { slug: held, title: "", status: "", score: 0, exact: false },
+    ];
+    const result: PapercutFileResult = {
+      action: "duplicate_blocked",
+      slug,
+      component,
+      symptom_hash: hash,
+      duplicates,
+    };
+    if (opts.json) print(JSON.stringify(result));
+    else {
+      print(`duplicate: ${held}`);
+      print("The symptom head already names that slug. This filing was not written.");
+    }
+    return result;
   }
 
   const record = materialized as FbrainRecord;
@@ -750,16 +396,10 @@ export async function papercutFileCmd(
     plan,
     type: PAPERCUT,
     slug,
+    durable: true,
+    failOnIndexPartial: true,
   });
 
-  // Same best-effort cross-type collision NOTE that `fbrain new` and
-  // `fbrain put` emit on a create. `papercut file` did not, and that silence
-  // is how the fleet accumulated 55 slugs holding BOTH a `reference` (the
-  // pre-2026-08-04 prose ledger record, closed and archived) and a `papercut`
-  // (the typed row, `open`) — measured on the primary 2026-09-01, 55 of 58 in
-  // component `lastgit`. Every one of those was filed through this verb, over
-  // an ancestor it never mentioned. STDERR only, swallowed on error, so it can
-  // neither fail the file nor perturb stdout/`--json`.
   const collisions = await findCrossTypeSlugCollisions(
     node,
     opts.cfg,
@@ -769,10 +409,6 @@ export async function papercutFileCmd(
   const collisionNote = crossTypeSlugNote(PAPERCUT, slug, collisions);
   if (collisionNote) console.error(collisionNote);
 
-  // The resident batch writes the primary row, the list row, and the status
-  // row together. A missing list schema is the only case where this version
-  // cannot include the list projection.
-  const listIndexFailed = recordListEntryHash(opts.cfg) === null;
   if (opts.json) {
     print(
       JSON.stringify({
@@ -781,8 +417,6 @@ export async function papercutFileCmd(
         component,
         symptom_hash: hash,
         duplicates: [],
-        waived,
-        list_index_failed: listIndexFailed,
         durability: writeDurabilityOf(fileReceipt),
       }),
     );
@@ -791,17 +425,6 @@ export async function papercutFileCmd(
       `filed papercut ${slug}  [${component}/${severity}/${kind}]  symptom:${hash} ` +
         writeDurabilityTokens(fileReceipt).join(" "),
     );
-    if (waived.length > 0) {
-      print(
-        `  --not-duplicate-of-any cleared ${waived.length} candidate(s), recorded in the body: ${waived.join(", ")}`,
-      );
-    }
-    if (listIndexFailed) {
-      print(
-        "warning: the record persisted but the type-list index patch failed — it will not " +
-          "appear in `papercut census` / `brain list` until `brain reindex --list-index` runs.",
-      );
-    }
   }
   return {
     action: "filed",
@@ -809,10 +432,10 @@ export async function papercutFileCmd(
     component,
     symptom_hash: hash,
     duplicates: [],
-    waived,
     durability: writeDurabilityOf(fileReceipt),
   };
 }
+
 
 export type PapercutCloseOptions = {
   cfg: Config;
@@ -822,16 +445,8 @@ export type PapercutCloseOptions = {
   fixedBy?: string;
   verifiedBy?: string;
   duplicateOf?: string;
-  /** Internal: also set the row's kind (used by `file --reopen`). */
+  /** Also set the row's kind in the same write. */
   kind?: string;
-  /**
-   * Ask the node for an exact durable disk receipt for this one resident
-   * batch, and fail loudly when it does not confirm one. A status transition is
-   * four small fields and a stamp, so paying for durability on it is cheap —
-   * unlike on a large body append. Opt-in rather than default: the default path
-   * must keep working against a node that does not accept the durability field.
-   */
-  durable?: boolean;
   verbose?: Verbose;
   print?: (line: string) => void;
   json?: boolean;
@@ -891,7 +506,7 @@ export function referenceTwinStatusFor(typedStatus: string): string | null {
     : REFERENCE_TWIN_CLOSED;
 }
 
-async function closeReferenceTwin(opts: {
+async function planReferenceTwin(opts: {
   node: ReturnType<typeof newWriteClientFromCfg>["node"];
   cfg: Config;
   slug: string;
@@ -899,30 +514,50 @@ async function closeReferenceTwin(opts: {
   stamp: string;
   now: string;
   verbose?: Verbose;
-}): Promise<PapercutTwinResult | null> {
+}): Promise<{
+  prior: PapercutTwinResult | null;
+  op: PlannedMutation | null;
+  from: string | null;
+  to: string | null;
+}> {
   const target = referenceTwinStatusFor(opts.status);
-  if (target === null) return null;
-  if (opts.cfg.schemaHashes.reference === undefined) return null;
+  if (target === null) return { prior: null, op: null, from: null, to: null };
+  if (opts.cfg.schemaHashes.reference === undefined) {
+    return { prior: null, op: null, from: null, to: null };
+  }
   const refHash = schemaHashFor("reference", opts.cfg);
   let twin: FbrainRecord | null;
   try {
-    twin = await findBySlug(opts.node, "reference", refHash, opts.slug);
+    twin = await findBySlug(opts.node, "reference", refHash, opts.slug, opts.cfg);
   } catch (error) {
-    // The typed close is already committed. A twin read that fails must not
-    // turn a successful close into an error, but it must not be silent either:
-    // silence is how the two copies drifted for a month.
     return {
-      type: "reference",
-      from: "?",
-      to: target,
-      changed: false,
-      persisted: false,
-      error: error instanceof Error ? error.message : String(error),
+      prior: {
+        type: "reference",
+        from: "?",
+        to: target,
+        changed: false,
+        persisted: false,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      op: null,
+      from: null,
+      to: null,
     };
   }
-  if (twin === null) return null;
+  if (twin === null) return { prior: null, op: null, from: null, to: null };
   if (twin.status === target) {
-    return { type: "reference", from: twin.status, to: target, changed: false, persisted: true };
+    return {
+      prior: {
+        type: "reference",
+        from: twin.status,
+        to: target,
+        changed: false,
+        persisted: true,
+      },
+      op: null,
+      from: null,
+      to: null,
+    };
   }
   const patch = {
     status: target,
@@ -930,48 +565,30 @@ async function closeReferenceTwin(opts: {
     updated_at: opts.now,
   };
   const primaryFields = updateFieldsFrom(twin, "reference", patch);
-  const next = { ...twin, ...patch } as FbrainRecord;
-  const plan = await buildResidentWritePlan({
+  const sealed = await sealRecordFields({
     node: opts.node,
     cfg: opts.cfg,
     type: "reference",
-    schemaHash: refHash,
-    previous: twin,
-    next,
-    primaryFields,
-    now: opts.now,
-  });
-  const twinReceipt = await commitResidentWritePlan({
-    node: opts.node,
-    plan,
-    type: "reference",
     slug: opts.slug,
+    fields: primaryFields,
+    ...(opts.verbose !== undefined ? { verbose: opts.verbose } : {}),
   });
-  // Verify-after-write with the full point-read retry budget. The defect on
-  // record (papercut-brain-status-write-reports-a-transition-it-did-not-
-  // persist-after-a-typed-close) is precisely a reference status write that
-  // printed its transition and re-read as `active`, so this verb does not
-  // print one it has not re-read.
-  const seen = await withReadRetry(
-    () => findBySlug(opts.node, "reference", refHash, opts.slug),
-    (r) => r !== null && r.status === target,
-  );
-  const reread = seen?.status ?? "(missing)";
   return {
-    type: "reference",
+    prior: null,
+    op: {
+      mutationType: "update",
+      schemaHash: refHash,
+      keyHash: opts.slug,
+      fields: sealed.fields,
+      projection: "primary",
+    },
     from: twin.status,
     to: target,
-    changed: true,
-    persisted: reread === target,
-    reread,
-    durability: writeDurabilityOf(twinReceipt),
   };
 }
 
-// The whole point of this command: ONE call performs both writes. The prose
-// ledger required two (`brain append` for the evidence, `brain status` for the
-// field) and runs routinely did the first and forgot the second — 40 of 107
-// records on 2026-08-04. A closure that cannot be half-applied cannot drift.
+// One call writes the status field and the evidence block. The reference twin,
+// when it changes, is one mutation in that same batch.
 export async function papercutCloseCmd(
   opts: PapercutCloseOptions,
 ): Promise<PapercutCloseResult> {
@@ -1038,29 +655,17 @@ export async function papercutCloseCmd(
     primaryFields,
     now,
   });
-  // Read the receipt. The six non-`put` call sites of this helper all used a
-  // bare `await` and threw the node's durability claim away; this is the one
-  // whose loss was measured. See the block at the bottom of
-  // src/write-confirmation.ts.
-  const receipt = await commitResidentWritePlan({
-    node,
-    plan,
-    type: PAPERCUT,
-    slug,
-    ...(opts.durable ? { durable: true } : {}),
-  });
-  const durability = writeDurabilityOf(receipt);
-  const revision = receipt.mutationIds[0];
-
-  // The reference twin, in the SAME verb. Measured 2026-08-18 on the
-  // `papercut-lastdb-*` family: 3 of 84 dual-typed slugs read typed-CLOSED x
-  // reference-ACTIVE, every one of them closed through this verb and then
-  // hand-written on the reference side as a separate `brain status`, which is
-  // the step a run can forget and the write that was observed not to persist
-  // when it followed this one. The `papercut-lastgit-*` family drifted 92 of
-  // 121 the OTHER way for the mirror-image reason. Writing the twin here
-  // removes both the step and the ordering.
-  const twin = await closeReferenceTwin({
+  if (plan.indexNotes.includes(INDEX_PARTIAL)) {
+    const why = plan.indexNotes.filter((line) => line !== INDEX_PARTIAL && line.length > 0);
+    throw new FbrainError({
+      code: "index_partial",
+      message:
+        `index partial for papercut ${slug}` +
+        (why.length > 0 ? ` (${why.join(", ")})` : ""),
+      hint: "The command does not report success. Read the record before a manual retry.",
+    });
+  }
+  const twinPlan = await planReferenceTwin({
     node,
     cfg: opts.cfg,
     slug,
@@ -1069,12 +674,37 @@ export async function papercutCloseCmd(
     now,
     verbose: opts.verbose,
   });
-
-  const durabilityWarning = writeDurabilityWarning(durability, {
-    verb: "papercut close",
-    retryHint:
-      "Re-run with --durable to demand a disk receipt (it fails loudly if the node will not give one).",
+  if (twinPlan.op) plan.ops.push(twinPlan.op);
+  const receipt = await commitResidentWritePlan({
+    node,
+    plan,
+    type: PAPERCUT,
+    slug,
+    durable: true,
+    failOnIndexPartial: true,
   });
+  const durability = writeDurabilityOf(receipt);
+  const revision = receipt.mutationIds[0];
+
+  let twin = twinPlan.prior;
+  if (twinPlan.op && twinPlan.from && twinPlan.to) {
+    const refHash = schemaHashFor("reference", opts.cfg);
+    const target = twinPlan.to;
+    const seen = await withReadRetry(
+      () => findBySlug(node, "reference", refHash, slug, opts.cfg, { hydrate: false }),
+      (row) => row !== null && row.status === target,
+    );
+    const reread = seen?.status ?? "(missing)";
+    twin = {
+      type: "reference",
+      from: twinPlan.from,
+      to: target,
+      changed: true,
+      persisted: reread === target,
+      reread,
+      durability,
+    };
+  }
 
   if (opts.json) {
     print(
@@ -1092,7 +722,6 @@ export async function papercutCloseCmd(
     print(
       `papercut ${slug}: ${from} → ${status} ${writeDurabilityTokens(receipt).join(" ")}`,
     );
-    if (durabilityWarning) print(durabilityWarning);
     if (twin && twin.changed) print(`reference ${slug}: ${twin.from} → ${twin.to}`);
     else if (twin) print(`reference ${slug}: already ${twin.to}, left as is`);
     if (twin && twin.changed && !twin.persisted) {
@@ -1118,6 +747,7 @@ export async function papercutCloseCmd(
     ...(revision ? { revision } : {}),
   };
 }
+
 
 export type PapercutCensusOptions = {
   cfg: Config;
@@ -1192,41 +822,17 @@ export function buildCensus(
   );
 }
 
-// Every count prints its method. This is a rule the corpus paid for: an
-// instrument that reports a number without saying how it got it is how a
-// 44.5% win got reported as a 2.2% regression, and how a truncated
-// enumeration got copied into durable memory as a fact.
-//
-// `buildCensus` reads exactly two fields off each record: `component` and
-// `status`. Both are written only by verbs that go through the resident write
-// plan (`papercut file`, `papercut close`, `put`, `status`), and that plan
-// patches this index in the same write. So the snapshot cannot lag on either
-// one, and the census does not need a point read to be correct. Measured on
-// the primary over all 2230 common open rows on 2026-09-04, snapshot against
-// point read: `component` and `status` disagreed on ZERO rows, while
-// `updated_at` disagreed on 1044 (46.8%) and `tags` on 5 — the two fields
-// `brain append` and `brain tag` used to write without patching the index, and
-// the two fields the census never reads.
-//
-// The point read remains available as `--point-read`, because it is the only
-// reading that can catch a record whose status moved WITHOUT this index
-// following. That is a repair-detection check, not a counting method, and it
-// costs one node request per row: 2977 requests and 141.8s against 3.3s for
-// the same ledger on the same primary. Charging every caller of `census` that
-// price to run an index audit made the ledger's own sizing instrument more
-// expensive than the thing it sizes — `Papercut` is a top-five lifetime
-// consumer on the node — so the audit is opt-in and the count is not.
+// The count names its read. The page carries slug, status, title, and updated_at.
 export const CENSUS_METHOD =
-  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
-  "component and status read from the index payload snapshot, which the resident write plan " +
-  "patches on every write of either field (no point reads); " +
-  "run --point-read to re-read every record and catch a status the index did not follow; " +
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "counts from the cards on that page, the page does not carry component, " +
+  "run --point-read to read those slugs from the product records; " +
   "live = open+partial+fixed";
 
-/** The audit reading: every record point-read and re-checked against its partition. */
+/** The same page, then the product records for the slugs on it. */
 export const CENSUS_METHOD_POINT_READ =
-  "method: status-keyed papercut index (one keyed partition per status, no papercut enumeration), " +
-  "every record point-read and re-checked against its partition (--point-read); " +
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "then the product records for the slugs on that page (--point-read); " +
   "live = open+partial+fixed";
 
 /**
@@ -1240,18 +846,26 @@ export async function papercutCensusCmd(
   opts: PapercutCensusOptions,
 ): Promise<void> {
   const print = resolvePrintSink(opts);
-  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  // The count is served from the index snapshot unless the caller asks for the
-  // audit reading. `opts.fast` stays accepted so existing callers that opted
-  // in to the snapshot keep working; it now names the default.
   const pointRead = opts.pointRead === true;
-  const method = censusMethod(pointRead);
-  const records = await readPapercutsByStatus(node, opts.cfg, undefined, {
-    fast: !pointRead,
-    // The census prints two fields. A snapshot that carries only a head of
-    // some other field (the body) still answers it.
-    needFields: ["component", "status"],
-  });
+  if (opts.component && !pointRead) {
+    throw new FbrainError({
+      code: "papercut_census_page_field",
+      message: "The list page does not carry component.",
+      hint: "Pass --point-read to read component from the product records on the page.",
+    });
+  }
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const hash = papercutPageHash();
+  const page = await readPapercutPage(node, opts.cfg, hash, opts.verbose);
+  const records = pointRead
+    ? await productRecordsOnPage(
+        node,
+        opts.cfg,
+        page.cards.map((card) => card.slug),
+        false,
+      )
+    : pageSummaries(page.cards);
+  const method = pageMethod(censusMethod(pointRead), hash, page.older);
   const rows = buildCensus(records, opts.component);
 
   if (opts.json) {
@@ -1380,24 +994,6 @@ export type PapercutListRow = {
    */
   closes_when?: ClosesWhenClaim;
 };
-
-/** The record fields one `papercut list` row prints. The body is not one of them. */
-const PAPERCUT_LIST_ROW_FIELDS: readonly string[] = [
-  "slug",
-  "title",
-  "status",
-  "component",
-  "severity",
-  "kind",
-  "repo",
-  "fixed_by",
-  "verified_by",
-  "duplicate_of",
-  "symptom_hash",
-  "tags",
-  "created_at",
-  "updated_at",
-];
 
 function str(record: { [field: string]: unknown }, field: string): string {
   const v = record[field];
@@ -1719,51 +1315,15 @@ export function buildPapercutList(
 // dropped its `<component>` positional, so the promise that the filter was
 // actually applied is the load-bearing half of the line.
 export const LIST_METHOD =
-  "method: status-keyed papercut index (same read as `papercut census`), " +
-  "every record point-read and re-checked against its partition (--point-read), " +
-  "FILTERS, every matching row returned, oldest-updated first";
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "then the product records for the slugs on that page (--point-read), " +
+  "FILTERS, oldest updated_at first";
 
-/**
- * The default listing, served from the snapshot the index already carries.
- *
- * `census` flipped to this reading on 2026-09-04 and `list` deliberately did
- * not, on one measured objection: `list` is ordered oldest-updated-first
- * because the reconcile loop consumes it in that order, and `updated_at` was
- * stale on 1044 of 2230 rows (46.8%) — it was the one field `brain append` and
- * `brain tag` wrote without patching this index.
- *
- * Those two verbs patch the index now, and the objection was re-measured on
- * the primary 2026-09-06 rather than assumed to still hold. Two readings, one
- * unfiltered pair and one controlled sandwich (fast, point-read, fast, so a
- * row written mid-window is excluded rather than counted as lag):
- *
- * | reading | rows | node requests | node service time |
- * |---|---|---|---|
- * | point-read, unfiltered | 3388 | 3404 | 2743.3s (199.4s wall) |
- * | snapshot, unfiltered   | 3389 |   10 |   21.7s (21.9s wall)  |
- * | point-read, --severity p0 | 274 | 290 | 369.8s |
- * | snapshot,   --severity p0 | 274 |  10 |  32.1s |
- *
- * Agreement, snapshot against point read, on the 273 of 274 sandwich rows that
- * did not change during the window: every stored field agreed — status,
- * severity, kind, component, repo, fixed_by, verified_by, duplicate_of, title,
- * tags, created_at, symptom_hash — and `updated_at` disagreed on ONE row
- * (0.37%, against 46.8% two days earlier). On the unfiltered pair, 2 of 3388
- * rows carried a snapshot `updated_at` older than the point read, both last
- * written 2026-09-04, i.e. residue from before the patch rather than new drift.
- *
- * So the ordering objection now costs the reconcile loop at most a couple of
- * positions, and the reading it was protecting cost 340x the node requests of
- * the one it rejected. `--point-read` keeps the audit reading, which is still
- * the only one that catches a header the index did not follow.
- */
 export const LIST_METHOD_FAST =
-  "method: status-keyed papercut index (same read as `papercut census`), " +
-  "records read from the index payload snapshot, NOT point-read, " +
-  "FILTERS, every matching row returned, " +
-  "ordered by a possibly-stale updated_at — the header fields are current, " +
-  "updated_at and tags can lag a write made before this index was last rebuilt; " +
-  "run --point-read to re-read every record and catch a header the index did not follow";
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "same page as papercut census, cards on that page, " +
+  "the page carries slug, status, title, and updated_at, " +
+  "FILTERS, oldest updated_at on the card first";
 
 // The old line said "component/status filters applied" as a fixed string, and
 // that was accurate only for as long as those were the only two filters the
@@ -1833,9 +1393,8 @@ export function listMethod(
 // consumer that reads this as the hydrated ledger would treat a missing field
 // as an empty one — the exact defect the hydrated row type exists to prevent.
 export const LIST_INDEX_ONLY_METHOD =
-  "method: status-keyed papercut index, index-only projection (slug + status partition; " +
-  "records not hydrated, status not re-verified per record, no component filter), " +
-  "status filter applied, every matching row returned, slug order";
+  "method: one HashRangeKey on the papercut list page, field blp_page, " +
+  "slug and status from the card, product records not read, slug order";
 
 /**
  * What `--body-resolved` did, appended to whichever method line applies.
@@ -1924,109 +1483,75 @@ export async function papercutListCmd(
   // this reader cannot serve is a usage error, and it should not need a
   // reachable node to say so.
   const bodyResolved = opts.bodyResolved === true;
-  // Refuse rather than silently degrade, the same way `--index-only` refuses a
-  // filter it cannot serve. `--fast` CAN reach a body — `psi_payload` is a
-  // snapshot of the whole record — which is exactly why this has to be an
-  // explicit refusal instead of an absence: the snapshot lags `brain append`
-  // for any row written before appends began patching this index, and an
-  // append is precisely the write that puts a closing block into a body. The
-  // rows a stale snapshot would drop are the newest and most interesting ones,
-  // and dropping them is silent.
   if (bodyResolved && opts.fast === true) {
     throw new FbrainError({
       code: "papercut_list_body_resolved_needs_point_read",
-      message:
-        "`--body-resolved` matches the record body, and `--fast` serves bodies from the index payload snapshot, which lags exactly the appends this filter looks for.",
-      hint: "Drop --fast. A row whose closing block was appended after the last index rebuild would be missed, and missing it is silent.",
+      message: "`--body-resolved` reads the product body. `--fast` reads the page only.",
+      hint: "Drop --fast.",
     });
   }
   if (bodyResolved && opts.indexOnly === true) {
     throw new FbrainError({
       code: "papercut_list_index_only_no_body",
-      message:
-        "`--index-only` reads the status-keyed index without hydrating records, and `body` is a record field that projection does not carry.",
-      hint: "Drop --index-only to get the hydrated ledger that --body-resolved can filter.",
+      message: "`--index-only` reads the card. The card does not carry body.",
+      hint: "Drop --index-only.",
     });
   }
   const print = resolvePrintSink(opts);
-  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const status = opts.status ? ensurePapercutStatus(opts.status) : undefined;
+  const hash = papercutPageHash(status);
   if (opts.indexOnly) {
-    // One keyed partition read, and not even a payload parse: this projection
-    // is the slug/status pair a queue consumer re-verifies on its own point
-    // get.
-    // `--index-only` reads slug + status partition and nothing else, so every
-    // other filter names a record field that is not present to filter on.
-    // Refusing is the point: the previous release refused `component` here and
-    // silently ignored the rest, which is the same accepted-and-dropped shape
-    // this change exists to remove.
     const unservable = PAPERCUT_LIST_FILTERS.filter(
       (f) => f !== "status" && opts[f] !== undefined,
     );
     if (unservable.length > 0) {
       throw new FbrainError({
         code: "papercut_list_index_only_no_component",
-        message: `\`--index-only\` reads the status-keyed index without hydrating records, and ${unservable.join(", ")} ${unservable.length === 1 ? "is a record field" : "are record fields"} the index does not carry.`,
-        hint: "Drop --index-only to get the hydrated, filtered ledger, or drop the filter it cannot serve.",
+        message: `\`--index-only\` reads the card, and ${unservable.join(", ")} ${unservable.length === 1 ? "is" : "are"} not on that card.`,
+        hint: "Drop --index-only, or drop the filter.",
       });
     }
-    const rows = (
-      await readPapercutSlugsByStatus(node, opts.cfg, opts.status)
-    ).sort((a, b) => a.slug.localeCompare(b.slug));
-    if (opts.json) {
-      print(
-        JSON.stringify({
-          rows,
-          total: rows.length,
-          method: LIST_INDEX_ONLY_METHOD,
-        }),
-      );
-      return;
-    }
-    for (const r of rows) print(`${r.status.padEnd(9)} ${r.slug}`);
-    print(`${rows.length} row(s)`);
-    print(LIST_INDEX_ONLY_METHOD);
-    return;
   }
-  // Read one status partition when the caller named one; the whole ledger
-  // otherwise. `readPapercutsByStatus` is the same complete reader `census`
-  // uses, so list and census are two views of ONE read and cannot disagree.
-  // See LIST_METHOD_FAST for why the snapshot is the default reading.
   const fast = listReadsSnapshot({ pointRead: opts.pointRead, bodyResolved });
   const filters: PapercutListFilters = {};
   for (const f of PAPERCUT_LIST_FILTERS) {
     const v = opts[f];
     if (v !== undefined) Object.assign(filters, { [f]: v });
   }
-  // Narrow on the record-field filters, then filter AGAIN on what came back.
-  // The second pass is what makes a wrongly-including snapshot harmless: it
-  // costs one point read, not a wrong row.
+  if (status) filters.status = status;
   const narrowBy = narrowingFilters(filters);
-  const stats = newPapercutReadStats();
-  const records = await readPapercutsByStatus(node, opts.cfg, opts.status, {
-    fast,
-    // `list` prints the header fields of each row. The index snapshot carries
-    // every one of them whole and cuts only the body, which `list` does not
-    // print. If a snapshot ever lacked one of these fields it would be
-    // point-read, never printed as a head.
-    needFields: PAPERCUT_LIST_ROW_FIELDS,
-    narrow: narrowBy
-      ? (record) => matchesPapercutFilters(record, narrowBy)
-      : undefined,
-    stats,
-  });
-  const baseMethod = listMethod(
-    fast,
-    filters,
-    narrowBy
-      ? {
-          fields: Object.keys(narrowBy),
-          rows: stats.rows,
-          pointReads: stats.pointReads,
-        }
-      : undefined,
-  );
-  // `Closes-when:` children are point-read, in either ledger, only under
-  // --body-resolved: that is the reading that already paid for every body.
+  if (!opts.indexOnly && fast && narrowBy) {
+    throw new FbrainError({
+      code: "papercut_list_page_field",
+      message: "The list page does not carry component, severity, kind, repo, or tags.",
+      hint: "Pass --point-read to read those fields from the product records on the page.",
+    });
+  }
+  const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
+  const page = await readPapercutPage(node, opts.cfg, hash, opts.verbose);
+  if (opts.indexOnly) {
+    const rows = page.cards
+      .map((card) => ({ slug: card.slug, status: card.status }))
+      .sort((a, b) => a.slug.localeCompare(b.slug));
+    const method = pageMethod(LIST_INDEX_ONLY_METHOD, hash, page.older);
+    if (opts.json) {
+      print(JSON.stringify({ rows, total: rows.length, method }));
+      return;
+    }
+    for (const r of rows) print(`${r.status.padEnd(9)} ${r.slug}`);
+    print(`${rows.length} row(s)`);
+    print(method);
+    return;
+  }
+  const records = fast
+    ? pageSummaries(page.cards)
+    : await productRecordsOnPage(
+        node,
+        opts.cfg,
+        page.cards.map((card) => card.slug),
+        bodyResolved,
+      );
+  const baseMethod = pageMethod(listMethod(fast, filters), hash, page.older);
   const childStatus = bodyResolved
     ? await readClosesWhenChildren(node, opts.cfg, records.map(wholeRecordOrThrow))
     : new Map<string, string>();
@@ -2281,11 +1806,6 @@ export async function papercutSetCmd(
 
   const next = { ...record, ...patch } as FbrainRecord;
   const primaryFields = updateFieldsFrom(record, PAPERCUT, patch);
-  // Through the shared write plan, not a bare mutation: `planPapercutStatusOps`
-  // rewrites this row's `psi_payload` from the record, and that snapshot is
-  // what `papercut list --kind …` pre-selects candidates on. An amend that did
-  // not refresh the index would leave the row absent from the very query this
-  // verb exists to make it appear in.
   const writePlan = await buildResidentWritePlan({
     node,
     cfg: opts.cfg,

@@ -9,11 +9,10 @@ import {
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
+import { HEAD_RANGE } from "../list-page.ts";
 import {
-  hasAnyLiveRecord,
   completeKeyTags,
   findBySlug,
-  findBySlugs,
   isSchemaNotFoundReadError,
   isTombstoned,
   listRecordKeys,
@@ -21,11 +20,15 @@ import {
   missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
-  withReadRetry,
   type FbrainRecord,
   type RecordKey,
 } from "../record.ts";
-import { type RecordType } from "../schemas.ts";
+import {
+  BRAIN_LIST_COUNT_SCHEMA_KEY,
+  BRAIN_LIST_PAGE_SCHEMA_KEY,
+  isRecordType,
+  type RecordType,
+} from "../schemas.ts";
 import { resolveRecordsByTag } from "../tag-index.ts";
 
 // Default cap for an unfiltered `fbrain list`. Without it an
@@ -39,28 +42,16 @@ export type ListOptions = {
   type?: RecordType;
   status?: string;
   tag?: string;
-  // Optional explicit cap. When omitted, `listCmd` applies
-  // DEFAULT_LIST_LIMIT and prints a "K more" hint on truncation.
-  // Must be a positive integer when set — non-positive values are
-  // rejected by the CLI before they reach here.
+  // Optional explicit cap. When omitted, `listCmd` shows
+  // DEFAULT_LIST_LIMIT cards from the one page. A positive integer.
+  // Values above LIST_LIMIT_CAP are cut to that cap.
   limit?: number;
-  // Skip the first N matches after filter+sort, before `limit` is
-  // applied — the paging companion to `limit` (records N+1 … N+limit).
-  // A non-negative integer when set; validated by the CLI. Applies to
-  // the sorted, filtered set, so `--offset 50 -n 50` yields records
-  // 51–100 in the same newest-first order a bare list would show.
-  offset?: number;
-  // Lower-bound filter on `updated_at`: keep only records whose
-  // updated_at is >= this instant. Parsed by the CLI (ISO-8601 or a
-  // relative token like `7d`/`24h`) into epoch-millis so this module
-  // stays clock-free and testable. Applied alongside the status/tag
-  // filters, BEFORE sort/offset/limit.
+  // Page id. Default `__head__`. `p` plus eight digits names one older page.
+  page?: string;
+  // Keep cards on this page whose updated_at is at or after this instant.
+  // Does not read the older page.
   updatedSinceMs?: number;
-  // Count-only mode. When true, emit just the number of records that
-  // match the filters (updated-since/status/tag) — no bodies, no
-  // per-row summaries. `offset`/`limit` do NOT clip a count (a count is
-  // of the whole matching set); the truncation/paging window only shapes
-  // the row output. Keeps token/wire cost flat for "how many …" queries.
+  // Read BrainListCount for `all` or `--type`. Not a page read.
   count?: boolean;
   fields?: readonly string[];
   // Machine-readable mode. Emits a single JSON array document via
@@ -77,14 +68,8 @@ export type ListOptions = {
   // `FbrainError.agentHint` for the ERROR path. Default (undefined) keeps the
   // human CLI output byte-identical.
   agent?: boolean;
-  // Structured-result sink. When set, receives the SAME payload that
-  // `--json` mode serializes to stdout — one source of truth for both the
-  // JSON CLI surface and the MCP `structuredContent`. Fires once per call
-  // regardless of the `json` flag, so the MCP handler can run the command
-  // in human mode for `content` text AND capture the typed payload without
-  // re-parsing the printed line. In row mode the payload is the array of
-  // `RecordSummary` (`[]` on no records); in `count` mode it is a
-  // `{ count: number }` object.
+  // Same payload as `--json`. Row mode is the page envelope. Count mode is
+  // `{ count }` or `{ miss: true }`.
   onResult?: (payload: ListResult) => void;
   // Structured advisory sink for read-degraded configs. The human/CLI surface
   // still receives the existing note via printErr; MCP uses this to expose
@@ -101,370 +86,361 @@ export type ListOptions = {
 // `--count` mode still returns the match count only.
 export type ListPageResult = {
   items: RecordSummary[];
-  /** Match count after filters, before offset/limit (index-level). */
+  /** Cards on this page after the page filter, before the limit. */
   total: number;
   /**
-   * True when this page is not the full match set (offset/limit clipped, or
-   * unhydratable index rows were repaired-out of the page). Honesty signal
-   * only — never a promise that `total` is a complete census.
+   * True when the print cut the page, the atom names an older page, or the
+   * page atom is absent. Not a census.
    */
   truncated: boolean;
 };
-export type ListResult = ListPageResult | { count: number };
-
-function emptyListPage(): ListPageResult {
-  return { items: [], total: 0, truncated: false };
-}
+export type ListResult = ListPageResult | { count: number } | { miss: true };
 
 export type ListEntry = { type: RecordType; record: FbrainRecord };
 
-export async function listCmd(opts: ListOptions): Promise<void> {
-  const { print, printErr } = resolvePrintSinks(opts);
-  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+const LIST_LIMIT_CAP = 100;
+const PAGE_ID = /^p\d{8}$/;
 
-  // `--count` fast path: a count never renders a row, so it never needs
-  // title/body — only slug + tombstone + updated_at to filter, exactly what
-  // `listRecordKeys` projects (vs. `listRecords`' full-field fetch). Kept to
-  // `--status`/`--tag`-less counts: `--status` needs a field the key
-  // projection doesn't carry, and `--tag` already has its own index-first
-  // path in `resolveListEntries`. This is what stops `fbrain list --count`
-  // from paying for a full-corpus body drain just to answer "how many".
-  if (opts.count && opts.status === undefined && !opts.tag) {
-    const keyEntries = await resolveListKeyEntries(node, opts);
-    const count = keyEntries.filter(({ key }) =>
-      matchesListKeyFilters(key, opts),
-    ).length;
-    opts.onResult?.({ count });
-    if (opts.json) {
-      print(JSON.stringify({ count }));
-    } else {
-      print(String(count));
-    }
-    return;
-  }
+function backfillLine(hash: string, type: RecordType | undefined): string {
+  const source = type ?? "<type>";
+  return `brain reindex --target ${hash} --source-hash ${source} --slug <slug>`;
+}
 
-  // Body-less sweep: for the common --tag-less path this is a KEYS-ONLY
-  // listing (title/body are never fetched for the whole type — the fix this
-  // card lands); for --tag it's the tag-index sweep, already point-get-
-  // bounded by tag cardinality rather than corpus size, so a hydrated
-  // record is available immediately and is cached in `hydratedByKey` for
-  // reuse at hydrate time below (no re-fetch of a body we already have).
-  const hydratedByKey = new Map<string, FbrainRecord>();
-  let light: RecordKey[];
+function textField(
+  row: { fields: Record<string, unknown> } | null | undefined,
+  name: string,
+): string | null {
+  if (!row) return null;
+  const value = row.fields[name];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
 
-  if (opts.tag) {
-    const sweep = () => resolveListEntries(node, opts);
-    // The dogfood read-flake repro (2026-05-26): a status write lands, but
-    // the immediately-following filtered list returns empty for ~1s. Retry
-    // the sweep — --tag always retries (mirrors the pre-existing contract).
-    // See withReadRetry in ../record.ts.
-    const all = await withReadRetry(sweep, (acc) =>
-      acc.some(({ record }) => !isTombstoned(record)),
-    );
-    light = all.map(({ type, record }) => {
-      hydratedByKey.set(recordKeyId(type, record.slug), record);
-      return {
-        type,
-        slug: record.slug,
-        status: record.status,
-        tags: record.tags,
-        updatedAt: record.updated_at,
-      };
-    });
-  } else {
-    const sweep = () => resolveListKeyEntries(node, opts);
-    // Retry only when --status is present — without it, empty is a
-    // legitimate signal and burning the budget every invocation slows down
-    // genuinely-empty lists. The isHit predicate fires when the sweep sees
-    // any (already tombstone-filtered) key; the user filter is applied
-    // after, so a sweep that surfaces a key that doesn't match the filter
-    // still stops retrying (we're riding out the empty-sweep flake, not
-    // searching for a matching row).
-    const wantsRetry = opts.status !== undefined;
-    const keyEntries = wantsRetry
-      ? await withReadRetry(sweep, (acc) => acc.length > 0)
-      : await sweep();
-    light = keyEntries.map(({ type, key }) => ({
-      type,
-      slug: key.slug,
-      status: key.status,
-      tags: key.tags,
-      updatedAt: key.updatedAt,
-    }));
-  }
-
-  const filtered = light.filter((key) => matchesListKeyFilters(key, opts));
-
-  // Primary: newest updated_at first. Tie-breakers: type then slug, both
-  // ascending — needed because the node's `/api/query` row order is
-  // unstable (see queryAll in ../client.ts), so a tie on updated_at would
-  // otherwise resolve in whatever order the daemon happened to serve the
-  // rows. With `-n N` truncation that lets `fbrain list` swap WHICH rows
-  // it shows across invocations. Ties are realistic: `migrate` / `init`
-  // seed batches stamp identical timestamps, and `nowIso()` is
-  // millisecond-resolution so any two `put` / `status` / `link` calls in
-  // the same ms collide. (type, slug) is globally unique — slugs aren't
-  // unique across types but type+slug is — so the order is fully pinned.
-  filtered.sort(compareRecordKeysByUpdatedThenSlug);
-
-  // `--count` short-circuit: emit only how many records match the
-  // filters, before the row-shaping (offset/limit) and the empty-node
-  // hint path. A count is of the WHOLE matching set — `offset`/`limit`
-  // shape row output, not a count — so it reports `filtered.length`
-  // regardless of those flags. Count 0 prints a bare `0` (or `{count: 0}`
-  // JSON), never the create-your-first hint: a caller asking "how many
-  // match" wants a number, not new-dev guidance. This keeps token/wire
-  // cost flat for "how many open papercuts" style queries.
-  if (opts.count) {
-    const count = filtered.length;
-    opts.onResult?.({ count });
-    if (opts.json) {
-      print(JSON.stringify({ count }));
-    } else {
-      print(String(count));
-    }
-    return;
-  }
-
-  // Genuinely-empty result wins over the truncation path — print
-  // `no records` even when the implicit default cap would have taken
-  // effect. (Iron: the cap is a UX guard against floods, not a signal.)
-  if (filtered.length === 0) {
-    opts.onResult?.(emptyListPage());
-    if (opts.fields !== undefined && opts.fields.length > 0) return;
-    // Context-aware no-result hint, completing the empty-node-hint trilogy
-    // (list/search/ask). `list` is step 2 of init's own Next-steps — the
-    // FIRST content command a brand-new dev runs — so a bare `no records`
-    // dead-ends them. Probe whether the brain holds ANY live record (a cheap
-    // extra round-trip, paid only on the no-result path, like search/ask) and:
-    //   - genuinely-empty brain → the same calm "create your first record"
-    //     guidance search (#276) / ask (#279) already give the new dev.
-    //   - records exist but a --type/--status/--tag filter matched none → a
-    //     filter-specific nudge instead; "create your first" would be wrong
-    //     (mirrors search.ts's "populated brain that matched nothing keeps a
-    //     different hint" split).
-    // `!filteredQuery && non-empty` is impossible (no filter on a non-empty
-    // brain can't yield zero), so it falls through to the empty-brain hint.
-    const filteredQuery =
-      opts.type !== undefined ||
-      opts.status !== undefined ||
-      opts.tag !== undefined ||
-      opts.updatedSinceMs !== undefined;
-    const empty = !(await hasAnyLiveRecord(node, opts.cfg));
-    // Filter hint only when a filter is active AND the brain has records;
-    // every other shape (empty brain; or the impossible no-filter-yet-zero
-    // case) falls through to the new-dev create-your-first guidance.
-    // On the MCP agent channel the hint must name TOOLS the agent can call:
-    // its create tool is `fbrain_put` (not `fbrain <type> new`) and re-listing
-    // unfiltered is the `fbrain_list` tool (not the `fbrain list` CLI verb).
-    // Render the agent-voiced variant only when `opts.agent` is set; the human
-    // CLI path is unchanged.
-    const hint = opts.agent
-      ? !empty && filteredQuery
-        ? "hint:  no records match that filter — call `fbrain_list` with no type/status/tag filter"
-        : "hint:  no records yet — create your first with the `fbrain_put` tool, then try again"
-      : !empty && filteredQuery
-        ? "hint:  no records match that filter — try `fbrain list` with no --type/--status/--tag"
-        : "hint:  no records yet — create your first with `fbrain <type> new <slug>` (design/concept/project/…), then list again";
-    if (opts.json) {
-      // Honesty envelope (items/total/truncated); hint stays on stderr so
-      // stdout remains a single parseable JSON document.
-      print(JSON.stringify(emptyListPage()));
-      printErr(hint);
-    } else {
-      print("no records");
-      print(hint);
-    }
-    return;
-  }
-
-  // Paging window: drop the first `--offset` rows, then apply the limit.
-  // Offset is a non-negative integer (validated upstream in cli.ts); it
-  // slices the sorted, filtered set, so `--offset 50 -n 50` yields records
-  // 51–100 in the same newest-first order. A huge offset simply produces
-  // `paged.length === 0` and the row loop prints nothing (the empty-brain
-  // hint path is not re-entered — that only guards a genuinely empty match
-  // set, which already returned above).
-  const offset = opts.offset ?? 0;
-  const paged = offset > 0 ? filtered.slice(offset) : filtered;
-
-  // Explicit `-n N` overrides the default. Non-positive values are
-  // rejected upstream in cli.ts, so any `opts.limit` reaching here is
-  // a positive integer.
-  const effectiveLimit = opts.limit ?? DEFAULT_LIST_LIMIT;
-  const trimmed = paged.slice(0, effectiveLimit);
-  // Rows remaining AFTER this offset+limit window — what a follow-up page
-  // (advance `--offset` by `effectiveLimit`) would surface. Measured from
-  // the post-offset `paged` set so the "K more" hint counts only rows the
-  // caller hasn't seen yet, not rows already skipped by `--offset`.
-  const truncated = paged.length - trimmed.length;
-  if (trimmed.length === 0) {
-    const past: ListPageResult = {
-      items: [],
-      total: filtered.length,
-      truncated: filtered.length > 0,
-    };
-    opts.onResult?.(past);
-    if (opts.fields !== undefined && opts.fields.length > 0) return;
-    const note = `offset ${offset} is past the ${filtered.length} matching record(s)`;
-    if (opts.json) {
-      print(JSON.stringify(past));
-      printErr(`note:  ${note}`);
-    } else {
-      print("no records");
-      print(`hint:  ${note}`);
-    }
-    return;
-  }
-
-  // Hydrate ONLY the final page — a point-get per entry not already fetched
-  // by the --tag sweep. This is the crux of the fix: no matter how large the
-  // corpus, a bounded `-n N` (or the default cap) pays for at most N body
-  // fetches, never one full-type body fetch regardless of page size.
-  //
-  // A null point-get means the list index still has a row whose product
-  // record is gone (delete left a phantom, or a race). Do NOT silently drop
-  // it: repair the list partition and surface a stderr note so a short page
-  // never looks like a complete sample with no signal.
-  const unhydratable: Array<{ type: RecordType; slug: string }> = [];
-  const needed = new Map<RecordType, string[]>();
-  for (const entry of trimmed) {
-    if (hydratedByKey.has(recordKeyId(entry.type, entry.slug))) continue;
-    const slugs = needed.get(entry.type) ?? [];
-    if (!slugs.includes(entry.slug)) slugs.push(entry.slug);
-    needed.set(entry.type, slugs);
-  }
-  const fetched = new Map<string, FbrainRecord | null>();
-  await Promise.all(
-    [...needed].map(async ([type, slugs]) => {
-      const found = await findBySlugs(node, type, schemaHashFor(type, opts.cfg), slugs);
-      for (const [slug, record] of found) {
-        fetched.set(recordKeyId(type, slug), record);
-      }
-    }),
-  );
-  const hydrated: ListEntry[] = [];
-  for (const entry of trimmed) {
-    const cached = hydratedByKey.get(recordKeyId(entry.type, entry.slug));
-    if (cached) {
-      hydrated.push({ type: entry.type, record: cached });
-      continue;
-    }
-    const record = fetched.get(recordKeyId(entry.type, entry.slug)) ?? null;
-    if (record) {
-      hydrated.push({ type: entry.type, record });
-      continue;
-    }
-    unhydratable.push({ type: entry.type, slug: entry.slug });
-  }
-
-  if (unhydratable.length > 0) {
-    try {
-      const { deleteTypeListEntry } = await import("../record-list-index.ts");
-      for (const row of unhydratable) {
-        try {
-          await deleteTypeListEntry(node, opts.cfg, row.type, row.slug);
-        } catch {
-          /* best-effort per-row repair */
-        }
-      }
-    } catch {
-      /* schema import / unavailable — still surface below */
-    }
-    const sample = unhydratable
-      .slice(0, 3)
-      .map((r) => `${r.type}/${r.slug}`)
-      .join(", ");
-    const more =
-      unhydratable.length > 3 ? ` (+${unhydratable.length - 3} more)` : "";
-    printErr(
-      `note:  repaired ${unhydratable.length} unhydratable list-index row(s) ` +
-        `(product get returned null): ${sample}${more}. ` +
-        `Run \`fbrain reindex --list-index\` for a full partition rebuild.`,
-    );
-  }
-
-  // One JSON document — honesty envelope so callers can tell a sample from a
-  // census. Field set per item matches the human table (plus timestamps /
-  // optional design_slug); body omitted (use `fbrain get <slug> --json`).
-  //
-  // Built unconditionally (not just under --json) so the `onResult`
-  // structured sink and the `--json` stdout document are the SAME value
-  // — the MCP `structuredContent` can't drift from the CLI JSON shape.
-  const items = hydrated.map(({ type, record }) => recordSummary(type, record));
-  const total = filtered.length;
-  const pageResult: ListPageResult = {
-    items,
-    total,
-    truncated:
-      truncated > 0 ||
-      offset > 0 ||
-      unhydratable.length > 0 ||
-      items.length < trimmed.length,
-  };
-  opts.onResult?.(pageResult);
-
-  if (opts.fields !== undefined && opts.fields.length > 0) {
-    printFieldProjection(items, opts.fields, print);
-    return;
-  }
-
-  if (opts.json) {
-    print(JSON.stringify(pageResult));
-    // Truncation advisory still useful for `jq` users — they may
-    // wonder why the page is shorter than expected — but it must
-    // never appear on stdout under --json. Route to stderr instead.
-    if (opts.limit === undefined && truncated > 0) {
-      printErr(
-        `note:  ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
-      );
-    }
-    return;
-  }
-
-  const lines = formatTable(
-    hydrated.map(({ type, record }) => {
-      const tags =
-        record.tags.length === 0 ? "" : ` [${record.tags.join(",")}]`;
-      return [type, record.slug, record.status, `${record.title}${tags}`];
-    }),
-  );
-  for (const line of lines) print(line);
-
-  // Only hint when the default cap (not an explicit `-n N`) clipped
-  // the output. With an explicit limit the user asked for N — they
-  // already know they're seeing a slice.
-  if (opts.limit === undefined && truncated > 0) {
-    print(
-      `… ${truncated} more (use -n N to widen, or filter with --type/--tag)`,
-    );
+function emitLines(
+  opts: Pick<ListOptions, "json" | "fields">,
+  print: (line: string) => void,
+  printErr: (line: string) => void,
+  lines: readonly string[],
+  jsonBody: string | null,
+): void {
+  const advisory =
+    opts.json === true || (opts.fields !== undefined && opts.fields.length > 0);
+  if (jsonBody !== null && opts.json === true) print(jsonBody);
+  for (const line of lines) {
+    if (advisory) printErr(line);
+    else print(line);
   }
 }
+
+export async function listCmd(opts: ListOptions): Promise<void> {
+  const { print, printErr } = resolvePrintSinks(opts);
+  if (opts.count) {
+    await printListCount(opts, print, printErr);
+    return;
+  }
+  await printListPage(opts, print, printErr);
+}
+
+async function printListCount(
+  opts: ListOptions,
+  print: (line: string) => void,
+  printErr: (line: string) => void,
+): Promise<void> {
+  if (opts.updatedSinceMs !== undefined) {
+    opts.onResult?.({ miss: true });
+    emitLines(
+      opts,
+      print,
+      printErr,
+      ["miss", "the counter is the whole list, not a time window"],
+      JSON.stringify({ miss: true }),
+    );
+    return;
+  }
+  if ((opts.status && opts.status.length > 0) || (opts.tag && opts.tag.length > 0)) {
+    opts.onResult?.({ miss: true });
+    emitLines(
+      opts,
+      print,
+      printErr,
+      ["miss", "a status count and a tag count have no counter"],
+      JSON.stringify({ miss: true }),
+    );
+    return;
+  }
+  const hash = opts.type ?? "all";
+  const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+  if (schemaHash.length === 0) {
+    missCount(opts, print, printErr, hash);
+    return;
+  }
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+  const raw = await readCountAtom(node, schemaHash, hash);
+  if (raw === null || !/^-?\d+$/.test(raw)) {
+    missCount(opts, print, printErr, hash);
+    return;
+  }
+  const count = Number(raw);
+  opts.onResult?.({ count });
+  if (opts.json) {
+    print(JSON.stringify({ count }));
+    printErr("counter");
+    return;
+  }
+  print(`${count} counter`);
+}
+
+function missCount(
+  opts: ListOptions,
+  print: (line: string) => void,
+  printErr: (line: string) => void,
+  hash: string,
+): void {
+  opts.onResult?.({ miss: true });
+  emitLines(
+    opts,
+    print,
+    printErr,
+    ["miss", "index record absent", backfillLine(hash, opts.type)],
+    JSON.stringify({ miss: true }),
+  );
+}
+
+async function readCountAtom(
+  node: NodeClient,
+  schemaHash: string,
+  hash: string,
+): Promise<string | null> {
+  if (node.queryByKey) {
+    const row = await node.queryByKey({
+      schemaHash,
+      fields: ["bln_n"],
+      keyHash: hash,
+    });
+    return textField(row, "bln_n");
+  }
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["bln_n"],
+    filter: { HashKey: hash },
+  });
+  return textField(res.results[0], "bln_n");
+}
+
+async function printListPage(
+  opts: ListOptions,
+  print: (line: string) => void,
+  printErr: (line: string) => void,
+): Promise<void> {
+  let hash: string;
+  if (opts.tag && opts.tag.length > 0) {
+    hash = `tag#${opts.tag}`;
+  } else if (opts.status && opts.status.length > 0) {
+    if (!opts.type) {
+      throw new FbrainError({
+        code: "status_needs_type",
+        message: "a status list needs --type",
+        hint: "Pass --type with --status.",
+      });
+    }
+    hash = `${opts.type}#${opts.status}`;
+  } else {
+    hash = opts.type ?? "all";
+  }
+  const pageId = opts.page;
+  let range = HEAD_RANGE;
+  if (pageId !== undefined && pageId.length > 0) {
+    if (pageId === HEAD_RANGE || PAGE_ID.test(pageId)) range = pageId;
+    else {
+      throw new FbrainError({
+        code: "invalid_page",
+        message: `page id ${pageId} is not a list page id`,
+        hint: "Use __head__ or a page id of p plus eight digits.",
+      });
+    }
+  }
+
+  const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+  const countable = hash === "all" || isRecordType(hash);
+
+  const finishEmpty = async (atomPresent: boolean, older: string): Promise<void> => {
+    let countKind: "zero" | "positive" | "absent" = "absent";
+    if (countable && countSchema.length > 0) {
+      const rawCount = await readCountAtom(node, countSchema, hash);
+      if (rawCount !== null && /^-?\d+$/.test(rawCount)) {
+        const n = Number(rawCount);
+        if (n === 0) countKind = "zero";
+        else if (n > 0) countKind = "positive";
+      }
+    }
+    const lines: string[] = [];
+    let truncated = true;
+    if (older.length > 0) {
+      lines.push(`sample ${older}`);
+      if (countable && countKind === "absent") {
+        lines.push("index record absent");
+        lines.push(backfillLine(hash, opts.type));
+      }
+    } else if (countKind === "zero" || (atomPresent && !countable)) {
+      truncated = false;
+      lines.push("no records");
+    } else if (countKind === "positive") {
+      lines.push("sample");
+      lines.push("index partial");
+      lines.push(backfillLine(hash, opts.type));
+    } else {
+      lines.push("sample");
+      lines.push("index record absent");
+      lines.push(backfillLine(hash, opts.type));
+    }
+    const emptyResult: ListPageResult = { items: [], total: 0, truncated };
+    opts.onResult?.(emptyResult);
+    emitLines(
+      opts,
+      print,
+      printErr,
+      lines,
+      opts.json ? JSON.stringify(emptyResult) : null,
+    );
+  };
+
+  if (schemaHash.length === 0) {
+    await finishEmpty(false, "");
+    return;
+  }
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["blp_page"],
+    filter: { HashRangeKey: { hash, range } },
+  });
+  const raw = textField(res.results[0], "blp_page");
+  if (raw === null) {
+    await finishEmpty(false, "");
+    return;
+  }
+
+  type Card = { type?: string; slug: string; status: string; updatedAt: string; title: string };
+  let cards: Card[] | null = null;
+  let older = "";
+  try {
+    const value = JSON.parse(raw) as { cards?: unknown; older?: unknown };
+    if (value && typeof value === "object") {
+      const parsed: Card[] = [];
+      if (Array.isArray(value.cards)) {
+        for (const item of value.cards) {
+          if (!item || typeof item !== "object") continue;
+          const card = item as Record<string, unknown>;
+          if (typeof card.slug !== "string" || card.slug.length === 0) continue;
+          const named = typeof card.type === "string" ? card.type : undefined;
+          parsed.push({
+            ...(named !== undefined ? { type: named } : {}),
+            slug: card.slug,
+            status: typeof card.status === "string" ? card.status : "",
+            updatedAt: typeof card.updated_at === "string" ? card.updated_at : "",
+            title: typeof card.title === "string" ? card.title : "",
+          });
+        }
+      }
+      cards = parsed;
+      older = typeof value.older === "string" ? value.older : "";
+    }
+  } catch {
+    cards = null;
+  }
+  if (cards === null) {
+    const partial: ListPageResult = { items: [], total: 0, truncated: true };
+    opts.onResult?.(partial);
+    emitLines(
+      opts,
+      print,
+      printErr,
+      ["sample", "index partial"],
+      opts.json ? JSON.stringify(partial) : null,
+    );
+    return;
+  }
+  if (cards.length === 0) {
+    await finishEmpty(true, older);
+    return;
+  }
+
+  const cap =
+    opts.limit === undefined ? DEFAULT_LIST_LIMIT : Math.min(opts.limit, LIST_LIMIT_CAP);
+  const matched: Array<{ type: RecordType; slug: string; status: string; title: string; updatedAt: string }> = [];
+  for (const card of cards) {
+    const type = card.type && isRecordType(card.type) ? card.type : opts.type ?? null;
+    if (!type) continue;
+    if (opts.type && type !== opts.type) continue;
+    if (opts.status && card.status !== opts.status) continue;
+    if (opts.updatedSinceMs !== undefined) {
+      const updated = Date.parse(card.updatedAt);
+      if (!Number.isFinite(updated) || updated < opts.updatedSinceMs) continue;
+    }
+    matched.push({
+      type,
+      slug: card.slug,
+      status: card.status,
+      title: card.title,
+      updatedAt: card.updatedAt,
+    });
+  }
+  const last = cards[cards.length - 1]!;
+  let showOlder = false;
+  if (older.length > 0) {
+    if (opts.updatedSinceMs === undefined) showOlder = true;
+    else {
+      const updated = Date.parse(last.updatedAt);
+      showOlder = !Number.isFinite(updated) || updated >= opts.updatedSinceMs;
+    }
+  }
+  const shown = matched.slice(0, cap);
+  const clipped = matched.length > shown.length;
+  const items: RecordSummary[] = shown.map((card) => ({
+    type: card.type,
+    slug: card.slug,
+    title: card.title,
+    status: card.status,
+    updated_at: card.updatedAt,
+  }));
+  const pageResult: ListPageResult = {
+    items,
+    total: matched.length,
+    truncated: clipped || showOlder,
+  };
+  opts.onResult?.(pageResult);
+  const notes: string[] = [];
+  if (clipped) notes.push("the cap cut this page");
+  if (showOlder) notes.push(`sample ${older}`);
+  if (opts.fields !== undefined && opts.fields.length > 0) {
+    printFieldProjection(items, opts.fields, print);
+    for (const note of notes) printErr(note);
+    return;
+  }
+  if (opts.json) {
+    print(JSON.stringify(pageResult));
+    for (const note of notes) printErr(note);
+    return;
+  }
+  if (items.length === 0 && !showOlder) print("no records");
+  const lines = formatTable(shown.map((card) => [card.type, card.slug, card.status, card.title]));
+  for (const line of lines) print(line);
+  for (const note of notes) print(note);
+}
+
 
 export type RecordSummary = {
   type: RecordType;
   slug: string;
   title: string;
   status: string;
-  tags: string[];
+  // A page card omits this. The atom has no tag list.
+  tags?: string[];
   design_slug?: string;
-  created_at: string;
+  // A page card omits this. The atom has no create time.
+  created_at?: string;
   updated_at: string;
 };
-
-function recordSummary(type: RecordType, r: FbrainRecord): RecordSummary {
-  const out: RecordSummary = {
-    type,
-    slug: r.slug,
-    title: r.title,
-    status: r.status,
-    tags: r.tags,
-    created_at: r.created_at,
-    updated_at: r.updated_at,
-  };
-  if (r.design_slug !== undefined) out.design_slug = r.design_slug;
-  return out;
-}
 
 export async function resolveListEntries(
   node: NodeClient,
@@ -483,7 +459,8 @@ export async function resolveListEntries(
   );
   if (opts.tag) {
     const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
-      findBySlug: (type, hash, slug) => findBySlug(node, type, hash, slug),
+      findBySlug: (type, hash, slug) =>
+        findBySlug(node, type, hash, slug, opts.cfg, { hydrate: false }),
       schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
     });
     if (indexed !== null) {
@@ -527,18 +504,56 @@ export function matchesListFilters(
   return true;
 }
 
-// Key-only counterpart to `resolveListEntries`, for the `--count` fast path
-// in `listCmd`. Fetches slug + tombstone + updated_at per candidate
-// type via `listRecordKeys` (a skinny `/api/query` projection, no
-// title/body) instead of `listRecords`' full-field fetch — the fix for the
-// default `fbrain list` full-corpus body drain. Tombstones are already
-// dropped by `listRecordKeys`, mirroring `resolveListEntries`'s reliance on
-// `matchesListFilters`' `isTombstoned` check.
+async function readPapercutTypePageKeys(
+  node: NodeClient,
+  cfg: Config,
+  status: string | undefined,
+  verbose?: Verbose,
+): Promise<RecordKey[]> {
+  const hash = status && status.length > 0 ? `papercut#${status}` : "papercut";
+  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
+  if (schemaHash.length === 0) return [];
+  verbose?.(`query HashRangeKey hash=${hash} range=${HEAD_RANGE} field=blp_page`);
+  const res = await node.queryAll({
+    schemaHash,
+    fields: ["blp_page"],
+    filter: { HashRangeKey: { hash, range: HEAD_RANGE } },
+  });
+  const raw = res.results[0]?.fields?.blp_page;
+  if (typeof raw !== "string" || raw.length === 0) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const cards = (parsed as { cards?: unknown }).cards;
+  if (!Array.isArray(cards)) return [];
+  const keys: RecordKey[] = [];
+  for (const item of cards) {
+    if (!item || typeof item !== "object") continue;
+    const card = item as { slug?: unknown; status?: unknown; updated_at?: unknown };
+    if (typeof card.slug !== "string" || card.slug.length === 0) continue;
+    keys.push({
+      type: "papercut",
+      slug: card.slug,
+      status: typeof card.status === "string" ? card.status : "",
+      tags: [],
+      updatedAt: typeof card.updated_at === "string" ? card.updated_at : "",
+    });
+  }
+  return keys;
+}
+
+// Key-only walk: slug, tombstone, and updated_at via `listRecordKeys`.
+// Tombstones are already dropped by that read.
+// An explicit papercut type reads the status page and does not read PapercutStatusIndex.
 export async function resolveListKeyEntries(
   node: NodeClient,
   opts: Pick<
     ListOptions,
-    "cfg" | "type" | "status" | "tag" | "printErr" | "onSkippedTypes"
+    "cfg" | "type" | "status" | "tag" | "verbose" | "printErr" | "onSkippedTypes"
   >,
 ): Promise<Array<{ type: RecordType; key: RecordKey }>> {
   const { activeTypes: types } = resolveTypeFilter(
@@ -552,27 +567,15 @@ export async function resolveListKeyEntries(
 
   const acc: Array<{ type: RecordType; key: RecordKey }> = [];
   for (const t of types) {
-    // The dedicated papercut ledger (and explicit `list --type papercut`)
-    // must be status-keyed. A global multi-type list keeps its existing
-    // per-type key walk so a newly deployed, not-yet-initialized internal
-    // index cannot make every unrelated record type unreadable.
+    // Only an explicit --type papercut. A mixed list keeps the per-type key walk.
     if (t === "papercut" && opts.type === "papercut") {
-      const { readPapercutsByStatus } = await import(
-        "../papercut-status-index.ts"
+      const keys = await readPapercutTypePageKeys(
+        node,
+        opts.cfg,
+        opts.status,
+        opts.verbose,
       );
-      const records = await readPapercutsByStatus(node, opts.cfg, opts.status);
-      for (const record of records) {
-        acc.push({
-          type: t,
-          key: {
-            type: t,
-            slug: record.slug,
-            status: record.status,
-            tags: record.tags,
-            updatedAt: record.updated_at,
-          },
-        });
-      }
+      for (const key of keys) acc.push({ type: t, key });
       continue;
     }
     let keys: RecordKey[];
@@ -629,12 +632,6 @@ export function matchesListKeyFilters(
     return false;
   }
   return true;
-}
-
-// Stable identity for the hydration cache (`hydratedByKey` in `listCmd`) —
-// (type, slug) is globally unique, matching the sort tie-break below.
-function recordKeyId(type: RecordType, slug: string): string {
-  return `${type}::${slug}`;
 }
 
 // Same (updated_at desc, then type asc, then slug asc) ordering the old

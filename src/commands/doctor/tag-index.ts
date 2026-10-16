@@ -19,7 +19,7 @@
 
 import type { NodeClient, Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
-import { backlinkIndexTag } from "../../backlink-index.ts";
+import { backlinkIndexTag, pageBackfill } from "../../backlink-index.ts";
 import { snapshotSummary, type SnapshotSummary } from "../../index-payload.ts";
 import { readTypeListIndex } from "../../record-list-index.ts";
 import { RECORD_TYPES, type RecordType } from "../../schemas.ts";
@@ -43,8 +43,10 @@ export const DOCTOR_TAG_SAMPLE_RECORDS = 25;
 export const DOCTOR_TAG_SAMPLE_TAGS = 40;
 
 const REPAIR =
-  "replace every old brain binary (CLI, brain-mcp, routines, other devices), then run " +
-  "`brain reindex --tags` and `brain reindex --backlinks` at a quiet moment (admin operation, one device at a time)";
+  "The old payload write stopped. " +
+  pageBackfill("tag#<tag>", "<type>") +
+  ". " +
+  pageBackfill("link#<slug>", "<type>");
 
 export async function runTagIndexProbe(
   node: NodeClient,
@@ -69,7 +71,11 @@ export async function runTagIndexProbe(
       detail:
         "the TagMembership schema is not registered in this config: tag and backlink membership is NOT " +
         "written, and reads use the legacy layout, which no longer moves (`list --tag` and `linked_from` go stale)",
-      fix: "run `brain init` (the only command that registers the schema), then `brain reindex --tags` and `brain reindex --backlinks`",
+      fix:
+        "run `brain init` (the only command that registers the schema). The old payload write stopped. " +
+        pageBackfill("tag#<tag>", "<type>") +
+        ". " +
+        pageBackfill("link#<slug>", "<type>"),
     };
   }
 

@@ -127,7 +127,7 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
   const verbose = opts.verbose ?? (() => {});
   if (process.env.LASTSEEK_DISABLE === "1") return null;
 
-  const args = ["query", opts.query, "--k", String(opts.k ?? 50)];
+  const args = ["query", opts.query, "--k", String(opts.k ?? 25)];
   for (const s of opts.schemas ?? []) args.push("--schema", s);
   if (opts.exact) args.push("--exact");
   if (opts.min_score !== undefined) {
@@ -138,14 +138,13 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
   const budgetMs = envMs("LASTSEEK_BUDGET_MS", DEFAULT_BUDGET_MS);
 
   // Budget check BEFORE the spawn: once this invocation has spent its helper
-  // time, further phrasings are not worth another caller-visible stall. The
-  // incumbent ranker still answers them.
+  // time, further phrasings are not worth another caller-visible stall.
   const spentMs = subprocessMsSoFar();
   if (budgetMs > 0 && spentMs >= budgetMs) {
     notice(
       `lastseek: skipped — this call already spent ${(spentMs / 1000).toFixed(1)}s of its ` +
         `${(budgetMs / 1000).toFixed(1)}s helper budget (LASTSEEK_BUDGET_MS); ` +
-        "ranking this query with the incumbent search plane instead.",
+        "this command uses the keyword-head sample.",
     );
     return null;
   }
@@ -176,8 +175,7 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
     if (timedOut) {
       notice(
         `lastseek: query exceeded its ${(timeoutMs / 1000).toFixed(1)}s deadline ` +
-          "(LASTSEEK_TIMEOUT_MS) and was stopped; ranking with the incumbent search " +
-          "plane instead. Results are the cheaper ranker's, not LastSeek's.",
+          "(LASTSEEK_TIMEOUT_MS) and was stopped; this command uses the keyword-head sample.",
       );
       return null;
     }

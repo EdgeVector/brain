@@ -12,7 +12,18 @@ type PutConfirmation = {
   revision?: string;
   durability?: "queued" | "durable";
   search?: "queued" | "ready";
+  indexNotes?: readonly string[];
 };
+
+/** The two phrases a caller can rely on. Other notes stay in the JSON array. */
+export function formatIndexNotes(notes: readonly string[] | undefined): string {
+  const visible: string[] = [];
+  if (notes?.includes("index partial")) visible.push("index partial");
+  if (notes?.includes("the count did not confirm")) {
+    visible.push("the count did not confirm");
+  }
+  return visible.length > 0 ? ` ${visible.join(" ")}` : "";
+}
 
 export function indexPendingNote(indexPending: boolean): string {
   return indexPending
@@ -35,6 +46,7 @@ export function formatPutConfirmation(result: PutConfirmation): string {
   return (
     `${result.action} ${result.type} ${result.slug}` +
     (extras.length > 0 ? ` ${extras.join(" ")}` : "") +
+    formatIndexNotes(result.indexNotes) +
     indexPendingNote(result.indexPending) +
     listIndexFailedNote(result.listIndexFailed)
   );

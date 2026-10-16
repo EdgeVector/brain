@@ -128,7 +128,8 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_type",
   "invalid_min_score",
   "invalid_limit",
-  "invalid_offset",
+  "invalid_page",
+  "status_needs_type",
   "invalid_updated_since",
   "invalid_body_limit",
   "invalid_field",
@@ -136,6 +137,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "doctor_mode_conflict",
   "doctor_flag_requires_usage",
   "migrate_mode_conflict",
+  "reindex_refused",
   "migrate_flag_requires_add_field",
   // Bad invocation surfaced inside the command modules (put / new / raw):
   // missing or contradictory slug/type, a misapplied --design, an
@@ -414,12 +416,16 @@ server-side, not through a windowed get).
 Examples:
   echo "- new bullet" | fbrain append my-tracker --type project
   fbrain append design-notes --type design < addendum.md`,
-  get: `fbrain get <slug> [--type T] [--body-limit N] [--field PATH]... [--json]
+  get: `fbrain get <slug> [--type T] [--page ID] [--limit N] [--body-limit N] [--field PATH]... [--json]
 
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
 
   --type        ${RECORD_TYPE_LIST}
+  --page ID     with --type design, read that child page. The default is
+                \`__head__\`. An older id is \`p\` plus eight digits.
+                \`linked_from\` stays on \`__head__\`.
+  --limit       max child cards from that one page (default 20, cap 100)
   --body-limit  truncate body output to N chars (default: full body)
   --field       project one field path as plain output; repeat or comma-separate
                 for TSV rows (e.g. --field status, or --field slug,status).
@@ -429,30 +435,27 @@ exists in multiple types (specify --type to disambiguate).
                 is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
                 print to stderr) so \`--json\` stdout is always parseable.`,
   list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
-             [--offset N] [-n N | --limit N] [--count] [--field PATH]... [--json]
+             [--page ID] [-n N | --limit N] [--count] [--field PATH]... [--json]
 
   --type          ${RECORD_TYPE_LIST}
-                  (omit to list across all types)
-  --status        filter by status enum
-  --tag           filter by tag membership
-  --updated-since keep only records updated at/after WHEN — an ISO-8601
+                  (omit to list the \`all\` page)
+  --status        with --type, read the \`<type>#<status>\` page
+  --tag           read the \`tag#<tag>\` page
+  --updated-since keep cards on this page updated at/after WHEN — an ISO-8601
                   timestamp (\`2026-07-01\`, \`2026-07-01T12:00:00Z\`) or a
                   relative window: \`45s\` \`30m\` \`24h\` \`7d\` \`2w\`
-  --offset N      skip the first N matches (after filter+sort), then apply the
-                  limit — pages past \`--limit\` (\`--offset 50 -n 50\` → records
-                  51–100). Non-negative integer.
-  -n, --limit     max results, newest-first (\`-n\` and \`--limit\` are aliases; last wins)
-  --count         print only how many records match the filters (no bodies);
-                  ignores --offset/--limit (a count is of the whole match set)
+  --page ID       read that page. The default is \`__head__\`. An older id is
+                  \`p\` plus eight digits.
+  -n, --limit     max cards from that one page (default 20, cap 100).
+                  \`-n\` and \`--limit\` are aliases; last wins
+  --count         print the counter for \`all\` or for --type, and the word
+                  \`counter\`. A status, a tag, or --updated-since returns a miss.
   --field         project one field path as plain output; repeat or comma-separate
                   for TSV rows (e.g. --field slug, or --field type,slug,status).
                   Supports dot paths and array indexes.
-  --json          emit a JSON array of record summaries on stdout
-                  ({type, slug, title, status, tags, design_slug?, created_at,
-                  updated_at}); truncation hint routes to stderr. With --count,
-                  emits \`{"count": N}\` instead. On failure, a \`{error, hint}\`
-                  JSON object is emitted to stdout too, so \`--json\` stdout is
-                  always parseable.`,
+  --json          emit one JSON object on stdout
+                  ({items, total, truncated}). With --count, emits
+                  \`{"count": N}\` or \`{"miss": true}\`. Notes go to stderr.`,
   which: `fbrain which [--json] [--check]
 
 Print the brain executable selected by this shell, the resolved source root,
@@ -544,13 +547,17 @@ store a generic explicit link tag on the source record.
   --json       emit \`{ok, from_type, from_slug, to_type, to_slug}\` on stdout; the human \`linked …\` line
             moves to stderr so \`--json\` stdout is always parseable. On failure
             a \`{error, hint}\` JSON object is emitted to stdout too.`,
-  backlinks: `fbrain backlinks <slug> [--type T] [--json]
+  backlinks: `fbrain backlinks <slug> [--type T] [--page ID] [--limit N] [--json]
 
 Lists records that link to <slug> through explicit stored edges or mention it
 with a body \`[[slug]]\` reference. Does not require the target slug to exist,
 so dangling wiki-link intent remains queryable.
 
-  --type    target type for typed explicit edges (body refs are slug-only)
+  --type    target type for typed explicit edges (body refs are slug-only).
+            It does not change the page key.
+  --page ID read that link page. The default is \`__head__\`. An older id is
+            \`p\` plus eight digits.
+  --limit   max cards from that one page (default 50, cap 100)
   --json    emit \`{slug, type?, linked_from:[...]}\` on stdout.`,
   graph: `fbrain graph <neighbors|path|query> [...] [--json]
 
@@ -876,82 +883,25 @@ FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  reindex: `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges] [--max-records N] [--bm25] [--list-index] [--child-task-index] [--papercut-status-index]
+  reindex: `brain reindex --target <hash> --source-hash <type> --slug <slug> [--slug <slug> ...]
 
-Ensures every live (non-tombstoned) fbrain record's CURRENT embedding is
-present by re-issuing an update mutation. fold_db's EmbeddingIndex is not
-purged on tombstone or re-put.
+One call names one target hash, one source type, and at most 25 slugs.
+It reads those RecordListEntry keys and writes one batch.
+It prints wrote N and the cursor key. It does not loop.
 
-NOTE: fold_db's index is append-only. Re-issuing the update does NOT
-replace the prior embedding in place — it APPENDS a fresh one and the
-previous entry persists as stale. So reindex does NOT de-duplicate the
-index and does NOT reduce pollution (it adds one stale entry per record).
-It is not a fix for high \`doctor --freshness\` pollution; that purge is
-upstream fold_db work (G3d/G3e), not available at the fbrain layer.
+  --target          list hash. all is valid. A type, type#status, tag#, link#,
+                    child#, symptom, symptom#, keyword, or kw# are valid.
+  --source-hash     one record type. all is refused.
+  --slug            repeat up to 25. A call with no slug is refused.
+  --tags            the old payload write stopped. No scan.
+  --backlinks       the old payload write stopped. No scan.
+  --child-task-index the old payload write stopped. No scan.
+  --papercut-status-index does not write PapercutStatusIndex.
+  --bm25            refused.
+  --list-index      refused. This command does not walk every record.
+  --graph-edges     refused. This command does not walk every record.
 
-  --type            narrow to one of: ${RECORD_TYPE_LIST}
-                    (default: all ${RECORD_TYPE_COUNT})
-  --dry-run         list records that would be reindexed; no writes
-  --tags            rebuild the tag secondary index from a full corpus scan.
-                    Repairs records written before the index existed or after
-                    a best-effort index update failed, and members an old
-                    binary wrote to the legacy layout. Needs the TagMembership
-                    schema (\`brain init\` registers it; reindex never does).
-                    ADMIN operation for a quiet moment, one device at a time:
-                    it deletes rows no record backs, so a member another
-                    device adds meanwhile can be deleted. Standalone mode:
-                    skips the embedding refresh.
-  --backlinks       rebuild the backlink secondary index from a full corpus scan.
-                    Repairs records written before the index existed or after
-                    a best-effort backlink update failed. Same schema need and
-                    same admin-operation rule as --tags. Standalone mode:
-                    skips the embedding refresh.
-  --graph-edges     rebuild typed graph edges for a bounded slice of the keyed
-                    Brain list index. Preserves frontmatter-origin edges that
-                    cannot be reconstructed from stored bodies and prints the
-                    known enumeration-under-report caveat. Standalone mode.
-  --max-records N   cap --graph-edges work (default: 100; positive integer).
-  --bm25            pre-warm the client-side BM25 search cache \`ask\`/\`search\`
-                    read on every call, from a full corpus scan. Read-only
-                    (no mutation, no --type narrowing — the cache is keyed by
-                    the same type set ask/search request). Run this after a
-                    bulk edit so the next \`ask\` hits a warm cache instead of
-                    paying for (and visibly noting) a live rebuild.
-                    Standalone mode: skips the embedding refresh.
-  --list-index      rebuild the RecordListEntry keyed list partition from an
-                    admin SOT scan of each product schema (and re-stamp the
-                    completeness marker). Repairs persistent under-report when
-                    dual-write patches failed while the marker stayed set —
-                    the case where \`brain get\` still resolves rows that
-                    \`brain list\` / \`brain search\` miss. Dry-run censuses
-                    listed-set vs SOT without writing. Standalone mode: skips
-                    the embedding refresh.
-  --child-task-index rebuild the design->child-task keyed index (see
-                    src/child-task-index.ts) from an admin SOT scan of the
-                    task schema (and re-stamp the completeness marker).
-                    Repairs the same class of under-report as --list-index,
-                    one layer up: \`brain get <design>\` / \`brain delete
-                    <design>\` resolve child tasks through this index once
-                    it is registered and complete. Dry-run censuses the
-                    indexed set vs SOT without writing. Standalone mode:
-                    skips the embedding refresh.
-  --papercut-status-index rebuild the status->papercut keyed ledger index
-                    from an admin SOT scan of the papercut schema. Repairs
-                    missing, duplicate, or old-status rows and stamps the
-                    global completeness marker. Dry-run censuses indexed
-                    status/slug pairs vs SOT without writing. Standalone mode:
-                    skips the embedding refresh.
-                    This scan issues one point read per live papercut
-                    (thousands on a real corpus) and has NO overall
-                    wall-clock deadline of its own — total run time scales
-                    with live corpus size and node load, from seconds to
-                    tens of minutes. It reports progress to stderr
-                    ("scanned N record(s)...") every ~250 records or ~5s,
-                    whichever comes first, so a long-but-healthy run does
-                    not read like a hang.
-
-Run with the global --verbose to print per-record outcome
-(kept | reindexed | skipped-tombstone).`,
+Run with the global --verbose to print node calls.`,
   migrate: `fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
 fbrain migrate --status
 fbrain migrate --resume <manifest-id>
@@ -994,11 +944,9 @@ Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
   papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B | --body-file PATH|-]
                        [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
-                       [--repo owner/name] [--tag T]... [--not-duplicate-of SLUG]...
-                       [--not-duplicate-of-any] [--reopen CANONICAL]
+                       [--repo owner/name] [--tag T]...
 brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
                         [--duplicate-of SLUG]   (required with --status duplicate)
-                        [--durable]
 brain papercut set <slug> [--kind K] [--repo owner/name] [--severity p0|p1|p2|p3]
                       [--component C]
 brain papercut census [<component>] [--point-read] [--json]
@@ -1011,34 +959,15 @@ failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
 and closed at the bottom, 22 could not be counted at all, and the same defect
 was filed twice two hours apart by runs that could not see each other.
 
-file    Files a new papercut, AFTER a dedupe gate. <slug> may leave out the
-        leading \`papercut-\`; it is added and one stderr line says so. Only
-        \`file\` does this: close, set and put take the full slug. The gate is two
-        nets: an exact \`symptom_hash\` match over (component, normalized
-        --symptom), and a similarity check against every LIVE papercut in the
-        same component (and near-identical live rows in any component).
-        LIVE means open, partial, or fixed — \`fixed\` still gates, because the
-        fix is not proven on any machine until the record reads \`verified\`.
-        A hit REFUSES the write (exit 3) and prints the candidates.
+file    Files a new papercut. <slug> may leave out the leading \`papercut-\`; it
+        is added and one stderr line says so. Only \`file\` does this: close, set
+        and put take the full slug. The same slug is a refile when the filing
+        text matches. A different slug in the symptom head is a duplicate. The
+        command reads that one head. It does not rank the corpus. A duplicate
+        REFUSES the write (exit 3) and prints that slug. Nothing is written.
 
-        RECURRENCE: a row CLOSED (verified/wontfix/duplicate) in the last 14
-        days that reads like the same defect also refuses the write. It may be
-        a recurrence or a SIBLING defect that shares the words, and similarity
-        cannot tell them apart: read its claim. If the defect came back, do
-        not file a fresh row: re-run the same command with --reopen <slug>.
-        The filing becomes a \`reconfirmed\` evidence block on that row and a
-        closed row goes back to \`open\` — one row carries the recurrence. If it
-        is a sibling, clear it with --not-duplicate-of <slug>.
-        --not-duplicate-of-any does not clear a recurrence.
-
-        The refusal prints the complete SIMILARITY-ranked set, so clearing what
-        it named cannot reveal a second page of it. It does not follow
-        citations: the record that owns the class can be one hop from a
-        candidate, so read each candidate's body. Clear a false match with
-        --not-duplicate-of <slug>, or, once you have read them all,
-        --not-duplicate-of-any. Both are recorded in the new record's body —
-        the bulk form says so in its own words, so a reader can tell the two
-        apart. Neither can clear an EXACT slug match.
+        file and close both require a durable receipt. A queued receipt fails
+        the command. A partial index fails the command.
 
 close   Sets the status field AND appends the evidence block in ONE write, so a
         half-closure is not expressible. --status verified additionally requires
@@ -1046,17 +975,9 @@ close   Sets the status field AND appends the evidence block in ONE write, so a
         merge reference is rejected, because "merged" is a fact about a
         repository and not about anything running.
 
-        The ack carries durability=durable|queued|unreported and the write's
-        revision. Only durable means on disk. queued means the node took the
-        write and has not flushed it, unreported means this node does not
-        answer the question at all; a queued status write has been observed to
-        revert across a node restart, taking the evidence stanza with it. A
-        re-read does NOT detect this -- a queued write is served from the state
-        it landed in, so the check reads exactly like a durable one, and the
-        ack prints one line saying so. --durable
-        asks for an exact disk receipt for the one batch and fails loudly when
-        the node will not confirm it; a status transition is a handful of small
-        fields, so it is cheap to pay for there, unlike on a body append.
+        The ack carries durability=durable and the write's revision. Only
+        durable means on disk. A queued receipt fails the command. The status
+        move and the reference twin, when the twin changes, are one batch.
 
 set     Amends a header column on an existing row: --kind, --repo, --severity,
         --component. Nothing else. No status transition (that is close, which
@@ -1082,63 +1003,25 @@ set     Amends a header column on an existing row: --kind, --repo, --severity,
         reader who finds kind=specified-fix on a row filed as complaint cannot
         tell it was amended, when, or from what.
 
-census  Counts by component and status, and prints its own method line.
+census  Counts the cards on one list page and prints its method line.
 
-        It counts from the snapshot the index already carries: one node query
-        per status partition and ZERO point reads. It reads exactly two fields,
-        component and status, and both are written only by verbs that go
-        through the resident write plan, which patches this index in the same
-        write — so neither can lag. Measured on the primary over all 2230
-        common open rows (2026-09-04), snapshot against point read: component
-        and status disagreed on ZERO rows.
-        --point-read re-reads every record and re-checks it against its
-        partition. That is the only reading that catches a record whose status
-        moved without this index following, and it is an index audit rather
-        than a counting method: 2977 node requests and 141.8s, against 3.3s for
-        the same ledger the same hour. Reach for it when you suspect the index,
-        or after brain reindex --papercut-status-index.
-        list reads the same snapshot by default as of 2026-09-06; it kept the
-        point read until then, because list is ordered oldest-updated-first and
-        updated_at was the field the snapshot lagged on. Either way the method
-        line says which reading produced the numbers.
+        The read is one HashRangeKey. Hash \`papercut\`. Range \`__head__\`.
+        Field \`blp_page\`. A card carries slug, status, title, and updated_at.
+        The page does not carry component. When older is set, the line says sample.
+        --point-read reads those slugs from the product records.
+        A component argument needs --point-read.
 
-list    The row-level view of the SAME read census counts, so the two can never
-        disagree. Applies <component> and --status, returns every matching row
-        (no sample, no cap), and carries every stored header field —
-        component/severity/kind/repo/fixed_by/verified_by/duplicate_of — because
-        those are what a closure audit is made of. Ordered oldest-updated first,
-        which is the order the reconcile loop actually consumes.
+list    Prints the cards on that page. \`--status S\` uses hash \`papercut#S\`.
+        The read is one HashRangeKey. Range \`__head__\`. Field \`blp_page\`.
+        The command does not read PapercutStatusIndex.
 
-        Like census, it reads each row from the snapshot the index already
-        carries: one node query per status partition and ZERO point reads.
-        Measured on the primary 2026-09-06, unfiltered: 10 node requests and
-        21.7s of node service time, against 3404 requests and 2743.3s for the
-        point read of the same ledger. In a controlled fast/point-read/fast
-        sandwich over 274 rows, the 273 that did not change during the window
-        agreed on EVERY stored field; updated_at disagreed on one row (0.37%,
-        against 46.8% on 2026-09-04, before brain append and brain tag began
-        patching this index).
-        --point-read re-reads every record and re-checks it against its
-        partition. That is the only reading that catches a record whose header
-        moved without this index following, and it is an index audit rather
-        than a listing method. Reach for it when you suspect the index, or
-        after brain reindex --papercut-status-index.
-        --index-only returns slug + status partition straight from the keyed
-        index, without even parsing the payload. The status is the partition
-        key, not re-verified per record, and there is no component filter —
-        queue consumers point-get what they act on.
-        --body-resolved keeps only the rows whose BODY claims a resolution the
-        typed status does not carry: status open with a Status: FIXED/RESOLVED
-        or Verified: line, or status fixed carrying a live-check line. The
-        ledger predates the typed status column, so runs wrote their verdict as
-        prose and left the header alone — 11 of the 16 open rows with a
-        fixed_by header read that way on 2026-09-05, the oldest since
-        2026-08-05, and every reader that ranks by status counted them as
-        outstanding. These are CANDIDATES for a live re-check, not closures: a
-        body claiming verified is a hypothesis until someone re-measures, so
-        this is a reader with no write path. Refuses --fast and --index-only,
-        because body is the field it matches and neither reading can be trusted
-        for it.
+        The page does not carry component, severity, kind, repo, or tags.
+        Those filters need --point-read. --point-read reads the product
+        records for the slugs on the page.
+        --index-only prints slug and status from the card.
+        --body-resolved reads the body of those slugs. It keeps a row whose
+        body claims a resolution the status does not carry. It refuses
+        --fast and --index-only.
 
 Statuses: ${PAPERCUT_STATUSES.join(" | ")}
 Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
@@ -1287,6 +1170,8 @@ const APPEND_OPTIONS = {
 } as const;
 const GET_OPTIONS = {
   type: { type: "string" },
+  page: { type: "string" },
+  limit: { type: "string", short: "n" },
   "body-limit": { type: "string" },
   field: { type: "string", multiple: true },
   // Machine-readable mode: emit the resolved record as a single JSON
@@ -1300,10 +1185,7 @@ const LIST_OPTIONS = {
   // `--limit` with `-n` short alias — mirrors SEARCH_OPTIONS / ASK_OPTIONS so a
   // user who learned `search --limit N` doesn't hit "Unknown option" on list.
   limit: { type: "string", short: "n" },
-  // `--offset N` — skip the first N matches (after filter+sort) before the
-  // limit applies. The paging companion to --limit: `--offset 50 -n 50`
-  // yields records 51–100. Non-negative integer; validated before parseArgs.
-  offset: { type: "string" },
+  page: { type: "string" },
   // `--updated-since <ISO|relative>` — keep only records whose updated_at is
   // at or after the given instant. Accepts an ISO-8601 timestamp or a
   // relative window token (`7d`, `24h`, `2w`, `30m`, `45s`).
@@ -1468,6 +1350,8 @@ const LINK_OPTIONS = {
 } as const;
 const BACKLINKS_OPTIONS = {
   type: { type: "string" },
+  page: { type: "string" },
+  limit: { type: "string", short: "n" },
   json: { type: "boolean", default: false },
 } as const;
 const GRAPH_OPTIONS = {
@@ -1479,6 +1363,9 @@ const GRAPH_OPTIONS = {
 } as const;
 const REINDEX_OPTIONS = {
   type: { type: "string" },
+  target: { type: "string" },
+  "source-hash": { type: "string" },
+  slug: { type: "string", multiple: true },
   "dry-run": { type: "boolean", default: false },
   tags: { type: "boolean", default: false },
   backlinks: { type: "boolean", default: false },
@@ -1511,15 +1398,8 @@ export const PAPERCUT_OPTIONS = {
   kind: { type: "string" },
   repo: { type: "string" },
   tag: { type: "string", multiple: true },
-  "not-duplicate-of": { type: "string", multiple: true },
-  "not-duplicate-of-any": { type: "boolean" },
-  reopen: { type: "string" },
   // close
   status: { type: "string" },
-  // `papercut close` only: require a durable disk receipt for the status write.
-  // Deliberately NOT shared with the other subcommands — the consumption table
-  // below refuses it on any verb that would ignore it.
-  durable: { type: "boolean" },
   // census / list
   "index-only": { type: "boolean" },
   fast: { type: "boolean" },
@@ -1828,9 +1708,6 @@ const LIMIT_INT_FLAGS: readonly IntFlagSpec[] = [
 ];
 const BODY_LIMIT_INT_FLAGS: readonly IntFlagSpec[] = [
   { flag: "--body-limit", canonical: "--body-limit" },
-];
-const OFFSET_INT_FLAGS: readonly IntFlagSpec[] = [
-  { flag: "--offset", canonical: "--offset" },
 ];
 const USAGE_WINDOW_INT_FLAGS: readonly IntFlagSpec[] = [
   { flag: "--usage-window", canonical: "--usage-window" },
@@ -2713,6 +2590,7 @@ export function putJsonPayload(result: PutResult): Record<string, unknown> {
     exact_projections: result.exactProjections ?? null,
     durability: result.durability ?? "queued",
     search: result.search ?? "queued",
+    index_notes: result.indexNotes ?? [],
   };
 }
 
@@ -2806,7 +2684,10 @@ export async function withTypeAsPositionalHint<T>(
 }
 
 async function runGet(args: Argv, verbose: Verbose): Promise<number> {
-  const intArgs = normalizeNegativeIntFlagValues(args, BODY_LIMIT_INT_FLAGS);
+  const intArgs = normalizeNegativeIntFlagValues(args, [
+    ...BODY_LIMIT_INT_FLAGS,
+    ...LIMIT_INT_FLAGS,
+  ]);
   const { values, positionals } = parseCommandArgs(
     {
       args: intArgs,
@@ -2852,9 +2733,16 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     min: 1,
     code: "invalid_body_limit",
   });
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
   const cfg = readConfig();
   const getOpts: Parameters<typeof getRecord>[0] = { cfg, slug, verbose };
   if (type) getOpts.type = type;
+  if (typeof values.page === "string" && values.page.length > 0) getOpts.page = values.page;
+  if (limit !== undefined) getOpts.limit = limit;
   if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
   if (fields.length > 0) getOpts.fields = fields;
   if (values.json) getOpts.json = true;
@@ -2886,10 +2774,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runList(args: Argv, verbose: Verbose): Promise<number> {
-  const intArgs = normalizeNegativeIntFlagValues(args, [
-    ...LIMIT_INT_FLAGS,
-    ...OFFSET_INT_FLAGS,
-  ]);
+  const intArgs = normalizeNegativeIntFlagValues(args, [...LIMIT_INT_FLAGS]);
   let parsed;
   try {
     parsed = parseCommandArgs(
@@ -2931,19 +2816,14 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     min: 1,
     code: "invalid_limit",
   });
-  const offset = strictInt(values.offset, {
-    flag: lastIntFlagSpelling(args, OFFSET_INT_FLAGS),
-    min: 0,
-    code: "invalid_offset",
-  });
   const cfg = readConfig();
   const lOpts: Parameters<typeof listCmd>[0] = { cfg, verbose };
   if (type) lOpts.type = type;
   if (values.status) lOpts.status = values.status;
   if (values.tag) lOpts.tag = values.tag;
   if (typeof limit === "number" && Number.isFinite(limit)) lOpts.limit = limit;
-  if (typeof offset === "number" && Number.isFinite(offset))
-    lOpts.offset = offset;
+  if (typeof values.page === "string" && values.page.length > 0)
+    lOpts.page = values.page;
   if (values["updated-since"]) {
     lOpts.updatedSinceMs = parseUpdatedSince(values["updated-since"]);
   }
@@ -3352,13 +3232,17 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     lOpts.onResult = (payload) =>
       console.log(
         JSON.stringify({
-          ok: true,
+          ok: payload.index_applied,
           task: payload.from_slug,
           design: payload.to_slug,
           from_type: payload.from_type,
           from_slug: payload.from_slug,
           to_type: payload.to_type,
           to_slug: payload.to_slug,
+          index_applied: payload.index_applied,
+          ...(payload.index_notes !== undefined
+            ? { index_notes: payload.index_notes }
+            : {}),
         }),
       );
   }
@@ -3367,9 +3251,10 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
 }
 
 async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
+  const intArgs = normalizeNegativeIntFlagValues(args, LIMIT_INT_FLAGS);
   const { values, positionals } = parseCommandArgs(
     {
-      args,
+      args: intArgs,
       strict: true,
       allowPositionals: true,
       options: BACKLINKS_OPTIONS,
@@ -3390,7 +3275,20 @@ async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
   }
   const cfg = readConfig();
   const type = parseRecordType(values.type);
-  await backlinksCmd({ cfg, slug, type, json: values.json, verbose });
+  const limit = strictInt(values.limit, {
+    flag: lastIntFlagSpelling(args, LIMIT_INT_FLAGS),
+    min: 1,
+    code: "invalid_limit",
+  });
+  await backlinksCmd({
+    cfg,
+    slug,
+    type,
+    json: values.json,
+    verbose,
+    ...(typeof values.page === "string" && values.page.length > 0 ? { page: values.page } : {}),
+    ...(limit !== undefined ? { limit } : {}),
+  });
   return 0;
 }
 
@@ -4119,6 +4017,14 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
     }
     rOpts.graphMaxRecords = max;
   }
+  if (typeof values.target === "string") rOpts.target = values.target;
+  if (typeof values["source-hash"] === "string") rOpts.sourceHash = values["source-hash"];
+  if (values.slug !== undefined) {
+    const raw = values.slug;
+    rOpts.slugs = (Array.isArray(raw) ? raw : [raw]).filter(
+      (slug): slug is string => typeof slug === "string" && slug.length > 0,
+    );
+  }
   await reindexCmd(rOpts);
   return 0;
 }
@@ -4366,9 +4272,6 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "kind",
     "repo",
     "tag",
-    "not-duplicate-of",
-    "not-duplicate-of-any",
-    "reopen",
   ],
   close: [
     ...PAPERCUT_SHARED_FLAGS,
@@ -4377,7 +4280,6 @@ export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
     "fixed-by",
     "verified-by",
     "duplicate-of",
-    "durable",
   ],
   // `set` deliberately does NOT list `status`. A status move must carry
   // evidence, and `close` is the verb that takes it; a header amender that
@@ -4506,42 +4408,14 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
     };
     if (typeof values.repo === "string") opts.repo = values.repo;
     if (values.tag) opts.tags = values.tag as string[];
-    if (values["not-duplicate-of"]) {
-      opts.notDuplicateOf = values["not-duplicate-of"] as string[];
-    }
-    if (values["not-duplicate-of-any"]) opts.notDuplicateOfAny = true;
-    if (typeof values.reopen === "string") opts.reopen = values.reopen;
     const result = await papercutFileCmd(opts);
     // A blocked duplicate is a REFUSED write, and a routine that ignores the
     // exit code must not read it as "filed". Exit 3 distinguishes it from both
     // success (0) and a malformed invocation (2).
     if (result.action === "duplicate_blocked") {
-      // One stderr line too: callers that capture only stderr saw an empty
-      // stream on exit 3 and misread the refusal
-      // (papercut-brain-papercut-file-duplicate-exit). stdout keeps the full
-      // candidate list (or the --json object).
-      // An EXACT match is this slug against itself, so the caller is almost
-      // always re-filing to correct a header column they left off the first
-      // call. Sending them to `brain append` there is sending them to write
-      // prose no filter can read; `papercut set` is the verb that moves the
-      // column. Measured 2026-09-26: the omitted flag was `--kind`, and the
-      // row stayed absent from `--kind specified-fix` with the correction
-      // sitting in its body.
-      const exact = result.duplicates.find((d) => d.exact);
-      // A recurrence refusal does NOT name a --reopen slug here. The top-scored
-      // CLOSED row is as likely to be a sibling defect as the recurrence, and a
-      // slug in the one line a caller reads invites a --reopen that flips a
-      // verified row back to open (papercut-papercut-dedupe-gate-surfaces-an-
-      // instance-and-calls-the-set-complete-while-the-class-owner-is-one-hop-
-      // away-20261004). Name the count and send the reader to the claims.
-      const closedCount = result.duplicates.filter((d) => d.recurrence === true).length;
-      const next = result.reopen?.length
-        ? `${closedCount} of them CLOSED (a recurrence or a sibling defect): read their claims on stdout, then --reopen the row with the same defect or --not-duplicate-of a sibling`
-        : exact
-          ? `that is THIS slug: to correct a header column use \`brain papercut set ${exact.slug} [--kind K] [--repo owner/name] [--severity S] [--component C]\`, or append evidence with \`brain append ${exact.slug} --type papercut\``
-          : `append evidence: brain append ${result.duplicates[0]?.slug ?? "<slug>"} --type papercut`;
+      const held = result.duplicates[0]?.slug ?? "<slug>";
       console.error(
-        `papercut file: NOT filed (exit 3) — ${result.duplicates.length} candidate(s) may already describe this; ${next}. Candidates are on stdout.`,
+        `papercut file: NOT filed (exit 3) — the symptom head already names ${held}.`,
       );
       return 3;
     }
@@ -4583,7 +4457,6 @@ async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
       opts.verifiedBy = values["verified-by"];
     if (typeof values["duplicate-of"] === "string")
       opts.duplicateOf = values["duplicate-of"];
-    if (values.durable === true) opts.durable = true;
     await papercutCloseCmd(opts);
     return 0;
   }

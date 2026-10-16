@@ -3,11 +3,18 @@
 // compatibility; all other pairs store a link:<type>:<slug> tag on the
 // source record. Explicit edges reject missing targets.
 
+import { hasSpillMarker } from "../body-spill.ts";
 import { FbrainError, type Verbose } from "../client.ts";
-import { reconcileBacklinkIndex } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
+import { extractGraphEdges } from "../graph-edge.ts";
+import {
+  commitHeadPages,
+  INDEX_PARTIAL,
+  planRecordListSide,
+  WRITE_BATCH_MAX,
+} from "../list-page.ts";
 import {
   findBySlug,
   genericLinkTag,
@@ -15,9 +22,11 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
+  writeRecordFields,
   type FbrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
+import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type LinkOptions = {
   cfg: Config;
@@ -44,6 +53,9 @@ export type LinkResult = {
   from_slug: string;
   to_type: RecordType;
   to_slug: string;
+  // False when a head write did not apply. A cap note can still be true.
+  index_applied: boolean;
+  index_notes?: string[];
 };
 
 export async function linkCmd(opts: LinkOptions): Promise<void> {
@@ -60,7 +72,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   // A keyed point-read (`findBySlug`) is authoritative (found-or-not) without
   // scanning, so a real record on a >100-row schema is still found and a typo'd
   // <task-slug> errors in one query. Same point-read put.ts / new.ts use.
-  const source = await findBySlug(node, fromType, fromHash, fromSlug);
+  const source = await findBySlug(node, fromType, fromHash, fromSlug, opts.cfg, {
+    hydrate: false,
+  });
   if (!source) {
     if (fromType !== "task" || toType !== "design") {
       throw new FbrainError({
@@ -77,7 +91,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     // lookup: a flaky page miss just falls through to the generic hint.
     const designHash = schemaHashFor("design", opts.cfg);
     const taskHash = schemaHashFor("task", opts.cfg);
-    const asDesign = await findBySlug(node, "design", designHash, fromSlug);
+    const asDesign = await findBySlug(node, "design", designHash, fromSlug, opts.cfg, {
+      hydrate: false,
+    });
     let hint: string;
     if (asDesign) {
       // Only print the swap suggestion when the 2nd arg actually names a
@@ -92,7 +108,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
       const asTask =
         toSlug === fromSlug
           ? null
-          : await findBySlug(node, "task", taskHash, toSlug);
+          : await findBySlug(node, "task", taskHash, toSlug, opts.cfg, { hydrate: false });
       hint = asTask
         ? `'${fromSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${toSlug} ${fromSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
         : `'${fromSlug}' is a design, not a task — \`link\` takes a TASK first. Name a real task (\`fbrain list --type task\`), then the design (usage: \`fbrain link <task-slug> <design-slug>\`).`;
@@ -106,7 +122,9 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     });
   }
 
-  const target = await findBySlug(node, toType, toHash, toSlug);
+  const target = await findBySlug(node, toType, toHash, toSlug, opts.cfg, {
+    hydrate: false,
+  });
   if (!target) {
     // Wrong-type detection: if `designSlug` names a record of another type
     // (concept/reference/project/...), telling the user to "create the
@@ -135,45 +153,70 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   const now = nowIso();
   const fields = fieldsForLinkUpdate(source, fromType, toType, toSlug, now);
 
-  await node.updateRecord({
-    schemaHash: fromHash,
-    keyHash: fromSlug,
-    fields,
-  });
-  await reconcileBacklinkIndex(
+  // The source read keeps the stored head. Seal so a full body cannot land again.
+  const sealed = await writeRecordFields({
     node,
-    opts.cfg,
-    fromType,
-    fromSlug,
-    source,
-    fields as FbrainRecord,
-    opts.verbose,
-  );
-  // Keep the design->child-task index current (see child-task-index.ts). A
-  // task<->design `link` reparents the task exactly like a `put` that edits
-  // `design_slug` would — the "any task reparent" write path the index must
-  // cover, not just create/put/delete.
-  if (fromType === "task") {
-    const { maintainChildTaskIndex } = await import("../child-task-index.ts");
-    await maintainChildTaskIndex({
-      node,
-      cfg: opts.cfg,
-      taskSlug: fromSlug,
-      task: fields as FbrainRecord,
-      previousDesignSlug: source.design_slug,
-      verbose: opts.verbose,
-    });
+    cfg: opts.cfg,
+    type: fromType,
+    slug: fromSlug,
+    schemaHash: fromHash,
+    fields,
+    ...(opts.verbose ? { verbose: opts.verbose } : {}),
+  });
+  const storedRecord = sealed.fields as FbrainRecord;
+  // A spill on this write keeps the full body already in memory.
+  const linkView: FbrainRecord =
+    sealed.spilled.length > 0 && typeof fields.body === "string"
+      ? { ...storedRecord, body: fields.body }
+      : storedRecord;
+  // Wiki dests keep their slots. The explicit target is last, under LINK_CAP.
+  const edges = extractGraphEdges({ sourceSlug: fromSlug, body: linkView.body });
+  edges.push({
+    src: fromSlug.toLowerCase(),
+    dst: toSlug.toLowerCase(),
+    type: "mentions",
+    provenance: "explicit",
+    created_at: now,
+  });
+  const side = await planRecordListSide({
+    node,
+    cfg: opts.cfg,
+    type: fromType,
+    previous: source,
+    next: linkView,
+    nextEdges: edges,
+    // The tail stays in the file. Keep stored edge ids that are not in the head.
+    ...(hasSpillMarker(linkView.body) ? { preserveStoredEdges: true } : {}),
+  });
+  const notes = [...side.details];
+  let ops = side.ops;
+  if (ops.length > WRITE_BATCH_MAX) {
+    ops = ops.slice(0, WRITE_BATCH_MAX);
+    if (!notes.includes(INDEX_PARTIAL)) notes.push(INDEX_PARTIAL);
   }
+  if (ops.length > 0) {
+    if (!node.mutateBatch) {
+      if (!notes.includes(INDEX_PARTIAL)) notes.push(INDEX_PARTIAL);
+    } else {
+      await node.mutateBatch(ops);
+    }
+  }
+  const headNotes = await commitHeadPages(node, side.heads);
+  for (const line of headNotes) {
+    if (!notes.includes(line)) notes.push(line);
+  }
+  const indexNote = formatIndexNotes(notes);
+  const indexApplied = headNotes.length === 0;
 
-  print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}`);
-  // Emit the structured payload from the SAME normalized slugs the printed
-  // line uses (one source of truth — see the read commands).
+  print(`linked ${fromType} ${fromSlug} → ${toType} ${toSlug}${indexNote}`);
   opts.onResult?.({
     action: "linked",
     from_type: fromType,
     from_slug: fromSlug,
     to_type: toType,
     to_slug: toSlug,
+    index_applied: indexApplied,
+    ...(notes.length > 0 ? { index_notes: notes } : {}),
   });
 }
 
@@ -243,7 +286,7 @@ async function findOtherTypeForSlug(
   }
   for (const [hash, t] of typesByHash) {
     try {
-      const row = await findBySlug(node, t, hash, slug);
+      const row = await findBySlug(node, t, hash, slug, cfg, { hydrate: false });
       if (row) return t;
     } catch {
       // Best-effort: a flaked probe falls through to the next hash.

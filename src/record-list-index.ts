@@ -201,8 +201,8 @@ export async function readTypeListIndex(
  * Replace the whole list for one type. Cold-seed and admin repair path only;
  * `patchTypeListIndex` is what the hot put/delete path uses.
  *
- * Upserts every live SOT record, deletes partition rows not in SOT (stale
- * dual-write residue), then stamps the completeness marker.
+ * Deletes partition rows that are not in the live set. An upsert that writes
+ * no row does not stamp the completeness marker.
  */
 export async function writeTypeListIndex(
   node: NodeClient,
@@ -222,10 +222,11 @@ export async function writeTypeListIndex(
       }
     }
   }
+  let wroteRow = false;
   for (const record of records) {
-    await upsertTypeListEntry(node, cfg, type, record);
+    if (await upsertTypeListEntry(node, cfg, type, record)) wroteRow = true;
   }
-  await markTypePartitionMigrated(node, cfg, type);
+  if (wroteRow) await markTypePartitionMigrated(node, cfg, type);
 }
 
 /** Point-read one HashRange row to decide create vs update. */
@@ -243,24 +244,18 @@ export async function typeListEntryExists(
   return res.results.length > 0;
 }
 
-/** Write ONE record's row. Returns false when the HashRange schema is absent. */
+/** A new payload is not written. `deleteTypeListEntry` still removes an old row. */
 export async function upsertTypeListEntry(
   node: NodeClient,
   cfg: SchemaCfg,
   type: RecordType,
   record: FbrainRecord,
 ): Promise<boolean> {
-  const entryHash = recordListEntryHash(cfg);
-  if (!entryHash) return false;
-  const { hash, range } = entryKeyFor(type, record.slug);
-  const fields = entryFieldsFor(type, record);
-  const exists = await typeListEntryExists(node, entryHash, type, record.slug);
-  if (exists) {
-    await node.updateRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
-  } else {
-    await node.createRecord({ schemaHash: entryHash, fields, keyHash: hash, keyRange: range });
-  }
-  return true;
+  void node;
+  void cfg;
+  void type;
+  void record;
+  return false;
 }
 
 /**
