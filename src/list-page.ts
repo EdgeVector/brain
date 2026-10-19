@@ -1516,15 +1516,16 @@ export async function readPageChain(
 }
 
 /**
- * Two writes can name the same page. Apply each replay on the shared prior
- * page so both cards stay. One head is returned unchanged.
+ * Replay each head on the shared prior page. A single list head is already
+ * that page. A single keyword head is replayed too: its stored fields can
+ * replace another card on a full ranker page.
  */
 export function mergeHeadCommits(
   heads: readonly HeadCommit[],
 ): { head: HeadCommit | null; note: string | null } {
   const first = heads[0];
   if (!first) return { head: null, note: null };
-  if (heads.length === 1) return { head: first, note: null };
+  if (heads.length === 1 && first.replay.kind !== "keyword") return { head: first, note: null };
   if (heads.some((head) => head.replay.kind === "keyword")) return mergeKeywordCommits(heads);
   return mergeListCommits(heads);
 }
