@@ -325,6 +325,8 @@ export async function commitResidentWritePlans(opts: {
   writes: readonly { plan: ResidentWritePlan; type: RecordType; slug: string }[];
   durable?: boolean;
   failOnIndexPartial?: boolean;
+  /** A papercut close with no twin is one write. Replay its keyword heads. */
+  replayKeywords?: boolean;
 }): Promise<ResidentCommitResult> {
   const first = opts.writes[0];
   if (!first) return { ...emptyBatchResult(), indexNotes: [] };
@@ -343,7 +345,12 @@ export async function commitResidentWritePlans(opts: {
     type: write.type,
     delta: write.plan.countDelta,
   })), notes);
-  const ops = orderPrimaryFirst(assembleWriteOps(opts.writes, related, notes).concat(counts));
+  const ops = orderPrimaryFirst(assembleWriteOps(
+    opts.writes,
+    related,
+    notes,
+    opts.replayKeywords === true,
+  ).concat(counts));
   assertOpsFitAtomBudget(first.type, first.slug, ops);
   if (ops.length > WRITE_BATCH_MAX) {
     throw new FbrainError({
@@ -520,6 +527,7 @@ function assembleWriteOps(
   writes: readonly { plan: ResidentWritePlan }[],
   related: boolean,
   notes: string[],
+  replayKeywords = false,
 ): PlannedMutation[] {
   const sides: SideAssembly[] = writes.map((write) => ({
     ops: write.plan.ops.filter((op) => op.projection !== "primary"),
@@ -528,12 +536,15 @@ function assembleWriteOps(
     tokenSet: write.plan.tokenSet,
   }));
   const primary = writes.flatMap((write) => write.plan.ops.filter((op) => op.projection === "primary"));
-  if (!related) {
+  if (!related && !replayKeywords) {
     return dedupeOps(primary.concat(sides.flatMap((side) => assembleSide(side, false, notes))));
   }
   // Group page heads across the related writes before dedupe. A per-write
-  // render plus last-wins dedupe drops the other write's card.
-  const sharedHeads = headsToOps(sides.flatMap((side) => side.heads), true, notes);
+  // render plus last-wins dedupe drops the other write's card. A one-write
+  // close still replays keyword heads: the stored page can replace another card.
+  const sharedHeads = related
+    ? headsToOps(sides.flatMap((side) => side.heads), true, notes)
+    : sides.flatMap((side) => side.heads.map(headToOp));
   const sharedKeywords = headsToOps(
     sides.flatMap((side) => side.keywordHeads),
     true,
@@ -543,7 +554,8 @@ function assembleWriteOps(
     const token = side.tokenSet ? tokenSetOp(side.tokenSet) : null;
     return token ? [...side.ops, token] : [...side.ops];
   });
-  return dedupeOps(mergeSharedDirectories(primary.concat(rest, sharedHeads, sharedKeywords)));
+  const joined = primary.concat(rest, sharedHeads, sharedKeywords);
+  return dedupeOps(related ? mergeSharedDirectories(joined) : joined);
 }
 
 function assembleSide(side: SideAssembly, related: boolean, notes: string[]): PlannedMutation[] {
