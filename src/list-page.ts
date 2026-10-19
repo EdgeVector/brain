@@ -1541,13 +1541,22 @@ function mergeListCommits(
 ): { head: HeadCommit | null; note: string | null } {
   let page = parsePage(expectedPageRaw(heads));
   let note: string | null = null;
+  let lost = false;
   for (const head of heads) {
     const replay = head.replay;
     if (replay.kind === "place") {
+      // A full head stays as the prior page. Do not pop a card, and do not
+      // point older at an overflow page that already holds the moved card.
+      if (replay.overflowId.length > 0) {
+        note = "head full";
+        lost = true;
+        continue;
+      }
       const cards = dropCard(page.cards, replay.card.type ?? "", replay.card.slug);
       cards.unshift(replay.card);
       if (cards.length > replay.bound) {
         note = "head full";
+        lost = true;
         continue;
       }
       page = { cards, older: page.older, ...(page.linked !== undefined ? { linked: page.linked } : {}) };
@@ -1564,6 +1573,7 @@ function mergeListCommits(
       const held = page.cards[0]?.slug ?? "";
       if (held.length > 0 && held !== replay.slug) {
         note = "symptom occupied";
+        lost = true;
         continue;
       }
       page = { cards: [{ slug: replay.slug }], older: "" };
@@ -1573,20 +1583,25 @@ function mergeListCommits(
       const held = page.cards[0]?.slug ?? "";
       if (held.length > 0 && held !== replay.slug) {
         note = "symptom occupied";
+        lost = true;
         continue;
       }
       page = { cards: [], older: "" };
       continue;
     }
-    if (replay.kind === "ensure-empty" && page.cards.length === 0) {
-      page = { cards: [], older: "" };
+    if (replay.kind === "ensure-empty") {
+      if (page.cards.length === 0) page = { cards: [], older: "" };
+      continue;
     }
+    note = note ?? "page allocation conflict";
+    lost = true;
   }
+  if (lost) return { head: null, note };
   const last = heads[heads.length - 1];
   if (!last) return { head: null, note };
   const symptom = last.replay.kind === "symptom" || last.replay.kind === "clear";
   const json = renderPage(page, symptom);
-  if (json === null) return { head: last, note: note ?? "page cap" };
+  if (json === null) return { head: null, note: note ?? "page cap" };
   const existed = heads.some((head) => head.expected.type === "value");
   return {
     head: {
@@ -1603,19 +1618,27 @@ function mergeKeywordCommits(
 ): { head: HeadCommit | null; note: string | null } {
   let cards = parseKeywordCards(expectedPageRaw(heads), false);
   let note: string | null = null;
+  let lost = false;
   for (const head of heads) {
-    if (head.replay.kind !== "keyword") continue;
+    if (head.replay.kind !== "keyword") {
+      note = note ?? "keyword page";
+      lost = true;
+      continue;
+    }
     const placed = nextKeywordCards(cards, head.replay.type, head.replay.slug, head.replay.weight);
     if (placed === "saturated") {
       note = "keyword cap";
+      lost = true;
       continue;
     }
     if (placed === "full") {
       note = "keyword page";
+      lost = true;
       continue;
     }
     if (placed !== "same") cards = placed;
   }
+  if (lost) return { head: null, note };
   const last = heads[heads.length - 1];
   if (!last) return { head: null, note };
   if (cards.length === 0) {
@@ -1624,7 +1647,7 @@ function mergeKeywordCommits(
     return { head: { ...last, mutationType: "delete", fields: {} }, note };
   }
   const json = JSON.stringify({ cards: sortKeyword(cards) });
-  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return { head: last, note: note ?? "keyword page" };
+  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return { head: null, note: note ?? "keyword page" };
   const existed = heads.some((head) => head.expected.type === "value");
   return {
     head: {

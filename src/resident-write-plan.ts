@@ -31,7 +31,7 @@ import {
   type HeadCommit,
   type ListSidePlan,
 } from "./list-page.ts";
-import { type FbrainRecord } from "./record.ts";
+import { schemaHashFor, type FbrainRecord } from "./record.ts";
 
 export type ProjectionKind =
   | "primary"
@@ -370,51 +370,72 @@ export async function commitResidentWritePlans(opts: {
   return { ...primary, indexNotes: notes };
 }
 
-export async function removeResidentListSide(opts: {
+/**
+ * Product tombstone and page changes in one mutation call.
+ * The update stamps the tombstone fields. The delete hides the product key.
+ * Those two ops share a key, so this list must not pass through dedupe:
+ * dedupe would keep only the delete and drop the tombstone fields.
+ * The node applies the update first and the delete after it.
+ * A missing batch client or a failed call throws before any success line.
+ */
+export async function commitResidentRemoval(opts: {
   node: NodeClient;
   cfg: Config;
   type: RecordType;
-  record: FbrainRecord;
-  /** The delete command can prove page membership before the primary delete. */
-  side?: ListSidePlan;
+  slug: string;
+  tombstoneFields: Record<string, unknown>;
+  side: ListSidePlan;
 }): Promise<ResidentCommitResult> {
-  const side = opts.side ?? await planRecordListSide({
-    node: opts.node,
-    cfg: opts.cfg,
-    type: opts.type,
-    previous: opts.record,
-    next: null,
-    nextEdges: [],
-  });
-  const notes = [...side.details];
+  if (!opts.node.mutateBatch) {
+    throw new FbrainError({
+      code: "resident_commit_unavailable",
+      message: "this node client cannot send a Fold resident batch",
+      hint: "Upgrade brain so NodeClient.mutateBatch is present.",
+    });
+  }
+  const notes = [...opts.side.details];
   const counts = await countMutations(opts.node, [{
     cfg: opts.cfg,
     type: opts.type,
     delta: -1,
   }], notes);
-  const ops = assembleSide(side, false, notes).concat(counts);
+  const schemaHash = schemaHashFor(opts.type, opts.cfg);
+  const pages = dedupeOps(assembleSide({
+    ops: opts.side.ops,
+    heads: opts.side.heads,
+    keywordHeads: opts.side.keywordHeads,
+    tokenSet: opts.side.tokenSet,
+  }, false, notes).concat(counts));
+  const ops = [
+    {
+      mutationType: "update" as const,
+      schemaHash,
+      keyHash: opts.slug,
+      fields: opts.tombstoneFields,
+      projection: "primary" as const,
+    },
+    {
+      mutationType: "delete" as const,
+      schemaHash,
+      keyHash: opts.slug,
+      fields: {},
+      projection: "primary" as const,
+    },
+    ...pages,
+  ];
   if (ops.length > WRITE_BATCH_MAX) {
-    noteIndexPartial(notes, "batch cap");
     throw new FbrainError({
       code: "resident_batch_too_large",
-      message: `list removal has ${ops.length} mutations; the cap is ${WRITE_BATCH_MAX}.`,
-      hint: "The list page was not changed. Read the record before a manual retry.",
+      message: `delete batch has ${ops.length} mutations; the cap is ${WRITE_BATCH_MAX}.`,
+      hint: "The command does not report success. The record was not written.",
     });
   }
-  let primary = emptyBatchResult();
-  if (!opts.node.mutateBatch && ops.length > 0) {
-    noteIndexPartial(notes, "batch unavailable");
-  } else if (opts.node.mutateBatch && ops.length > 0) {
-    try {
-      primary = await opts.node.mutateBatch(ops);
-    } catch {
-      noteIndexPartial(notes, "batch1 failed");
-    }
+  try {
+    const primary = await opts.node.mutateBatch(ops);
+    return { ...primary, indexNotes: notes };
+  } catch (err) {
+    throw wrapCommitError(err, opts.type, opts.slug, ops);
   }
-  return {
-    ...primary,
-    indexNotes: notes,
-  };
 }
 
 function emptyBatchResult(): BatchMutationResult {
@@ -507,9 +528,22 @@ function assembleWriteOps(
     tokenSet: write.plan.tokenSet,
   }));
   const primary = writes.flatMap((write) => write.plan.ops.filter((op) => op.projection === "primary"));
-  let ops = primary.concat(sides.flatMap((side) => assembleSide(side, related, notes)));
-  if (related) ops = mergeSharedDirectories(ops);
-  return dedupeOps(ops);
+  if (!related) {
+    return dedupeOps(primary.concat(sides.flatMap((side) => assembleSide(side, false, notes))));
+  }
+  // Group page heads across the related writes before dedupe. A per-write
+  // render plus last-wins dedupe drops the other write's card.
+  const sharedHeads = headsToOps(sides.flatMap((side) => side.heads), true, notes);
+  const sharedKeywords = headsToOps(
+    sides.flatMap((side) => side.keywordHeads),
+    true,
+    notes,
+  );
+  const rest = sides.flatMap((side) => {
+    const token = side.tokenSet ? tokenSetOp(side.tokenSet) : null;
+    return token ? [...side.ops, token] : [...side.ops];
+  });
+  return dedupeOps(mergeSharedDirectories(primary.concat(rest, sharedHeads, sharedKeywords)));
 }
 
 function assembleSide(side: SideAssembly, related: boolean, notes: string[]): PlannedMutation[] {
