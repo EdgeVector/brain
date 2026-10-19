@@ -183,11 +183,15 @@ function linkCardSlugs(raw: string): string[] {
   try {
     const value = JSON.parse(raw) as { cards?: unknown };
     if (!Array.isArray(value.cards)) return [];
+    const seen = new Set<string>();
     const slugs: string[] = [];
     for (const item of value.cards) {
       if (!item || typeof item !== "object") continue;
       const slug = (item as { slug?: unknown }).slug;
-      if (typeof slug === "string" && slug.length > 0) slugs.push(slug);
+      // A papercut and its reference twin share one slug. One slug is one inbound edge.
+      if (typeof slug !== "string" || slug.length === 0 || seen.has(slug)) continue;
+      seen.add(slug);
+      slugs.push(slug);
     }
     return slugs;
   } catch {

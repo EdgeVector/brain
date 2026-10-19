@@ -1620,12 +1620,21 @@ function mergeKeywordCommits(
   let note: string | null = null;
   let lost = false;
   for (const head of heads) {
-    if (head.replay.kind !== "keyword") {
+    const replay = head.replay;
+    if (replay.kind !== "keyword") {
       note = note ?? "keyword page";
       lost = true;
       continue;
     }
-    const placed = nextKeywordCards(cards, head.replay.type, head.replay.slug, head.replay.weight);
+    // A higher weight must not replace the other twin. A full ranker page
+    // refuses the new card the same way a full list head does.
+    const present = cards.some((card) => card.type === replay.type && card.slug === replay.slug);
+    if (replay.weight !== null && !present && cards.length >= RANKER_PAGE) {
+      note = "keyword cap";
+      lost = true;
+      continue;
+    }
+    const placed = nextKeywordCards(cards, replay.type, replay.slug, replay.weight);
     if (placed === "saturated") {
       note = "keyword cap";
       lost = true;
