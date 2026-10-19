@@ -1,27 +1,18 @@
-// `fbrain doctor` probe — structural integrity of the typed graph-edge planes.
+// `brain doctor` probe — the edge-set atom and the link page agree.
 //
-// WHAT THIS CHECK CAN HONESTLY SAY. There is no scan, so this probe cannot
-// enumerate "every record that has edges" and therefore cannot certify the
-// whole graph. It seeds from a BOUNDED slice of the keyed type-list index and
-// reports exactly how many sources it read. A green line here means "the
-// sources I sampled are internally consistent", and the detail string says so
-// with a number — it never implies corpus-wide cleanliness.
+// There is no scan. This probe reads one page of each type and reports how
+// many sources it read. A green line means those sources agree. It does not
+// certify the whole graph.
 //
-// WHY DANGLING IS A WARN AND MIRROR DRIFT IS A FAIL. A dangling target is
-// often intentional in this product: `src/commands/backlinks.ts` documents
-// that a `[[slug]]` to a record that does not exist yet is a note-to-self, and
-// the wiki-link extractor deliberately preserves it. So dangling targets are
-// reported, but they do not fail the doctor.
+// A dangling target is a note. A wiki link to a record that does not exist
+// yet stays. Dangling targets do not fail the doctor.
 //
-// Mirror drift is different in kind. Phase 1 dual-writes each edge into the
-// out-plane and the in-plane; if one row exists without its twin, then the two
-// planes disagree and a traversal's answer depends on which direction it
-// walked. That is a correctness defect in the substrate, and it fails.
+// An edge that is on the edge set and not on the destination link page is a
+// defect. The same is true the other way. That fails.
 
 import type { NodeClient, Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
-import { snapshotSummary } from "../../index-payload.ts";
-import { readTypeListIndex } from "../../record-list-index.ts";
+import { readPageChain } from "../../list-page.ts";
 import { RECORD_TYPES, type RecordType } from "../../schemas.ts";
 import {
   graphEdgesUnavailable,
@@ -34,9 +25,7 @@ import type { CheckResult } from "../doctor.ts";
  * Cap on seed slugs the doctor probe will lint.
  *
  * Deliberately small: `doctor` is run interactively and must stay cheap. The
- * lint issues a handful of keyed reads per seed, so this bounds the probe to a
- * few hundred reads in the worst case. `brain reindex --graph-edges` is the
- * place to lint a wider slice.
+ * lint issues a handful of keyed reads per seed.
  */
 export const DOCTOR_GRAPH_LINT_MAX_SLUGS = 25;
 
@@ -47,11 +36,8 @@ export type GraphLintProbeOptions = {
 };
 
 /**
- * Collect a bounded seed set from the keyed type-list index.
- *
- * Returns null when no type partition carries the completeness marker — the
- * index is not trustworthy then, and seeding from an unmarked partition would
- * make the probe's coverage number a fiction.
+ * One page of each type. Null only when the list page schema is absent.
+ * An empty page is an empty seed list.
  */
 export async function collectGraphLintSeeds(
   node: NodeClient,
@@ -62,26 +48,17 @@ export async function collectGraphLintSeeds(
     (t) => (cfg.schemaHashes as Record<string, string | undefined>)[t] !== undefined,
   );
   const seeds: string[] = [];
-  let anyMarked = false;
-  // Round-robin across types rather than draining one: a lint that only ever
-  // sampled `design` would report green while another type's plane rotted.
   const perType: string[][] = [];
   for (const type of types) {
-    let records;
+    let cards;
     try {
-      records = await readTypeListIndex(node, cfg, type);
+      cards = await readPageChain(node, cfg, type, 1);
     } catch {
       continue;
     }
-    if (records === null) continue;
-    anyMarked = true;
-    perType.push(
-      records
-        .map((r) => snapshotSummary(r).slug)
-        .filter((s): s is string => typeof s === "string"),
-    );
+    if (cards === null) return null;
+    perType.push(cards.map((card) => card.slug).filter((slug) => slug.length > 0));
   }
-  if (!anyMarked) return null;
   for (let i = 0; seeds.length < maxSlugs; i += 1) {
     let progressed = false;
     for (const slugs of perType) {
@@ -115,9 +92,9 @@ export async function runGraphEdgeLintProbe(
       ok: false,
       tag: "FAIL",
       detail:
-        "graph-edge schemas are not in config, so every write parses its links and stores no edge; " +
-        "`graph neighbors`, `graph path`, and the adjacency boost all read an empty graph",
-      fix: "run `fbrain init` to register them, then `fbrain reindex --graph-edges`",
+        "the edge-set schema is not in config, so a write stores no edge; " +
+        "`graph neighbors`, `graph path`, and the adjacency boost read an empty graph",
+      fix: "run `brain init` to register the edge-set schema",
     };
   }
   const maxSlugs = opts.maxSlugs ?? DOCTOR_GRAPH_LINT_MAX_SLUGS;
@@ -132,7 +109,7 @@ export async function runGraphEdgeLintProbe(
         name,
         ok: true,
         tag: "SKIP",
-        detail: `could not read the type-list index: ${errText(err)}`,
+        detail: `could not read the list page: ${errText(err)}`,
       };
     }
   }
@@ -141,8 +118,8 @@ export async function runGraphEdgeLintProbe(
       name,
       ok: true,
       tag: "SKIP",
-      detail: "no type-list partition carries the completeness marker, so there is no trustworthy seed set",
-      fix: "run `fbrain reindex --list-index` to rebuild it",
+      detail: "the list page schema is not in config, so there is no seed set",
+      fix: "run `brain init` to register the list page schema",
     };
   }
   if (seeds.length === 0) {
@@ -161,8 +138,8 @@ export async function runGraphEdgeLintProbe(
       name,
       ok: false,
       tag: "FAIL",
-      detail: "graph-edge schemas are not in config, so no edge row can be read or written",
-      fix: "run `fbrain init` to register them, then `fbrain reindex --graph-edges`",
+      detail: "the edge-set schema is not in config, so no edge can be read or written",
+      fix: "run `brain init` to register the edge-set schema",
     };
   }
 
@@ -185,9 +162,9 @@ export async function runGraphEdgeLintProbe(
       name,
       ok: false,
       detail:
-        `${scope}; ${mirror.length} edge(s) exist on only one plane ` +
-        `(${summarize(mirror)}) — a traversal's answer depends on which direction it walks`,
-      fix: "run `fbrain reindex --graph-edges` to rewrite both planes from record bodies",
+        `${scope}; ${mirror.length} edge(s) are on the edge set or the link page only ` +
+        `(${summarize(mirror)})`,
+      fix: "put the source record again so the edge set and the link page match",
     };
   }
   const notes: string[] = [];
@@ -202,7 +179,7 @@ export async function runGraphEdgeLintProbe(
       fix: "dangling wiki-links are intentional notes-to-self in fbrain bodies; fix only if a slug was renamed",
     };
   }
-  return { name, ok: true, detail: `${scope}; both edge planes agree` };
+  return { name, ok: true, detail: `${scope}; the edge set and the link page agree` };
 }
 
 /** First few findings, so the detail line is actionable without being a dump. */

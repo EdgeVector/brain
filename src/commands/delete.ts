@@ -264,31 +264,6 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     node, cfg: opts.cfg, type, previous: record, next: null, nextEdges: [],
   });
   await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
-  // Remove an old RecordListEntry row when that key exists.
-  {
-    const { maintainTypeListIndex } = await import("../record-list-index.ts");
-    await maintainTypeListIndex({
-      node,
-      cfg: opts.cfg,
-      type,
-      record: null,
-      slug,
-      verbose: opts.verbose,
-    });
-  }
-  if (type === "papercut") {
-    const { maintainPapercutStatusIndex } = await import(
-      "../papercut-status-index.ts"
-    );
-    await maintainPapercutStatusIndex({
-      node,
-      cfg: opts.cfg,
-      slug,
-      record: null,
-      previousStatus: record.status,
-      verbose: opts.verbose,
-    });
-  }
   const indexNote = await dropListSide(node, opts.cfg, type, record, listSide);
 
   print(`deleted ${type} ${slug}${indexNote}`);
@@ -550,32 +525,6 @@ export async function deleteByFilter(
         slug,
         resolved.record.created_at,
       );
-      {
-        const { maintainTypeListIndex } = await import(
-          "../record-list-index.ts"
-        );
-        await maintainTypeListIndex({
-          node,
-          cfg: opts.cfg,
-          type: m.type,
-          record: null,
-          slug,
-          verbose: opts.verbose,
-        });
-      }
-      if (m.type === "papercut") {
-        const { maintainPapercutStatusIndex } = await import(
-          "../papercut-status-index.ts"
-        );
-        await maintainPapercutStatusIndex({
-          node,
-          cfg: opts.cfg,
-          slug,
-          record: null,
-          previousStatus: resolved.record.status,
-          verbose: opts.verbose,
-        });
-      }
       const indexNote = await dropListSide(
         node,
         opts.cfg,

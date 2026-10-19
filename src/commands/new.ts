@@ -24,8 +24,7 @@ import {
   schemaHashFor,
   validateSlug,
 } from "../record.ts";
-import { RECORDS, type RecordType } from "../schemas.ts";
-import { recordListEntryHash } from "../record-list-index.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY, RECORDS, type RecordType } from "../schemas.ts";
 import {
   buildResidentWritePlan,
   commitResidentWritePlan,
@@ -168,7 +167,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   });
   return {
     indexPending: true,
-    listIndexFailed: recordListEntryHash(opts.cfg) === null,
+    listIndexFailed: (opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "") === "",
     durability: writeDurabilityOf(receipt),
   };
 }

@@ -12,23 +12,18 @@ import {
   FbrainError,
   type BatchMutationResult,
   type NodeClient,
+  type QueryRow,
 } from "./client.ts";
 import type { Config } from "./config.ts";
-import { GRAPH_EDGE_RECONCILE_FIELDS, type RecordType } from "./schemas.ts";
+import { countAfterDelta, parseListCount } from "./count-state.ts";
+import { BRAIN_LIST_COUNT_SCHEMA_KEY, type RecordType } from "./schemas.ts";
 import {
-  edgeFields,
-  edgeRange,
-  graphEdgeHashes,
-  normalizeGraphEdgeType,
-  type GraphEdge,
-} from "./graph-edge.ts";
-import {
-  adjustListCounts,
-  commitHeadPages,
-  commitKeywordHeads,
   COUNT_UNCONFIRMED,
+  DIRECTORY_RANGE,
   EDGE_CAP,
+  HEAD_RANGE,
   INDEX_PARTIAL,
+  mergeHeadCommits,
   planRecordListSide,
   recordGraphEdges,
   WRITE_BATCH_MAX,
@@ -36,7 +31,7 @@ import {
   type HeadCommit,
   type ListSidePlan,
 } from "./list-page.ts";
-import { normalizeSlug, type FbrainRecord } from "./record.ts";
+import { type FbrainRecord } from "./record.ts";
 
 export type ProjectionKind =
   | "primary"
@@ -52,7 +47,8 @@ export type ProjectionKind =
   | "directory"
   | "edge-set"
   | "token-set"
-  | "keyword";
+  | "keyword"
+  | "count";
 
 export type PlannedMutation = {
   mutationType: "create" | "update" | "delete";
@@ -130,98 +126,6 @@ function countOps(ops: PlannedMutation[]): ExactProjectionCounts {
     else counts.deleted += 1;
   }
   return counts;
-}
-
-function planGraphOps(opts: {
-  cfg: Pick<Config, "schemaHashes">;
-  sourceSlug: string;
-  previousEdges: readonly GraphEdge[];
-  desiredEdges: readonly GraphEdge[];
-}): { ops: PlannedMutation[]; partial: boolean } {
-  const hashes = graphEdgeHashes(opts.cfg);
-  if (!hashes) return { ops: [], partial: false };
-  const src = normalizeSlug(opts.sourceSlug).toLowerCase();
-  const current = new Map(opts.previousEdges.map((edge) => [edgeRange(edge), edge]));
-  const wanted = new Map(opts.desiredEdges.map((edge) => [edgeRange(edge), edge]));
-  const deletes: PlannedMutation[] = [];
-  const writes: PlannedMutation[] = [];
-  for (const [range] of current) {
-    if (wanted.has(range)) continue;
-    deletes.push({
-      mutationType: "delete",
-      schemaHash: hashes.out,
-      keyHash: src,
-      keyRange: range,
-      fields: {},
-      projection: "graph",
-    });
-  }
-  for (const [range, edge] of wanted) {
-    const old = current.get(range);
-    if (old && graphEdgeUnchanged(old, edge)) continue;
-    const fields = edgeFields({
-      ...edge,
-      created_at: old?.created_at || edge.created_at,
-    });
-    writes.push({
-      mutationType: old ? "update" : "create",
-      schemaHash: hashes.out,
-      keyHash: edge.src,
-      keyRange: range,
-      fields,
-      projection: "graph",
-    });
-  }
-  const partial = deletes.length > EDGE_CAP;
-  return { ops: [...deletes.slice(0, EDGE_CAP), ...writes], partial };
-}
-
-function graphEdgeUnchanged(old: GraphEdge, next: GraphEdge): boolean {
-  return (
-    old.src === next.src &&
-    old.dst === next.dst &&
-    old.type === next.type &&
-    old.provenance === next.provenance
-  );
-}
-
-async function readCurrentGraphEdges(opts: {
-  node: NodeClient;
-  cfg: Config;
-  sourceSlug: string;
-  ids: readonly string[];
-}): Promise<{ ids: Set<string>; edges: GraphEdge[] }> {
-  const hashes = graphEdgeHashes(opts.cfg);
-  const ids = new Set([...new Set(opts.ids)].slice(0, EDGE_CAP * 2));
-  if (!hashes || ids.size === 0) return { ids: new Set(), edges: [] };
-  const src = normalizeSlug(opts.sourceSlug).toLowerCase();
-  const keys = [...ids].map((range) => ({ hash: src, range }));
-  const fields = [...GRAPH_EDGE_RECONCILE_FIELDS];
-  const rows = opts.node.queryByKeys
-    ? await opts.node.queryByKeys({ schemaHash: hashes.out, fields, keys })
-    : (await opts.node.queryAll({
-      schemaHash: hashes.out, fields,
-      filter: { HashRangeKeys: keys.map((key) => [key.hash, key.range]) },
-    })).results;
-  const edges: GraphEdge[] = [];
-  for (const row of rows) {
-    const field = row.fields;
-    // Some nodes return the inbound sibling from the shared graph fields.
-    if (typeof field.bge_src === "string" && field.bge_src.length > 0 && field.bge_src !== src) continue;
-    const rawType = field.bge_type;
-    const provenance = field.bge_provenance;
-    if (field.bge_src !== src || typeof field.bge_dst !== "string" ||
-        typeof rawType !== "string" || normalizeGraphEdgeType(rawType) !== rawType ||
-        (provenance !== "explicit" && provenance !== "wikilink" && provenance !== "frontmatter")) {
-      throw new FbrainError({ code: "graph_edge_invalid", message: `Cannot update malformed graph edges for ${src}.` });
-    }
-    const edge: GraphEdge = {
-      src, dst: field.bge_dst, type: normalizeGraphEdgeType(rawType), provenance,
-      created_at: typeof field.bge_created_at === "string" ? field.bge_created_at : "",
-    };
-    if (ids.has(edgeRange(edge))) edges.push(edge);
-  }
-  return { ids, edges };
 }
 
 function planChildTaskOps(opts: {
@@ -341,47 +245,6 @@ export async function buildResidentWritePlan(opts: {
   }
   for (const op of side.ops) ops.push(op);
 
-  let graphDesired = desiredForPages;
-  let graphPrevious = opts.previous ? recordGraphEdges(opts.type, opts.previous, [], now) : [];
-  const knownPreviousIds = new Set(graphPrevious.map(edgeRange));
-  graphPrevious.push(...edgesFromIds(
-    opts.next.slug, side.previousEdgeIds.filter((id) => !knownPreviousIds.has(id)), now,
-  ));
-  if (preserveStoredEdges || side.preservedEdgeIds.length > 0) {
-    const kept = new Set(side.writtenEdgeIds);
-    const prevIds = new Set(graphPrevious.map((edge) => edgeRange(edge)));
-    graphDesired = [
-      ...bodyDesired.filter((edge) => kept.has(edgeRange(edge))),
-      ...edgesFromIds(opts.next.slug, side.preservedEdgeIds, now),
-    ];
-    graphPrevious = [
-      ...graphPrevious,
-      ...edgesFromIds(
-        opts.next.slug,
-        side.preservedEdgeIds.filter((id) => !prevIds.has(id)),
-        now,
-      ),
-    ];
-  }
-  // A prior metadata-only update can change an edge's provenance without
-  // changing its id. Compare the actual keyed graph fields before a no-op.
-  const currentGraph = await readCurrentGraphEdges({
-    node: opts.node, cfg: opts.cfg, sourceSlug: opts.next.slug,
-    ids: [...side.previousEdgeIds, ...graphDesired.map(edgeRange)],
-  });
-  graphPrevious = [
-    ...graphPrevious.filter((edge) => !currentGraph.ids.has(edgeRange(edge))),
-    ...currentGraph.edges,
-  ];
-  const graph = planGraphOps({
-    cfg: opts.cfg,
-    sourceSlug: opts.next.slug,
-    previousEdges: graphPrevious,
-    desiredEdges: graphDesired,
-  });
-  if (graph.partial) noteIndexPartial(indexNotes, "edge cap");
-  ops.push(...graph.ops);
-
   ops.push(
     ...planChildTaskOps({
       cfg: opts.cfg,
@@ -456,7 +319,7 @@ export async function commitResidentWritePlan(opts: {
   });
 }
 
-/** Related records share their primary batch (for example a papercut twin). */
+/** Related records share one mutation call (for example a papercut twin). */
 export async function commitResidentWritePlans(opts: {
   node: NodeClient;
   writes: readonly { plan: ResidentWritePlan; type: RecordType; slug: string }[];
@@ -475,28 +338,28 @@ export async function commitResidentWritePlans(opts: {
   }
   const notes = [...new Set(opts.writes.flatMap((write) => write.plan.indexNotes))];
   const related = opts.writes.length > 1;
-  const isListSide = (op: PlannedMutation): boolean => [
-    "list-page", "list-locator", "directory", "edge-set", "token-set", "keyword",
-  ].includes(op.projection);
-  const allOps = dedupeOps(opts.writes.flatMap((write) =>
-    related ? write.plan.ops.filter((op) => !isListSide(op)) : write.plan.ops,
-  ));
-  // Put every primary first, so a projection cap cannot split the record pair.
-  const ops = [...allOps.filter((op) => op.projection === "primary"),
-    ...allOps.filter((op) => op.projection !== "primary")];
-  if (ops.filter((op) => op.projection === "primary").length > WRITE_BATCH_MAX) {
-    throw new FbrainError({ code: "resident_batch_too_large", message: "Related records exceed one primary batch." });
+  const counts = await countMutations(opts.node, opts.writes.map((write) => ({
+    cfg: write.plan.cfg,
+    type: write.type,
+    delta: write.plan.countDelta,
+  })), notes);
+  const ops = orderPrimaryFirst(assembleWriteOps(opts.writes, related, notes).concat(counts));
+  assertOpsFitAtomBudget(first.type, first.slug, ops);
+  if (ops.length > WRITE_BATCH_MAX) {
+    throw new FbrainError({
+      code: "resident_batch_too_large",
+      message: `resident batch has ${ops.length} mutations; the cap is ${WRITE_BATCH_MAX}.`,
+      hint: "The command does not report success. The record was not written.",
+    });
   }
-  const split = splitResidentBatches(ops, 0);
-  if (split.trimmed) noteIndexPartial(notes, "batch cap");
   if (opts.failOnIndexPartial && notes.includes(INDEX_PARTIAL)) {
     throw indexPartialMiss(first.type, first.slug, notes);
   }
   const durable = opts.durable ? { durability: "durable" as const } : undefined;
   let primary = emptyBatchResult();
   try {
-    if (split.batch1.length > 0) {
-      primary = await opts.node.mutateBatch(split.batch1, durable);
+    if (ops.length > 0) {
+      primary = await opts.node.mutateBatch(ops, durable);
       if (opts.durable && primary.durability !== "durable") {
         throw durableMiss(first.type, first.slug, primary.durability);
       }
@@ -504,66 +367,7 @@ export async function commitResidentWritePlans(opts: {
   } catch (err) {
     throw wrapCommitError(err, first.type, first.slug, ops);
   }
-  if (split.batch2.length > 0) {
-    try {
-      const second = await opts.node.mutateBatch(split.batch2, durable);
-      if (opts.durable && second.durability !== "durable") {
-        throw durableMiss(first.type, first.slug, second.durability);
-      }
-      if (split.batch1.length === 0) primary = second;
-    } catch (err) {
-      if (
-        opts.durable ||
-        (err instanceof FbrainError && err.code === "durability_not_confirmed")
-      ) {
-        throw wrapCommitError(err, first.type, first.slug, ops);
-      }
-      noteIndexPartial(notes, "batch2 failed");
-    }
-  }
-  // Keyword heads ack before the token set changes, so a lost head keeps its old token.
-  for (const write of opts.writes) {
-    // Both primaries already exist. Refresh one record's side only after the
-    // previous side ack, so related writes do not compete for the same head.
-    const side = related ? await planRecordListSide(write.plan.listSideInput) : null;
-    if (side) {
-      for (const line of side.details) if (!notes.includes(line)) notes.push(line);
-      if (side.ops.length > WRITE_BATCH_MAX) {
-        noteIndexPartial(notes, "batch cap");
-      } else if (side.ops.length > 0) {
-        const receipt = await opts.node.mutateBatch(side.ops, durable);
-        if (opts.durable && receipt.durability !== "durable") {
-          throw durableMiss(write.type, write.slug, receipt.durability);
-        }
-      }
-    }
-    const keywordNotes = await commitKeywordHeads(
-      opts.node, side ? side.keywordHeads : write.plan.keywordHeads,
-      side ? side.tokenSet : write.plan.tokenSet,
-    );
-    for (const line of keywordNotes) if (!notes.includes(line)) notes.push(line);
-    const headNotes = await commitHeadPages(opts.node, side?.heads ?? write.plan.heads);
-    for (const line of headNotes) if (!notes.includes(line)) notes.push(line);
-  }
-  for (const write of opts.writes) {
-    if (write.plan.countDelta === 0) continue;
-    const count = await adjustListCounts(
-      opts.node,
-      write.plan.cfg,
-      write.type,
-      write.plan.countDelta,
-    );
-    if (count === "unconfirmed" && !notes.includes(COUNT_UNCONFIRMED)) {
-      notes.push(COUNT_UNCONFIRMED);
-    }
-  }
-  if (opts.failOnIndexPartial && notes.includes(INDEX_PARTIAL)) {
-    throw indexPartialMiss(first.type, first.slug, notes);
-  }
-  return {
-    ...primary,
-    indexNotes: notes,
-  };
+  return { ...primary, indexNotes: notes };
 }
 
 export async function removeResidentListSide(opts: {
@@ -583,32 +387,29 @@ export async function removeResidentListSide(opts: {
     nextEdges: [],
   });
   const notes = [...side.details];
-  let rest = side.ops.filter((op) => op.projection !== "keyword");
-  if (rest.length > WRITE_BATCH_MAX) {
-    rest = rest.slice(0, WRITE_BATCH_MAX);
+  const counts = await countMutations(opts.node, [{
+    cfg: opts.cfg,
+    type: opts.type,
+    delta: -1,
+  }], notes);
+  const ops = assembleSide(side, false, notes).concat(counts);
+  if (ops.length > WRITE_BATCH_MAX) {
     noteIndexPartial(notes, "batch cap");
+    throw new FbrainError({
+      code: "resident_batch_too_large",
+      message: `list removal has ${ops.length} mutations; the cap is ${WRITE_BATCH_MAX}.`,
+      hint: "The list page was not changed. Read the record before a manual retry.",
+    });
   }
   let primary = emptyBatchResult();
-  if (!opts.node.mutateBatch && rest.length > 0) {
+  if (!opts.node.mutateBatch && ops.length > 0) {
     noteIndexPartial(notes, "batch unavailable");
-  } else if (opts.node.mutateBatch && rest.length > 0) {
+  } else if (opts.node.mutateBatch && ops.length > 0) {
     try {
-      primary = await opts.node.mutateBatch(rest);
+      primary = await opts.node.mutateBatch(ops);
     } catch {
       noteIndexPartial(notes, "batch1 failed");
     }
-  }
-  const keywordNotes = await commitKeywordHeads(opts.node, side.keywordHeads, side.tokenSet);
-  for (const line of keywordNotes) {
-    if (!notes.includes(line)) notes.push(line);
-  }
-  const headNotes = await commitHeadPages(opts.node, side.heads);
-  for (const line of headNotes) {
-    if (!notes.includes(line)) notes.push(line);
-  }
-  const count = await adjustListCounts(opts.node, opts.cfg, opts.type, -1);
-  if (count === "unconfirmed" && !notes.includes(COUNT_UNCONFIRMED)) {
-    notes.push(COUNT_UNCONFIRMED);
   }
   return {
     ...primary,
@@ -680,27 +481,225 @@ function wrapCommitError(
   });
 }
 
-function isBatch2(op: PlannedMutation): boolean {
-  return op.projection === "keyword" || op.projection === "graph";
+function orderPrimaryFirst(ops: readonly PlannedMutation[]): PlannedMutation[] {
+  return [
+    ...ops.filter((op) => op.projection === "primary"),
+    ...ops.filter((op) => op.projection !== "primary"),
+  ];
 }
 
-function splitResidentBatches(
-  ops: readonly PlannedMutation[],
-  headCount: number,
-): { batch1: PlannedMutation[]; batch2: PlannedMutation[]; trimmed: boolean } {
-  let batch1 = ops.filter((op) => !isBatch2(op));
-  let batch2 = ops.filter((op) => isBatch2(op));
-  let trimmed = false;
-  const budget = Math.max(0, WRITE_BATCH_MAX - headCount);
-  if (batch1.length > budget) {
-    batch1 = batch1.slice(0, budget);
-    trimmed = true;
+type SideAssembly = {
+  ops: readonly PlannedMutation[];
+  heads: readonly HeadCommit[];
+  keywordHeads: readonly HeadCommit[];
+  tokenSet: DeferredTokenSet | null;
+};
+
+function assembleWriteOps(
+  writes: readonly { plan: ResidentWritePlan }[],
+  related: boolean,
+  notes: string[],
+): PlannedMutation[] {
+  const sides: SideAssembly[] = writes.map((write) => ({
+    ops: write.plan.ops.filter((op) => op.projection !== "primary"),
+    heads: write.plan.heads,
+    keywordHeads: write.plan.keywordHeads,
+    tokenSet: write.plan.tokenSet,
+  }));
+  const primary = writes.flatMap((write) => write.plan.ops.filter((op) => op.projection === "primary"));
+  let ops = primary.concat(sides.flatMap((side) => assembleSide(side, related, notes)));
+  if (related) ops = mergeSharedDirectories(ops);
+  return dedupeOps(ops);
+}
+
+function assembleSide(side: SideAssembly, related: boolean, notes: string[]): PlannedMutation[] {
+  const token = side.tokenSet ? tokenSetOp(side.tokenSet) : null;
+  return [
+    ...side.ops,
+    ...headsToOps(side.heads, related, notes),
+    ...headsToOps(side.keywordHeads, related, notes),
+    ...(token ? [token] : []),
+  ];
+}
+
+function headsToOps(heads: readonly HeadCommit[], related: boolean, notes: string[]): PlannedMutation[] {
+  if (!related) return heads.map(headToOp);
+  const groups = new Map<string, HeadCommit[]>();
+  for (const head of heads) {
+    const id = `${head.schemaHash}\0${head.keyHash}\0${head.keyRange}`;
+    const group = groups.get(id) ?? [];
+    group.push(head);
+    groups.set(id, group);
   }
-  if (batch2.length > WRITE_BATCH_MAX) {
-    batch2 = batch2.slice(0, WRITE_BATCH_MAX);
-    trimmed = true;
+  const ops: PlannedMutation[] = [];
+  for (const group of groups.values()) {
+    const merged = mergeHeadCommits(group);
+    if (merged.note) noteIndexPartial(notes, merged.note);
+    if (merged.head) ops.push(headToOp(merged.head));
   }
-  return { batch1, batch2, trimmed };
+  return ops;
+}
+
+function headToOp(head: HeadCommit): PlannedMutation {
+  return {
+    mutationType: head.mutationType,
+    schemaHash: head.schemaHash,
+    keyHash: head.keyHash,
+    keyRange: head.keyRange,
+    fields: head.fields,
+    projection: head.replay.kind === "keyword" ? "keyword" : "list-page",
+  };
+}
+
+function tokenSetOp(tokenSet: DeferredTokenSet): PlannedMutation | null {
+  if (tokenSet.nextNames.length === 0) {
+    if (!tokenSet.existed) return null;
+    return {
+      mutationType: "delete",
+      schemaHash: tokenSet.schemaHash,
+      keyHash: tokenSet.keyHash,
+      keyRange: HEAD_RANGE,
+      fields: {},
+      projection: "token-set",
+    };
+  }
+  const json = JSON.stringify(tokenSet.nextNames);
+  if (tokenSet.existed && tokenSet.stored === json) return null;
+  return {
+    mutationType: tokenSet.existed ? "update" : "create",
+    schemaHash: tokenSet.schemaHash,
+    keyHash: tokenSet.keyHash,
+    keyRange: HEAD_RANGE,
+    fields: { bts_h: tokenSet.keyHash, bts_r: HEAD_RANGE, bts_tokens: json },
+    projection: "token-set",
+  };
+}
+
+function mergeSharedDirectories(ops: PlannedMutation[]): PlannedMutation[] {
+  const groups = new Map<string, PlannedMutation[]>();
+  const rest: PlannedMutation[] = [];
+  for (const op of ops) {
+    if (op.projection !== "directory") {
+      rest.push(op);
+      continue;
+    }
+    const id = `${op.schemaHash}\0${op.keyHash}\0${op.keyRange ?? ""}`;
+    const group = groups.get(id) ?? [];
+    group.push(op);
+    groups.set(id, group);
+  }
+  for (const group of groups.values()) {
+    const only = group[0];
+    if (!only) continue;
+    if (group.length === 1) {
+      rest.push(only);
+      continue;
+    }
+    rest.push(unionDirectory(group));
+  }
+  return rest;
+}
+
+function unionDirectory(ops: readonly PlannedMutation[]): PlannedMutation {
+  const last = ops[ops.length - 1]!;
+  const names = new Set<string>();
+  let write = false;
+  for (const op of ops) {
+    if (op.mutationType === "delete") continue;
+    write = true;
+    const raw = op.fields.btd_types;
+    if (typeof raw !== "string") continue;
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!Array.isArray(value)) continue;
+      for (const name of value) {
+        if (typeof name === "string" && name.length > 0) names.add(name);
+      }
+    } catch {
+      /* A bad directory value does not add names. */
+    }
+  }
+  if (!write) return { ...last, mutationType: "delete", fields: {} };
+  const json = JSON.stringify([...names].sort());
+  const existed = ops.some((op) => op.mutationType === "update");
+  return {
+    ...last,
+    mutationType: existed ? "update" : "create",
+    fields: { btd_h: last.keyHash, btd_r: last.keyRange ?? DIRECTORY_RANGE, btd_types: json },
+  };
+}
+
+async function countMutations(
+  node: NodeClient,
+  items: readonly { cfg: Config; type: RecordType; delta: number }[],
+  notes: string[],
+): Promise<PlannedMutation[]> {
+  const deltas = new Map<string, number>();
+  let schemaHash = "";
+  for (const item of items) {
+    if (item.delta === 0) continue;
+    const hash = item.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
+    if (hash.length === 0) continue;
+    schemaHash = hash;
+    deltas.set("all", (deltas.get("all") ?? 0) + item.delta);
+    deltas.set(item.type, (deltas.get(item.type) ?? 0) + item.delta);
+  }
+  if (schemaHash.length === 0 || deltas.size === 0) return [];
+  const hashes = [...deltas.keys()];
+  let rows: QueryRow[] = [];
+  try {
+    if (!node.queryByKeys) {
+      if (!notes.includes(COUNT_UNCONFIRMED)) notes.push(COUNT_UNCONFIRMED);
+      return [];
+    }
+    rows = await node.queryByKeys({
+      schemaHash,
+      fields: ["bln_h", "bln_n"],
+      keys: hashes.map((hash) => ({ hash })),
+    });
+  } catch {
+    if (!notes.includes(COUNT_UNCONFIRMED)) notes.push(COUNT_UNCONFIRMED);
+    return [];
+  }
+  const ops: PlannedMutation[] = [];
+  for (const hash of hashes) {
+    const delta = deltas.get(hash) ?? 0;
+    const row = rows.find((item) => {
+      const named = item.key.hash && item.key.hash.length > 0
+        ? item.key.hash
+        : fieldString(item.fields, "bln_h");
+      return named === hash;
+    });
+    const rawValue = row?.fields?.bln_n;
+    if (row && typeof rawValue !== "string") {
+      if (!notes.includes(COUNT_UNCONFIRMED)) notes.push(COUNT_UNCONFIRMED);
+      continue;
+    }
+    const raw = typeof rawValue === "string" ? rawValue : null;
+    if (raw !== null && parseListCount(raw) === null) {
+      if (!notes.includes(COUNT_UNCONFIRMED)) notes.push(COUNT_UNCONFIRMED);
+      continue;
+    }
+    if (raw === null && delta < 0) continue;
+    const next = countAfterDelta(raw, delta);
+    if (next === null) {
+      if (!notes.includes(COUNT_UNCONFIRMED)) notes.push(COUNT_UNCONFIRMED);
+      continue;
+    }
+    ops.push({
+      mutationType: raw === null ? "create" : "update",
+      schemaHash,
+      keyHash: hash,
+      fields: { bln_h: hash, bln_n: next },
+      projection: "count",
+    });
+  }
+  return ops;
+}
+
+function fieldString(fields: Record<string, unknown> | undefined, name: string): string {
+  const value = fields?.[name];
+  return typeof value === "string" ? value : "";
 }
 
 function noteIndexPartial(details: string[], why: string): void {
@@ -708,25 +707,6 @@ function noteIndexPartial(details: string[], why: string): void {
   if (why.length > 0 && why !== INDEX_PARTIAL && !details.includes(why)) {
     details.push(why);
   }
-}
-
-function edgesFromIds(sourceSlug: string, ids: readonly string[], now: string): GraphEdge[] {
-  const src = normalizeSlug(sourceSlug).toLowerCase();
-  const edges: GraphEdge[] = [];
-  for (const id of ids) {
-    const cut = id.indexOf("#");
-    if (cut <= 0) continue;
-    const dst = id.slice(cut + 1);
-    if (dst.length === 0) continue;
-    edges.push({
-      src,
-      dst,
-      type: normalizeGraphEdgeType(id.slice(0, cut)),
-      provenance: "frontmatter",
-      created_at: now,
-    });
-  }
-  return edges;
 }
 
 function dedupeOps(ops: PlannedMutation[]): PlannedMutation[] {

@@ -1,11 +1,9 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
 import {
-  snapshotSummary,
   type IndexSnapshot,
   type SnapshotSummary,
 } from "./index-payload.ts";
-import { listIndexRepairHint } from "./primary-brain.ts";
 import type { NodeClient, QueryRow } from "./client.ts";
 import {
   FbrainError,
@@ -365,32 +363,8 @@ export function arrayStringField(f: Record<string, unknown>, key: string): strin
 export type ListRecordsCfg = { schemaHashes: Record<string, string> };
 
 /**
- * Product list of one record type: RecordListEntry keyed partition read.
- *
- * NEVER scans. This path used to cold-seed the index with an admin full scan on
- * an index miss, which meant an ordinary `brain list` sent
- * `X-LastDB-Allow-Full-Scan: 1` from the request path. That is the exact thing
- * [[design-lastdb-scan-deprecation-path]] (approved 2026-07-18) forbids:
- *
- *     Need a list view?  -> thin INDEX schema written on write + point-get bodies
- *     Admin rebuild?     -> offline bulk only, bulk QoS, NEVER request-path
- *
- * The seed was a migration artifact. Before the 2026-07-28 RecordListEntry
- * cutover there was no index, so it had to be backfilled from records that
- * predated it. Every writer has maintained the index on write ever since, so
- * for anything written after that cutover the index is authoritative and the
- * seed is dead weight — reachable only for a partition that was never seeded,
- * i.e. a brand-new record type. It stayed dormant for months and fired the
- * first time one was added (`papercut`, 2026-08-06), where it did not merely
- * scan: the node reported a `total_count` over the whole keyspace and paged
- * with repeated keys until the client's loop guard aborted.
- *
- * A cold partition is now an ERROR that names the offline repair, because a
- * short list that says it is short beats a scan that says nothing.
- * `cfg` is REQUIRED so omit-cfg callers cannot silently full-scan. The product
- * schema hash is deliberately NOT a parameter: this path never reads the
- * product schema, and not accepting its hash is what makes that structural
- * rather than a rule someone has to remember.
+ * Product list of one record type. Walk the type page (`hash` = type), then
+ * read the product keys. An absent page is an empty list. This path does not scan.
  */
 export async function listRecords(
   node: NodeClient,
@@ -410,28 +384,54 @@ export async function listRecords(
   cfg: ListRecordsCfg,
   opts: (CompleteOptions & { summary?: false }) | { summary: true },
 ): Promise<FbrainRecord[] | SnapshotSummary[]> {
-  const { readTypeListIndex } = await import("./record-list-index.ts");
-  const indexed = await readTypeListIndex(node, cfg, type);
-  if (indexed !== null) {
-    const live = indexed.filter((s) => !isTombstoned(snapshotSummary(s)));
-    // A list row keeps only a head of a long body (index-payload.ts), and a head
-    // is not a record. A caller that reads no body passes `summary: true` and
-    // gets summaries (no `body`, a type that is not a record). Every other
-    // caller gets whole records and MUST say what to do with a cut row whose
-    // product record cannot be read (`onMissing`, no default): "skip" for read
-    // and display paths (the row is a stale index row), "throw" for rebuild and
-    // delete paths. Either way the head is never returned as if it were the
-    // record.
-    if ("summary" in opts && opts.summary === true) return live.map(snapshotSummary);
-    return completeSnapshots(node, type, cfg, live, opts.onMissing, opts);
+  const cards = await typePageCards(node, cfg, type);
+  if ("summary" in opts && opts.summary === true) {
+    return cards.map((card) => ({
+      slug: card.slug,
+      title: card.title ?? "",
+      status: card.status ?? "",
+      tags: [],
+      created_at: "",
+      updated_at: card.updated_at ?? "",
+    }));
   }
-  throw new FbrainError({
-    code: "list_index_incomplete",
-    message:
-      `the ${type} record-list index partition is not marked complete, so \`${type}\` cannot be ` +
-      "listed without a full schema scan — which product read paths must not do.",
-    hint: listIndexRepairHint(type),
-  });
+  const { records, missing } = await readFullRecords(
+    node,
+    type,
+    cfg,
+    cards.map((card) => card.slug),
+    opts.onMissing,
+    opts,
+  );
+  if (missing.length > 0) {
+    opts.skipped?.push(...missing);
+    warnSkippedRows(type, missing);
+  }
+  const out: FbrainRecord[] = [];
+  for (const card of cards) {
+    const record = records.get(card.slug);
+    if (record) out.push(record);
+  }
+  return out;
+}
+
+async function typePageCards(
+  node: NodeClient,
+  cfg: ListRecordsCfg,
+  type: RecordType,
+): Promise<Array<{ slug: string; title?: string; status?: string; updated_at?: string }>> {
+  const { readPageChain } = await import("./list-page.ts");
+  const cards = await readPageChain(node, cfg, type);
+  if (cards === null) return [];
+  const seen = new Set<string>();
+  const out: Array<{ slug: string; title?: string; status?: string; updated_at?: string }> = [];
+  for (const card of cards) {
+    if (card.type !== undefined && card.type !== type) continue;
+    if (card.slug.length === 0 || seen.has(card.slug)) continue;
+    seen.add(card.slug);
+    out.push(card);
+  }
+  return out;
 }
 
 // Progress-callback cadence for `listRecordsAdminScan`: report whichever
@@ -736,58 +736,16 @@ export async function listRecordKeys(
   cfg: ListRecordsCfg,
   opts: { seedOnMiss?: boolean } = {},
 ): Promise<RecordKey[]> {
-  const { readTypeListIndex, writeTypeListIndex } = await import("./record-list-index.ts");
-  const records = await readTypeListIndex(node, cfg, type);
-  if (records !== null) {
-    return records
-      .map((s) => ({ ...snapshotSummary(s), tagsCut: s.cut && s.cutFields.includes("*") }))
-      .filter((r) => !isTombstoned(r))
-      .map((r) => ({
-        type,
-        slug: r.slug,
-        updatedAt: r.updated_at,
-        status: r.status,
-        tags: r.tags,
-        ...(r.tagsCut ? { tagsCut: true } : {}),
-      }));
-  }
-  if (opts.seedOnMiss) {
-    const seeded = await listRecordsAdminScan(node, type, schemaHash, {
-      seedIndex: async (recordsToSeed) => {
-        try {
-          await writeTypeListIndex(node, cfg, type, recordsToSeed);
-        } catch {
-          /* best-effort */
-        }
-      },
-    });
-    return seeded.map((r) => ({
-      type,
-      slug: r.slug,
-      updatedAt: r.updated_at,
-      status: r.status,
-      tags: r.tags,
-    }));
-  }
-  const res = await node.queryAll({
-    schemaHash,
-    fields: ["slug", "tags", "updated_at", "status"],
-    allowFullScan: true,
-  });
-  const keys: RecordKey[] = [];
-  for (const row of res.results) {
-    const f = (row.fields ?? {}) as Record<string, unknown>;
-    const tags = arrayStringField(f, "tags");
-    if (tags.includes(TOMBSTONE_TAG)) continue;
-    keys.push({
-      type,
-      slug: stringField(f, "slug"),
-      updatedAt: stringField(f, "updated_at"),
-      status: stringField(f, "status"),
-      tags,
-    });
-  }
-  return keys;
+  void schemaHash;
+  void opts;
+  const cards = await typePageCards(node, cfg, type);
+  return cards.map((card) => ({
+    type,
+    slug: card.slug,
+    updatedAt: card.updated_at ?? "",
+    status: card.status ?? "",
+    tags: [],
+  }));
 }
 
 // Page size for the no-match probe/hint paths (`hasAnyLiveRecord`,
@@ -1291,34 +1249,35 @@ export async function hydrateSchemaBySlug(
   onMissing: OnMissing,
   options?: ReadRetryOptions,
 ): Promise<Map<string, FbrainRecord>> {
-  const { readTypeListEntriesBySlugs } = await import("./record-list-index.ts");
+  const hash = schemaHashFor(type, cfg);
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
   const bySlug = new Map<string, FbrainRecord>();
-  const cutRows: IndexSnapshot[] = [];
   let pending = [...slugs];
   for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
     if (wait > 0) await sleep(wait);
-    const found = await readTypeListEntriesBySlugs(node, cfg, type, pending);
+    const found = await findBySlugsRaw(node, type, hash, pending);
     const missed: string[] = [];
     for (const slug of pending) {
-      const snapshot = found.get(slug) ?? null;
-      if (snapshot) {
-        if (isTombstoned(snapshotSummary(snapshot))) continue;
-        if (snapshot.cut) cutRows.push(snapshot);
-        else bySlug.set(slug, snapshot.record);
+      const record = found.get(slug) ?? null;
+      if (record === null) {
+        missed.push(slug);
         continue;
       }
-      missed.push(slug);
+      if (!isTombstoned(record)) bySlug.set(slug, record);
     }
     pending = missed;
   }
-  // A list row that keeps only a head of a long body is completed from the
-  // product schema (retried; `onMissing` decides if the record cannot be read).
-  for (const record of await completeSnapshots(node, type, cfg, cutRows, onMissing, options)) {
-    bySlug.set(record.slug, record);
+  if (pending.length > 0 && onMissing === "throw") {
+    throw new FbrainError({
+      code: "index_row_incomplete",
+      message:
+        `${pending.length} ${type} record(s) could not be read from the product schema ` +
+        `(${pending.slice(0, 5).join(", ")}${pending.length > 5 ? ", ..." : ""}).`,
+      hint: "Retry. An empty read is usually a short read.",
+    });
   }
   return bySlug;
 }
@@ -1362,21 +1321,10 @@ export async function findChildTasksByDesignForDisplay(
   cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<ChildTasksLookup> {
-  const { isChildTaskIndexIncomplete } = await import("./child-task-index.ts");
-  try {
-    return {
-      status: "ok",
-      tasks: await findChildTasksByDesign(node, designSlug, cfg, options),
-    };
-  } catch (err) {
-    if (!isChildTaskIndexIncomplete(err)) throw err;
-    const e = err as { message?: string; hint?: string };
-    return {
-      status: "unavailable",
-      reason: e.message ?? "child-task index incomplete",
-      hint: e.hint,
-    };
-  }
+  return {
+    status: "ok",
+    tasks: await findChildTasksByDesign(node, designSlug, cfg, options),
+  };
 }
 
 export async function findChildTasksByDesign(
@@ -1385,34 +1333,19 @@ export async function findChildTasksByDesign(
   cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
 ): Promise<FbrainRecord[]> {
-  // Keyed path first: one design's children via (design_slug, task slug)
-  // partition read (child-task-index.ts) instead of the whole task
-  // partition. `null` means the index isn't registered yet (INERT ON
-  // DEPLOY) — fall through to the pre-existing list-and-filter path below,
-  // unchanged. A registered-but-unmigrated index throws loudly and that
-  // propagates, same as `listRecords`'s own contract.
-  const { readChildTasksByDesign } = await import("./child-task-index.ts");
-  const indexed = await readChildTasksByDesign(node, cfg, designSlug);
-  if (indexed !== null) return indexed;
-
-  const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
-  const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
-  const sleep = options?.sleep ?? defaultSleep;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const wait = computeBackoffMs(attempt, ceilingMs);
-    if (wait > 0) await sleep(wait);
-    // Fallback path (index not yet registered): index-first via listRecords+cfg.
-    // A display lookup: a stale list row with no task behind it is skipped.
-    const list = await listRecords(node, "task", cfg, { onMissing: "skip" });
-    if (list.length > 0) {
-      return list.filter(
-        (r) => !isTombstoned(r) && r.design_slug === designSlug,
-      );
-    }
-    // Empty page ⇒ ambiguous (fresh node vs. saturated-daemon flake); retry
-    // up to EMPTY_PAGE_RETRY_ATTEMPTS before declaring "no children".
+  void options;
+  const { readPageChain } = await import("./list-page.ts");
+  const parent = normalizeSlug(designSlug).toLowerCase();
+  const cards = await readPageChain(node, cfg, `child#${parent}`);
+  if (cards === null || cards.length === 0) return [];
+  const slugs = [...new Set(cards.map((card) => card.slug).filter((slug) => slug.length > 0))];
+  const found = await findBySlugs(node, "task", schemaHashFor("task", cfg), slugs);
+  const tasks: FbrainRecord[] = [];
+  for (const slug of slugs) {
+    const record = found.get(slug);
+    if (record && normalizeSlug(record.design_slug ?? "").toLowerCase() === parent) tasks.push(record);
   }
-  return [];
+  return tasks;
 }
 
 function defaultSleep(ms: number): Promise<void> {

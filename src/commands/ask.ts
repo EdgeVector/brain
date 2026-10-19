@@ -17,7 +17,7 @@ import {
   resolveTypeFilter,
 } from "../record.ts";
 import { BRAIN_EDGE_SET_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
-import { tokenize } from "../retrieval/bm25.ts";
+import { tokenize } from "../tokenize.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { normalizeGraphEdgeType } from "../graph-edge.ts";
 import {

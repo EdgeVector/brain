@@ -20,8 +20,7 @@
 import type { NodeClient, Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
 import { backlinkIndexTag, pageBackfill } from "../../backlink-index.ts";
-import { snapshotSummary, type SnapshotSummary } from "../../index-payload.ts";
-import { readTypeListIndex } from "../../record-list-index.ts";
+import { readPageChain } from "../../list-page.ts";
 import { RECORD_TYPES, type RecordType } from "../../schemas.ts";
 import {
   readTagMigrationStates,
@@ -30,8 +29,10 @@ import {
   tagMemberSchemaHash,
 } from "../../tag-index.ts";
 import {
+  arrayStringField,
   normalizeSlug,
   parseGenericLinkTag,
+  stringField,
   TOMBSTONE_TAG,
 } from "../../record.ts";
 import type { CheckResult } from "../doctor.ts";
@@ -84,12 +85,12 @@ export async function runTagIndexProbe(
     tags = opts.tags ? [...opts.tags] : await sampleTags(node, cfg);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    verbose?.(`${name}: could not read the type-list index — ${detail}`);
+    verbose?.(`${name}: could not read the list page — ${detail}`);
     return {
       name,
       ok: true,
       tag: "SKIP",
-      detail: `registered; the drift sample could not read the type-list index: ${detail}`,
+      detail: `registered; the drift sample could not read the list page: ${detail}`,
     };
   }
   if (tags.length === 0) {
@@ -145,22 +146,42 @@ export async function runTagIndexProbe(
   };
 }
 
-/** Distinct tags and link-target tags of a bounded slice of the type-list index. */
+type SampledRecord = {
+  type: RecordType;
+  tags: string[];
+  designSlug: string;
+};
+
+/** One list page per type, then one product read of tags for the chosen slugs. */
 async function sampleTags(node: NodeClient, cfg: Config): Promise<string[]> {
   const types: RecordType[] = RECORD_TYPES.filter(
     (t) => (cfg.schemaHashes as Record<string, string | undefined>)[t] !== undefined,
   );
-  const perType: Array<Array<{ type: RecordType; record: SnapshotSummary }>> = [];
+  const perType: Array<{ type: RecordType; slugs: string[] }> = [];
   for (const type of types) {
-    let records;
+    let cards;
     try {
-      records = await readTypeListIndex(node, cfg, type);
+      cards = await readPageChain(node, cfg, type, 1);
     } catch {
       continue;
     }
-    if (records === null) continue;
-    perType.push(records.map((snapshot) => ({ type, record: snapshotSummary(snapshot) })));
+    if (cards === null) continue;
+    const slugs = cards.map((card) => card.slug).filter((slug) => slug.length > 0);
+    if (slugs.length > 0) perType.push({ type, slugs });
   }
+  const picked: Array<{ type: RecordType; slug: string }> = [];
+  for (let i = 0; picked.length < DOCTOR_TAG_SAMPLE_RECORDS; i += 1) {
+    let progressed = false;
+    for (const row of perType) {
+      const slug = row.slugs[i];
+      if (slug === undefined) continue;
+      progressed = true;
+      picked.push({ type: row.type, slug });
+      if (picked.length >= DOCTOR_TAG_SAMPLE_RECORDS) break;
+    }
+    if (!progressed) break;
+  }
+  const records = await readSampleFields(node, cfg, picked);
   const tags: string[] = [];
   const seen = new Set<string>();
   const add = (tag: string): void => {
@@ -169,33 +190,55 @@ async function sampleTags(node: NodeClient, cfg: Config): Promise<string[]> {
     seen.add(tag);
     tags.push(tag);
   };
-  let taken = 0;
-  // Round-robin across types: a sample of one type would hide drift in another.
-  for (let i = 0; taken < DOCTOR_TAG_SAMPLE_RECORDS; i += 1) {
-    let progressed = false;
-    for (const rows of perType) {
-      const row = rows[i];
-      if (row === undefined) continue;
-      progressed = true;
-      taken += 1;
-      for (const tag of row.record.tags) add(tag);
-      // Link targets from the keys a summary keeps (design_slug, generic link
-      // tags). Wiki links live in the body, which a sample does not read.
-      for (const target of summaryLinkTargets(row.record, row.type)) {
-        add(backlinkIndexTag(target));
-      }
-      if (taken >= DOCTOR_TAG_SAMPLE_RECORDS) break;
-    }
-    if (!progressed) break;
+  for (const record of records) {
+    for (const tag of record.tags) add(tag);
+    for (const target of sampleLinkTargets(record)) add(backlinkIndexTag(target));
   }
   return tags;
 }
 
-/** Link targets a summary names without its body: a task's design, and generic link tags. */
-function summaryLinkTargets(record: SnapshotSummary, type: RecordType): string[] {
+async function readSampleFields(
+  node: NodeClient,
+  cfg: Config,
+  picked: readonly { type: RecordType; slug: string }[],
+): Promise<SampledRecord[]> {
+  if (picked.length === 0) return [];
+  if (!node.queryByKeys) {
+    throw new Error("the node client has no keyed batch read");
+  }
+  const byType = new Map<RecordType, string[]>();
+  for (const item of picked) {
+    const slugs = byType.get(item.type) ?? [];
+    slugs.push(item.slug);
+    byType.set(item.type, slugs);
+  }
+  const out: SampledRecord[] = [];
+  for (const [type, slugs] of byType) {
+    const schemaHash = cfg.schemaHashes[type] ?? "";
+    if (schemaHash.length === 0) continue;
+    const fields = type === "task" ? ["slug", "tags", "design_slug"] : ["slug", "tags"];
+    const rows = await node.queryByKeys({
+      schemaHash,
+      fields,
+      keys: slugs.map((slug) => ({ hash: slug })),
+    });
+    for (const row of rows) {
+      const fieldsOf = row.fields ?? {};
+      out.push({
+        type,
+        tags: arrayStringField(fieldsOf, "tags"),
+        designSlug: type === "task" ? stringField(fieldsOf, "design_slug") : "",
+      });
+    }
+  }
+  return out;
+}
+
+/** A task design and a generic link tag. The sample does not read the body. */
+function sampleLinkTargets(record: SampledRecord): string[] {
   const targets = new Set<string>();
-  if (type === "task" && typeof record.design_slug === "string" && record.design_slug.length > 0) {
-    const design = normalizeSlug(record.design_slug);
+  if (record.type === "task" && record.designSlug.length > 0) {
+    const design = normalizeSlug(record.designSlug);
     if (design.length > 0) targets.add(design);
   }
   for (const tag of record.tags) {

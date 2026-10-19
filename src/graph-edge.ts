@@ -1,11 +1,10 @@
-import type { NodeClient, QueryRow } from "./client.ts";
+import type { NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
 import { normalizeSlug } from "./record.ts";
 import {
-  GRAPH_EDGE_IN_SCHEMA_KEY,
-  GRAPH_EDGE_NEIGHBOR_FIELDS,
-  GRAPH_EDGE_OUT_SCHEMA_KEY,
-  GRAPH_EDGE_RECONCILE_FIELDS,
+  BRAIN_EDGE_SET_SCHEMA_KEY,
+  BRAIN_LIST_PAGE_SCHEMA_KEY,
+  RECORD_TYPES,
 } from "./schemas.ts";
 
 export const GRAPH_EDGE_TYPES = [
@@ -69,11 +68,15 @@ export function extractGraphEdges(opts: {
   return [...byKey.values()].sort(compareEdges);
 }
 
+const EDGE_HEAD = "__head__";
+const EDGE_FRONTMATTER = "__frontmatter__";
+
+/** Out is the edge-set schema. In is the list-page schema (`link#slug`). */
 export function graphEdgeHashes(
   cfg: Pick<Config, "schemaHashes">,
 ): { out: string; in: string } | null {
-  const out = cfg.schemaHashes[GRAPH_EDGE_OUT_SCHEMA_KEY];
-  const inbound = cfg.schemaHashes[GRAPH_EDGE_IN_SCHEMA_KEY];
+  const out = cfg.schemaHashes[BRAIN_EDGE_SET_SCHEMA_KEY];
+  const inbound = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY];
   return out && inbound ? { out, in: inbound } : null;
 }
 
@@ -87,6 +90,30 @@ export type ReadGraphEdgesDetailed = {
   droppedOwns: number;
 };
 
+function parseIdList(raw: unknown): string[] {
+  if (typeof raw !== "string" || raw.length === 0) return [];
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function edgeFromId(src: string, id: string, provenance: GraphEdgeProvenance): GraphEdge | null {
+  const cut = id.indexOf("#");
+  if (cut <= 0) return null;
+  const dst = id.slice(cut + 1);
+  if (dst.length === 0) return null;
+  return {
+    src,
+    dst,
+    type: normalizeGraphEdgeType(id.slice(0, cut)),
+    provenance,
+    created_at: "",
+  };
+}
+
 export async function readGraphEdgesDetailed(
   node: NodeClient,
   cfg: Pick<Config, "schemaHashes">,
@@ -94,32 +121,78 @@ export async function readGraphEdgesDetailed(
   direction: "out" | "in",
   opts?: ReadGraphEdgesOpts,
 ): Promise<ReadGraphEdgesDetailed> {
+  void opts;
   const hashes = graphEdgeHashes(cfg);
   if (!hashes) return { edges: null, droppedOwns: 0 };
   const key = normalizeSlug(slug).toLowerCase();
-  const fields = [...(opts?.fields ?? GRAPH_EDGE_NEIGHBOR_FIELDS)];
-  const res = await node.queryAll({
-    schemaHash: hashes[direction],
-    fields,
-    filter: { HashKey: key },
+  if (direction === "in") {
+    const res = await node.queryAll({
+      schemaHash: hashes.in,
+      fields: ["blp_page"],
+      filter: { HashRangeKey: { hash: `link#${key}`, range: EDGE_HEAD } },
+    });
+    const raw = res.results[0]?.fields?.blp_page;
+    const ids = typeof raw === "string" ? linkCardSlugs(raw) : [];
+    const edges = ids.map((src) => edgeFromId(src, `mentions#${key}`, "explicit"))
+      .filter((edge): edge is GraphEdge => edge !== null);
+    return { edges: edges.sort(compareEdges), droppedOwns: 0 };
+  }
+  const types = RECORD_TYPES.filter((type) => {
+    const hash = cfg.schemaHashes[type];
+    return typeof hash === "string" && hash.length > 0;
   });
-  // Measured on the primary brain 2026-08-24: querying either plane's schema
-  // hash with the same `HashKey` returns the IDENTICAL union of that slug's
-  // inbound and outbound rows. The two planes are one product under two
-  // indexes, and the node's HashKey filter does not pick the index the schema
-  // hash names. Untrimmed, an `out` read hands back edges pointing AT the
-  // slug, which `graph neighbors` then renders with the queried slug as its
-  // own neighbour, and which the mirror lint compares against itself and
-  // always calls agreement. Keep only the rows this direction actually owns.
-  // Harmless once the node discriminates: the predicate is already true then.
-  const owns = direction === "out"
-    ? (edge: GraphEdge) => edge.src === key
-    : (edge: GraphEdge) => edge.dst === key;
-  const mapped = res.results
-    .map(rowToEdge)
-    .filter((edge): edge is GraphEdge => edge !== null);
-  const kept = mapped.filter(owns).sort(compareEdges);
-  return { edges: kept, droppedOwns: mapped.length - kept.length };
+  const keys = types.flatMap((type) => [
+    { hash: `es#${type}#${key}`, range: EDGE_HEAD },
+    { hash: `es#${type}#${key}`, range: EDGE_FRONTMATTER },
+  ]);
+  if (keys.length === 0) return { edges: [], droppedOwns: 0 };
+  const rows = node.queryByKeys
+    ? await node.queryByKeys({
+      schemaHash: hashes.out,
+      fields: ["bes_r", "bes_ids"],
+      keys,
+    })
+    : (await node.queryAll({
+      schemaHash: hashes.out,
+      fields: ["bes_r", "bes_ids"],
+      filter: { HashRangeKeys: keys.map((item) => [item.hash, item.range]) },
+    })).results;
+  const frontmatter = new Set<string>();
+  const headIds: string[] = [];
+  for (const row of rows) {
+    const range = row.key?.range ?? "";
+    const ids = parseIdList(row.fields?.bes_ids);
+    if (range === EDGE_FRONTMATTER) {
+      for (const id of ids) frontmatter.add(id);
+    } else {
+      headIds.push(...ids);
+    }
+  }
+  const seen = new Set<string>();
+  const edges: GraphEdge[] = [];
+  for (const id of headIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const edge = edgeFromId(key, id, frontmatter.has(id) ? "frontmatter" : "explicit");
+    if (edge) edges.push(edge);
+  }
+  return { edges: edges.sort(compareEdges), droppedOwns: 0 };
+}
+
+function linkCardSlugs(raw: string): string[] {
+  try {
+    const value = JSON.parse(raw) as { cards?: unknown };
+    if (!Array.isArray(value.cards)) return [];
+    const slugs: string[] = [];
+    for (const item of value.cards) {
+      if (!item || typeof item !== "object") continue;
+      const slug = (item as { slug?: unknown }).slug;
+      if (typeof slug === "string" && slug.length > 0) slugs.push(slug);
+    }
+    return slugs;
+  } catch {
+    return [];
+  }
 }
 
 export async function readGraphEdges(
@@ -132,154 +205,14 @@ export async function readGraphEdges(
   const detailed = await readGraphEdgesDetailed(node, cfg, slug, direction, opts);
   if (detailed.edges !== null) {
     opts?.verbose?.(
-      `graph-edges ${direction} fields=${(opts?.fields ?? GRAPH_EDGE_NEIGHBOR_FIELDS).length} ` +
-        `kept=${detailed.edges.length} droppedOwns=${detailed.droppedOwns}`,
+      `graph-edges ${direction} kept=${detailed.edges.length} droppedOwns=${detailed.droppedOwns}`,
     );
   }
   return detailed.edges;
 }
 
-export async function reconcileGraphEdges(opts: {
-  node: NodeClient;
-  cfg: Pick<Config, "schemaHashes">;
-  sourceSlug: string;
-  body: string;
-  frontmatterEdges?: readonly string[];
-  preserveExistingFrontmatter?: boolean;
-  now?: string;
-}): Promise<number> {
-  const hashes = graphEdgeHashes(opts.cfg);
-  if (!hashes) return 0;
-  const existing = (await readGraphEdges(opts.node, opts.cfg, opts.sourceSlug, "out", {
-    fields: GRAPH_EDGE_RECONCILE_FIELDS,
-  })) ?? [];
-  const desired = extractGraphEdges(opts);
-  if (opts.preserveExistingFrontmatter) {
-    for (const edge of existing) {
-      if (edge.provenance === "frontmatter" && !desired.some((d) => edgeRange(d) === edgeRange(edge))) {
-        desired.push(edge);
-      }
-    }
-  }
-  const current = new Map(existing.map((edge) => [edgeRange(edge), edge]));
-  const wanted = new Map(desired.map((edge) => [edgeRange(edge), edge]));
-  for (const [range] of current) {
-    if (!wanted.has(range)) {
-      await opts.node.deleteRecord({
-        schemaHash: hashes.out,
-        keyHash: normalizeSlug(opts.sourceSlug).toLowerCase(),
-        keyRange: range,
-      });
-    }
-  }
-  for (const [range, edge] of wanted) {
-    const old = current.get(range);
-    const fields = edgeFields({ ...edge, created_at: old?.created_at || edge.created_at });
-    const mutation = { schemaHash: hashes.out, fields, keyHash: edge.src, keyRange: range };
-    if (old) await opts.node.updateRecord(mutation);
-    else await opts.node.createRecord(mutation);
-  }
-  return wanted.size;
-}
-
-// An unregistered substrate is a config state, not a per-write event: every
-// `put` on that brain drops its links the same way. Warn once per process so
-// the first write says it plainly and a 200-record backfill does not print
-// the same line 200 times.
-let inertNoticeEmitted = false;
-
-/** Test seam — forget that the once-per-process inert notice was printed. */
-export function resetGraphEdgeInertNotice(): void {
-  inertNoticeEmitted = false;
-}
-
-export type MaintainGraphEdgesResult = {
-  graphEdgeIndexFailed: boolean;
-  edges: number;
-  // True when the graph-edge schemas are absent from config, so no edge row
-  // can be written whatever the body says.
-  substrateInert: boolean;
-  // Links parsed out of this body that the inert substrate discarded. Zero
-  // when the substrate is live, or when the body carries no links.
-  droppedLinks: number;
-};
-
-export async function maintainGraphEdges(
-  opts: Parameters<typeof reconcileGraphEdges>[0] & {
-    verbose?: (message: string) => void;
-    // Loud channel for the inert-substrate notice. Defaults to stderr — this
-    // one must reach a non-verbose operator, unlike `verbose`.
-    warn?: (message: string) => void;
-  },
-): Promise<MaintainGraphEdgesResult> {
-  // Before phase 1 shipped, this path returned `edges: 0` here in silence, so
-  // a brain whose config never got the two schema keys looked identical to a
-  // brain whose records simply carry no links. It is not: the links parsed
-  // fine and were thrown away. Say so.
-  if (graphEdgeHashes(opts.cfg) === null) {
-    const droppedLinks = extractGraphEdges(opts).length;
-    if (droppedLinks > 0 && !inertNoticeEmitted) {
-      inertNoticeEmitted = true;
-      const warn = opts.warn ?? ((message: string) => console.error(message));
-      warn(
-        `graph-edge substrate is INERT: parsed ${droppedLinks} link(s) in ${opts.sourceSlug} ` +
-          "and stored none, because the graph-edge schemas are not in this brain's config. " +
-          "The record is saved; its links are not queryable. " +
-          "Fix: run `fbrain init` to register them, then `fbrain reindex --graph-edges`. " +
-          "(reported once per process)",
-      );
-    }
-    return { graphEdgeIndexFailed: false, edges: 0, substrateInert: true, droppedLinks };
-  }
-  try {
-    return {
-      graphEdgeIndexFailed: false,
-      edges: await reconcileGraphEdges(opts),
-      substrateInert: false,
-      droppedLinks: 0,
-    };
-  } catch (err) {
-    opts.verbose?.(
-      `graph-edge reconcile FAILED for ${opts.sourceSlug}: ${err instanceof Error ? err.message : String(err)}; ` +
-        "record persisted — run `fbrain reindex --graph-edges` for bounded repair",
-    );
-    return { graphEdgeIndexFailed: true, edges: 0, substrateInert: false, droppedLinks: 0 };
-  }
-}
-
 export function edgeRange(edge: Pick<GraphEdge, "type" | "dst">): string {
   return `${edge.type}#${edge.dst}`;
-}
-
-export function edgeFields(edge: GraphEdge): Record<string, string> {
-  return {
-    bge_src: edge.src,
-    bge_dst: edge.dst,
-    bge_type: edge.type,
-    bge_provenance: edge.provenance,
-    bge_created_at: edge.created_at,
-    bge_out_r: `${edge.type}#${edge.dst}`,
-    bge_in_r: `${edge.type}#${edge.src}`,
-  };
-}
-
-function rowToEdge(row: QueryRow): GraphEdge | null {
-  const fields = (row.fields as Record<string, unknown> | undefined) ?? {};
-  const src = typeof fields.bge_src === "string" ? fields.bge_src : "";
-  const dst = typeof fields.bge_dst === "string" ? fields.bge_dst : "";
-  const provenance = fields.bge_provenance;
-  if (
-    !src ||
-    !dst ||
-    (provenance !== "explicit" && provenance !== "wikilink" && provenance !== "frontmatter")
-  ) return null;
-  return {
-    src,
-    dst,
-    type: typeof fields.bge_type === "string" ? normalizeGraphEdgeType(fields.bge_type) : "mentions",
-    provenance,
-    created_at: typeof fields.bge_created_at === "string" ? fields.bge_created_at : "",
-  };
 }
 
 function compareEdges(a: GraphEdge, b: GraphEdge): number {
