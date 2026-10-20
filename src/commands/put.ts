@@ -36,12 +36,12 @@ import {
   type RecordFieldPatch,
 } from "../record.ts";
 import {
+  BRAIN_LIST_PAGE_SCHEMA_KEY,
   RECORDS,
   isRecordType,
   recordTypeList,
   type RecordType,
 } from "../schemas.ts";
-import { recordListEntryHash } from "../record-list-index.ts";
 import { ensurePapercutSlug } from "../papercut.ts";
 import {
   buildResidentWritePlan,
@@ -297,7 +297,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     action: plan.action,
     title,
     indexPending: search === "queued",
-    listIndexFailed: recordListEntryHash(opts.cfg) === null,
+    listIndexFailed: (opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "") === "",
     ...(writeId ? { writeId, revision: writeId } : {}),
     durability,
     search,

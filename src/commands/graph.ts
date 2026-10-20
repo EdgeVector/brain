@@ -28,8 +28,7 @@ import {
 } from "../graph-traverse.ts";
 
 export const GRAPH_EDGES_UNCONFIGURED_HINT =
-  "graph edges are not configured — run `brain init` to register the edge schemas, " +
-  "then `brain reindex --graph-edges` to populate them";
+  "graph edges are not configured — run `brain init` to register the edge-set schema";
 
 export type GraphNeighborsJson = {
   slug: string;

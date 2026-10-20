@@ -108,9 +108,8 @@ not touched at all.
    attachment field except `filenames` is `no_index`; in v2 the indexed
    surface shrinks further — the DB carries only pointer metadata, the
    content bytes never enter the DB at all.
-2. **Brain local BM25:** the CLI's own BM25 corpus is built exclusively from
-   knowledge-record `title + body` across `RECORD_TYPES`
-   (`src/retrieval/bm25.ts`); internal schemas never enter it.
+2. **Search:** `brain search` uses LastSeek. The local token rebuild is
+   retired. Internal schemas do not enter search.
 3. **Read surfaces:** `get`/`list`/`ask` only read the 10 record types, so
    neither pointers nor bytes can leak through result payloads either.
 

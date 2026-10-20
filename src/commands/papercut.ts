@@ -682,6 +682,7 @@ export async function papercutCloseCmd(
     writes,
     durable: true,
     failOnIndexPartial: true,
+    replayKeywords: true,
   });
   const durability = writeDurabilityOf(receipt);
   const revision = receipt.mutationIds[0];

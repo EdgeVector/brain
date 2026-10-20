@@ -4,7 +4,7 @@ import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
 import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type FbrainRecord } from "./record.ts";
-import { tokenize } from "./retrieval/bm25.ts";
+import { tokenize } from "./tokenize.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
   BRAIN_LIST_LOCATOR_SCHEMA_KEY,
@@ -1488,6 +1488,185 @@ async function readOnePage(
   const row = res.results[0];
   if (!row) return null;
   return rowField(row, "blp_page");
+}
+
+/** Cards on one list hash. Absent head is an empty list. A missing schema is null. */
+export async function readPageChain(
+  node: NodeClient,
+  cfg: { schemaHashes: Record<string, string> },
+  hash: string,
+  maxPages = 1000,
+): Promise<ListCard[] | null> {
+  const schemaHash = schemaOf(cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
+  if (schemaHash.length === 0) return null;
+  const cards: ListCard[] = [];
+  const seen = new Set<string>();
+  let range = HEAD_RANGE;
+  for (let depth = 0; depth < maxPages; depth++) {
+    if (seen.has(range)) break;
+    seen.add(range);
+    const raw = await readOnePage(node, schemaHash, hash, range);
+    if (raw === null) return range === HEAD_RANGE ? [] : cards;
+    const page = parsePage(raw);
+    for (const card of page.cards) cards.push(card);
+    if (page.older.length === 0) break;
+    range = page.older;
+  }
+  return cards;
+}
+
+/**
+ * Replay each head on the shared prior page. A single list head is already
+ * that page. A single keyword head is replayed too: its stored fields can
+ * replace another card on a full ranker page.
+ */
+export function mergeHeadCommits(
+  heads: readonly HeadCommit[],
+): { head: HeadCommit | null; note: string | null } {
+  const first = heads[0];
+  if (!first) return { head: null, note: null };
+  if (heads.length === 1 && first.replay.kind !== "keyword") return { head: first, note: null };
+  if (heads.some((head) => head.replay.kind === "keyword")) return mergeKeywordCommits(heads);
+  return mergeListCommits(heads);
+}
+
+function expectedPageRaw(heads: readonly HeadCommit[]): string | null {
+  for (const head of heads) {
+    if (head.expected.type === "value") return head.expected.value;
+  }
+  return null;
+}
+
+function mergeListCommits(
+  heads: readonly HeadCommit[],
+): { head: HeadCommit | null; note: string | null } {
+  let page = parsePage(expectedPageRaw(heads));
+  let note: string | null = null;
+  let lost = false;
+  for (const head of heads) {
+    const replay = head.replay;
+    if (replay.kind === "place") {
+      // A full head stays as the prior page. Do not pop a card, and do not
+      // point older at an overflow page that already holds the moved card.
+      if (replay.overflowId.length > 0) {
+        note = "head full";
+        lost = true;
+        continue;
+      }
+      const cards = dropCard(page.cards, replay.card.type ?? "", replay.card.slug);
+      cards.unshift(replay.card);
+      if (cards.length > replay.bound) {
+        note = "head full";
+        lost = true;
+        continue;
+      }
+      page = { cards, older: page.older, ...(page.linked !== undefined ? { linked: page.linked } : {}) };
+      continue;
+    }
+    if (replay.kind === "remove") {
+      page = {
+        ...page,
+        cards: dropCard(page.cards, replay.type, replay.slug),
+      };
+      continue;
+    }
+    if (replay.kind === "symptom") {
+      const held = page.cards[0]?.slug ?? "";
+      if (held.length > 0 && held !== replay.slug) {
+        note = "symptom occupied";
+        lost = true;
+        continue;
+      }
+      page = { cards: [{ slug: replay.slug }], older: "" };
+      continue;
+    }
+    if (replay.kind === "clear") {
+      const held = page.cards[0]?.slug ?? "";
+      if (held.length > 0 && held !== replay.slug) {
+        note = "symptom occupied";
+        lost = true;
+        continue;
+      }
+      page = { cards: [], older: "" };
+      continue;
+    }
+    if (replay.kind === "ensure-empty") {
+      if (page.cards.length === 0) page = { cards: [], older: "" };
+      continue;
+    }
+    note = note ?? "page allocation conflict";
+    lost = true;
+  }
+  if (lost) return { head: null, note };
+  const last = heads[heads.length - 1];
+  if (!last) return { head: null, note };
+  const symptom = last.replay.kind === "symptom" || last.replay.kind === "clear";
+  const json = renderPage(page, symptom);
+  if (json === null) return { head: null, note: note ?? "page cap" };
+  const existed = heads.some((head) => head.expected.type === "value");
+  return {
+    head: {
+      ...last,
+      mutationType: existed ? "update" : "create",
+      fields: { blp_h: last.keyHash, blp_r: last.keyRange, blp_page: json },
+    },
+    note,
+  };
+}
+
+function mergeKeywordCommits(
+  heads: readonly HeadCommit[],
+): { head: HeadCommit | null; note: string | null } {
+  let cards = parseKeywordCards(expectedPageRaw(heads), false);
+  let note: string | null = null;
+  let lost = false;
+  for (const head of heads) {
+    const replay = head.replay;
+    if (replay.kind !== "keyword") {
+      note = note ?? "keyword page";
+      lost = true;
+      continue;
+    }
+    // A higher weight must not replace the other twin. A full ranker page
+    // refuses the new card the same way a full list head does.
+    const present = cards.some((card) => card.type === replay.type && card.slug === replay.slug);
+    if (replay.weight !== null && !present && cards.length >= RANKER_PAGE) {
+      note = "keyword cap";
+      lost = true;
+      continue;
+    }
+    const placed = nextKeywordCards(cards, replay.type, replay.slug, replay.weight);
+    if (placed === "saturated") {
+      note = "keyword cap";
+      lost = true;
+      continue;
+    }
+    if (placed === "full") {
+      note = "keyword page";
+      lost = true;
+      continue;
+    }
+    if (placed !== "same") cards = placed;
+  }
+  if (lost) return { head: null, note };
+  const last = heads[heads.length - 1];
+  if (!last) return { head: null, note };
+  if (cards.length === 0) {
+    const existed = heads.some((head) => head.expected.type === "value" || head.mutationType === "delete");
+    if (!existed) return { head: null, note };
+    return { head: { ...last, mutationType: "delete", fields: {} }, note };
+  }
+  const json = JSON.stringify({ cards: sortKeyword(cards) });
+  if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return { head: null, note: note ?? "keyword page" };
+  const existed = heads.some((head) => head.expected.type === "value");
+  return {
+    head: {
+      ...last,
+      mutationType: existed ? "update" : "create",
+      fields: { blp_h: last.keyHash, blp_r: last.keyRange, blp_page: json },
+    },
+    note,
+  };
 }
 
 function headWrite(head: HeadCommit, raw: string | null, page: PageBody, symptom: boolean): HeadCommit | null {

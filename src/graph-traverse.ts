@@ -1,18 +1,10 @@
 // Bounded traversal and integrity linting over the persisted typed-edge
 // substrate written by `src/graph-edge.ts`.
 //
-// ACCESS-PATTERN CONTRACT (the reason this file exists at all): LastDB is
-// Dynamo-style — point get is O(1), a range under one hash is O(log M), and a
-// scan does not exist. Phase 1 dual-writes every edge into two schemas keyed
-// the two ways a traversal needs to walk it:
-//
-//   __graphedgeout__   hash = bge_src   range = "<type>#<dst>"
-//   __graphedgein__    hash = bge_dst   range = "<type>#<src>"
-//
-// So "who does X point at" and "who points at X" are BOTH one keyed range read.
-// Every traversal below is therefore a breadth-first walk where each frontier
-// node costs exactly one keyed read per direction — never a scan, and never a
-// read whose cost depends on the size of the corpus.
+// ACCESS-PATTERN CONTRACT: LastDB is Dynamo-style. An exact key is O(1).
+// A scan does not exist. One edge is stored once, in the edge-set atom.
+// Outbound reads that atom for each record type. Inbound reads the link page
+// `link#<slug>`. Each step of a walk is those keyed reads.
 //
 // The cost that IS unbounded is the walk itself: a graph with a hub node fans
 // out without limit, and an unbounded walk over a keyed substrate is still a
@@ -134,7 +126,7 @@ export function resolveMaxHops(requested?: number): number {
   return requested;
 }
 
-/** True when the graph-edge schemas are absent from config (phase 1 not run). */
+/** True when the edge-set schema or the list page schema is absent. */
 export function graphEdgesUnavailable(cfg: Pick<Config, "schemaHashes">): boolean {
   return graphEdgeHashes(cfg) === null;
 }
@@ -484,14 +476,14 @@ export async function lintGraphEdges(
         inbound = (await readGraphEdges(node, cfg, edge.dst, "in")) ?? [];
         inboundByDst.set(edge.dst, inbound);
       }
-      const mirrored = inbound.some((m) => m.src === edge.src && m.type === edge.type);
+      const mirrored = inbound.some((m) => m.src === edge.src);
       if (!mirrored) {
         findings.push({
           code: "mirror-missing",
           src: edge.src,
           dst: edge.dst,
           type: edge.type,
-          detail: "out-edge has no matching in-edge row",
+          detail: "out edge is not on the destination link page",
         });
       }
     }
@@ -502,14 +494,14 @@ export async function lintGraphEdges(
     for (const edge of inEdges) {
       if (edge.src === edge.dst) continue;
       const siblings = (await readGraphEdges(node, cfg, edge.src, "out")) ?? [];
-      const mirrored = siblings.some((m) => m.dst === src && m.type === edge.type);
+      const mirrored = siblings.some((m) => m.dst === src);
       if (!mirrored) {
         findings.push({
           code: "mirror-orphan",
           src: edge.src,
           dst: src,
           type: edge.type,
-          detail: "in-edge row has no matching out-edge row",
+          detail: "link page names a source that does not store this edge",
         });
       }
     }

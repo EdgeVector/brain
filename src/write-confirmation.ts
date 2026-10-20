@@ -3,11 +3,7 @@ type PutConfirmation = {
   type: string;
   slug: string;
   indexPending: boolean;
-  // The record persisted but the record-list index patch did not. Unlike
-  // `indexPending` this does NOT heal itself: the list index is patched by
-  // read-modify-write, so a dropped entry stays dropped until a migration or
-  // cold seed rebuilds it. Silence here is what let the primary's rollup fall
-  // 760 live records behind `brain list` before anyone noticed (2026-07-28).
+  // The list page schema is not registered, so the write cannot place a card.
   listIndexFailed?: boolean;
   revision?: string;
   durability?: "queued" | "durable";
@@ -33,8 +29,8 @@ export function indexPendingNote(indexPending: boolean): string {
 
 export function listIndexFailedNote(listIndexFailed: boolean | undefined): string {
   return listIndexFailed
-    ? " (WARNING: record saved but the record-list index patch FAILED — `brain list` and" +
-      " `brain ask` will not see this record until the index is rebuilt; this does not self-heal)"
+    ? " (WARNING: record saved but the list page schema is not registered —" +
+      " `brain list` will not see this record until `brain init`)"
     : "";
 }
 

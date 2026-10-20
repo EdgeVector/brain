@@ -14,7 +14,7 @@ import { hydrateRecord, parseSpillMarker } from "../body-spill.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import { extractGraphEdges } from "../graph-edge.ts";
-import { BACKLINK_PAGE, DIRECTORY_RANGE, EDGE_CAP, FRONTMATTER_RANGE, HEAD_RANGE } from "../list-page.ts";
+import { BACKLINK_PAGE, EDGE_CAP, FRONTMATTER_RANGE, HEAD_RANGE } from "../list-page.ts";
 import {
   arrayStringField,
   normalizeSlug,
@@ -27,8 +27,6 @@ import { recordFromPrimaryFields } from "../resident-write-plan.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
   BRAIN_LIST_PAGE_SCHEMA_KEY,
-  BRAIN_TYPE_DIRECTORY_SCHEMA_KEY,
-  GRAPH_EDGE_OUT_SCHEMA_KEY,
   isRecordType,
   type RecordType,
 } from "../schemas.ts";
@@ -221,7 +219,7 @@ function storedStringList(raw: string): string[] | null {
   }
 }
 
-/** Typed metadata proves frontmatter links; legacy graph rows need a unique source type. */
+/** The frontmatter range of the edge set proves a frontmatter link. */
 async function markFrontmatterLinks(
   node: ReturnType<typeof newReadClientFromCfg>,
   cfg: Config,
@@ -231,7 +229,6 @@ async function markFrontmatterLinks(
   targetType: RecordType,
 ): Promise<boolean> {
   const setSchema = cfg.schemaHashes[BRAIN_EDGE_SET_SCHEMA_KEY] ?? "";
-  const graphSchema = cfg.schemaHashes[GRAPH_EDGE_OUT_SCHEMA_KEY] ?? "";
   const candidates = new Map<string, { slug: string; type: RecordType; source: LinkSource }>();
   for (const card of cards) {
     if (!isRecordType(card.type)) continue;
@@ -267,68 +264,17 @@ async function markFrontmatterLinks(
     return cut > 0 && id.slice(cut + 1) === destination;
   };
   let partial = false;
-  const legacy = new Map<string, { slug: string; type: RecordType; source: LinkSource; ids: string[] }>();
   for (const [hash, candidate] of candidates) {
+    if (!frontmatterIds.has(hash)) continue;
+    const frontmatter = frontmatterIds.get(hash);
     const ids = headIds.get(hash);
-    if (frontmatterIds.has(hash)) {
-      const frontmatter = frontmatterIds.get(hash);
-      if (!frontmatter || frontmatter.length > EDGE_CAP) {
-        partial = true;
-      } else if (frontmatter.length > 0) {
-        if (!ids || ids.length > EDGE_CAP) partial = true;
-        else candidate.source.frontmatterLink = frontmatter.some((id) =>
-          matchesDestination(id) && ids.includes(id));
-      }
-      continue;
-    }
-    if (!ids || ids.length > EDGE_CAP) {
+    if (!frontmatter || frontmatter.length > EDGE_CAP || !ids || ids.length > EDGE_CAP) {
       partial = true;
       continue;
     }
-    const matching = ids.filter(matchesDestination);
-    if (matching.length > 0) legacy.set(hash, { ...candidate, ids: matching });
-  }
-  if (legacy.size === 0) return partial;
-  const directorySchema = cfg.schemaHashes[BRAIN_TYPE_DIRECTORY_SCHEMA_KEY] ?? "";
-  if (directorySchema.length === 0 || graphSchema.length === 0) return true;
-  const directory = await node.queryByKeys({
-    schemaHash: directorySchema,
-    fields: ["btd_h", "btd_types"],
-    keys: [...new Set([...legacy.values()].map(({ slug }) => slug))]
-      .map((hash) => ({ hash, range: DIRECTORY_RANGE })),
-  });
-  const sourceTypes = new Map(directory.map((row) => [
-    row.key?.hash || stringField(row.fields, "btd_h"),
-    storedStringList(stringField(row.fields, "btd_types")),
-  ]));
-  const graphKeys = new Map<string, { hash: string; range: string; sources: LinkSource[] }>();
-  for (const candidate of legacy.values()) {
-    const types = sourceTypes.get(candidate.slug);
-    if (!types || types.length !== 1 || types[0] !== candidate.type) {
-      partial = true;
-      continue;
-    }
-    for (const id of candidate.ids) {
-      const hash = normalizeSlug(candidate.slug).toLowerCase();
-      const key = `${hash}\0${id}`;
-      const graph = graphKeys.get(key) ?? { hash, range: id, sources: [] };
-      graph.sources.push(candidate.source);
-      graphKeys.set(key, graph);
-    }
-  }
-  if (graphKeys.size === 0) return partial;
-  const edges = await node.queryByKeys({
-    schemaHash: graphSchema,
-    fields: ["bge_src", "bge_dst", "bge_type", "bge_provenance"],
-    keys: [...graphKeys.values()].map(({ hash, range }) => ({ hash, range })),
-  });
-  for (const row of edges) {
-    if (stringField(row.fields, "bge_provenance") !== "frontmatter") continue;
-    const src = stringField(row.fields, "bge_src");
-    const dst = stringField(row.fields, "bge_dst");
-    if (dst !== destination) continue;
-    const graph = graphKeys.get(`${src}\0${stringField(row.fields, "bge_type")}#${dst}`);
-    for (const source of graph?.sources ?? []) source.frontmatterLink = true;
+    if (frontmatter.length === 0) continue;
+    candidate.source.frontmatterLink = frontmatter.some((id) =>
+      matchesDestination(id) && ids.includes(id));
   }
   return partial;
 }

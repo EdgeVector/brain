@@ -1,15 +1,11 @@
 // `fbrain delete <slug> [--type T]` — delete a record.
 //
-// LastDB native `MutationType::Delete` converges tip absence on the persist
-// lane. A later get misses the row. This command:
-//   1. Overwrites every user field with sentinel values and stamps the
-//      tombstone tag (TOMBSTONE_TAG from record.ts) so older fbrain read
-//      paths still hide the row if a native Delete read is delayed.
-//   2. Fires fold_db `mutation_type=delete` with an empty
-//      `fields_and_values` body. That is the native Delete, not a no-op.
-//   3. Verifies by reading the record back. Success is either a miss
-//      (native Delete hid the row) or a row that still carries the
-//      tombstone tag. Only "row visible AND not tombstoned" fails.
+// One mutation call carries the product tombstone and the page changes.
+// The call updates the product fields to the tombstone tag, then deletes
+// the product key. The node applies that update first and the delete after
+// it, so a later get misses the row. The batch ack is success. A missing
+// batch client, a batch over the cap, or a failed batch fails the command
+// before any success line.
 //
 // Historical Phase 5 (2026-05-23) treated Delete as a sync-log marker
 // only. That is no longer true. See docs/phase-5-delete-spike.md for the
@@ -20,24 +16,19 @@ import { pageBackfill, readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
-import { HEAD_RANGE, planRecordListSide, type ListSidePlan } from "../list-page.ts";
+import { HEAD_RANGE, planRecordListSide } from "../list-page.ts";
 import {
   buildRecordFields,
-  findBySlugRaw,
-  isTombstoned,
   normalizeSlug,
   nowIso,
   NOT_FOUND_TYPED,
   resolveBySlug,
-  schemaHashFor,
   TOMBSTONE_TAG,
-  withReadRetry,
 } from "../record.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
 import { matchesListFilters, resolveListEntries } from "./list.ts";
-import { removeResidentListSide } from "../resident-write-plan.ts";
+import { commitResidentRemoval } from "../resident-write-plan.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
-import type { FbrainRecord } from "../record.ts";
 
 export type DeleteOptions = {
   cfg: Config;
@@ -161,62 +152,6 @@ export function buildTombstoneFields(
   });
 }
 
-// Soft-delete a single, ALREADY-RESOLVED live record: stamp the tombstone
-// fields, fire fold_db's delete mutation, and verify the tombstone stuck.
-// This is the one source of truth for the tombstone write — both the
-// single-slug `deleteRecord` and the batch `deleteByFilter` funnel through
-// it so the two paths can never drift in how they delete.
-//
-// The referential-integrity guard (design-with-live-tasks) lives in the
-// CALLERS, not here: single-slug delete reports it as a hard error, while
-// batch delete skips+warns per record (a batch must not abort midway because
-// one design is still linked). `created` is the record's existing
-// `created_at`, preserved verbatim in the tombstone.
-async function tombstoneOne(
-  node: NodeClient,
-  cfg: Config,
-  type: RecordType,
-  slug: string,
-  created: string,
-): Promise<void> {
-  const schemaHash = schemaHashFor(type, cfg);
-  const fields = buildTombstoneFields(type, slug, created, nowIso());
-
-  await node.updateRecord({ schemaHash, fields, keyHash: slug });
-  // Fire fold_db's own delete mutation so the sync-log marker + per-field
-  // tombstone (current fold_db) are written. When the spike was authored
-  // this was a no-op at the storage layer (Probe B); current fold_db
-  // repurposes it as a per-field tombstone write that hides the row from
-  // default queries — which the verify below tolerates.
-  await node.deleteRecord({ schemaHash, keyHash: slug });
-
-  // Verify the delete landed. A successful delete leaves the row in
-  // one of two states:
-  //   (a) row absent from the raw read — current fold_db's
-  //       `MutationType::Delete` writes a per-field tombstone that the
-  //       default query filter hides;
-  //   (b) row present but carrying our TOMBSTONE_TAG — older fold_db
-  //       (pre-tombstone repurposing) where `MutationType::Delete` is a
-  //       no-op and only the prior `update` mutation matters.
-  // Only "row visible AND not tombstoned" is a real failure: the update
-  // mutation reported success but the tag did not land.
-  //
-  // Retry on the worst-case signal (row visible AND not tombstoned), so
-  // the page-flake hedge from PR #53 still absorbs a transient
-  // un-tombstoned read on a saturated daemon.
-  const verify = await withReadRetry(
-    () => findBySlugRaw(node, type, schemaHash, slug),
-    (r) => r === null || isTombstoned(r),
-  );
-  if (verify !== null && !isTombstoned(verify)) {
-    throw new FbrainError({
-      code: "delete_not_applied",
-      message: `Soft-delete did not stick for ${type} ${slug}.`,
-      hint: "Re-run with --verbose; inspect the node log; the update mutation reported success but a subsequent read still shows the record without the tombstone tag.",
-    });
-  }
-}
-
 export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
@@ -263,33 +198,15 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   const listSide = await planRecordListSide({
     node, cfg: opts.cfg, type, previous: record, next: null, nextEdges: [],
   });
-  await tombstoneOne(node, opts.cfg, type, slug, record.created_at);
-  // Remove an old RecordListEntry row when that key exists.
-  {
-    const { maintainTypeListIndex } = await import("../record-list-index.ts");
-    await maintainTypeListIndex({
-      node,
-      cfg: opts.cfg,
-      type,
-      record: null,
-      slug,
-      verbose: opts.verbose,
-    });
-  }
-  if (type === "papercut") {
-    const { maintainPapercutStatusIndex } = await import(
-      "../papercut-status-index.ts"
-    );
-    await maintainPapercutStatusIndex({
-      node,
-      cfg: opts.cfg,
-      slug,
-      record: null,
-      previousStatus: record.status,
-      verbose: opts.verbose,
-    });
-  }
-  const indexNote = await dropListSide(node, opts.cfg, type, record, listSide);
+  const removed = await commitResidentRemoval({
+    node,
+    cfg: opts.cfg,
+    type,
+    slug,
+    tombstoneFields: buildTombstoneFields(type, slug, record.created_at, nowIso()),
+    side: listSide,
+  });
+  const indexNote = formatIndexNotes(removed.indexNotes);
 
   print(`deleted ${type} ${slug}${indexNote}`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
@@ -424,17 +341,6 @@ function describeSelector(opts: DeleteByFilterOptions): string {
   return parts.join(" ");
 }
 
-async function dropListSide(
-  node: NodeClient,
-  cfg: Config,
-  type: RecordType,
-  record: FbrainRecord,
-  side: ListSidePlan,
-): Promise<string> {
-  const removed = await removeResidentListSide({ node, cfg, type, record, side });
-  return formatIndexNotes(removed.indexNotes);
-}
-
 function isNotFound(err: unknown): boolean {
   return err instanceof FbrainError && err.code === "not_found";
 }
@@ -543,46 +449,20 @@ export async function deleteByFilter(
       const listSide = await planRecordListSide({
         node, cfg: opts.cfg, type: m.type, previous: resolved.record, next: null, nextEdges: [],
       });
-      await tombstoneOne(
+      const removed = await commitResidentRemoval({
         node,
-        opts.cfg,
-        m.type,
+        cfg: opts.cfg,
+        type: m.type,
         slug,
-        resolved.record.created_at,
-      );
-      {
-        const { maintainTypeListIndex } = await import(
-          "../record-list-index.ts"
-        );
-        await maintainTypeListIndex({
-          node,
-          cfg: opts.cfg,
-          type: m.type,
-          record: null,
+        tombstoneFields: buildTombstoneFields(
+          m.type,
           slug,
-          verbose: opts.verbose,
-        });
-      }
-      if (m.type === "papercut") {
-        const { maintainPapercutStatusIndex } = await import(
-          "../papercut-status-index.ts"
-        );
-        await maintainPapercutStatusIndex({
-          node,
-          cfg: opts.cfg,
-          slug,
-          record: null,
-          previousStatus: resolved.record.status,
-          verbose: opts.verbose,
-        });
-      }
-      const indexNote = await dropListSide(
-        node,
-        opts.cfg,
-        m.type,
-        resolved.record,
-        listSide,
-      );
+          resolved.record.created_at,
+          nowIso(),
+        ),
+        side: listSide,
+      });
+      const indexNote = formatIndexNotes(removed.indexNotes);
       print(`deleted ${m.type} ${slug}${indexNote}`);
       deleted.push({ type: m.type, slug });
     } catch (err) {

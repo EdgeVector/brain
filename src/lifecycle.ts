@@ -1,6 +1,5 @@
-// Pure helpers for the record-lifecycle keep set.
-// Membership lives in HashRange indexes (see lifecycle-index.ts), not in a
-// list-of-slugs field.
+// Tag helpers for topic, series, and day tags.
+// The lifecycle schemas are retired. These helpers stay for tag text.
 
 import type { FbrainRecord } from "./record.ts";
 import type { RecordType } from "./schemas.ts";
