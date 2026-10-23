@@ -90,7 +90,7 @@ export function gbrainCandidatePaths(slug: string, type?: string): string[] {
   if (type) add(GBRAIN_TYPE_DIRS[type] ?? type);
   const head = slug.split("-", 1)[0]!.toLowerCase();
   for (const key of [head, head.replace(/s$/, ""), `${head}s`]) {
-    if (["design", "decision", "preference", "reference", "sop", "task", "project", "spike", "agent", "papercut"].includes(key)) {
+    if (["design", "decision", "preference", "reference", "sop", "task", "project", "spike", "agent"].includes(key)) {
       add(key);
     }
     if (key === "concept" || key === "concepts") add("wiki/concepts");

@@ -61,7 +61,6 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    | `spike` | Time-boxed investigation or exploration with a defined conclusion |
    | `sop` | Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task |
    | `decision` | A call a human made — the choice, its rationale, and outcome — kept as an auditable trail |
-   | `papercut` | A defect in our own tooling — file with `brain papercut file` |
 
    Link records with `fbrain_link`. Passing only `from_slug` and `to_slug`
    preserves the legacy task → design default; pass `from_type`/`to_type` for
@@ -71,7 +70,7 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    and whether it links by explicit edge or body `[[slug]]` reference.
    Slugs are per-type, so pass `type` to `fbrain_get`/`fbrain_delete`
    whenever a slug could be ambiguous; without it, the type named by the
-   slug prefix (`papercut-…`, `design-…`) is tried first.
+   slug prefix (`design-…`, `decision-…`) is tried first.
 
 4. **It scales — call it liberally.** Point lookups (`fbrain_get`, a filtered
    `fbrain_list`) are index-backed and stay flat, well under a millisecond, from

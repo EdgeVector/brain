@@ -42,7 +42,6 @@ import {
   recordTypeList,
   type RecordType,
 } from "../schemas.ts";
-import { ensurePapercutSlug } from "../papercut.ts";
 import {
   buildResidentWritePlan,
   commitResidentWritePlan,
@@ -173,13 +172,6 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
       throw err;
     }
   }
-  // The papercut file door rejects a slug without the `papercut-` prefix
-  // (2026-08-17), because the fleet's queue readers quarantine one. `put` is
-  // the documented fallback when the file door refuses, and it kept accepting
-  // the bare form, so the same slug was valid through one verb and invalid
-  // through the other. CREATE only: a legacy row already stored bare must
-  // stay updatable, or the reconciler could never close it.
-  if (type === "papercut" && !existing) ensurePapercutSlug(slug);
   // Body-shrink guard — data-loss protection for the get(windowed)→edit→re-put
   // loop and status-only touch-up re-puts. Runs BEFORE the write (like
   // `validateSlug`/`ensureStatus`) so a refused shrink never lands a partial

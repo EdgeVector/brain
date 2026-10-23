@@ -1439,7 +1439,6 @@ export type ResolvedRecord = {
 
 export const GET_RECORD_TYPE_PRECEDENCE = [
   "reference",
-  "papercut",
   "project",
   "sop",
   "decision",
@@ -1492,9 +1491,7 @@ export interface ResolveBySlugOpts {
     | "attachments"
     | "attachments migrate"
     | "detach"
-    | "attachment get"
-    | "papercut close"
-    | "papercut set";
+    | "attachment get";
   // Read-only callers can opt into deterministic ambiguity resolution while
   // mutating callers keep the safer default of erroring unless --type is set.
   ambiguousTypePrecedence?: readonly RecordType[];
@@ -1851,7 +1848,6 @@ export function normalizeSlug(slug: string): string {
 // `design-…` slug stored as a project (they exist) misses the hint and is
 // found by the sweep one request later.
 const SLUG_PREFIX_TYPE_HINTS: ReadonlyArray<readonly [string, RecordType]> = [
-  ["papercut-", "papercut"],
   ["design-", "design"],
   ["decision-", "decision"],
   ["sop-", "sop"],

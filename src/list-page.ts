@@ -496,12 +496,6 @@ function slotsFor(
       bound: CHILD_PAGE,
     });
   }
-  if (type === "papercut") {
-    const symptom = textField(record, "symptom_hash");
-    if (symptom.length > 0) {
-      slots.push({ hash: `symptom#${symptom}`, kind: "symptom", bound: SYMPTOM_PAGE });
-    }
-  }
   return slots;
 }
 

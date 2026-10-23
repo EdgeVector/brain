@@ -51,8 +51,6 @@ export function isLiveStatus(type: RecordType, status: string): boolean {
     case "agent":
     case "spike":
       return status === "active";
-    case "papercut":
-      return status === "open" || status === "partial";
     case "project":
       return status === "planning" || status === "in_progress";
     case "design":

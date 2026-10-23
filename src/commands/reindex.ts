@@ -259,7 +259,6 @@ export type ReindexOptions = {
   bm25?: boolean;
   listIndex?: boolean;
   childTaskIndex?: boolean;
-  papercutStatusIndex?: boolean;
   graphEdges?: boolean;
   graphMaxRecords?: number;
   target?: string;
@@ -353,13 +352,6 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
         ? pageBackfill("link#<slug>", "<type>")
         : pageBackfill("child#<designSlug>", "task");
     print(`The old payload write stopped. ${backfill}`);
-    return { wrote: 0 };
-  }
-
-  if (opts.papercutStatusIndex) {
-    print(
-      "papercut-status-index: this command does not write PapercutStatusIndex. papercut list reads the list page.",
-    );
     return { wrote: 0 };
   }
 
