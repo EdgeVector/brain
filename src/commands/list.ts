@@ -507,51 +507,8 @@ export function matchesListFilters(
   return true;
 }
 
-async function readPapercutTypePageKeys(
-  node: NodeClient,
-  cfg: Config,
-  status: string | undefined,
-  verbose?: Verbose,
-): Promise<RecordKey[]> {
-  const hash = status && status.length > 0 ? `papercut#${status}` : "papercut";
-  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
-  if (schemaHash.length === 0) return [];
-  verbose?.(`query HashRangeKey hash=${hash} range=${HEAD_RANGE} field=blp_page`);
-  const res = await node.queryAll({
-    schemaHash,
-    fields: ["blp_page"],
-    filter: { HashRangeKey: { hash, range: HEAD_RANGE } },
-  });
-  const raw = res.results[0]?.fields?.blp_page;
-  if (typeof raw !== "string" || raw.length === 0) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object") return [];
-  const cards = (parsed as { cards?: unknown }).cards;
-  if (!Array.isArray(cards)) return [];
-  const keys: RecordKey[] = [];
-  for (const item of cards) {
-    if (!item || typeof item !== "object") continue;
-    const card = item as { slug?: unknown; status?: unknown; updated_at?: unknown };
-    if (typeof card.slug !== "string" || card.slug.length === 0) continue;
-    keys.push({
-      type: "papercut",
-      slug: card.slug,
-      status: typeof card.status === "string" ? card.status : "",
-      tags: [],
-      updatedAt: typeof card.updated_at === "string" ? card.updated_at : "",
-    });
-  }
-  return keys;
-}
-
 // Key-only walk: slug, tombstone, and updated_at via `listRecordKeys`.
 // Tombstones are already dropped by that read.
-// An explicit papercut type reads the status page and does not read PapercutStatusIndex.
 export async function resolveListKeyEntries(
   node: NodeClient,
   opts: Pick<
@@ -570,17 +527,6 @@ export async function resolveListKeyEntries(
 
   const acc: Array<{ type: RecordType; key: RecordKey }> = [];
   for (const t of types) {
-    // Only an explicit --type papercut. A mixed list keeps the per-type key walk.
-    if (t === "papercut" && opts.type === "papercut") {
-      const keys = await readPapercutTypePageKeys(
-        node,
-        opts.cfg,
-        opts.status,
-        opts.verbose,
-      );
-      for (const key of keys) acc.push({ type: t, key });
-      continue;
-    }
     let keys: RecordKey[];
     try {
       keys = await listRecordKeys(

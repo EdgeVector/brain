@@ -107,13 +107,13 @@ reports a tag whose legacy row is newer than its copy stamp (check
 ## Index payloads
 
 Index rows that keep a snapshot of the record (`RecordListEntry`, `LiveIndex`
-and its siblings, `ChildTaskIndex`, `PapercutStatusIndex`) follow one rule
+and its siblings, `ChildTaskIndex`) follow one rule
 (`src/index-payload.ts`). The payload is the whole record when its atom is at
 most 8 KiB. Otherwise, until it fits: the body is cut to a head of at most 2 KiB
 (then smaller); every other text field above 2 KiB is cut to 2 KiB (then 512
 bytes); last, only the keys and summary fields (slug, status, timestamps, a
-short title, a bounded list of short tags). `idx_truncated` (`psi_truncated` for
-papercuts) names the cut fields (`*` for keys only). The payload is always
+short title, a bounded list of short tags). `idx_truncated` names the cut fields
+(`*` for keys only). The payload is always
 bounded. Short titles, ids and tags are never cut.
 
 A keys-only row keeps at most 2 KiB of short tags (the tombstone tag is always
@@ -147,11 +147,6 @@ reported as 0.
 `brain consolidate` compares bodies and can delete a record. It uses the cluster
 snapshot only to name the members, and point-reads the body of every member from
 the product schema; if one cannot be read it stops and changes nothing.
-
-`papercut list` and `papercut census` print only fields the papercut snapshot
-keeps whole; the reader (`needFields`) point-reads a row only when a needed
-field is cut. A fast papercut read returns `SnapshotSummary` rows; the
-`--body-resolved` filter refuses a row that has no body.
 
 Existing oversize rows stay until the row is next written, or until the matching
 `reindex` command runs.

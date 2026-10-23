@@ -45,10 +45,8 @@ const FILE_FIELDS = [
 ];
 
 /** Which text fields of a record type can spill. Everything else is size-guarded only. */
-export function spillFieldsFor(type: RecordType): readonly string[] {
-  // A papercut close appends its evidence block to `body`. `verified_by` holds
-  // a full live-check transcript by design, and `fixed_by` is free text.
-  return type === "papercut" ? ["body", "verified_by", "fixed_by"] : ["body"];
+export function spillFieldsFor(_type: RecordType): readonly string[] {
+  return ["body"];
 }
 
 // ── marker ──────────────────────────────────────────────────────────────────
@@ -712,8 +710,8 @@ export function assertFieldBudget(
           `the atom budget is ${FIELD_MAX_BYTES} bytes (the node refuses 65536).`,
         hint:
           spillFieldsFor(type).includes(name)
-            ? "Long text should have spilled to a body file. Report this as a papercut with the slug."
-            : "Shorten the field. Only body text (and papercut evidence) spills to a file.",
+            ? "Long text should have spilled to a body file."
+            : "Shorten the field. Only body text spills to a file.",
       });
     }
   }

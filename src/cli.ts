@@ -5,7 +5,6 @@
 // canonical schema hash being targeted — per the Phase 0 spike's
 // debugging guidance.
 
-import { readFileSync } from "node:fs";
 import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
@@ -77,23 +76,8 @@ import {
   RECORD_TYPES,
   statusValuesFor,
   TYPES_WITHOUT_NEW_VERB,
-  PAPERCUT_KINDS,
-  PAPERCUT_SEVERITIES,
-  PAPERCUT_STATUSES,
   type RecordType,
 } from "./schemas.ts";
-import {
-  ensureKind,
-  ensureSeverity,
-  PAPERCUT_USAGE_CODES,
-} from "./papercut.ts";
-import {
-  papercutCensusCmd,
-  papercutCloseCmd,
-  papercutFileCmd,
-  papercutListCmd,
-  papercutSetCmd,
-} from "./commands/papercut.ts";
 import { consolidateCmd, PROVE_TOPIC } from "./commands/consolidate.ts";
 import {
   FBRAIN_MCP_READ_TOOL_NAMES,
@@ -161,11 +145,6 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   // `status:` in put frontmatter) is a caller-supplied malformed value, same
   // class as invalid_slug — usage error, exit 2.
   "invalid_status",
-  // Papercut invocation errors — a bad enum value for --severity/--kind/
-  // --status/--component, a missing --symptom/--evidence, a `verified` with no
-  // live check behind it, a `duplicate` with no target, or a slug that already
-  // exists. All are "you invoked it wrong", exit 2.
-  ...PAPERCUT_USAGE_CODES,
   "missing_tag_mutation",
   "invalid_raw_method",
   "invalid_raw_path",
@@ -218,7 +197,6 @@ export const COMMANDS = [
   "admin-snapshot",
   "reindex",
   "migrate",
-  "papercut",
   "consolidate",
   "mcp",
   "hook",
@@ -281,7 +259,6 @@ ${RECORD_NEW_HELP_LINES}
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        backfill named record keys into one list, keyword page, or type directory
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
-  papercut       file/close/set/census the typed defect ledger (dedupe-gated; close is one write, not two)
   consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
   mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
@@ -898,7 +875,6 @@ It prints wrote N and the cursor key. It does not walk the corpus.
   --tags            the old payload write stopped. No scan.
   --backlinks       the old payload write stopped. No scan.
   --child-task-index the old payload write stopped. No scan.
-  --papercut-status-index does not write PapercutStatusIndex.
   --bm25            refused.
   --list-index      refused. This command does not walk every record.
   --graph-edges     refused. This command does not walk every record.
@@ -944,90 +920,6 @@ re-puts and re-hashes all six together.
 
 Example:
   fbrain migrate --add-field concept urgency String --default "normal"`,
-  papercut: `brain papercut file <slug> --component C --symptom S --title T [--body B | --body-file PATH|-]
-                       [--severity p0|p1|p2|p3] [--kind complaint|specified-fix|reconfirmed]
-                       [--repo owner/name] [--tag T]...
-brain papercut close <slug> --status S --evidence E [--fixed-by REF] [--verified-by CHECK]
-                        [--duplicate-of SLUG]   (required with --status duplicate)
-brain papercut set <slug> [--kind K] [--repo owner/name] [--severity p0|p1|p2|p3]
-                      [--component C]
-brain papercut census [<component>] [--point-read] [--json]
-brain papercut list [<component>] [--status S] [--severity p0|p1|p2|p3]
-                    [--kind K] [--repo owner/name] [--tag T]...
-                    [--index-only] [--point-read] [--body-resolved] [--json]
-
-The typed defect ledger. Replaces freeform \`papercut-*\` prose records, whose
-failure modes were measured rather than guessed: 40 of 107 read OPEN at the top
-and closed at the bottom, 22 could not be counted at all, and the same defect
-was filed twice two hours apart by runs that could not see each other.
-
-file    Files a new papercut. <slug> may leave out the leading \`papercut-\`; it
-        is added and one stderr line says so. Only \`file\` does this: close, set
-        and put take the full slug. The same slug is a refile when the filing
-        text matches. A different slug in the symptom head is a duplicate. The
-        command reads that one head. It does not rank the corpus. A duplicate
-        REFUSES the write (exit 3) and prints that slug. Nothing is written.
-
-        file and close both require a durable receipt. A queued receipt fails
-        the command. A partial index fails the command.
-
-close   Sets the status field AND appends the evidence block in ONE write, so a
-        half-closure is not expressible. --status verified additionally requires
-        --verified-by naming the LIVE check you ran; a value that looks like a
-        merge reference is rejected, because "merged" is a fact about a
-        repository and not about anything running.
-
-        The ack carries durability=durable and the write's revision. Only
-        durable means on disk. A queued receipt fails the command. The status
-        move and the reference twin, when the twin changes, are one batch.
-
-set     Amends a header column on an existing row: --kind, --repo, --severity,
-        --component. Nothing else. No status transition (that is close, which
-        requires evidence), no body rewrite, no symptom_hash (the dedupe key).
-        Tags are brain tag <slug> --type papercut.
-
-        It exists because file REFUSES a second call on the same slug — the
-        dedupe gate reports an EXACT self-match, correctly, since the row is a
-        duplicate of itself — and close writes only the closure columns. So
-        before this verb a filing that omitted --kind kept kind=complaint
-        forever, and never appeared in
-        papercut list --status open --kind specified-fix, which is the
-        cheapest triage query there is. The correction had to live as prose in
-        the body, where no filter can see it.
-
-        A column that already holds the requested value is reported unchanged
-        and NOT written: a write bumps updated_at, list is ordered
-        oldest-updated-first, so a no-op amend would reorder the triage queue
-        it feeds.
-
-        The change is appended to the body as one Header-amended <ts>: line.
-        A header rewrite is durable and leaves no diff — without that line a
-        reader who finds kind=specified-fix on a row filed as complaint cannot
-        tell it was amended, when, or from what.
-
-census  Counts the cards on one list page and prints its method line.
-
-        The read is one HashRangeKey. Hash \`papercut\`. Range \`__head__\`.
-        Field \`blp_page\`. A card carries slug, status, title, and updated_at.
-        The page does not carry component. When older is set, the line says sample.
-        --point-read reads those slugs from the product records.
-        A component argument needs --point-read.
-
-list    Prints the cards on that page. \`--status S\` uses hash \`papercut#S\`.
-        The read is one HashRangeKey. Range \`__head__\`. Field \`blp_page\`.
-        The command does not read PapercutStatusIndex.
-
-        The page does not carry component, severity, kind, repo, or tags.
-        Those filters need --point-read. --point-read reads the product
-        records for the slugs on the page.
-        --index-only prints slug and status from the card.
-        --body-resolved reads the body of those slugs. It keeps a row whose
-        body claims a resolution the status does not carry. It refuses
-        --fast and --index-only.
-
-Statuses: ${PAPERCUT_STATUSES.join(" | ")}
-Severity: ${PAPERCUT_SEVERITIES.join(" | ")}
-Kinds:    ${PAPERCUT_KINDS.join(" | ")}`,
   consolidate: `brain consolidate --topic T [--prove] [--json]
 
 Collapse one topic cluster to one live canonical slug.
@@ -1374,7 +1266,6 @@ const REINDEX_OPTIONS = {
   bm25: { type: "boolean", default: false },
   "list-index": { type: "boolean", default: false },
   "child-task-index": { type: "boolean", default: false },
-  "papercut-status-index": { type: "boolean", default: false },
   "graph-edges": { type: "boolean", default: false },
   "max-records": { type: "string" },
 } as const;
@@ -1386,34 +1277,6 @@ const MIGRATE_OPTIONS = {
   "dry-run": { type: "boolean", default: false },
 } as const;
 
-// Flags across all four `papercut` subcommands. parseArgs takes one option set
-// per command, so file/close/census/list share this table and each subcommand
-// validates the flags that matter to it.
-export const PAPERCUT_OPTIONS = {
-  // file
-  title: { type: "string" },
-  body: { type: "string" },
-  "body-file": { type: "string" },
-  component: { type: "string" },
-  symptom: { type: "string" },
-  severity: { type: "string" },
-  kind: { type: "string" },
-  repo: { type: "string" },
-  tag: { type: "string", multiple: true },
-  // close
-  status: { type: "string" },
-  // census / list
-  "index-only": { type: "boolean" },
-  fast: { type: "boolean" },
-  "body-resolved": { type: "boolean" },
-  "point-read": { type: "boolean" },
-  evidence: { type: "string" },
-  "fixed-by": { type: "string" },
-  "verified-by": { type: "string" },
-  "duplicate-of": { type: "string" },
-  // shared
-  json: { type: "boolean", default: false },
-} as const;
 const CONSOLIDATE_OPTIONS = {
   topic: { type: "string" },
   prove: { type: "boolean", default: false },
@@ -1474,7 +1337,6 @@ export const CLI_SPEC = {
   "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
   reindex: REINDEX_OPTIONS,
   migrate: MIGRATE_OPTIONS,
-  papercut: PAPERCUT_OPTIONS,
   consolidate: CONSOLIDATE_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
@@ -2132,8 +1994,6 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runReindex(args, verboseFn);
     case "migrate":
       return runMigrate(args, verboseFn);
-    case "papercut":
-      return runPapercut(args, verboseFn);
     case "consolidate":
       return runConsolidate(args, verboseFn);
     case "mcp":
@@ -4007,7 +3867,6 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (values.bm25) rOpts.bm25 = true;
   if (values["list-index"]) rOpts.listIndex = true;
   if (values["child-task-index"]) rOpts.childTaskIndex = true;
-  if (values["papercut-status-index"]) rOpts.papercutStatusIndex = true;
   if (values["graph-edges"]) rOpts.graphEdges = true;
   if (typeof values["max-records"] === "string") {
     const max = Number.parseInt(values["max-records"], 10);
@@ -4169,43 +4028,6 @@ function requireGraphPositional(
   return positionals[0] as string;
 }
 
-export const PAPERCUT_SUBCOMMANDS = ["file", "close", "set", "census", "list"] as const;
-
-function requiredFlag(
-  values: Record<string, unknown>,
-  flag: string,
-  sub: string,
-): string {
-  const raw = values[flag];
-  if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new FbrainError({
-      code: "invalid_papercut_field",
-      message: `papercut ${sub} requires --${flag}.`,
-      hint: `Run \`brain help papercut\` for the full form.`,
-    });
-  }
-  return raw;
-}
-
-// The flags `papercut close` still needs. `close` checked them one at a time
-// across two layers (--status/--evidence here, --verified-by and --duplicate-of
-// in papercutCloseCmd), so a caller who passed neither --evidence nor
-// --verified-by needed two failed commands to learn both
-// (papercut-brain-papercut-close-usage-omits-duplicate-of-20260923). The
-// per-status flags only count once --status says which status it is.
-export function missingPapercutCloseFlags(
-  values: Record<string, unknown>,
-): string[] {
-  const given = (flag: string) =>
-    typeof values[flag] === "string" && values[flag].trim().length > 0;
-  const missing = ["status", "evidence"].filter((f) => !given(f));
-  if (values.status === "verified" && !given("verified-by"))
-    missing.push("verified-by");
-  if (values.status === "duplicate" && !given("duplicate-of"))
-    missing.push("duplicate-of");
-  return missing;
-}
-
 async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parseCommandArgs(
     {
@@ -4242,284 +4064,6 @@ async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
       }),
     );
   }
-  return 0;
-}
-
-// One shared option table means a flag meant for another subcommand parses
-// cleanly and then falls on the floor. That is not hypothetical: `list`
-// accepted `--severity`, `--kind`, `--repo` and `--tag`, applied none of them,
-// and the strict parser's own unknown-option hint listed all four as valid
-// options of the command that was ignoring them. A run asking for the p0 rows
-// got all 2144 open ones with nothing in the output to say so.
-//
-// `list` now applies those four. This table closes the class rather than the
-// instance: a flag a subcommand does not consume is REFUSED, so the next one
-// added to the shared table cannot be silently dropped by the other three.
-// `--json` is the one flag all four genuinely consume. It also carries
-// `default: false`, so it is never `undefined` — a consumption check written
-// against undefined alone would refuse it on every single papercut call.
-const PAPERCUT_SHARED_FLAGS = ["json"] as const;
-
-export const PAPERCUT_FLAGS_BY_SUBCOMMAND: Readonly<
-  Record<string, readonly string[]>
-> = {
-  file: [
-    ...PAPERCUT_SHARED_FLAGS,
-    "title",
-    "body",
-    "body-file",
-    "component",
-    "symptom",
-    "severity",
-    "kind",
-    "repo",
-    "tag",
-  ],
-  close: [
-    ...PAPERCUT_SHARED_FLAGS,
-    "status",
-    "evidence",
-    "fixed-by",
-    "verified-by",
-    "duplicate-of",
-  ],
-  // `set` deliberately does NOT list `status`. A status move must carry
-  // evidence, and `close` is the verb that takes it; a header amender that
-  // could also flip status would be a status launderer with no evidence flag.
-  set: [...PAPERCUT_SHARED_FLAGS, "kind", "repo", "severity", "component"],
-  census: [...PAPERCUT_SHARED_FLAGS, "fast", "point-read"],
-  list: [
-    ...PAPERCUT_SHARED_FLAGS,
-    "status",
-    "index-only",
-    "fast",
-    "point-read",
-    "body-resolved",
-    "severity",
-    "kind",
-    "repo",
-    "tag",
-  ],
-};
-
-// `component` is the positional both readers take, not a flag, so it is absent
-// from the census/list rows above on purpose.
-export function assertPapercutFlagsConsumed(
-  sub: string,
-  values: Record<string, unknown>,
-): void {
-  const consumed = new Set(PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? []);
-  const stray = Object.keys(PAPERCUT_OPTIONS).filter(
-    (f) => !consumed.has(f) && values[f] !== undefined,
-  );
-  if (stray.length === 0) return;
-  const flags = stray.map((f) => `--${f}`).join(", ");
-  const uses = (PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? [])
-    .map((f) => `--${f}`)
-    .join(" ");
-  // The operator who types `papercut census --severity p0` wants the p0 rows
-  // narrowed, and `list` is the reader that can do it. Saying so costs one
-  // clause and saves the round trip through `brain help papercut`.
-  const toList =
-    sub === "census" &&
-    stray.some((f) => PAPERCUT_FLAGS_BY_SUBCOMMAND.list?.includes(f))
-      ? ` To filter rows by ${stray.join("/")}, use \`brain papercut list\`.`
-      : "";
-  throw new FbrainError({
-    code: "papercut_flag_not_consumed",
-    message: `papercut ${sub} does not use ${flags}, so passing ${stray.length === 1 ? "it" : "them"} would change nothing about the result.`,
-    hint: `Flags ${sub} uses: ${uses}.${toList} Run \`brain help papercut\` for the full form.`,
-  });
-}
-
-// `--body "<text>"` goes through the shell, which expands `$VAR` and
-// backticks inside double quotes and silently corrupts evidence. `--body-file
-// <path>` (or `-` for stdin) reads the body byte-exact.
-async function papercutBodyFromFlags(values: Record<string, unknown>): Promise<string> {
-  const file = values["body-file"];
-  if (typeof file === "string") {
-    if (typeof values.body === "string") {
-      throw new FbrainError({
-        code: "papercut_body_conflict",
-        message: "papercut file takes --body OR --body-file, not both.",
-      });
-    }
-    if (file === "-") return await Bun.stdin.text();
-    try {
-      return readFileSync(file, "utf8");
-    } catch (err) {
-      throw new FbrainError({
-        code: "papercut_body_file_unreadable",
-        message: `--body-file ${file}: ${(err as Error).message}`,
-      });
-    }
-  }
-  return typeof values.body === "string" ? values.body : "";
-}
-
-async function runPapercut(args: Argv, verbose: Verbose): Promise<number> {
-  const sub = args[0];
-  if (!sub || sub.startsWith("-")) {
-    throw new FbrainError({
-      code: "missing_slug",
-      message: `papercut needs a subcommand: ${PAPERCUT_SUBCOMMANDS.join(" | ")}.`,
-      hint: "Run `brain help papercut`.",
-    });
-  }
-  if (!(PAPERCUT_SUBCOMMANDS as readonly string[]).includes(sub)) {
-    throw new FbrainError({
-      code: "unknown_option",
-      message: `Unknown papercut subcommand: ${sub}`,
-      hint: `Expected one of: ${PAPERCUT_SUBCOMMANDS.join(" | ")}.`,
-    });
-  }
-  const { values, positionals } = parseCommandArgs(
-    {
-      args: args.slice(1),
-      strict: true,
-      allowPositionals: true,
-      options: PAPERCUT_OPTIONS,
-    },
-    "papercut",
-    { name: sub, flags: PAPERCUT_FLAGS_BY_SUBCOMMAND[sub] ?? [] },
-  );
-  assertPapercutFlagsConsumed(sub, values as Record<string, unknown>);
-  const cfg = readConfig();
-  const json = values.json === true;
-
-  if (sub === "file") {
-    const slug = positionals[0];
-    if (!slug) {
-      throw new FbrainError({
-        code: "missing_slug",
-        message: "papercut file requires a slug.",
-        hint: "brain papercut file <slug> --component C --symptom S --title T",
-      });
-    }
-    const opts: Parameters<typeof papercutFileCmd>[0] = {
-      cfg,
-      slug,
-      title: requiredFlag(values, "title", "file"),
-      body: await papercutBodyFromFlags(values),
-      component: requiredFlag(values, "component", "file"),
-      symptom: requiredFlag(values, "symptom", "file"),
-      severity: typeof values.severity === "string" ? values.severity : "p2",
-      kind: typeof values.kind === "string" ? values.kind : "complaint",
-      verbose,
-      json,
-    };
-    if (typeof values.repo === "string") opts.repo = values.repo;
-    if (values.tag) opts.tags = values.tag as string[];
-    const result = await papercutFileCmd(opts);
-    // A blocked duplicate is a REFUSED write, and a routine that ignores the
-    // exit code must not read it as "filed". Exit 3 distinguishes it from both
-    // success (0) and a malformed invocation (2).
-    if (result.action === "duplicate_blocked") {
-      const held = result.duplicates[0]?.slug ?? "<slug>";
-      console.error(
-        `papercut file: NOT filed (exit 3) — the symptom head already names ${held}.`,
-      );
-      return 3;
-    }
-    return 0;
-  }
-
-  if (sub === "close") {
-    const slug = positionals[0];
-    if (!slug) {
-      throw new FbrainError({
-        code: "missing_slug",
-        message: "papercut close requires a slug.",
-        hint: "brain papercut close <slug> --status S --evidence E",
-      });
-    }
-    // Two or more missing: say so once. A single missing flag keeps the message
-    // it always had (requiredFlag, or the richer verification text in
-    // papercutCloseCmd).
-    const missing = missingPapercutCloseFlags(values as Record<string, unknown>);
-    if (missing.length > 1) {
-      const status = typeof values.status === "string" ? ` --status ${values.status}` : "";
-      throw new FbrainError({
-        code: "invalid_papercut_field",
-        message: `papercut close${status} requires ${missing.map((f) => `--${f}`).join(" and ")}.`,
-        hint: `Run \`brain help papercut\` for the full form.`,
-      });
-    }
-    const opts: Parameters<typeof papercutCloseCmd>[0] = {
-      cfg,
-      slug,
-      status: requiredFlag(values, "status", "close"),
-      evidence: requiredFlag(values, "evidence", "close"),
-      verbose,
-      json,
-    };
-    if (typeof values["fixed-by"] === "string")
-      opts.fixedBy = values["fixed-by"];
-    if (typeof values["verified-by"] === "string")
-      opts.verifiedBy = values["verified-by"];
-    if (typeof values["duplicate-of"] === "string")
-      opts.duplicateOf = values["duplicate-of"];
-    await papercutCloseCmd(opts);
-    return 0;
-  }
-
-  if (sub === "set") {
-    const slug = positionals[0];
-    if (!slug) {
-      throw new FbrainError({
-        code: "missing_slug",
-        message: "papercut set requires a slug.",
-        hint: "brain papercut set <slug> [--kind K] [--repo owner/name] [--severity S] [--component C]",
-      });
-    }
-    const sOpts: Parameters<typeof papercutSetCmd>[0] = { cfg, slug, verbose, json };
-    if (typeof values.kind === "string") sOpts.kind = values.kind;
-    if (typeof values.repo === "string") sOpts.repo = values.repo;
-    if (typeof values.severity === "string") sOpts.severity = values.severity;
-    if (typeof values.component === "string") sOpts.component = values.component;
-    await papercutSetCmd(sOpts);
-    return 0;
-  }
-
-  // census / list share the component positional. `list` used to accept it
-  // here and then never pass it on — it delegated to the generic record lister,
-  // which has no component filter at all. So `papercut list lastdb` served a
-  // 20-row newest-first sample of EVERY component (measured 2026-08-17: 8 of 20
-  // rows were kanban/lastgit/fold/pipeline), under an envelope whose `total`
-  // was the unfiltered papercut count and whose truncation hint named a `-n N`
-  // flag this subcommand's own strict parser rejects. Every chief-engineer
-  // routine pointed at this reader was surveying a cross-component sample as if
-  // it were its own family's ledger.
-  const component = positionals[0];
-  if (sub === "census") {
-    const cOpts: Parameters<typeof papercutCensusCmd>[0] = {
-      cfg,
-      verbose,
-      json,
-    };
-    if (component) cOpts.component = component;
-    if (values.fast === true) cOpts.fast = true;
-    if (values["point-read"] === true) cOpts.pointRead = true;
-    await papercutCensusCmd(cOpts);
-    return 0;
-  }
-
-  const lOpts: Parameters<typeof papercutListCmd>[0] = { cfg, verbose, json };
-  if (component) lOpts.component = component;
-  if (typeof values.status === "string") lOpts.status = values.status;
-  if (values["index-only"] === true) lOpts.indexOnly = true;
-  if (values.fast === true) lOpts.fast = true;
-  if (values["point-read"] === true) lOpts.pointRead = true;
-  if (values["body-resolved"] === true) lOpts.bodyResolved = true;
-  // Validated, not passed through: an unvalidated `--severity p1 ` or `--kind
-  // fix` matches no row, and a filter that answers "0 rows" for a typo is the
-  // same lie in a quieter voice as one that ignores the flag outright.
-  if (typeof values.severity === "string")
-    lOpts.severity = ensureSeverity(values.severity);
-  if (typeof values.kind === "string") lOpts.kind = ensureKind(values.kind);
-  if (typeof values.repo === "string") lOpts.repo = values.repo;
-  if (values.tag) lOpts.tags = values.tag as string[];
-  await papercutListCmd(lOpts);
   return 0;
 }
 
@@ -4651,12 +4195,6 @@ function parseRecordType(raw: string | undefined): RecordType | undefined {
   if (raw === undefined) return undefined;
   const normalised = raw.trim().toLowerCase();
   if (isRecordType(normalised)) return normalised;
-  // `brain get` shows a papercut's KIND (complaint | specified-fix |
-  // reconfirmed) in its header, and agents copy that into `--type`. The kind
-  // is a papercut field, not a record type, so it maps to `papercut`.
-  if ((PAPERCUT_KINDS as readonly string[]).includes(normalised.replace(/_/g, "-"))) {
-    return "papercut";
-  }
   throw new FbrainError({
     code: "invalid_type",
     message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,

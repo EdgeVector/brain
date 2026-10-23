@@ -41,7 +41,6 @@ export type ProjectionKind =
   | "backlink"
   | "graph"
   | "child-task"
-  | "papercut-status"
   | "list-page"
   | "list-locator"
   | "directory"

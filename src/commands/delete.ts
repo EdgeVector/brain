@@ -132,7 +132,6 @@ export const TOMBSTONE_STATUS: Record<RecordType, string> = {
   spike: "concluded",
   sop: "archived",
   decision: "superseded",
-  papercut: "wontfix",
 };
 
 export function buildTombstoneFields(
