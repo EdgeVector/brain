@@ -5,9 +5,9 @@ import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
 import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type FbrainRecord } from "./record.ts";
 import { tokenize } from "./tokenize.ts";
+import { locatorMutations, locatorSchema, readLocators } from "./list-locator.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
-  BRAIN_LIST_LOCATOR_SCHEMA_KEY,
   BRAIN_LIST_PAGE_SCHEMA_KEY,
   BRAIN_TOKEN_SET_SCHEMA_KEY,
   BRAIN_TYPE_DIRECTORY_SCHEMA_KEY,
@@ -25,7 +25,9 @@ export const BACKFILL_PAGE = 25;
 export const CHILD_PAGE = 20;
 export const BACKLINK_PAGE = 50;
 export const SYMPTOM_PAGE = 1;
-export const WRITE_BATCH_MAX = 64;
+// An old locator can add one retirement per compact replacement. Keep the
+// one-request conversion bounded without trimming the required page writes.
+export const WRITE_BATCH_MAX = 128;
 export const READ_KEY_CAP = 43;
 export const HEAD_RANGE = "__head__";
 export const FRONTMATTER_RANGE = "__frontmatter__";
@@ -130,6 +132,8 @@ type MemLoc = {
   existed: boolean;
   touched: boolean;
   deleted: boolean;
+  legacy?: boolean;
+  compact?: boolean;
 };
 
 function schemaOf(cfg: SchemaCfg, key: string): string {
@@ -552,7 +556,7 @@ export async function planRecordListSide(opts: {
 }): Promise<ListSidePlan> {
   const details: string[] = [];
   const pageSchema = schemaOf(opts.cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
-  const locSchema = schemaOf(opts.cfg, BRAIN_LIST_LOCATOR_SCHEMA_KEY);
+  const locSchema = locatorSchema(opts.cfg);
   const dirSchema = schemaOf(opts.cfg, BRAIN_TYPE_DIRECTORY_SCHEMA_KEY);
   const edgeSchema = schemaOf(opts.cfg, BRAIN_EDGE_SET_SCHEMA_KEY);
   const tokenSchema = schemaOf(opts.cfg, BRAIN_TOKEN_SET_SCHEMA_KEY);
@@ -617,10 +621,9 @@ export async function planRecordListSide(opts: {
     const queriedHeads = new Set<string>();
     for (const slot of headKeys.values()) queriedHeads.add(slot.hash);
     const [locRows, headRows, edgeRows, tokenRows, dirRows] = await Promise.all([
-      readExact(
+      readLocators(
         opts.node,
-        locSchema,
-        ["bll_h", "bll_r", "bll_page"],
+        opts.cfg,
         locatorKeys.map((key) => ({ hash: key.hash, range: key.range })),
       ),
       readExact(
@@ -661,6 +664,8 @@ export async function planRecordListSide(opts: {
         existed: true,
         touched: false,
         deleted: false,
+        legacy: row.fields?.__legacy_locator === true,
+        compact: row.fields?.__compact_locator === true,
       });
     }
     for (const row of headRows) {
@@ -723,10 +728,9 @@ export async function planRecordListSide(opts: {
       return !locs.has(locKey(slot.hash, `${opts.type}#${slug}`));
     });
     if (extraLocators.length > 0 && locSchema.length > 0) {
-      const extraRows = await readExact(
+      const extraRows = await readLocators(
         opts.node,
-        locSchema,
-        ["bll_h", "bll_r", "bll_page"],
+        opts.cfg,
         extraLocators.map((slot) => ({
           hash: `loc#${slot.hash}`,
           range: `${opts.type}#${slug}`,
@@ -746,6 +750,8 @@ export async function planRecordListSide(opts: {
           existed: true,
           touched: false,
           deleted: false,
+          legacy: row.fields?.__legacy_locator === true,
+          compact: row.fields?.__compact_locator === true,
         });
       }
     }
@@ -897,30 +903,9 @@ export async function planRecordListSide(opts: {
   if (locSchema.length > 0) {
     for (const loc of locs.values()) {
       if (!loc.touched) continue;
-      if (loc.deleted) {
-        if (!loc.existed) continue;
-        ops.push({
-          mutationType: "delete",
-          schemaHash: locSchema,
-          keyHash: `loc#${loc.listHash}`,
-          keyRange: loc.range,
-          fields: {},
-          projection: "list-locator",
-        });
-        continue;
+      for (const op of locatorMutations(opts.cfg, loc)) {
+        ops.push({ ...op, projection: "list-locator" });
       }
-      ops.push({
-        mutationType: loc.existed ? "update" : "create",
-        schemaHash: locSchema,
-        keyHash: `loc#${loc.listHash}`,
-        keyRange: loc.range,
-        fields: {
-          bll_h: `loc#${loc.listHash}`,
-          bll_r: loc.range,
-          bll_page: loc.pageId,
-        },
-        projection: "list-locator",
-      });
     }
   }
 
@@ -994,7 +979,7 @@ export async function planRecordListSide(opts: {
     }
     const json = JSON.stringify(nextIds);
     const same = edgeExisted && JSON.stringify(previousEdgeIds) === json;
-    if (!same) {
+    if (!same && nextIds.length > 0) {
       ops.push({
         mutationType: edgeExisted ? "update" : "create",
         schemaHash: edgeSchema,
@@ -1008,7 +993,8 @@ export async function planRecordListSide(opts: {
         projection: "edge-set",
       });
     }
-  } else if (!opts.next && edgeExisted && edgeSchema.length > 0) {
+  }
+  if ((!opts.next || nextIds.length === 0) && edgeExisted && edgeSchema.length > 0) {
     ops.push({
       mutationType: "delete",
       schemaHash: edgeSchema,
@@ -1021,7 +1007,7 @@ export async function planRecordListSide(opts: {
   if (edgeSchema.length > 0 && opts.next &&
       (opts.frontmatterEdges !== undefined || opts.previous === null)) {
     const json = JSON.stringify(nextFrontmatterIds);
-    if (!frontmatterExisted || frontmatterJson !== json) {
+    if (nextFrontmatterIds.length > 0 && (!frontmatterExisted || frontmatterJson !== json)) {
       ops.push({
         mutationType: frontmatterExisted ? "update" : "create",
         schemaHash: edgeSchema,
@@ -1031,7 +1017,8 @@ export async function planRecordListSide(opts: {
         projection: "edge-set",
       });
     }
-  } else if (!opts.next && frontmatterExisted && edgeSchema.length > 0) {
+  }
+  if ((!opts.next || nextFrontmatterIds.length === 0) && frontmatterExisted && edgeSchema.length > 0) {
     ops.push({
       mutationType: "delete",
       schemaHash: edgeSchema,
@@ -1054,7 +1041,8 @@ export async function planRecordListSide(opts: {
     tokenSchema.length > 0 &&
     slug.length > 0 &&
     (opts.next
-      ? !tokenExisted || storedTokenJson !== tokenJson
+      ? (nextTokenNames.length > 0 && !tokenExisted)
+        || (tokenExisted && (nextTokenNames.length === 0 || storedTokenJson !== tokenJson))
       : tokenExisted);
 
   if (pageSchema.length > 0 && slug.length > 0) {
@@ -1147,7 +1135,7 @@ export async function planRecordListSide(opts: {
         stored: storedTokenJson,
         nextNames: nextTokenNames,
       };
-    } else if (!opts.next) {
+    } else if (!opts.next || nextTokenNames.length === 0) {
       ops.push({
         mutationType: "delete",
         schemaHash: tokenSchema,
@@ -1247,6 +1235,7 @@ async function validatePageLocatorSubjects(opts: {
     opts.locs.set(id, {
       listHash: hash, range: subjectRange, pageId,
       existed: old?.existed ?? false, touched: false, deleted: false,
+      legacy: old?.legacy ?? false, compact: old?.compact ?? false,
     });
   };
   type Walk = { hash: string; range: string; slug: string; seen: Set<string> };
@@ -2501,7 +2490,7 @@ export async function planNamedSlugBackfill(opts: {
   }
 
   const target = opts.target;
-  const locSchema = schemaOf(opts.cfg, BRAIN_LIST_LOCATOR_SCHEMA_KEY);
+  const locSchema = locatorSchema(opts.cfg);
   const edgeSchema = schemaOf(opts.cfg, BRAIN_EDGE_SET_SCHEMA_KEY);
   const useLocator = !target.symptom;
   if (useLocator && locSchema.length === 0) {
@@ -2516,16 +2505,14 @@ export async function planNamedSlugBackfill(opts: {
   const located = new Set<string>();
   if (useLocator) {
     const prefix = `${opts.sourceType}#`;
-    const rows = await readKeyed(
+    traces.push(`HashRangeKeys compact locator keys=${opts.slugOrder.length}`);
+    const rows = await readLocators(
       opts.node,
-      locSchema,
-      ["bll_h", "bll_r", "bll_page"],
+      opts.cfg,
       opts.slugOrder.map((slug) => ({
         hash: `loc#${target.hash}`,
         range: `${prefix}${slug}`,
       })),
-      "BrainListLocator",
-      traces,
     );
     for (const row of rows) {
       const range = rowRange(row) || rowField(row, "bll_r") || "";
@@ -2540,6 +2527,8 @@ export async function planNamedSlugBackfill(opts: {
         existed: true,
         touched: false,
         deleted: false,
+        legacy: row.fields?.__legacy_locator === true,
+        compact: row.fields?.__compact_locator === true,
       });
     }
     if (located.size > 0) {
@@ -2749,17 +2738,7 @@ export async function planNamedSlugBackfill(opts: {
         ? loc.range.slice(opts.sourceType.length + 1)
         : "";
       if (newlyEligible.has(slug) && !located.has(slug)) placed.add(slug);
-      ops.push({
-        mutationType: loc.existed ? "update" : "create",
-        schemaHash: locSchema,
-        keyHash: `loc#${loc.listHash}`,
-        keyRange: loc.range,
-        fields: {
-          bll_h: `loc#${loc.listHash}`,
-          bll_r: loc.range,
-          bll_page: loc.pageId,
-        },
-      });
+      ops.push(...locatorMutations(opts.cfg, loc));
     }
   }
   if (target.symptom) {

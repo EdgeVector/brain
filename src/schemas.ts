@@ -66,7 +66,7 @@ export type SchemaDefinition = {
   // Every PRODUCT record schema is "Hash" (one row per slug). "HashRange"
   // exists for a page key. A page row uses a hash and a range.
   schema_type: "Hash" | "HashRange";
-  key: { hash_field: string; range_field?: string };
+  key: { hash_field?: string; range_field?: string };
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
@@ -955,6 +955,7 @@ export const RECORDS: Record<RecordType, RecordTypeDef> = {
 // them to an older field (the 2026-10-12 `bge_created_at` refusal).
 export const BRAIN_LIST_PAGE_SCHEMA_KEY = "__brainlistpage__";
 export const BRAIN_LIST_LOCATOR_SCHEMA_KEY = "__brainlistlocator__";
+export const BRAIN_COMPACT_LOCATOR_SCHEMA_KEY = "__braincompactlocator__";
 export const BRAIN_TYPE_DIRECTORY_SCHEMA_KEY = "__braintypedirectory__";
 export const BRAIN_LIST_COUNT_SCHEMA_KEY = "__brainlistcount__";
 export const BRAIN_EDGE_SET_SCHEMA_KEY = "__brainedgeset__";
@@ -1048,6 +1049,25 @@ export const brainListLocatorSchema = supportSchema({
     },
   ],
 });
+
+export const brainCompactLocatorSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainCompactListLocator_v1",
+    descriptive_name: "BrainCompactListLocator_v1",
+    owner_app_id: OWNER_APP_ID,
+    purpose_statement: "One exact compact list-locator value addressed by the digest of its list and card identity; no ordered range",
+    schema_type: "Hash",
+    // Explicit request coordinates address the sole field's molecule. There
+    // are no redundant hash/range fields for Mini to materialize and store.
+    key: {},
+    fields: ["bcl_page"],
+    field_types: { bcl_page: "String" },
+    field_descriptions: { bcl_page: "Compact Brain list-locator v1 value: the current page id for the tuple digest" },
+    field_classifications: { bcl_page: ["no_index", "metadata"] },
+    field_data_classifications: { bcl_page: GENERAL },
+  },
+  mutation_mappers: {},
+};
 
 export const brainTypeDirectorySchema = supportSchema({
   name: "BrainTypeDirectory",
@@ -1234,6 +1254,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: brainListLocatorSchema,
     types: [],
     extraKeys: [BRAIN_LIST_LOCATOR_SCHEMA_KEY],
+  },
+  {
+    key: BRAIN_COMPACT_LOCATOR_SCHEMA_KEY,
+    schema: brainCompactLocatorSchema,
+    types: [],
+    extraKeys: [BRAIN_COMPACT_LOCATOR_SCHEMA_KEY],
   },
   {
     key: BRAIN_TYPE_DIRECTORY_SCHEMA_KEY,
