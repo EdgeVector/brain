@@ -491,6 +491,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       print,
     };
     if (verbose !== undefined) consentBase.verbose = verbose;
+    if (nodeSocketPath !== undefined) consentBase.socketPath = nodeSocketPath;
     if (opts.grantConsent) consentBase.nonInteractiveGrant = true;
     consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
   }

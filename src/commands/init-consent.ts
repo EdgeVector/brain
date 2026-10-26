@@ -53,6 +53,8 @@ export type EstablishConsentOptions = {
   scope?: string;
   print?: (line: string) => void;
   verbose?: Verbose;
+  /** Socket path override for owner-session attestation (when targeting a loopback node). */
+  socketPath?: string;
   // Injection seams for tests:
   store?: CapabilityStore;
   /** Override the consent transport (default: built from a NodeClient). */
@@ -215,7 +217,7 @@ export async function establishConsentInline(
   // are unauthenticated handshake endpoints.
   const transport =
     opts.transport ??
-    transportFromNode(opts.nodeUrl, opts.userHash, opts.verbose);
+    transportFromNode(opts.nodeUrl, opts.userHash, opts.verbose, opts.socketPath);
 
   const runFolddbGrant = opts.runFolddbGrant ?? defaultRunFolddbGrant;
 
@@ -290,6 +292,7 @@ function transportFromNode(
   nodeUrl: string,
   userHash: string,
   verbose: Verbose | undefined,
+  socketPath?: string,
 ): ConsentTransport {
   const nodeOpts: Parameters<typeof newNodeClient>[0] = {
     baseUrl: nodeUrl,
@@ -297,6 +300,7 @@ function transportFromNode(
     capability: () => null,
   };
   if (verbose !== undefined) nodeOpts.verbose = verbose;
+  if (socketPath !== undefined) nodeOpts.socketPath = socketPath;
   const node = newNodeClient(nodeOpts);
   return {
     requestConsent: (appId, scope) => node.requestConsent(appId, scope),
