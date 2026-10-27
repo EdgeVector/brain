@@ -304,6 +304,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const nodeUrl = resolved.nodeUrl;
   const schemaServiceUrl = resolved.schemaServiceUrl;
+  // Resolve the socket path that will actually be used for owner-session
+  // attestation. This is what newNodeClient will use internally when
+  // connecting, so we persist it to the config so later commands use the same
+  // socket without needing to re-supply FBRAIN_FOLDDB_SOCKET or LASTDB_HOME.
+  const nodeSocketPath = isLoopbackNodeUrl(nodeUrl)
+    ? defaultFolddbSocketPath(existing?.nodeSocketPath)
+    : undefined;
   // Always echo which node we're targeting and where the URL came from — a dev
   // re-running `init` to confirm "which node am I actually pointed at?" needs
   // the answer on every run.
@@ -320,7 +327,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Step 0/6: probe identity (with cold-build retry).
   print(`[1/${STEPS}] probing node identity`);
   const probeUserHash = existing?.userHash ?? "init-probe";
-  const probeClient = newNodeClient({ baseUrl: nodeUrl, userHash: probeUserHash, verbose: verbose ?? (() => {}) });
+  const probeClient = newNodeClient({ 
+    baseUrl: nodeUrl, 
+    userHash: probeUserHash, 
+    verbose: verbose ?? (() => {}),
+    socketPath: nodeSocketPath,
+  });
   const identity = await probeWithRetry(probeClient, { nodeUrl, sleep: opts.sleep, retryDelaysMs: opts.retryDelaysMs }, print);
 
   let userHash: string;
@@ -394,7 +406,12 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       `        FBRAIN_APP_IDENTITY_ENFORCE=off → namespaced fbrain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
     );
   }
-  const nodeClient = newNodeClient({ baseUrl: nodeUrl, userHash, verbose: verbose ?? (() => {}) });
+  const nodeClient = newNodeClient({ 
+    baseUrl: nodeUrl, 
+    userHash, 
+    verbose: verbose ?? (() => {}),
+    socketPath: nodeSocketPath,
+  });
   const schemaHashes: Record<string, string> = {};
 
   // Checkpoint the config DURING declaration, not only after it.
@@ -415,7 +432,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     if (checkpointed) return;
     if (!schemaHashes.design || !schemaHashes.task) return;
     checkpointed = true;
-    writeConfig(buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes }), configPath);
+    writeConfig(buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath }), configPath);
     print(`        checkpointed config to ${configPath} (partial; init still running)`);
   };
 
@@ -443,7 +460,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // mid-grant doesn't lose schema state — the next init re-runs the consent
   // step idempotently).
   print(`[5/${STEPS}] writing config to ${configPath}`);
-  const config = buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes });
+  const config = buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath });
   // Mini first-run: local declare means schemas never went through
   // schema_service, so consent-request against the cloud app registry will
   // 404 "app not registered". Pin client enforce-off so NodeOwner writes work
@@ -474,6 +491,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       print,
     };
     if (verbose !== undefined) consentBase.verbose = verbose;
+    if (nodeSocketPath !== undefined) consentBase.socketPath = nodeSocketPath;
     if (opts.grantConsent) consentBase.nonInteractiveGrant = true;
     consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
   }
@@ -502,6 +520,7 @@ function buildConfig(parts: {
   schemaServiceUrl: string;
   userHash: string;
   schemaHashes: Record<string, string>;
+  nodeSocketPath?: string;
 }): Config {
   const config: Config = {
     configVersion: CONFIG_VERSION,
@@ -514,14 +533,13 @@ function buildConfig(parts: {
     designSchemaHash: parts.schemaHashes.design ?? "",
     taskSchemaHash: parts.schemaHashes.task ?? "",
   };
-  // Persist an explicit owner-session socket override (app-isolation flip,
-  // fold#739) when one was provided via `FBRAIN_FOLDDB_SOCKET` — so later
-  // commands attest against the same non-default node without re-supplying the
-  // env. Unset → omitted, and attestation falls back to the default
-  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
-  const socketOverride = process.env.FBRAIN_FOLDDB_SOCKET;
-  if (socketOverride && socketOverride.length > 0) {
-    config.nodeSocketPath = socketOverride;
+  // Persist the owner-session socket path that init actually connected through
+  // (app-isolation flip, fold#739). When set, later commands attest against the
+  // same node without re-supplying FBRAIN_FOLDDB_SOCKET or LASTDB_HOME. Unset
+  // → omitted, and attestation falls back to the default resolution (checking
+  // FBRAIN_FOLDDB_SOCKET env, then deriving from LASTDB_HOME/FOLDDB_HOME).
+  if (parts.nodeSocketPath && parts.nodeSocketPath.length > 0) {
+    config.nodeSocketPath = parts.nodeSocketPath;
   }
   return config;
 }
