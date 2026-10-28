@@ -23,7 +23,7 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   const rename = (name: string) => {
     const [root, ...path] = name.split(".");
     const canonical = root && aliases[root];
-    if (!canonical) throw new Error(`No approved field for ${schema.descriptive_name}.${name}`);
+    if (!canonical) throw new Error(`No canonical field map for ${schema.descriptive_name}.${name}`);
     return [canonical, ...path].join(".");
   };
   const result = structuredClone(schema) as unknown as Record<string, unknown>;
@@ -38,7 +38,7 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   const fields = schema.fields.map((alias) => {
     const name = rename(alias);
     const field = definitions[name];
-    if (!field) throw new Error(`Missing approved definition ${name}`);
+    if (!field) throw new Error(`Missing canonical definition ${name}`);
     return { name, field };
   });
   result.field_types = Object.fromEntries(fields.map(({name, field}) => [name, field.field_type]));

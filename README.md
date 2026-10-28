@@ -713,12 +713,14 @@ Until the readiness gate ships, both gbrain and fbrain coexist; the `gbrain put`
 
 ## Standard canonical vocabulary
 
-`src/canonical-fields.json` defines the approved names, descriptions, and types for schema publication.
+`src/canonical-fields.json` defines the standard names, descriptions, and types for schema publication.
 The app keeps its local command field names.
 A schema-specific field map translates those names for the stored canonical identity.
 The map leaves values, record keys, cursors, and file references intact.
 
-A fresh home uses these definitions after operator approval in the schema service.
+A fresh home submits these definitions through normal schema declarations.
+The schema service checks names, definitions, types, and concept reuse for every caller.
+No special vocabulary key or operator approval path exists.
 An existing config without a field map keeps its current schema identities and declaration path.
 An explicit data migration must precede a change to those identities.
 This change does not perform that migration.
