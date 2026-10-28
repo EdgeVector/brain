@@ -1485,17 +1485,38 @@ export async function readPageChain(
   const cards: ListCard[] = [];
   const seen = new Set<string>();
   let range = HEAD_RANGE;
+  // A bulk reader knows the hash. Fetch its page atoms together, then follow
+  // only the linked chain. Staged overflow pages are never membership proof.
+  // The one-page callers retain one exact read and do not fetch older pages.
+  const pages = new Map<string, string>();
+  if (maxPages > 1) {
+    const result = await node.queryAll({ schemaHash, fields: ["blp_h", "blp_r", "blp_page"], filter: { HashKey: hash } });
+    for (const row of result.results) {
+      const key = row.key?.range ?? rowField(row, "blp_r");
+      const raw = rowField(row, "blp_page");
+      if (key && raw !== null) pages.set(key, raw);
+    }
+  }
   for (let depth = 0; depth < maxPages; depth++) {
-    if (seen.has(range)) break;
+    if (seen.has(range)) throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} repeats a page.` });
     seen.add(range);
-    const raw = await readOnePage(node, schemaHash, hash, range);
-    if (raw === null) return range === HEAD_RANGE ? [] : cards;
+    const raw = maxPages > 1 ? pages.get(range) ?? null : await readOnePage(node, schemaHash, hash, range);
+    if (raw === null) {
+      if (range === HEAD_RANGE) return [];
+      throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} is missing page ${range}.` });
+    }
+    try {
+      const value = JSON.parse(raw);
+      if (!value || !Array.isArray(value.cards) || (value.older !== undefined && typeof value.older !== "string")) throw new Error("Invalid page");
+    } catch {
+      throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} has an invalid page ${range}.` });
+    }
     const page = parsePage(raw);
     for (const card of page.cards) cards.push(card);
-    if (page.older.length === 0) break;
+    if (page.older.length === 0 || maxPages === 1) return cards;
     range = page.older;
   }
-  return cards;
+  throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} exceeded ${maxPages} pages.` });
 }
 
 /**

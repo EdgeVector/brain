@@ -10,6 +10,8 @@ export type V2Record = FbrainRecord & {
   br2_id: string; br2_type: RecordType; br2_scope: string; br2_status: string;
   br2_order: string; br2_revision: string;
 };
+type ListOptions = { type?: RecordType; status?: string; tag?: string; cursor?: unknown; limit?: number };
+type ListResult = { items: Record<string, unknown>[]; cursor: unknown; hasMore: boolean };
 
 export function recordKey(type: RecordType, slug: string): string {
   return `v2:${Buffer.from(JSON.stringify([type, slug])).toString("base64url")}`;
@@ -120,9 +122,33 @@ export class BrainV2Store {
     if (result.durability !== "durable") throw new Error("Brain v2 did not receive a durable batch result");
   }
 
-  async list(options: { type?: RecordType; status?: string; tag?: string; cursor?: unknown; limit?: number } = {}): Promise<{ items: Record<string, unknown>[]; cursor: unknown; hasMore: boolean }> {
+  async list(options: ListOptions = {}): Promise<ListResult> {
     const limit = options.limit ?? 20;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Brain v2 list limit must be 1..100");
+    return this.readPage(options, limit, V2_SUMMARY_FIELDS);
+  }
+
+  // Explicit bulk traversal. Consumers can process each bounded page without
+  // retaining the corpus. Normal list calls remain one page, capped at 100.
+  async *pages(options: Omit<ListOptions, "cursor" | "limit"> & { fields?: string[]; pageSize?: number } = {}): AsyncGenerator<ListResult> {
+    const limit = options.pageSize ?? 1000;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Brain v2 bulk page size must be 1..1000");
+    const fields = options.fields ?? V2_SUMMARY_FIELDS;
+    if (fields.some(field => !V2_RECORD_FIELDS.includes(field))) throw new Error("Unknown Brain v2 field");
+    let cursor: unknown;
+    const seen = new Set<string>();
+    for (let page = 0; page < 1000; page++) {
+      const result = await this.readPage({ ...options, cursor }, limit, fields);
+      yield result;
+      if (!result.hasMore) return;
+      const token = JSON.stringify(result.cursor);
+      if (!result.cursor || seen.has(token)) throw new Error("Brain v2 continuation stalled");
+      seen.add(token); cursor = result.cursor;
+    }
+    throw new Error("Brain v2 traversal exceeded 1000 pages");
+  }
+
+  private async readPage(options: ListOptions, limit: number, fields: string[]): Promise<ListResult> {
     if (options.status && !options.type) throw new Error("A status list requires a type");
     const layout = options.tag ? "tag" : options.status ? "status" : options.type ? "type" : "recent";
     const hash = options.tag ?? (options.type ? options.status ? statusKey(options.type, options.status) : options.type : "brain");
@@ -134,7 +160,7 @@ export class BrainV2Store {
     if (!Array.isArray(rows)) throw new Error("Brain v2 list response has no rows");
     const ids = rows.map(row => (row.fields ?? row)[layout === "tag" ? "bt2_id" : "br2_id"]);
     if (!ids.every((id): id is string => typeof id === "string")) throw new Error("Brain v2 lookup has an invalid identity");
-    const records = await this.readKeys(ids, V2_SUMMARY_FIELDS);
+    const records = await this.readKeys(ids, [...new Set([...fields, "br2_id", "br2_type", "status", "tags"])]);
     const byId = new Map(records.map(row => [row.fields.br2_id, row.fields]));
     const items = ids.flatMap(id => {
       const record = byId.get(id);

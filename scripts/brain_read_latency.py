@@ -30,7 +30,7 @@ def measure(args, layout, version, source, repeat):
     environment.update(LASTDB_ISOLATED_COPY="1", LASTDB_SUPPRESS_RECOVERY_PHRASE="1",
                        LASTDB_HOME=str(home), FOLDDB_HOME=str(home), FBRAIN_FOLDDB_SOCKET=str(sock),
                        FBRAIN_APP_IDENTITY_ENFORCE="off", BRAIN_CONFIG=str(root / "config.json"),
-                       BRAIN_READ_SOURCE=str(source), LAST_STACK_HEARTBEATS_FILE=str(root / "absent-heartbeats"),
+                       BRAIN_READ_SOURCE=str(source), BRAIN_READ_VERSION=version, LAST_STACK_HEARTBEATS_FILE=str(root / "absent-heartbeats"),
                        LASTSEEK_BIN=str(root / "absent-lastseek"), RUST_MIN_STACK="16777216")
     log = (destination / "node.log").open("w")
     daemon, client = None, None
@@ -125,15 +125,21 @@ def report(args, runs):
                     records = [result for run in runs if run["layout"] == layout and run["version"] == version
                                for result in run["results"] if result["operation"] == operation and result["state"] == state]
                     samples = [sample for record in records for sample in record["samples"]]
-                    summary = stats(samples)
+                    successful = [sample for sample in samples if sample.get("verified")]
+                    summary = stats(successful) if successful else {"p50_ms": None, "p95_ms": None, "p99_ms": None, "operations": 0}
+                    summary.update(failed=len(samples) - len(successful), attempted=len(samples),
+                                   failed_p50_ms=median(sample["elapsed_ms"] for sample in samples if not sample.get("verified")) if len(samples) != len(successful) else None,
+                                   requests_per_operation=median(sample["requests"] for sample in samples))
                     summary.update(response_bytes=median(sample["response_bytes"] for sample in samples),
                                    client_peak_sampled_bytes=max(record["client_peak_sampled_bytes"] for record in records),
                                    node_peak_sampled_bytes=max(record["node_peak_sampled_bytes"] for record in records))
                     pair.append(summary)
                 before, after = pair
                 comparisons.append({"layout": layout, "operation": operation, "state": state, "before": before, "after": after})
-                lines.append(f"| {layout} | {operation} | {state} | {before['p50_ms']:.2f} | {after['p50_ms']:.2f} | "
-                             f"{before['p95_ms']:.2f} | {after['p95_ms']:.2f} | {before['requests_per_operation']:.1f} | {after['requests_per_operation']:.1f} |")
+                def cell(value, key):
+                    return f"{value[key]:.2f}" if value[key] is not None else f"failed {value['failed']}/{value['attempted']}"
+                lines.append(f"| {layout} | {operation} | {state} | {cell(before, 'p50_ms')} | {cell(after, 'p50_ms')} | "
+                             f"{cell(before, 'p95_ms')} | {cell(after, 'p95_ms')} | {before['requests_per_operation']:.1f} | {after['requests_per_operation']:.1f} |")
     lines += ["", "Read results require exact generated membership and field values. Raw samples include response bytes and sampled memory sizes.",
               "Migration read measures the source read, without schema publication or migration writes. Bulk selection does not delete data.",
               "V2 snapshot counts use a complete summary traversal; V2 has no maintained count schema or snapshot command.",

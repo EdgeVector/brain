@@ -17,6 +17,9 @@ const records = await import(resolve(source, "src/record.ts"));
 const definitions = await import(resolve(source, "src/schemas.ts"));
 const v2Module = await import(resolve(source, "src/v2/store.ts"));
 const v2Schemas = await import(resolve(source, "src/v2/schemas.ts"));
+const [getCommand, listCommand, snapshotCommand, deleteCommand, searchCommand] = await Promise.all([
+  "get", "list", "admin-snapshot", "delete", "search",
+].map(name => import(resolve(source, `src/commands/${name}.ts`))));
 let requests = 0, responseBytes = 0;
 globalThis.fetch = new Proxy(globalThis.fetch, {
   async apply(target, receiver, args) {
@@ -137,16 +140,14 @@ function check(items: any[], expected: number, full = false): number {
 async function operation(name: string): Promise<number> {
   if (name === "get") {
     if (layout === "v2") return check([await store.get("concept", "read-0")], 1, true);
-    const { getRecord } = await import(resolve(source, "src/commands/get.ts"));
     let result: any;
-    await getRecord({ cfg, type: "concept", slug: "read-0", json: true, print: () => {}, onResult: (value: any) => { result = value; } });
+    await getCommand!.getRecord({ cfg, type: "concept", slug: "read-0", json: true, print: () => {}, onResult: (value: any) => { result = value; } });
     return check([result], 1, true);
   }
   if (name === "first_page") {
     if (layout === "v2") return check((await store.list({ type: "concept", limit: 20 })).items, 20);
-    const { listCmd } = await import(resolve(source, "src/commands/list.ts"));
     let result: any;
-    await listCmd({ cfg, type: "concept", limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
+    await listCommand!.listCmd({ cfg, type: "concept", limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
     return check(result.items, 20);
   }
   if (name === "all_summaries" || name === "all_records") {
@@ -166,24 +167,21 @@ async function operation(name: string): Promise<number> {
   }
   if (name === "snapshot_counts") {
     if (layout === "v2") { let count = 0; for await (const page of v2Pages()) count += page.length; if (count !== settings.records) throw new Error("V2 count incomplete"); return count; }
-    const { buildBrainAdminSnapshot } = await import(resolve(source, "src/commands/admin-snapshot.ts"));
-    const snapshot = await buildBrainAdminSnapshot(node, cfg);
+    const snapshot = await snapshotCommand!.buildBrainAdminSnapshot(node, cfg);
     if (snapshot.unavailable_types.length || snapshot.type_counts.concept !== settings.records / 2 || snapshot.type_counts.reference !== settings.records / 2) throw new Error("Snapshot counts incomplete");
     return settings.records;
   }
   if (name === "bulk_selection") {
     if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages({ type: "concept", status: "parked" })) items.push(...page); return check(items, settings.records / 4); }
-    const { deleteByFilter } = await import(resolve(source, "src/commands/delete.ts"));
     let result: any;
-    await deleteByFilter({ cfg, type: "concept", status: "parked", yes: false, print: () => {}, onResult: (value: any) => { result = value; } });
+    await deleteCommand!.deleteByFilter({ cfg, type: "concept", status: "parked", yes: false, print: () => {}, onResult: (value: any) => { result = value; } });
     if (!result.ok || result.deleted.length !== settings.records / 4) throw new Error("Bulk selection incomplete");
     return result.deleted.length;
   }
   if (name === "search_fallback") {
     if (layout === "v2") return -1; // V2 has no search adapter; do not invent one for a comparison.
-    const { searchCmd } = await import(resolve(source, "src/commands/search.ts"));
     let result: any;
-    await searchCmd({ cfg, query: "molecule", limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
+    await searchCommand!.searchCmd({ cfg, query: "molecule", limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
     if (result.length !== 20) throw new Error("Keyword search page incomplete");
     return result.length;
   }
@@ -194,8 +192,15 @@ if (phase === "setup") await setup();
 else {
   for (let sample = 0; sample < settings.samples; sample++) {
     const before = requests, bytes = responseBytes, start = performance.now();
-    const count = await operation(phase!);
-    samples.push({ elapsed_ms: performance.now() - start, requests: requests - before, response_bytes: responseBytes - bytes, count });
+    try {
+      const count = await operation(phase!);
+      samples.push({ elapsed_ms: performance.now() - start, requests: requests - before, response_bytes: responseBytes - bytes, count, verified: true });
+    } catch (error) {
+      if (process.env.BRAIN_READ_VERSION !== "before" || !String(error).includes("[read_resource_limit]")) throw error;
+      // A broken baseline is a measured failure, never a successful latency.
+      samples.push({ elapsed_ms: performance.now() - start, requests: requests - before, response_bytes: responseBytes - bytes,
+        verified: false, error: String(error).slice(0, 1000) });
+    }
   }
 }
 writeFileSync(outputPath, JSON.stringify({ layout, phase, source, records: settings.records,

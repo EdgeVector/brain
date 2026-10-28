@@ -1,7 +1,7 @@
 # Brain v2 storage spike
 
 The branch `spike/brain-v2-molecules-20261027` contains an opt-in storage adapter for the existing Brain client.
-Normal Brain commands and initialization keep their current behavior.
+Normal initialization does not activate the adapter.
 The adapter uses one record schema and three narrow native lookup schemas.
 Proteins share their field atoms. A separate schema holds tag memberships.
 
@@ -46,3 +46,39 @@ An improvement in one metric does not establish an improvement in the other metr
 
 Keep the spike branch after the CI result.
 Do not activate it on an existing Brain home or upgrade the primary through this work.
+
+## Bulk read follow-up
+
+The read workflow compares the retained spike revision with the new read code.
+It uses 1,000 and 10,000 generated records on the same pinned LastDB release.
+Each comparison has three paired repeats, one call after a daemon restart, and five later calls per operation.
+The OS file cache remains in place after a daemon restart.
+
+The operations are get, first page, all summaries, all records, snapshot counts, bulk selection, and migration source reads.
+Current Brain also measures the keyword fallback with LastSeek absent.
+V2 has no search adapter or snapshot command.
+Its count operation reads all summaries; it does not maintain a count schema.
+
+The setup writes equal generated corpora through native mutation batches.
+It writes the current page format and count records directly, outside the measured read time.
+This method measures read cost; it does not measure corpus creation cost or production enrollment.
+Each complete result must match the generated membership and field values.
+The workflow records a baseline resource-limit error as a failure, with the elapsed time to failure.
+A failed request does not count as a successful latency.
+Any candidate failure stops the job.
+
+Current Brain reads one hash of page atoms together, then follows only its linked pages.
+Normal list calls still read one exact page.
+Batch reads use at most 100 keys per request and four requests at once.
+Migration reads use these batches for each page of storage keys.
+Snapshot counts use one batch of maintained counters.
+Bulk selection reads the summary fields it needs and checks current status and tags.
+It does not fetch record bodies.
+V2 has an explicit bulk page iterator with a maximum of 1,000 identities per page.
+The caller can process each page without a full corpus in memory.
+
+The CI summary contains before and after latencies and request counts.
+Raw artifacts contain response bytes, memory samples, source revisions, and failures.
+The operation clock excludes module imports and process startup.
+The artifact also records the full workload process time.
+Small sample counts limit conclusions about p95 and p99.

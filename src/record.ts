@@ -585,15 +585,12 @@ export async function listRecordsAdminScan(
   opts?: {
     seedIndex?: (records: FbrainRecord[]) => Promise<void>;
     includeTombstones?: boolean;
-    // Called periodically (count- and time-gated; see PROGRESS_* below) with
-    // the number of keys point-read so far. This walk issues one request per
-    // live key — thousands on a large schema — with no caller-visible output
-    // otherwise, so a multi-minute run reads identically to a hang from
-    // outside the process. Optional; omit for silent callers.
+    // Called periodically with the number of storage keys considered so far.
+    // Each keys page is read in bounded native batches, never one call per key.
     onProgress?: (scanned: number) => void;
   },
 ): Promise<FbrainRecord[]> {
-  if (!node.listRecordKeys || !node.queryByKey) {
+  if (!node.listRecordKeys || !node.queryByKeys) {
     throw new FbrainError({
       code: "admin_list_not_supported",
       message: "This node client does not support the keys-only admin list path.",
@@ -612,19 +609,18 @@ export async function listRecordsAdminScan(
       limit: QUERY_PAGE_SIZE,
       ...(cursor === undefined ? {} : { cursor }),
     });
-    for (const key of page.keys) {
+    const keys = page.keys.filter((key) => {
+      if (seenKeys.has(key.hash)) return false;
+      seenKeys.add(key.hash);
+      return true;
+    });
+    const batch = await node.queryByKeys({ schemaHash, fields: fieldsFor(type), keys });
+    for (const row of batch) {
       // Brain product schemas are Hash-keyed by slug. Ignore duplicate storage
       // identities defensively; the list route is the membership authority.
-      if (seenKeys.has(key.hash)) continue;
-      seenKeys.add(key.hash);
-      const row = await node.queryByKey({
-        schemaHash,
-        fields: fieldsFor(type),
-        keyHash: key.hash,
-      });
       // A delete can race between the membership page and its point-get. The
       // keyed miss is authoritative, so omit it from this drain.
-      if (row !== null) rows.push(row);
+      rows.push(row);
       if (
         opts?.onProgress &&
         (seenKeys.size - lastProgressCount >= PROGRESS_REPORT_EVERY_N ||
