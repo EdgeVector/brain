@@ -357,6 +357,23 @@ export async function putAttachmentBlob(
   if (existing !== null) {
     return { blobRef: `sha256:${hash}`, deduplicated: true };
   }
+  if (cfg.schemaFieldAliases?.[schemaHash]) {
+    // Current Mini stores local bytes first; the caller writes the pointer.
+    const path = "/api/db/put-blob-local";
+    const stored = await node.rawCall("POST", path, {bytes_b64:Buffer.from(bytes).toString("base64")});
+    if (stored.status !== 200) throw filePlaneError(path,stored.status,stored.body);
+    const root = (stored.json ?? {}) as Record<string,unknown>;
+    const data = root.data as Record<string,unknown> | undefined;
+    const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
+    const pointer = fileBlob?.pointer;
+    if (!pointer || typeof pointer !== "object" || typeof (pointer as Record<string,unknown>).$lastdb_file !== "object" || fileBlob?.blob_ref !== `sha256:${hash}`) {
+      throw new FbrainError({code:"attachment_pointer_invalid",message:"Local file storage returned an invalid attachment pointer."});
+    }
+    await node.createRecord({schemaHash,keyHash:hash,fields:{
+      content_hash:hash,size:String(bytes.length),media_type:mediaType,file:pointer,created_at:nowIso(),
+    }});
+    return {blobRef:`sha256:${hash}`,deduplicated:false};
+  }
   const res = await node.rawCall("POST", "/api/db/file-blob", {
     schema: schemaHash,
     field: "file",
