@@ -725,6 +725,9 @@ export type BatchMutationOp = {
   keyHash: string;
   keyRange?: string;
   fields: Record<string, unknown>;
+  expected?:
+    | { type: "absent"; field: string }
+    | { type: "value"; field: string; value: string };
 };
 
 export type BatchMutationResult = {
@@ -1694,6 +1697,7 @@ export function newNodeClient(opts: {
           fields_and_values: op.fields,
           key_value: { hash: op.keyHash, range: op.keyRange ?? null },
           mutation_type: op.mutationType,
+          ...(op.expected ? { expected: op.expected } : {}),
           ...(options?.durability === "durable"
             ? { durability: "durable" as const }
             : {}),

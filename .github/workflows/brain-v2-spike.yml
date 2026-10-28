@@ -1,0 +1,63 @@
+name: Brain v2 storage spike
+on:
+  pull_request:
+    paths:
+      - 'src/v2/**'
+      - 'src/client.ts'
+      - 'scripts/brain_v2_spike.py'
+      - '.github/workflows/brain-v2-spike.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  brain-v2-spike:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LASTDB_REVISION: 688222b04d18d717da913007cb41e7174e48f395
+      LASTDB_TAG: nightly-20261027-688222b04
+      LASTDB_BUNDLE_SHA256: 6dcae41be0a7d4ea8783fdea164481728515afce0beba507545f96b74175a046
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - name: Download and verify the pinned release daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/brain-v2-binary"
+          curl --fail --location --retry 3 \
+            "https://github.com/EdgeVector/lastdb/releases/download/$LASTDB_TAG/lastdb-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$RUNNER_TEMP/brain-v2-binary/bundle.tar.gz"
+          printf '%s  %s\n' "$LASTDB_BUNDLE_SHA256" "$RUNNER_TEMP/brain-v2-binary/bundle.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/brain-v2-binary/bundle.tar.gz" -C "$RUNNER_TEMP/brain-v2-binary"
+          "$RUNNER_TEMP/brain-v2-binary/lastdbd" --version
+          printf 'Release: %s\nSource: %s\nBundle SHA-256: %s\n' "$LASTDB_TAG" "$LASTDB_REVISION" "$LASTDB_BUNDLE_SHA256" >> "$GITHUB_STEP_SUMMARY"
+      - name: Measure real record operations on paired fresh homes
+        run: >-
+          python3 scripts/brain_v2_spike.py
+          --lastdbd "$RUNNER_TEMP/brain-v2-binary/lastdbd"
+          --lastdb-revision "$LASTDB_REVISION"
+          --output "$RUNNER_TEMP/brain-v2-results"
+          --records 1024 --body-bytes 4096 --repeats 3
+      - name: Retain the source and raw measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        id: measurements
+        with:
+          name: brain-v2-spike-${{ github.sha }}
+          path: ${{ runner.temp }}/brain-v2-results
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record the artifact identity and expiry
+        if: always() && steps.measurements.outcome == 'success'
+        env:
+          ARTIFACT_URL: ${{ steps.measurements.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.measurements.outputs.artifact-digest }}
+        run: |
+          printf '\nArtifact: %s\nSHA-256: %s\nRetention: 14 days from this run.\n' "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
