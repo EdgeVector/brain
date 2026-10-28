@@ -103,17 +103,20 @@ A full record list reads the two documents through the same key.
 It does not fetch every record again by identity.
 Tags retain a separate membership product and a batch read of the required documents.
 
-This layout keeps five schemas and uses 26 physical field declarations.
+This layout uses six schemas and 29 physical field declarations.
 The public record fields remain available through the adapter.
 The body occurs in one content atom; lookup molecules reference the same atom.
 The adapter writes only the documents and route fields that change.
 An unchanged order key and tag membership do not require tag writes.
 
-V2 counts use the node's exact count for each known type hash.
+V2 counts use the node's exact count for each known type and identity-bucket hash.
 A descending keyed query requests that count and materializes only one probe record.
 The node counts live molecule keys without a full body read.
 The adapter refuses an absent count or an integrity error.
-The count has no additional app schema or counter write.
+The unbucketed native count exceeded the node's work budget at 5,000 keys in CI.
+A count membership schema divides each type across eight hashes derived from the record identity.
+Proteins maintain this membership as part of the record write.
+The app does not maintain a separate numeric counter or add a counter read before each write.
 Counts across types do not form one transaction.
 
 CI first verifies actual writes, edits, deletes, recreation, native counts, and all three shared proteins.

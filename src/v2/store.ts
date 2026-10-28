@@ -8,13 +8,17 @@ import { V2_RECORD_FIELDS, V2_STORED_FIELDS, V2_SUMMARY_FIELDS, type V2SchemaMap
 
 export type V2Record = FbrainRecord & {
   br2_id: string; br2_type: RecordType; br2_scope: string; br2_status: string;
-  br2_order: string; br2_revision: string;
+  br2_order: string; br2_revision: string; br2_count_hash: string;
 };
 type ListOptions = { type?: RecordType; status?: string; tag?: string; cursor?: unknown; limit?: number };
 type ListResult = { items: Record<string, unknown>[]; cursor: unknown; hasMore: boolean };
 const CARD_FIELDS = ["br2_type", "slug", "title", "status", "tags", "updated_at"];
 const CONTENT_FIELDS = ["body", "created_at", "design_slug", "program", "gate_slug", "decided_by", "decided_on"];
-const ROUTING_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision"];
+const ROUTING_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision", "br2_count_hash"];
+const COUNT_BUCKETS = 8;
+function countHash(type: RecordType, id: string): string {
+  return `${type}#${createHash("sha256").update(id).digest()[0]! % COUNT_BUCKETS}`;
+}
 
 export function recordKey(type: RecordType, slug: string): string {
   return `v2:${Buffer.from(JSON.stringify([type, slug])).toString("base64url")}`;
@@ -40,6 +44,7 @@ function packed(record: V2Record, fields: string[]): string {
 }
 export function encodeV2Record(record: V2Record): Record<string, unknown> {
   return { ...Object.fromEntries(ROUTING_FIELDS.map(field => [field, record[field]])),
+    br2_count_hash: countHash(record.br2_type, record.br2_id),
     br2_card: packed(record, CARD_FIELDS), br2_content: packed(record, CONTENT_FIELDS) };
 }
 function document(value: unknown): Record<string, unknown> {
@@ -103,7 +108,7 @@ export class BrainV2Store {
     const id = recordKey(type, record.slug);
     const next: V2Record = { ...record, tags: [...new Set(record.tags)], created_at: previous?.created_at ?? record.created_at,
       br2_id: id, br2_type: type, br2_scope: "brain", br2_status: statusKey(type, record.status),
-      br2_order: orderKey(id, record.updated_at), br2_revision: randomUUID() };
+      br2_order: orderKey(id, record.updated_at), br2_revision: randomUUID(), br2_count_hash: countHash(type, id) };
     const encoded = encodeV2Record(next), old = previous ? encodeV2Record(previous) : {};
     const fields = Object.fromEntries(Object.entries(encoded).filter(([name, value]) => old[name] !== value));
     const expected = previous ? { type: "value" as const, field: "br2_revision", value: previous.br2_revision }
@@ -128,6 +133,7 @@ export class BrainV2Store {
       ops.push({ mutationType: "delete", schemaHash: this.schemas[layout], keyHash: hash, keyRange: previous.br2_order, fields: {} });
     }
     for (const tag of previous.tags) ops.push(this.tagDelete(tag, previous));
+    ops.push({ mutationType: "delete", schemaHash: this.schemas.count, keyHash: previous.br2_count_hash, keyRange: previous.br2_id, fields: {} });
     await this.commit(ops);
   }
   private tagDelete(tag: string, previous: V2Record): BatchMutationOp {
@@ -210,13 +216,14 @@ export class BrainV2Store {
   async counts(): Promise<{ total: number; types: Record<RecordType, number> }> {
     // A descending keyed page asks the node for its exact native membership
     // count. Only one probe row is materialized; the rest are key metadata.
-    const types = {} as Record<RecordType, number>;
-    for (let offset = 0; offset < RECORD_TYPES.length; offset += 4) {
-      await Promise.all(RECORD_TYPES.slice(offset, offset + 4).map(async type => {
-        const result = await rawData(this.node, "POST", "/api/query", { schema_name: this.schemas.type,
-          fields: ["br2_id"], filter: { HashKey: type }, sort_order: "Desc", limit: 1 });
-        if (!Number.isSafeInteger(result.total_count) || result.total_count < 0 || result.unresolved_rows !== 0 || result.tombstoned_rows !== 0) throw new Error(`Brain v2 native count is unavailable for ${type}`);
-        types[type] = result.total_count;
+    const types = Object.fromEntries(RECORD_TYPES.map(type => [type, 0])) as Record<RecordType, number>;
+    const keys = RECORD_TYPES.flatMap(type => Array.from({ length: COUNT_BUCKETS }, (_, bucket) => ({ type, hash: `${type}#${bucket}` })));
+    for (let offset = 0; offset < keys.length; offset += 4) {
+      await Promise.all(keys.slice(offset, offset + 4).map(async ({ type, hash }) => {
+        const result = await rawData(this.node, "POST", "/api/query", { schema_name: this.schemas.count,
+          fields: ["br2_id"], filter: { HashKey: hash }, sort_order: "Desc", limit: 1 });
+        if (!Number.isSafeInteger(result.total_count) || result.total_count < 0 || result.unresolved_rows !== 0 || result.tombstoned_rows !== 0) throw new Error(`Brain v2 native count is unavailable for ${hash}`);
+        types[type] += result.total_count;
       }));
     }
     return { total: Object.values(types).reduce((sum, value) => sum + value, 0), types };

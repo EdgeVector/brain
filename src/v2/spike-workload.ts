@@ -68,7 +68,8 @@ async function setup(): Promise<void> {
 }
 
 async function proteinBinding(field = "br2_id"): Promise<{ identity: string; members: number }> {
-  const molecules = await Promise.all(["record", "recent", "type", "status"].map(async layout => {
+  const layouts = field === "br2_id" ? ["record", "recent", "type", "status", "count"] : ["record", "recent", "type", "status"];
+  const molecules = await Promise.all(layouts.map(async layout => {
     const name = schemas[layout as keyof V2SchemaMap];
     const metadata = await rawData(node, "GET", `/api/schema/${encodeURIComponent(name)}`);
     const definition = metadata.schema?.schema ?? metadata.schema;
@@ -174,6 +175,9 @@ async function verify(): Promise<Record<string, unknown>> {
       filter: { HashRangeKey: { hash, range: removed.br2_order } }, limit: 1 });
     if ((result.results ?? result.rows)?.length !== 0) throw new Error(`V2 delete left the exact ${layout} key`);
   }
+  const countKey = await rawData(node, "POST", "/api/query", { schema_name: schemas.count, fields: ["br2_id"],
+    filter: { HashRangeKey: { hash: removed.br2_count_hash, range: removed.br2_id } }, limit: 1 });
+  if (countKey.results?.length !== 0) throw new Error("V2 delete left the exact count key");
   await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
   if (!(await store.get("concept", "recreated"))) throw new Error("V2 recreation failed");
   await Promise.all(Array.from({ length: 8 }, (_, i) => store.put("concept", { ...common, slug: `concurrent-${i}`, tags: [] })));

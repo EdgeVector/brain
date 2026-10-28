@@ -10,6 +10,7 @@ const descriptions: Record<string, string> = {
   br2_revision: "Brain v2 compare-and-set record revision",
   br2_card: "Brain v2 public summary document, version 1",
   br2_content: "Brain v2 body and optional public fields document, version 1",
+  br2_count_hash: "Brain v2 type and identity bucket for bounded native counts, version 1",
 };
 
 function definition(name: string, fields: string[], hash: string, range?: string): SchemaDefinition {
@@ -33,12 +34,13 @@ export const V2_RECORD_FIELDS = [
   "design_slug", "program", "gate_slug", "decided_by", "decided_on",
 ];
 export const V2_SUMMARY_FIELDS = ["br2_id", "br2_type", "slug", "title", "status", "tags", "updated_at"];
-export const V2_STORED_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision", "br2_card", "br2_content"];
+export const V2_STORED_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision", "br2_card", "br2_content", "br2_count_hash"];
 export const V2_SCHEMAS = {
   record: definition("BrainV2PackedRecord", V2_STORED_FIELDS, "br2_id"),
   recent: definition("BrainV2PackedRecent", ["br2_scope", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_scope", "br2_order"),
   type: definition("BrainV2PackedByType", ["br2_type", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_type", "br2_order"),
   status: definition("BrainV2PackedByStatus", ["br2_status", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_status", "br2_order"),
+  count: definition("BrainV2CountMember", ["br2_count_hash", "br2_id"], "br2_count_hash", "br2_id"),
   // A tag membership is a different product. Distinct field identities prevent
   // automatic scalar coherence from treating an array as one tag coordinate.
   tag: definition("BrainV2TagMember", ["bt2_tag", "bt2_order", "bt2_id"], "bt2_tag", "bt2_order"),
