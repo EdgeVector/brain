@@ -131,8 +131,8 @@ export class BrainV2Store {
   // Explicit bulk traversal. Consumers can process each bounded page without
   // retaining the corpus. Normal list calls remain one page, capped at 100.
   async *pages(options: Omit<ListOptions, "cursor" | "limit"> & { fields?: string[]; pageSize?: number } = {}): AsyncGenerator<ListResult> {
-    const limit = options.pageSize ?? 1000;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error("Brain v2 bulk page size must be 1..1000");
+    const limit = options.pageSize ?? 500;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("Brain v2 bulk page size must be 1..500");
     const fields = options.fields ?? V2_SUMMARY_FIELDS;
     if (fields.some(field => !V2_RECORD_FIELDS.includes(field))) throw new Error("Unknown Brain v2 field");
     let cursor: unknown;

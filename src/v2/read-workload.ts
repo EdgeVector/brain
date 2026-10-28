@@ -124,31 +124,35 @@ async function* v2Pages(options: Record<string, unknown> = {}, full = false): As
   }
   throw new Error("Baseline V2 continuation exceeded its bound");
 }
-function check(items: any[], expected: number, full = false): number {
+let verificationChecks: Array<() => void> = [];
+function check(items: any[], expected: number, full = false, allowed: (number: number) => boolean = () => true): number {
+  verificationChecks.push(() => {
   const ids = new Set(items.map(item => `${item.br2_type ?? item.type ?? ""}:${item.slug}`));
   if (items.length !== expected || ids.size !== expected) throw new Error(`Incomplete result: ${items.length}/${ids.size}, expected ${expected}`);
   for (const item of items) {
     const number = Number(String(item.slug).slice(5));
+    if (!Number.isInteger(number) || number < 0 || number >= settings.records || !allowed(number)) throw new Error(`Unexpected identity ${item.slug}`);
     const { record } = input(number);
     for (const field of full ? fields : ["slug", "title", "status", "updated_at"]) {
       const actual = item[field] ?? (field === "updated_at" ? item.updatedAt : undefined);
       if (JSON.stringify(actual) !== JSON.stringify(record[field])) throw new Error(`Value mismatch ${record.slug}.${field}`);
     }
   }
+  });
   return items.length;
 }
 async function operation(name: string): Promise<number> {
   if (name === "get") {
-    if (layout === "v2") return check([await store.get("concept", "read-0")], 1, true);
+    if (layout === "v2") return check([await store.get("concept", "read-0")], 1, true, number => number === 0);
     let result: any;
     await getCommand!.getRecord({ cfg, type: "concept", slug: "read-0", json: true, print: () => {}, onResult: (value: any) => { result = value; } });
-    return check([result], 1, true);
+    return check([result], 1, true, number => number === 0);
   }
   if (name === "first_page") {
-    if (layout === "v2") return check((await store.list({ type: "concept", limit: 20 })).items, 20);
+    if (layout === "v2") return check((await store.list({ type: "concept", limit: 20 })).items, 20, false, number => number % 2 === 0 && number >= settings.records - 40);
     let result: any;
     await listCommand!.listCmd({ cfg, type: "concept", limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
-    return check(result.items, 20);
+    return check(result.items, 20, false, number => number % 2 === 0 && number >= settings.records - 40);
   }
   if (name === "all_summaries" || name === "all_records") {
     const full = name === "all_records", items: any[] = [];
@@ -162,20 +166,25 @@ async function operation(name: string): Promise<number> {
     return check(items, settings.records, full);
   }
   if (name === "migration_read") {
-    if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages({ type: "concept" }, true)) items.push(...page); return check(items, settings.records / 2, true); }
-    return check(await records.listRecordsAdminScan(node, "concept", cfg.schemaHashes.concept), settings.records / 2, true);
+    if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages({ type: "concept" }, true)) items.push(...page); return check(items, settings.records / 2, true, number => number % 2 === 0); }
+    return check(await records.listRecordsAdminScan(node, "concept", cfg.schemaHashes.concept), settings.records / 2, true, number => number % 2 === 0);
   }
   if (name === "snapshot_counts") {
-    if (layout === "v2") { let count = 0; for await (const page of v2Pages()) count += page.length; if (count !== settings.records) throw new Error("V2 count incomplete"); return count; }
+    if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages()) items.push(...page); return check(items, settings.records); }
     const snapshot = await snapshotCommand!.buildBrainAdminSnapshot(node, cfg);
-    if (snapshot.unavailable_types.length || snapshot.type_counts.concept !== settings.records / 2 || snapshot.type_counts.reference !== settings.records / 2) throw new Error("Snapshot counts incomplete");
+    verificationChecks.push(() => {
+      if (snapshot.unavailable_types.length || definitions.RECORD_TYPES.some((type: RecordType) => snapshot.type_counts[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("Snapshot counts incomplete");
+    });
     return settings.records;
   }
   if (name === "bulk_selection") {
-    if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages({ type: "concept", status: "parked" })) items.push(...page); return check(items, settings.records / 4); }
+    if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages({ type: "concept", status: "parked" })) items.push(...page); return check(items, settings.records / 4, false, number => number % 4 === 0); }
     let result: any;
     await deleteCommand!.deleteByFilter({ cfg, type: "concept", status: "parked", yes: false, print: () => {}, onResult: (value: any) => { result = value; } });
-    if (!result.ok || result.deleted.length !== settings.records / 4) throw new Error("Bulk selection incomplete");
+    verificationChecks.push(() => {
+      const ids = new Set(result.deleted.map((item: any) => item.slug));
+      if (!result.ok || result.deleted.length !== settings.records / 4 || ids.size !== settings.records / 4 || result.deleted.some((item: any) => item.type !== "concept" || !/^read-\d+$/.test(item.slug) || Number(item.slug.slice(5)) % 4 !== 0 || Number(item.slug.slice(5)) >= settings.records)) throw new Error("Bulk selection incomplete");
+    });
     return result.deleted.length;
   }
   if (name === "search_fallback") {
@@ -192,9 +201,12 @@ if (phase === "setup") await setup();
 else {
   for (let sample = 0; sample < settings.samples; sample++) {
     const before = requests, bytes = responseBytes, start = performance.now();
+    verificationChecks = [];
     try {
       const count = await operation(phase!);
-      samples.push({ elapsed_ms: performance.now() - start, requests: requests - before, response_bytes: responseBytes - bytes, count, verified: true });
+      const elapsed = performance.now() - start;
+      for (const verify of verificationChecks) verify();
+      samples.push({ elapsed_ms: elapsed, requests: requests - before, response_bytes: responseBytes - bytes, count, verified: true });
     } catch (error) {
       if (process.env.BRAIN_READ_VERSION !== "before" || !String(error).includes("[read_resource_limit]")) throw error;
       // A broken baseline is a measured failure, never a successful latency.

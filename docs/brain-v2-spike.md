@@ -74,7 +74,7 @@ Migration reads use these batches for each page of storage keys.
 Snapshot counts use one batch of maintained counters.
 Bulk selection reads the summary fields it needs and checks current status and tags.
 It does not fetch record bodies.
-V2 has an explicit bulk page iterator with a maximum of 1,000 identities per page.
+V2 has an explicit bulk page iterator with a maximum of 500 identities per page.
 The caller can process each page without a full corpus in memory.
 
 The CI summary contains before and after latencies and request counts.
