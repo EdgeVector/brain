@@ -1,3 +1,4 @@
+import { canonicalSchema } from "../canonical-vocabulary.ts";
 // `fbrain doctor` — live health check for the local fbrain setup.
 //
 // Contract:
@@ -44,6 +45,7 @@ import {
 import { runGraphEdgeLintProbe } from "./doctor/graph-lint.ts";
 import { runTagIndexProbe, TAG_INDEX_CHECK } from "./doctor/tag-index.ts";
 import {
+  boundSchemaNames,
   checkSchemaDrift,
   safeListManifests,
   schemaServiceFixHint,
@@ -91,6 +93,7 @@ export type DoctorOptions = {
     userHash: string;
     verbose?: Verbose;
     socketPath?: string;
+    schemaFieldAliases?: import("../field-alias-transport.ts").FieldAliasProfiles;
   }) => NodeClient;
   // For testing: inject the search plane. Without this seam the
   // embedding-runtime probe consults the REAL plane on the host, so a test that
@@ -226,6 +229,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     userHash: cfg.userHash,
     verbose,
     socketPath: nodeSocketPath,
+    schemaFieldAliases:cfg.schemaFieldAliases,
     // doctor describes an old node instead of refusing to look at it.
     skipApiVersionGate: true,
   });
@@ -468,8 +472,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       const driftCheck = await checkSchemaDrift(
         schemaClient,
         label,
-        entry.schema,
+        cfg.schemaFieldAliases?.[hash] ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema,
         hash,
+        boundSchemaNames(cfg, hash),
       );
       const softened = softenDriftIfMigrated(driftCheck, entry.key, hash, allManifests);
       checks.push(softened);

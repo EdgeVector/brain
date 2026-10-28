@@ -1,3 +1,4 @@
+import type { FieldAliasProfiles } from "./field-alias-transport.ts";
 // Capability-aware NodeClient factories for write commands AND for search.
 //
 // `newWriteNodeClient` returns a NodeClient that behaves exactly like
@@ -39,6 +40,7 @@ import {
 import type { CapabilityStore } from "./capability.ts";
 
 export type WriteNodeClientOptions = {
+  schemaFieldAliases?: FieldAliasProfiles;
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
@@ -46,14 +48,14 @@ export type WriteNodeClientOptions = {
   // (app-isolation flip, fold#739). Forwarded verbatim to `newNodeClient`.
   // Unset → the default `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock`.
   socketPath?: string;
-  // Override the keychain store (tests inject an in-memory / file store).
+  // Override the keychain store.
   store?: CapabilityStore;
   appId?: string;
   scope?: string;
   // Console sink for the first-run consent instruction (default: stderr so it
   // never pollutes stdout the CLI parses).
   print?: (line: string) => void;
-  // Tuning hooks (tests).
+  // Consent polling options.
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
@@ -67,7 +69,7 @@ export type WriteNodeClientOptions = {
 export type WriteNodeClient = {
   /** The capability-aware NodeClient. */
   node: NodeClient;
-  /** The underlying session (exposed for tests / advanced callers). */
+  /** The underlying session for advanced callers. */
   session: CapabilitySession;
 };
 
@@ -112,6 +114,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
     };
     if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
     if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
+    plainOpts.schemaFieldAliases = opts.schemaFieldAliases;
     const plain = newNodeClient(plainOpts);
     const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
     return { node: plain, session: idleSession };
@@ -127,6 +130,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
   };
   if (opts.verbose !== undefined) baseOpts.verbose = opts.verbose;
   if (opts.socketPath !== undefined) baseOpts.socketPath = opts.socketPath;
+  baseOpts.schemaFieldAliases = opts.schemaFieldAliases;
   const base = newNodeClient(baseOpts);
 
   // Wrap the three mutation methods so each runs under the capability
@@ -181,6 +185,7 @@ export function newSearchNodeClient(opts: WriteNodeClientOptions): WriteNodeClie
     };
     if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
     if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
+    plainOpts.schemaFieldAliases = opts.schemaFieldAliases;
     const plain = newNodeClient(plainOpts);
     const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
     return { node: plain, session: idleSession };
@@ -194,6 +199,7 @@ export function newSearchNodeClient(opts: WriteNodeClientOptions): WriteNodeClie
   };
   if (opts.verbose !== undefined) baseOpts.verbose = opts.verbose;
   if (opts.socketPath !== undefined) baseOpts.socketPath = opts.socketPath;
+  baseOpts.schemaFieldAliases = opts.schemaFieldAliases;
   const base = newNodeClient(baseOpts);
 
   const node: NodeClient = {
@@ -249,6 +255,7 @@ export function newWriteClientFromCfg(
   const opts: WriteNodeClientOptions = {
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
+    schemaFieldAliases:cfg.schemaFieldAliases,
   };
   if (verbose !== undefined) opts.verbose = verbose;
   if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;
@@ -266,6 +273,7 @@ export function newSearchClientFromCfg(
   const opts: WriteNodeClientOptions = {
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
+    schemaFieldAliases:cfg.schemaFieldAliases,
   };
   if (verbose !== undefined) opts.verbose = verbose;
   if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;

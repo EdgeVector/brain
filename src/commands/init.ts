@@ -1,3 +1,4 @@
+import { canonicalProfilesForHashes, canonicalSchema } from "../canonical-vocabulary.ts";
 // `fbrain init` — bootstrap a node (if needed), register every fbrain
 // schema, load them, persist canonical hashes to ~/.fbrain/config.json.
 //
@@ -57,7 +58,7 @@ export type InitOptions = {
   bootstrapName?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
-  // Tuning hooks (mainly for tests):
+  // Retry controls:
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -68,7 +69,7 @@ export type InitOptions = {
    * when a live capability is already cached.
    */
   grantConsent?: boolean;
-  // Inline consent (Step 6/6) injection seam for tests. When omitted, init
+  // Inline consent controls (Step 6/6). When omitted, init
   // runs the real `establishConsentInline` against the configured node.
   consent?: Pick<
     EstablishConsentOptions,
@@ -80,7 +81,7 @@ export type InitOptions = {
 // (hostname only) so clients select socket transport via isLoopbackNodeUrl —
 // it is NOT a TCP endpoint. The retired :9001 control plane must never appear
 // in new configs or user-facing first-run copy. Schema service is the prod
-// cloud Lambda; the dev Lambda is reserved for the test harness.
+// cloud Lambda; the dev Lambda is separate from production.
 export const DEFAULT_NODE_URL = "http://127.0.0.1";
 export const DEFAULT_SCHEMA_SERVICE_URL =
   "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
@@ -406,7 +407,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       `        FBRAIN_APP_IDENTITY_ENFORCE=off → namespaced fbrain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
     );
   }
+  // Existing configs retain their data identities. A fresh home may opt in.
+  const loadedBefore = existing ? [] : await probeClient.listLoadedSchemas();
+  const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
+    : !loadedBefore.some((schema) => schema.owner_app_id === OWNER_APP_ID &&
+      schema.fields?.some((field) => ["slug", "body", "blp_h"].includes(field)));
   const nodeClient = newNodeClient({ 
+    canonicalVocabulary, schemaFieldAliases:existing?.schemaFieldAliases,
     baseUrl: nodeUrl, 
     userHash, 
     verbose: verbose ?? (() => {}),
@@ -432,7 +439,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     if (checkpointed) return;
     if (!schemaHashes.design || !schemaHashes.task) return;
     checkpointed = true;
-    writeConfig(buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath }), configPath);
+    writeConfig(buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath, canonicalVocabulary }), configPath);
     print(`        checkpointed config to ${configPath} (partial; init still running)`);
   };
 
@@ -441,6 +448,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     schemaHashes,
     print,
     writeCheckpointConfig,
+    canonicalVocabulary,
   );
   if (!localDeclare.supported) {
     print(
@@ -450,6 +458,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     await registerAndLoadSchemasFromCatalog({
       nodeClient,
       schemaServiceUrl,
+      canonicalVocabulary,
       schemaHashes,
       verbose,
       print,
@@ -460,7 +469,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // mid-grant doesn't lose schema state — the next init re-runs the consent
   // step idempotently).
   print(`[5/${STEPS}] writing config to ${configPath}`);
-  const config = buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath });
+  const config = buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath, canonicalVocabulary });
   // Mini first-run: local declare means schemas never went through
   // schema_service, so consent-request against the cloud app registry will
   // 404 "app not registered". Pin client enforce-off so NodeOwner writes work
@@ -521,6 +530,7 @@ function buildConfig(parts: {
   userHash: string;
   schemaHashes: Record<string, string>;
   nodeSocketPath?: string;
+  canonicalVocabulary?: boolean;
 }): Config {
   const config: Config = {
     configVersion: CONFIG_VERSION,
@@ -530,6 +540,7 @@ function buildConfig(parts: {
     // Copy: the caller keeps mutating `schemaHashes` as later schemas land, and
     // a checkpointed config must not change under the file already written.
     schemaHashes: { ...parts.schemaHashes },
+    schemaFieldAliases:parts.canonicalVocabulary ? canonicalProfilesForHashes(parts.schemaHashes) : undefined,
     designSchemaHash: parts.schemaHashes.design ?? "",
     taskSchemaHash: parts.schemaHashes.task ?? "",
   };
@@ -560,9 +571,10 @@ function isDeclareConflict(err: unknown): boolean {
 async function recoverDeclaredCanonical(
   nodeClient: InitNodeClient,
   entry: UniqueSchemaEntry,
+  canonicalVocabulary: boolean,
 ): Promise<string | null> {
   const fromLoaded = (loaded: Awaited<ReturnType<InitNodeClient["listLoadedSchemas"]>>) =>
-    resolveOwnedSchemaHash(entry.schema, loaded);
+    resolveOwnedSchemaHash(canonicalVocabulary ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema, loaded, canonicalVocabulary);
   try {
     const existing = fromLoaded(await nodeClient.listLoadedSchemas());
     if (existing) return existing;
@@ -584,6 +596,7 @@ async function tryDeclareOwnedSchemasLocally(
   schemaHashes: Record<string, string>,
   print: (line: string) => void,
   onSchemaDeclared?: () => void,
+  canonicalVocabulary = false,
 ): Promise<{ supported: true } | { supported: false; reason: string }> {
   const width = declareConcurrency();
   print(
@@ -602,7 +615,7 @@ async function tryDeclareOwnedSchemasLocally(
     const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, (line) => {
       done += 1;
       print(`${line}   [${done}/${UNIQUE_SCHEMAS.length}]`);
-    });
+    }, canonicalVocabulary);
     if (outcome === "ok" || outcome === "conflict-recovered") onSchemaDeclared?.();
     return outcome;
   });
@@ -647,7 +660,7 @@ async function tryDeclareOwnedSchemasLocally(
       const outcome =
         remaining > 0
           ? await withDeadline(
-              declareOneOwnedSchema(nodeClient, entry, schemaHashes, print),
+              declareOneOwnedSchema(nodeClient, entry, schemaHashes, print, canonicalVocabulary),
               remaining,
               "expired" as const,
             )
@@ -684,6 +697,7 @@ async function declareOneOwnedSchema(
   entry: UniqueSchemaEntry,
   schemaHashes: Record<string, string>,
   print: (line: string) => void,
+  canonicalVocabulary: boolean,
 ): Promise<DeclareOneOutcome> {
   if (!nodeClient.declareAppSchema) return "unsupported";
   // Already recovered on a prior pass (retry of a deferred entry).
@@ -718,7 +732,7 @@ async function declareOneOwnedSchema(
   } catch (err) {
     if (err instanceof FbrainError && err.code === "node_http_404") return "unsupported";
     if (!isDeclareConflict(err)) throw err;
-    const recovered = await recoverDeclaredCanonical(nodeClient, entry);
+    const recovered = await recoverDeclaredCanonical(nodeClient, entry, canonicalVocabulary);
     if (recovered) {
       for (const key of schemaConfigKeys(entry)) {
         schemaHashes[key] = recovered;
@@ -758,12 +772,13 @@ export function localMintIdentityHash(
 async function registerAndLoadSchemasFromCatalog(opts: {
   nodeClient: InitNodeClient;
   schemaServiceUrl: string;
+  canonicalVocabulary: boolean;
   schemaHashes: Record<string, string>;
   verbose?: Verbose;
   print: (line: string) => void;
 }): Promise<void> {
   const { nodeClient, schemaServiceUrl, schemaHashes, verbose, print } = opts;
-  const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose);
+  const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose, opts.canonicalVocabulary);
   const certBlocked: typeof UNIQUE_SCHEMAS = [];
   for (const entry of UNIQUE_SCHEMAS) {
     try {
@@ -817,7 +832,7 @@ async function registerAndLoadSchemasFromCatalog(opts: {
     const loaded = await nodeClient.listLoadedSchemas();
     const stillMissing: string[] = [];
     for (const entry of certBlocked) {
-      const hash = resolveOwnedSchemaHash(entry.schema, loaded);
+      const hash = resolveOwnedSchemaHash(opts.canonicalVocabulary ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema, loaded, opts.canonicalVocabulary);
       if (hash) {
         for (const key of schemaConfigKeys(entry)) {
           schemaHashes[key] = hash;

@@ -1,3 +1,5 @@
+import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Typed HTTP wrappers for fold_db_node + schema_service.
 //
 // Every node endpoint sends X-User-Hash (per Phase 0 spike: missing →
@@ -693,6 +695,8 @@ export type CapabilityProvider = () => string | null;
 // present for writes?" must accept either field.
 // `owner_app_id` is present on app-owned schemas (e.g. `"fbrain"`).
 export type LoadedSchema = {
+  fields?: string[];
+  field_types?: Record<string,unknown>;
   descriptive_name?: string;
   owner_app_id?: string;
   /** Catalog / storage key (what mutates and config schemaHashes use). */
@@ -876,11 +880,13 @@ export type NodeClient = {
 export function newSchemaServiceClient(
   baseUrl: string,
   verbose: Verbose = noopVerbose,
+  canonicalVocabulary = false,
 ): SchemaServiceClient {
   const url = stripTrailingSlash(baseUrl);
   return {
     baseUrl: url,
     async registerSchema(req) {
+      if (canonicalVocabulary) req = {...req, schema:canonicalSchema(req.schema)};
       const path = "/v1/schemas";
       const { res, readBody } = await callSchemaServiceRaw(url, path, "POST", req, verbose);
       const body = await readBody();
@@ -963,8 +969,8 @@ export function newSchemaServiceClient(
     async rawCall(method, path, body) {
       const { res, readBody } = await callSchemaServiceRaw(url, path, method, body, verbose);
       const text = await readBody({ asText: true });
-      const json = parseJsonSafe(text);
-      return { status: res.status, headers: res.headers, body: text, json };
+      return { status: res.status, headers: res.headers, body: text, json:parseJsonSafe(text) };
+
     },
   };
 }
@@ -975,6 +981,8 @@ function stringProp(obj: Record<string, unknown>, key: string): string {
 }
 
 export function newNodeClient(opts: {
+  canonicalVocabulary?: boolean;
+  schemaFieldAliases?: FieldAliasProfiles;
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
@@ -1000,6 +1008,8 @@ export function newNodeClient(opts: {
   skipApiVersionGate?: boolean;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
+  const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
+  const canonicalVocabulary = opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
   const capability = opts.capability;
@@ -1067,13 +1077,13 @@ export function newNodeClient(opts: {
     return apiVersionGate;
   };
 
-  const sdkTransport = fetchTransport(
+  const sdkTransport = fieldAliasTransport(fetchTransport(
     url,
     { "X-User-Hash": userHash, "X-LastDB-Client": "brain" },
     sessionHeader,
     socketPath,
     requireNodeApiVersion,
-  );
+  ), fieldProfiles);
 
   // SDK clients constructed here never use the SDK's capability store —
   // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
@@ -1112,13 +1122,13 @@ export function newNodeClient(opts: {
       url,
       path,
       method,
-      body,
+      encodeFieldRequest(path, body, fieldProfiles),
       userHash,
       verbose,
       headers,
       socketPath,
     );
-    const parsed = await readBody();
+    const parsed = decodeFieldReply(path, body, await readBody(), fieldProfiles);
     return { status: res.status, body: parsed };
   };
 
@@ -1432,6 +1442,20 @@ export function newNodeClient(opts: {
     };
   };
 
+  let canonicalReadiness: Promise<void> | undefined;
+  const requireCanonicalHome = (): Promise<void> => canonicalReadiness ??= (async () => {
+    const raw = await callJsonOk("/api/schemas", "GET") as Record<string, unknown>;
+    const catalog = raw.data && typeof raw.data === "object" ? raw.data as Record<string,unknown> : raw;
+    if (!Array.isArray(catalog.schemas)) throw new FbrainError({code:"schema_catalog_invalid",message:"Cannot confirm the local schema format before declaration."});
+    for (const item of catalog.schemas) {
+      if (!item || typeof item !== "object") continue;
+      const schema = item as Record<string,unknown>;
+      if (schema.owner_app_id === "fbrain" && Array.isArray(schema.fields) && schema.fields.some((field) => field === "slug" || field === "body" || field === "blp_h")) {
+        throw new FbrainError({code:"canonical_migration_required",message:"This home uses legacy knowledge fields. An explicit data migration is required before new schema publication."});
+      }
+    }
+  })();
+
   return {
     baseUrl: url,
     userHash,
@@ -1609,6 +1633,9 @@ export function newNodeClient(opts: {
       };
     },
     async declareAppSchema(appId, schema) {
+      if (canonicalVocabulary) await requireCanonicalHome();
+      const local = schema;
+      if (canonicalVocabulary) schema = canonicalSchema(local);
       const body = await callJsonOk("/api/apps/declare-schema", "POST", {
         app_id: appId,
         schema,
@@ -1624,6 +1651,7 @@ export function newNodeClient(opts: {
           hint: "Upgrade the node or inspect the app-schema declaration response.",
         });
       }
+      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName]));
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
@@ -1647,6 +1675,8 @@ export function newNodeClient(opts: {
           // Catalog / write-path key. Prefer this when identity_hash drifts.
           name: typeof s.name === "string" ? s.name : undefined,
           identity_hash: typeof s.identity_hash === "string" ? s.identity_hash : undefined,
+          fields:Array.isArray(s.fields) ? s.fields.filter((field): field is string => typeof field === "string") : [],
+          field_types:s.field_types && typeof s.field_types === "object" ? s.field_types as Record<string,unknown> : {},
         }));
     },
     async createRecord({ schemaHash, fields, keyHash, keyRange }) {
@@ -1869,10 +1899,12 @@ export function newNodeClient(opts: {
       }
     },
     async rawCall(method, path, body) {
-      const { res, readBody } = await callNodeRaw(url, path, method, body, userHash, verbose, await sessionHeader(), socketPath);
+      const { res, readBody } = await callNodeRaw(url, path, method, encodeFieldRequest(path, body, fieldProfiles), userHash, verbose, await sessionHeader(), socketPath);
       const text = await readBody({ asText: true });
-      const json = parseJsonSafe(text);
-      return { status: res.status, headers: res.headers, body: text, json };
+      const original = parseJsonSafe(text);
+      const json = decodeFieldReply(path, body, original, fieldProfiles);
+      return { status: res.status, headers: res.headers, body: json === original ? text : JSON.stringify(json), json };
+
     },
   };
 }
@@ -1949,6 +1981,7 @@ export function newReadClientFromCfg(cfg: Config, verbose?: Verbose): NodeClient
   const opts: Parameters<typeof newNodeClient>[0] = {
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
+    schemaFieldAliases:cfg.schemaFieldAliases,
   };
   if (verbose !== undefined) opts.verbose = verbose;
   if (cfg.nodeSocketPath !== undefined) opts.socketPath = cfg.nodeSocketPath;

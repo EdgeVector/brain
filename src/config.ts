@@ -1,3 +1,4 @@
+import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Persistent CLI config — `~/.brain/config.json` by default, with
 // `~/.fbrain/config.json` retained as a compatibility fallback.
 // Holds the canonical schema hashes (NOT the descriptive_names), per the
@@ -46,6 +47,7 @@ export type Config = {
   schemaServiceUrl: string;
   userHash: string;
   schemaHashes: Record<string, string>;
+  schemaFieldAliases?: FieldAliasProfiles;
   // Mirror of schemaHashes.design / schemaHashes.task — present on disk
   // for backward compat with v1 readers. Always kept in sync on write.
   designSchemaHash: string;
@@ -242,5 +244,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
   if (typeof r.appIdentityEnforce === "boolean") {
     config.appIdentityEnforce = r.appIdentityEnforce;
   }
+  const aliases = parseFieldAliases(r.schemaFieldAliases);
+  if (aliases) config.schemaFieldAliases = aliases;
   return config;
 }

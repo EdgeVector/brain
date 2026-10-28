@@ -1,3 +1,4 @@
+import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 // The node refuses an atom above 64 KiB.
 // Seal runs in `buildResidentWritePlan` and in `writeRecordFields` (append, tag, link, gate).
 
@@ -243,6 +244,7 @@ export async function ensureBodyFileSchema(
   }
   const declared = await node.declareAppSchema(OWNER_APP_ID, bodyFileSchema.schema);
   cfg.schemaHashes[BODY_FILE_SCHEMA_KEY] = declared.canonical;
+  if (cfg.schemaFieldAliases) cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
   if (opts.persist) {
     if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
     else writeConfig(cfg);

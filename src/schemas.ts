@@ -46,14 +46,14 @@
 // and the node resolves short names to the fbrain/* namespace at boot.
 export const OWNER_APP_ID = "fbrain";
 
-export type FieldType = "String" | "Any" | { Array: "String" };
+export type FieldType = "String" | "DateTime" | "Any" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
   // App-identity ownership. The schema_service folds this into the identity
   // hash and stores the schema under the canonical name `{owner_app_id}/{name}`
   // (= `fbrain/<Name>`). Set on every fbrain schema; optional in the TS type
-  // so externally-loaded schema definitions (e.g. legacy fixtures, or future
+  // so externally-loaded schema definitions (e.g. legacy definitions, or future
   // non-fbrain catalogues) can omit it without a TS error.
   owner_app_id?: string;
   descriptive_name: string;
@@ -1312,8 +1312,12 @@ export function resolveOwnedSchemaHash(
     descriptive_name?: string;
     owner_app_id?: string;
     identity_hash?: string;
+    fields?: string[];
+    field_types?: Record<string,unknown>;
   }>,
+  canonicalVocabulary = false,
 ): string | null {
+  const expected = req.schema;
   const wantName = req.schema.descriptive_name;
   const wantOwner = req.schema.owner_app_id;
   for (const s of loaded) {
@@ -1321,7 +1325,10 @@ export function resolveOwnedSchemaHash(
       s.descriptive_name === wantName &&
       s.owner_app_id === wantOwner &&
       typeof s.identity_hash === "string" &&
-      s.identity_hash.length > 0
+      s.identity_hash.length > 0 &&
+      (!canonicalVocabulary || (expected.fields.every((field) => s.fields?.includes(field) &&
+        JSON.stringify(s.field_types?.[field]) === JSON.stringify(expected.field_types[field])) &&
+        s.fields?.every((field) => expected.fields.includes(field))))
     ) {
       return s.identity_hash;
     }

@@ -1,3 +1,4 @@
+import { canonicalProfilesForHashes } from "../canonical-vocabulary.ts";
 // Privacy-safe brain admin snapshot publisher + LastDB deliver dogfood.
 //
 // Mirrors the routines `publish-status` / `deliver-status` pattern: write a
@@ -436,6 +437,7 @@ async function ensureAdminSnapshotSchema(
   }
   const declared = await node.declareAppSchema(OWNER_APP_ID, adminSnapshotSchema.schema);
   cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY] = declared.canonical;
+  if (cfg.schemaFieldAliases) cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
   if (opts.persist) writeConfig(cfg);
   return declared.canonical;
 }

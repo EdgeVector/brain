@@ -10,6 +10,7 @@ export async function checkSchemaDrift(
   type: string,
   request: AddSchemaRequest,
   hash: string,
+  canonicalNames: readonly string[] = [],
 ): Promise<CheckResult> {
   const name = `schema-drift[${type}]`;
   let registered: RegisteredSchema | null;
@@ -34,7 +35,12 @@ export async function checkSchemaDrift(
       fix: "re-run `fbrain init`",
     };
   }
-  const classification = classifySchemaDrift(request, registered);
+  // A canonical identity can serve several explicit local record-type names.
+  // Only accept another name already bound to this exact hash in this config.
+  const expected = registered.name === hash && canonicalNames.includes(registered.descriptive_name)
+    ? {...request, schema:{...request.schema, descriptive_name:registered.descriptive_name}}
+    : request;
+  const classification = classifySchemaDrift(expected, registered);
   switch (classification.kind) {
     case "none":
       return { name, ok: true, detail: `${registered.descriptive_name} @ ${hash.slice(0, 12)}…` };
@@ -78,6 +84,13 @@ export async function checkSchemaDrift(
           "bump descriptive_name in src/schemas.ts to force a fresh registration.",
       };
   }
+}
+
+export function boundSchemaNames(cfg: Config, hash: string): string[] {
+  if (!cfg.schemaFieldAliases?.[hash]) return [];
+  return UNIQUE_SCHEMAS
+    .filter((entry) => cfg.schemaHashes[entry.key] === hash)
+    .map((entry) => entry.schema.schema.descriptive_name);
 }
 
 // Classify a drift comparison so doctor can tell "fbrain's canonical is a
