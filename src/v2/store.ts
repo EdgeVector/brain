@@ -160,7 +160,8 @@ export class BrainV2Store {
     if (!Array.isArray(rows)) throw new Error("Brain v2 list response has no rows");
     const ids = rows.map(row => (row.fields ?? row)[layout === "tag" ? "bt2_id" : "br2_id"]);
     if (!ids.every((id): id is string => typeof id === "string")) throw new Error("Brain v2 lookup has an invalid identity");
-    const records = await this.readKeys(ids, [...new Set([...fields, "br2_id", "br2_type", "status", "tags"])]);
+    const required = ["br2_id", ...(options.type ? ["br2_type"] : []), ...(options.status ? ["status"] : []), ...(options.tag ? ["tags"] : [])];
+    const records = await this.readKeys(ids, [...new Set([...fields, ...required])]);
     const byId = new Map(records.map(row => [row.fields.br2_id, row.fields]));
     const items = ids.flatMap(id => {
       const record = byId.get(id);

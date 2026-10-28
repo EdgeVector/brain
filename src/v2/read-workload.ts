@@ -103,7 +103,7 @@ async function setup(): Promise<void> {
 
 async function* v2Pages(options: Record<string, unknown> = {}, full = false): AsyncGenerator<any[]> {
   if (store.pages) {
-    for await (const page of store.pages({ ...options, fields: full ? v2Schemas.V2_RECORD_FIELDS : v2Schemas.V2_SUMMARY_FIELDS })) yield page.items;
+    for await (const page of store.pages({ ...options, fields: full ? ["br2_id", "br2_type", ...fields] : v2Schemas.V2_SUMMARY_FIELDS })) yield page.items;
     return;
   }
   // Baseline uses the existing public page API, followed by a body batch only
@@ -113,7 +113,7 @@ async function* v2Pages(options: Record<string, unknown> = {}, full = false): As
   for (let page = 0; page <= settings.records; page++) {
     const result = await store.list({ ...options, limit: 100, cursor });
     if (full && result.items.length) {
-      const rows = await node.queryByKeys({ schemaHash: schemas.record, fields: v2Schemas.V2_RECORD_FIELDS,
+      const rows = await node.queryByKeys({ schemaHash: schemas.record, fields: ["br2_id", "br2_type", ...fields],
         keys: result.items.map((item: any) => ({ hash: item.br2_id })) });
       yield rows.map((row: any) => row.fields);
     } else yield result.items;
@@ -170,7 +170,16 @@ async function operation(name: string): Promise<number> {
     return check(await records.listRecordsAdminScan(node, "concept", cfg.schemaHashes.concept), settings.records / 2, true, number => number % 2 === 0);
   }
   if (name === "snapshot_counts") {
-    if (layout === "v2") { const items: any[] = []; for await (const page of v2Pages()) items.push(...page); return check(items, settings.records); }
+    if (layout === "v2") {
+      const ids = new Set<string>(), counts = new Map<string, number>();
+      const pages = store.pages ? store.pages({ fields: ["br2_id", "br2_type"] }) : v2Pages();
+      for await (const page of pages) for (const item of (Array.isArray(page) ? page : page.items)) {
+        if (ids.has(item.br2_id)) throw new Error("V2 count repeats an identity");
+        ids.add(item.br2_id); counts.set(item.br2_type, (counts.get(item.br2_type) ?? 0) + 1);
+      }
+      verificationChecks.push(() => { if (ids.size !== settings.records || types.some(type => counts.get(type) !== settings.records / 2)) throw new Error("V2 count incomplete"); });
+      return ids.size;
+    }
     const snapshot = await snapshotCommand!.buildBrainAdminSnapshot(node, cfg);
     verificationChecks.push(() => {
       if (snapshot.unavailable_types.length || definitions.RECORD_TYPES.some((type: RecordType) => snapshot.type_counts[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("Snapshot counts incomplete");

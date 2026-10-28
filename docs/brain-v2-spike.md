@@ -57,7 +57,7 @@ The OS file cache remains in place after a daemon restart.
 The operations are get, first page, all summaries, all records, snapshot counts, bulk selection, and migration source reads.
 Current Brain also measures the keyword fallback with LastSeek absent.
 V2 has no search adapter or snapshot command.
-Its count operation reads all summaries; it does not maintain a count schema.
+Its count operation reads all identities and types; it does not maintain a count schema.
 
 The setup writes equal generated corpora through native mutation batches.
 It writes the current page format and count records directly, outside the measured read time.
@@ -80,5 +80,8 @@ The caller can process each page without a full corpus in memory.
 The CI summary contains before and after latencies and request counts.
 Raw artifacts contain response bytes, memory samples, source revisions, and failures.
 The operation clock excludes module imports and process startup.
+The operation clock also excludes the final membership and field checks.
+Bulk record reads request the public record fields in both versions.
+V2 counts omit titles, tags, and record bodies through the new field selection.
 The artifact also records the full workload process time.
 Small sample counts limit conclusions about p95 and p99.

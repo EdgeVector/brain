@@ -112,8 +112,9 @@ def report(args, runs):
              "Restart means a fresh daemon on the same generated disk files; the OS file cache is not cleared.",
              "Warm calls follow the restart call. Module import and process startup are outside operation time.",
              f"Each cell pools {args.repeats} paired runs; warm cells contain {args.repeats * args.samples} calls.", "",
-             "| Layout | Operation | State | Before p50 ms | After p50 ms | Before p95 ms | After p95 ms | Before calls | After calls |",
-             "|---|---|---|---:|---:|---:|---:|---:|---:|"]
+             "Latencies include only successful calls. Failures remain visible beside every comparison.",
+             "| Layout | Operation | State | Before p50 ms | After p50 ms | Before p95 ms | After p95 ms | Before calls | After calls | Failed before; after |",
+             "|---|---|---|---:|---:|---:|---:|---:|---:|---|"]
     comparisons = []
     for layout in ("current", "v2"):
         for operation in OPERATIONS:
@@ -139,10 +140,11 @@ def report(args, runs):
                 def cell(value, key):
                     return f"{value[key]:.2f}" if value[key] is not None else f"failed {value['failed']}/{value['attempted']}"
                 lines.append(f"| {layout} | {operation} | {state} | {cell(before, 'p50_ms')} | {cell(after, 'p50_ms')} | "
-                             f"{cell(before, 'p95_ms')} | {cell(after, 'p95_ms')} | {before['requests_per_operation']:.1f} | {after['requests_per_operation']:.1f} |")
+                             f"{cell(before, 'p95_ms')} | {cell(after, 'p95_ms')} | {before['requests_per_operation']:.1f} | {after['requests_per_operation']:.1f} | "
+                             f"{before['failed']}/{before['attempted']}; {after['failed']}/{after['attempted']} |")
     lines += ["", "Read results require exact generated membership and field values. Raw samples include response bytes and sampled memory sizes.",
               "Migration read measures the source read, without schema publication or migration writes. Bulk selection does not delete data.",
-              "V2 snapshot counts use a complete summary traversal; V2 has no maintained count schema or snapshot command.",
+              "V2 snapshot counts use a complete identity/type traversal; V2 has no maintained count schema or snapshot command.",
               "Only the current Brain keyword fallback is measured. LastSeek is absent. V2 search is unsupported and is not compared.",
               "Low sample counts limit tail estimates. No primary, primary copy, local benchmark, or test suite is used."]
     save(args.output / "metrics.json", {"records": args.records, "baseline_revision": args.baseline_revision,
