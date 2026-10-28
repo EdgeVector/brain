@@ -29,6 +29,7 @@ function renameObject(value: ObjectValue, aliases: Record<string,string>, strict
   }));
 }
 function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
+  if (Array.isArray(input)) return input.map((item) => encodeItem(item, profiles));
   const value = object(input);
   if (!value) return input;
   const result = {...value};

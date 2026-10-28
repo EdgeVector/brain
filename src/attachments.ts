@@ -1,3 +1,4 @@
+import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 // File attachments for fbrain knowledge records.
 //
 // Model (additive by construction — no existing schema changes, no record
@@ -149,6 +150,7 @@ export async function ensureAttachmentSchemas(
     (await node.declareAppSchema(OWNER_APP_ID, attachmentFileSchema.schema)).canonical;
   cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY] = declaredIndex;
   cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY] = declaredFile;
+  if (cfg.schemaFieldAliases) cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
   if (opts.persist) {
     if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
     else writeConfig(cfg);
