@@ -145,9 +145,12 @@ export class BrainV2Store {
     return this.readPage(options, limit, V2_SUMMARY_FIELDS);
   }
   async *pages(options: Omit<ListOptions, "cursor" | "limit"> & { fields?: string[]; pageSize?: number } = {}): AsyncGenerator<ListResult> {
-    const fields = options.fields ?? V2_SUMMARY_FIELDS, limit = options.pageSize ?? 500;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("Brain v2 bulk page size must be 1..500");
+    const fields = options.fields ?? V2_SUMMARY_FIELDS, requested = options.pageSize ?? 500;
+    if (!Number.isInteger(requested) || requested < 1 || requested > 500) throw new Error("Brain v2 bulk page size must be 1..500");
     if (fields.some(field => !V2_RECORD_FIELDS.includes(field))) throw new Error("Unknown Brain v2 field");
+    // Bound field work, not just the number of record identities. A content
+    // page reads two documents; a summary page reads only one.
+    const limit = Math.min(requested, Math.max(1, Math.floor(500 / physicalFields(fields).length)));
     let cursor: unknown;
     const seen = new Set<string>();
     for (let page = 0; page < 1000; page++) {
