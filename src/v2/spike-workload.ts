@@ -7,8 +7,8 @@ import type { Config } from "../config.ts";
 import { findBySlug, type FbrainRecord } from "../record.ts";
 import { buildResidentWritePlan, commitResidentWritePlan } from "../resident-write-plan.ts";
 import { UNIQUE_SCHEMAS, type RecordType } from "../schemas.ts";
-import { BrainV2Store, rawData, recordKey, statusKey } from "./store.ts";
-import { V2_RECORD_FIELDS, V2_SCHEMAS, type V2SchemaMap } from "./schemas.ts";
+import { BrainV2Store, rawData, statusKey } from "./store.ts";
+import { V2_SCHEMAS, type V2SchemaMap } from "./schemas.ts";
 
 if (process.env.CI !== "true" || process.env.LASTDB_ISOLATED_COPY !== "1") throw new Error("Run this workload only in CI on a fresh generated home");
 const [layout, phase, configPath, outputPath] = process.argv.slice(2);
@@ -67,15 +67,16 @@ async function setup(): Promise<void> {
   }
 }
 
-async function proteinBinding(): Promise<{ identity: string; members: number }> {
-  const molecules = await Promise.all(["record", "recent", "type", "status"].map(async layout => {
+async function proteinBinding(field = "br2_id"): Promise<{ identity: string; members: number }> {
+  const layouts = field === "br2_id" ? ["record", "recent", "type", "status", "count"] : ["record", "recent", "type", "status"];
+  const molecules = await Promise.all(layouts.map(async layout => {
     const name = schemas[layout as keyof V2SchemaMap];
     const metadata = await rawData(node, "GET", `/api/schema/${encodeURIComponent(name)}`);
     const definition = metadata.schema?.schema ?? metadata.schema;
     if (!definition?.name) throw new Error("Schema metadata has no canonical name");
-    if (definition.field_molecule_uuids?.br2_id) return String(definition.field_molecule_uuids.br2_id);
+    if (definition.field_molecule_uuids?.[field]) return String(definition.field_molecule_uuids[field]);
     const digest = createHash("sha256");
-    for (const part of ["lastdb:molecule-uuid:v1", String(definition.name), "br2_id"]) {
+    for (const part of ["lastdb:molecule-uuid:v1", String(definition.name), field]) {
       const bytes = Buffer.from(part), length = Buffer.alloc(4);
       length.writeUInt32BE(bytes.length);
       digest.update(length).update(bytes);
@@ -98,9 +99,8 @@ async function verify(): Promise<Record<string, unknown>> {
     const numbers = Array.from({ length: Math.min(100, settings.records - offset) }, (_, i) => i + offset);
     if (!node.queryByKeys) throw new Error("Missing batch read support");
     if (layout === "v2") {
-      const rows = await node.queryByKeys({ schemaHash: schemas.record, fields: V2_RECORD_FIELDS,
-        keys: numbers.map(number => ({ hash: recordKey(input(number).type, `record-${number}`) })) });
-      for (const row of rows) found.set(String(row.fields.slug), row.fields);
+      const rows = await store.getMany(numbers.map(number => ({ type: input(number).type, slug: `record-${number}` })));
+      for (const row of rows) found.set(row.slug, row);
     } else {
       const batches = await Promise.all(types.map(type => node.queryByKeys!({ schemaHash: cfg.schemaHashes[type]!,
         fields: ["slug", "title", "body", "status", "tags", "created_at", "updated_at"],
@@ -140,6 +140,8 @@ async function verify(): Promise<Record<string, unknown>> {
     cursor = result.cursor;
   }
   if (ids.size !== found.size) throw new Error(`V2 list membership differs: ${ids.size} != ${found.size}`);
+  const initialCounts = await store.counts();
+  if (initialCounts.total !== found.size || initialCounts.types.concept !== found.size / 2 || initialCounts.types.reference !== found.size / 2) throw new Error("V2 native counts differ after deletes");
   for (const type of types) {
     for (const status of ["active", type === "concept" ? "parked" : "archived"]) {
       const list = await store.list({ type, status, limit: 20 });
@@ -173,14 +175,19 @@ async function verify(): Promise<Record<string, unknown>> {
       filter: { HashRangeKey: { hash, range: removed.br2_order } }, limit: 1 });
     if ((result.results ?? result.rows)?.length !== 0) throw new Error(`V2 delete left the exact ${layout} key`);
   }
+  const countKey = await rawData(node, "POST", "/api/query", { schema_name: schemas.count, fields: ["br2_id"],
+    filter: { HashRangeKey: { hash: removed.br2_count_hash, range: removed.br2_id } }, limit: 1 });
+  if (countKey.results?.length !== 0) throw new Error("V2 delete left the exact count key");
   await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
   if (!(await store.get("concept", "recreated"))) throw new Error("V2 recreation failed");
   await Promise.all(Array.from({ length: 8 }, (_, i) => store.put("concept", { ...common, slug: `concurrent-${i}`, tags: [] })));
   const concurrent = await Promise.all(Array.from({ length: 8 }, (_, i) => store.get("concept", `concurrent-${i}`)));
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
+  if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 native count differs after recreation and concurrent creates");
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,
     duplicate_slugs: true, partial_update: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
     identity_protein: await proteinBinding(),
+    summary_protein: await proteinBinding("br2_card"), content_protein: await proteinBinding("br2_content"),
     older_record_update: "accepted", status_scope_example: statusKey("concept", "active") };
 }
 

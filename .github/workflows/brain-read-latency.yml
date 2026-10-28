@@ -9,20 +9,63 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  LASTDB_REVISION: 688222b04d18d717da913007cb41e7174e48f395
+  LASTDB_TAG: nightly-20261027-688222b04
+  LASTDB_BUNDLE_SHA256: 6dcae41be0a7d4ea8783fdea164481728515afce0beba507545f96b74175a046
+  BASELINE_REVISION: 80ceb97be0c59fc7a7ea8abca5e7fa461f5f35b0
 jobs:
+  packed-operations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - name: Verify the pinned daemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/read-binary"
+          curl --fail --location --retry 3 "https://github.com/EdgeVector/lastdb/releases/download/$LASTDB_TAG/lastdb-x86_64-unknown-linux-gnu.tar.gz" --output "$RUNNER_TEMP/read-binary/bundle.tar.gz"
+          printf '%s  %s\n' "$LASTDB_BUNDLE_SHA256" "$RUNNER_TEMP/read-binary/bundle.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/read-binary/bundle.tar.gz" -C "$RUNNER_TEMP/read-binary"
+      - name: Verify packed records and shared molecules before bulk measurements
+        run: >-
+          python3 scripts/brain_v2_spike.py
+          --lastdbd "$RUNNER_TEMP/read-binary/lastdbd"
+          --lastdb-revision "$LASTDB_REVISION"
+          --output "$RUNNER_TEMP/packed-operations"
+          --records 128 --body-bytes 4096 --repeats 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        id: operations
+        with:
+          name: packed-operations-${{ github.sha }}
+          path: ${{ runner.temp }}/packed-operations
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record operation artifact identity
+        if: always() && steps.operations.outcome == 'success'
+        env:
+          ARTIFACT_URL: ${{ steps.operations.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.operations.outputs.artifact-digest }}
+        run: |
+          printf '\nArtifact: %s\nSHA-256: %s\nRetention: 14 days.\n' "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
   read-latency:
     name: read-latency-${{ matrix.records }}
     runs-on: ubuntu-24.04
+    needs: [packed-operations]
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         records: [1000, 10000]
-    env:
-      LASTDB_REVISION: 688222b04d18d717da913007cb41e7174e48f395
-      LASTDB_TAG: nightly-20261027-688222b04
-      LASTDB_BUNDLE_SHA256: 6dcae41be0a7d4ea8783fdea164481728515afce0beba507545f96b74175a046
-      BASELINE_REVISION: 5a9d7bc813171c2870e9561f585b571bebd32bf0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -68,3 +111,15 @@ jobs:
           ARTIFACT_DIGEST: ${{ steps.measurements.outputs.artifact-digest }}
         run: |
           printf '\nArtifact: %s\nSHA-256: %s\nRetention: 14 days from this run.\n' "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+  benchmark-complete:
+    if: ${{ always() }}
+    needs: [packed-operations, read-latency]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require real operations, measurements, and artifact uploads
+        env:
+          OPERATIONS: ${{ needs.packed-operations.result }}
+          MEASUREMENTS: ${{ needs.read-latency.result }}
+        run: |
+          test "$OPERATIONS" = success
+          test "$MEASUREMENTS" = success
