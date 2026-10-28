@@ -15,8 +15,9 @@ const [layout, phase, configPath, outputPath] = process.argv.slice(2);
 if (!configPath || !outputPath || !["current", "v2"].includes(layout ?? "")) throw new Error("Usage: current|v2 phase config output");
 const settings = JSON.parse(readFileSync(configPath, "utf8")) as { socket: string; records: number; bodyBytes: number };
 let requests = 0;
+const countRequest = (line: string): void => { if (line.startsWith("→")) requests++; };
 const node: NodeClient = newNodeClient({ baseUrl: "http://127.0.0.1", userHash: "brain-v2-ci", socketPath: settings.socket,
-  verbose: line => { if (line.startsWith("→")) requests++; } });
+  verbose: countRequest });
 const cfg: Config = { configVersion: 4, nodeUrl: "http://127.0.0.1", schemaServiceUrl: "http://127.0.0.1:1",
   userHash: "brain-v2-ci", schemaHashes: Object.fromEntries(UNIQUE_SCHEMAS.map(entry => [entry.key, entry.schema.schema.name])),
   designSchemaHash: "Design", taskSchemaHash: "Task", nodeSocketPath: settings.socket, appIdentityEnforce: false };
@@ -192,7 +193,7 @@ else if (phase === "delete") {
     if (layout === "v2") await store.delete(type, record.slug);
     else {
       const { deleteRecord } = await import("../commands/delete.ts");
-      await deleteRecord({ cfg, type, slug: record.slug, print: () => {} });
+      await deleteRecord({ cfg, type, slug: record.slug, print: () => {}, verbose: countRequest });
     }
     samples.push({ number, elapsed_ms: performance.now() - started, requests: requests - before });
   }

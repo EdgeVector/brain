@@ -23,6 +23,10 @@ The result includes:
 - Native list continuation, typed status lists, tag lists, duplicate slugs, concurrent edits, and recreation.
 - The actual protein membership for the shared identity field across all four layouts.
 
+Write latency includes the addressed read, the write plan, and the durable mutation result.
+It excludes command startup, frontmatter parsing, and the optional cross-type hint reads.
+The adapter writes changed fields only. The node retains the other field values and uses stored scalar fields for key moves.
+
 The workflow verifies the release archive checksum and the daemon source revision.
 The CI summary contains the comparison. Raw output stays in a CI artifact for 14 days.
 No local benchmark, primary access, primary copy, or test suite is required.
