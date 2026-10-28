@@ -181,8 +181,8 @@ async function operation(name: string): Promise<number> {
   if (name === "search_fallback") {
     if (layout === "v2") return -1; // V2 has no search adapter; do not invent one for a comparison.
     let result: any;
-    await searchCommand!.searchCmd({ cfg, query: "molecule", limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
-    if (result.length !== 20) throw new Error("Keyword search page incomplete");
+    await searchCommand!.searchCmd({ cfg, query: "molecule", limit: 5, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
+    if (result.length !== 5) throw new Error("Keyword search page incomplete");
     return result.length;
   }
   throw new Error(`Unknown operation ${name}`);

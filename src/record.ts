@@ -908,8 +908,7 @@ export async function writeRecordFields(opts: {
   return sealed;
 }
 
-// One keyed read for the slugs this call names. A node without `queryByKeys`
-// falls back to one `findBySlug` per slug. Tombstones come back as null, the
+// Batched keyed reads for the slugs this call names. Tombstones come back as null, the
 // same as `findBySlug`. Slugs the read does not return are null.
 export async function findBySlugs(
   node: NodeClient,
@@ -938,10 +937,7 @@ export async function findBySlugsRaw(
   const out = new Map<string, FbrainRecord | null>();
   if (slugs.length === 0) return out;
   if (!node.queryByKeys) {
-    for (const slug of slugs) {
-      out.set(slug, await findBySlugRaw(node, type, schemaHash, slug, undefined, { hydrate: false }));
-    }
-    return out;
+    throw new FbrainError({ code: "keyed_read_required", message: "This read requires a client with batched keyed reads." });
   }
   const rows = await node.queryByKeys({
     schemaHash,
