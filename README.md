@@ -710,3 +710,19 @@ Until the readiness gate ships, both gbrain and fbrain coexist; the `gbrain put`
 - No compiled standalone binaries — fbrain runs as a Bun-runtime CLI (`bun add -g github:EdgeVector/fbrain` today; `npm i -g fbrain` / `bunx fbrain` once published to npm)
 
 <!-- lastgit-era-3 cutover proof commit, lastgit-era-3-builder run 34, 2026-09-27 -->
+
+## Standard canonical vocabulary
+
+`src/canonical-fields.json` defines the approved names, descriptions, and types for schema publication.
+The app keeps its local command field names.
+A schema-specific field map translates those names for the stored canonical identity.
+The map leaves values, record keys, cursors, and file references intact.
+
+A fresh home uses these definitions after operator approval in the schema service.
+An existing config without a field map keeps its current schema identities and declaration path.
+An explicit data migration must precede a change to those identities.
+This change does not perform that migration.
+
+Date fields use `DateTime` when the current wire value is an RFC 3339 instant.
+Decimal text and optional date text keep explicit text definitions.
+This change does not infer value conversions from a field name.

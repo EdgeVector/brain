@@ -1,0 +1,778 @@
+{
+  "fields": {
+    "knowledge_snapshot_id": {
+      "description": "the stable identifier of a knowledge metadata snapshot",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "snapshot_producer_app_id": {
+      "description": "the app identifier of the producer of a metadata snapshot",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "snapshot_schema_version_text": {
+      "description": "the text version of the payload contract of a metadata snapshot",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "snapshot_captured_at": {
+      "description": "the RFC 3339 instant when a metadata snapshot was captured",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_type_counts_json": {
+      "description": "a JSON-encoded object with one live knowledge record count for each record type",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "open_decision_list_json": {
+      "description": "a JSON-encoded list of open decision slugs and titles",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "active_program_summary_list_json": {
+      "description": "a JSON-encoded list of summaries of active programs",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "recent_heartbeat_event_list_json": {
+      "description": "a JSON-encoded list of recent heartbeat event identifiers, times and outcomes",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_slug": {
+      "description": "the stable slug that identifies a knowledge record within its record type",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_title": {
+      "description": "the one-line title of a knowledge record",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_markdown": {
+      "description": "the Markdown text of a knowledge record",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_status": {
+      "description": "the lifecycle status of a knowledge record, interpreted by its record type",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_tag_labels": {
+      "description": "the freeform tag labels attached to a knowledge record",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_created_at": {
+      "description": "the RFC 3339 instant when a knowledge record was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_updated_at": {
+      "description": "the RFC 3339 instant when a knowledge record was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "file_content_sha256_hex": {
+      "description": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "file_size_bytes_decimal_text": {
+      "description": "the base-10 text encoding of a file size in bytes",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "file_media_type": {
+      "description": "the MIME type of a file",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "media"
+      },
+      "interest_category": null
+    },
+    "file_content_base64": {
+      "description": "the base64 encoding of the complete bytes of a file",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "binary"
+      }
+    },
+    "file_record_created_at": {
+      "description": "the RFC 3339 instant when a file metadata record was first stored",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "native_file_reference": {
+      "description": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
+      "field_type": "Any",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "file-reference"
+      }
+    },
+    "attachment_lookup_key": {
+      "description": "the attachment-list key __attidx__ followed by the SHA-256 digest of the owning record type and slug",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_type": {
+      "description": "the record type that names one kind of knowledge record",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "attachment_file_names": {
+      "description": "the file names attached to a knowledge record",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "attachment_metadata_list_json": {
+      "description": "a JSON-encoded list of attachment names, file references, sizes, media types and added times",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "attachment_list_created_at": {
+      "description": "the RFC 3339 instant when an attachment metadata list was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "attachment_list_updated_at": {
+      "description": "the RFC 3339 instant when an attachment metadata list was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_text_file_lookup_key": {
+      "description": "the key __bodyfile__ followed by the SHA-256 digest of source record type, slug and local field name",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_text_source_local_field_name": {
+      "description": "the app-local name of the knowledge record field whose text is held in this file",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_text_file_created_at": {
+      "description": "the RFC 3339 instant when a knowledge text file was first stored",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_text_file_updated_at": {
+      "description": "the RFC 3339 instant when a knowledge text file was last replaced",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_backfill_scope_key": {
+      "description": "the backfill scope key bf# followed by the target list hash and source record type",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_backfill_cursor_marker": {
+      "description": "the fixed __cursor__ range marker of a knowledge list backfill",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_backfill_cursor_json": {
+      "description": "a JSON-encoded backfill cursor with the last source slug and count added for that slug",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_list_record_page_id": {
+      "description": "the page identifier assigned to one knowledge record in a particular list",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_edge_set_scope_key": {
+      "description": "the edge-set scope key es# followed by a knowledge record type and slug",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_edge_set_head_marker": {
+      "description": "the fixed __head__ range marker of a knowledge edge set",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_edge_reference_list_json": {
+      "description": "a JSON-encoded list of at most sixteen edge references encoded as type#destination",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_count_scope_key": {
+      "description": "the count scope token all or one knowledge record type name",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_count_decimal_text": {
+      "description": "the base-10 text encoding of a count of knowledge records within a named count scope",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_list_locator_scope_key": {
+      "description": "the locator scope token loc# followed by the knowledge list hash",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_list_record_reference": {
+      "description": "a knowledge record reference encoded as type#slug within one list locator",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_list_scope_key": {
+      "description": "the selector for a knowledge list by type, status, tag, parent design, link target or symptom; all selects the complete list",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_list_page_key": {
+      "description": "the __head__ marker or a knowledge list page identifier p followed by eight digits",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_list_page_json": {
+      "description": "a JSON-encoded knowledge list page with short record summaries and an older page identifier; no record body",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_token_set_scope_key": {
+      "description": "the token-set scope key ts# followed by a knowledge record type and slug",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_token_set_head_marker": {
+      "description": "the fixed __head__ range marker of a knowledge token set",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_token_list_json": {
+      "description": "a JSON-encoded list of at most eight tokens written by a knowledge record",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_type_directory_marker": {
+      "description": "the fixed __types__ range marker of a knowledge record type directory",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_record_type_list_json": {
+      "description": "a JSON-encoded list of the knowledge record types that use one record slug",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "north_star_slug": {
+      "description": "the slug of the North Star that owns the outcome; empty when no North Star is assigned",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "decision_gate_slug": {
+      "description": "the slug of the decision gate that a decision clears; empty when no gate is assigned",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "decision_maker_identifier": {
+      "description": "the person or agent identifier supplied as the maker of a decision",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "decision_date_text": {
+      "description": "the date text supplied by the decision author; an empty value denotes no supplied date",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_lookup_key": {
+      "description": "the key __tagidx__ followed by the lowercase SHA-256 digest of a tag label",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_label": {
+      "description": "the complete text label of a tag",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tagged_record_references": {
+      "description": "the knowledge record references encoded as type:slug that carry a tag",
+      "field_type": {
+        "Array": "String"
+      },
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_membership_list_created_at": {
+      "description": "the RFC 3339 instant when a tag membership list was created",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_membership_list_updated_at": {
+      "description": "the RFC 3339 instant when a tag membership list was last updated",
+      "field_type": "DateTime",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_membership_bucket_key": {
+      "description": "the key __tagidx__ followed by the lowercase SHA-256 digest of a tag or link-target label",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_membership_entry_key": {
+      "description": "the type:slug membership reference, or a reserved double-underscore key for copy state",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_label_excerpt": {
+      "description": "the first 1 KiB of a tag label, for display only",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "tag_membership_copy_state_json": {
+      "description": "a JSON-encoded legacy membership copy stamp or short-lived copy claim",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "parent_design_slug": {
+      "description": "the slug of the parent design of a knowledge task; empty when no parent is assigned",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    }
+  },
+  "schemas": {
+    "BrainAdminSnapshot": {
+      "slug": "knowledge_snapshot_id",
+      "source_app": "snapshot_producer_app_id",
+      "schema_version": "snapshot_schema_version_text",
+      "captured_at": "snapshot_captured_at",
+      "type_counts_json": "knowledge_record_type_counts_json",
+      "open_decisions_json": "open_decision_list_json",
+      "active_programs_head_json": "active_program_summary_list_json",
+      "recent_heartbeats_json": "recent_heartbeat_event_list_json"
+    },
+    "Agent": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "BrainAttachmentBlob": {
+      "content_hash": "file_content_sha256_hex",
+      "size": "file_size_bytes_decimal_text",
+      "media_type": "file_media_type",
+      "data": "file_content_base64",
+      "created_at": "file_record_created_at"
+    },
+    "BrainAttachmentFile": {
+      "content_hash": "file_content_sha256_hex",
+      "size": "file_size_bytes_decimal_text",
+      "media_type": "file_media_type",
+      "file": "native_file_reference",
+      "created_at": "file_record_created_at"
+    },
+    "BrainAttachmentIndex": {
+      "slug": "attachment_lookup_key",
+      "record_type": "knowledge_record_type",
+      "record_slug": "knowledge_record_slug",
+      "filenames": "attachment_file_names",
+      "attachments_json": "attachment_metadata_list_json",
+      "created_at": "attachment_list_created_at",
+      "updated_at": "attachment_list_updated_at"
+    },
+    "BrainBodyFile": {
+      "file_key": "knowledge_text_file_lookup_key",
+      "record_type": "knowledge_record_type",
+      "record_slug": "knowledge_record_slug",
+      "record_field": "knowledge_text_source_local_field_name",
+      "content_hash": "file_content_sha256_hex",
+      "size": "file_size_bytes_decimal_text",
+      "file": "native_file_reference",
+      "created_at": "knowledge_text_file_created_at",
+      "updated_at": "knowledge_text_file_updated_at"
+    },
+    "BrainBackfillCursor": {
+      "bfc_h": "knowledge_backfill_scope_key",
+      "bfc_r": "knowledge_backfill_cursor_marker",
+      "bfc_state": "knowledge_backfill_cursor_json"
+    },
+    "BrainCompactListLocator_v1": {
+      "bcl_page": "knowledge_list_record_page_id"
+    },
+    "BrainEdgeSet": {
+      "bes_h": "knowledge_edge_set_scope_key",
+      "bes_r": "knowledge_edge_set_head_marker",
+      "bes_ids": "knowledge_edge_reference_list_json"
+    },
+    "BrainListCount": {
+      "bln_h": "knowledge_count_scope_key",
+      "bln_n": "knowledge_record_count_decimal_text"
+    },
+    "BrainListLocator": {
+      "bll_h": "knowledge_list_locator_scope_key",
+      "bll_r": "knowledge_list_record_reference",
+      "bll_page": "knowledge_list_record_page_id"
+    },
+    "BrainListPage": {
+      "blp_h": "knowledge_list_scope_key",
+      "blp_r": "knowledge_list_page_key",
+      "blp_page": "knowledge_list_page_json"
+    },
+    "BrainTokenSet": {
+      "bts_h": "knowledge_token_set_scope_key",
+      "bts_r": "knowledge_token_set_head_marker",
+      "bts_tokens": "knowledge_token_list_json"
+    },
+    "BrainTypeDirectory": {
+      "btd_h": "knowledge_record_slug",
+      "btd_r": "knowledge_type_directory_marker",
+      "btd_types": "knowledge_record_type_list_json"
+    },
+    "Concept": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Decision": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "program": "north_star_slug",
+      "gate_slug": "decision_gate_slug",
+      "decided_by": "decision_maker_identifier",
+      "decided_on": "decision_date_text",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Design": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Preference": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Project": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Reference": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Sop": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "Spike": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    },
+    "TagIndex": {
+      "slug": "tag_lookup_key",
+      "tag": "tag_label",
+      "members": "tagged_record_references",
+      "created_at": "tag_membership_list_created_at",
+      "updated_at": "tag_membership_list_updated_at"
+    },
+    "TagMembership_hashrange_v1": {
+      "tmb_h": "tag_membership_bucket_key",
+      "tmb_r": "tag_membership_entry_key",
+      "tmb_tag": "tag_label_excerpt",
+      "tmb_copy": "tag_membership_copy_state_json"
+    },
+    "Task": {
+      "slug": "knowledge_record_slug",
+      "title": "knowledge_record_title",
+      "body": "knowledge_record_markdown",
+      "status": "knowledge_record_status",
+      "design_slug": "parent_design_slug",
+      "tags": "knowledge_record_tag_labels",
+      "created_at": "knowledge_record_created_at",
+      "updated_at": "knowledge_record_updated_at"
+    }
+  }
+}
