@@ -342,8 +342,7 @@ function pointerFromFileRow(row: QueryRow, hash: string): Record<string, unknown
   return pointer as Record<string, unknown>;
 }
 
-// CAS put through the node's file-blob plane: upload bytes as an encrypted B2
-// CAS blob and persist the `$lastdb_file` pointer into a BrainAttachmentFile
+// Store file bytes through the node and persist the `$lastdb_file` pointer in a BrainAttachmentFile
 // record keyed by the content hash. Identical hash ⇒ identical bytes, so an
 // existing pointer record is left untouched (metadata-only attach); the probe
 // is a keyed point-read.
@@ -369,7 +368,10 @@ export async function putAttachmentBlob(
     const data = root.data as Record<string,unknown> | undefined;
     const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
     const pointer = fileBlob?.pointer;
-    if (!pointer || typeof pointer !== "object" || (!(pointer as Record<string,unknown>).$lastdb_file || typeof (pointer as Record<string,unknown>).$lastdb_file !== "object") || fileBlob?.blob_ref !== `sha256:${hash}`) {
+    const marker = pointer && typeof pointer === "object"
+      ? (pointer as Record<string,unknown>).$lastdb_file : null;
+    if (!marker || typeof marker !== "object" || fileBlob?.file_hash !== hash
+      || typeof fileBlob.blob_ref !== "string" || !/^sha256:[a-f0-9]{64}$/.test(fileBlob.blob_ref)) {
       throw new FbrainError({code:"attachment_pointer_invalid",message:"Local file storage returned an invalid attachment pointer."});
     }
     await node.createRecord({schemaHash,keyHash:hash,fields:{
