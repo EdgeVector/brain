@@ -16,7 +16,7 @@ import { pageBackfill, readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
-import { HEAD_RANGE, planRecordListSide } from "../list-page.ts";
+import { HEAD_RANGE, planRecordListSide, readPageChain } from "../list-page.ts";
 import {
   buildRecordFields,
   normalizeSlug,
@@ -24,9 +24,10 @@ import {
   NOT_FOUND_TYPED,
   resolveBySlug,
   TOMBSTONE_TAG,
+  schemaHashFor,
+  arrayStringField,
 } from "../record.ts";
-import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, type RecordType } from "../schemas.ts";
-import { matchesListFilters, resolveListEntries } from "./list.ts";
+import { BRAIN_LIST_PAGE_SCHEMA_KEY, RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
 import { commitResidentRemoval } from "../resident-write-plan.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
@@ -282,50 +283,37 @@ async function resolveFilterMatches(
   node: NodeClient,
   opts: DeleteByFilterOptions,
 ): Promise<{ matches: FilterMatch[]; partial: boolean }> {
+  const types = opts.type ? [opts.type] : RECORD_TYPES.filter(type => Boolean(opts.cfg.schemaHashes[type]));
+  // Older homes can lack a status page until backfill. Preserve the type
+  // membership source, then check current status without fetching any bodies.
+  const hashes = opts.tag ? [`tag#${opts.tag}`] : types;
   if (opts.tag) {
-    const hash = `tag#${opts.tag}`;
-    const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
-    const seen = new Set<string>();
-    const matches: FilterMatch[] = [];
-    let range = HEAD_RANGE;
-    let partial = false;
-    for (;;) {
-      if (seen.has(range)) {
-        partial = true;
-        break;
-      }
-      seen.add(range);
-      const page = await readStoredPage(node, schemaHash, hash, range);
-      if (page.kind !== "page") {
-        partial = true;
-        break;
-      }
-      for (const card of page.cards) {
-        if (!isRecordType(card.type)) continue;
-        if (opts.type && card.type !== opts.type) continue;
-        if (opts.status && card.status !== opts.status) continue;
-        matches.push({
-          type: card.type,
-          slug: card.slug,
-          title: card.title,
-          created_at: "",
-        });
-      }
-      if (page.older.length === 0) break;
-      range = page.older;
-    }
-    sortFilterMatches(matches);
-    return { matches, partial };
+    const head = await readStoredPage(node, opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "", hashes[0]!, HEAD_RANGE);
+    if (head.kind !== "page") return { matches: [], partial: true };
   }
-  const entries = await resolveListEntries(node, opts);
-  const matches: FilterMatch[] = entries
-    .filter(({ record }) => matchesListFilters(record, opts))
-    .map(({ type, record }) => ({
-      type,
-      slug: record.slug,
-      title: record.title,
-      created_at: record.created_at,
-    }));
+  const chains = await Promise.all(hashes.map(hash => readPageChain(node, opts.cfg, hash)));
+  if (chains.some(chain => chain === null)) return { matches: [], partial: true };
+  const byType = new Map<RecordType, Set<string>>();
+  for (const [index, chain] of chains.entries()) for (const card of chain ?? []) {
+    const type = card.type ?? (opts.tag ? undefined : hashes[index]?.split("#")[0]);
+    if (!type || !isRecordType(type) || (opts.type && type !== opts.type)) continue;
+    const slugs = byType.get(type) ?? new Set<string>();
+    slugs.add(card.slug); byType.set(type, slugs);
+  }
+  if (!node.queryByKeys) throw new FbrainError({ code: "keyed_read_required", message: "Bulk selection requires batch reads." });
+  // Read only selection fields. Recheck the current record's status and tags;
+  // a stale summary cannot authorize a delete, and bodies are unnecessary.
+  const batches = await Promise.all([...byType].map(async ([type, slugs]) => {
+    const rows = await node.queryByKeys!({ schemaHash: schemaHashFor(type, opts.cfg),
+      fields: ["slug", "title", "status", "tags", "created_at"], keys: [...slugs].map(hash => ({ hash })) });
+    return rows.flatMap(row => {
+      const record = row.fields;
+      const tags = arrayStringField(record, "tags");
+      if (tags.includes(TOMBSTONE_TAG) || (opts.tag && !tags.includes(opts.tag)) || (opts.status && record.status !== opts.status)) return [];
+      return [{ type, slug: String(record.slug), title: String(record.title ?? ""), created_at: String(record.created_at ?? "") }];
+    });
+  }));
+  const matches = batches.flat();
   sortFilterMatches(matches);
   return { matches, partial: false };
 }

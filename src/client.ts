@@ -725,6 +725,9 @@ export type BatchMutationOp = {
   keyHash: string;
   keyRange?: string;
   fields: Record<string, unknown>;
+  expected?:
+    | { type: "absent"; field: string }
+    | { type: "value"; field: string; value: string };
 };
 
 export type BatchMutationResult = {
@@ -1319,6 +1322,9 @@ export function newNodeClient(opts: {
     const allResults: QueryRow[] = [];
     const seenKeys = new Set<string>();
     let offset = 0;
+    let cursor: SdkKeyValue | undefined;
+    const seenCursors = new Set<string>();
+    let complete = false;
     let lastTotalCount: number | null = null;
     for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
       const pageResult = await queryPageSdk(
@@ -1326,7 +1332,7 @@ export function newNodeClient(opts: {
         {
           fields,
           limit: QUERY_PAGE_SIZE,
-          offset,
+          ...(cursor ? { cursor } : { offset }),
           ...(filter ? { filter: filter as SdkQueryFilter["filter"] } : {}),
         },
         keyed ? undefined : { allowFullScan: true },
@@ -1354,7 +1360,7 @@ export function newNodeClient(opts: {
       const hasMore = pageResult.page?.hasMore === true;
       const fullPageMaybeMore =
         pageResult.page === null && pageResults.length >= QUERY_PAGE_SIZE;
-      if (!hasMore && !fullPageMaybeMore) break;
+      if (!hasMore && !fullPageMaybeMore) { complete = true; break; }
       if (newOnPage === 0) {
         throw new FbrainError({
           code: "query_pagination_stalled",
@@ -1382,8 +1388,18 @@ export function newNodeClient(opts: {
       // explicit break for clarity and so the throw above can only
       // ever fire on a real overlap.
       if (pageResults.length === 0) break;
+      const nextCursor = pageResult.page?.nextCursor;
+      if (nextCursor) {
+        const token = JSON.stringify(nextCursor);
+        if (seenCursors.has(token)) throw new FbrainError({ code: "query_pagination_stalled", message: "The node repeated a query cursor." });
+        seenCursors.add(token);
+        cursor = nextCursor;
+      } else if (cursor) {
+        throw new FbrainError({ code: "query_pagination_incomplete", message: "The node omitted the next cursor during a keyed continuation." });
+      }
       offset += pageResults.length;
     }
+    if (!complete) throw new FbrainError({ code: "query_pagination_incomplete", message: `The query exceeded ${QUERY_PAGE_LIMIT} pages.` });
     if (lastTotalCount !== null && allResults.length < lastTotalCount) {
       throw new FbrainError({
         code: "query_pagination_incomplete",
@@ -1694,6 +1710,7 @@ export function newNodeClient(opts: {
           fields_and_values: op.fields,
           key_value: { hash: op.keyHash, range: op.keyRange ?? null },
           mutation_type: op.mutationType,
+          ...(op.expected ? { expected: op.expected } : {}),
           ...(options?.durability === "durable"
             ? { durability: "durable" as const }
             : {}),
@@ -1772,16 +1789,16 @@ export function newNodeClient(opts: {
     async queryByKeys({ schemaHash, fields, keys }) {
       if (keys.length === 0) return [];
       const rows: QueryRow[] = [];
-      for (let offset = 0; offset < keys.length; offset += QUERY_PAGE_SIZE) {
-        const slice = keys.slice(offset, offset + QUERY_PAGE_SIZE);
-        const page = await queryAllGuarded({
-          schemaHash,
-          fields,
-          filter: {
-            HashRangeKeys: slice.map((key) => [key.hash, key.range ?? ""]),
-          },
-        });
-        rows.push(...page.results);
+      // Bound native field work as well as simultaneous requests. A 1000-key
+      // batch can exceed the node budget before its first row returns.
+      const batchSize = 100, concurrency = 4;
+      for (let offset = 0; offset < keys.length; offset += batchSize * concurrency) {
+        const batches: Array<Array<{ hash: string; range?: string }>> = [];
+        for (let part = offset; part < Math.min(keys.length, offset + batchSize * concurrency); part += batchSize) batches.push(keys.slice(part, part + batchSize));
+        const pages = await Promise.all(batches.map(slice => queryAllGuarded({
+          schemaHash, fields, filter: { HashRangeKeys: slice.map(key => [key.hash, key.range ?? ""]) },
+        })));
+        for (const page of pages) rows.push(...page.results);
       }
       return rows;
     },

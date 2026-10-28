@@ -11,9 +11,11 @@ import { join } from "node:path";
 
 import { FbrainError, newReadClientFromCfg, type NodeClient, type QueryRow, type Verbose } from "../client.ts";
 import { writeConfig, type Config } from "../config.ts";
-import { findBySlug, isTombstoned, listRecords, schemaHashFor, type FbrainRecord } from "../record.ts";
+import { findBySlug, isTombstoned, schemaHashFor, type FbrainRecord } from "../record.ts";
+import { parseListCount } from "../count-state.ts";
 import {
   ADMIN_SNAPSHOT_SCHEMA_KEY,
+  BRAIN_LIST_COUNT_SCHEMA_KEY,
   OWNER_APP_ID,
   RECORD_TYPES,
   adminSnapshotSchema,
@@ -291,8 +293,11 @@ export async function buildBrainAdminSnapshot(
   const now = opts.now ?? new Date();
   const typeCounts = {} as Record<RecordType, number | null>;
   const unavailable: BrainAdminSnapshot["unavailable_types"] = [];
+  const [counts, openDecisions, activePrograms, heartbeats] = await Promise.all([
+    readTypeCounts(node, cfg), buildOpenDecisionLines(node, cfg), buildActiveProgramsHead(node, cfg), buildRecentHeartbeats(node, cfg),
+  ]);
   for (const type of RECORD_TYPES) {
-    const counted = await countLiveRecords(node, cfg, type);
+    const counted = counts.get(type) ?? { unavailable: "The type count is absent or invalid." };
     if ("count" in counted) {
       typeCounts[type] = counted.count;
     } else {
@@ -309,9 +314,9 @@ export async function buildBrainAdminSnapshot(
     captured_at: now.toISOString(),
     type_counts: typeCounts,
     unavailable_types: unavailable,
-    open_decisions: await buildOpenDecisionLines(node, cfg),
-    active_programs_head: await buildActiveProgramsHead(node, cfg),
-    recent_heartbeats: await buildRecentHeartbeats(node, cfg),
+    open_decisions: openDecisions,
+    active_programs_head: activePrograms,
+    recent_heartbeats: heartbeats,
   };
 }
 
@@ -456,29 +461,34 @@ async function findSnapshotRow(
   schemaHash: string,
   slug: string,
 ): Promise<QueryRow | null> {
-  const res = await node.queryAll({ schemaHash, fields: ["slug"] });
-  return res.results.find((row) => row.key?.hash === slug || row.fields.slug === slug) ?? null;
+  if (!node.queryByKey) throw new FbrainError({ code: "keyed_read_required", message: "The snapshot requires a keyed read client." });
+  return node.queryByKey({ schemaHash, fields: ["slug"], keyHash: slug });
 }
 
 /**
- * Live rows of one type, for the count. The snapshot never carries a body, so
- * this reads summaries (no body, no completion of a cut list row). If the list
- * cannot be read at all (an incomplete list index, a node error) the type is
- * reported as unavailable, not as 0.
+ * Read the maintained type counters in one batch. An absent or invalid count
+ * remains unavailable; never infer zero or walk the corpus to hide a miss.
  */
-async function countLiveRecords(
+async function readTypeCounts(
   node: NodeClient,
   cfg: Config,
-  type: RecordType,
-): Promise<{ count: number } | { unavailable: string }> {
+): Promise<Map<RecordType, { count: number } | { unavailable: string }>> {
+  const counts = new Map<RecordType, { count: number } | { unavailable: string }>();
   try {
-    const rows = await listRecords(node, type, cfg, { summary: true });
-    return { count: rows.filter((row) => !isTombstoned(row)).length };
+    const schemaHash = cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY];
+    if (!schemaHash || !node.queryByKeys) return counts;
+    const rows = await node.queryByKeys({ schemaHash, fields: ["bln_h", "bln_n"], keys: RECORD_TYPES.map(hash => ({ hash })) });
+    for (const row of rows) {
+      const type = row.key?.hash ?? row.fields.bln_h;
+      const count = parseListCount(typeof row.fields.bln_n === "string" ? row.fields.bln_n : null);
+      if (RECORD_TYPES.includes(type as RecordType) && count && count.count >= 0) counts.set(type as RecordType, { count: count.count });
+    }
   } catch (err) {
     const code = err instanceof FbrainError ? `${err.code}: ` : "";
     const message = err instanceof Error ? err.message : String(err);
-    return { unavailable: `${code}${message}`.slice(0, 200) };
+    for (const type of RECORD_TYPES) counts.set(type, { unavailable: `${code}${message}`.slice(0, 200) });
   }
+  return counts;
 }
 
 async function buildOpenDecisionLines(
