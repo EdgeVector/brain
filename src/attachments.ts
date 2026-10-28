@@ -299,6 +299,9 @@ function filePlaneError(path: string, status: number, body: string): FbrainError
       hint: "Attachments need a cloud-sync-capable lastdbd. Upgrade the node binary.",
     });
   }
+  if (path === "/api/db/put-blob-local" && status === 409) {
+    return new FbrainError({code:"attachment_local_file_write_paused",message:"LastDB paused local file writes.",hint:"Read the node status before the next attempt."});
+  }
   if (status === 409) {
     return new FbrainError({
       code: "attachment_file_plane_unavailable",
@@ -366,7 +369,7 @@ export async function putAttachmentBlob(
     const data = root.data as Record<string,unknown> | undefined;
     const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
     const pointer = fileBlob?.pointer;
-    if (!pointer || typeof pointer !== "object" || typeof (pointer as Record<string,unknown>).$lastdb_file !== "object" || fileBlob?.blob_ref !== `sha256:${hash}`) {
+    if (!pointer || typeof pointer !== "object" || (!(pointer as Record<string,unknown>).$lastdb_file || typeof (pointer as Record<string,unknown>).$lastdb_file !== "object") || fileBlob?.blob_ref !== `sha256:${hash}`) {
       throw new FbrainError({code:"attachment_pointer_invalid",message:"Local file storage returned an invalid attachment pointer."});
     }
     await node.createRecord({schemaHash,keyHash:hash,fields:{
@@ -436,10 +439,9 @@ export async function getAttachmentBlob(
       if (res.status !== 200) {
         throw filePlaneError("/api/db/fetch-file-blob", res.status, res.body);
       }
-      const fileBlob =
-        res.json && typeof res.json === "object"
-          ? ((res.json as Record<string, unknown>).file_blob as Record<string, unknown> | undefined)
-          : undefined;
+      const root = (res.json ?? {}) as Record<string,unknown>;
+      const data = root.data as Record<string,unknown> | undefined;
+      const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
       const b64 = fileBlob && typeof fileBlob.bytes_b64 === "string" ? fileBlob.bytes_b64 : "";
       const bytes = new Uint8Array(Buffer.from(b64, "base64"));
       const fields = (row.fields ?? {}) as Record<string, unknown>;
