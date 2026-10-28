@@ -21,9 +21,16 @@ const [getCommand, listCommand, snapshotCommand, deleteCommand, searchCommand] =
   "get", "list", "admin-snapshot", "delete", "search",
 ].map(name => import(resolve(source, `src/commands/${name}.ts`))));
 let requests = 0, responseBytes = 0;
+let profile = new Map<string, { requests: number; elapsed_sum_ms: number; max_ms: number; response_bytes: number }>();
 globalThis.fetch = new Proxy(globalThis.fetch, {
   async apply(target, receiver, args) {
     requests++;
+    const start = performance.now();
+    const request = typeof args[1]?.body === "string" ? JSON.parse(args[1].body) : {};
+    const label = JSON.stringify({ path: String(args[0]).split("?")[0], schema: request.schema_name,
+      fields: request.fields, filter: Object.keys(request.filter ?? {})[0], sort_order: request.sort_order });
+    const captured = profile;
+    let bytes = 0;
     const response = await Reflect.apply(target, receiver, args);
     // Count bytes actually delivered to the caller, without a second body copy.
     const reader = response.body?.getReader();
@@ -31,8 +38,12 @@ globalThis.fetch = new Proxy(globalThis.fetch, {
     const body = new ReadableStream({
       async pull(controller) {
         const part = await reader.read();
-        if (part.done) controller.close();
-        else { responseBytes += part.value.byteLength; controller.enqueue(part.value); }
+        if (part.done) {
+          const elapsed = performance.now() - start;
+          const aggregate = captured.get(label) ?? { requests: 0, elapsed_sum_ms: 0, max_ms: 0, response_bytes: 0 };
+          aggregate.requests++; aggregate.elapsed_sum_ms += elapsed; aggregate.max_ms = Math.max(aggregate.max_ms, elapsed); aggregate.response_bytes += bytes;
+          captured.set(label, aggregate); controller.close();
+        } else { bytes += part.value.byteLength; responseBytes += part.value.byteLength; controller.enqueue(part.value); }
       },
       cancel(reason) { return reader.cancel(reason); },
     });
@@ -72,8 +83,9 @@ async function setup(): Promise<void> {
     const { type, record } = input(number);
     if (layout === "v2") {
       const id = v2Module.recordKey(type, record.slug), order = v2Module.orderKey(id, record.updated_at);
-      await add(schemas.record!, id, { ...record, br2_id: id, br2_type: type, br2_scope: "brain", br2_status: v2Module.statusKey(type, record.status),
-        br2_order: order, br2_revision: `seed-${number}` });
+      const logical = { ...record, br2_id: id, br2_type: type, br2_scope: "brain", br2_status: v2Module.statusKey(type, record.status),
+        br2_order: order, br2_revision: `seed-${number}` };
+      await add(schemas.record!, id, v2Module.encodeV2Record ? v2Module.encodeV2Record(logical) : logical);
       await add(schemas.tag!, "shared", { bt2_tag: "shared", bt2_order: order, bt2_id: id }, order);
     } else {
       await add(cfg.schemaHashes[type]!, record.slug, record);
@@ -171,6 +183,13 @@ async function operation(name: string): Promise<number> {
   }
   if (name === "snapshot_counts") {
     if (layout === "v2") {
+      if (store.counts) {
+        const result = await store.counts();
+        verificationChecks.push(() => {
+          if (result.total !== settings.records || definitions.RECORD_TYPES.some((type: RecordType) => result.types[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("V2 native counts incomplete");
+        });
+        return result.total;
+      }
       const ids = new Set<string>(), counts = new Map<string, number>();
       const pages = store.pages ? store.pages({ fields: ["br2_id", "br2_type"] }) : v2Pages();
       for await (const page of pages) for (const item of (Array.isArray(page) ? page : page.items)) {
@@ -210,12 +229,14 @@ if (phase === "setup") await setup();
 else {
   for (let sample = 0; sample < settings.samples; sample++) {
     const before = requests, bytes = responseBytes, start = performance.now();
+    profile = new Map();
     verificationChecks = [];
     try {
       const count = await operation(phase!);
       const elapsed = performance.now() - start;
       for (const verify of verificationChecks) verify();
-      samples.push({ elapsed_ms: elapsed, requests: requests - before, response_bytes: responseBytes - bytes, count, verified: true });
+      samples.push({ elapsed_ms: elapsed, requests: requests - before, response_bytes: responseBytes - bytes, count, verified: true,
+        profile: Object.fromEntries(profile) });
     } catch (error) {
       if (process.env.BRAIN_READ_VERSION !== "before" || !String(error).includes("[read_resource_limit]")) throw error;
       // A broken baseline is a measured failure, never a successful latency.

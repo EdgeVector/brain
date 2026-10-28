@@ -85,3 +85,44 @@ Bulk record reads request the public record fields in both versions.
 V2 counts omit titles, tags, and record bodies through the new field selection.
 The artifact also records the full workload process time.
 Small sample counts limit conclusions about p95 and p99.
+
+## Packed molecule follow-up
+
+The next comparison uses the merged read fixes at `80ceb97be0c59fc7a7ea8abca5e7fa461f5f35b0` as its baseline.
+Current Brain reads many summary cards from one page atom.
+The first V2 layout reads an identity, then reads each public field from the record schema.
+Each field adds a molecule read, atom data, and response metadata.
+Fewer requests alone do not remove this field cost.
+
+The packed V2 layout stores one public summary document and one content document per record.
+The summary omits the body.
+The content holds the body, create time, and optional public fields.
+The recent, type, and status molecules share both documents through proteins.
+A list reads the summary directly through its lookup key.
+A full record list reads the two documents through the same key.
+It does not fetch every record again by identity.
+Tags retain a separate membership product and a batch read of the required documents.
+
+This layout keeps five schemas and uses 26 physical field declarations.
+The public record fields remain available through the adapter.
+The body occurs in one content atom; lookup molecules reference the same atom.
+The adapter writes only the documents and route fields that change.
+An unchanged order key and tag membership do not require tag writes.
+
+V2 counts use the node's exact count for each known type hash.
+A descending keyed query requests that count and materializes only one probe record.
+The node counts live molecule keys without a full body read.
+The adapter refuses an absent count or an integrity error.
+The count has no additional app schema or counter write.
+Counts across types do not form one transaction.
+
+CI first verifies actual writes, edits, deletes, recreation, native counts, and all three shared proteins.
+The bulk comparison then records per-request field selections, response bytes, request time, and node operation data.
+Request-time sums can overlap when calls run concurrently.
+The operation latency remains a wall-clock value.
+The final membership and field checks remain outside that clock.
+
+The packed schemas have new names and require a fresh generated home in this spike.
+This change does not convert an existing V2 home or publish production schema declarations.
+Normal Brain initialization does not activate it.
+LastSeek, body files, and attachments remain outside the comparison.

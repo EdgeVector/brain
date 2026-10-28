@@ -61,6 +61,8 @@ def measure(args, layout, version, source, repeat):
             result.update(node_peak_sampled_bytes=peak_node, client_peak_sampled_bytes=peak_client,
                           process_ms=(time.monotonic() - started) * 1000)
             save(path, result)
+            if phase != "setup":
+                save(destination / f"{label}-node.json", call(sock, "/api/status"))
             return result
 
         def restart():
@@ -144,7 +146,8 @@ def report(args, runs):
                              f"{before['failed']}/{before['attempted']}; {after['failed']}/{after['attempted']} |")
     lines += ["", "Read results require exact generated membership and field values. Raw samples include response bytes and sampled memory sizes.",
               "Migration read measures the source read, without schema publication or migration writes. Bulk selection does not delete data.",
-              "V2 snapshot counts use a complete identity/type traversal; V2 has no maintained count schema or snapshot command.",
+              "The baseline V2 count traverses identities and types. The candidate uses exact native keyed counts without a count schema.",
+              "Per-request profiles retain schema, selected fields, bytes, and elapsed time. Elapsed sums overlap for concurrent requests.",
               "Only the current Brain keyword fallback is measured. LastSeek is absent. V2 search is unsupported and is not compared.",
               "Low sample counts limit tail estimates. No primary, primary copy, local benchmark, or test suite is used."]
     save(args.output / "metrics.json", {"records": args.records, "baseline_revision": args.baseline_revision,
