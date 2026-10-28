@@ -11,6 +11,7 @@ import platform
 import shutil
 import socket
 import stat
+from statistics import median
 import subprocess
 import tempfile
 import time
@@ -103,6 +104,49 @@ def stats(samples):
             "requests_per_operation": sum(sample["requests"] for sample in samples) / len(samples)}
 
 
+def start_node(args, environment, home, sock, root, log):
+    daemon = subprocess.Popen([str(args.lastdbd), "--data-dir", str(home), "--socket-path", str(sock),
+                               "--full-socket-path", str(root / "f.sock")],
+                              env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if daemon.poll() is not None:
+                raise RuntimeError("Owned daemon exited before health; inspect its CI log")
+            if sock.exists():
+                try:
+                    value = call(sock, "/api/version")
+                    if args.lastdb_revision[:9] not in json.dumps(value):
+                        raise RuntimeError("Daemon version differs from pinned LastDB revision")
+                    return daemon, value
+                except (OSError, http.client.HTTPException):
+                    pass
+            time.sleep(.1)
+        raise RuntimeError("Owned daemon missed its health deadline")
+    except BaseException:
+        if daemon.poll() is None:
+            daemon.terminate()
+            try:
+                daemon.wait(timeout=45)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait(timeout=5)
+        raise
+
+
+def stop_node(daemon, home):
+    if daemon.poll() is None:
+        daemon.terminate()
+        try:
+            daemon.wait(timeout=45)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait(timeout=5)
+    path = home / ".shutdown_flush_ready"
+    receipt = json.loads(path.read_text()) if path.exists() else None
+    return {"exit_code": daemon.returncode, "receipt": receipt}
+
+
 def run_case(args, layout, repeat, output):
     destination = output / f"{repeat:02d}-{layout}"
     destination.mkdir()
@@ -120,29 +164,22 @@ def run_case(args, layout, repeat, output):
                        FBRAIN_FOLDDB_SOCKET=str(sock), RUST_MIN_STACK="16777216")
     save(root / "settings.json", {"socket": str(sock), "records": args.records, "bodyBytes": args.body_bytes})
     log = (destination / "node.log").open("w")
-    daemon = subprocess.Popen([str(args.lastdbd), "--data-dir", str(home), "--socket-path", str(sock),
-                               "--full-socket-path", str(root / "f.sock")],
-                              env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    daemon = None
     client = None
     try:
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            if daemon.poll() is not None:
-                raise RuntimeError("Owned daemon exited before health; inspect its CI log")
-            if sock.exists():
-                try:
-                    value = call(sock, "/api/version")
-                    if args.lastdb_revision[:9] not in json.dumps(value):
-                        raise RuntimeError("Daemon version differs from pinned LastDB revision")
-                    save(destination / "version.json", value)
-                    break
-                except (OSError, http.client.HTTPException):
-                    pass
-            time.sleep(.1)
-        else:
-            raise RuntimeError("Owned daemon missed its health deadline")
+        daemon, version = start_node(args, environment, home, sock, root, log)
+        save(destination / "version.json", version)
         summary = {"layout": layout, "repeat": repeat, "phases": {}}
         for phase in ("setup", "create", "update", "delete", "verify"):
+            if phase == "verify":
+                shutdown = stop_node(daemon, home)
+                save(destination / "restart-shutdown.json", shutdown)
+                if (shutdown["exit_code"] != 0 or not shutdown["receipt"]
+                        or shutdown["receipt"].get("pid") != daemon.pid
+                        or shutdown["receipt"].get("flush_ok") is not True):
+                    raise RuntimeError("Restart lacks a successful shutdown flush")
+                daemon, version = start_node(args, environment, home, sock, root, log)
+                summary["restart"] = {"restored_same_owned_home": True, "node_memory": memory(daemon.pid)}
             peak_node, peak_client, peak_combined = 0, 0, 0
             phase_log = (destination / f"{phase}.log").open("w")
             client = subprocess.Popen(["bun", "src/v2/spike-workload.ts", layout, phase,
@@ -150,6 +187,8 @@ def run_case(args, layout, repeat, output):
                                       env=environment, stdin=subprocess.DEVNULL, stdout=phase_log, stderr=phase_log)
             deadline = time.monotonic() + 900
             while client.poll() is None:
+                if daemon.poll() is not None:
+                    raise RuntimeError("Owned daemon exited during the workload")
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"{layout}/{phase} exceeded its 900-second bound")
                 node_size = memory(daemon.pid).get("VmRSS", 0)
@@ -186,17 +225,9 @@ def run_case(args, layout, repeat, output):
             except subprocess.TimeoutExpired:
                 client.kill()
                 client.wait(timeout=5)
-        if daemon.poll() is None:
-            daemon.terminate()
-            try:
-                daemon.wait(timeout=45)
-            except subprocess.TimeoutExpired:
-                daemon.kill()
-                daemon.wait(timeout=5)
+        if daemon is not None:
+            save(destination / "shutdown.json", stop_node(daemon, home))
         log.close()
-        receipt_path = home / ".shutdown_flush_ready"
-        receipt = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
-        save(destination / "shutdown.json", {"exit_code": daemon.returncode, "receipt": receipt})
         if (root.is_symlink() or root.stat().st_uid != os.getuid() or root.stat().st_ino != owner["inode"]
                 or json.loads((root / "owner.json").read_text()) != owner):
             raise RuntimeError("Owned home identity changed; refuse cleanup")
@@ -225,13 +256,34 @@ def report(results, output, args):
                      f"{create['latency']['p95_ms']:.3f} | {update['latency']['p50_ms']:.3f} | {update['latency']['p95_ms']:.3f} | "
                      f"{max(create['node_peak_sampled_bytes'], update['node_peak_sampled_bytes'])/2**20:.2f} | "
                      f"{max(create['client_peak_sampled_bytes'], update['client_peak_sampled_bytes'])/2**20:.2f} |")
+    comparisons = {}
+    selectors = {
+        "created_allocated_bytes": lambda result: result["phases"]["create"]["disk"]["whole_home"]["allocated_bytes"],
+        "updated_allocated_bytes": lambda result: result["phases"]["update"]["disk"]["whole_home"]["allocated_bytes"],
+        "node_peak_sampled_bytes": lambda result: max(result["phases"][phase]["node_peak_sampled_bytes"] for phase in ("create", "update")),
+        "client_peak_sampled_bytes": lambda result: max(result["phases"][phase]["client_peak_sampled_bytes"] for phase in ("create", "update")),
+        "create_p50_ms": lambda result: result["phases"]["create"]["latency"]["p50_ms"],
+        "update_p50_ms": lambda result: result["phases"]["update"]["latency"]["p50_ms"],
+    }
+    lines += ["", "### Median of paired repeats", "", "| Measure | Current | V2 | V2 relative change |", "|---|---:|---:|---:|"]
+    for name, select in selectors.items():
+        current = median(select(result) for result in results if result["layout"] == "current")
+        candidate = median(select(result) for result in results if result["layout"] == "v2")
+        change = 100 * (candidate / current - 1)
+        comparisons[name] = {"current": current, "v2": candidate, "relative_change_percent": change}
+        lines.append(f"| {name} | {current:.3f} | {candidate:.3f} | {change:+.1f}% |")
+    lines += ["", "### Product operation results", ""]
+    for result in results:
+        verified = result["phases"]["verify"]["verification"]
+        lines.append(f"- Repeat {result['repeat']}, {result['layout']}: {verified['records_verified']} records verified after a daemon restart; older-record update: {verified['older_record_update']}.")
     lines += ["", "Disk includes the whole generated home. Raw metrics separate database, Search delivery queue, and other files.",
               "The default Brain path also maintains counts and bounded keyword fallback pages. V2 does not implement those features yet.",
               "This spike covers scalar lookup molecules and tag memberships. Search delivery is queued; LastSeek, graph, files, and migration are outside this comparison.",
               "No primary data or primary copy is used. No local benchmark or test suite runs.",
               "The prototype remains opt-in. These results do not authorize a primary upgrade."]
     text = "\n".join(lines) + "\n"
-    save(output / "metrics.json", {"source": os.environ["GITHUB_SHA"], "lastdb_revision": args.lastdb_revision, "results": results})
+    save(output / "metrics.json", {"source": os.environ["GITHUB_SHA"], "lastdb_revision": args.lastdb_revision,
+                                   "comparisons": comparisons, "results": results})
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
         stream.write(text)
     print(text)

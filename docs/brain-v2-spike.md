@@ -19,8 +19,9 @@ The result includes:
 - The daemon memory size and the client memory size, with samples every 50 ms.
 - The median, 95th percentile, and 99th percentile for durable create and update calls.
 - The request count per record operation.
-- Keyed read results for every generated record after updates and deletes.
+- Keyed read results for every generated record after updates, deletes, and a daemon restart.
 - Native list continuation, typed status lists, tag lists, duplicate slugs, concurrent edits, and recreation.
+- The actual protein membership for the shared identity field across all four layouts.
 
 The workflow verifies the release archive checksum and the daemon source revision.
 The CI summary contains the comparison. Raw output stays in a CI artifact for 14 days.

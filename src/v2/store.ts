@@ -53,6 +53,13 @@ export class BrainV2Store {
     return recordOf(rows[0]);
   }
 
+  async patch(type: RecordType, slug: string, patch: Partial<FbrainRecord>): Promise<V2Record> {
+    const previous = await this.get(type, slug);
+    if (!previous) throw new Error("Brain v2 patch target is absent");
+    return this.put(type, { ...previous, ...patch, slug,
+      updated_at: patch.updated_at ?? new Date().toISOString() }, previous);
+  }
+
   private async readKeys(keys: string[], fields: string[]): Promise<QueryRow[]> {
     if (!this.node.queryByKeys) throw new Error("Brain v2 requires batched keyed reads");
     return this.node.queryByKeys({ schemaHash: this.schemas.record, fields, keys: keys.map(hash => ({ hash })) });
@@ -116,7 +123,7 @@ export class BrainV2Store {
     const layout = options.tag ? "tag" : options.status ? "status" : options.type ? "type" : "recent";
     const hash = options.tag ?? (options.type ? options.status ? statusKey(options.type, options.status) : options.type : "brain");
     const result = await rawData(this.node, "POST", "/api/query", {
-      schema: this.schemas[layout], fields: [layout === "tag" ? "bt2_id" : "br2_id"],
+      schema_name: this.schemas[layout], fields: [layout === "tag" ? "bt2_id" : "br2_id"],
       filter: { HashKey: hash }, limit, ...(options.cursor ? { cursor: options.cursor } : {}),
     });
     const rows = (result.results ?? result.rows) as Array<Record<string, unknown> & { fields?: Record<string, unknown> }>;

@@ -60,6 +60,30 @@ async function setup(): Promise<void> {
   }
 }
 
+async function proteinBinding(): Promise<{ identity: string; members: number }> {
+  const molecules = await Promise.all(["record", "recent", "type", "status"].map(async layout => {
+    const name = schemas[layout as keyof V2SchemaMap];
+    const metadata = await rawData(node, "GET", `/api/schema/${encodeURIComponent(name)}`);
+    const definition = metadata.schema?.schema ?? metadata.schema;
+    if (!definition?.name) throw new Error("Schema metadata has no canonical name");
+    if (definition.field_molecule_uuids?.br2_id) return String(definition.field_molecule_uuids.br2_id);
+    const digest = createHash("sha256");
+    for (const part of ["lastdb:molecule-uuid:v1", String(definition.name), "br2_id"]) {
+      const bytes = Buffer.from(part), length = Buffer.alloc(4);
+      length.writeUInt32BE(bytes.length);
+      digest.update(length).update(bytes);
+    }
+    return digest.digest("base64url");
+  }));
+  const bindings = await Promise.all(molecules.map(molecule => rawData(node, "GET", `/api/protein/of-molecule/${molecule}`)));
+  const identity = bindings[0]?.protein_uuid;
+  if (typeof identity !== "string" || bindings.some(binding => binding.protein_uuid !== identity)) throw new Error("The native layouts do not share one identity protein");
+  const protein = await rawData(node, "GET", `/api/protein/${identity}`);
+  const members = new Set((protein.members as Array<{ molecule_uuid: string }>).map(member => member.molecule_uuid));
+  if (molecules.some(molecule => !members.has(molecule))) throw new Error("The protein lacks a native lookup member");
+  return { identity, members: members.size };
+}
+
 async function verify(): Promise<Record<string, unknown>> {
   const expected = Array.from({ length: settings.records - 8 }, (_, number) => number);
   const found = new Map<string, Record<string, unknown>>();
@@ -128,22 +152,28 @@ async function verify(): Promise<Record<string, unknown>> {
   if (!ambiguous) throw new Error("V2 untyped get lost slug ambiguity");
   const previous = await store.get("concept", "same-slug");
   if (!previous) throw new Error("V2 collision record is absent");
+  const partial = await store.patch("concept", "same-slug", { title: "Partial title update", updated_at: "2026-02-01T00:00:00.000Z" });
+  if (partial.body !== previous.body || JSON.stringify(partial.tags) !== JSON.stringify(previous.tags)) throw new Error("V2 partial update lost unchanged fields");
   const contenders = await Promise.allSettled([0, 1].map(i => store.put("concept",
-    { ...common, slug: "same-slug", title: `Concurrent edit ${i}`, tags: [], updated_at: new Date(Date.UTC(2026, 2, 1) + i).toISOString() }, previous)));
+    { ...common, slug: "same-slug", title: `Concurrent edit ${i}`, tags: [], updated_at: new Date(Date.UTC(2026, 2, 1) + i).toISOString() }, partial)));
   if (contenders.filter(result => result.status === "fulfilled").length !== 1) throw new Error("V2 revision condition did not reject a concurrent edit");
   const deletion = input(2).record;
-  await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
+  const removed = await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
   await store.delete("concept", "recreated");
   if (await store.get("concept", "recreated")) throw new Error("V2 delete left the canonical record");
-  const oldStatus = await store.list({ type: "concept", status: "active", limit: 100 });
-  if (oldStatus.items.some(row => row.slug === "recreated")) throw new Error("V2 delete left a lookup member");
+  for (const [layout, hash] of [["recent", removed.br2_scope], ["type", removed.br2_type], ["status", removed.br2_status], ["tag", "new-only"]] as const) {
+    const result = await rawData(node, "POST", "/api/query", { schema_name: schemas[layout], fields: [layout === "tag" ? "bt2_id" : "br2_id"],
+      filter: { HashRangeKey: { hash, range: removed.br2_order } }, limit: 1 });
+    if ((result.results ?? result.rows)?.length !== 0) throw new Error(`V2 delete left the exact ${layout} key`);
+  }
   await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
   if (!(await store.get("concept", "recreated"))) throw new Error("V2 recreation failed");
   await Promise.all(Array.from({ length: 8 }, (_, i) => store.put("concept", { ...common, slug: `concurrent-${i}`, tags: [] })));
   const concurrent = await Promise.all(Array.from({ length: 8 }, (_, i) => store.get("concept", `concurrent-${i}`)));
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,
-    duplicate_slugs: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
+    duplicate_slugs: true, partial_update: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
+    identity_protein: await proteinBinding(),
     older_record_update: "accepted", status_scope_example: statusKey("concept", "active") };
 }
 
