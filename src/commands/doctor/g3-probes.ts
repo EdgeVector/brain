@@ -696,10 +696,12 @@ export async function runWriteRoundtripProbe(
   const slug = `doctor-write-roundtrip-${nonce}`;
 
   const wnOpts: WriteNodeClientOptions = {
+    schemaFieldAliases: cfg.schemaFieldAliases,
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
   };
   if (verbose) wnOpts.verbose = verbose;
+  if (cfg.nodeSocketPath !== undefined) wnOpts.socketPath = cfg.nodeSocketPath;
   if (opts.capabilityStore) wnOpts.store = opts.capabilityStore;
   const { node } = (opts.writeNodeFactory ?? newWriteNodeClient)(wnOpts);
 
