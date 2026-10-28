@@ -279,7 +279,8 @@ def report(results, output, args):
         lines.append(f"- Repeat {result['repeat']}, {result['layout']}: {verified['records_verified']} records verified after a daemon restart; older-record update: {verified['older_record_update']}.")
     lines += ["", "Disk includes the whole generated home. Raw metrics separate database, Search delivery queue, and other files.",
               "The default Brain path also maintains counts and bounded keyword fallback pages. V2 does not implement those features yet.",
-              "This spike covers scalar lookup molecules and tag memberships. Search delivery is queued; LastSeek, graph, files, and migration are outside this comparison.",
+              "This spike covers scalar lookup molecules and tag memberships. Search state is retained in the checkpoint status; no Search or LastSeek performance result is claimed.",
+              "Graph relationships, body files, attachments, and migration remain outside this comparison.",
               "No primary data or primary copy is used. No local benchmark or test suite runs.",
               "The prototype remains opt-in. These results do not authorize a primary upgrade."]
     text = "\n".join(lines) + "\n"
