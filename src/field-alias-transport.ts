@@ -4,7 +4,7 @@
 import type { Transport } from "@lastdb/app-sdk";
 export type FieldAliasProfiles = Record<string, Record<string, string>>;
 type ObjectValue = Record<string, unknown>;
-const dataRoute = /^\/api\/(query|queries|mutation|mutations|records|conflicts|app\/search)(\/|$)/;
+const dataRoute = /^\/api\/(query|queries|mutation|mutations|records|conflicts|app\/search|db\/file-blob|sharing\/deliver)(\/|$)/;
 function object(value: unknown): ObjectValue | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : null;
 }
@@ -35,15 +35,16 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
   const result = {...value};
   const aliases = profile(value, profiles);
   if (aliases) {
-    for (const key of ["fields", "fields_and_values"]) {
+    for (const key of ["fields", "fields_and_values", "additional_fields"]) {
       const fields = value[key];
       if (Array.isArray(fields)) result[key] = fields.map((field) => typeof field === "string" ? rename(field, aliases, true) : field);
       else if (object(fields)) result[key] = renameObject(fields as ObjectValue, aliases, true);
     }
+    if (typeof value.field === "string") result.field = rename(value.field,aliases,true);
     const expected = object(value.expected);
     if (expected && typeof expected.field === "string") result.expected = {...expected, field:rename(expected.field, aliases, true)};
   }
-  for (const key of ["queries", "mutations", "keys"]) {
+  for (const key of ["queries", "mutations", "keys", "legs"]) {
     if (Array.isArray(value[key])) result[key] = (value[key] as unknown[]).map((item) => encodeItem(item, profiles));
   }
   return result;
