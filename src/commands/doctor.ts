@@ -45,6 +45,7 @@ import {
 import { runGraphEdgeLintProbe } from "./doctor/graph-lint.ts";
 import { runTagIndexProbe, TAG_INDEX_CHECK } from "./doctor/tag-index.ts";
 import {
+  boundSchemaNames,
   checkSchemaDrift,
   safeListManifests,
   schemaServiceFixHint,
@@ -473,6 +474,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         label,
         cfg.schemaFieldAliases?.[hash] ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema,
         hash,
+        boundSchemaNames(cfg, hash),
       );
       const softened = softenDriftIfMigrated(driftCheck, entry.key, hash, allManifests);
       checks.push(softened);
