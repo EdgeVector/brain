@@ -9,11 +9,9 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 //     (the TagIndex pattern). Carries the attachment entries as JSON plus a
 //     `filenames` array — the only word-indexed (searchable) surface.
 //   - `BrainAttachmentFile` — one record per unique content hash (SHA-256 of
-//     the raw file). The bytes do NOT live in the record: `POST
-//     /api/db/file-blob` uploads them as an encrypted CAS blob to B2
-//     (`{scope}/cas/sha256/…`, metered as file bytes — fold
-//     docs/designs/cloud-file-blobs-on-demand-sync.md) and persists the
-//     returned `$lastdb_file` pointer into the record's `file` field. Reads go
+//     the raw file). The bytes do NOT live in the record. Current Mini stores
+//     them through /api/db/put-blob-local; Brain writes the returned pointer as
+//     the whole Any field. Legacy nodes retain their cloud file route. Reads go
 //     through `POST /api/db/fetch-file-blob` with that pointer and are
 //     sha256-verified here before any byte is handed back.
 //   - `BrainAttachmentBlob` — LEGACY v1 stand-in (base64 bytes in a no_index
@@ -66,7 +64,7 @@ const FILE_FIELDS = ["content_hash", "size", "media_type", "file", "created_at"]
 
 export type AttachmentEntry = {
   name: string;
-  /** `sha256:<hex>` — matches fold's CAS blob_ref convention. */
+  /** Brain's plaintext content identity, distinct from Mini's encrypted blob reference. */
   blob_ref: string;
   size: number;
   media_type: string;
@@ -286,10 +284,7 @@ function requireFileSchemaHash(cfg: Config): string {
   return schemaHash;
 }
 
-// Map a non-200 from the node's file-blob plane to an actionable error. The
-// two structural cases get their own hints: 501 = the daemon binary was built
-// without cloud-sync; 409 = cloud sync is not configured on this node (the
-// file plane uploads through the sync engine's B2 credentials).
+// Map file-route failures. Local write holds differ from legacy cloud setup.
 function filePlaneError(path: string, status: number, body: string): FbrainError {
   const excerpt = body.slice(0, 300);
   if (status === 501) {
@@ -359,11 +354,10 @@ export async function putAttachmentBlob(
   if (existing !== null) {
     return { blobRef: `sha256:${hash}`, deduplicated: true };
   }
-  if (cfg.schemaFieldAliases?.[schemaHash]) {
-    // Current Mini stores local bytes first; the caller writes the pointer.
-    const path = "/api/db/put-blob-local";
-    const stored = await node.rawCall("POST", path, {bytes_b64:Buffer.from(bytes).toString("base64")});
-    if (stored.status !== 200) throw filePlaneError(path,stored.status,stored.body);
+  // Current Mini stores local bytes first; the caller writes the pointer.
+  const path = "/api/db/put-blob-local";
+  const stored = await node.rawCall("POST", path, {bytes_b64:Buffer.from(bytes).toString("base64")});
+  if (stored.status === 200) {
     const root = (stored.json ?? {}) as Record<string,unknown>;
     const data = root.data as Record<string,unknown> | undefined;
     const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
@@ -379,6 +373,10 @@ export async function putAttachmentBlob(
     }});
     return {blobRef:`sha256:${hash}`,deduplicated:false};
   }
+  if (cfg.schemaFieldAliases?.[schemaHash] || ![404,405].includes(stored.status)) {
+    throw filePlaneError(path,stored.status,stored.body);
+  }
+  // Legacy nodes without local file storage retain their previous route.
   const res = await node.rawCall("POST", "/api/db/file-blob", {
     schema: schemaHash,
     field: "file",

@@ -727,6 +727,7 @@ Date fields use `DateTime` when the current wire value is an RFC 3339 instant.
 Decimal text and optional date text keep explicit text definitions.
 This change does not infer value conversions from a field name.
 
-Canonical homes store attachment bytes through the current local file command.
+Current Mini stores attachment bytes through the local file command.
 A separate mapped mutation stores the complete native pointer in its `Any` field.
-This path needs no cloud account. Legacy configs keep their existing attachment command.
+This path needs no cloud account. Legacy configs use it on current Mini.
+Older nodes without this command keep their previous attachment command.
