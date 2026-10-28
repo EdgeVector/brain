@@ -284,7 +284,13 @@ async function resolveFilterMatches(
   opts: DeleteByFilterOptions,
 ): Promise<{ matches: FilterMatch[]; partial: boolean }> {
   const types = opts.type ? [opts.type] : RECORD_TYPES.filter(type => Boolean(opts.cfg.schemaHashes[type]));
-  const hashes = opts.tag ? [`tag#${opts.tag}`] : types.map(type => opts.status ? `${type}#${opts.status}` : type);
+  // Older homes can lack a status page until backfill. Preserve the type
+  // membership source, then check current status without fetching any bodies.
+  const hashes = opts.tag ? [`tag#${opts.tag}`] : types;
+  if (opts.tag) {
+    const head = await readStoredPage(node, opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "", hashes[0]!, HEAD_RANGE);
+    if (head.kind !== "page") return { matches: [], partial: true };
+  }
   const chains = await Promise.all(hashes.map(hash => readPageChain(node, opts.cfg, hash)));
   if (chains.some(chain => chain === null)) return { matches: [], partial: true };
   const byType = new Map<RecordType, Set<string>>();
