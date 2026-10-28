@@ -214,6 +214,7 @@ def run_case(args, layout, repeat, output):
             if phase == "verify":
                 checkpoint["verification"] = measured["verification"]
             summary["phases"][phase] = checkpoint
+            save(destination / f"{phase}-checkpoint.json", checkpoint)
             print(f"{destination.name}: {phase} complete", flush=True)
         save(destination / "metrics.json", summary)
         return summary

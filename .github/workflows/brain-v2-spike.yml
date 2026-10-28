@@ -38,12 +38,19 @@ jobs:
           tar -xzf "$RUNNER_TEMP/brain-v2-binary/bundle.tar.gz" -C "$RUNNER_TEMP/brain-v2-binary"
           "$RUNNER_TEMP/brain-v2-binary/lastdbd" --version
           printf 'Release: %s\nSource: %s\nBundle SHA-256: %s\n' "$LASTDB_TAG" "$LASTDB_REVISION" "$LASTDB_BUNDLE_SHA256" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify real operations before the full measurement
+        run: >-
+          python3 scripts/brain_v2_spike.py
+          --lastdbd "$RUNNER_TEMP/brain-v2-binary/lastdbd"
+          --lastdb-revision "$LASTDB_REVISION"
+          --output "$RUNNER_TEMP/brain-v2-results/operations"
+          --records 128 --body-bytes 4096 --repeats 1
       - name: Measure real record operations on paired fresh homes
         run: >-
           python3 scripts/brain_v2_spike.py
           --lastdbd "$RUNNER_TEMP/brain-v2-binary/lastdbd"
           --lastdb-revision "$LASTDB_REVISION"
-          --output "$RUNNER_TEMP/brain-v2-results"
+          --output "$RUNNER_TEMP/brain-v2-results/measurements"
           --records 1024 --body-bytes 4096 --repeats 3
       - name: Retain the source and raw measurements
         if: always()

@@ -81,8 +81,12 @@ export class BrainV2Store {
     const expected = previous
       ? { type: "value" as const, field: "br2_revision", value: previous.br2_revision }
       : { type: "absent" as const, field: "br2_revision" };
+    // A field molecule can retain its current value. Write only changed fields;
+    // the node reads persisted routing fields when a protein key must move.
+    const fields = previous ? Object.fromEntries(Object.entries(next).filter(([name, value]) =>
+      JSON.stringify(previous[name]) !== JSON.stringify(value))) : next;
     const ops: BatchMutationOp[] = [{ mutationType: previous ? "update" : "create",
-      schemaHash: this.schemas.record, keyHash: id, fields: next, expected }];
+      schemaHash: this.schemas.record, keyHash: id, fields, expected }];
     if (previous) ops.push(...this.tagDeletes(previous));
     ops.push(...next.tags.map(tag => ({ mutationType: "create" as const,
       schemaHash: this.schemas.tag, keyHash: tag, keyRange: next.br2_order,
