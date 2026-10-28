@@ -212,6 +212,8 @@ def report(results, output, args):
     lines = ["## Brain v2 molecule spike", "", f"Source: `{os.environ['GITHUB_SHA']}`.",
              f"LastDB: `{args.lastdb_revision}`. Binary SHA-256: `{hashlib.sha256(args.lastdbd.read_bytes()).hexdigest()}`.",
              f"Each fresh home receives {args.records} records, {args.body_bytes} body bytes, two tags, and two record types.",
+             f"Update timing uses {args.records//4} writes to the sixteen most recent records. Eight recent records are then deleted.",
+             "An older-record update runs separately and retains the current layout's refusal as an operational finding.",
              "Both layouts use the same release daemon, host, disk format, encryption defaults, and durable create/update calls.",
              "Order alternates between paired repeats. Memory values are process memory; samples occur every 50 ms.", "",
              "| Repeat | Layout | Created disk MiB | Updated disk MiB | Create p50 ms | Create p95 ms | Update p50 ms | Update p95 ms | Node peak MiB | Client peak MiB |", "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
@@ -246,8 +248,8 @@ def main():
     args = parser.parse_args()
     if os.environ.get("CI") != "true" or platform.system() != "Linux":
         parser.error("Measurements run only on a Linux CI worker")
-    if not (64 <= args.records <= 10_000 and args.records % 4 == 0 and 256 <= args.body_bytes <= 16384 and 1 <= args.repeats <= 5):
-        parser.error("Use 64..10000 records divisible by four, 256..16384 body bytes, and 1..5 repeats")
+    if not (128 <= args.records <= 10_000 and args.records % 64 == 0 and 256 <= args.body_bytes <= 16384 and 1 <= args.repeats <= 5):
+        parser.error("Use 128..10000 records divisible by 64, 256..16384 body bytes, and 1..5 repeats")
     args.lastdbd = args.lastdbd.resolve(strict=True)
     args.output.mkdir(parents=True, exist_ok=False)
     results = []

@@ -7,7 +7,8 @@ Proteins share their field atoms. A separate schema holds tag memberships.
 
 The CI workflow compares the current Brain write plan with the adapter on the same pinned LastDB release.
 Each layout receives 1,024 generated records, 4,096 body bytes per record, two tags, and two record types.
-The workload updates one quarter of the records and deletes sixteen records.
+The workload sends 256 updates to the sixteen most recent records and deletes eight recent records.
+It measures an older-record update separately because the current layout can refuse that operation after page overflow.
 Three paired repeats alternate the layout order on one CI worker.
 Every repeat uses a fresh generated home.
 

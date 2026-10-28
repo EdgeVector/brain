@@ -26,18 +26,18 @@ const samples: Array<{ number: number; elapsed_ms: number; requests: number }> =
 const digest = createHash("sha256");
 const types: RecordType[] = ["concept", "reference"];
 
-function input(number: number, updated = false): { type: RecordType; record: FbrainRecord } {
+function input(number: number, updated = false, revision = 1): { type: RecordType; record: FbrainRecord } {
   const type = types[number % 2]!;
-  const body = `${updated ? "Updated" : "Original"} content for record ${number}. ` + "A durable note about molecules and shared field values. ".repeat(Math.ceil(settings.bodyBytes / 54));
-  const time = new Date(Date.UTC(2026, 0, 1) + number * 1000 + (updated ? 86_400_000 : 0)).toISOString();
+  const body = `${updated ? `Updated revision ${revision}` : "Original"} content for record ${number}. ` + "A durable note about molecules and shared field values. ".repeat(Math.ceil(settings.bodyBytes / 54));
+  const time = new Date(Date.UTC(2026, 0, 1) + number * 1000 + (updated ? 86_400_000 * revision : 0)).toISOString();
   return { type, record: { slug: `record-${number}`, title: `Molecule design note ${number}`,
     body: body.slice(0, settings.bodyBytes), status: updated ? type === "concept" ? "parked" : "archived" : "active",
     tags: ["shared", `topic-${(number + (updated ? 1 : 0)) % 8}`],
     created_at: new Date(Date.UTC(2026, 0, 1) + number * 1000).toISOString(), updated_at: time } };
 }
 
-async function write(number: number, updated = false): Promise<void> {
-  const { type, record } = input(number, updated);
+async function write(number: number, updated = false, revision = 1): Promise<void> {
+  const { type, record } = input(number, updated, revision);
   digest.update(JSON.stringify([type, record]));
   const started = performance.now(), before = requests;
   if (layout === "v2") await store.put(type, record);
@@ -61,7 +61,7 @@ async function setup(): Promise<void> {
 }
 
 async function verify(): Promise<Record<string, unknown>> {
-  const expected = Array.from({ length: settings.records }, (_, number) => number).filter(number => number >= 16);
+  const expected = Array.from({ length: settings.records - 8 }, (_, number) => number);
   const found = new Map<string, Record<string, unknown>>();
   for (let offset = 0; offset < settings.records; offset += 100) {
     const numbers = Array.from({ length: Math.min(100, settings.records - offset) }, (_, i) => i + offset);
@@ -79,13 +79,22 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   if (found.size !== expected.length) throw new Error(`Record membership differs: ${found.size} != ${expected.length}`);
   for (const number of expected) {
-    const { record } = input(number, number < settings.records / 4);
+    const { record } = input(number, number >= settings.records - 16, settings.records / 64);
     const actual = found.get(record.slug);
     for (const [field, value] of Object.entries(record)) {
       if (JSON.stringify(actual?.[field]) !== JSON.stringify(value)) throw new Error(`Stored value differs: ${record.slug}.${field}`);
     }
   }
-  if (layout !== "v2") return { records_verified: found.size, limits: "Current list pages retain their existing concurrency and sample contract" };
+  if (layout !== "v2") {
+    let olderUpdate: string | null = null;
+    try { await write(16, true); }
+    catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "list_membership_unproven") throw error;
+      olderUpdate = String(error.code);
+    }
+    return { records_verified: found.size, older_record_update: olderUpdate ?? "accepted",
+      limits: "Recent-update latency is paired. The older-record attempt is a separate operational result." };
+  }
   const ids = new Set<string>();
   let cursor: unknown;
   for (let page = 0; page < Math.ceil(settings.records / 100) + 2; page++) {
@@ -108,6 +117,9 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   const tag = await store.list({ tag: "shared", limit: 20 });
   if (tag.items.length !== 20) throw new Error("V2 tag list is incomplete");
+  await write(16, true);
+  const older = await store.get("concept", "record-16");
+  if (!older || older.status !== "parked") throw new Error("V2 older-record update failed");
   const common = input(0).record;
   await store.put("concept", { ...common, slug: "same-slug", tags: [] });
   await store.put("reference", { ...common, slug: "same-slug", tags: [] });
@@ -132,15 +144,19 @@ async function verify(): Promise<Record<string, unknown>> {
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,
     duplicate_slugs: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
-    status_scope_example: statusKey("concept", "active") };
+    older_record_update: "accepted", status_scope_example: statusKey("concept", "active") };
 }
 
 let verification: Record<string, unknown> | undefined;
 if (phase === "setup") await setup();
 else if (phase === "create") for (let number = 0; number < settings.records; number++) await write(number);
-else if (phase === "update") for (let number = 0; number < settings.records / 4; number++) await write(number, true);
+else if (phase === "update") {
+  for (let operation = 0; operation < settings.records / 4; operation++) {
+    await write(settings.records - 16 + operation % 16, true, Math.floor(operation / 16) + 1);
+  }
+}
 else if (phase === "delete") {
-  for (let number = 0; number < 16; number++) {
+  for (let number = settings.records - 8; number < settings.records; number++) {
     const { type, record } = input(number, true), started = performance.now(), before = requests;
     digest.update(JSON.stringify([type, record.slug]));
     if (layout === "v2") await store.delete(type, record.slug);
