@@ -159,7 +159,7 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   if (ids.size !== found.size) throw new Error(`V2 list membership differs: ${ids.size} != ${found.size}`);
   const initialCounts = await store.counts();
-  if (initialCounts.total !== found.size || initialCounts.types.concept !== found.size / 2 || initialCounts.types.reference !== found.size / 2) throw new Error("V2 native counts differ after deletes");
+  if (initialCounts.total !== found.size || initialCounts.types.concept !== found.size / 2 || initialCounts.types.reference !== found.size / 2) throw new Error("V2 counts differ after deletes");
   for (const type of types) {
     for (const status of ["active", type === "concept" ? "parked" : "archived"]) {
       const list = await store.list({ type, status, limit: 20 });
@@ -226,7 +226,7 @@ async function verify(): Promise<Record<string, unknown>> {
   await Promise.all(Array.from({ length: 8 }, (_, i) => store.put("concept", { ...common, slug: `concurrent-${i}`, tags: [] })));
   const concurrent = await Promise.all(Array.from({ length: 8 }, (_, i) => store.get("concept", `concurrent-${i}`)));
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
-  if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 native count differs after recreation and concurrent creates");
+  if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 count differs after recreation and concurrent creates");
   const pageLifecycle = await verifySummaryPageLifecycle(store, common);
   const queryFormats = nativeReads ? await verifyQueryFormats(node, schemas, settings.records + 3, !!paged) : undefined;
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,

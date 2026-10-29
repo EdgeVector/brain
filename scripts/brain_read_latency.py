@@ -151,7 +151,7 @@ def report(args, runs):
                              f"{before['failed']}/{before['attempted']}; {after['failed']}/{after['attempted']} |")
     lines += ["", "Read results require exact generated membership and field values. Raw samples include response bytes and sampled memory sizes.",
               "Migration read measures the source read, without schema publication or migration writes. Bulk selection does not delete data.",
-              "Each layout uses its implemented count path. The opt-in shared-read candidate batches exact native counts without probe records.",
+              "Each layout uses its implemented count path. The optional canonical-page adapter reads app counts maintained in the guarded source write.",
               "Per-request profiles retain schema, selected fields, bytes, and elapsed time. Elapsed sums overlap for concurrent requests.",
               "Only the current Brain keyword fallback is measured. LastSeek is absent. V2 search is unsupported and is not compared.",
               "Low sample counts limit tail estimates. No primary, primary copy, local benchmark, or test suite is used."]

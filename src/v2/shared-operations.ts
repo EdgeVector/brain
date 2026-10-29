@@ -120,7 +120,7 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
         if (row.metadata.br2_content.atom_uuid !== canonical?.atom || record.title !== canonical.record.title || body !== canonical.record.body) throw new Error("Protein member did not retain its shared content atom");
       }
     }));
-    if ((await ctx.store.counts()).total !== ctx.records + 3) throw new Error("Partial edits changed native counts");
+    if ((await ctx.store.counts()).total !== ctx.records + 3) throw new Error("Partial edits changed counts");
   }
   return { samples, verification: { edits: 64, distinct_records: after.size, unchanged_content_atoms: true, native_member_key_moves: ctx.layout === "v2",
     content_atoms: Object.fromEntries([...after].map(([slug, value]) => [slug, value.atom])) } };

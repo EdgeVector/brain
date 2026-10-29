@@ -221,7 +221,7 @@ async function operation(name: string): Promise<number> {
       if (store.counts) {
         const result = await store.counts();
         verificationChecks.push(() => {
-          if (result.total !== settings.records || definitions.RECORD_TYPES.some((type: RecordType) => result.types[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("V2 native counts incomplete");
+          if (result.total !== settings.records || definitions.RECORD_TYPES.some((type: RecordType) => result.types[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("V2 counts incomplete");
         });
         return result.total;
       }
