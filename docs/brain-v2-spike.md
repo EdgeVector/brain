@@ -179,3 +179,30 @@ Shared atoms do not remove the cost of each selected molecule key.
 Current Brain can return cached summaries and counts through fewer keys.
 V2 retains native membership checks and pages by key.
 Do not infer a speed gain for every operation from the full-record result.
+
+## Canonical summary page spike
+
+The optional paged adapter replaces the per-record summary atoms and the count-member molecule.
+It stores each summary once, in a bounded page with compact values and shared tag and status dictionaries.
+A directory at the known `brain` key gives the page keys, range boundaries, counts, and a revision.
+The record, its summary pages, and the directory change in one native durable batch.
+Both the source revision and the directory value guard that batch.
+Only an explicit CAS refusal permits a retry. A transport error does not permit a write retry.
+
+Pages split before the atom limit. The directory supports at most 500 pages.
+A page split changes the directory and its pages without a rewrite of the other record keys.
+Readers fetch the directory and known page keys through captured keyed batches.
+They reject a changed directory, missing page, duplicate identity, or count mismatch.
+Counts read the same directory that the guarded source write updates.
+This is an app count maintained with the source write, rather than a native membership sweep.
+Raw edits to internal schemas are outside the adapter write contract.
+
+The body and identity fields still use native proteins for type and status keys.
+The global recent molecule is unnecessary because the canonical pages already order summaries.
+The paged layout has six schemas and 21 field declarations.
+It requires a fresh generated home and remains separate from normal Brain initialization.
+CI measures the retained optimized V2 and the paged V2 on the same accepted LastDB program.
+The summary and count p50 and p95 must beat current Brain after restart and warm, at both corpus sizes.
+Disk median and maximum must not exceed retained V2 at any checkpoint.
+Real app write checkpoints must also stay below current Brain.
+The primary and its archive stay unchanged.

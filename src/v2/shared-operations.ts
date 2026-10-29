@@ -5,8 +5,8 @@ import type { RecordType } from "../schemas.ts";
 import { decodeV2Record, rawData, recordKey } from "./store.ts";
 import { V2_STORED_FIELDS, type V2SchemaMap } from "./schemas.ts";
 
-export async function verifyQueryFormats(node: NodeClient, schemas: V2SchemaMap, total: number): Promise<unknown> {
-  const query = { schema_name: schemas.record, fields: ["br2_card", "br2_content", "br2_count_hash"],
+export async function verifyQueryFormats(node: NodeClient, schemas: V2SchemaMap, total: number, paged = false): Promise<unknown> {
+  const query = { schema_name: schemas.record, fields: paged ? ["br2_id", "br2_content", "br2_revision"] : ["br2_card", "br2_content", "br2_count_hash"],
     filter: { HashKey: recordKey("concept", "record-16") }, limit: 1 };
   const full = await rawData(node, "POST", "/api/query", query);
   const values = await rawData(node, "POST", "/api/query", { ...query, response_format: "values" });
@@ -17,8 +17,8 @@ export async function verifyQueryFormats(node: NodeClient, schemas: V2SchemaMap,
   for (const name of ["unresolved_rows", "tombstoned_rows", "key_form", "conflict_flags", "has_more", "next_cursor"]) {
     if (!(name in values) || JSON.stringify(values[name]) !== JSON.stringify(full[name])) throw new Error(`Compact query lost ${name}`);
   }
-  const hash = full.results[0].fields.br2_count_hash;
-  const countQuery = { schema_name: schemas.count, fields: ["br2_id"], filter: { HashKey: hash } };
+  const hash = paged ? recordKey("concept", "record-16") : full.results[0].fields.br2_count_hash;
+  const countQuery = { schema_name: paged ? schemas.record : schemas.count, fields: ["br2_id"], filter: { HashKey: hash } };
   const legacy = await rawData(node, "POST", "/api/query", { ...countQuery, sort_order: "Desc", limit: 1 });
   const batch = await rawData(node, "POST", "/api/queries/batch", { queries: [
     { ...query, response_format: "values" }, { ...countQuery, response_format: "count" }, query,
@@ -50,11 +50,13 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
     const layouts = ctx.layout === "v2" ? ["v2"] : ["concept", "reference"];
     const pages = await Promise.all(layouts.map(async layout => {
       const keys = numbers.filter(number => layout === "v2" || identity(number).type === layout);
-      const result = await rawData(ctx.node, "POST", "/api/query", { schema_name: layout === "v2" ? ctx.schemas.record : ctx.cfg.schemaHashes[layout],
-        fields: layout === "v2" ? V2_STORED_FIELDS : ["slug", "title", "body", "status", "tags", "created_at", "updated_at"],
-        filter: { HashRangeKeys: keys.map(number => { const key = identity(number); return [layout === "v2" ? ctx.recordKey(key.type, key.slug) : key.slug, ""]; }) }, limit: 100 });
+      const [result, records] = await Promise.all([rawData(ctx.node, "POST", "/api/query", { schema_name: layout === "v2" ? ctx.schemas.record : ctx.cfg.schemaHashes[layout],
+        fields: layout === "v2" ? ctx.store.paged ? ["br2_id", "br2_content"] : V2_STORED_FIELDS : ["slug", "title", "body", "status", "tags", "created_at", "updated_at"],
+        filter: { HashRangeKeys: keys.map(number => { const key = identity(number); return [layout === "v2" ? ctx.recordKey(key.type, key.slug) : key.slug, ""]; }) }, limit: 100 }),
+        ctx.store.paged && layout === "v2" ? ctx.store.getMany(keys.map(identity)) : Promise.resolve([])]);
+      const byId = new Map<string, any>(records.map((record: any) => [record.br2_id, record]));
       if (result.unresolved_rows !== 0 || result.tombstoned_rows !== 0 || result.has_more || result.results.length !== keys.length) throw new Error("Partial-write snapshot is incomplete");
-      return result.results.map((row: any) => ({ record: layout === "v2" ? ctx.decodeV2Record(row.fields, true) : row.fields,
+      return result.results.map((row: any) => ({ record: layout === "v2" ? ctx.store.paged ? byId.get(row.fields.br2_id) : ctx.decodeV2Record(row.fields, true) : row.fields,
         atom: row.metadata?.[layout === "v2" ? "br2_content" : "body"]?.atom_uuid }));
     }));
     return new Map(pages.flat().map((item: any) => [item.record.slug, item]));
@@ -88,13 +90,15 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
     }
   }
   if (ctx.layout === "v2") {
-    await Promise.all((["recent", "type", "status"] as const).map(async layout => {
+    await Promise.all(((ctx.store.paged ? ["type", "status"] : ["recent", "type", "status"]) as Array<"recent" | "type" | "status">).map(async layout => {
       const coordinates = [...after.values()].map(({ record }) => [layout === "recent" ? record.br2_scope : layout === "type" ? record.br2_type : record.br2_status, record.br2_order]);
-      const page = await rawData(ctx.node, "POST", "/api/query", { schema_name: ctx.schemas[layout], fields: ["br2_card", "br2_content"], filter: { HashRangeKeys: coordinates }, limit: 100 });
+      const page = await rawData(ctx.node, "POST", "/api/query", { schema_name: ctx.schemas[layout], fields: [ctx.store.paged ? "br2_id" : "br2_card", "br2_content"], filter: { HashRangeKeys: coordinates }, limit: 100 });
       if (page.unresolved_rows !== 0 || page.tombstoned_rows !== 0 || page.results.length !== after.size) throw new Error("Partial key move lost a protein member");
       for (const row of page.results) {
-        const record = ctx.decodeV2Record(row.fields, true), canonical = after.get(record.slug);
-        if (row.metadata.br2_content.atom_uuid !== canonical?.atom || record.title !== canonical.record.title || record.body !== canonical.record.body) throw new Error("Protein member did not retain its shared content atom");
+        const record = ctx.store.paged ? [...after.values()].find(item => item.record.br2_id === row.fields.br2_id)?.record : ctx.decodeV2Record(row.fields, true);
+        const canonical = after.get(record?.slug);
+        const body = ctx.store.paged ? JSON.parse(row.fields.br2_content).body : record.body;
+        if (row.metadata.br2_content.atom_uuid !== canonical?.atom || record.title !== canonical.record.title || body !== canonical.record.body) throw new Error("Protein member did not retain its shared content atom");
       }
     }));
     if ((await ctx.store.counts()).total !== ctx.records + 3) throw new Error("Partial edits changed native counts");
@@ -104,19 +108,20 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
 }
 
 export async function verifyPartialAfterRestart(node: NodeClient, layout: string, schemas: V2SchemaMap, cfg: Config,
-  records: number, proof: any, codec: { key: typeof recordKey; decode: typeof decodeV2Record }): Promise<Record<string, unknown>> {
+  records: number, proof: any, codec: { key: typeof recordKey; decode: typeof decodeV2Record }, store?: any): Promise<Record<string, unknown>> {
   const identities = Array.from({ length: 8 }, (_, offset) => ({ type: ((records - 16 + offset) % 2 ? "reference" : "concept") as RecordType,
     slug: `record-${records - 16 + offset}`, title: `Summary-only edit ${56 + offset}` }));
   const pages = await Promise.all((layout === "v2" ? ["v2"] : ["concept", "reference"]).map(async type => {
     const keys = identities.filter(key => type === "v2" || key.type === type);
     const page = await rawData(node, "POST", "/api/query", { schema_name: type === "v2" ? schemas.record : cfg.schemaHashes[type],
-      fields: type === "v2" ? V2_STORED_FIELDS : ["slug", "title", "body"],
+      fields: type === "v2" ? store?.paged ? ["br2_id", "br2_content"] : V2_STORED_FIELDS : ["slug", "title", "body"],
       filter: { HashRangeKeys: keys.map(key => [type === "v2" ? codec.key(key.type, key.slug) : key.slug, ""]) }, limit: 100 });
     if (page.unresolved_rows !== 0 || page.tombstoned_rows !== 0 || page.has_more || page.results.length !== keys.length) throw new Error("Partial restart read is incomplete");
     return page.results;
   }));
+  const decoded = store?.paged && layout === "v2" ? await store.getMany(identities) : [];
   for (const row of pages.flat()) {
-    const record = layout === "v2" ? codec.decode(row.fields, true) : row.fields;
+    const record = layout === "v2" ? store?.paged ? decoded.find((record: any) => record.br2_id === row.fields.br2_id) : codec.decode(row.fields, true) : row.fields;
     const expected = identities.find(key => key.slug === record.slug);
     if (!expected || record.title !== expected.title || !record.body
         || row.metadata?.[layout === "v2" ? "br2_content" : "body"]?.atom_uuid !== proof.content_atoms?.[record.slug]) throw new Error("Partial restart lost its title or content atom");

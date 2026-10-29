@@ -31,7 +31,7 @@ def measure(args, layout, version, source, repeat):
                        LASTDB_HOME=str(home), FOLDDB_HOME=str(home), FBRAIN_FOLDDB_SOCKET=str(sock),
                        FBRAIN_APP_IDENTITY_ENFORCE="off", BRAIN_CONFIG=str(root / "config.json"),
                        BRAIN_READ_SOURCE=str(source), BRAIN_READ_VERSION=version, LAST_STACK_HEARTBEATS_FILE=str(root / "absent-heartbeats"),
-                       BRAIN_SHARED_READS="1" if getattr(args, "native_reads", False) and version == "after" else "0",
+                       BRAIN_SHARED_READS="1" if getattr(args, "native_reads", False) else "0",
                        LASTSEEK_BIN=str(root / "absent-lastseek"), RUST_MIN_STACK="16777216")
     log = (destination / "node.log").open("w")
     daemon, client = None, None
