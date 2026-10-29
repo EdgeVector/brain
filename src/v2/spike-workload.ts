@@ -15,7 +15,7 @@ const { newNodeClient } = await import(resolve(source, "src/client.ts"));
 const { findBySlug } = await import(resolve(source, "src/record.ts"));
 const { buildResidentWritePlan, commitResidentWritePlan } = await import(resolve(source, "src/resident-write-plan.ts"));
 const { UNIQUE_SCHEMAS } = await import(resolve(source, "src/schemas.ts"));
-const { BrainV2Store, rawData, statusKey } = await import(resolve(source, "src/v2/store.ts"));
+const { BrainV2Store, rawData, statusKey, recordKey, decodeV2Record } = await import(resolve(source, "src/v2/store.ts"));
 const { V2_SCHEMAS } = await import(resolve(source, "src/v2/schemas.ts"));
 
 if (process.env.CI !== "true" || process.env.LASTDB_ISOLATED_COPY !== "1") throw new Error("Run this workload only in CI on a fresh generated home");
@@ -79,7 +79,7 @@ async function setup(): Promise<void> {
 }
 
 async function proteinBinding(field = "br2_id"): Promise<{ identity: string; members: number }> {
-  const layouts = field === "br2_id" ? ["record", "count"] : ["record", "recent", "type", "status"];
+  const layouts = field === "br2_id" ? ["record", "recent", "type", "status", "count"] : ["record", "recent", "type", "status"];
   const molecules = await Promise.all(layouts.map(async layout => {
     const name = schemas[layout as keyof V2SchemaMap];
     const metadata = await rawData(node, "GET", `/api/schema/${encodeURIComponent(name)}`);
@@ -225,12 +225,12 @@ else if (phase === "delete") {
 } else if (phase === "verify") verification = await verify();
 else if (phase === "partial") {
   const result = await summaryPatchOperations({ node, store, schemas, cfg, layout: layout!, records: settings.records,
-    nativeReads, requests: () => requests, findBySlug, buildResidentWritePlan, commitResidentWritePlan });
+    nativeReads, requests: () => requests, findBySlug, buildResidentWritePlan, commitResidentWritePlan, recordKey, decodeV2Record });
   samples.push(...result.samples); verification = result.verification;
 }
 else if (phase === "reopen_partial") {
   const proof = JSON.parse(readFileSync(resolve(dirname(outputPath), "partial.json"), "utf8")).verification;
-  verification = await verifyPartialAfterRestart(node, layout!, schemas, cfg, settings.records, proof);
+  verification = await verifyPartialAfterRestart(node, layout!, schemas, cfg, settings.records, proof, { key: recordKey, decode: decodeV2Record });
 }
 else throw new Error(`Unknown spike phase: ${phase}`);
 writeFileSync(outputPath, JSON.stringify({ layout, phase, requests, input_sha256: digest.digest("hex"), samples, verification }, null, 2) + "\n");

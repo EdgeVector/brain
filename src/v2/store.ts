@@ -21,7 +21,9 @@ function countHash(type: RecordType, id: string): string {
 }
 
 export function recordKey(type: RecordType, slug: string): string {
-  return `v2:${Buffer.from(JSON.stringify([type, slug])).toString("base64url")}`;
+  // The fixed enum contains no colon, so the first separator after the prefix
+  // uniquely divides type and opaque slug. No JSON/base64 expansion is needed.
+  return `v2c:${type}:${slug}`;
 }
 export function statusKey(type: RecordType, status: string): string { return JSON.stringify([type, status]); }
 export function orderKey(id: string, time: string): string {

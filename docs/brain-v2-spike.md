@@ -140,8 +140,10 @@ Full replies remain the default for other clients.
 Exact native counts use batch queries without a probe record.
 Two hashes share one request, and at most four requests run at once.
 The node keeps one aggregate work budget for each request.
-This mode keeps six schemas and removes three redundant identity molecules.
-It uses 26 field declarations. The shared summary identifies each lookup record.
+This mode keeps six schemas and 29 field declarations.
+The identity molecules remain necessary for native protein key moves.
+Compact identities use a fixed type prefix and the slug without JSON/base64 expansion.
+This key encoding requires a fresh generated home; the spike does not convert old keys.
 It adds no stored page copy, count cache, or document.
 
 `patchSummary` edits a title, status, tags, or update time without a client read

@@ -40,7 +40,8 @@ export async function verifyQueryFormats(node: NodeClient, schemas: V2SchemaMap,
 }
 
 type PatchContext = { node: NodeClient; store: any; schemas: V2SchemaMap; cfg: Config; layout: string; records: number;
-  nativeReads: boolean; requests: () => number; findBySlug: any; buildResidentWritePlan: any; commitResidentWritePlan: any };
+  nativeReads: boolean; requests: () => number; findBySlug: any; buildResidentWritePlan: any; commitResidentWritePlan: any;
+  recordKey: typeof recordKey; decodeV2Record: typeof decodeV2Record };
 
 export async function summaryPatchOperations(ctx: PatchContext): Promise<{ samples: any[]; verification: Record<string, unknown> }> {
   const numbers = Array.from({ length: 8 }, (_, offset) => ctx.records - 16 + offset);
@@ -51,9 +52,9 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
       const keys = numbers.filter(number => layout === "v2" || identity(number).type === layout);
       const result = await rawData(ctx.node, "POST", "/api/query", { schema_name: layout === "v2" ? ctx.schemas.record : ctx.cfg.schemaHashes[layout],
         fields: layout === "v2" ? V2_STORED_FIELDS : ["slug", "title", "body", "status", "tags", "created_at", "updated_at"],
-        filter: { HashRangeKeys: keys.map(number => { const key = identity(number); return [layout === "v2" ? recordKey(key.type, key.slug) : key.slug, ""]; }) }, limit: 100 });
+        filter: { HashRangeKeys: keys.map(number => { const key = identity(number); return [layout === "v2" ? ctx.recordKey(key.type, key.slug) : key.slug, ""]; }) }, limit: 100 });
       if (result.unresolved_rows !== 0 || result.tombstoned_rows !== 0 || result.has_more || result.results.length !== keys.length) throw new Error("Partial-write snapshot is incomplete");
-      return result.results.map((row: any) => ({ record: layout === "v2" ? decodeV2Record(row.fields, true) : row.fields,
+      return result.results.map((row: any) => ({ record: layout === "v2" ? ctx.decodeV2Record(row.fields, true) : row.fields,
         atom: row.metadata?.[layout === "v2" ? "br2_content" : "body"]?.atom_uuid }));
     }));
     return new Map(pages.flat().map((item: any) => [item.record.slug, item]));
@@ -92,7 +93,7 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
       const page = await rawData(ctx.node, "POST", "/api/query", { schema_name: ctx.schemas[layout], fields: ["br2_card", "br2_content"], filter: { HashRangeKeys: coordinates }, limit: 100 });
       if (page.unresolved_rows !== 0 || page.tombstoned_rows !== 0 || page.results.length !== after.size) throw new Error("Partial key move lost a protein member");
       for (const row of page.results) {
-        const record = decodeV2Record(row.fields, true), canonical = after.get(record.slug);
+        const record = ctx.decodeV2Record(row.fields, true), canonical = after.get(record.slug);
         if (row.metadata.br2_content.atom_uuid !== canonical?.atom || record.title !== canonical.record.title || record.body !== canonical.record.body) throw new Error("Protein member did not retain its shared content atom");
       }
     }));
@@ -103,19 +104,19 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
 }
 
 export async function verifyPartialAfterRestart(node: NodeClient, layout: string, schemas: V2SchemaMap, cfg: Config,
-  records: number, proof: any): Promise<Record<string, unknown>> {
+  records: number, proof: any, codec: { key: typeof recordKey; decode: typeof decodeV2Record }): Promise<Record<string, unknown>> {
   const identities = Array.from({ length: 8 }, (_, offset) => ({ type: ((records - 16 + offset) % 2 ? "reference" : "concept") as RecordType,
     slug: `record-${records - 16 + offset}`, title: `Summary-only edit ${56 + offset}` }));
   const pages = await Promise.all((layout === "v2" ? ["v2"] : ["concept", "reference"]).map(async type => {
     const keys = identities.filter(key => type === "v2" || key.type === type);
     const page = await rawData(node, "POST", "/api/query", { schema_name: type === "v2" ? schemas.record : cfg.schemaHashes[type],
       fields: type === "v2" ? V2_STORED_FIELDS : ["slug", "title", "body"],
-      filter: { HashRangeKeys: keys.map(key => [type === "v2" ? recordKey(key.type, key.slug) : key.slug, ""]) }, limit: 100 });
+      filter: { HashRangeKeys: keys.map(key => [type === "v2" ? codec.key(key.type, key.slug) : key.slug, ""]) }, limit: 100 });
     if (page.unresolved_rows !== 0 || page.tombstoned_rows !== 0 || page.has_more || page.results.length !== keys.length) throw new Error("Partial restart read is incomplete");
     return page.results;
   }));
   for (const row of pages.flat()) {
-    const record = layout === "v2" ? decodeV2Record(row.fields, true) : row.fields;
+    const record = layout === "v2" ? codec.decode(row.fields, true) : row.fields;
     const expected = identities.find(key => key.slug === record.slug);
     if (!expected || record.title !== expected.title || !record.body
         || row.metadata?.[layout === "v2" ? "br2_content" : "body"]?.atom_uuid !== proof.content_atoms?.[record.slug]) throw new Error("Partial restart lost its title or content atom");
