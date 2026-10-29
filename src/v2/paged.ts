@@ -82,6 +82,7 @@ export class PagedBrainV2Store {
   }
   async put(type: RecordType, record: FbrainRecord, previous?: V2Record | null): Promise<V2Record> {
     validateSlug(record.slug); ensureStatus(type, record.status);
+    if (Buffer.byteLength(JSON.stringify(record.body)) > 48 * 1024) throw new Error("V2 spike body exceeds 48 KiB");
     const prior = previous === undefined ? await this.get(type, record.slug) : previous;
     const next = this.next(type, { ...record, created_at: prior?.created_at ?? record.created_at });
     const encoded = encodeV2Record(next);
@@ -127,7 +128,8 @@ export class PagedBrainV2Store {
       const after = options.cursor == null ? undefined : String(options.cursor);
       if (after && !/^[0-9a-f]{14}\.[A-Za-z0-9_-]{43}$/.test(after)) throw new Error("Invalid V2 summary cursor");
       const candidates = after ? records.filter(row => cardOrder(row) > after) : records, page = candidates.slice(0, limit);
-      return { items: page.map(row => project(row, V2_SUMMARY_FIELDS)), cursor: page.length ? cardOrder(page.at(-1)!) : null, hasMore: candidates.length > limit };
+      const hasMore = candidates.length > limit;
+      return { items: page.map(row => project(row, V2_SUMMARY_FIELDS)), cursor: hasMore && page.length ? cardOrder(page.at(-1)!) : null, hasMore };
     }
     const layout = options.tag ? "tag" : options.status ? "status" : "type";
     const hash = options.tag ?? (options.status ? statusKey(options.type!, options.status) : options.type!);
@@ -149,6 +151,8 @@ export class PagedBrainV2Store {
   async *pages(options: Omit<Options, "cursor" | "limit"> & { fields?: string[]; pageSize?: number } = {}): AsyncGenerator<any> {
     const fields = options.fields ?? V2_SUMMARY_FIELDS;
     if (fields.some(f => !V2_RECORD_FIELDS.includes(f))) throw new Error("Unknown V2 field");
+    const size = options.pageSize ?? 500;
+    if (!Number.isInteger(size) || size < 1 || size > 500) throw new Error("V2 page size must be 1..500");
     if (options.type || options.status || options.tag) {
       let cursor: unknown;
       const seen = new Set<string>();
@@ -168,11 +172,11 @@ export class PagedBrainV2Store {
     const selected = records.filter(r => (!options.type || r.br2_type === options.type) && (!options.status || r.status === options.status)
       && (!options.tag || r.tags.includes(options.tag)));
     const full = fields.some(f => !V2_SUMMARY_FIELDS.includes(f));
-    for (let i = 0; i < selected.length; i += 100) {
-      const slice = selected.slice(i, i + 100);
+    for (let i = 0; i < selected.length; i += size) {
+      const slice = selected.slice(i, i + size);
       const rows = full ? await this.getMany(slice.map(r => ({ type: r.br2_type, slug: r.slug }))) : slice;
       if (rows.length !== slice.length) throw new Error("V2 full page lost a summary");
-      yield { items: rows.map(row => project(row, fields)), hasMore: i + 100 < selected.length, cursor: null };
+      yield { items: rows.map(row => project(row, fields)), hasMore: i + size < selected.length, cursor: null };
     }
   }
 }
