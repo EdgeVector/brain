@@ -34,7 +34,9 @@ export class PagedBrainV2Store {
           counts[RECORD_TYPES.indexOf(card.br2_type)]!++;
         }
         if (counts.some((value, i) => value !== directory.head.counts[i])) throw new Error("V2 summary counts differ");
-        return { records: cards.map(publicCard), directory };
+        // Bulk summaries do not request routing fields. Avoid hashing every
+        // identity into an order key merely to discard that field at projection.
+        return { records: cards.map(card => ({ ...card, tags: [...card.tags], br2_id: cardId(card) } as V2Record)), directory };
       } catch (error) { if (String(error).includes("summary snapshot changed") && attempt < 3) continue; throw error; }
     }
     throw new Error("V2 summary snapshot is busy");
@@ -123,8 +125,9 @@ export class PagedBrainV2Store {
     if (!options.type && !options.tag) {
       const { records } = await this.summaries();
       const after = options.cursor == null ? undefined : String(options.cursor);
-      const candidates = records.filter(row => !after || row.br2_order > after), page = candidates.slice(0, limit);
-      return { items: page.map(row => project(row, V2_SUMMARY_FIELDS)), cursor: page.at(-1)?.br2_order ?? null, hasMore: candidates.length > limit };
+      if (after && !/^[0-9a-f]{14}\.[A-Za-z0-9_-]{43}$/.test(after)) throw new Error("Invalid V2 summary cursor");
+      const candidates = after ? records.filter(row => cardOrder(row) > after) : records, page = candidates.slice(0, limit);
+      return { items: page.map(row => project(row, V2_SUMMARY_FIELDS)), cursor: page.length ? cardOrder(page.at(-1)!) : null, hasMore: candidates.length > limit };
     }
     const layout = options.tag ? "tag" : options.status ? "status" : "type";
     const hash = options.tag ?? (options.status ? statusKey(options.type!, options.status) : options.type!);
