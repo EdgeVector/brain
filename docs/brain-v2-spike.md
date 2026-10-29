@@ -129,3 +129,37 @@ The packed schemas have new names and require a fresh generated home in this spi
 This change does not convert an existing V2 home or publish production schema declarations.
 Normal Brain initialization does not activate it.
 LastSeek, body files, and attachments remain outside the comparison.
+
+## Shared atom read spike
+
+The optional `nativeReads` adapter mode requires the paired LastDB change.
+It requests compact values for keyed reads and native list pages.
+The reply keeps keys, cursors, and integrity flags without per-field provenance.
+Full replies remain the default for other clients.
+
+Exact native counts use batch queries without a probe record.
+Two hashes share one request, and at most four requests run at once.
+The node keeps one aggregate work budget for each request.
+This mode retains the existing six schemas and 29 field declarations.
+It adds no stored page copy, count cache, or document.
+
+`patchSummary` edits a title, status, tags, or update time without a client read
+of the content document. It returns the summary. The full `patch` API remains.
+CI requires the same content atom before and after 64 edits, through the three
+lookup molecules and after a daemon restart.
+
+The LastDB shared-atom workflow selects exact Brain and engine commits.
+It verifies both CI programs before each measurement job.
+Both Brain layouts run on both engine versions with equal generated inputs.
+The read sizes are 1,000 and 10,000 records. The write size is 1,024 records.
+The comparison includes typed and untyped reads, a 100-key batch, first pages,
+tag and status pages, complete summaries, complete records, counts, selection,
+migration source reads, and the current keyword fallback.
+V2 search remains unsupported. No LastSeek performance claim follows.
+
+The space gate checks the V2 candidate against accepted packed V2.
+Neither the median nor the maximum may increase for whole-home allocated bytes
+or database logical bytes. Each checkpoint follows a flush and a fixed idle.
+The comparison includes creates, updates, deletes, partial edits, and restart.
+It records sampled node and client memory beside durable write latency.
+The primary and its archive stay outside the spike.

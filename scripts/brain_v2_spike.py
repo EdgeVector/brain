@@ -148,7 +148,7 @@ def stop_node(daemon, home):
 
 
 def run_case(args, layout, repeat, output):
-    destination = output / f"{repeat:02d}-{layout}"
+    destination = output / f"{repeat:02d}-{getattr(args, 'case_label', layout)}"
     destination.mkdir()
     root = Path(tempfile.mkdtemp(prefix="br2-", dir="/tmp")).resolve()
     owner = {"pid": os.getpid(), "uid": os.getuid(), "inode": root.stat().st_ino}
@@ -162,6 +162,8 @@ def run_case(args, layout, repeat, output):
                        LASTDB_HOME=str(home), FOLDDB_HOME=str(home),
                        FBRAIN_APP_IDENTITY_ENFORCE="off", BRAIN_CONFIG=str(root / "config.json"),
                        FBRAIN_FOLDDB_SOCKET=str(sock), RUST_MIN_STACK="16777216")
+    environment.update(BRAIN_SPIKE_SOURCE=str(getattr(args, "source", Path.cwd())),
+                       BRAIN_SHARED_READS="1" if getattr(args, "native_reads", False) else "0")
     save(root / "settings.json", {"socket": str(sock), "records": args.records, "bodyBytes": args.body_bytes})
     log = (destination / "node.log").open("w")
     daemon = None
@@ -170,10 +172,11 @@ def run_case(args, layout, repeat, output):
         daemon, version = start_node(args, environment, home, sock, root, log)
         save(destination / "version.json", version)
         summary = {"layout": layout, "repeat": repeat, "phases": {}}
-        for phase in ("setup", "create", "update", "delete", "verify"):
-            if phase == "verify":
+        phases = ("setup", "create", "update", "delete", "verify") + (("partial", "reopen_partial") if getattr(args, "extended", False) else ())
+        for phase in phases:
+            if phase in ("verify", "reopen_partial"):
                 shutdown = stop_node(daemon, home)
-                save(destination / "restart-shutdown.json", shutdown)
+                save(destination / f"{phase}-restart-shutdown.json", shutdown)
                 if (shutdown["exit_code"] != 0 or not shutdown["receipt"]
                         or shutdown["receipt"].get("pid") != daemon.pid
                         or shutdown["receipt"].get("flush_ok") is not True):
@@ -209,9 +212,12 @@ def run_case(args, layout, repeat, output):
                 flushed = call(sock, "/api/db/flush", {})
                 if flushed.get("durable") is not True:
                     raise RuntimeError("Checkpoint lacks a durable flush")
+            if getattr(args, "extended", False):
+                # One fixed idle interval, no force compaction or retry-until-small loop.
+                time.sleep(3)
             checkpoint["disk"] = disk(home)
             save(destination / f"{phase}-status.json", call(sock, "/api/status"))
-            if phase == "verify":
+            if phase in ("verify", "partial", "reopen_partial"):
                 checkpoint["verification"] = measured["verification"]
             summary["phases"][phase] = checkpoint
             save(destination / f"{phase}-checkpoint.json", checkpoint)

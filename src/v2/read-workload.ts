@@ -28,7 +28,10 @@ globalThis.fetch = new Proxy(globalThis.fetch, {
     const start = performance.now();
     const request = typeof args[1]?.body === "string" ? JSON.parse(args[1].body) : {};
     const label = JSON.stringify({ path: String(args[0]).split("?")[0], schema: request.schema_name,
-      fields: request.fields, filter: Object.keys(request.filter ?? {})[0], sort_order: request.sort_order });
+      fields: request.fields, filter: Object.keys(request.filter ?? {})[0], sort_order: request.sort_order,
+      response_format: request.response_format,
+      batch: request.queries?.map((query: any) => ({ schema: query.schema_name, fields: query.fields,
+        filter: Object.keys(query.filter ?? {})[0], response_format: query.response_format })) });
     const captured = profile;
     let bytes = 0;
     const response = await Reflect.apply(target, receiver, args);
@@ -55,7 +58,7 @@ const cfg: Config = { configVersion: 4, nodeUrl: "http://127.0.0.1", schemaServi
   userHash: "brain-read-ci", schemaHashes: Object.fromEntries(definitions.UNIQUE_SCHEMAS.map((entry: any) => [entry.key, entry.schema.schema.name])),
   designSchemaHash: "Design", taskSchemaHash: "Task", nodeSocketPath: settings.socket, appIdentityEnforce: false };
 const schemas = Object.fromEntries(Object.entries(v2Schemas.V2_SCHEMAS).map(([key, schema]: [string, any]) => [key, schema.name]));
-const store = new v2Module.BrainV2Store(node, schemas);
+const store = new v2Module.BrainV2Store(node, schemas, { nativeReads: process.env.BRAIN_SHARED_READS === "1" });
 const types: RecordType[] = ["concept", "reference"];
 const fields = ["slug", "title", "body", "status", "tags", "created_at", "updated_at"];
 function input(number: number): { type: RecordType; record: FbrainRecord } {
@@ -89,6 +92,8 @@ async function setup(): Promise<void> {
       await add(schemas.tag!, "shared", { bt2_tag: "shared", bt2_order: order, bt2_id: id }, order);
     } else {
       await add(cfg.schemaHashes[type]!, record.slug, record);
+      if (settings.extended) await add(cfg.schemaHashes.__braintypedirectory__!, record.slug,
+        { btd_h: record.slug, btd_r: "__types__", btd_types: JSON.stringify([type]) }, "__types__");
       const card = { type, slug: record.slug, title: record.title, status: record.status, updated_at: record.updated_at };
       for (const hash of ["all", type, `${type}#${record.status}`, "tag#shared"]) {
         const cards = scopes.get(hash) ?? []; cards.push(card); scopes.set(hash, cards);
@@ -154,6 +159,28 @@ function check(items: any[], expected: number, full = false, allowed: (number: n
   return items.length;
 }
 async function operation(name: string): Promise<number> {
+  if (name === "get_untyped") {
+    if (layout === "v2") return check([await store.getUntyped("read-0")], 1, true, number => number === 0);
+    let result: any;
+    await getCommand!.getRecord({ cfg, slug: "read-0", json: true, print: () => {}, onResult: (value: any) => { result = value; } });
+    return check([result], 1, true, number => number === 0);
+  }
+  if (name === "get_many") {
+    const keys = Array.from({ length: 100 }, (_, number) => ({ ...input(number), number }));
+    const items = layout === "v2" ? await store.getMany(keys.map(({ type, record }) => ({ type, slug: record.slug })))
+      : (await Promise.all(types.map(async type => (await node.queryByKeys({ schemaHash: cfg.schemaHashes[type], fields,
+        keys: keys.filter(key => key.type === type).map(({ record }) => ({ hash: record.slug })) })).map((row: any) => row.fields)))).flat();
+    return check(items, 100, true, number => number < 100);
+  }
+  if (name === "tag_page" || name === "status_page") {
+    const options = name === "tag_page" ? { tag: "shared" } : { type: "concept", status: "parked" };
+    if (layout === "v2") return check((await store.list({ ...options, limit: 20 })).items, 20, false,
+      number => name === "tag_page" ? number >= settings.records - 20 : number % 4 === 0 && number >= settings.records - 80);
+    let result: any;
+    await listCommand!.listCmd({ cfg, ...options, limit: 20, json: true, print: () => {}, printErr: () => {}, onResult: (value: any) => { result = value; } });
+    return check(result.items, 20, false,
+      number => name === "tag_page" ? number >= settings.records - 20 : number % 4 === 0 && number >= settings.records - 80);
+  }
   if (name === "get") {
     if (layout === "v2") return check([await store.get("concept", "read-0")], 1, true, number => number === 0);
     let result: any;

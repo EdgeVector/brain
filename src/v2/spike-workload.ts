@@ -2,13 +2,21 @@
 // real LastDB daemon; no mocks, fixture store, or alternate storage engine.
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { newNodeClient, type NodeClient } from "../client.ts";
+import { resolve, dirname } from "node:path";
+import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
-import { findBySlug, type FbrainRecord } from "../record.ts";
-import { buildResidentWritePlan, commitResidentWritePlan } from "../resident-write-plan.ts";
-import { UNIQUE_SCHEMAS, type RecordType } from "../schemas.ts";
-import { BrainV2Store, rawData, statusKey } from "./store.ts";
-import { V2_SCHEMAS, type V2SchemaMap } from "./schemas.ts";
+import type { FbrainRecord } from "../record.ts";
+import type { RecordType } from "../schemas.ts";
+import type { V2SchemaMap } from "./schemas.ts";
+import { verifyQueryFormats, summaryPatchOperations, verifyPartialAfterRestart } from "./shared-operations.ts";
+
+const source = resolve(process.env.BRAIN_SPIKE_SOURCE ?? ".");
+const { newNodeClient } = await import(resolve(source, "src/client.ts"));
+const { findBySlug } = await import(resolve(source, "src/record.ts"));
+const { buildResidentWritePlan, commitResidentWritePlan } = await import(resolve(source, "src/resident-write-plan.ts"));
+const { UNIQUE_SCHEMAS } = await import(resolve(source, "src/schemas.ts"));
+const { BrainV2Store, rawData, statusKey } = await import(resolve(source, "src/v2/store.ts"));
+const { V2_SCHEMAS } = await import(resolve(source, "src/v2/schemas.ts"));
 
 if (process.env.CI !== "true" || process.env.LASTDB_ISOLATED_COPY !== "1") throw new Error("Run this workload only in CI on a fresh generated home");
 const [layout, phase, configPath, outputPath] = process.argv.slice(2);
@@ -25,10 +33,11 @@ globalThis.fetch = new Proxy(globalThis.fetch, {
 });
 const node: NodeClient = newNodeClient({ baseUrl: "http://127.0.0.1", userHash: "brain-v2-ci", socketPath: settings.socket });
 const cfg: Config = { configVersion: 4, nodeUrl: "http://127.0.0.1", schemaServiceUrl: "http://127.0.0.1:1",
-  userHash: "brain-v2-ci", schemaHashes: Object.fromEntries(UNIQUE_SCHEMAS.map(entry => [entry.key, entry.schema.schema.name])),
+  userHash: "brain-v2-ci", schemaHashes: Object.fromEntries(UNIQUE_SCHEMAS.map((entry: any) => [entry.key, entry.schema.schema.name])),
   designSchemaHash: "Design", taskSchemaHash: "Task", nodeSocketPath: settings.socket, appIdentityEnforce: false };
-const schemas = Object.fromEntries(Object.entries(V2_SCHEMAS).map(([key, schema]) => [key, schema.name])) as V2SchemaMap;
-const store = new BrainV2Store(node, schemas);
+const schemas = Object.fromEntries(Object.entries(V2_SCHEMAS).map(([key, schema]: [string, any]) => [key, schema.name])) as V2SchemaMap;
+const nativeReads = process.env.BRAIN_SHARED_READS === "1";
+const store = new BrainV2Store(node, schemas, { nativeReads });
 const samples: Array<{ number: number; elapsed_ms: number; requests: number }> = [];
 const digest = createHash("sha256");
 const types: RecordType[] = ["concept", "reference"];
@@ -58,7 +67,7 @@ async function write(number: number, updated = false, revision = 1): Promise<voi
 }
 
 async function setup(): Promise<void> {
-  const definitions = layout === "v2" ? Object.values(V2_SCHEMAS) : UNIQUE_SCHEMAS.map(entry => entry.schema.schema);
+  const definitions = layout === "v2" ? Object.values(V2_SCHEMAS) : UNIQUE_SCHEMAS.map((entry: any) => entry.schema.schema);
   // CI system roots are local to this fresh generated home. Production app
   // registration and declaration-issued identities remain a rollout task.
   for (const definition of definitions) {
@@ -184,11 +193,12 @@ async function verify(): Promise<Record<string, unknown>> {
   const concurrent = await Promise.all(Array.from({ length: 8 }, (_, i) => store.get("concept", `concurrent-${i}`)));
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
   if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 native count differs after recreation and concurrent creates");
+  const queryFormats = nativeReads ? await verifyQueryFormats(node, schemas, settings.records + 3) : undefined;
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,
     duplicate_slugs: true, partial_update: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
     identity_protein: await proteinBinding(),
     summary_protein: await proteinBinding("br2_card"), content_protein: await proteinBinding("br2_content"),
-    older_record_update: "accepted", status_scope_example: statusKey("concept", "active") };
+    older_record_update: "accepted", status_scope_example: statusKey("concept", "active"), query_formats: queryFormats };
 }
 
 let verification: Record<string, unknown> | undefined;
@@ -205,11 +215,20 @@ else if (phase === "delete") {
     digest.update(JSON.stringify([type, record.slug]));
     if (layout === "v2") await store.delete(type, record.slug);
     else {
-      const { deleteRecord } = await import("../commands/delete.ts");
+    const { deleteRecord } = await import(resolve(source, "src/commands/delete.ts"));
       await deleteRecord({ cfg, type, slug: record.slug, print: () => {} });
     }
     samples.push({ number, elapsed_ms: performance.now() - started, requests: requests - before });
   }
 } else if (phase === "verify") verification = await verify();
+else if (phase === "partial") {
+  const result = await summaryPatchOperations({ node, store, schemas, cfg, layout: layout!, records: settings.records,
+    nativeReads, requests: () => requests, findBySlug, buildResidentWritePlan, commitResidentWritePlan });
+  samples.push(...result.samples); verification = result.verification;
+}
+else if (phase === "reopen_partial") {
+  const proof = JSON.parse(readFileSync(resolve(dirname(outputPath), "partial.json"), "utf8")).verification;
+  verification = await verifyPartialAfterRestart(node, layout!, schemas, cfg, settings.records, proof);
+}
 else throw new Error(`Unknown spike phase: ${phase}`);
 writeFileSync(outputPath, JSON.stringify({ layout, phase, requests, input_sha256: digest.digest("hex"), samples, verification }, null, 2) + "\n");

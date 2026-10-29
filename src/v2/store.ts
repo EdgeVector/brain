@@ -75,7 +75,8 @@ function physicalFields(fields: string[]): string[] {
 }
 
 export class BrainV2Store {
-  constructor(readonly node: NodeClient, readonly schemas: V2SchemaMap) {}
+  constructor(readonly node: NodeClient, readonly schemas: V2SchemaMap,
+    readonly options: { nativeReads?: boolean } = {}) {}
 
   async get(type: RecordType, slug: string): Promise<V2Record | null> {
     return (await this.getMany([{ type, slug }]))[0] ?? null;
@@ -97,7 +98,46 @@ export class BrainV2Store {
     if (!previous) throw new Error("Brain v2 patch target is absent");
     return this.put(type, { ...previous, ...patch, slug, updated_at: patch.updated_at ?? new Date().toISOString() }, previous);
   }
+  // A caller that only needs the edited summary does not need to read the
+  // content document. Native proteins retain its atom through a key move.
+  async patchSummary(type: RecordType, slug: string,
+    patch: Partial<Pick<FbrainRecord, "title" | "status" | "tags" | "updated_at">>): Promise<Record<string, unknown>> {
+    if (Object.keys(patch).some(field => !["title", "status", "tags", "updated_at"].includes(field))) throw new Error("Unknown Brain v2 summary patch field");
+    const rows = await this.readKeys([recordKey(type, slug)], [...ROUTING_FIELDS, "br2_card"]);
+    const previous = rows[0] ? decodeV2Record(rows[0].fields) : null;
+    if (!previous || ROUTING_FIELDS.some(field => typeof previous[field] !== "string")) throw new Error("Brain v2 patch target is absent or incomplete");
+    const next = { ...previous, ...patch, slug, br2_type: type,
+      updated_at: patch.updated_at ?? new Date().toISOString(), br2_revision: randomUUID() };
+    ensureStatus(type, next.status);
+    if (typeof next.title !== "string" || !Array.isArray(next.tags) || next.tags.some(tag => typeof tag !== "string")) throw new Error("Invalid Brain v2 summary patch");
+    next.tags = [...new Set(next.tags)];
+    next.br2_status = statusKey(type, next.status);
+    next.br2_order = orderKey(next.br2_id, next.updated_at);
+    const fields = { br2_card: packed(next, CARD_FIELDS), ...(next.br2_status !== previous.br2_status ? { br2_status: next.br2_status } : {}),
+      br2_order: next.br2_order, br2_revision: next.br2_revision };
+    await this.commit([{ mutationType: "update", schemaHash: this.schemas.record, keyHash: next.br2_id,
+      fields, expected: { type: "value", field: "br2_revision", value: previous.br2_revision } },
+      ...this.tagChanges(previous, next)]);
+    return project(next, V2_SUMMARY_FIELDS);
+  }
   private async readKeys(keys: string[], fields: string[]): Promise<QueryRow[]> {
+    if (this.options.nativeReads) {
+      const result: QueryRow[] = [], unique = [...new Set(keys)];
+      for (let offset = 0; offset < unique.length; offset += 400) {
+        const slices: string[][] = [];
+        for (let part = offset; part < Math.min(offset + 400, unique.length); part += 100) slices.push(unique.slice(part, part + 100));
+        const pages = await Promise.all(slices.map(async slice => {
+          const page = await rawData(this.node, "POST", "/api/query", { schema_name: this.schemas.record,
+            fields, filter: { HashRangeKeys: slice.map(hash => [hash, ""]) }, limit: 100, response_format: "values" });
+          this.cleanPage(page);
+          if (page.has_more !== false || page.results.some((row: QueryRow) => !slice.includes(row.key.hash ?? "") || row.key.range)) throw new Error("Brain v2 keyed batch is incomplete or has an unexpected key");
+          return page.results as QueryRow[];
+        }));
+        result.push(...pages.flat());
+      }
+      if (new Set(result.map(row => row.key.hash)).size !== result.length) throw new Error("Brain v2 keyed batch repeats a key");
+      return result;
+    }
     if (!this.node.queryByKeys) throw new Error("Brain v2 requires batched keyed reads");
     return this.node.queryByKeys({ schemaHash: this.schemas.record, fields, keys: keys.map(hash => ({ hash })) });
   }
@@ -114,15 +154,20 @@ export class BrainV2Store {
     const expected = previous ? { type: "value" as const, field: "br2_revision", value: previous.br2_revision }
       : { type: "absent" as const, field: "br2_revision" };
     const ops: BatchMutationOp[] = [{ mutationType: previous ? "update" : "create", schemaHash: this.schemas.record, keyHash: id, fields, expected }];
+    ops.push(...this.tagChanges(previous, next));
+    await this.commit(ops);
+    return next;
+  }
+  private tagChanges(previous: V2Record | null, next: V2Record): BatchMutationOp[] {
+    const ops: BatchMutationOp[] = [];
     // When the order key and membership stay fixed, retain the tag tips too.
     const oldTags = new Set(previous?.tags ?? []), nextTags = new Set(next.tags);
     if (previous) for (const tag of oldTags) if (previous.br2_order !== next.br2_order || !nextTags.has(tag)) ops.push(this.tagDelete(tag, previous));
     for (const tag of nextTags) if (!previous || previous.br2_order !== next.br2_order || !oldTags.has(tag)) {
       ops.push({ mutationType: "create", schemaHash: this.schemas.tag, keyHash: tag, keyRange: next.br2_order,
-        fields: { bt2_tag: tag, bt2_order: next.br2_order, bt2_id: id } });
+        fields: { bt2_tag: tag, bt2_order: next.br2_order, bt2_id: next.br2_id } });
     }
-    await this.commit(ops);
-    return next;
+    return ops;
   }
   async delete(type: RecordType, slug: string): Promise<void> {
     const previous = await this.get(type, slug);
@@ -144,6 +189,9 @@ export class BrainV2Store {
     if (!this.node.mutateBatch) throw new Error("Brain v2 requires the native mutation batch");
     const result = await this.node.mutateBatch(ops, { durability: "durable" });
     if (result.durability !== "durable") throw new Error("Brain v2 did not receive a durable batch result");
+  }
+  private cleanPage(page: Record<string, any>): void {
+    if (!Array.isArray(page.results) || page.unresolved_rows !== 0 || page.tombstoned_rows !== 0) throw new Error("Brain v2 page contains unresolved records");
   }
   async list(options: ListOptions = {}): Promise<ListResult> {
     const limit = options.limit ?? 20;
@@ -179,9 +227,9 @@ export class BrainV2Store {
     const result = await rawData(this.node, "POST", "/api/query", {
       schema_name: this.schemas[layout], fields: layout === "tag" ? ["bt2_id"] : needsMetadata ? ["br2_card"] : selected,
       filter: { HashKey: hash }, limit, ...(options.cursor ? { cursor: options.cursor } : {}),
+      ...(this.options.nativeReads ? { response_format: "values" } : {}),
     });
-    if (!Array.isArray(result.results)) throw new Error("Brain v2 list response has no rows");
-    if (result.unresolved_rows !== 0 || result.tombstoned_rows !== 0) throw new Error("Brain v2 page contains unresolved records");
+    this.cleanPage(result);
     const rows = result.results as Array<{ key: { hash: string; range: string }; fields: Record<string, unknown> }>;
     let decoded: V2Record[];
     if (layout === "tag") {
@@ -218,6 +266,25 @@ export class BrainV2Store {
     // count. Only one probe row is materialized; the rest are key metadata.
     const types = Object.fromEntries(RECORD_TYPES.map(type => [type, 0])) as Record<RecordType, number>;
     const keys = RECORD_TYPES.flatMap(type => Array.from({ length: COUNT_BUCKETS }, (_, bucket) => ({ type, hash: `${type}#${bucket}` })));
+    if (this.options.nativeReads) {
+      // The batch keeps the node's aggregate work budget. Two count hashes
+      // per request bound membership work at the measured 10,000-record size.
+      for (let offset = 0; offset < keys.length; offset += 8) {
+        const batches = Array.from({ length: Math.min(4, Math.ceil((keys.length - offset) / 2)) }, (_, part) => keys.slice(offset + part * 2, offset + part * 2 + 2));
+        await Promise.all(batches.map(async slice => {
+          const batch = await rawData(this.node, "POST", "/api/queries/batch", { queries: slice.map(({ hash }) => ({
+            schema_name: this.schemas.count, fields: ["br2_id"], filter: { HashKey: hash }, response_format: "count" })) });
+          if (batch.count !== slice.length || !Array.isArray(batch.results) || batch.results.length !== slice.length) throw new Error("Brain v2 count batch is incomplete");
+          batch.results.forEach((entry: any, index: number) => {
+            const value = entry.response?.data ?? entry.response;
+            if (entry.status !== 200 || entry.response?.ok === false || value?.exact !== true
+                || !Number.isSafeInteger(value.total_count) || value.total_count < 0 || value.unresolved_rows !== 0 || value.tombstoned_rows !== 0) throw new Error("Brain v2 exact count batch failed");
+            types[slice[index]!.type] += value.total_count;
+          });
+        }));
+      }
+      return { total: Object.values(types).reduce((sum, value) => sum + value, 0), types };
+    }
     for (let offset = 0; offset < keys.length; offset += 4) {
       await Promise.all(keys.slice(offset, offset + 4).map(async ({ type, hash }) => {
         const result = await rawData(this.node, "POST", "/api/query", { schema_name: this.schemas.count,

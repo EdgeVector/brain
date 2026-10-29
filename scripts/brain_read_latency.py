@@ -11,7 +11,7 @@ import tempfile
 import time
 from statistics import median
 
-from brain_v2_spike import call, memory, save, start_node, stop_node, stats
+from brain_v2_spike import call, disk, memory, save, start_node, stop_node, stats
 
 OPERATIONS = ("get", "first_page", "all_summaries", "all_records", "snapshot_counts", "bulk_selection", "migration_read", "search_fallback")
 
@@ -31,6 +31,7 @@ def measure(args, layout, version, source, repeat):
                        LASTDB_HOME=str(home), FOLDDB_HOME=str(home), FBRAIN_FOLDDB_SOCKET=str(sock),
                        FBRAIN_APP_IDENTITY_ENFORCE="off", BRAIN_CONFIG=str(root / "config.json"),
                        BRAIN_READ_SOURCE=str(source), BRAIN_READ_VERSION=version, LAST_STACK_HEARTBEATS_FILE=str(root / "absent-heartbeats"),
+                       BRAIN_SHARED_READS="1" if getattr(args, "native_reads", False) and version == "after" else "0",
                        LASTSEEK_BIN=str(root / "absent-lastseek"), RUST_MIN_STACK="16777216")
     log = (destination / "node.log").open("w")
     daemon, client = None, None
@@ -41,7 +42,8 @@ def measure(args, layout, version, source, repeat):
 
         def workload(phase, count, label):
             nonlocal client
-            save(root / "settings.json", {"socket": str(sock), "records": args.records, "samples": count})
+            save(root / "settings.json", {"socket": str(sock), "records": args.records, "samples": count,
+                                         "extended": getattr(args, "extended", False)})
             path = destination / f"{label}.json"
             with (destination / f"{label}.log").open("w") as output:
                 started = time.monotonic()
@@ -77,8 +79,11 @@ def measure(args, layout, version, source, repeat):
         seeded = workload("setup", 0, "setup")
         if call(sock, "/api/db/flush", {}).get("durable") is not True:
             raise RuntimeError("Setup flush was not durable")
+        if getattr(args, "extended", False):
+            time.sleep(3)
+        seeded_disk = disk(home)
         results = []
-        for operation in OPERATIONS:
+        for operation in getattr(args, "operations", OPERATIONS):
             if layout == "v2" and operation == "search_fallback":
                 continue
             restart()
@@ -90,7 +95,7 @@ def measure(args, layout, version, source, repeat):
                 results.append({"operation": operation, "state": state, **result})
             print(f"{destination.name}: {operation} complete", flush=True)
         return {"layout": layout, "version": version, "repeat": repeat, "results": results,
-                "input_sha256": seeded["input_sha256"]}
+                "input_sha256": seeded["input_sha256"], "seeded_disk": seeded_disk, "final_disk": disk(home)}
     finally:
         if client and client.poll() is None:
             client.terminate()
@@ -119,7 +124,7 @@ def report(args, runs):
              "|---|---|---|---:|---:|---:|---:|---:|---:|---|"]
     comparisons = []
     for layout in ("current", "v2"):
-        for operation in OPERATIONS:
+        for operation in getattr(args, "operations", OPERATIONS):
             if layout == "v2" and operation == "search_fallback":
                 continue
             for state in ("restart", "warm"):
@@ -146,7 +151,7 @@ def report(args, runs):
                              f"{before['failed']}/{before['attempted']}; {after['failed']}/{after['attempted']} |")
     lines += ["", "Read results require exact generated membership and field values. Raw samples include response bytes and sampled memory sizes.",
               "Migration read measures the source read, without schema publication or migration writes. Bulk selection does not delete data.",
-              "The baseline V2 count traverses identities and types. The candidate uses exact native keyed counts without a count schema.",
+              "Each layout uses its implemented count path. The opt-in shared-read candidate batches exact native counts without probe records.",
               "Per-request profiles retain schema, selected fields, bytes, and elapsed time. Elapsed sums overlap for concurrent requests.",
               "Only the current Brain keyword fallback is measured. LastSeek is absent. V2 search is unsupported and is not compared.",
               "Low sample counts limit tail estimates. No primary, primary copy, local benchmark, or test suite is used."]
