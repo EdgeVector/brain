@@ -37,6 +37,7 @@ export const V2_SUMMARY_FIELDS = ["br2_id", "br2_type", "slug", "title", "status
 export const V2_STORED_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision", "br2_card", "br2_content", "br2_count_hash"];
 export const V2_SCHEMAS = {
   record: definition("BrainV2PackedRecord", V2_STORED_FIELDS, "br2_id"),
+  // The identity also supplies the reverse key for native protein key moves.
   recent: definition("BrainV2PackedRecent", ["br2_scope", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_scope", "br2_order"),
   type: definition("BrainV2PackedByType", ["br2_type", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_type", "br2_order"),
   status: definition("BrainV2PackedByStatus", ["br2_status", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_status", "br2_order"),
