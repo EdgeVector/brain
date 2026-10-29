@@ -28,6 +28,13 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   };
   const result = structuredClone(schema) as unknown as Record<string, unknown>;
   result.fields = schema.fields.map(rename);
+  if (schema.alternate_keys) {
+    result.alternate_keys = Object.fromEntries(Object.entries(schema.alternate_keys).map(([name, key]) => [name, {
+      ...key,
+      hash_field: rename(key.hash_field),
+      ...(key.range_field != null ? { range_field: rename(key.range_field) } : {}),
+    }]));
+  }
   result.key = Object.fromEntries(Object.entries(schema.key ?? {}).filter(([,field]) => typeof field === "string").map(([role, field]) => [role, rename(field)]));
   for (const property of ["field_classifications", "field_interest_categories", "ref_fields", "transform_fields"]) {
     const map = result[property];

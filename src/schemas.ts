@@ -1,4 +1,7 @@
 // Schema definitions for fbrain's record types.
+// Proteins are deprecated for new designs. The definitions below retain the
+// existing layout until an explicit conversion preserves its ordered keys.
+// Canonical field aliases describe fields; they do not authorize value aliases.
 //
 // Pattern status: fbrain's per-kind, purpose-split schemas are
 // grandfathered historical catalog identities. Do not copy this as the
@@ -67,6 +70,13 @@ export type SchemaDefinition = {
   // exists for a page key. A page row uses a hash and a range.
   schema_type: "Hash" | "HashRange";
   key: { hash_field?: string; range_field?: string };
+  /** Reuse canonical field definitions without sharing record values. */
+  independent_fields?: boolean;
+  alternate_keys?: Record<string, {
+    hash_field: string;
+    range_field?: string | null;
+    missing?: "reject" | "omit";
+  }>;
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
