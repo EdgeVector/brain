@@ -166,3 +166,16 @@ or database logical bytes. Each checkpoint follows a flush and a fixed idle.
 The comparison includes creates, updates, deletes, partial edits, and restart.
 It records sampled node and client memory beside durable write latency.
 The primary and its archive stay outside the spike.
+
+The read setup uses direct mutation batches to prepare the required keys.
+It omits some current Brain search records that a real app write creates.
+Those homes do not represent the full app disk cost.
+Use the durable app write run for the disk comparison between the two layouts.
+The read homes still show disk size beside each read result.
+The space gate proves no increase from accepted V2 at the measured sizes.
+It does not prove that every V2 read home uses less disk than current Brain.
+
+Shared atoms do not remove the cost of each selected molecule key.
+Current Brain can return cached summaries and counts through fewer keys.
+V2 retains native membership checks and pages by key.
+Do not infer a speed gain for every operation from the full-record result.
