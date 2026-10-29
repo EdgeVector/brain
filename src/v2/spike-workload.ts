@@ -8,7 +8,7 @@ import type { Config } from "../config.ts";
 import type { FbrainRecord } from "../record.ts";
 import type { RecordType } from "../schemas.ts";
 import type { V2SchemaMap } from "./schemas.ts";
-import { verifyQueryFormats, summaryPatchOperations, verifyPartialAfterRestart } from "./shared-operations.ts";
+import { verifyQueryFormats, summaryPatchOperations, verifyPartialAfterRestart, verifySummaryPageLifecycle } from "./shared-operations.ts";
 
 const source = resolve(process.env.BRAIN_SPIKE_SOURCE ?? ".");
 const { newNodeClient } = await import(resolve(source, "src/client.ts"));
@@ -227,12 +227,13 @@ async function verify(): Promise<Record<string, unknown>> {
   const concurrent = await Promise.all(Array.from({ length: 8 }, (_, i) => store.get("concept", `concurrent-${i}`)));
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
   if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 native count differs after recreation and concurrent creates");
+  const pageLifecycle = await verifySummaryPageLifecycle(store, common);
   const queryFormats = nativeReads ? await verifyQueryFormats(node, schemas, settings.records + 3, !!paged) : undefined;
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,
     duplicate_slugs: true, partial_update: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
     identity_protein: await proteinBinding(),
     summary_protein: paged ? "canonical summary pages; no per-record summary copies" : await proteinBinding("br2_card"), content_protein: await proteinBinding("br2_content"),
-    older_record_update: olderResult, status_scope_example: statusKey("concept", "active"), query_formats: queryFormats };
+    older_record_update: olderResult, status_scope_example: statusKey("concept", "active"), query_formats: queryFormats, summary_page_lifecycle: pageLifecycle };
 }
 
 let verification: Record<string, unknown> | undefined;

@@ -4,6 +4,25 @@ import type { Config } from "../config.ts";
 import type { RecordType } from "../schemas.ts";
 import { decodeV2Record, rawData, recordKey } from "./store.ts";
 import { V2_STORED_FIELDS, type V2SchemaMap } from "./schemas.ts";
+import type { FbrainRecord } from "../record.ts";
+
+// Real app writes force a bounded summary page to split, then remove its
+// leading records. No source mutation bypasses the adapter's guarded batch.
+export async function verifySummaryPageLifecycle(store: any, common: FbrainRecord): Promise<Record<string, unknown>> {
+  const snapshot = async () => {
+    const rows: string[] = [];
+    for await (const page of store.pages()) for (const r of page.items) rows.push(JSON.stringify(
+      [r.br2_type, r.slug, r.title, r.status, r.tags, r.updated_at]));
+    return rows.sort();
+  };
+  const before = await snapshot(), counts = await store.counts();
+  const slugs = Array.from({ length: 3 }, (_, i) => `page-lifecycle-${i}`);
+  for (let i = 0; i < slugs.length; i++) await store.put("concept", { ...common, slug: slugs[i], tags: [],
+    title: "Page split guard ".repeat(1500), updated_at: new Date(Date.UTC(2027, 0, 1) + i * 1000).toISOString() });
+  for (const slug of [...slugs].reverse()) await store.delete("concept", slug);
+  if (JSON.stringify(await snapshot()) !== JSON.stringify(before) || JSON.stringify(await store.counts()) !== JSON.stringify(counts)) throw new Error("Summary page lifecycle changed an existing record or count");
+  return { inserted_and_removed: 3, existing_summaries_unchanged: true, exact_counts_unchanged: true };
+}
 
 export async function verifyQueryFormats(node: NodeClient, schemas: V2SchemaMap, total: number, paged = false): Promise<unknown> {
   const query = { schema_name: schemas.record, fields: paged ? ["br2_id", "br2_content", "br2_revision"] : ["br2_card", "br2_content", "br2_count_hash"],
