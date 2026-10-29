@@ -197,9 +197,11 @@ Counts read the same directory that the guarded source write updates.
 This is an app count maintained with the source write, rather than a native membership sweep.
 Raw edits to internal schemas are outside the adapter write contract.
 
-The body and identity fields still use native proteins for type and status keys.
-The global recent molecule is unnecessary because the canonical pages already order summaries.
-The paged layout has six schemas and 21 field declarations.
+The body and identity fields still use native proteins for recent, type, and status keys.
+Body pages use those native range molecules rather than a batch of per-record hash reads.
+The first canonical summary page has the known `head` key.
+A delete that empties it moves the next page into that key in the guarded batch.
+The paged layout has seven schemas and 26 field declarations.
 It requires a fresh generated home and remains separate from normal Brain initialization.
 CI measures the retained optimized V2 and the paged V2 on the same accepted LastDB program.
 The summary and count p50 and p95 must beat current Brain after restart and warm, at both corpus sizes.

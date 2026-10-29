@@ -4,9 +4,10 @@ import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import { definition } from "./schemas.ts";
 import { orderKey, recordKey, statusKey, type V2Record } from "./store.ts";
 
-export const PAGE_FIELDS = ["br2_id", "br2_type", "br2_status", "br2_order", "br2_revision", "br2_content"];
+export const PAGE_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision", "br2_content"];
 export const PAGED_SCHEMAS = {
   record: definition("BrainV2PageRecord", PAGE_FIELDS, "br2_id"),
+  recent: definition("BrainV2PageRecent", ["br2_scope", "br2_order", "br2_id", "br2_content"], "br2_scope", "br2_order"),
   type: definition("BrainV2PageByType", ["br2_type", "br2_order", "br2_id", "br2_content"], "br2_type", "br2_order"),
   status: definition("BrainV2PageByStatus", ["br2_status", "br2_order", "br2_id", "br2_content"], "br2_status", "br2_order"),
   tag: definition("BrainV2PageTag", ["bt2_tag", "bt2_order", "bt2_id"], "bt2_tag", "bt2_order"),
@@ -26,7 +27,7 @@ export function bounded(value: unknown): string {
   return text;
 }
 export function emptyHead(): Head {
-  return { version: 1, revision: randomUUID(), counts: RECORD_TYPES.map(() => 0), leaves: [[randomUUID(), ""]] };
+  return { version: 1, revision: randomUUID(), counts: RECORD_TYPES.map(() => 0), leaves: [["head", ""]] };
 }
 export function readHead(raw: unknown): Directory {
   if (raw === undefined) return { head: emptyHead(), raw: null };
@@ -35,6 +36,7 @@ export function readHead(raw: unknown): Directory {
   if (head.version !== 1 || typeof head.revision !== "string" || !Array.isArray(head.counts)
       || head.counts.length !== RECORD_TYPES.length || head.counts.some(n => !Number.isSafeInteger(n) || n < 0)
       || !Array.isArray(head.leaves) || !head.leaves.length || head.leaves.length > 500
+      || head.leaves[0]?.[0] !== "head"
       || new Set(head.leaves.map(([id]) => id)).size !== head.leaves.length
       || head.leaves.some(([id, low], i) => typeof id !== "string" || typeof low !== "string"
         || (i === 0 ? low !== "" : low <= head.leaves[i - 1]![1]))) throw new Error("Invalid summary directory");

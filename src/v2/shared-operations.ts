@@ -90,7 +90,7 @@ export async function summaryPatchOperations(ctx: PatchContext): Promise<{ sampl
     }
   }
   if (ctx.layout === "v2") {
-    await Promise.all(((ctx.store.paged ? ["type", "status"] : ["recent", "type", "status"]) as Array<"recent" | "type" | "status">).map(async layout => {
+    await Promise.all((["recent", "type", "status"] as const).map(async layout => {
       const coordinates = [...after.values()].map(({ record }) => [layout === "recent" ? record.br2_scope : layout === "type" ? record.br2_type : record.br2_status, record.br2_order]);
       const page = await rawData(ctx.node, "POST", "/api/query", { schema_name: ctx.schemas[layout], fields: [ctx.store.paged ? "br2_id" : "br2_card", "br2_content"], filter: { HashRangeKeys: coordinates }, limit: 100 });
       if (page.unresolved_rows !== 0 || page.tombstoned_rows !== 0 || page.results.length !== after.size) throw new Error("Partial key move lost a protein member");

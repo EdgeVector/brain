@@ -43,6 +43,18 @@ export class PageWriter {
         if (leaf.some(card => cardId(card) === id)) throw new Error("V2 summary identity already exists");
         leaf.push(next); head.counts[RECORD_TYPES.indexOf(next.br2_type)]!++;
       }
+      if (pages.get("head")?.length === 0 && head.leaves.length > 1) {
+        // Keep the first canonical page at its known key. A merge changes
+        // page objects, never the record keys that refer to the directory.
+        const following = head.leaves[1]![0];
+        if (!pages.has(following)) {
+          try {
+            const loaded = await this.io.pages(directory, [following]);
+            pages.set(following, unpack(loaded.rows[0]!.fields.bsp_doc));
+          } catch (error) { if (String(error).includes("summary snapshot changed") && attempt < 19) continue; throw error; }
+        }
+        pages.set("head", pages.get(following)!); pages.set(following, []);
+      }
       const mutations = this.pageMutations(directory, pages);
       head.revision = randomUUID();
       const expected = directory.raw === null ? { type: "absent" as const, field: "bsd_doc" }
