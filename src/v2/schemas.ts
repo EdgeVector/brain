@@ -13,7 +13,7 @@ const descriptions: Record<string, string> = {
   br2_count_hash: "Brain v2 type and identity bucket for bounded native counts, version 1",
 };
 
-function definition(name: string, fields: string[], hash: string, range?: string): SchemaDefinition {
+export function definition(name: string, fields: string[], hash: string, range?: string): SchemaDefinition {
   return {
     name, descriptive_name: name, owner_app_id: "fbrain",
     purpose_statement: "Experimental Brain v2 storage layout; explicit opt-in only",

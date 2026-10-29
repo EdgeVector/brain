@@ -1,14 +1,14 @@
 // CI-only generated operational workload. Uses real Brain write paths and a
 // real LastDB daemon; no mocks, fixture store, or alternate storage engine.
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import type { NodeClient } from "../client.ts";
 import type { Config } from "../config.ts";
 import type { FbrainRecord } from "../record.ts";
 import type { RecordType } from "../schemas.ts";
 import type { V2SchemaMap } from "./schemas.ts";
-import { verifyQueryFormats, summaryPatchOperations, verifyPartialAfterRestart } from "./shared-operations.ts";
+import { verifyQueryFormats, summaryPatchOperations, verifyPartialAfterRestart, verifySummaryPageLifecycle } from "./shared-operations.ts";
 
 const source = resolve(process.env.BRAIN_SPIKE_SOURCE ?? ".");
 const { newNodeClient } = await import(resolve(source, "src/client.ts"));
@@ -17,6 +17,9 @@ const { buildResidentWritePlan, commitResidentWritePlan } = await import(resolve
 const { UNIQUE_SCHEMAS } = await import(resolve(source, "src/schemas.ts"));
 const { BrainV2Store, rawData, statusKey, recordKey, decodeV2Record } = await import(resolve(source, "src/v2/store.ts"));
 const { V2_SCHEMAS } = await import(resolve(source, "src/v2/schemas.ts"));
+const paged = process.env.BRAIN_SHARED_READS === "1" && existsSync(resolve(source, "src/v2/paged.ts"))
+  ? await import(resolve(source, "src/v2/paged.ts")) : null;
+const activeSchemas = paged?.PAGED_SCHEMAS ?? V2_SCHEMAS;
 
 if (process.env.CI !== "true" || process.env.LASTDB_ISOLATED_COPY !== "1") throw new Error("Run this workload only in CI on a fresh generated home");
 const [layout, phase, configPath, outputPath] = process.argv.slice(2);
@@ -41,9 +44,9 @@ const node: NodeClient = newNodeClient({ baseUrl: "http://127.0.0.1", userHash: 
 const cfg: Config = { configVersion: 4, nodeUrl: "http://127.0.0.1", schemaServiceUrl: "http://127.0.0.1:1",
   userHash: "brain-v2-ci", schemaHashes: Object.fromEntries(UNIQUE_SCHEMAS.map((entry: any) => [entry.key, entry.schema.schema.name])),
   designSchemaHash: "Design", taskSchemaHash: "Task", nodeSocketPath: settings.socket, appIdentityEnforce: false };
-const schemas = Object.fromEntries(Object.entries(V2_SCHEMAS).map(([key, schema]: [string, any]) => [key, schema.name])) as V2SchemaMap;
+const schemas = Object.fromEntries(Object.entries(activeSchemas).map(([key, schema]: [string, any]) => [key, schema.name])) as V2SchemaMap;
 const nativeReads = process.env.BRAIN_SHARED_READS === "1";
-const store = new BrainV2Store(node, schemas, { nativeReads });
+const store = paged ? new paged.PagedBrainV2Store(node, schemas) : new BrainV2Store(node, schemas, { nativeReads });
 const samples: Array<{ number: number; elapsed_ms: number; requests: number }> = [];
 const digest = createHash("sha256");
 const types: RecordType[] = ["concept", "reference"];
@@ -73,7 +76,7 @@ async function write(number: number, updated = false, revision = 1): Promise<voi
 }
 
 async function setup(): Promise<void> {
-  const definitions = layout === "v2" ? Object.values(V2_SCHEMAS) : UNIQUE_SCHEMAS.map((entry: any) => entry.schema.schema);
+  const definitions = layout === "v2" ? Object.values(activeSchemas) : UNIQUE_SCHEMAS.map((entry: any) => entry.schema.schema);
   // CI system roots are local to this fresh generated home. Production app
   // registration and declaration-issued identities remain a rollout task.
   for (const definition of definitions) {
@@ -83,7 +86,7 @@ async function setup(): Promise<void> {
 }
 
 async function proteinBinding(field = "br2_id"): Promise<{ identity: string; members: number }> {
-  const layouts = field === "br2_id" ? ["record", "recent", "type", "status", "count"] : ["record", "recent", "type", "status"];
+  const layouts = paged ? ["record", "recent", "type", "status"] : field === "br2_id" ? ["record", "recent", "type", "status", "count"] : ["record", "recent", "type", "status"];
   const molecules = await Promise.all(layouts.map(async layout => {
     const name = schemas[layout as keyof V2SchemaMap];
     const metadata = await rawData(node, "GET", `/api/schema/${encodeURIComponent(name)}`);
@@ -156,7 +159,7 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   if (ids.size !== found.size) throw new Error(`V2 list membership differs: ${ids.size} != ${found.size}`);
   const initialCounts = await store.counts();
-  if (initialCounts.total !== found.size || initialCounts.types.concept !== found.size / 2 || initialCounts.types.reference !== found.size / 2) throw new Error("V2 native counts differ after deletes");
+  if (initialCounts.total !== found.size || initialCounts.types.concept !== found.size / 2 || initialCounts.types.reference !== found.size / 2) throw new Error("V2 counts differ after deletes");
   for (const type of types) {
     for (const status of ["active", type === "concept" ? "parked" : "archived"]) {
       const list = await store.list({ type, status, limit: 20 });
@@ -165,6 +168,11 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   const tag = await store.list({ tag: "shared", limit: 20 });
   if (tag.items.length !== 20) throw new Error("V2 tag list is incomplete");
+  for (const status of [undefined, "parked"]) {
+    const mixed = await store.list({ tag: "shared", type: "concept", ...(status ? { status } : {}), limit: 100 });
+    if (!mixed.items.length || mixed.items.some((r: any) => r.br2_type !== "concept" || !r.tags.includes("shared")
+        || (status && r.status !== status))) throw new Error("Mixed tag/type/status selection differs");
+  }
   let olderResult = "accepted";
   const priorOlder = await store.get("concept", "record-16");
   try { await write(16, true); }
@@ -202,26 +210,30 @@ async function verify(): Promise<Record<string, unknown>> {
   const removed = await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
   await store.delete("concept", "recreated");
   if (await store.get("concept", "recreated")) throw new Error("V2 delete left the canonical record");
-  for (const [layout, hash] of [["recent", removed.br2_scope], ["type", removed.br2_type], ["status", removed.br2_status], ["tag", "new-only"]] as const) {
-    const result = await rawData(node, "POST", "/api/query", { schema_name: schemas[layout], fields: [layout === "tag" ? "bt2_id" : "br2_card"],
+  for (const [layout, hash] of (paged ? [["recent", removed.br2_scope], ["type", removed.br2_type], ["status", removed.br2_status], ["tag", "new-only"]]
+    : [["recent", removed.br2_scope], ["type", removed.br2_type], ["status", removed.br2_status], ["tag", "new-only"]]) as Array<[keyof V2SchemaMap, string]>) {
+    const result = await rawData(node, "POST", "/api/query", { schema_name: schemas[layout], fields: [layout === "tag" ? "bt2_id" : paged ? "br2_id" : "br2_card"],
       filter: { HashRangeKey: { hash, range: removed.br2_order } }, limit: 1 });
     if ((result.results ?? result.rows)?.length !== 0) throw new Error(`V2 delete left the exact ${layout} key`);
   }
-  const countKey = await rawData(node, "POST", "/api/query", { schema_name: schemas.count, fields: ["br2_id"],
-    filter: { HashRangeKey: { hash: removed.br2_count_hash, range: removed.br2_id } }, limit: 1 });
-  if (countKey.results?.length !== 0) throw new Error("V2 delete left the exact count key");
+  if (!paged) {
+    const countKey = await rawData(node, "POST", "/api/query", { schema_name: schemas.count, fields: ["br2_id"],
+      filter: { HashRangeKey: { hash: removed.br2_count_hash, range: removed.br2_id } }, limit: 1 });
+    if (countKey.results?.length !== 0) throw new Error("V2 delete left the exact count key");
+  }
   await store.put("concept", { ...deletion, slug: "recreated", tags: ["new-only"] });
   if (!(await store.get("concept", "recreated"))) throw new Error("V2 recreation failed");
   await Promise.all(Array.from({ length: 8 }, (_, i) => store.put("concept", { ...common, slug: `concurrent-${i}`, tags: [] })));
   const concurrent = await Promise.all(Array.from({ length: 8 }, (_, i) => store.get("concept", `concurrent-${i}`)));
   if (concurrent.some(record => record === null)) throw new Error("V2 concurrent creates lost a record");
-  if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 native count differs after recreation and concurrent creates");
-  const queryFormats = nativeReads ? await verifyQueryFormats(node, schemas, settings.records + 3) : undefined;
+  if ((await store.counts()).total !== settings.records + 3) throw new Error("V2 count differs after recreation and concurrent creates");
+  const pageLifecycle = await verifySummaryPageLifecycle(store, common);
+  const queryFormats = nativeReads ? await verifyQueryFormats(node, schemas, settings.records + 3, !!paged) : undefined;
   return { records_verified: found.size, list_members_verified: ids.size, typed_status_and_tag_lists: true,
     duplicate_slugs: true, partial_update: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
     identity_protein: await proteinBinding(),
-    summary_protein: await proteinBinding("br2_card"), content_protein: await proteinBinding("br2_content"),
-    older_record_update: olderResult, status_scope_example: statusKey("concept", "active"), query_formats: queryFormats };
+    summary_protein: paged ? "canonical summary pages; no per-record summary copies" : await proteinBinding("br2_card"), content_protein: await proteinBinding("br2_content"),
+    older_record_update: olderResult, status_scope_example: statusKey("concept", "active"), query_formats: queryFormats, summary_page_lifecycle: pageLifecycle };
 }
 
 let verification: Record<string, unknown> | undefined;
@@ -251,7 +263,7 @@ else if (phase === "partial") {
 }
 else if (phase === "reopen_partial") {
   const proof = JSON.parse(readFileSync(resolve(dirname(outputPath), "partial.json"), "utf8")).verification;
-  verification = await verifyPartialAfterRestart(node, layout!, schemas, cfg, settings.records, proof, { key: recordKey, decode: decodeV2Record });
+  verification = await verifyPartialAfterRestart(node, layout!, schemas, cfg, settings.records, proof, { key: recordKey, decode: decodeV2Record }, store);
 }
 else throw new Error(`Unknown spike phase: ${phase}`);
 writeFileSync(outputPath, JSON.stringify({ layout, phase, requests, input_sha256: digest.digest("hex"), samples, verification }, null, 2) + "\n");

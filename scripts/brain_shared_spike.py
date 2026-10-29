@@ -23,7 +23,7 @@ def case_args(args, version):
     before = version == "before"
     return SimpleNamespace(**vars(args), version=version, lastdbd=args.baseline_daemon if before else args.candidate_daemon,
                            lastdb_revision=args.baseline_core if before else args.candidate_core,
-                           source=args.baseline_source if before else Path.cwd(), native_reads=not before,
+                           source=args.baseline_source if before else Path.cwd(), native_reads=True,
                            body_bytes=4096, extended=True, operations=OPERATIONS)
 
 
@@ -41,8 +41,30 @@ def disk_gate(runs, kind):
             passed = median(after) <= median(before) and max(after) <= max(before)
             compared.append({"checkpoint": point, "category": category, "measure": measure,
                              "before": before, "after": after, "passed": passed})
+    if kind == "storage":
+        for point in points:
+            for category, measure in (("whole_home", "allocated_bytes"), ("database", "logical_bytes")):
+                values = {layout: [run["phases"][point]["disk"][category][measure] for run in runs
+                                   if run["version"] == "after" and run["layout"] == layout] for layout in ("current", "v2")}
+                before, after = values["current"], values["v2"]
+                compared.append({"checkpoint": point, "category": category + " versus current Brain", "measure": measure,
+                                 "before": before, "after": after, "passed": median(after) <= median(before) and max(after) <= max(before)})
     return {"passed": all(point["passed"] for point in compared), "points": compared,
             "rule": "V2 candidate median and maximum must not exceed accepted V2; whole-home allocated bytes and database logical bytes"}
+
+
+def latency_gate(comparisons):
+    points = []
+    for operation in ("all_summaries", "snapshot_counts"):
+        for state in ("restart", "warm"):
+            pair = {layout: next(c["after"] for c in comparisons if c["layout"] == layout
+                                 and c["operation"] == operation and c["state"] == state) for layout in ("current", "v2")}
+            for metric in ("p50_ms", "p95_ms"):
+                current, v2 = pair["current"], pair["v2"]
+                passed = not current["failed"] and not v2["failed"] and v2[metric] < current[metric]
+                points.append({"operation": operation, "state": state, "metric": metric,
+                               "current": current[metric], "v2": v2[metric], "passed": passed})
+    return {"passed": all(p["passed"] for p in points), "points": points}
 
 
 def require_shutdowns(output):
@@ -161,9 +183,10 @@ def main():
     else:
         comparisons = write_storage_summary(args, runs)
     gate = disk_gate(runs, args.kind)
+    speed = latency_gate(comparisons) if args.kind == "read" else None
     shutdowns = require_shutdowns(args.output)
     storage.save(args.output / "shared-metrics.json", {"sources": identities, "kind": args.kind, "records": args.records,
-                 "comparisons": comparisons, "disk_gate": gate, "shutdown_flushes": shutdowns, "runs": runs})
+                 "comparisons": comparisons, "disk_gate": gate, "latency_gate": speed, "shutdown_flushes": shutdowns, "runs": runs})
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
         summary.write(f"\nBrain source: `{identities['brain_before']}` → `{identities['brain_after']}`.  \n"
                       f"LastDB source: `{args.baseline_core}` → `{args.candidate_core}`.  \n"
@@ -173,8 +196,14 @@ def main():
         for point in gate["points"]:
             summary.write(f"| {point['checkpoint']} | {point['category']} | {point['measure']} | {median(point['before']):.0f} | {median(point['after']):.0f} | "
                           f"{max(point['before'])} | {max(point['after'])} | {'PASS' if point['passed'] else 'FAIL'} |\n")
+        if speed:
+            summary.write("\n### Summary/count target against current Brain\n\n| Operation | State | Metric | Current ms | V2 ms | Result |\n|---|---|---|---:|---:|---|\n")
+            for p in speed["points"]:
+                summary.write(f"| {p['operation']} | {p['state']} | {p['metric']} | {p['current']:.3f} | {p['v2']:.3f} | {'PASS' if p['passed'] else 'FAIL'} |\n")
     if not gate["passed"]:
         raise RuntimeError("The candidate V2 exceeded accepted V2 disk space; retain this failed measurement")
+    if speed and not speed["passed"]:
+        raise RuntimeError("V2 summaries/counts did not beat current Brain at p50 and p95; retain this failed measurement")
 
 
 if __name__ == "__main__":

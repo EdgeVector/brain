@@ -1,7 +1,7 @@
 // CI operational benchmark against generated data in a real, isolated node.
 // The source directory selects the retained baseline or the candidate code.
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Config } from "../config.ts";
 import type { FbrainRecord } from "../record.ts";
@@ -17,6 +17,9 @@ const records = await import(resolve(source, "src/record.ts"));
 const definitions = await import(resolve(source, "src/schemas.ts"));
 const v2Module = await import(resolve(source, "src/v2/store.ts"));
 const v2Schemas = await import(resolve(source, "src/v2/schemas.ts"));
+const paged = process.env.BRAIN_SHARED_READS === "1" && existsSync(resolve(source, "src/v2/paged.ts"))
+  ? await import(resolve(source, "src/v2/paged.ts")) : null;
+const activeSchemas = paged?.PAGED_SCHEMAS ?? v2Schemas.V2_SCHEMAS;
 const [getCommand, listCommand, snapshotCommand, deleteCommand, searchCommand] = await Promise.all([
   "get", "list", "admin-snapshot", "delete", "search",
 ].map(name => import(resolve(source, `src/commands/${name}.ts`))));
@@ -57,8 +60,8 @@ const node = clientModule.newNodeClient({ baseUrl: "http://127.0.0.1", userHash:
 const cfg: Config = { configVersion: 4, nodeUrl: "http://127.0.0.1", schemaServiceUrl: "http://127.0.0.1:1",
   userHash: "brain-read-ci", schemaHashes: Object.fromEntries(definitions.UNIQUE_SCHEMAS.map((entry: any) => [entry.key, entry.schema.schema.name])),
   designSchemaHash: "Design", taskSchemaHash: "Task", nodeSocketPath: settings.socket, appIdentityEnforce: false };
-const schemas = Object.fromEntries(Object.entries(v2Schemas.V2_SCHEMAS).map(([key, schema]: [string, any]) => [key, schema.name]));
-const store = new v2Module.BrainV2Store(node, schemas, { nativeReads: process.env.BRAIN_SHARED_READS === "1" });
+const schemas = Object.fromEntries(Object.entries(activeSchemas).map(([key, schema]: [string, any]) => [key, schema.name]));
+const store = paged ? new paged.PagedBrainV2Store(node, schemas) : new v2Module.BrainV2Store(node, schemas, { nativeReads: process.env.BRAIN_SHARED_READS === "1" });
 const types: RecordType[] = ["concept", "reference"];
 const fields = ["slug", "title", "body", "status", "tags", "created_at", "updated_at"];
 function input(number: number): { type: RecordType; record: FbrainRecord } {
@@ -68,10 +71,15 @@ function input(number: number): { type: RecordType; record: FbrainRecord } {
     status: number % 4 === 0 ? "parked" : "active", tags: ["shared"], created_at: time, updated_at: time } };
 }
 async function setup(): Promise<void> {
-  const declarations = layout === "v2" ? Object.values(v2Schemas.V2_SCHEMAS) : definitions.UNIQUE_SCHEMAS.map((entry: any) => entry.schema.schema);
+  const declarations = layout === "v2" ? Object.values(activeSchemas) : definitions.UNIQUE_SCHEMAS.map((entry: any) => entry.schema.schema);
   for (const definition of declarations as any[]) {
     const { owner_app_id: _owner, ...schema } = definition;
     await v2Module.rawData(node, "POST", "/api/schemas/seed-system", { isolated_copy: true, schema: { ...schema, source: "system_seed" } });
+  }
+  if (layout === "v2" && paged) {
+    const { seedPaged } = await import(resolve(source, "src/v2/paged-seed.ts"));
+    await seedPaged(node, schemas, Array.from({ length: settings.records }, (_, number) => input(number)));
+    return;
   }
   // Equal generated corpora, seeded with native mutation batches. Setup cost is
   // outside read timings; this does not replay or simulate any read response.
@@ -213,7 +221,7 @@ async function operation(name: string): Promise<number> {
       if (store.counts) {
         const result = await store.counts();
         verificationChecks.push(() => {
-          if (result.total !== settings.records || definitions.RECORD_TYPES.some((type: RecordType) => result.types[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("V2 native counts incomplete");
+          if (result.total !== settings.records || definitions.RECORD_TYPES.some((type: RecordType) => result.types[type] !== (types.includes(type) ? settings.records / 2 : 0))) throw new Error("V2 counts incomplete");
         });
         return result.total;
       }
