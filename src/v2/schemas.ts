@@ -37,9 +37,11 @@ export const V2_SUMMARY_FIELDS = ["br2_id", "br2_type", "slug", "title", "status
 export const V2_STORED_FIELDS = ["br2_id", "br2_type", "br2_scope", "br2_status", "br2_order", "br2_revision", "br2_card", "br2_content", "br2_count_hash"];
 export const V2_SCHEMAS = {
   record: definition("BrainV2PackedRecord", V2_STORED_FIELDS, "br2_id"),
-  recent: definition("BrainV2PackedRecent", ["br2_scope", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_scope", "br2_order"),
-  type: definition("BrainV2PackedByType", ["br2_type", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_type", "br2_order"),
-  status: definition("BrainV2PackedByStatus", ["br2_status", "br2_order", "br2_id", "br2_card", "br2_content"], "br2_status", "br2_order"),
+  // The shared summary already identifies the record. These views need no
+  // duplicate identity molecule; their keys and two document atoms suffice.
+  recent: definition("BrainV2PackedRecent", ["br2_scope", "br2_order", "br2_card", "br2_content"], "br2_scope", "br2_order"),
+  type: definition("BrainV2PackedByType", ["br2_type", "br2_order", "br2_card", "br2_content"], "br2_type", "br2_order"),
+  status: definition("BrainV2PackedByStatus", ["br2_status", "br2_order", "br2_card", "br2_content"], "br2_status", "br2_order"),
   count: definition("BrainV2CountMember", ["br2_count_hash", "br2_id"], "br2_count_hash", "br2_id"),
   // A tag membership is a different product. Distinct field identities prevent
   // automatic scalar coherence from treating an array as one tag coordinate.

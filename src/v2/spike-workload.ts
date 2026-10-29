@@ -26,9 +26,11 @@ let requests = 0;
 // Count the actual I/O boundary, including clients constructed by commands.
 // Every call still reaches the native fetch; no response or transport is mocked.
 globalThis.fetch = new Proxy(globalThis.fetch, {
-  apply(target, receiver, argumentsList) {
+  async apply(target, receiver, argumentsList) {
     requests++;
-    return Reflect.apply(target, receiver, argumentsList);
+    const response = await Reflect.apply(target, receiver, argumentsList);
+    if (response.status >= 400) console.error("CI node refusal", response.status, (await response.clone().text()).slice(0, 2000));
+    return response;
   },
 });
 const node: NodeClient = newNodeClient({ baseUrl: "http://127.0.0.1", userHash: "brain-v2-ci", socketPath: settings.socket });
@@ -77,7 +79,7 @@ async function setup(): Promise<void> {
 }
 
 async function proteinBinding(field = "br2_id"): Promise<{ identity: string; members: number }> {
-  const layouts = field === "br2_id" ? ["record", "recent", "type", "status", "count"] : ["record", "recent", "type", "status"];
+  const layouts = field === "br2_id" ? ["record", "count"] : ["record", "recent", "type", "status"];
   const molecules = await Promise.all(layouts.map(async layout => {
     const name = schemas[layout as keyof V2SchemaMap];
     const metadata = await rawData(node, "GET", `/api/schema/${encodeURIComponent(name)}`);
@@ -180,7 +182,7 @@ async function verify(): Promise<Record<string, unknown>> {
   await store.delete("concept", "recreated");
   if (await store.get("concept", "recreated")) throw new Error("V2 delete left the canonical record");
   for (const [layout, hash] of [["recent", removed.br2_scope], ["type", removed.br2_type], ["status", removed.br2_status], ["tag", "new-only"]] as const) {
-    const result = await rawData(node, "POST", "/api/query", { schema_name: schemas[layout], fields: [layout === "tag" ? "bt2_id" : "br2_id"],
+    const result = await rawData(node, "POST", "/api/query", { schema_name: schemas[layout], fields: [layout === "tag" ? "bt2_id" : "br2_card"],
       filter: { HashRangeKey: { hash, range: removed.br2_order } }, limit: 1 });
     if ((result.results ?? result.rows)?.length !== 0) throw new Error(`V2 delete left the exact ${layout} key`);
   }
