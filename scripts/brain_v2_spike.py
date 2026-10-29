@@ -163,7 +163,8 @@ def run_case(args, layout, repeat, output):
                        FBRAIN_APP_IDENTITY_ENFORCE="off", BRAIN_CONFIG=str(root / "config.json"),
                        FBRAIN_FOLDDB_SOCKET=str(sock), RUST_MIN_STACK="16777216")
     environment.update(BRAIN_SPIKE_SOURCE=str(getattr(args, "source", Path.cwd())),
-                       BRAIN_SHARED_READS="1" if getattr(args, "native_reads", False) else "0")
+                       BRAIN_SHARED_READS="1" if getattr(args, "native_reads", False) else "0",
+                       BRAIN_PROFILE_BASELINE="1" if getattr(args, "version", None) == "before" and layout == "v2" else "0")
     save(root / "settings.json", {"socket": str(sock), "records": args.records, "bodyBytes": args.body_bytes})
     log = (destination / "node.log").open("w")
     daemon = None

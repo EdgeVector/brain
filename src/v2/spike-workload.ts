@@ -23,13 +23,17 @@ const [layout, phase, configPath, outputPath] = process.argv.slice(2);
 if (!configPath || !outputPath || !["current", "v2"].includes(layout ?? "")) throw new Error("Usage: current|v2 phase config output");
 const settings = JSON.parse(readFileSync(configPath, "utf8")) as { socket: string; records: number; bodyBytes: number };
 let requests = 0;
+let lastNodeRefusal = "";
 // Count the actual I/O boundary, including clients constructed by commands.
 // Every call still reaches the native fetch; no response or transport is mocked.
 globalThis.fetch = new Proxy(globalThis.fetch, {
   async apply(target, receiver, argumentsList) {
     requests++;
     const response = await Reflect.apply(target, receiver, argumentsList);
-    if (response.status >= 400) console.error("CI node refusal", response.status, (await response.clone().text()).slice(0, 2000));
+    if (response.status >= 400) {
+      lastNodeRefusal = (await response.clone().text()).slice(0, 2000);
+      console.error("CI node refusal", response.status, lastNodeRefusal);
+    }
     return response;
   },
 });
@@ -161,9 +165,26 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   const tag = await store.list({ tag: "shared", limit: 20 });
   if (tag.items.length !== 20) throw new Error("V2 tag list is incomplete");
-  await write(16, true);
+  let olderResult = "accepted";
+  const priorOlder = await store.get("concept", "record-16");
+  try { await write(16, true); }
+  catch (error) {
+    if (process.env.BRAIN_PROFILE_BASELINE !== "1" || !lastNodeRefusal.includes("the typed molecule has no admitted range profile")) throw error;
+    const unchanged = await store.get("concept", "record-16");
+    if (!priorOlder || !unchanged || Object.entries(priorOlder).some(([field, value]) => JSON.stringify(value) !== JSON.stringify(unchanged[field]))) throw new Error("Baseline profile refusal changed its source record");
+    const peers = [["recent", priorOlder.br2_scope, priorOlder.br2_order], ["type", priorOlder.br2_type, priorOlder.br2_order],
+      ["status", priorOlder.br2_status, priorOlder.br2_order], ["count", priorOlder.br2_count_hash, priorOlder.br2_id],
+      ...priorOlder.tags.map((tag: string) => ["tag", tag, priorOlder.br2_order])];
+    await Promise.all(peers.map(async ([layout, hash, range]: string[]) => {
+      const page = await rawData(node, "POST", "/api/query", { schema_name: schemas[layout as keyof V2SchemaMap],
+        fields: [layout === "tag" ? "bt2_id" : "br2_id"], filter: { HashRangeKey: { hash, range } }, limit: 1 });
+      if (page.unresolved_rows !== 0 || page.tombstoned_rows !== 0 || page.results.length !== 1
+          || page.results[0].fields[layout === "tag" ? "bt2_id" : "br2_id"] !== priorOlder.br2_id) throw new Error("Baseline profile refusal changed its membership");
+    }));
+    olderResult = "failed: missing molecule range profile after restart; source and memberships unchanged";
+  }
   const older = await store.get("concept", "record-16");
-  if (!older || older.status !== "parked") throw new Error("V2 older-record update failed");
+  if (olderResult === "accepted" && (!older || older.status !== "parked")) throw new Error("V2 older-record update failed");
   const common = input(0).record;
   await store.put("concept", { ...common, slug: "same-slug", tags: [] });
   await store.put("reference", { ...common, slug: "same-slug", tags: [] });
@@ -200,7 +221,7 @@ async function verify(): Promise<Record<string, unknown>> {
     duplicate_slugs: true, partial_update: true, concurrent_revision_conflict: true, delete_and_recreate: true, concurrent_creates: 8,
     identity_protein: await proteinBinding(),
     summary_protein: await proteinBinding("br2_card"), content_protein: await proteinBinding("br2_content"),
-    older_record_update: "accepted", status_scope_example: statusKey("concept", "active"), query_formats: queryFormats };
+    older_record_update: olderResult, status_scope_example: statusKey("concept", "active"), query_formats: queryFormats };
 }
 
 let verification: Record<string, unknown> | undefined;

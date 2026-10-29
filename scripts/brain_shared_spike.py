@@ -21,7 +21,7 @@ PHASES = ("create", "update", "delete", "verify", "partial", "reopen_partial")
 
 def case_args(args, version):
     before = version == "before"
-    return SimpleNamespace(**vars(args), lastdbd=args.baseline_daemon if before else args.candidate_daemon,
+    return SimpleNamespace(**vars(args), version=version, lastdbd=args.baseline_daemon if before else args.candidate_daemon,
                            lastdb_revision=args.baseline_core if before else args.candidate_core,
                            source=args.baseline_source if before else Path.cwd(), native_reads=not before,
                            body_bytes=4096, extended=True, operations=OPERATIONS)
@@ -96,6 +96,9 @@ def write_storage_summary(args, runs):
     lines += ["", "Disk checkpoints follow one durable flush and a fixed three-second idle. No forced compaction or repeat-until-small pass runs.",
               "All generated homes stop and are removed. The primary and its archive are not read or copied.",
               "V2 has no search adapter. Body files, attachments, production registration, and migration writes remain outside the spike."]
+    lines += ["", "### Older-record operation after restart", ""]
+    for run in runs:
+        lines.append(f"- Repeat {run['repeat']}, {run['version']}/{run['layout']}: {run['phases']['verify']['verification']['older_record_update']}.")
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
         summary.write("\n".join(lines) + "\n")
     return comparisons
