@@ -140,7 +140,9 @@ export class PagedBrainV2Store {
       let cursor: unknown;
       const seen = new Set<string>();
       for (let i = 0; i < 1000; i++) {
-        const result = await this.reader.native({ ...options, cursor }, size, full);
+        // Keep the existing 500 projected-field work bound. Two-field body
+        // pages also fit the ordinary byte budget at the 48 KiB body fence.
+        const result = await this.reader.native({ ...options, cursor }, full ? Math.min(size, 250) : size, full);
         const rows = (full && options.tag) || fields.includes("br2_revision")
           ? await this.getMany(result.items.map(r => ({ type: r.br2_type, slug: r.slug }))) : result.items;
         yield { ...result, items: rows.map(row => project(row as V2Record, fields)) };
