@@ -168,6 +168,11 @@ async function verify(): Promise<Record<string, unknown>> {
   }
   const tag = await store.list({ tag: "shared", limit: 20 });
   if (tag.items.length !== 20) throw new Error("V2 tag list is incomplete");
+  for (const status of [undefined, "parked"]) {
+    const mixed = await store.list({ tag: "shared", type: "concept", ...(status ? { status } : {}), limit: 100 });
+    if (!mixed.items.length || mixed.items.some((r: any) => r.br2_type !== "concept" || !r.tags.includes("shared")
+        || (status && r.status !== status))) throw new Error("Mixed tag/type/status selection differs");
+  }
   let olderResult = "accepted";
   const priorOlder = await store.get("concept", "record-16");
   try { await write(16, true); }

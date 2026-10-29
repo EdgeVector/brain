@@ -139,15 +139,31 @@ export class PagedBrainV2Store {
     const byId = new Map(rows.map(row => [row.br2_id, row]));
     const items = result.results.map((row: any) => {
       const record = byId.get(row.fields[layout === "tag" ? "bt2_id" : "br2_id"]);
-      if (!record || record.br2_order !== row.key.range || (options.type && record.br2_type !== options.type)
-          || (options.status && record.status !== options.status) || (options.tag && !record.tags.includes(options.tag))) throw new Error("V2 keyed list differs from its summary");
-      return project(record, V2_SUMMARY_FIELDS);
-    });
+      if (!record || record.br2_order !== row.key.range || (layout !== "tag" && ((options.type && record.br2_type !== options.type)
+          || (options.status && record.status !== options.status))) || (options.tag && !record.tags.includes(options.tag))) throw new Error("V2 keyed list differs from its summary");
+      return record;
+    }).filter((record: V2Record) => (!options.type || record.br2_type === options.type) && (!options.status || record.status === options.status))
+      .map((record: V2Record) => project(record, V2_SUMMARY_FIELDS));
     return { items, cursor: result.next_cursor ?? null, hasMore: result.has_more === true };
   }
   async *pages(options: Omit<Options, "cursor" | "limit"> & { fields?: string[]; pageSize?: number } = {}): AsyncGenerator<any> {
     const fields = options.fields ?? V2_SUMMARY_FIELDS;
     if (fields.some(f => !V2_RECORD_FIELDS.includes(f))) throw new Error("Unknown V2 field");
+    if (options.type || options.status || options.tag) {
+      let cursor: unknown;
+      const seen = new Set<string>();
+      for (let i = 0; i < 1000; i++) {
+        const result = await this.list({ ...options, limit: 100, cursor });
+        const rows = fields.some(f => !V2_SUMMARY_FIELDS.includes(f))
+          ? await this.getMany(result.items.map(r => ({ type: r.br2_type as RecordType, slug: r.slug as string }))) : result.items;
+        yield { ...result, items: rows.map(row => project(row as V2Record, fields)) };
+        if (!result.hasMore) return;
+        const token = JSON.stringify(result.cursor);
+        if (!result.cursor || seen.has(token)) throw new Error("V2 keyed continuation stalled");
+        seen.add(token); cursor = result.cursor;
+      }
+      throw new Error("V2 keyed traversal exceeded 1000 pages");
+    }
     const { records } = await this.summaries();
     const selected = records.filter(r => (!options.type || r.br2_type === options.type) && (!options.status || r.status === options.status)
       && (!options.tag || r.tags.includes(options.tag)));
