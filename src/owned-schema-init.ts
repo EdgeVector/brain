@@ -33,8 +33,8 @@ export async function syncOwnedModel(node: NodeClient, base: Config, existing: C
   if (existing && Object.entries(schemaHashes).some(([key, value]) => existing.schemaHashes[key] !== value)) {
     throw new FbrainError({ code: "schema_pin_changed", message: "An owned schema address changed. The config remains unchanged." });
   }
-  return { ...base, storageModel: MULTI_KEY_MODEL, schemaHashes,
-    designSchemaHash: schemaHashes.design!, taskSchemaHash: schemaHashes.task!, appIdentityEnforce: false,
+  return { ...existing, ...base, storageModel: MULTI_KEY_MODEL, schemaHashes,
+    designSchemaHash: schemaHashes.design!, taskSchemaHash: schemaHashes.task!, appIdentityEnforce: existing?.appIdentityEnforce ?? false,
     schemaFieldAliases: canonicalVocabulary ? Object.assign({}, ...resolved.map((entry) => profilesFor(entry.schema, [entry.identity, entry.runtime]))) : undefined,
   };
 }

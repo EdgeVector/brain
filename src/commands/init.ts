@@ -427,7 +427,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
     }, existing, canonicalVocabulary);
     writeConfig(config, configPath);
-    const consent = { state: "skipped", reason: "enforce_off" } as const;
+    const consent = config.appIdentityEnforce === false
+      ? { state: "skipped", reason: "enforce_off" } as const
+      : await establishConsentInline({nodeUrl,userHash,print,verbose,socketPath:nodeSocketPath,
+        nonInteractiveGrant:opts.grantConsent,...opts.consent});
     printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
     return { config, bootstrapped, consent };
   }
