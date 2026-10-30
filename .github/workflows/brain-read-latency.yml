@@ -3,123 +3,197 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'scripts/brain_latency.mjs'
       - 'scripts/brain_read_latency.py'
-      - 'scripts/brain_v2_spike.py'
       - '.github/workflows/brain-read-latency.yml'
+  push:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
+concurrency:
+  group: brain-native-latency-${{ github.ref }}
+  cancel-in-progress: true
 env:
-  LASTDB_REVISION: 688222b04d18d717da913007cb41e7174e48f395
-  LASTDB_TAG: nightly-20261027-688222b04
-  LASTDB_BUNDLE_SHA256: 6dcae41be0a7d4ea8783fdea164481728515afce0beba507545f96b74175a046
-  BASELINE_REVISION: 4e1ae9df117f27bb7ce0a97eefc2d88acbce7850
+  APP_BEFORE: 648cef807fcd9e08615eb8d9065649baf8a2f0f3
+  DAEMON_BEFORE: 858aa4e19300d3413ab7bf24d5a443c4d08fb4b0
+  DAEMON_AFTER: e532566c185c11fcbf6b085f66a2400e61385ad6
+  APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
+  CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
-  packed-operations:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ env.APP_AFTER }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.3.10'
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
-      - name: Verify the pinned daemon
+      - run: node --check scripts/brain_latency.mjs
+      - name: Retain exact source revisions
         shell: bash
         run: |
           set -euo pipefail
-          mkdir "$RUNNER_TEMP/read-binary"
-          curl --fail --location --retry 3 "https://github.com/EdgeVector/lastdb/releases/download/$LASTDB_TAG/lastdb-x86_64-unknown-linux-gnu.tar.gz" --output "$RUNNER_TEMP/read-binary/bundle.tar.gz"
-          printf '%s  %s\n' "$LASTDB_BUNDLE_SHA256" "$RUNNER_TEMP/read-binary/bundle.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/read-binary/bundle.tar.gz" -C "$RUNNER_TEMP/read-binary"
-      - name: Verify packed records and shared molecules before bulk measurements
-        run: >-
-          python3 scripts/brain_v2_spike.py
-          --lastdbd "$RUNNER_TEMP/read-binary/lastdbd"
-          --lastdb-revision "$LASTDB_REVISION"
-          --output "$RUNNER_TEMP/packed-operations"
-          --records 128 --body-bytes 4096 --repeats 1
-      - uses: actions/upload-artifact@v4
+          for label in brain-before daemon-before daemon-after; do
+            case "$label" in
+              brain-before) repository=brain; revision="$APP_BEFORE" ;;
+              daemon-before) repository=lastdb; revision="$DAEMON_BEFORE" ;;
+              daemon-after) repository=lastdb; revision="$DAEMON_AFTER" ;;
+            esac
+            directory="$RUNNER_TEMP/$label"
+            git init "$directory"
+            git -C "$directory" remote add origin "https://github.com/EdgeVector/$repository.git"
+            git -C "$directory" fetch --depth 1 origin "$revision"
+            git -C "$directory" checkout --detach FETCH_HEAD
+            test "$(git -C "$directory" rev-parse HEAD)" = "$revision"
+          done
+          cd "$RUNNER_TEMP/brain-before"
+          bun install --frozen-lockfile
+      - name: Require registered definitions before the build
+        run: |
+          python3 scripts/brain_read_latency.py --mode catalog \
+            --baseline "$RUNNER_TEMP/brain-before" --candidate "$GITHUB_WORKSPACE" \
+            --app-baseline-revision "$APP_BEFORE" --app-revision "$APP_AFTER" \
+            --lastdb-source "$RUNNER_TEMP/daemon-after" \
+            --baseline-binary "$RUNNER_TEMP/brain-binaries/before" --binary "$RUNNER_TEMP/brain-binaries/after" \
+            --baseline-revision "$DAEMON_BEFORE" --revision "$DAEMON_AFTER" \
+            --records 1000 --output "$RUNNER_TEMP/brain-definitions"
+      - name: Build the compatible and native daemons once
+        env:
+          CARGO_BUILD_JOBS: '3'
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/brain-binaries"
+          for label in before after; do
+            if [ "$label" = before ]; then revision="$DAEMON_BEFORE"; else revision="$DAEMON_AFTER"; fi
+            cd "$RUNNER_TEMP/daemon-$label"
+            FOLDDB_BUILD_VERSION_OVERRIDE="bench-$revision" \
+              CARGO_TARGET_DIR="$RUNNER_TEMP/brain-target-$label" \
+              cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
+            cp "$RUNNER_TEMP/brain-target-$label/dev-release/lastdbd" "$RUNNER_TEMP/brain-binaries/$label"
+            rm -rf "$RUNNER_TEMP/brain-target-$label"
+          done
+          cd "$RUNNER_TEMP/brain-binaries"
+          sha256sum before after > SHA256SUMS
+          printf 'Before: %s\nAfter: %s\n' "$DAEMON_BEFORE" "$DAEMON_AFTER" > revisions.txt
+      - name: Retain definition results
         if: always()
-        id: operations
+        uses: actions/upload-artifact@v4
         with:
-          name: packed-operations-${{ github.sha }}
-          path: ${{ runner.temp }}/packed-operations
+          name: brain-definitions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/brain-definitions/
           if-no-files-found: error
           retention-days: 14
-      - name: Record operation artifact identity
-        if: always() && steps.operations.outcome == 'success'
+      - name: Retain the exact daemon programs
+        id: binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: brain-native-binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/brain-binaries/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify the binary artifact identity and expiry
         env:
-          ARTIFACT_URL: ${{ steps.operations.outputs.artifact-url }}
-          ARTIFACT_DIGEST: ${{ steps.operations.outputs.artifact-digest }}
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.binaries.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.binaries.outputs.artifact-url }}
+          ARTIFACT_SHA256: ${{ steps.binaries.outputs.artifact-digest }}
         run: |
-          printf '\nArtifact: %s\nSHA-256: %s\nRetention: 14 days.\n' "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
-  read-latency:
-    name: read-latency-${{ matrix.records }}
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/binary-artifact.json"
+          python3 "$RUNNER_TEMP/daemon-after/scripts/benchmarks/artifact.py" \
+            --metadata "$RUNNER_TEMP/binary-artifact.json" --output "$RUNNER_TEMP/binary-artifact-receipt"
+  measure:
+    name: ${{ matrix.mode }}-latency-${{ matrix.records }}
+    needs: [build]
     runs-on: ubuntu-24.04
-    needs: [packed-operations]
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        records: [1000, 10000]
+        include:
+          - {mode: read, records: 1000, repeats: 3, body_bytes: 0}
+          - {mode: read, records: 10000, repeats: 3, body_bytes: 0}
+          - {mode: operations, records: 128, repeats: 1, body_bytes: 4096}
+          - {mode: operations, records: 1024, repeats: 3, body_bytes: 4096}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 0
+          ref: ${{ env.APP_AFTER }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.3.10'
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - name: Retain baseline and verify the pinned daemon
+      - name: Retain the source reader and daemon support code
         shell: bash
         run: |
           set -euo pipefail
-          mkdir "$RUNNER_TEMP/read-baseline" "$RUNNER_TEMP/read-binary"
-          git archive "$BASELINE_REVISION" | tar -x -C "$RUNNER_TEMP/read-baseline"
-          curl --fail --location --retry 3 "https://github.com/EdgeVector/lastdb/releases/download/$LASTDB_TAG/lastdb-x86_64-unknown-linux-gnu.tar.gz" --output "$RUNNER_TEMP/read-binary/bundle.tar.gz"
-          printf '%s  %s\n' "$LASTDB_BUNDLE_SHA256" "$RUNNER_TEMP/read-binary/bundle.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/read-binary/bundle.tar.gz" -C "$RUNNER_TEMP/read-binary"
-          printf 'LastDB source: %s\nRelease: %s\nSHA-256: %s\n' "$LASTDB_REVISION" "$LASTDB_TAG" "$LASTDB_BUNDLE_SHA256" >> "$GITHUB_STEP_SUMMARY"
-      - name: Measure both layouts before and after on paired generated homes
-        run: >-
-          python3 scripts/brain_read_latency.py
-          --lastdbd "$RUNNER_TEMP/read-binary/lastdbd"
-          --lastdb-revision "$LASTDB_REVISION"
-          --baseline "$RUNNER_TEMP/read-baseline"
-          --baseline-revision "$BASELINE_REVISION"
-          --output "$RUNNER_TEMP/read-results"
-          --records ${{ matrix.records }} --repeats 3 --samples 5
+          for label in brain-before daemon-after; do
+            if [ "$label" = brain-before ]; then repository=brain; revision="$APP_BEFORE"; else repository=lastdb; revision="$DAEMON_AFTER"; fi
+            directory="$RUNNER_TEMP/$label"
+            git init "$directory"
+            git -C "$directory" remote add origin "https://github.com/EdgeVector/$repository.git"
+            git -C "$directory" fetch --depth 1 origin "$revision"
+            git -C "$directory" checkout --detach FETCH_HEAD
+            test "$(git -C "$directory" rev-parse HEAD)" = "$revision"
+          done
+          cd "$RUNNER_TEMP/brain-before"
+          bun install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: brain-native-binaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/brain-binaries/
+      - name: Verify the downloaded program checksums
+        run: |
+          cd "$RUNNER_TEMP/brain-binaries"
+          sha256sum --check SHA256SUMS
+          chmod +x before after
+      - name: Measure the actual app operations before and after
+        run: |
+          python3 scripts/brain_read_latency.py --mode '${{ matrix.mode }}' \
+            --baseline "$RUNNER_TEMP/brain-before" --candidate "$GITHUB_WORKSPACE" \
+            --app-baseline-revision "$APP_BEFORE" --app-revision "$APP_AFTER" \
+            --lastdb-source "$RUNNER_TEMP/daemon-after" \
+            --baseline-binary "$RUNNER_TEMP/brain-binaries/before" --binary "$RUNNER_TEMP/brain-binaries/after" \
+            --baseline-revision "$DAEMON_BEFORE" --revision "$DAEMON_AFTER" \
+            --records '${{ matrix.records }}' --repeats '${{ matrix.repeats }}' --samples 5 \
+            --body-bytes '${{ matrix.body_bytes }}' --output "$RUNNER_TEMP/brain-results"
       - name: Retain raw samples and source identities
         if: always()
-        uses: actions/upload-artifact@v4
         id: measurements
+        uses: actions/upload-artifact@v4
         with:
-          name: brain-read-${{ matrix.records }}-${{ github.sha }}
-          path: ${{ runner.temp }}/read-results
+          name: brain-${{ matrix.mode }}-${{ matrix.records }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/brain-results/
           if-no-files-found: error
           retention-days: 14
-      - name: Record artifact checksum and retention
-        if: always() && steps.measurements.outcome == 'success'
+      - name: Verify the measurement artifact identity and expiry
+        if: ${{ always() && steps.measurements.outcome == 'success' }}
         env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.measurements.outputs.artifact-id }}
           ARTIFACT_URL: ${{ steps.measurements.outputs.artifact-url }}
-          ARTIFACT_DIGEST: ${{ steps.measurements.outputs.artifact-digest }}
+          ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
         run: |
-          printf '\nArtifact: %s\nSHA-256: %s\nRetention: 14 days from this run.\n' "$ARTIFACT_URL" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/measurement-artifact.json"
+          python3 "$RUNNER_TEMP/daemon-after/scripts/benchmarks/artifact.py" \
+            --metadata "$RUNNER_TEMP/measurement-artifact.json" --output "$RUNNER_TEMP/measurement-artifact-receipt"
   benchmark-complete:
     if: ${{ always() }}
-    needs: [packed-operations, read-latency]
+    needs: [build, measure]
     runs-on: ubuntu-24.04
     steps:
-      - name: Require real operations, measurements, and artifact uploads
+      - name: Require real operations, measurements, and verified artifact uploads
         env:
-          OPERATIONS: ${{ needs.packed-operations.result }}
-          MEASUREMENTS: ${{ needs.read-latency.result }}
+          BUILD: ${{ needs.build.result }}
+          MEASUREMENTS: ${{ needs.measure.result }}
         run: |
-          test "$OPERATIONS" = success
+          test "$BUILD" = success
           test "$MEASUREMENTS" = success
