@@ -11,6 +11,8 @@ import { parseListCount } from "../count-state.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import { HEAD_RANGE } from "../list-page.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedRecordPage } from "../named-records.ts";
 import {
   completeKeyTags,
   findBySlug,
@@ -86,6 +88,7 @@ export type ListOptions = {
 // that need completeness-dependent sweeps must use search / point reads.
 // `--count` mode still returns the match count only.
 export type ListPageResult = {
+  next_page?: string;
   items: RecordSummary[];
   /** Cards on this page after the page filter, before the limit. */
   total: number;
@@ -136,6 +139,24 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   const { print, printErr } = resolvePrintSinks(opts);
   if (opts.count) {
     await printListCount(opts, print, printErr);
+    return;
+  }
+  if (multiKey(opts.cfg) && !opts.tag) {
+    const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+    const page = await namedRecordPage(node, opts.cfg, {
+      ...(opts.type ? { type: opts.type } : {}), ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.updatedSinceMs !== undefined ? { updatedSinceMs: opts.updatedSinceMs } : {}),
+    }, Math.min(opts.limit ?? DEFAULT_LIST_LIMIT, LIST_LIMIT_CAP), opts.page);
+    const result: ListPageResult = { items: page.items, total: page.items.length, truncated: page.has_more,
+      ...(page.next_page ? { next_page: page.next_page } : {}) };
+    opts.onResult?.(result);
+    if (opts.fields?.length) printFieldProjection(result.items, opts.fields, print);
+    else if (opts.json) print(JSON.stringify(result));
+    else {
+      if (!result.items.length) print("no records");
+      for (const line of formatTable(result.items.map((item) => [item.type, item.slug, item.status, item.title]))) print(line);
+    }
+    if (page.next_page) (opts.json || opts.fields?.length ? printErr : print)(`sample ${page.next_page}`);
     return;
   }
   await printListPage(opts, print, printErr);

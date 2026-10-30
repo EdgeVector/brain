@@ -709,6 +709,8 @@ export type AppSchemaDeclaration = {
   app_id: string;
   schema: string;
   canonical: string;
+  identityHash?: string;
+  independentFields?: boolean;
   resolution: "mint" | "link" | string;
   decision?: string;
 };
@@ -1643,6 +1645,8 @@ export function newNodeClient(opts: {
       const b = body as Record<string, unknown>;
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema === "string" ? b.schema : "";
+      const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
+      const independentFields = b.independent_fields === true;
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
       if (!canonical || !schemaName || !resolution) {
         throw new FbrainError({
@@ -1651,11 +1655,11 @@ export function newNodeClient(opts: {
           hint: "Upgrade the node or inspect the app-schema declaration response.",
         });
       }
-      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName]));
+      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName, identityHash ?? ""]));
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
-        canonical,
+        canonical, identityHash, independentFields,
         resolution,
         decision: typeof b.decision === "string" ? b.decision : undefined,
       };

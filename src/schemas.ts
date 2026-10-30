@@ -73,8 +73,12 @@ export type SchemaDefinition = {
   /** Reuse canonical field definitions without sharing record values. */
   independent_fields?: boolean;
   alternate_keys?: Record<string, {
-    hash_field: string;
+    hash_field?: string;
+    hash_literal?: string;
     range_field?: string | null;
+    range_parts?: Array<{ field: string; format?: "text" | "reverse_time_millis" | { padded_text: { width: number } } }>;
+    range_separator?: string;
+    omit_empty_hash?: boolean;
     missing?: "reject" | "omit";
   }>;
   fields: string[];

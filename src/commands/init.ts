@@ -1,3 +1,5 @@
+import { multiKey } from "../multi-key.ts";
+import { syncOwnedModel } from "../owned-schema-init.ts";
 import { canonicalProfilesForHashes, canonicalSchema } from "../canonical-vocabulary.ts";
 // `fbrain init` — bootstrap a node (if needed), register every fbrain
 // schema, load them, persist canonical hashes to ~/.fbrain/config.json.
@@ -419,6 +421,16 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     verbose: verbose ?? (() => {}),
     socketPath: nodeSocketPath,
   });
+  if (!existing || multiKey(existing)) {
+    const config = await syncOwnedModel(nodeClient, {
+      configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
+      designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
+    }, existing);
+    writeConfig(config, configPath);
+    const consent = { state: "skipped", reason: "enforce_off" } as const;
+    printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
+    return { config, bootstrapped, consent };
+  }
   const schemaHashes: Record<string, string> = {};
 
   // Checkpoint the config DURING declaration, not only after it.

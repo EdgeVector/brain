@@ -1188,6 +1188,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             "True when the print cut the page, the atom names an older page, " +
               "or the page atom is absent.",
           ),
+        next_page: z.string().optional().describe("Opaque continuation for a named-key list. Repeat the same filters with page."),
         count: z
           .number()
           .int()
@@ -1237,6 +1238,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
                 records: result.items,
                 total: result.total,
                 truncated: result.truncated,
+                ...(result.next_page ? { next_page: result.next_page } : {}),
                 skipped_types: skippedTypes,
               }
             : "count" in result

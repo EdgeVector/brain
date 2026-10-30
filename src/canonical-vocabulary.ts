@@ -31,8 +31,9 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   if (schema.alternate_keys) {
     result.alternate_keys = Object.fromEntries(Object.entries(schema.alternate_keys).map(([name, key]) => [name, {
       ...key,
-      hash_field: rename(key.hash_field),
+      ...(key.hash_field ? { hash_field: rename(key.hash_field) } : {}),
       ...(key.range_field != null ? { range_field: rename(key.range_field) } : {}),
+      ...(key.range_parts ? { range_parts: key.range_parts.map((part) => ({ ...part, field: rename(part.field) })) } : {}),
     }]));
   }
   result.key = Object.fromEntries(Object.entries(schema.key ?? {}).filter(([,field]) => typeof field === "string").map(([role, field]) => [role, rename(field)]));

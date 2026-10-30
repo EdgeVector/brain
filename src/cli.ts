@@ -9,11 +9,12 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
 import { getFbrainVersion } from "./version.ts";
-import { FbrainError } from "./client.ts";
+import { FbrainError, newReadClientFromCfg } from "./client.ts";
 import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
 import { primaryBrain, readFromPrimary } from "./primary-brain.ts";
 import { parseFieldProjection } from "./field-projection.ts";
+import { convertMultiKey } from "./commands/multi-key-convert.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
@@ -156,6 +157,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
 ]);
 
 export const COMMANDS = [
+  "multi-key-convert",
   "init",
   "design",
   "task",
@@ -289,6 +291,7 @@ function simpleNewHelp(type: RecordType): string {
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
+  "multi-key-convert": "brain multi-key-convert [--apply --maintenance] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. Init leaves existing values unchanged.",
   init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
@@ -1299,6 +1302,7 @@ const MCP_OPTIONS = {
 } as const;
 
 export const CLI_SPEC = {
+  "multi-key-convert": {apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"}},
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
@@ -1929,6 +1933,13 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
     ? (msg: string) => console.error(`[verbose] ${msg}`)
     : undefined;
   switch (cmd) {
+    case "multi-key-convert": {
+      const {values}=parseArgs({args,strict:true,allowPositionals:false,options:{
+        apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"}}});
+      const cfg=readConfig();
+      console.log(JSON.stringify(await convertMultiKey(newReadClientFromCfg(cfg,verboseFn),cfg,values)));
+      return 0;
+    }
     case "init":
       return runInitCmd(args, verboseFn);
     case "design":

@@ -5,6 +5,8 @@ import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
 import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type FbrainRecord } from "./record.ts";
 import { tokenize } from "./tokenize.ts";
+import { multiKey } from "./multi-key.ts";
+import { namedCards } from "./named-records.ts";
 import { locatorMutations, locatorSchema, readLocators } from "./list-locator.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
@@ -38,7 +40,7 @@ const TITLE_BYTES_TIGHT = 32;
 export const INDEX_PARTIAL = "index partial";
 export const COUNT_UNCONFIRMED = "the count did not confirm";
 
-type SchemaCfg = { schemaHashes: Record<string, string> };
+type SchemaCfg = { schemaHashes: Record<string, string>; storageModel?: "multi-key-v1" };
 
 export type ListCard = {
   type?: string;
@@ -472,12 +474,13 @@ function slotsFor(
   record: FbrainRecord,
   linkDests: readonly string[],
   details: string[],
+  native = false,
 ): Slot[] {
-  const slots: Slot[] = [
+  const slots: Slot[] = native ? [] : [
     { hash: "all", kind: "list", bound: LIST_PAGE },
     { hash: type, kind: "list", bound: LIST_PAGE },
   ];
-  if (record.status.length > 0) {
+  if (!native && record.status.length > 0) {
     slots.push({
       hash: `${type}#${record.status}`,
       kind: "list",
@@ -493,7 +496,7 @@ function slotsFor(
   for (const dest of linkDests.slice(0, LINK_CAP)) {
     slots.push({ hash: `link#${dest}`, kind: "list", bound: BACKLINK_PAGE });
   }
-  if (type === "task" && record.design_slug && record.design_slug.length > 0) {
+  if (!native && type === "task" && record.design_slug && record.design_slug.length > 0) {
     slots.push({
       hash: `child#${record.design_slug}`,
       kind: "list",
@@ -576,10 +579,10 @@ export async function planRecordListSide(opts: {
   const nextDests = uniqueDests(nextIds);
   const previousDests = linkDestsFromRecord(opts.type, opts.previous);
   const knownOld = opts.previous
-    ? slotsFor(opts.type, opts.previous, previousDests, details)
+    ? slotsFor(opts.type, opts.previous, previousDests, details, multiKey(opts.cfg))
     : [];
   const knownNew = opts.next
-    ? slotsFor(opts.type, opts.next, nextDests, details)
+    ? slotsFor(opts.type, opts.next, nextDests, details, multiKey(opts.cfg))
     : [];
 
   const pages = new Map<string, MemPage>();
@@ -1476,10 +1479,14 @@ async function readOnePage(
 /** Cards on one list hash. Absent head is an empty list. A missing schema is null. */
 export async function readPageChain(
   node: NodeClient,
-  cfg: { schemaHashes: Record<string, string> },
+  cfg: SchemaCfg,
   hash: string,
   maxPages = 1000,
 ): Promise<ListCard[] | null> {
+  if (multiKey(cfg)) {
+    const cards = await namedCards(node, cfg, hash, maxPages === 1);
+    if (cards !== null) return cards;
+  }
   const schemaHash = schemaOf(cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
   if (schemaHash.length === 0) return null;
   const cards: ListCard[] = [];

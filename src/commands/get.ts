@@ -19,6 +19,8 @@ import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
 import { BACKLINK_PAGE, CHILD_PAGE, HEAD_RANGE } from "../list-page.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedRecordPage } from "../named-records.ts";
 import {
   findBySlug,
   NOT_FOUND_TYPED,
@@ -71,7 +73,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
         hint: "Pass --type design with --page.",
       });
     }
-    childRange = pageRangeOrThrow(opts.page);
+    childRange = multiKey(opts.cfg) ? opts.page : pageRangeOrThrow(opts.page);
   }
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
@@ -111,7 +113,15 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   const pageSchema = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
   let designChildren: Array<{ slug: string; status: string }> | undefined;
   let tasksLines: string[] | undefined;
-  if (found.type === "design") {
+  let nextChildPage: string | undefined;
+  if (found.type === "design" && multiKey(opts.cfg)) {
+    const page = await namedRecordPage(node, opts.cfg, { type: "task", design: found.record.slug },
+      Math.min(opts.limit ?? CHILD_PAGE, 100), childRange);
+    designChildren = page.items.map((card) => ({ slug: card.slug, status: card.status }));
+    tasksLines = [`${"tasks:".padEnd(12)}${designChildren.map((card) => `${card.slug} (${card.status})`).join(", ")}`];
+    if (page.next_page) tasksLines.push(`sample ${page.next_page}`);
+    nextChildPage = page.next_page;
+  } else if (found.type === "design") {
     const childHash = `child#${found.record.slug}`;
     const childPage = await readStoredPage(node, pageSchema, childHash, childRange);
     const childView = memberLines(`tasks:`.padEnd(12), childPage, {
@@ -167,6 +177,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     found.also_types,
     { tasks: tasksLines, linkedFrom: linkView.lines },
   );
+  if (nextChildPage) json.next_child_page = nextChildPage;
   opts.onResult?.(json);
 
   if (opts.fields !== undefined && opts.fields.length > 0) {

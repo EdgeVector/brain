@@ -1,3 +1,4 @@
+import { writeConfigFile } from "./config-file.ts";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Persistent CLI config — `~/.brain/config.json` by default, with
 // `~/.fbrain/config.json` retained as a compatibility fallback.
@@ -20,7 +21,7 @@ import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transp
 // — the cleanup is purely shape, not data (consolidation already moved
 // every legacy row into the per-kind canonicals).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { FbrainError } from "./client.ts";
@@ -42,6 +43,7 @@ export const CONFIG_VERSION = 4;
 const LEGACY_NOTE_SCHEMA_KEY_V3 = "__legacy_note__";
 
 export type Config = {
+  storageModel?: "multi-key-v1";
   configVersion: number;
   nodeUrl: string;
   schemaServiceUrl: string;
@@ -147,7 +149,7 @@ export function writeConfig(
 ): void {
   mkdirSync(dirname(path), { recursive: true });
   const synced = syncMirrors(config);
-  writeFileSync(path, JSON.stringify(synced, null, 2) + "\n", "utf8");
+  writeConfigFile(path, JSON.stringify(synced, null, 2) + "\n");
 }
 
 // Keep designSchemaHash/taskSchemaHash mirrored against schemaHashes
@@ -167,6 +169,9 @@ function assertConfigShape(path: string, raw: unknown): Config {
     throw new ConfigInvalidError(path, "not an object");
   }
   const r = raw as Record<string, unknown>;
+  if (r.storageModel !== undefined && r.storageModel !== "multi-key-v1") {
+    throw new ConfigInvalidError(path, "unsupported storageModel");
+  }
 
   for (const key of ["nodeUrl", "schemaServiceUrl", "userHash"] as const) {
     if (!(key in r)) {
@@ -227,6 +232,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
 
   const config: Config = {
+    ...(r.storageModel === "multi-key-v1" ? { storageModel: "multi-key-v1" as const } : {}),
     configVersion: CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl: r.schemaServiceUrl as string,
