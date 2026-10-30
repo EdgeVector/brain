@@ -36,8 +36,19 @@ const inputSha = createHash("sha256").update(JSON.stringify(corpus)).digest("hex
 const samples = [];
 let verification;
 
+// The registry is the one the comparison daemons use: `ENVIRONMENT` selects it from the
+// exact LastDB source's folddb_profile/environments.json, which the daemon also reads.
+function schemaService() {
+  const registry = JSON.parse(readFileSync(join(settings.lastdbSource, "folddb_profile", "environments.json"), "utf8"));
+  const service = registry.environments?.[process.env.ENVIRONMENT ?? ""]?.schema_service;
+  require(typeof service === "string" && service.startsWith("https://"),
+    "Set ENVIRONMENT to the Schema Service environment that the comparison daemons use");
+  return service;
+}
+
 async function catalog() {
   const results = [];
+  const service = schemaService();
   for (const root of [settings.baseline, settings.candidate]) {
     const definitions = await load(root, "schemas");
     const { canonicalSchema } = await load(root, "canonical-vocabulary");
@@ -45,24 +56,25 @@ async function catalog() {
       results.push(...await Promise.all(definitions.UNIQUE_SCHEMAS.slice(offset, offset + 4).map(async (entry) => {
         const schema = canonicalSchema(entry.schema.schema);
         // This public replay returns an existing definition. It grants no publisher authority.
-        const reply = await fetch("https://axo709qs11.execute-api.us-east-1.amazonaws.com/v1/schemas", {
+        const reply = await fetch(`${service}/v1/schemas`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ schema, mutation_mappers: {} }), signal: AbortSignal.timeout(60000),
         });
         const body = await reply.json(), stored = body.schema ?? body;
         const exact = reply.status === 200 && ["owner_app_id", "schema_type", "field_types", "field_descriptions"]
           .every((key) => stable(stored[key] ?? null) === stable(schema[key] ?? null))
-          && stored.key?.hash_field === schema.key.hash_field
-          && (stored.key?.range_field ?? null) === (schema.key.range_field ?? null)
+          // The service stores an absent key part as null; the app source omits it.
+          && (stored.key?.hash_field ?? null) === (schema.key?.hash_field ?? null)
+          && (stored.key?.range_field ?? null) === (schema.key?.range_field ?? null)
           && stable([...(stored.fields ?? [])].sort()) === stable([...schema.fields].sort());
-        return { source: root, schema: schema.descriptive_name, status: reply.status, exact_definition: exact };
+        return { source: root, environment: process.env.ENVIRONMENT, schema: schema.descriptive_name, status: reply.status, exact_definition: exact };
       })));
     }
   }
   verification = { definitions: results };
   writeFileSync(outputPath, JSON.stringify(verification, null, 2) + "\n");
   require(results.every((entry) => entry.exact_definition),
-    "Publish the exact Brain definitions with their registered owner before this comparison");
+    `Publish or repair the exact Brain definitions in the ${process.env.ENVIRONMENT} Schema Service before this comparison`);
 }
 
 async function client(root, cfg, canonicalVocabulary = false) {
@@ -98,7 +110,7 @@ async function setup() {
   }
   const config = await load(settings.candidate, "config");
   config.writeConfig({ configVersion: config.CONFIG_VERSION, nodeUrl: "http://127.0.0.1", nodeSocketPath: settings.socket,
-    schemaServiceUrl: "https://axo709qs11.execute-api.us-east-1.amazonaws.com", userHash, schemaHashes,
+    schemaServiceUrl: schemaService(), userHash, schemaHashes,
     schemaFieldAliases, designSchemaHash: schemaHashes.design, taskSchemaHash: schemaHashes.task,
     appIdentityEnforce: false }, settings.config);
 }
