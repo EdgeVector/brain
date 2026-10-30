@@ -116,7 +116,21 @@ async function writeRecords(root, node, cfg, records, patchOnly = false) {
 
 async function run() {
   if (phase === "catalog") return catalog();
-  if (phase === "setup") return setup();
+  if (phase === "setup") {
+    await setup();
+    const cfg = JSON.parse(readFileSync(settings.config, "utf8")), node = await client(source, cfg);
+    const definitions = await load(source, "schemas");
+    const schemaHash = cfg.schemaHashes[definitions.BRAIN_LIST_COUNT_SCHEMA_KEY];
+    const keys = ["all", ...definitions.RECORD_TYPES];
+    // These are known-empty generated homes, not discovered application data.
+    // Retain the original corpus's explicit zero counters for unused record types.
+    const existing = await node.queryByKeys({ schemaHash, fields: ["bln_n"], keys: keys.map((hash) => ({ hash })) });
+    require(existing.length === 0, "The new generated home already contains app counters");
+    const receipt = await node.mutateBatch(keys.map((hash) => ({ mutationType: "create", schemaHash, keyHash: hash,
+      fields: { bln_h: hash, bln_n: "0" } })), { durability: "durable" });
+    require(receipt.durability === "durable", "The initial generated counters lack a durable receipt");
+    return;
+  }
   const root = phase === "seed" && settings.label !== "fresh" ? settings.baseline : source;
   const cfg = JSON.parse(readFileSync(settings.config, "utf8")), node = await client(root, cfg);
   const r = await load(root, "record");
