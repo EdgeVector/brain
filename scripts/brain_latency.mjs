@@ -124,6 +124,7 @@ async function writeRecord(root, node, cfg, { type, previous = null, record }, p
     now: record.updated_at });
   const receipt = await plans.commitResidentWritePlan({ node, plan, type, slug: record.slug, durable: true, failOnIndexPartial: true });
   require(receipt.durability === "durable", "The app write lacks a durable receipt");
+  return plan;
 }
 
 async function run() {
@@ -155,12 +156,29 @@ async function run() {
     return;
   }
   if (phase === "seed" || phase === "create") {
+    const acceptedWrites = [];
     for (const item of corpus) {
       const start = performance.now(), calls = requests, bytes = responseBytes;
-      await writeRecord(root, node, cfg, item);
+      const plan = await writeRecord(root, node, cfg, item);
       if (phase === "create") samples.push({ elapsed_ms: performance.now() - start, records: 1,
         requests: requests - calls, response_bytes: responseBytes - bytes, verified: true });
+      else {
+        const primary = plan.ops.filter((op) => op.projection === "primary");
+        const directory = plan.ops.filter((op) => op.projection === "directory");
+        require(primary.length === 1 && primary[0].keyHash === item.record.slug
+          && primary[0].schemaHash === cfg.schemaHashes[item.type], "The accepted write has a different primary key");
+        require(directory.length === 1 && directory[0].schemaHash === cfg.schemaHashes.__braintypedirectory__
+          && directory[0].keyHash === item.record.slug && directory[0].keyRange === "__types__"
+          && directory[0].fields.btd_h === item.record.slug && directory[0].fields.btd_r === "__types__",
+          "The accepted write lacks its authoritative type-directory key");
+        const members = JSON.parse(directory[0].fields.btd_types);
+        require(Array.isArray(members) && members.includes(item.type), "The accepted directory write omits the record type");
+        acceptedWrites.push({ type: item.type, slug: primary[0].keyHash, primary_schema: primary[0].schemaHash,
+          directory_schema: directory[0].schemaHash, directory_hash: directory[0].keyHash,
+          directory_range: directory[0].keyRange, directory_types: members });
+      }
     }
+    if (phase === "seed") verification = { accepted_writes: acceptedWrites };
     return;
   }
   if (phase === "update" || phase === "partial") {
@@ -228,6 +246,26 @@ async function run() {
     return;
   }
   const [get, list, snapshot, search] = await Promise.all(["get", "list", "admin-snapshot", "search"].map((name) => load(root, "commands/" + name)));
+  let expectedSharedReferences;
+  if (phase === "migration_read" && settings.label === "before") {
+    const seed = JSON.parse(readFileSync(settings.seedProof, "utf8"));
+    const accepted = seed.verification?.accepted_writes;
+    require(seed.phase === "seed" && seed.source === settings.baseline && seed.input_sha256 === inputSha
+      && Array.isArray(accepted) && accepted.length === corpus.length
+      && new Set(accepted.map((entry) => entry.slug)).size === corpus.length,
+      "The migration read lacks the complete accepted seed-write set");
+    for (const entry of accepted) {
+      const number = Number(String(entry.slug).slice(5)), expected = input(number);
+      require(Number.isInteger(number) && number >= 0 && number < settings.records
+        && entry.slug === expected.record.slug && entry.type === expected.type
+        && entry.primary_schema === cfg.schemaHashes[entry.type]
+        && entry.directory_schema === cfg.schemaHashes.__braintypedirectory__
+        && entry.directory_hash === entry.slug && entry.directory_range === "__types__"
+        && Array.isArray(entry.directory_types) && entry.directory_types.includes(entry.type),
+        "An accepted seed write has different primary or directory membership");
+    }
+    expectedSharedReferences = new Set(accepted.filter((entry) => entry.type === "reference").map((entry) => entry.slug));
+  }
   for (let sample = 0; sample < settings.samples; sample++) {
     let result, sharedValueRows;
     const before = requests, bytes = responseBytes, start = performance.now();
@@ -267,10 +305,11 @@ async function run() {
       if (phase === "migration_read" && settings.label === "before" && Array.isArray(items)) {
         // The old shared-value layout also lists each reference slug under the concept key
         // molecule (CI read 1000 rows for 500 concept records). The conversion removes these
-        // rows. Count them, check that they are reference slugs, and check concept exactly.
+        // rows. Check every returned field and the exact set of accepted reference writes.
+        // The expected keys come from acknowledged primary + directory writes, never read counts.
         const other = items.filter((item) => Number(String(item?.slug).slice(5)) % 2 === 1);
-        require(new Set(other.map((item) => item.slug)).size === other.length
-          && other.every((item) => Number(String(item.slug).slice(5)) < settings.records), "A shared-value row is not a reference slug");
+        checkRecords(other, expectedSharedReferences.size, fields,
+          (number) => expectedSharedReferences.has(input(number).record.slug));
         sharedValueRows = other.length;
         items = items.filter((item) => !other.includes(item));
       }

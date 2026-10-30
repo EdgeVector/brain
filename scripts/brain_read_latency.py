@@ -34,6 +34,7 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
     settings = {"label": label, "baseline": str(args.baseline), "candidate": str(args.candidate),
                 "socket": str(node.socket) if node else None, "config": str(destination / "config.json"),
                 "records": args.records, "samples": samples, "bodyBytes": args.body_bytes,
+                "seedProof": str(destination / "seed.json"),
                 "partialProof": str(destination / "partial.json"),
                 "lastdbSource": str(args.lastdb_source)}
     name = tag or phase
