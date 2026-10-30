@@ -366,6 +366,7 @@ async function primaryRows(node, cfg, numbers) {
 }
 
 let requests = 0, responseBytes = 0, profile = new Map();
+const conversionMetadata = Object.create(null);
 globalThis.fetch = new Proxy(globalThis.fetch, {
   async apply(target, receiver, args) {
     requests++;
@@ -373,7 +374,21 @@ globalThis.fetch = new Proxy(globalThis.fetch, {
     const request = typeof args[1]?.body === "string" ? JSON.parse(args[1].body) : {};
     const label = JSON.stringify({ path: String(args[0]).split("?")[0], schema: request.schema_name,
       fields: request.fields, key_name: request.key_name, filter: Object.keys(request.filter ?? {})[0], response_format: request.response_format });
-    const response = await Reflect.apply(target, receiver, args), reader = response.body?.getReader();
+    const response = await Reflect.apply(target, receiver, args);
+    // Preserve existing metadata replies only in this untimed conversion process.
+    // No request is added; all homes and inputs belong to the hosted CI run.
+    if (phase === "convert") {
+      const path = new URL(String(args[0]), "http://localhost").pathname;
+      if (path.startsWith("/api/schema/") && response.status === 200)
+        conversionMetadata[path] = await response.clone().json();
+      if (path === "/api/db/alternate-keys" && response.status >= 400 && request.action !== "app_status") {
+        const reason = (await response.clone().text()).slice(0, 4096);
+        verification = { maintenance_error: { action: request.action, status: response.status, body: reason },
+          schema_metadata: conversionMetadata };
+        console.error(`Actual generated-home maintenance ${request.action}: HTTP ${response.status}: ${reason}`);
+      }
+    }
+    const reader = response.body?.getReader();
     if (!reader) return response;
     let bytes = 0;
     const body = new ReadableStream({
