@@ -43,7 +43,7 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
                    if not key.startswith(("LASTDB", "FOLD", "FBRAIN", "BRAIN", "LASTSEEK", "SENTRY", "OTEL"))
                    and key not in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY")}
     environment.update(LASTDB_ISOLATED_COPY="1", LASTDB_SUPPRESS_RECOVERY_PHRASE="1",
-                       FBRAIN_APP_IDENTITY_ENFORCE="off", BRAIN_CONFIG=str(destination / "config.json"),
+                       BRAIN_CONFIG=str(destination / "config.json"),
                        FBRAIN_FOLDDB_SOCKET=str(node.socket) if node else "",
                        LASTSEEK_BIN=str(destination / "absent-lastseek"),
                        LAST_STACK_HEARTBEATS_FILE=str(destination / "absent-heartbeats"))
@@ -78,6 +78,15 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
     return result
 
 
+def cloud_off(node, destination, phase):
+    status = node.call("/api/sync/byte-backup-v2", {"action": "status"})[0]
+    if any(status.get(name) is not False for name in ("enabled", "automatic_backup_enabled", "running")):
+        raise RuntimeError("The generated node did not confirm that cloud sync stays OFF")
+    if status.get("manual_connection") is not None:
+        raise RuntimeError("The generated node has a cloud connection")
+    save(destination / f"cloud-off-{phase}.json", status)
+
+
 def run_case(args, Node, finish_setup, label, repeat):
     destination = args.output / f"{repeat:02d}-{label}"
     destination.mkdir()
@@ -85,22 +94,25 @@ def run_case(args, Node, finish_setup, label, repeat):
                         else (args.baseline_binary, args.baseline_revision))
     node = Node(binary, revision, destination, full_socket_name="folddb-full.sock",
                 temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={
-                    "APP_IDENTITY_ENFORCE": "false", "LASTDB_SELF_METRICS_TO_DB": "false",
+                    "LASTDB_SELF_METRICS_TO_DB": "false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
     result = {"label": label, "repeat": repeat, "results": []}
     try:
         node.start()
+        cloud_off(node, destination, "start")
         app(args, node, destination, label, "setup")
         if args.mode == "read":
             seeded = app(args, node, destination, label, "seed")
             result.update(input_sha256=seeded["input_sha256"], body_bytes=seeded["body_bytes"])
         if label == "after":
             app(args, node, destination, label, "convert")
+        cloud_off(node, destination, "converted")
         finish_setup(node, destination)
         node.stop()
         if label == "after":
             node.binary, node.revision = args.binary, args.revision
         node.start()
+        cloud_off(node, destination, "reopen")
         if args.mode == "read":
             for operation in OPERATIONS:
                 node.stop()
@@ -126,6 +138,8 @@ def run_case(args, Node, finish_setup, label, repeat):
                 result["results"].append({"operation": phase, "state": "operations", **measured})
                 result.update(input_sha256=measured["input_sha256"], body_bytes=measured["body_bytes"])
                 print(f"{destination.name}: {phase} complete", flush=True)
+        cloud_off(node, destination, "final")
+        result["cloud_sync_off"] = True
         result["disk"] = node.disk_breakdown()
         save(destination / "metrics.json", result)
         return result
