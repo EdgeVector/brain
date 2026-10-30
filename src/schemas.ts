@@ -1,6 +1,6 @@
 // Schema definitions for fbrain's record types.
-// Proteins are deprecated for new designs. The definitions below retain the
-// existing layout until an explicit conversion preserves its ordered keys.
+// The canonical definitions feed the owned layouts in multi-key.ts.
+// Existing values require the explicit conversion before an app cutover.
 // Canonical field aliases describe fields; they do not authorize value aliases.
 //
 // Pattern status: fbrain's per-kind, purpose-split schemas are
