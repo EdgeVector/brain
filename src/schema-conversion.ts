@@ -19,10 +19,32 @@ function stable(value: unknown): string {
     .sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => JSON.stringify(k)+":"+stable(v)).join(",") + "}";
   return JSON.stringify(value);
 }
+/** The maintenance route nests its durable receipt inside the data envelope. */
+function conversionReport(body: unknown): ConversionReport {
+  const root = body as {data?: unknown};
+  const data = (root?.data ?? root) as {app_schema_conversion?: unknown};
+  const report = data?.app_schema_conversion as Partial<ConversionReport> & {durable?: boolean};
+  const phases = ["backfill", "verifying", "verified", "retiring", "ready", "aborting", "complete", "aborted"];
+  const names = (value: unknown): value is string[] => Array.isArray(value) &&
+    value.every((name) => typeof name === "string" && name.length > 0) && new Set(value).size === value.length;
+  if (!report || report.durable !== true || typeof report.change_id !== "string" || !report.change_id ||
+      typeof report.phase !== "string" || !phases.includes(report.phase) ||
+      !names(report.converted_schemas) || !names(report.retired_schemas) ||
+      !Array.isArray(report.schemas) || report.schemas.length !== report.converted_schemas.length ||
+      report.schemas.some((item) => !item || typeof item.schema !== "string") ||
+      !same(report.schemas.map((item) => item.schema).sort(), [...report.converted_schemas].sort()) ||
+      !Number.isSafeInteger(report.selected_keys) || report.selected_keys! < 0 ||
+      !Number.isSafeInteger(report.expected_selected_keys) || report.expected_selected_keys! < 0 ||
+      report.selected_keys! > report.expected_selected_keys!) {
+    fail("The node did not return a valid durable app conversion receipt. No phase or config change follows this reply.");
+  }
+  return report as ConversionReport;
+}
 export async function conversionCall<T>(node: NodeClient, method: string, path: string, body?: unknown): Promise<T> {
   const reply = await node.rawCall(method,path,body);
   const root = reply.json as { data?: unknown; ok?: boolean };
   if (reply.status !== 200 || root?.ok === false) fail(`${path}: HTTP ${reply.status}: ${reply.body.slice(0,800)}`);
+  if (path === "/api/db/alternate-keys") return conversionReport(root) as T;
   const value=(root?.data ?? root) as {schema?:unknown};
   return (value?.schema ?? value) as T;
 }
@@ -31,7 +53,7 @@ export async function conversionPlan(node: NodeClient, cfg: Config, entries: Con
   const version = await conversionCall<{capabilities?: Record<string,boolean>}>(node,"GET","/api/version");
   if (!version.capabilities?.app_schema_conversion_v1) fail("Upgrade this node before the explicit app conversion.");
   const status = await node.rawCall("POST","/api/db/alternate-keys",{action:"app_status"});
-  const active = status.status === 200 ? ((status.json as {data?:unknown}).data ?? status.json) as ConversionReport : undefined;
+  const active = status.status === 200 ? conversionReport(status.json) : undefined;
   const pending = active && !["complete","aborted"].includes(active.phase) ? active : undefined;
   const sources = await Promise.all(entries.map(async(entry) => {
     const pin = cfg.schemaHashes[entry.keys[0]!] ?? fail("A kept schema pin is absent.");
@@ -77,7 +99,7 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
   if (!options.maintenance) fail("Use --apply --maintenance for the explicit request pause and conversion.");
   let report: ConversionReport | undefined;
   const status = await node.rawCall("POST","/api/db/alternate-keys",{action:"app_status"});
-  if (status.status === 200) report = ((status.json as {data?:unknown}).data ?? status.json) as ConversionReport;
+  if (status.status === 200) report = conversionReport(status.json);
   const names = plan.sources.map(({source}) => source.name).sort();
   if (report && !["complete","aborted"].includes(report.phase) && !same([...report.converted_schemas].sort(),names)) {
     fail("Another app conversion is active. Finish that conversion first.");
