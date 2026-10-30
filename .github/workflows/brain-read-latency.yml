@@ -20,8 +20,8 @@ env:
   # one value, so they always name the same registry. Production needs publisher authority.
   ENVIRONMENT: dev
   APP_BEFORE: 648cef807fcd9e08615eb8d9065649baf8a2f0f3
-  DAEMON_BEFORE: 46f1b2d6fd329b4931fd0f9e18f4fe39adb7bc56
-  DAEMON_AFTER: a83d5f06da5bfac12b8341594513743fbb3ffabd
+  DAEMON_BEFORE: 60d50847609a953ef2eda64829f525800fccd4a8
+  DAEMON_AFTER: 4df57d28b554d5a455e3d20e72a2dab0de1d73e2
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
