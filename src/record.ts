@@ -12,6 +12,7 @@ import {
   isLoopbackNodeUrl,
 } from "./client.ts";
 import { newSearchClientFromCfg } from "./write-context.ts";
+import { keyPage, multiKey } from "./multi-key.ts";
 import type { Config } from "./config.ts";
 import {
   hydrateRecord,
@@ -769,8 +770,11 @@ export async function listLiveSlugsPage(
   node: NodeClient,
   schemaHash: string,
   limit: number = NO_MATCH_PROBE_PAGE_LIMIT,
+  cfg: { storageModel?: string } = {},
 ): Promise<string[]> {
-  const rows = node.queryPage
+  const rows = multiKey(cfg)
+    ? (await keyPage(node, schemaHash, "recent", { HashKey: "all" }, LIVE_SLUG_PAGE_FIELDS, limit)).results
+    : node.queryPage
     ? await node.queryPage({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS, limit })
     : (await node.queryAll({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS })).results.slice(
         0,
@@ -789,36 +793,22 @@ export async function listLiveSlugsPage(
   return slugs;
 }
 
-// Cheap "does this brain hold ANY live record?" probe, used only on the
-// search/ask/list no-match path to distinguish a brand-new EMPTY brain (a new
-// dev who hasn't created anything yet) from a populated brain whose query
-// simply matched nothing. Walks fbrain's distinct schema hashes and asks each
-// for ONE small slug+tags page (`listLiveSlugsPage` — never a paginated
-// full-field fetch), returning true on the FIRST live (non-tombstone) row
-// seen. The types in `RECORD_TYPES` collapse onto a handful of unique schema
-// hashes (the Phase 6 types share the unified MEMO hash), so this is at most
-// a few single-page round trips and short-circuits the instant any record is
-// found.
-//
-// Returns `false` only when every schema hash comes back with no live row —
-// i.e. the empty-brain case. Errors propagate (a probe that can't reach the
-// node should surface, not silently claim "empty").
+// One body-free sample per distinct record schema, read in parallel. A sample
+// with no live slug is not a complete membership count. Read errors propagate.
 export async function hasAnyLiveRecord(
   node: NodeClient,
-  cfg: { schemaHashes: Record<string, string> },
+  cfg: { schemaHashes: Record<string, string>; storageModel?: string },
 ): Promise<boolean> {
   const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
-  for (const schemaHash of hashes) {
-    let slugs: string[];
+  const pages = await Promise.all(hashes.map(async (schemaHash) => {
     try {
-      slugs = await listLiveSlugsPage(node, schemaHash);
+      return await listLiveSlugsPage(node, schemaHash, NO_MATCH_PROBE_PAGE_LIMIT, cfg);
     } catch (err) {
-      if (isSchemaNotFoundReadError(err)) continue;
+      if (isSchemaNotFoundReadError(err)) return [];
       throw err;
     }
-    if (slugs.length > 0) return true;
-  }
-  return false;
+  }));
+  return pages.some((slugs) => slugs.length > 0);
 }
 
 // A single-record read returns the full text. `cfg` only saves a schema-hash

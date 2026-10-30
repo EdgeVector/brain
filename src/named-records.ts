@@ -43,7 +43,7 @@ export async function namedRecordPage(
   const streams = await Promise.all(types.map(async (type) => {
     const hash = scope.design ?? scope.status ?? "all";
     const name = scope.design !== undefined ? "by_design" : scope.status !== undefined ? "by_status" : "recent";
-    const page = await keyPage(node, cfg, type, name,
+    const page = await keyPage(node, cfg.schemaHashes[type]!, name,
       { HashRangeRange: { hash, start: anchor?.range ?? "", end } }, ["slug", "title", "status", "updated_at"], limit + 2);
     const rows = page.results.map((row) => {
       if (row.fields.slug !== row.key.hash) throw new FbrainError({ code: "named_record_identity", message: "The named key differs from its primary record." });

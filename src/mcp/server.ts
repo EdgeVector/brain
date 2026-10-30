@@ -2439,9 +2439,9 @@ async function nearestSlugCandidates(
   const node = newReadClientFromCfg(cfg);
   const types = type ? [type] : RECORD_TYPES;
   const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
-  for (const t of types) {
+  await Promise.all(types.map(async (t) => {
     try {
-      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg));
+      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg), undefined, cfg);
       for (const candidateSlug of slugs) {
         candidates.push({
           slug: candidateSlug,
@@ -2452,7 +2452,7 @@ async function nearestSlugCandidates(
     } catch {
       // Best-effort error hint only; preserve the original not_found error.
     }
-  }
+  }));
   return candidates
     .sort((a, b) => a.score - b.score || a.slug.localeCompare(b.slug) || a.type.localeCompare(b.type))
     .slice(0, 3)
