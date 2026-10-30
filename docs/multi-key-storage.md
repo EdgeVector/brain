@@ -26,6 +26,8 @@ The app requires a durable receipt before it reports a durable write.
 
 CAUTION: Existing app data requires explicit conversion before the new reader starts.
 
+The steps, the flags, and the required LastDB release are in `docs/multi-key-schemas.md`.
+
 The converter uses the type directory and exact counts as the membership source.
 It checks each expected key and the count guard.
 It retains record values, stored bodies, and canonical field definitions.

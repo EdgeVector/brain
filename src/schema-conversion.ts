@@ -72,7 +72,7 @@ export async function conversionPlan(node: NodeClient, cfg: Config, entries: Con
   const kept = new Set(sources.map(({source}) => source.name));
   if (pending) {
     if (!same([...pending.converted_schemas].sort(),[...kept].sort())) fail("Another app conversion is active.");
-    return {sources,retire:pending.retired_schemas};
+    return {sources,retire:pending.retired_schemas,legacy:[] as string[]};
   }
   const retired = await Promise.all([...new Set(retiredKeys.map((key) => cfg.schemaHashes[key]).filter(Boolean))].map(
     (pin) => conversionCall<Metadata>(node,"GET",`/api/schema/${encodeURIComponent(pin!)}`)));
@@ -87,15 +87,24 @@ export async function conversionPlan(node: NodeClient, cfg: Config, entries: Con
     .map((item)=>conversionCall<Metadata>(node,"GET",`/api/schema/${encodeURIComponent(item.name)}`)));
   for (const alias of aliases) {
     const mappings=Object.values(alias.field_mappers ?? {});
+    // An alias that maps only kept sources holds no value of its own. Retire it.
+    // Any other alias stays in the legacy list below, which needs explicit review.
     if (alias.owner_app_id!==OWNER_APP_ID || alias.independent_fields || !mappings.length
-      || mappings.some((mapping)=>!kept.has(mapping.split(".")[0]!))) fail("A local alias has data outside the kept sources. Review it before conversion.");
+      || mappings.some((mapping)=>!kept.has(mapping.split(".")[0]!))) continue;
     retire.push(alias.name);
   }
-  return {sources, retire:[...new Set(retire)]};
+  // The removal release refuses to start while any shared-value schema remains. A Brain
+  // schema that this release no longer declares (for example Papercut or the old graph
+  // edge rows) is neither kept nor an alias. Retiring it drops its values, so the owner
+  // must name that in the apply.
+  const legacy=directory.schemas.filter((item)=>item.owner_app_id===OWNER_APP_ID && !item.independent_fields
+    && !kept.has(item.name) && !retire.includes(item.name)).map((item)=>item.name).sort();
+  return {sources, retire:[...new Set(retire)], legacy};
 }
 export async function executeConversion(node: NodeClient, cfg: Config, path: string,
-  plan: Awaited<ReturnType<typeof conversionPlan>>, options: {apply?:boolean; maintenance?:boolean; abort?:boolean}) {
-  if (!options.apply) return {phase:"plan", schemas:plan.sources.map(({request}) => request),retire:plan.retire};
+  plan: Awaited<ReturnType<typeof conversionPlan>>,
+  options: {apply?:boolean; maintenance?:boolean; abort?:boolean; retireLegacy?:boolean}) {
+  if (!options.apply) return {phase:"plan", schemas:plan.sources.map(({request}) => request),retire:plan.retire,legacy:plan.legacy};
   if (!options.maintenance) fail("Use --apply --maintenance for the explicit request pause and conversion.");
   let report: ConversionReport | undefined;
   const status = await node.rawCall("POST","/api/db/alternate-keys",{action:"app_status"});
@@ -115,9 +124,15 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
     for (let page=0;page<100000;page++) { report=await step("app_abort"); if(report.phase==="aborted") return report; }
     fail("Abort page limit reached. Resume the abort.");
   }
-  if (!report || ["complete","aborted"].includes(report.phase)) report=await conversionCall<ConversionReport>(
-    node,"POST","/api/db/alternate-keys",{action:"app_begin",schemas:plan.sources.map(({request})=>request),
-      retire:plan.retire,maintenance:true});
+  if (!report || ["complete","aborted"].includes(report.phase)) {
+    if (plan.legacy.length && !options.retireLegacy) {
+      fail(`The node holds legacy Brain schemas that this release does not read: ${plan.legacy.join(", ")}. `
+        + "Review them. Add --retire-legacy to drop them in this conversion. The removal release does not start while they remain.");
+    }
+    const retire=options.retireLegacy ? [...new Set([...plan.retire,...plan.legacy])] : plan.retire;
+    report=await conversionCall<ConversionReport>(node,"POST","/api/db/alternate-keys",
+      {action:"app_begin",schemas:plan.sources.map(({request})=>request),retire,maintenance:true});
+  }
   try {
     for (let page=0;["backfill","verifying"].includes(report!.phase)&&page<100000;page++) report=await step("app_page");
     if (report!.phase==="verified") report=await step("app_commit");

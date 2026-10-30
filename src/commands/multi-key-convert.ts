@@ -6,7 +6,7 @@ import { conversionCall, conversionPlan, executeConversion, type Metadata } from
 import { BRAIN_LIST_COUNT_SCHEMA_KEY, BRAIN_TYPE_DIRECTORY_SCHEMA_KEY, RECORD_TYPES, type RecordType } from "../schemas.ts";
 
 export async function convertMultiKey(node: NodeClient,cfg:Config,
-  options:{apply?:boolean;maintenance?:boolean;abort?:boolean;configPath?:string}={}) {
+  options:{apply?:boolean;maintenance?:boolean;abort?:boolean;retireLegacy?:boolean;configPath?:string}={}) {
   let membership: Promise<Map<string,unknown>> | undefined;
   const plan=await conversionPlan(node,cfg,ownedSchemas(),async(entry)=>{
     const type=entry.keys[0]!;

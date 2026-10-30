@@ -291,7 +291,7 @@ function simpleNewHelp(type: RecordType): string {
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
-  "multi-key-convert": "brain multi-key-convert [--apply --maintenance] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. Init leaves existing values unchanged.",
+  "multi-key-convert": "brain multi-key-convert [--apply --maintenance [--retire-legacy]] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. Init leaves existing values unchanged.\nThe plan lists legacy Brain schemas that this release does not read. --retire-legacy drops them and their values in the same conversion. The apply refuses while that list is not empty and the flag is absent.",
   init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
@@ -1304,7 +1304,7 @@ const MCP_OPTIONS = {
 } as const;
 
 export const CLI_SPEC = {
-  "multi-key-convert": {apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"}},
+  "multi-key-convert": {apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"},"retire-legacy":{type:"boolean"}},
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
@@ -1937,9 +1937,10 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
   switch (cmd) {
     case "multi-key-convert": {
       const {values}=parseArgs({args,strict:true,allowPositionals:false,options:{
-        apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"}}});
+        apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"},"retire-legacy":{type:"boolean"}}});
       const cfg=readConfig();
-      console.log(JSON.stringify(await convertMultiKey(newReadClientFromCfg(cfg,verboseFn),cfg,values)));
+      const {"retire-legacy":retireLegacy,...flags}=values;
+      console.log(JSON.stringify(await convertMultiKey(newReadClientFromCfg(cfg,verboseFn),cfg,{...flags,retireLegacy})));
       return 0;
     }
     case "init":
