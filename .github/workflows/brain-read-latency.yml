@@ -17,8 +17,8 @@ concurrency:
   cancel-in-progress: true
 env:
   APP_BEFORE: 648cef807fcd9e08615eb8d9065649baf8a2f0f3
-  DAEMON_BEFORE: 98bc32bf3d59fd562150b882f462a7ec8ec42d38
-  DAEMON_AFTER: 533685c8f7dd876f096c173bafbb4dd35d596357
+  DAEMON_BEFORE: 641dd9fb095fe53ecaa106f96ad3283dec0f78c7
+  DAEMON_AFTER: db73619fd22a95a7c74e40622087c044bab4e283
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
