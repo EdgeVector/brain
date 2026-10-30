@@ -58,10 +58,10 @@ The workflow measures these real app operations:
 
 Operational measurements retain the 128-record pass and three 1,024-record passes.
 Each body contains 4,096 bytes.
-The app creates records in batches of eight.
+The app creates each record with one commit, as `brain put` does.
 Update, delete, and title-only mutation samples each change one record.
 The checks verify exact membership, values, counts, body atoms, and restart recovery.
-Batch creation latency and single-record mutation latency use distinct operations.
+Creation, update, delete, and title-only samples use distinct operations.
 
 The workflow requires the exact definitions in the DEV Schema Service before it builds a daemon.
 `ENVIRONMENT: dev` selects that service for the check and for both daemons.

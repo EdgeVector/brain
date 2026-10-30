@@ -115,14 +115,14 @@ async function setup() {
     appIdentityEnforce: false }, settings.config);
 }
 
-async function writeRecords(root, node, cfg, records, patchOnly = false) {
+// One record per commit, as `brain put` writes it. No Brain command commits several records in
+// one batch; that related-write path refuses a card when a list head is full.
+async function writeRecord(root, node, cfg, { type, previous = null, record }, patchOnly = false) {
   const r = await load(root, "record"), plans = await load(root, "resident-write-plan");
-  const writes = await Promise.all(records.map(async ({ type, previous = null, record }) => ({ type, slug: record.slug,
-    plan: await plans.buildResidentWritePlan({ node, cfg, type, schemaHash: cfg.schemaHashes[type], previous, next: record,
-      primaryFields: patchOnly ? { title: record.title, updated_at: record.updated_at } : r.buildRecordFields(type, record),
-      now: record.updated_at }),
-  })));
-  const receipt = await plans.commitResidentWritePlans({ node, writes, durable: true, failOnIndexPartial: true });
+  const plan = await plans.buildResidentWritePlan({ node, cfg, type, schemaHash: cfg.schemaHashes[type], previous, next: record,
+    primaryFields: patchOnly ? { title: record.title, updated_at: record.updated_at } : r.buildRecordFields(type, record),
+    now: record.updated_at });
+  const receipt = await plans.commitResidentWritePlan({ node, plan, type, slug: record.slug, durable: true, failOnIndexPartial: true });
   require(receipt.durability === "durable", "The app write lacks a durable receipt");
 }
 
@@ -155,11 +155,10 @@ async function run() {
     return;
   }
   if (phase === "seed" || phase === "create") {
-    for (let offset = 0; offset < corpus.length; offset += 8) {
-      const batch = corpus.slice(offset, offset + 8);
+    for (const item of corpus) {
       const start = performance.now(), calls = requests, bytes = responseBytes;
-      await writeRecords(root, node, cfg, batch);
-      if (phase === "create") samples.push({ elapsed_ms: performance.now() - start, records: batch.length,
+      await writeRecord(root, node, cfg, item);
+      if (phase === "create") samples.push({ elapsed_ms: performance.now() - start, records: 1,
         requests: requests - calls, response_bytes: responseBytes - bytes, verified: true });
     }
     return;
@@ -175,7 +174,7 @@ async function run() {
       const next = { ...previous, title: `${phase} ${operation}`, updated_at: new Date(Date.UTC(2026, 2, 1) + operation * 1000).toISOString(),
         ...(phase === "update" ? { status: type === "concept" ? "parked" : "archived" } : {}) };
       const start = performance.now(), calls = requests, bytes = responseBytes;
-      await writeRecords(root, node, cfg, [{ type, previous, record: next }], phase === "partial");
+      await writeRecord(root, node, cfg, { type, previous, record: next }, phase === "partial");
       samples.push({ elapsed_ms: performance.now() - start, records: 1,
         requests: requests - calls, response_bytes: responseBytes - bytes, verified: true });
     }

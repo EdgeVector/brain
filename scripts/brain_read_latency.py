@@ -149,7 +149,7 @@ def summarize(args, runs):
              f"Paired repeats: {args.repeats}. Each pair uses equal generated records and full body bytes.",
              "Restart uses the same generated files and a fresh daemon. The OS file cache is not cleared.",
              "Warm calls follow the restart call. Process startup and module import are outside operation latency.",
-             "Creation samples contain batches of eight records; update, delete, and partial samples contain one record.",
+             "Each creation, update, delete, and partial sample contains one record, as `brain put` writes it.",
              "Latency changes are advisory. Missing operations, failed values, incomplete samples, or failed uploads stop the gate.", "",
              "| Operation | State | Before p50 ms | After p50 ms | Before p95 ms | After p95 ms | Calls before / after |",
              "|---|---|---:|---:|---:|---:|---:|"]
@@ -165,7 +165,7 @@ def summarize(args, runs):
                 if not samples or any(not sample.get("verified") for sample in samples):
                     raise RuntimeError("The comparison contains missing or failed samples")
                 expected = (args.repeats * (1 if state == "restart" else args.samples)) if args.mode == "read" else args.repeats * {
-                    "create": args.records // 8, "update": args.records // 4, "delete": 8, "partial": 64}[operation]
+                    "create": args.records, "update": args.records // 4, "delete": 8, "partial": 64}[operation]
                 if len(samples) != expected:
                     raise RuntimeError("The operation count differs from the declared workload")
                 cells.append({"p50_ms": percentile(samples, .5), "p95_ms": percentile(samples, .95),

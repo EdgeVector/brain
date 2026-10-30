@@ -18,10 +18,22 @@ const fail = (message: string): never => { throw new FbrainError({ code: "multi_
 const keyOf = (entry: ConversionEntry): string => entry.keys[0]!;
 const COPY_BATCH = 8;
 
+/** The installed schema at a pin, or null when the node has no such schema. */
+async function schemaAt(node: NodeClient, pin: string): Promise<Metadata | null> {
+  const reply = await node.rawCall("GET",`/api/schema/${encodeURIComponent(pin)}`);
+  if (reply.status === 404) return null;
+  const root = reply.json as { data?: unknown; ok?: boolean };
+  if (reply.status !== 200 || root?.ok === false) fail(`/api/schema/${pin}: HTTP ${reply.status}: ${reply.body.slice(0,800)}`);
+  const value = (root?.data ?? root) as { schema?: Metadata };
+  const schema = (value?.schema ?? value) as Metadata;
+  if (typeof schema?.name !== "string" || !schema.name) fail(`/api/schema/${pin} returned no schema name.`);
+  return schema;
+}
+
 export async function convertMultiKey(node: NodeClient, cfg: Config, options: Options = {}) {
-  const directory = await conversionCall<{schemas:Metadata[]}>(node,"GET","/api/schemas");
-  if (!Array.isArray(directory.schemas)) fail("The schema directory is incomplete.");
-  const installed = (pin: string) => directory.schemas.find((item) => item.name === pin || item.identity_hash === pin);
+  const pins = [...new Set(ownedSchemas().map((entry) => cfg.schemaHashes[keyOf(entry)]).filter((pin): pin is string => !!pin))];
+  const sources = new Map(await Promise.all(pins.map(async (pin) => [pin, await schemaAt(node,pin)] as const)));
+  const installed = (pin: string) => sources.get(pin) ?? undefined;
   let counts: Promise<Map<RecordType,TypeCount>> | undefined;
   const typeCounts = () => counts ??= readTypeCounts(node,cfg);
 
@@ -31,18 +43,20 @@ export async function convertMultiKey(node: NodeClient, cfg: Config, options: Op
   const byPin = new Map<string, ConversionEntry[]>();
   for (const entry of ownedSchemas()) {
     const pin = cfg.schemaHashes[keyOf(entry)];
-    if (!pin || !installed(pin)) fresh.push(entry);
-    else byPin.set(pin, [...(byPin.get(pin) ?? []), entry]);
+    const source = pin ? installed(pin) : undefined;
+    if (!pin || !source) fresh.push(entry);
+    // Group by the installed runtime name: two pins can name one schema.
+    else byPin.set(source.name, [...(byPin.get(source.name) ?? []), entry]);
   }
-  for (const [pin, entries] of byPin) {
+  for (const [name, entries] of byPin) {
     if (entries.length === 1) { kept.push(entries[0]!); continue; }
-    const source = installed(pin)!;
+    const source = installed(cfg.schemaHashes[keyOf(entries[0]!)]!)!;
     const owner = entries.find((entry) => entry.schema.descriptive_name === source.descriptive_name);
     if (!owner || entries.some((entry) => !isRecordType(keyOf(entry)))) {
       fail(`Brain schemas ${entries.map(keyOf).join(", ")} share one installed schema with no unique owner. Review the config.`);
     }
     kept.push(owner!);
-    for (const entry of entries) if (entry !== owner) split.push({ entry, type: keyOf(entry) as RecordType, pin });
+    for (const entry of entries) if (entry !== owner) split.push({ entry, type: keyOf(entry) as RecordType, pin: name });
   }
   if (split.length && cfg.schemaFieldAliases) fail("A shared record schema with canonical field aliases needs a separate reviewed conversion.");
 
