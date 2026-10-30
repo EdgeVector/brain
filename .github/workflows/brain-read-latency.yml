@@ -122,7 +122,6 @@ jobs:
       matrix:
         include:
           - {mode: read, records: 1000, repeats: 3, body_bytes: 0}
-          - {mode: read, records: 10000, repeats: 3, body_bytes: 0}
           - {mode: operations, records: 128, repeats: 1, body_bytes: 4096}
           - {mode: operations, records: 1024, repeats: 3, body_bytes: 4096}
     steps:

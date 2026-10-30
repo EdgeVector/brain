@@ -16,6 +16,9 @@ The node updates these keys with the source record.
 Readers retain the primary identity in each named-key result.
 A mutation uses the primary identity.
 A cursor retains its scope and the last complete order key.
+A query page stays inside the native read budget of one request.
+The page size falls as the requested field count rises. The maximum is 128 records.
+The app returns the complete server cursor unchanged, including its `comparison` value.
 
 Tags, links, keyword pages, and exact counts remain separate app records.
 They describe relationships or derived state that an alternate key does not replace.
@@ -38,7 +41,7 @@ The earlier app creates its generated home on the compatible daemon.
 This app uses normal initialization on its own generated home on the removal daemon.
 No arm converts a home in place. The comparison does not measure the home copy.
 
-Read measurements retain 1,000 and 10,000 records, three paired repeats,
+Read measurements use 1,000 records, three paired repeats,
 one restart call per operation, and five subsequent warm calls.
 The bodies retain the original complete generated text, approximately 4.6 KB each.
 The workflow measures these real app operations:

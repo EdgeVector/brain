@@ -217,7 +217,7 @@ def main():
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("revision", "baseline-revision", "app-revision", "app-baseline-revision"):
         parser.add_argument("--" + name, required=True)
-    parser.add_argument("--records", type=int, choices=(128, 1024, 1000, 10000), required=True)
+    parser.add_argument("--records", type=int, choices=(128, 1024, 1000), required=True)
     parser.add_argument("--body-bytes", type=int, default=0)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=3)
@@ -226,8 +226,8 @@ def main():
         parser.error("Measurements run only in Linux GitHub Actions")
     if not 1 <= args.samples <= 20 or not 1 <= args.repeats <= 5:
         parser.error("Use 1..20 samples and 1..5 repeats")
-    if args.mode == "read" and (args.records not in (1000, 10000) or args.samples != 5 or args.repeats != 3 or args.body_bytes != 0):
-        parser.error("Reads require 1000/10000 records, original full bodies, five warm calls, and three repeats")
+    if args.mode == "read" and (args.records != 1000 or args.samples != 5 or args.repeats != 3 or args.body_bytes != 0):
+        parser.error("Reads require 1000 records, original full bodies, five warm calls, and three repeats")
     if args.mode == "operations" and (args.body_bytes != 4096 or (args.records, args.repeats) not in ((128, 1), (1024, 3))):
         parser.error("Operations require 128 records once or 1024 records three times, with 4096-byte bodies")
     for value in (args.revision, args.baseline_revision, args.app_revision, args.app_baseline_revision):

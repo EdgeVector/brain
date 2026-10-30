@@ -28,6 +28,10 @@ export interface KeyValue {
     hash: string | null;
     range: string | null;
 }
+/** Complete server continuation; primary-row keys do not carry this binding. */
+export interface QueryCursor extends KeyValue {
+    comparison?: string | null;
+}
 /** Options for the keys-only {@link LastDbClient.list} membership page. */
 export interface ListOptions {
     /** Page size sent to Mini (default 100, clamped by Mini to 1000). */
@@ -308,20 +312,8 @@ export interface QueryFilter {
      * both node kinds when omitted.
      */
     offset?: number;
-    /**
-     * Keyset cursor returned by a prior page's `page.nextCursor`. Forwarded
-     * verbatim as top-level `cursor`.
-     *
-     * Only send one the node actually handed you. The node consumes a cursor on
-     * a single path — the unfiltered `can_push_down` push-down — and a
-     * key-restricted read (`HashKey`/`HashRange*`) carries a filter, so it never
-     * reaches that branch. Sending a cursor on a filtered read is silently
-     * ignored: the node re-serves the same page, `has_more` never flips, and a
-     * client that paged by cursor instead of offset would not terminate. The
-     * node therefore returns `next_cursor: null` on every offset-paged shape, so
-     * following `page.nextCursor` is safe by construction.
-     */
-    cursor?: KeyValue;
+    /** Complete server cursor from page.nextCursor. Pass it back unchanged. */
+    cursor?: QueryCursor;
     /**
      * Two-pass field predicates, forwarded as the request's top-level `where`
      * (`fold_db` `Query.field_predicates`). Multiple predicates are AND'd.
@@ -458,8 +450,8 @@ export interface QueryPage {
     offset: number;
     /** True when more records exist beyond the returned page. */
     hasMore: boolean;
-    /** Cursor to pass as `QueryFilter.cursor` for the next page, when available. */
-    nextCursor: KeyValue | null;
+    /** Complete opaque server cursor. Forward all properties, including comparison. */
+    nextCursor: QueryCursor | null;
 }
 /** `POST /api/query` success body. */
 export interface QueryResult {
