@@ -1,4 +1,6 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
+export { QUERY_PAGE_SIZE };
 import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Typed HTTP wrappers for fold_db_node + schema_service.
 //
@@ -405,18 +407,7 @@ export type SchemaRecordKeyPage = {
   hasMore: boolean;
 };
 
-// Single-request page size for the `/api/query` pagination loop. The node
-// caps individual page requests at MAX_QUERY_LIMIT (1000); we ride that
-// cap directly so a database of N records resolves in ceil(N/1000) round
-// trips. The server's INTERNAL_FETCH_CAP (10000) is a separate ceiling
-// on the post-filter result set per-request — beyond that the node sets
-// `has_more` and we'd need to keep iterating.
-export const QUERY_PAGE_SIZE = 1000;
-
-// Safety cap to prevent an infinite pagination loop if the node ever
-// returns `has_more: true` together with an empty `results` page. At a
-// page size of 1000 this still permits 1,000,000 records before bailing
-// — well beyond fbrain's expected scale, but bounded.
+// A drain stays bounded even when the server returns a stalled continuation.
 export const QUERY_PAGE_LIMIT = 1000;
 
 // Detail fields carried by a capability 403 (the node may include `schema`,
@@ -1300,35 +1291,11 @@ export function newNodeClient(opts: {
         hint: "Use queryByKey / RecordListEntry / TagIndex, or allowFullScan: true for deliberate admin drains.",
       });
     }
-    // The node's /api/query handler silently defaults to limit=100
-    // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
-    // does NOT support a body-side tag/status filter — so any caller
-    // that wants to filter by a record field has to fetch everything
-    // and filter in-memory. We paginate up to QUERY_PAGE_SIZE rows per
-    // request and stop once the node reports `has_more: false`.
-    //
-    // CLIENT-SIDE GUARDS — fold_db_node's offset pagination is broken
-    // (handler `fold_db_node/src/handlers/query.rs`: `.skip(offset)
-    // .take(limit)` over an unstably-ordered result set). Verified
-    // 2026-05-30: paging a 177-row schema by 100 returns 177 rows but
-    // only 134 unique — ~43 dups + ~43 silently dropped. fbrain is
-    // safe today only because QUERY_PAGE_SIZE (1000) exceeds every
-    // current schema's row count, so the second page is never
-    // requested. To stay safe once any schema grows past the page
-    // size, we never trust offset-paged results blindly:
-    //   1. Dedupe rows by record key across pages — so a stable-
-    //      ordering future node fix transparently keeps working,
-    //      and an unstable node can never inflate the set with
-    //      duplicates.
-    //   2. If a follow-up page returns ONLY already-seen keys but
-    //      claims has_more=true, throw — pagination is stalled
-    //      mid-table and looping further would either spin to the
-    //      QUERY_PAGE_LIMIT cap or return a silently-truncated set.
-    //   3. After the loop terminates (has_more=false), if the
-    //      node's own total_count is greater than our deduped row
-    //      count, throw — the node dropped rows we cannot recover.
-    // The proper root-cause fix lives in fold_db_node/query.rs
-    // (stable ordering); this guard lets fbrain land independently.
+    // Bound native field work per IPC request. Complete membership still comes
+    // from the full cursor drain, never from a single page or a raw row count.
+    const pageSize = queryPageSize(fields.length);
+    // Keep the complete server cursor, deduplicate keys, reject stalled cursors,
+    // and refuse an incomplete drain. A nullable total count does not replace has_more.
     const allResults: QueryRow[] = [];
     const seenKeys = new Set<string>();
     let offset = 0;
@@ -1341,7 +1308,7 @@ export function newNodeClient(opts: {
         schemaHash,
         {
           fields,
-          limit: QUERY_PAGE_SIZE,
+          limit: pageSize,
           ...(cursor ? { cursor } : { offset }),
           ...(filter ? { filter: filter as SdkQueryFilter["filter"] } : {}),
         },
@@ -1362,14 +1329,14 @@ export function newNodeClient(opts: {
         newOnPage++;
       }
       // Stop on explicit `has_more: false`. Absent page envelope used to mean
-      // "done" even when the page was full (QUERY_PAGE_SIZE) — that silently
+      // "done" even when the page was full (the requested page size) — that silently
       // stopped at the MAX_QUERY_LIMIT=1000 cliff when a node returned
       // page:null (measured on primary for large type partitions). Treat a
       // full page with no envelope as "maybe more" and keep paging; a short
       // or empty follow-up page ends the loop via the empty/newOnPage guards.
       const hasMore = pageResult.page?.hasMore === true;
       const fullPageMaybeMore =
-        pageResult.page === null && pageResults.length >= QUERY_PAGE_SIZE;
+        pageResult.page === null && pageResults.length >= pageSize;
       if (!hasMore && !fullPageMaybeMore) { complete = true; break; }
       if (newOnPage === 0) {
         throw new FbrainError({
@@ -1419,7 +1386,7 @@ export function newNodeClient(opts: {
           `was ${lastTotalCount}. This means total_count includes record keys the node ` +
           `never returned in any page: either deleted/tombstoned keys counted in the ` +
           `total, or rows silently dropped by unstable offset pagination on a schema ` +
-          `larger than QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) ${DOCTOR_TIP}.`,
+          `larger than page size (${pageSize}) ${DOCTOR_TIP}.`,
         hint:
           "Do NOT assume this is an outdated node — the tombstone-aware count fix " +
           "(fold #995) has a deployed successor, and checking for it by commit " +

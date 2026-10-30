@@ -1020,7 +1020,10 @@ function parseQueryPage(body, returnedRows) {
     const limit = body['limit'];
     const offset = body['offset'];
     const hasMore = body['has_more'];
-    const nextCursor = parseKeyValue(body['next_cursor']);
+    // A continuation is opaque. Keep comparison and future server fields;
+    // parseKeyValue remains the separate primary-row address parser.
+    const rawCursor = body['next_cursor'];
+    const nextCursor = parseKeyValue(rawCursor) === null ? null : { ...rawCursor };
     if (typeof limit !== 'number' ||
         typeof offset !== 'number' ||
         typeof hasMore !== 'boolean') {

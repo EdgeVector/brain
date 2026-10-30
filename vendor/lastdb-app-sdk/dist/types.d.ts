@@ -458,7 +458,7 @@ export interface QueryPage {
     offset: number;
     /** True when more records exist beyond the returned page. */
     hasMore: boolean;
-    /** Cursor to pass as `QueryFilter.cursor` for the next page, when available. */
+    /** Complete opaque server cursor. Forward all properties, including comparison. */
     nextCursor: KeyValue | null;
 }
 /** `POST /api/query` success body. */
