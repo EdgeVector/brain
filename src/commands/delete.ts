@@ -29,6 +29,8 @@ import {
 } from "../record.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY, RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
 import { commitResidentRemoval } from "../resident-write-plan.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedRecordPage } from "../named-records.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type DeleteOptions = {
@@ -66,6 +68,10 @@ async function findLinkedTaskSlugs(
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
+  if (multiKey(cfg)) {
+    const page=await namedRecordPage(node,cfg,{type:"task",design:designSlug},20);
+    return page.items.map((task)=>task.slug);
+  }
   const hash = `child#${designSlug}`;
   const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
   const seen = new Set<string>();
@@ -286,7 +292,8 @@ async function resolveFilterMatches(
   const types = opts.type ? [opts.type] : RECORD_TYPES.filter(type => Boolean(opts.cfg.schemaHashes[type]));
   // Older homes can lack a status page until backfill. Preserve the type
   // membership source, then check current status without fetching any bodies.
-  const hashes = opts.tag ? [`tag#${opts.tag}`] : types;
+  const hashes = opts.tag ? [`tag#${opts.tag}`] : multiKey(opts.cfg) && opts.status
+    ? types.map((type)=>`${type}#${opts.status}`) : types;
   if (opts.tag) {
     const head = await readStoredPage(node, opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "", hashes[0]!, HEAD_RANGE);
     if (head.kind !== "page") return { matches: [], partial: true };

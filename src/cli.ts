@@ -404,6 +404,7 @@ exists in multiple types (specify --type to disambiguate).
   --type        ${RECORD_TYPE_LIST}
   --page ID     with --type design, read that child page. The default is
                 \`__head__\`. An older id is \`p\` plus eight digits.
+                Multi-key schemas return next_child_page. Pass that opaque value.
                 \`linked_from\` stays on \`__head__\`.
   --limit       max child cards from that one page (default 20, cap 100)
   --body-limit  truncate body output to N chars (default: full body)
@@ -425,7 +426,8 @@ exists in multiple types (specify --type to disambiguate).
                   timestamp (\`2026-07-01\`, \`2026-07-01T12:00:00Z\`) or a
                   relative window: \`45s\` \`30m\` \`24h\` \`7d\` \`2w\`
   --page ID       read that page. The default is \`__head__\`. An older id is
-                  \`p\` plus eight digits.
+                  \`p\` plus eight digits. Multi-key schemas return next_page;
+                  pass that opaque value for the next page.
   -n, --limit     max cards from that one page (default 20, cap 100).
                   \`-n\` and \`--limit\` are aliases; last wins
   --count         print the counter for \`all\` or for --type, and the word
