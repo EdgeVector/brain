@@ -1,21 +1,20 @@
 import { writeConfigFile } from "./config-file.ts";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
-// Persistent CLI config — `~/.brain/config.json` by default, with
-// `~/.fbrain/config.json` retained as a compatibility fallback.
+// Persistent CLI config — `~/.brain/config.json` by default.
 // Holds the canonical schema hashes (NOT the descriptive_names), per the
 // Phase 0 spike finding.
 //
 // v2 (Phase 6): `schemaHashes` map carries one canonical hash per record
 // type. `designSchemaHash` and `taskSchemaHash` are mirrored on disk for
 // backward compat with v1 readers. v1 configs are migrated in-memory on
-// read; the next `fbrain init` persists v2 to disk.
+// read; the next `brain init` persists v2 to disk.
 //
 // v3 (Phase D): same shape as v2; the version bump signals that the
 // default schema-service URL moved from the local `:9102` to the cloud
 // Lambda. `runInit` auto-heals v1/v2 configs with the dead local default
-// URLs on the next `fbrain init` (preserving any user override).
+// URLs on the next `brain init` (preserving any user override).
 //
-// v4 (this commit): legacy FbrainKindNote cleanup. The legacy schema and
+// v4 (this commit): legacy BrainKindNote cleanup. The legacy schema and
 // its `__legacy_note__` schemaHashes entry are gone. Any v3 config that
 // still carries that entry is auto-healed on read by stripping the entry
 // — the cleanup is purely shape, not data (consolidation already moved
@@ -24,17 +23,17 @@ import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transp
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { FbrainError } from "./client.ts";
+import { BrainError } from "./client.ts";
 // The guarded home resolver + its error live in client.ts (the lowest layer,
-// alongside FbrainError) so client.ts's `resolveNodeHome` can share the SAME
+// alongside BrainError) so client.ts's `resolveNodeHome` can share the SAME
 // guard with no import cycle. Re-exported here so the rest of the codebase
 // imports them from `./config.ts` (the conventional home for path resolution).
-export { fbrainHomeBase, validateHomeBase, HomeUnresolvedError } from "./client.ts";
-import { fbrainHomeBase } from "./client.ts";
+export { brainHomeBase, validateHomeBase, HomeUnresolvedError } from "./client.ts";
+import { brainHomeBase } from "./client.ts";
 
 export const CONFIG_VERSION = 4;
 
-// Legacy FbrainKindNote schema-key (pre-v4). Defined here, not in
+// Legacy BrainKindNote schema-key (pre-v4). Defined here, not in
 // schemas.ts, so the config migration can detect + strip it without
 // keeping the legacy schema definition alive. Any v3 config that carried
 // this key in `schemaHashes` is auto-healed on read (the entry is
@@ -61,13 +60,13 @@ export type Config = {
   // `<node-home>/data/folddb.sock`, where `<node-home>` resolves to `~/.lastdb`
   // on a current v0.15.1+ node (the FoldDB→LastDB rebrand) or `~/.folddb` on a
   // legacy 0.14.x node — see `resolveNodeHome` in client.ts. Set this (or the
-  // `FBRAIN_FOLDDB_SOCKET` env) when pointing fbrain at a node whose data dir
+  // `BRAIN_FOLDDB_SOCKET` env) when pointing brain at a node whose data dir
   // is elsewhere (an ephemeral test node). Omitted from disk when unset —
   // backward-compatible with every existing config.
   nodeSocketPath?: string;
   /**
    * When false, the client skips capability acquisition (same effect as
-   * `FBRAIN_APP_IDENTITY_ENFORCE=off`). Legacy configs may contain false from
+   * `BRAIN_APP_IDENTITY_ENFORCE=off`). Legacy configs may contain false from
    * the retired unregistered-schema bootstrap. New initialization must use
    * Schema Service-registered identities and must not treat this flag as a
    * local-schema option. Omitted when unset → default enforce-on.
@@ -75,54 +74,43 @@ export type Config = {
   appIdentityEnforce?: boolean;
 };
 
-export function resolveDefaultBrainDataDir(
-  homeBase: string,
-  exists: (p: string) => boolean,
-): string {
-  const primary = join(homeBase, ".brain");
-  const legacy = join(homeBase, ".fbrain");
-  if (exists(primary)) return primary;
-  if (exists(legacy)) return legacy;
-  return primary;
-}
-
 export function brainDataDir(): string {
-  return resolveDefaultBrainDataDir(fbrainHomeBase(), existsSync);
+  return join(brainHomeBase(), ".brain");
 }
 
 export function defaultConfigPath(): string {
-  const override = process.env.BRAIN_CONFIG || process.env.FBRAIN_CONFIG;
+  const override = process.env.BRAIN_CONFIG;
   if (override && override.length > 0) return override;
-  // BRAIN_CONFIG / FBRAIN_CONFIG overrides (above) win even with a broken HOME, so a pinned
+  // The BRAIN_CONFIG override (above) wins even with a broken HOME, so a pinned
   // config path still works. Otherwise derive from the guarded home base, which
   // fails loud rather than writing a relative `undefined/.brain/config.json`.
   return join(brainDataDir(), "config.json");
 }
 
 // The two first-touch config errors a brand-new developer hits when running
-// any verb before `fbrain init`. They extend FbrainError so they carry a
+// any verb before `brain init`. They extend BrainError so they carry a
 // stable `code` and a structured `hint` (the recovery action), exactly like
 // every operational error (node-down, capability, write-timeout). The
 // message states only the *condition*; the recovery lives in `hint` so the
 // two don't duplicate, and `--json` / the human `hint:` line both surface it.
 // Their codes are NOT in USAGE_ERROR_CODES, so they stay exit 1 (operational).
-export class ConfigMissingError extends FbrainError {
+export class ConfigMissingError extends BrainError {
   constructor(path: string) {
     super({
       code: "config_missing",
       message: `Config not found at ${path}.`,
-      hint: "Run `fbrain init` to create it.",
+      hint: "Run `brain init` to create it.",
     });
     this.name = "ConfigMissingError";
   }
 }
 
-export class ConfigInvalidError extends FbrainError {
+export class ConfigInvalidError extends BrainError {
   constructor(path: string, reason: string) {
     super({
       code: "config_invalid",
       message: `Config at ${path} is invalid: ${reason}.`,
-      hint: "Re-run `fbrain init` to regenerate it (or edit the file).",
+      hint: "Re-run `brain init` to regenerate it (or edit the file).",
     });
     this.name = "ConfigInvalidError";
   }
@@ -149,13 +137,8 @@ export function writeConfig(
   config: Config,
   path: string = defaultConfigPath(),
   expected?: string | null,
-  conversionScope?: string,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  const scopePath = path + ".conversion.json";
-  if (existsSync(scopePath) && readFileSync(scopePath, "utf8") !== conversionScope) {
-    throw new ConfigInvalidError(path, "resume the saved app conversion before a config change");
-  }
   writeConfigFile(path, configBytes(config), expected);
 }
 
@@ -240,8 +223,8 @@ function assertConfigShape(path: string, raw: unknown): Config {
     if (typeof v !== "string" || v.length === 0) {
       throw new ConfigInvalidError(path, `schemaHashes["${k}"] is not a non-empty string`);
     }
-    // v3 → v4: drop the now-defunct legacy FbrainKindNote entry. Records
-    // were migrated into per-kind canonicals by `fbrain consolidate`
+    // v3 → v4: drop the now-defunct legacy BrainKindNote entry. Records
+    // were migrated into per-kind canonicals by `brain consolidate`
     // before this cleanup landed; keeping the key would route reads at
     // an unregistered hash.
     if (k === LEGACY_NOTE_SCHEMA_KEY_V3) continue;

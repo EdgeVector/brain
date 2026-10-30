@@ -4,7 +4,7 @@ New installations declare independent record values. Canonical fields still reus
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.
 
 The compact list locator keeps its external digest key and sole page field. Its schema key stays empty and it has no alternate keys.
-Owned setup and conversion require `app_schema_opaque_hash_ownership_v1` for this exact shape.
+Owned setup requires `app_schema_opaque_hash_ownership_v1` for this exact shape.
 The node must prove exclusive ownership and retain the original molecule, current atoms, author metadata, and stored coordinates in place.
 The request has no membership filter, field transition, transform, or reference. The app does not invent a stored hash field or reconstruct API keys.
 
@@ -12,52 +12,41 @@ Each record kind uses recent and status keys. Task also uses a design key. Range
 
 ## Existing installations
 
-CAUTION: Convert an existing home on the compatible LastDB release from EdgeVector/lastdb#793. The removal release from EdgeVector/lastdb#803 does not start while any shared-value schema remains in the home.
+This release does not convert a home in place. It has no conversion command.
 
-The compatible release reports `app_schema_conversion_v1`, `compound_alternate_keys_v1`, and `independent_hash_range_v1`.
-A conversion that retires local aliases also requires `app_schema_alias_retirement_v1`.
-The node checks each alias against one kept source before the request pause. Unique old layouts stay unchanged.
+CAUTION: Do not start this release on a home that holds the old shared-value Brain layout. Init refuses that home with `home_copy_required` and makes no change.
 
-Do these steps in this order:
+An existing home moves to this release only by the home copy (EdgeVector/last-stack#377):
 
-1. Install this Brain release. Keep the compatible LastDB release on the node.
-2. Run `brain multi-key-convert` to read the plan. The command makes no change.
-3. Review the selected runtime schemas, definitions, type-directory membership, per-type counts, alternate keys, and local alias list.
-4. Run `brain multi-key-convert --apply --maintenance`.
-5. Resume the same command after an interruption. Keep the selected config and its `.conversion.json` file.
-6. Run normal init after a complete conversion to declare missing empty types. Init preserves existing runtime addresses and definition identities.
-7. Upgrade LastDB to the removal release only after every app conversion completes.
+1. The home copy reads the old home. It does not change the old home.
+2. The home copy writes the records to a new home that this release initializes.
+3. The new home uses the `brain` app ID, the `brain` definitions, and the named keys.
+4. The old home stays unchanged as the recovery point.
 
-CAUTION: A type inside another type, such as Sop inside Concept, needs a native conversion that preserves current atoms and author metadata.
-This command refuses that shape before any declaration, mutation, or request pause. It does not copy records through ordinary writes.
+Old app declarations refuse the new schemas. A ranged mutation cannot silently address an independent hash-only record.
 
-CAUTION: Unknown legacy schemas need a separate reviewed conversion. The retired `--retire-legacy` option refuses the request.
-No option discards their unique values. Equal field definitions do not prove equal record membership.
+## Migration note
 
-Each distinct record type keeps its own schema. Each type selects its records through the type directory.
-The per-type count guards that selection. A missing type with a non-zero count stops the plan.
-A missing empty type stays absent until normal init after the conversion.
+Earlier releases used the app ID `fbrain`. This release uses the app ID `brain`.
+The home copy maps these stored and local names:
 
-Before the request pause, the command saves the exact config hashes, full schema requests, membership, and alias list to a durable local scope.
-The returned node change ID binds that scope to one job. Resume and abort require the same full scope.
-The node then freezes requests, preserves current atom references and author clocks, creates the named keys, and retires only audited aliases.
-The command writes the config to disk before the node resumes requests. It checks the config and scope again after awaited reads.
+| Earlier name | This release |
+|---|---|
+| App ID and schema owner `fbrain` | `brain` |
+| Deletion tag `__fbrain_deleted__` | `__brain_deleted__` |
+| Backlink tag prefix `__fbrain_backlink__:` | `__brain_backlink__:` |
+| Capability store key `fbrain@<hash>` | `brain@<hash>` |
+| Environment variables `FBRAIN_*` | `BRAIN_*` |
+| Data directory fallback `~/.fbrain` | `~/.brain` only |
+| MCP tools `fbrain_*` | `brain_*` |
 
-Before publication, `--apply --maintenance --abort` removes the unpublished copy and restores the old state.
-After publication, resume forward. The node keeps requests blocked until completion.
-An unrelated pending job cannot supply membership, take over this config, or authorize an abort.
-
-The converter requires healthy counters, ordinary source schemas, no kept history, no molecule generations, no database catalog membership, and no registered logical peers.
-It refuses unknown schema shapes, transforms, incomplete type membership, and mixed values without its exact pending scope.
-Those states require a separate reviewed conversion.
-
-Init refuses an active local scope. Repeat init retains the supported owner mode and existing field profiles.
-Old app declarations refuse converted schemas. A ranged mutation cannot silently address an independent hash-only record.
-Legacy app code needs the compatible release until the explicit conversion completes.
+Ten field descriptions and purpose statements in `src/schemas.ts` still name `fbrain`.
+They stay unchanged because the Schema Service identity hash includes them.
 
 ## CI comparison
 
-The linked LastDB CI run compares the exact app revisions on the same daemon revision.
+The CI comparison runs the earlier app on the compatible daemon and this app on the removal daemon.
+Each app creates its own generated home. No home is converted in place.
 The workload uses generated data on owned CI homes.
 It checks logical record membership, order, bodies, updates, and cursors.
 Physical database size may decrease. Logical record counts must remain correct.

@@ -1,11 +1,11 @@
 // App-identity capability acquisition + storage + per-write attach + 403
-// handling for fbrain (app_identity v3.1, Lane D client side).
+// handling for brain (app_identity v3.1, Lane D client side).
 //
-// The contract fbrain implements (design doc "Client contract"):
+// The contract brain implements (design doc "Client contract"):
 //   1. On startup, check the OS keychain for an existing capability for this
 //      app_id + node. If absent or invalid → request consent.
-//   2. POST /api/apps/request-consent {app_id:"fbrain", scope:"wildcard"} → request_id.
-//   3. Print: "First-run setup — run: `folddb consent grant fbrain` …".
+//   2. POST /api/apps/request-consent {app_id:"brain", scope:"wildcard"} → request_id.
+//   3. Print: "First-run setup — run: `folddb consent grant brain` …".
 //   4. Poll GET /api/apps/consent-status/{request_id} every 2s.
 //   5. On 200 granted → store the base64 capability blob in the keychain.
 //   6. On 403 denied / 408 expired → surface; offer retry.
@@ -14,7 +14,7 @@
 //   X-App-Capability: <the base64 CapabilityToken blob, replayed verbatim>
 //   X-Capability-Ts:  <unix epoch seconds, computed per request, ≤60s old>
 //
-// fbrain is a TOKEN CARRIER: the node mints + signs the token; fbrain stores
+// brain is a TOKEN CARRIER: the node mints + signs the token; brain stores
 // the opaque base64 blob and replays it. It does NOT re-sign. It DOES run a
 // JCS-based integrity check on a cached token (the "or invalid" branch of step
 // 1) so a corrupt / tampered cache is discarded rather than replayed into a
@@ -24,10 +24,10 @@
 // and are re-exported here: token decode (`decodeCapabilityBlob`), the JCS
 // integrity binding (`tokenIntegrityValid` / `verifyCapabilityBlob`), the
 // eight-reason discriminated-403 list + guard, and the contract reaction
-// FLAGS (`capabilityDenialReaction`). What stays fbrain's own is the UX
+// FLAGS (`capabilityDenialReaction`). What stays brain's own is the UX
 // orchestration: the consent handshake loop (prints, the inline-grant hook,
-// the non-TTY fast-fail), fbrain-worded `surface` messages (they name
-// `folddb consent grant fbrain`), and the FbrainError code vocabulary.
+// the non-TTY fast-fail), brain-worded `surface` messages (they name
+// `folddb consent grant brain`), and the BrainError code vocabulary.
 
 import {
   capabilityDenialReaction,
@@ -43,12 +43,12 @@ import {
 import {
   APP_CAPABILITY_HEADER,
   CAPABILITY_TS_HEADER,
-  FbrainError,
+  BrainError,
   bodyStringField,
   type Verbose,
 } from "./client.ts";
 
-export const FBRAIN_APP_ID = "fbrain";
+export const BRAIN_APP_ID = "brain";
 
 // Re-export the per-write header names (defined in client.ts to avoid a
 // circular dependency) so capability consumers have a single import surface.
@@ -60,15 +60,15 @@ export const MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS = 3;
 
 // Token wire types + decode + the JCS integrity check come from the SDK — the
 // exact same shapes and checks every FoldDB app runs (and the same the Rust
-// node mints against). Re-exported so fbrain call sites keep this module as
+// node mints against). Re-exported so brain call sites keep this module as
 // their single import surface. NB `tokenIntegrityValid` is synchronous in the
-// SDK (node:crypto) where fbrain's old implementation was async; existing
+// SDK (node:crypto) where brain's old implementation was async; existing
 // `await tokenIntegrityValid(...)` call sites are unaffected.
 export { decodeCapabilityBlob, tokenIntegrityValid, verifyCapabilityBlob };
 export type { CapabilityToken, SignatureEnvelope };
 
 /**
- * What fbrain persists per (app_id, node). The base64 blob is the source of
+ * What brain persists per (app_id, node). The base64 blob is the source of
  * truth replayed in `X-App-Capability`; `nodePubkey` is cached separately so
  * a wrong-node check on load doesn't need to decode the blob.
  */
@@ -106,7 +106,7 @@ export interface CapabilityStore {
 // 403-reason classification (design "403 handling (contract)" table)
 // ---------------------------------------------------------------------------
 
-// The eight-reason list + guard are the SDK's — fbrain keeps its historical
+// The eight-reason list + guard are the SDK's — brain keeps its historical
 // names as aliases so call sites and tests read unchanged.
 export type Capability403Reason = CapabilityDenialReason;
 
@@ -135,8 +135,8 @@ type Reaction = {
  * The contract reaction for a discriminated 403 reason. The FLAGS
  * (discard / re-acquire / retry-once) come from the SDK's
  * `capabilityDenialReaction` — the canonical port of this table — while the
- * `surface` strings stay fbrain's own: they name fbrain and the exact
- * remediation command (`folddb consent grant fbrain`) a user of THIS app
+ * `surface` strings stay brain's own: they name brain and the exact
+ * remediation command (`folddb consent grant brain`) a user of THIS app
  * should run, which a generic SDK message cannot.
  */
 export function reactionFor(
@@ -150,34 +150,34 @@ export function reactionFor(
     reacquire: base.reacquire,
     retryOnce: base.retryOnce,
   };
-  const surface = fbrainSurfaceFor(reason, detail);
+  const surface = brainSurfaceFor(reason, detail);
   if (surface !== undefined) reaction.surface = surface;
   return reaction;
 }
 
-// fbrain's user/developer-facing wording for the reasons whose contract says
+// brain's user/developer-facing wording for the reasons whose contract says
 // "surface". Kept app-side deliberately (see the reactionFor docstring). The
 // set of reasons that carry a surface message must stay aligned with the
 // SDK's table — the flags above are the single source of truth for WHAT to
 // do; this is only the wording.
-function fbrainSurfaceFor(
+function brainSurfaceFor(
   reason: Capability403Reason,
   detail?: { schema?: string; capabilityId?: string; timestampSkewSecs?: number },
 ): string | undefined {
   switch (reason) {
     case "capability_revoked":
       return (
-        "fbrain's access to this node was revoked. Ask the node owner to re-grant: " +
-        "`lastdb consent grant fbrain`."
+        "brain's access to this node was revoked. Ask the node owner to re-grant: " +
+        "`lastdb consent grant brain`."
       );
     case "capability_out_of_scope":
       return (
-        `fbrain's capability does not cover ${detail?.schema ?? "this schema"} — ` +
+        `brain's capability does not cover ${detail?.schema ?? "this schema"} — ` +
         "the declared scope and the attempted write disagree. This is a developer bug."
       );
     case "capability_replay":
       return (
-        `fbrain's capability timestamp was rejected as a replay` +
+        `brain's capability timestamp was rejected as a replay` +
         (detail?.timestampSkewSecs !== undefined
           ? ` (skew ${detail.timestampSkewSecs}s)`
           : "") +
@@ -185,7 +185,7 @@ function fbrainSurfaceFor(
       );
     case "capability_bad_sig":
       return (
-        "fbrain's capability signature failed verification on the node. " +
+        "brain's capability signature failed verification on the node. " +
         "This is a developer bug — the stored token is malformed."
       );
     default:
@@ -194,20 +194,20 @@ function fbrainSurfaceFor(
 }
 
 // ---------------------------------------------------------------------------
-// Idempotency check (used by `fbrain init` to skip the inline consent step
+// Idempotency check (used by `brain init` to skip the inline consent step
 // when a live capability is already on disk)
 // ---------------------------------------------------------------------------
 
 /**
  * Read-only: does this store hold a structurally-valid, JCS-integrity-bound
  * capability for `appId` on this `nodeUrl`? Does NOT clear corrupt cache (use
- * CapabilitySession for that lifecycle); intended for `fbrain init`'s
+ * CapabilitySession for that lifecycle); intended for `brain init`'s
  * idempotency gate so re-running init never re-prompts.
  */
 export async function hasValidCachedCapability(
   store: CapabilityStore,
   nodeUrl: string,
-  appId: string = FBRAIN_APP_ID,
+  appId: string = BRAIN_APP_ID,
 ): Promise<boolean> {
   const cached = await store.load(nodeUrl);
   if (cached === null) return false;
@@ -231,7 +231,7 @@ export type ConsentTransport = {
 /**
  * Hook invoked once `request-consent` has returned 202, before polling
  * begins. The default prints the "First-run setup — run: …" instruction so a
- * second-terminal owner can grant. `fbrain init`'s inline-consent flow
+ * second-terminal owner can grant. `brain init`'s inline-consent flow
  * overrides this to shell out to `folddb consent grant <app_id> --yes`
  * directly, eliminating the two-terminal dance on the brew happy path.
  */
@@ -270,11 +270,11 @@ export type AcquireOptions = {
 
 /**
  * Run the full first-run consent handshake and persist the granted capability.
- * Returns the StoredCapability on success. Throws an FbrainError on denial,
+ * Returns the StoredCapability on success. Throws an BrainError on denial,
  * expiry, unknown-app, or timeout.
  */
 export async function acquireCapability(opts: AcquireOptions): Promise<StoredCapability> {
-  const appId = opts.appId ?? FBRAIN_APP_ID;
+  const appId = opts.appId ?? BRAIN_APP_ID;
   const scope = opts.scope ?? "wildcard";
   const print = opts.print ?? ((line: string) => console.error(line));
   const sleep = opts.sleep ?? defaultSleep;
@@ -292,30 +292,30 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   // out to `folddb consent grant <appId> --yes`) is unaffected — that path
   // can complete the grant without a TTY and the poll is just confirming.
   if (opts.onConsentRequested === undefined && !isTty()) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "consent_required_non_interactive",
       // Channel-neutral message — true on both surfaces. The old wording said
       // "this is a non-interactive shell", which is meaningless to an MCP agent
       // (it isn't a shell, and is *always* non-interactive). State the real
-      // fact instead: no write capability is cached and fbrain can't grant one
+      // fact instead: no write capability is cached and brain can't grant one
       // on its own.
       message:
         `No write capability is cached for "${appId}" on this node, ` +
-        `and fbrain can't request a grant non-interactively.`,
+        `and brain can't request a grant non-interactively.`,
       // CLI `hint` (human at a terminal) — UNCHANGED. Names the headless
       // one-shot and the local/dogfood enforcement escape hatch, both correct
       // for the human path and only shown when no `agentHint` is set.
       hint:
-        `Run \`fbrain init --grant-consent\` once, then retry — it creates the consent request, grants it, and stores the capability in one headless step. ` +
+        `Run \`brain init --grant-consent\` once, then retry — it creates the consent request, grants it, and stores the capability in one headless step. ` +
         `(A bare \`lastdb consent grant ${appId}\` only works once a pending request exists, i.e. an interactive write is already polling — it fails with "no pending consent request" on a fresh node.) ` +
-        `Set FBRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
+        `Set BRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
       // Agent-voiced remediation (MCP) — names the OWNER action in agent terms,
-      // with no "shell" and no FBRAIN_APP_IDENTITY_ENFORCE dogfood note the
+      // with no "shell" and no BRAIN_APP_IDENTITY_ENFORCE dogfood note the
       // agent can't act on. This is the first hard wall an agent hits on a
       // fresh owner's node (init headlessly skips the consent prompt).
       agentHint:
-        `The node owner must grant fbrain consent before writes land. ` +
-        `Ask them to run \`fbrain init --grant-consent\` (or \`lastdb consent grant ${appId} --yes\`) in their terminal, then retry.`,
+        `The node owner must grant brain consent before writes land. ` +
+        `Ask them to run \`brain init --grant-consent\` (or \`lastdb consent grant ${appId} --yes\`) in their terminal, then retry.`,
     });
   }
 
@@ -333,38 +333,38 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   // carries `agentHint`.
   const req = await opts.transport.requestConsent(appId, scope);
   if (req.status === 404) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "app_not_registered",
       message:
         `Node rejected consent request: app "${appId}" is not registered with schema_service.`,
       hint:
         "The app must be published before it can request consent " +
-        "(`folddb-dev app publish --id fbrain`). On a fresh node, run the app_identity " +
+        "(`folddb-dev app publish --id brain`). On a fresh node, run the app_identity " +
         "migration runbook first.",
     });
   }
   if (req.status === 400) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_scope",
       message: `Node rejected consent request: ${bodyStringField(req.body, "error") ?? "invalid scope"}.`,
     });
   }
   if (req.status !== 202) {
-    throw new FbrainError({
+    throw new BrainError({
       code: `request_consent_http_${req.status}`,
       message: `request-consent returned HTTP ${req.status}.`,
     });
   }
   const requestId = bodyStringField(req.body, "request_id");
   if (!requestId) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "request_consent_no_id",
       message: "request-consent returned 202 but no request_id.",
     });
   }
 
   // Step 3: tell the user what to do, then frame the polling line to match.
-  // The inline flow (used by `fbrain init --grant-consent`) has already shelled
+  // The inline flow (used by `brain init --grant-consent`) has already shelled
   // out to `folddb consent grant`, so the poll is just confirming the grant
   // landed — printing "Waiting for you to grant access" there would contradict
   // the "Granted access…" line the inline grant just printed. The manual
@@ -387,7 +387,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
     if (res.status === 200) {
       const blob = bodyStringField(res.body, "capability");
       if (!blob) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "consent_status_no_capability",
           message: "consent-status returned 200 granted but no capability blob.",
         });
@@ -402,20 +402,20 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       const verification = verifyCapabilityBlob(blob, appId);
       if (!verification.ok) {
         if (verification.problem === "malformed") {
-          throw new FbrainError({
+          throw new BrainError({
             code: "consent_status_bad_capability",
             message: "consent-status returned a capability that did not decode as a CapabilityToken.",
           });
         }
         if (verification.problem === "audience_mismatch") {
-          throw new FbrainError({
+          throw new BrainError({
             code: "consent_status_app_id_mismatch",
             message:
               `consent-status returned a capability bound to app "${verification.tokenAppId ?? "?"}", ` +
               `but "${appId}" was requested.`,
           });
         }
-        throw new FbrainError({
+        throw new BrainError({
           code: "consent_status_bad_capability_integrity",
           message:
             "consent-status returned a capability that failed JCS integrity check " +
@@ -435,24 +435,24 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       return stored;
     }
     if (res.status === 403) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "consent_denied",
-        message: `The node owner denied fbrain's request for access.`,
+        message: `The node owner denied brain's request for access.`,
         hint: `Retry with another \`lastdb consent grant ${appId}\` once you're ready to allow it.`,
       });
     }
     if (res.status === 408) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "consent_expired",
         message: `The consent request expired before it was granted (5-minute window).`,
-        hint: `Re-run the fbrain command to start a fresh request, then \`lastdb consent grant ${appId}\`.`,
+        hint: `Re-run the brain command to start a fresh request, then \`lastdb consent grant ${appId}\`.`,
       });
     }
     if (res.status === 404) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "consent_request_unknown",
         message: `The node no longer recognises this consent request (it may have restarted).`,
-        hint: `Re-run the fbrain command to start a fresh request.`,
+        hint: `Re-run the brain command to start a fresh request.`,
       });
     }
     if (res.status === 202) {
@@ -462,19 +462,19 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       consecutiveUnexpectedStatuses++;
       lastUnexpectedStatus = res.status;
       if (consecutiveUnexpectedStatuses >= MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS) {
-        throw new FbrainError({
+        throw new BrainError({
           code: `consent_status_http_${lastUnexpectedStatus}`,
           message:
             `consent-status returned HTTP ${lastUnexpectedStatus} ` +
             `${consecutiveUnexpectedStatuses} times while waiting for consent.`,
           hint:
-            `Inspect the node log for consent-status HTTP ${lastUnexpectedStatus}, then re-run the fbrain command.`,
+            `Inspect the node log for consent-status HTTP ${lastUnexpectedStatus}, then re-run the brain command.`,
         });
       }
     }
     // 202 pending (or a bounded run of unexpected statuses) → keep polling until the deadline.
     if (Date.now() >= deadline) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "consent_timeout",
         message: `Timed out after ${Math.round(maxWaitMs / 1000)}s waiting for consent to be granted.`,
         hint: `Run \`lastdb consent grant ${appId}\` and retry the command.`,
@@ -493,7 +493,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 // Mirror `defaultIsTty` in src/commands/init-consent.ts so both consent paths
-// agree on what "interactive" means. fbrain init's prompt branch and the
+// agree on what "interactive" means. brain init's prompt branch and the
 // in-write fast-fail branch must trigger on the same shell shape — otherwise
 // you'd get an init that silently skips the prompt followed by a first write
 // that polls (or vice versa).

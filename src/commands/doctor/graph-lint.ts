@@ -83,7 +83,7 @@ export async function runGraphEdgeLintProbe(
   // Not a SKIP. A SKIP reads as "nothing to check here" and leaves the run
   // green, which is exactly how a primary brain sat for a phase with every
   // `put` parsing its links and writing no edge row. The schemas ship in the
-  // standard `fbrain init` set, so their absence from config is a real defect
+  // standard `brain init` set, so their absence from config is a real defect
   // in this brain, and the whole graph surface — neighbors, path, adjacency
   // boost — silently answers nothing while it lasts.
   if (graphEdgesUnavailable(cfg)) {
@@ -176,7 +176,7 @@ export async function runGraphEdgeLintProbe(
       ok: true,
       tag: "WARN",
       detail: `${scope}; ${notes.join("; ")}`,
-      fix: "dangling wiki-links are intentional notes-to-self in fbrain bodies; fix only if a slug was renamed",
+      fix: "dangling wiki-links are intentional notes-to-self in brain bodies; fix only if a slug was renamed",
     };
   }
   return { name, ok: true, detail: `${scope}; the edge set and the link page agree` };

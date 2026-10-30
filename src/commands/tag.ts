@@ -1,11 +1,11 @@
-// `fbrain tag <slug> --add T[,T] --rm T[,T]` — mutate only a record's tags.
+// `brain tag <slug> --add T[,T] --rm T[,T]` — mutate only a record's tags.
 //
 // This is the tag-side sibling of `status`: resolve the live record, apply a
 // set add/remove to `tags`, then seal and write the stored fields. A hydrated
 // body must not replace the short field. Re-adding an existing
 // tag or removing an absent one is a no-op success.
 
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -89,10 +89,10 @@ export async function tagCmd(opts: TagOptions): Promise<void> {
   const add = parseTagList(opts.add);
   const rm = parseTagList(opts.rm);
   if (add.length === 0 && rm.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "missing_tag_mutation",
       message: "tag: pass at least one non-empty --add or --rm value.",
-      hint: "Example: `fbrain tag my-record --add owner:fbrain` or `fbrain tag my-record --rm stale`.",
+      hint: "Example: `brain tag my-record --add owner:brain` or `brain tag my-record --rm stale`.",
     });
   }
 

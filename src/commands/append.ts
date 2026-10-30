@@ -1,6 +1,6 @@
-// `fbrain append <slug>` — append a chunk to a record's body WITHOUT a full
-// rewrite. Closes the third leg of the read/write asymmetry: `fbrain_get`
-// windows a large body, `fbrain_put` is a full replace defaulting to empty, so
+// `brain append <slug>` — append a chunk to a record's body WITHOUT a full
+// rewrite. Closes the third leg of the read/write asymmetry: `brain_get`
+// windows a large body, `brain_put` is a full replace defaulting to empty, so
 // the only way to add to a big record was a get→edit→re-put that (a) truncates
 // past the get-window and (b) times out on a ~218KB tracker. `append` does a
 // bounded read-modify-write: resolve the live record, concatenate the chunk to
@@ -9,7 +9,7 @@
 // body, so it can never trip the put-side shrink guard — appending is the safe
 // primitive the shrink guard steers agents toward.
 
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -47,11 +47,11 @@ export type AppendOptions = {
   // Structured-output sink, mirroring the other write commands' `onResult`:
   // fires once on success with the SAME resolved `type`/`slug` and the
   // before/after body lengths the printed line reports, so the MCP
-  // `fbrain_append` tool's `structuredContent` can't drift from the text.
+  // `brain_append` tool's `structuredContent` can't drift from the text.
   onResult?: (payload: AppendResult) => void;
 };
 
-// The structured payload the MCP `fbrain_append` tool returns in
+// The structured payload the MCP `brain_append` tool returns in
 // `structuredContent`. `bytesAppended` is the length of the chunk (plus any
 // auto-inserted separator); `newBodyChars`/`oldBodyChars` bracket the growth
 // so an agent can confirm nothing was truncated.
@@ -93,7 +93,7 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
   const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
   if (opts.chunk.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "empty_append",
       message: "append: the chunk is empty — nothing to append.",
       hint: "Pass a non-empty body chunk (positional/stdin for the CLI, `chunk`/`chunk_path`/`chunk_b64` for the MCP tool).",
@@ -153,7 +153,7 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
   );
   if (!seen || !appendPersisted(seen.body, newBody, opts.chunk)) {
     const storedLen = seen ? seen.body.length : 0;
-    throw new FbrainError({
+    throw new BrainError({
       code: "append_not_persisted",
       message:
         `append: the re-read of ${only.type} ${slug} does not hold the appended text ` +

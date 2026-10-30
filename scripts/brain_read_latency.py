@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI-only normal-app latency across explicit conversion and a daemon upgrade."""
+"""CI-only normal-app latency: the earlier app and this app, each on its own fresh home."""
 import argparse
 import json
 import math
@@ -41,11 +41,11 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
     settings_path, output = destination / f"{name}-settings.json", destination / f"{name}.json"
     save(settings_path, settings)
     environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("LASTDB", "FOLD", "FBRAIN", "BRAIN", "LASTSEEK", "SENTRY", "OTEL"))
+                   if not key.startswith(("LASTDB", "FOLD", "BRAIN", "LASTSEEK", "SENTRY", "OTEL"))
                    and key not in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY")}
     environment.update(LASTDB_ISOLATED_COPY="1", LASTDB_SUPPRESS_RECOVERY_PHRASE="1",
                        BRAIN_CONFIG=str(destination / "config.json"),
-                       FBRAIN_FOLDDB_SOCKET=str(node.socket) if node else "",
+                       BRAIN_FOLDDB_SOCKET=str(node.socket) if node else "",
                        LASTSEEK_BIN=str(destination / "absent-lastseek"),
                        LAST_STACK_HEARTBEATS_FILE=str(destination / "absent-heartbeats"))
     peak_node, peak_client = 0, 0
@@ -91,7 +91,7 @@ def cloud_off(node, destination, phase):
 def run_case(args, Node, finish_setup, label, repeat):
     destination = args.output / f"{repeat:02d}-{label}"
     destination.mkdir()
-    binary, revision = ((args.binary, args.revision) if label == "fresh"
+    binary, revision = ((args.binary, args.revision) if label == "after"
                         else (args.baseline_binary, args.baseline_revision))
     node = Node(binary, revision, destination, full_socket_name="folddb-full.sock",
                 temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={
@@ -105,13 +105,9 @@ def run_case(args, Node, finish_setup, label, repeat):
         if args.mode == "read":
             seeded = app(args, node, destination, label, "seed")
             result.update(input_sha256=seeded["input_sha256"], body_bytes=seeded["body_bytes"])
-        if label == "after":
-            app(args, node, destination, label, "convert")
-        cloud_off(node, destination, "converted")
+        cloud_off(node, destination, "setup")
         finish_setup(node, destination)
         node.stop()
-        if label == "after":
-            node.binary, node.revision = args.binary, args.revision
         node.start()
         cloud_off(node, destination, "reopen")
         if args.mode == "read":
@@ -159,7 +155,8 @@ def summarize(args, runs):
     lines = [f"## Brain {args.mode} comparison: {args.records:,} records", "",
              f"Before app: `{args.app_baseline_revision}`. After app: `{args.app_revision}`.",
              f"Compatible daemon: `{args.baseline_revision}`. Native daemon: `{args.revision}`.",
-             "The earlier app creates both generated homes. Explicit conversion precedes the native daemon restart.",
+             "Each app creates its own generated home on its own daemon. No home is converted in place.",
+             "An existing home moves to this app only by the home copy. This comparison does not measure that copy.",
              "Canonical definitions remain shared. Record values belong to each schema.",
              f"Paired repeats: {args.repeats}. Each pair uses equal generated records and full body bytes.",
              "Restart uses the same generated files and a fresh daemon. The OS file cache is not cleared.",
@@ -199,7 +196,7 @@ def summarize(args, runs):
               "Bulk selection previews deletion without a write. Migration read measures the real app source read.",
               "The keyword fallback uses the real app with LastSeek absent. It does not claim LastSeek latency.",
               "Operational runs verify body atoms across title edits, deletion membership, exact counts, and restart recovery.",
-              "The fresh-init arm uses normal app initialization on the native daemon." if args.mode == "operations" else
+              "The after arm uses normal app initialization on the native daemon." if args.mode == "operations" else
               "Every read cell includes one restart call and five warm calls per paired repeat.",
               "This measures the app and daemon change. A same-layout LastDB benchmark isolates engine cost separately.",
               "Raw profiles, response sizes, memory samples, disk sizes, and source identities remain in CI artifacts.",
@@ -251,13 +248,25 @@ def main():
     from node import Node
     from app_multi_key_compare import finish_setup
 
-    runs = []
+    runs, failures = [], {}
     for repeat in range(1, args.repeats + 1):
         for label in (("before", "after") if repeat % 2 else ("after", "before")):
-            runs.append(run_case(args, Node, finish_setup, label, repeat))
-            save(args.output / "checkpoints.json", runs)
-    if args.mode == "operations":
-        runs.append(run_case(args, Node, finish_setup, "fresh", args.repeats + 1))
+            # A failed arm stops its own later repeats. The other arm still runs, so CI shows
+            # its result too. Any failure still fails this job after the loop.
+            if label in failures:
+                continue
+            try:
+                runs.append(run_case(args, Node, finish_setup, label, repeat))
+            except Exception as error:
+                failures[label] = f"{label} repeat {repeat}: {error}"
+                print(f"FAILED {failures[label]}", flush=True)
+            save(args.output / "checkpoints.json", {"runs": runs, "failures": failures})
+    if failures:
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
+            output.write(f"## Brain {args.mode} comparison: {args.records:,} records\n\n"
+                         + "".join(f"- Failed: {failure}\n" for failure in failures.values())
+                         + "".join(f"- Completed: {run['label']} repeat {run['repeat']}\n" for run in runs))
+        raise RuntimeError("; ".join(failures.values()))
     summarize(args, runs)
 
 

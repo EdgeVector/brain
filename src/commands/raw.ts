@@ -1,4 +1,4 @@
-// `fbrain raw <method> <path> [body]` — authenticated passthrough to the
+// `brain raw <method> <path> [body]` — authenticated passthrough to the
 // node or the schema service. Path prefix picks the service:
 //   /api/  → node (X-User-Hash auto-added)
 //   /v1/   → schema service (no auth header)
@@ -11,7 +11,7 @@
 import {
   newReadClientFromCfg,
   newSchemaServiceClient,
-  FbrainError,
+  BrainError,
   type RawResponse,
   type Verbose,
 } from "../client.ts";
@@ -67,7 +67,7 @@ export async function rawCmd(opts: RawOptions): Promise<number> {
 export function normalizeMethod(raw: string): RawMethod {
   const upper = raw.toUpperCase();
   if (!(RAW_METHODS as readonly string[]).includes(upper)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_raw_method",
       message: `Unsupported method "${raw}". Use one of: ${RAW_METHODS.join(", ")}.`,
     });
@@ -78,7 +78,7 @@ export function normalizeMethod(raw: string): RawMethod {
 export function pickService(path: string): "node" | "schema" {
   if (path.startsWith("/api/")) return "node";
   if (path.startsWith("/v1/")) return "schema";
-  throw new FbrainError({
+  throw new BrainError({
     code: "invalid_raw_path",
     message: `Path "${path}" must start with /api/ (node) or /v1/ (schema service).`,
   });

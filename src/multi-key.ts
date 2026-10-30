@@ -1,5 +1,5 @@
 // Named keys belong to one record schema. Relationship records keep their own values.
-import { FbrainError, type NodeClient, type QueryRow } from "./client.ts";
+import { BrainError, type NodeClient, type QueryRow } from "./client.ts";
 import { BRAIN_COMPACT_LOCATOR_SCHEMA_KEY, RECORD_TYPES, UNIQUE_SCHEMAS, schemaConfigKeys, type RecordType, type SchemaDefinition } from "./schemas.ts";
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
@@ -40,9 +40,9 @@ export async function keyPage(
   const page = (root?.data ?? root) as NamedPage;
   if (response.status !== 200 || !Array.isArray(page?.results) || typeof page.has_more !== "boolean"
       || page.results.some((row) => !row.key?.hash || !row.matched_key?.hash || typeof row.matched_key.range !== "string")) {
-    throw new FbrainError({ code: "multi_key_read_failed", message: `The ${schema}/${name} read did not return a valid named-key page.` });
+    throw new BrainError({ code: "multi_key_read_failed", message: `The ${schema}/${name} read did not return a valid named-key page.` });
   }
-  if (page.has_more && !page.next_cursor) throw new FbrainError({ code: "multi_key_cursor_missing", message: "The named-key page has no continuation." });
+  if (page.has_more && !page.next_cursor) throw new BrainError({ code: "multi_key_cursor_missing", message: "The named-key page has no continuation." });
   return page;
 }
 
@@ -57,14 +57,14 @@ export async function keyRows(
     const page = await keyPage(node, schema, name, filter, fields, 1000, cursor);
     for (const row of page.results) {
       const id = JSON.stringify(row.key);
-      if (seen.has(id)) throw new FbrainError({ code: "multi_key_duplicate", message: "The named-key pages repeat a primary record." });
+      if (seen.has(id)) throw new BrainError({ code: "multi_key_duplicate", message: "The named-key pages repeat a primary record." });
       seen.add(id);
       rows.push(row);
     }
     if (!page.has_more) return rows;
-    if (JSON.stringify(cursor) === JSON.stringify(page.next_cursor)) throw new FbrainError({ code: "multi_key_cursor_stalled", message: "The named-key cursor did not advance." });
+    if (JSON.stringify(cursor) === JSON.stringify(page.next_cursor)) throw new BrainError({ code: "multi_key_cursor_stalled", message: "The named-key cursor did not advance." });
     cursor = page.next_cursor;
   }
-  throw new FbrainError({ code: "multi_key_read_limit", message: "The named-key read exceeded its page limit." });
+  throw new BrainError({ code: "multi_key_read_limit", message: "The named-key read exceeded its page limit." });
 }
 

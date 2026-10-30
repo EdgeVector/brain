@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// fbrain CLI entrypoint.
+// brain CLI entrypoint.
 //
 // `--verbose` (global) echoes each HTTP request and response, including the
 // canonical schema hash being targeted — per the Phase 0 spike's
@@ -8,14 +8,12 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
-import { getFbrainVersion } from "./version.ts";
-import { FbrainError } from "./client.ts";
+import { getBrainVersion } from "./version.ts";
+import { BrainError } from "./client.ts";
 import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
 import { primaryBrain, readFromPrimary } from "./primary-brain.ts";
 import { parseFieldProjection } from "./field-projection.ts";
-import { convertMultiKey } from "./commands/multi-key-convert.ts";
-import { newWriteClientFromCfg } from "./write-context.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
@@ -82,25 +80,25 @@ import {
 } from "./schemas.ts";
 import { consolidateCmd, PROVE_TOPIC } from "./commands/consolidate.ts";
 import {
-  FBRAIN_MCP_READ_TOOL_NAMES,
-  FBRAIN_MCP_TOOL_NAMES,
-  FBRAIN_MCP_WRITE_TOOL_NAMES,
+  BRAIN_MCP_READ_TOOL_NAMES,
+  BRAIN_MCP_TOOL_NAMES,
+  BRAIN_MCP_WRITE_TOOL_NAMES,
 } from "./mcp/tools.ts";
 
-// Exit code for usage/argument errors — "you invoked fbrain wrong" (unknown
+// Exit code for usage/argument errors — "you invoked brain wrong" (unknown
 // command, typo'd command, missing required arg, unknown/misapplied flag,
 // missing flag value). Distinct from exit 1, which means an operational
 // failure — "the work couldn't be done" (record not found on a reachable
 // node, node unreachable, write/consent failure, non-2xx from `raw`). Help
 // and bare invocation stay 0. Mirrors the sibling fkanban CLI's contract so a
-// script or agent wrapping fbrain can tell "fix my invocation" apart from
+// script or agent wrapping brain can tell "fix my invocation" apart from
 // "the node is down / record missing / retry".
 export const USAGE_ERROR = 2;
 
-// FbrainError `code`s that represent a usage/argument error (bad invocation),
+// BrainError `code`s that represent a usage/argument error (bad invocation),
 // not an operational failure. main()'s catch maps these to USAGE_ERROR (2);
-// every other FbrainError code is operational and stays exit 1. Keep in sync
-// with the `throw new FbrainError({ code: ... })` sites in this file that
+// every other BrainError code is operational and stays exit 1. Keep in sync
+// with the `throw new BrainError({ code: ... })` sites in this file that
 // reject malformed invocations (flag parsing, positional arity, flag
 // combinations, numeric/type validation) — see `parseCommandArgs`,
 // `strictInt`, `parseRecordType`, and the per-command guards.
@@ -158,7 +156,6 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
 ]);
 
 export const COMMANDS = [
-  "multi-key-convert",
   "init",
   "design",
   "task",
@@ -216,7 +213,7 @@ const STATUS_HELP = RECORD_TYPES.map(
 ).join("\n");
 
 // The `<type> new` command lines carry each record type's "use it for"
-// one-liner so a new dev sees, in the bare `fbrain` help, which of the
+// one-liner so a new dev sees, in the bare `brain` help, which of the
 // types to reach for. Purposes come from the SINGLE SHARED RECORD_PURPOSES
 // map (schemas.ts) — the same source the README uses, so the two can't drift.
 const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.filter(
@@ -263,24 +260,24 @@ ${RECORD_NEW_HELP_LINES}
   reindex        backfill named record keys into one list, keyword page, or type directory
   migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
-  mcp            start an MCP server over stdio (${FBRAIN_MCP_TOOL_NAMES.length} tools: ${FBRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^fbrain_/, "")).join("/")})
-  mcp install    one-shot agent wiring: register fbrain with Claude Code + append instructions to CLAUDE.md
-  mcp instructions  print the copy-paste CLAUDE.md block to wire fbrain into your agent (>> CLAUDE.md)
-  hook session-start  Claude Code SessionStart hook: inject strong-confidence fbrain context
+  mcp            start an MCP server over stdio (${BRAIN_MCP_TOOL_NAMES.length} tools: ${BRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^brain_/, "")).join("/")})
+  mcp install    one-shot agent wiring: register brain with Claude Code + append instructions to CLAUDE.md
+  mcp instructions  print the copy-paste CLAUDE.md block to wire brain into your agent (>> CLAUDE.md)
+  hook session-start  Claude Code SessionStart hook: inject strong-confidence brain context
   help <cmd>     per-command usage
 
 Global flags:
   --verbose      echo HTTP requests + responses
   --help, -h     print this help
-  --version, -V  print the fbrain version and exit
+  --version, -V  print the brain version and exit
 
-Run \`brain help <command>\` for per-command usage. The old \`fbrain\` binary remains an alias.`;
+Run \`brain help <command>\` for per-command usage. The old \`brain\` binary remains an alias.`;
 
 // Shared help shape for the record types that take the common
 // (--title/--tag/--body/--force) flag set. Task is the one type with an extra
 // --design parent-link arg, so it keeps its own bespoke help block.
 function simpleNewHelp(type: RecordType): string {
-  return `fbrain ${type} new <slug> [--title T] [--tag T]... [--body STR] [--force] [--json]
+  return `brain ${type} new <slug> [--title T] [--tag T]... [--body STR] [--force] [--json]
 
   --title     one-line name (defaults to slug)
   --tag       repeatable; tag value to attach
@@ -292,28 +289,27 @@ function simpleNewHelp(type: RecordType): string {
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
-  "multi-key-convert": "brain multi-key-convert [--apply --maintenance] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. Init leaves existing values unchanged.\nUnknown legacy schemas and a type inside another type need a separate reviewed conversion. This command does not drop unique legacy values.",
   init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
 persist ~/.brain/config.json with canonical hashes, then prompt once to
-grant fbrain consent against this node so the first write doesn't stall.
+grant brain consent against this node so the first write doesn't stall.
 Idempotent — re-running skips bootstrap and the consent prompt when a
 live capability is already on disk.
 
   --node-url             defaults to http://127.0.0.1 — local node via Unix socket (~/.lastdb/data/folddb.sock)
   --schema-service-url   defaults to the prod cloud Lambda
                          (https://axo709qs11.execute-api.us-east-1.amazonaws.com)
-  --name                 bootstrap display name (default: fbrain)
+  --name                 bootstrap display name (default: brain)
   --grant-consent, --yes complete the one-time consent grant non-interactively
                          (no TTY needed). Use this in scripted / CI / agent
                          installs: init shells out to lastdb consent grant
                          and polls until the capability is cached. No-op when
                          a live capability already exists, or under
-                         FBRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb
+                         BRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb
                          CLI on PATH (fast-fails with a clear message if not).`,
   design: simpleNewHelp("design"),
-  task: `fbrain task new <slug> [--title T] [--design D] [--tag T]... [--body STR] [--force] [--json]
+  task: `brain task new <slug> [--title T] [--design D] [--tag T]... [--body STR] [--force] [--json]
 
   --title     one-line name (defaults to slug)
   --design    parent design slug (rejected if it does not exist)
@@ -331,7 +327,7 @@ live capability is already on disk.
   spike: simpleNewHelp("spike"),
   sop: simpleNewHelp("sop"),
   decision: simpleNewHelp("decision"),
-  put: `fbrain put [<slug>] [--type T] [--durable] [--json]
+  put: `brain put [<slug>] [--type T] [--durable] [--json]
 
 Read a markdown body (with optional YAML-subset frontmatter) from stdin
 and upsert a record. Re-putting the same slug updates in place —
@@ -374,9 +370,9 @@ Body after the closing \`---\` becomes the record's body (indexed for
 search). Empty body is valid as long as the type is set.
 
 Examples:
-  cat note.md | fbrain put my-note --type concept
-  echo "---\\ntype: concept\\nslug: concept-idempotency\\ntitle: Idempotency\\n---\\nbody" | fbrain put`,
-  append: `fbrain append <slug> [--type T] [--raw] [--json]  (chunk from stdin)
+  cat note.md | brain put my-note --type concept
+  echo "---\\ntype: concept\\nslug: concept-idempotency\\ntitle: Idempotency\\n---\\nbody" | brain put`,
+  append: `brain append <slug> [--type T] [--raw] [--json]  (chunk from stdin)
 
 Append a chunk to an existing record's body WITHOUT a full rewrite. The
 chunk is read from stdin. Unlike \`put\` (a full replace whose body defaults
@@ -384,7 +380,7 @@ to empty), \`append\` does a bounded read-modify-write: it resolves the live
 record, concatenates the chunk to its existing body, and writes it back —
 preserving title/tags/status/created_at. It can only GROW the body, so it
 never trips the put-side shrink guard and never truncates a large record
-(the \`fbrain get\` window limit is irrelevant — the full body is read
+(the \`brain get\` window limit is irrelevant — the full body is read
 server-side, not through a windowed get).
 
   --type    ${RECORD_TYPE_LIST}
@@ -395,9 +391,9 @@ server-side, not through a windowed get).
             On failure a \`{error, hint}\` JSON object is emitted to stdout too.
 
 Examples:
-  echo "- new bullet" | fbrain append my-tracker --type project
-  fbrain append design-notes --type design < addendum.md`,
-  get: `fbrain get <slug> [--type T] [--page ID] [--limit N] [--body-limit N] [--field PATH]... [--json]
+  echo "- new bullet" | brain append my-tracker --type project
+  brain append design-notes --type design < addendum.md`,
+  get: `brain get <slug> [--type T] [--page ID] [--limit N] [--body-limit N] [--field PATH]... [--json]
 
 Without --type, queries every registered schema. Errors if the slug
 exists in multiple types (specify --type to disambiguate).
@@ -416,7 +412,7 @@ exists in multiple types (specify --type to disambiguate).
                 (parseable by \`jq\`). On failure, a \`{error, hint}\` JSON object
                 is emitted to stdout too (the human \`error:\`/\`hint:\` lines still
                 print to stderr) so \`--json\` stdout is always parseable.`,
-  list: `fbrain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
+  list: `brain list [--type T] [--status S] [--tag T] [--updated-since WHEN]
              [--page ID] [-n N | --limit N] [--count] [--field PATH]... [--json]
 
   --type          ${RECORD_TYPE_LIST}
@@ -439,7 +435,7 @@ exists in multiple types (specify --type to disambiguate).
   --json          emit one JSON object on stdout
                   ({items, total, truncated}). With --count, emits
                   \`{"count": N}\` or \`{"miss": true}\`. Notes go to stderr.`,
-  which: `fbrain which [--json] [--check]
+  which: `brain which [--json] [--check]
 
 Print the brain executable selected by this shell, the resolved source root,
 and whether the running install is under ~/.host-track. This is a local install
@@ -448,7 +444,7 @@ configuration.
 
   --json   emit a single structured object on stdout
   --check  exit non-zero when brain is not host-track managed`,
-  status: `fbrain status <slug> [<new-status>] [--type T] [--json]
+  status: `brain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
 type's status enum, updates updated_at, and writes back.
@@ -459,7 +455,7 @@ type's status enum, updates updated_at, and writes back.
             with a new-status; the update form keeps its human transition
             line. On failure, a \`{error, hint}\` JSON object is emitted to
             stdout too (human \`error:\`/\`hint:\` lines still go to stderr).`,
-  tag: `fbrain tag <slug> [--type T] [--add T[,T]]... [--rm T[,T]]... [--json]
+  tag: `brain tag <slug> [--type T] [--add T[,T]]... [--rm T[,T]]... [--json]
 
 Add/remove tags on an existing record WITHOUT a full re-put. The command
 resolves the live record, applies set-add/remove to \`tags\`, and writes back
@@ -473,7 +469,7 @@ an absent one is a no-op success.
   --json    emit \`{ok, slug, added, removed, tags}\` on stdout; the human
             line moves to stderr so \`--json\` stdout is parseable. On failure
             a \`{error, hint}\` JSON object is emitted to stdout too.`,
-  attach: `fbrain attach <slug> <file> [--type T] [--name N] [--force] [--json]
+  attach: `brain attach <slug> <file> [--type T] [--name N] [--force] [--json]
 
 Attach a file to an existing record. Bytes are stored content-addressed
 (SHA-256) through the node's file-blob plane: an encrypted CAS blob in cloud
@@ -487,8 +483,8 @@ errors unless --force.
   --name    attachment name (default: the file's basename)
   --force   replace an existing attachment with the same name
   --json    emit \`{ok, slug, type, entry, deduplicated, replaced}\` on stdout`,
-  attachments: `fbrain attachments <slug> [--type T] [--json]
-fbrain attachments migrate [<slug>] [--type T] [--json]
+  attachments: `brain attachments <slug> [--type T] [--json]
+brain attachments migrate [<slug>] [--type T] [--json]
 
 List a record's attachments (name, size, media type, blob ref, added_at).
 
@@ -500,7 +496,7 @@ given, otherwise sweeps every attachment index. Idempotent.
   --type    ${RECORD_TYPE_LIST}
   --json    emit \`{ok, slug, type, attachments}\` (list) or \`{ok, report}\`
             (migrate) on stdout`,
-  detach: `fbrain detach <slug> <name-or-ref> [--type T] [--json]
+  detach: `brain detach <slug> <name-or-ref> [--type T] [--json]
 
 Remove one attachment by filename or sha256:<hex> blob ref. The
 content-addressed blob record remains (fold_db is append-only, and identical
@@ -508,7 +504,7 @@ content may back other records' attachments).
 
   --type    ${RECORD_TYPE_LIST}
   --json    emit \`{ok, slug, type, removed}\` on stdout`,
-  attachment: `fbrain attachment get <slug> <name-or-ref> [-o PATH] [--type T] [--force] [--json]
+  attachment: `brain attachment get <slug> <name-or-ref> [-o PATH] [--type T] [--force] [--json]
 
 Materialize one attachment's bytes to disk (or stdout with \`-o -\`). The
 decoded bytes are verified against the sha256 blob ref before writing —
@@ -519,7 +515,7 @@ overwrite an existing file unless --force.
   --type        ${RECORD_TYPE_LIST}
   --force       overwrite an existing destination file
   --json        emit \`{ok, slug, type, entry, output, bytes}\` on stdout`,
-  link: `fbrain link <from-slug> <to-slug> [--from-type T] [--to-type T] [--json]
+  link: `brain link <from-slug> <to-slug> [--from-type T] [--to-type T] [--json]
 
 Rejects a non-existent explicit target. With no type flags, preserves the
 legacy task → design behavior and writes task.design_slug. Other valid pairs
@@ -530,7 +526,7 @@ store a generic explicit link tag on the source record.
   --json       emit \`{ok, from_type, from_slug, to_type, to_slug}\` on stdout; the human \`linked …\` line
             moves to stderr so \`--json\` stdout is always parseable. On failure
             a \`{error, hint}\` JSON object is emitted to stdout too.`,
-  backlinks: `fbrain backlinks <slug> [--type T] [--page ID] [--limit N] [--json]
+  backlinks: `brain backlinks <slug> [--type T] [--page ID] [--limit N] [--json]
 
 Lists records that link to <slug> through explicit stored edges or mention it
 with a body \`[[slug]]\` reference. Does not require the target slug to exist,
@@ -542,21 +538,21 @@ so dangling wiki-link intent remains queryable.
             \`p\` plus eight digits.
   --limit   max cards from that one page (default 50, cap 100)
   --json    emit \`{slug, type?, linked_from:[...]}\` on stdout.`,
-  graph: `fbrain graph <neighbors|path|query> [...] [--json]
+  graph: `brain graph <neighbors|path|query> [...] [--json]
 
 Bounded traversal over the typed edge substrate written by \`put\`/\`append\`
-and rebuilt by \`fbrain reindex --graph-edges\`. Every walk is keyed reads
+and rebuilt by \`brain reindex --graph-edges\`. Every walk is keyed reads
 only — one range read per node per direction, never a scan.
 
-  fbrain graph neighbors <slug> [--direction out|in|both] [--edge-type T]...
+  brain graph neighbors <slug> [--direction out|in|both] [--edge-type T]...
       One hop. Default direction \`both\`, so an isolated record and an
       unconfigured substrate are distinguishable in the output.
 
-  fbrain graph path <src> <dst> [--max-hops N] [--direction ...] [--edge-type T]...
+  brain graph path <src> <dst> [--max-hops N] [--direction ...] [--edge-type T]...
       Shortest path within the hop budget. \`not found\` reports whether the
       search was exhausted or stopped at the budget — they are different claims.
 
-  fbrain graph query <slug> [--max-hops N] [--direction ...] [--edge-type T]... [--max-nodes N]
+  brain graph query <slug> [--max-hops N] [--direction ...] [--edge-type T]... [--max-nodes N]
       Breadth-first sweep of everything reachable within the budget, with the
       depth and the edge that first reached each hit.
 
@@ -568,13 +564,13 @@ only — one range read per node per direction, never a scan.
   --edge-type T   restrict to an edge type; repeatable. One of:
                   ${GRAPH_EDGE_TYPE_VALUES.join(", ")}
   --json          emit the structured result on stdout.`,
-  search: `fbrain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
+  search: `brain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
 
 Semantic search across indexed records. Dedupes fragment hits per record
 and skips stale hits (records deleted since indexing). Prints
 \`slug · score · type · title\` per match, with a short matching body snippet
 indented under each row — so the answer is visible without a follow-up
-\`fbrain get\`.
+\`brain get\`.
 
 \`score\` is a max-normalized cosine in 0–1 (the top hit is always \`1.000\`).
 \`ask\` instead prints a best-first ranked list (no score column), so the two
@@ -594,7 +590,7 @@ human outputs no longer invite a misleading score comparison.
                 route to stderr. On failure, a \`{error, hint}\` JSON object
                 is emitted to stdout too, so \`--json\` stdout is always
                 parseable.`,
-  ask: `fbrain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--graph-boost] [--type T]... [--field PATH]... [--json]
+  ask: `brain ask <query> [-n N | --limit N] [--expand|--llm] [--explain] [--graph-boost] [--type T]... [--field PATH]... [--json]
 
 Hybrid retrieval: BM25 (client-side) + vector (native-index, schema-scoped)
 fused via Reciprocal Rank Fusion. By DEFAULT it runs BM25 + vector on the
@@ -607,7 +603,7 @@ vector then run against original + 3 expansions and RRF fuses all 8 lists.
 Results are printed best-first as a ranked list — \`rank · slug · type ·
 title\` per match (a leading \`1.\`, \`2.\`, … rank position), with a short
 matching body snippet indented under each row, so the answer is visible
-without a follow-up \`fbrain get\`. The human output shows ranking only, not
+without a follow-up \`brain get\`. The human output shows ranking only, not
 a confidence magnitude. \`--json\` exposes the raw fused-RRF \`score\` for
 machine consumers that need the underlying ranking signal (\`--verbose\`
 shows it as a debug column too).
@@ -655,8 +651,8 @@ path automatically with a one-line notice; with --explain set, the explain
 section also prints a no-key notice instead of silently dropping.
 
 The LLM key (only needed for --expand) is read from \$ANTHROPIC_API_KEY
-(preferred) or an optional \`anthropicApiKey\` field in ~/.fbrain/config.json.`,
-  find: `fbrain find --match "<string>" [--match "<string>" ...] [-n N | --limit N] [--explain] [--type T]... [--field PATH]... [--json]
+(preferred) or an optional \`anthropicApiKey\` field in ~/.brain/config.json.`,
+  find: `brain find --match "<string>" [--match "<string>" ...] [-n N | --limit N] [--explain] [--type T]... [--field PATH]... [--json]
 
 Retrieval by an explicit array of match probes. Each \`--match\` is an
 independent semantic probe run against the vector plane — pass a whole
@@ -690,16 +686,16 @@ title\` per match, with a short matching body snippet indented under each row.
                 to stdout too, so \`--json\` stdout is always parseable.
 
 Needs no API key — no LLM call at any point.`,
-  gates: `fbrain gates --open
+  gates: `brain gates --open
 
 List live human gates from the single canonical \`open-decisions\` reference
 record. Only structured one-line entries are authoritative:
 \`status=... slug=... program=... unblocks=... evidence=... surfaced=...\`.
 
   --open   list live gates (status=open)`,
-  gate: `fbrain gate add <slug> --program P --unblocks U --evidence E [--recommendation R]
-fbrain gate clear <slug> --resolution TEXT
-fbrain gate verify
+  gate: `brain gate add <slug> --program P --unblocks U --evidence E [--recommendation R]
+brain gate clear <slug> --resolution TEXT
+brain gate verify
 
 Edit and verify the structured entries in the single canonical
 \`open-decisions\` reference record. This does not create a new schema/type.
@@ -709,25 +705,25 @@ Edit and verify the structured entries in the single canonical
   verify  checks each open gate's evidence pointer and flags stale gates
 
 Evidence pointers understood by verify:
-  fbrain:<slug>                    stale if the record is missing/done/moot
-  fbrain:<type>:<slug>             same, scoped to a record type
+  brain:<slug>                    stale if the record is missing/done/moot
+  brain:<type>:<slug>             same, scoped to a record type
   origin/main:<file>[#needle]      stale if the file or optional text is gone
 
   --program         owning program or durable program record
   --unblocks        work/capability this human decision unblocks
-  --evidence        durable fbrain record and/or origin/main file pointer
+  --evidence        durable brain record and/or origin/main file pointer
   --recommendation  optional recommended default/path
   --resolution      required clear reason`,
-  doctor: `fbrain doctor [--freshness] [--write] [--mcp] [--json] [--usage [--usage-window N] [--usage-path PATH]]
+  doctor: `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
-  - config valid (~/.fbrain/config.json + hex-64 hashes)
+  - config valid (~/.brain/config.json + hex-64 hashes)
   - schema service reachable
   - node reachable + provisioned
   - schemas loaded into the node
   - schema drift between schemas.ts and the registered Design/Task schemas
   - write-ready: a valid CapabilityToken is cached for this node AND
-    the node's app registry knows fbrain (a consent dry-run returns 202
+    the node's app registry knows brain (a consent dry-run returns 202
     rather than 404). FAIL is reported as "write-blocked" with a
     next-step hint — distinguishes a missing grant from a cold registry.
   - mcp-entrypoint: the \`brain-mcp\` bin (the agent-integration path
@@ -756,7 +752,7 @@ With --freshness, additionally runs the G3 retrieval-quality probes:
 
 With --write, additionally runs an idempotent put → get → soft-delete
 round-trip under a reserved \`doctor-write-roundtrip-<nonce>\` slug to
-prove writes actually land. OFF by default so plain \`fbrain doctor\`
+prove writes actually land. OFF by default so plain \`brain doctor\`
 never mutates.
 
 With --mcp, additionally BOOTS the \`brain-mcp\` entrypoint and asserts
@@ -765,21 +761,21 @@ PATH-only mcp-entrypoint check):
   - mcp-boot: spawn \`brain-mcp\`, drive a JSON-RPC initialize +
     tools/list handshake over stdio under a bounded deadline, and PASS
     only when the server returns a valid handshake AND reports exactly
-    the ${FBRAIN_MCP_TOOL_NAMES.length} expected tools. FAIL (not WARN) on a boot/handshake/tool-set
+    the ${BRAIN_MCP_TOOL_NAMES.length} expected tools. FAIL (not WARN) on a boot/handshake/tool-set
     mismatch. Skipped when \`brain-mcp\` isn't on PATH. OFF by default
-    so plain \`fbrain doctor\` never spawns the server.
+    so plain \`brain doctor\` never spawns the server.
 
 With --usage, skips the health checks and prints a team-adoption
 telemetry report: write count by userHash (8-char prefix only)
 over the last 7 days, broken down by record type. Also appends/
-updates today's per-user count in ~/.fbrain/usage.jsonl for trend
+updates today's per-user count in ~/.brain/usage.jsonl for trend
 plotting.
 
   --usage-window N   override the rolling window (default 7 days)
   --usage-path PATH  override the daily-summary file path
 
 Exits non-zero if any check fails or the pollution probe FAILs.`,
-  raw: `fbrain raw <method> <path> [body]
+  raw: `brain raw <method> <path> [body]
 
 Authenticated passthrough. \`/api/\` paths go to the node (with
 X-User-Hash); \`/v1/\` paths go to the schema service. Body argument
@@ -787,10 +783,10 @@ is treated as the literal request body; omit or pass \`-\` to read
 from stdin. Exits 0 on 2xx, 1 otherwise.
 
 Examples:
-  fbrain raw GET /api/system/auto-identity
-  fbrain raw POST /api/schemas/load
-  fbrain raw GET /v1/schemas`,
-  share: `fbrain share
+  brain raw GET /api/system/auto-identity
+  brain raw POST /api/schemas/load
+  brain raw GET /v1/schemas`,
+  share: `brain share
 
 Placeholder. Cross-node data flow requires fold_db's S3 + Auth-Lambda
 transport, and this daemon has not been signed in to it. The sharing
@@ -799,25 +795,25 @@ end-to-end on loopback, but no records actually move between nodes until
 the daemon authenticates against the cloud and an end-to-end test passes.
 
 Prints a notice and exits 1.`,
-  delete: `fbrain delete <slug> [--type T] [--force] [--json]
-fbrain delete --tag T [--type T] [--status S] [--yes] [--force] [--json]
+  delete: `brain delete <slug> [--type T] [--force] [--json]
+brain delete --tag T [--type T] [--status S] [--yes] [--force] [--json]
 
 Deletes a record. LastDB native Delete converges tip absence, so a later
 get misses the row. The CLI also overwrites user fields with sentinels and
-stamps a tombstone tag so older read paths hide the row. All fbrain read
+stamps a tombstone tag so older read paths hide the row. All brain read
 paths (get, list, status, link, search) treat the slug as gone.
 
-SINGLE-SLUG mode — \`fbrain delete <slug>\`:
+SINGLE-SLUG mode — \`brain delete <slug>\`:
 Without --type, queries every registered schema; errors with "specify
 --type" if the slug exists in more than one type. Errors with
 "No <type>: <slug>" if the slug is already deleted or never existed.
 
-FILTER (bulk) mode — \`fbrain delete --tag T [--type T] [--status S]\`:
+FILTER (bulk) mode — \`brain delete --tag T [--type T] [--status S]\`:
 Deletes EVERY live record matching the filter — the SAME
---tag/--type/--status selectors \`fbrain list\` accepts. DRY-RUN BY
+--tag/--type/--status selectors \`brain list\` accepts. DRY-RUN BY
 DEFAULT: it prints the records that WOULD be deleted (type · slug ·
 title) plus a count and exits WITHOUT mutating. Re-run with --yes to
-actually delete. A bare \`fbrain delete\` (no slug AND no filter) is
+actually delete. A bare \`brain delete\` (no slug AND no filter) is
 refused — it would otherwise select everything.
 
 Deleting a design that still has live tasks linked to it is blocked
@@ -838,10 +834,10 @@ delete anyway — the tasks' design references are then left dangling.
               human lines move to stderr so \`--json\` stdout is always
               parseable. On failure a \`{error, hint}\` JSON object is emitted too.
 
-After delete, a slug is reusable: \`fbrain design new <same-slug>\` (no
+After delete, a slug is reusable: \`brain design new <same-slug>\` (no
 --force) will recreate it.`,
-  "admin-snapshot": `fbrain admin-snapshot publish [--slug SLUG] [--dry-run] [--json]
-fbrain admin-snapshot deliver [--slug SLUG] [--dry-run] [--json] [--approve]
+  "admin-snapshot": `brain admin-snapshot publish [--slug SLUG] [--dry-run] [--json]
+brain admin-snapshot deliver [--slug SLUG] [--dry-run] [--json] [--approve]
                               [--max-records N]
                               [--recipient-pubkey K] [--messaging-public-key K]
                               [--messaging-pseudonym P] [--recipient-name N]
@@ -862,9 +858,9 @@ head, recent heartbeats (slug/ts/ok), and captured_at. NEVER full brain bodies.
   --messaging-pseudonym    admin kanban-consumer messaging pseudonym
   --recipient-name         optional display name for the staged delivery
 
-Recipient flags may also be supplied via FBRAIN_ADMIN_RECIPIENT_PUBKEY,
-FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY, FBRAIN_ADMIN_MESSAGING_PSEUDONYM, and
-FBRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
+Recipient flags may also be supplied via BRAIN_ADMIN_RECIPIENT_PUBKEY,
+BRAIN_ADMIN_MESSAGING_PUBLIC_KEY, BRAIN_ADMIN_MESSAGING_PSEUDONYM, and
+BRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
   reindex: `brain reindex --target <hash> --source-hash <type> --slug <slug> [--slug <slug> ...]
@@ -886,23 +882,23 @@ It prints wrote N and the cursor key. It does not walk the corpus.
   --graph-edges     refused. This command does not walk every record.
 
 Run with the global --verbose to print node calls.`,
-  migrate: `fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
-fbrain migrate --status
-fbrain migrate --resume <manifest-id>
+  migrate: `brain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
+brain migrate --status
+brain migrate --resume <manifest-id>
 
 MAINTAINER-ONLY. Evolving a schema publishes a NEW schema hash, which
 requires a maintainer DevCert for the schema service. Consumers don't
-run this: the canonical fbrain/* schemas are published centrally and
-\`fbrain init\` resolves them for you. The example below fails for a
+run this: the canonical brain/* schemas are published centrally and
+\`brain init\` resolves them for you. The example below fails for a
 fresh consumer (401 cert_required) by design — run it only as a
 maintainer (DevCert), or against a local/dev schema service you control
-(\`fbrain init --schema-service-url <URL>\`).
+(\`brain init --schema-service-url <URL>\`).
 
-Evolve a fbrain schema by adding a field. fold_db is append-only and
+Evolve a brain schema by adding a field. fold_db is append-only and
 identity-hashes schemas by (descriptive_name, sorted fields), so
 adding a field necessarily produces a new schema hash. \`migrate\`
 registers the new schema, re-puts every record with the new field set
-to the configured default, and atomically swaps ~/.fbrain/config.json.
+to the configured default, and atomically swaps ~/.brain/config.json.
 See docs/g15-schema-evolution-playbook.md for the full mechanism +
 recovery recipes.
 
@@ -920,12 +916,12 @@ re-puts and re-hashes all six together.
                 "dry_run"; no schema registration, node load, record
                 writes, or config swap.
   --status      tabular listing of every manifest under
-                ~/.fbrain/migrations/ (newest first).
+                ~/.brain/migrations/ (newest first).
   --resume ID   resume a previously-interrupted migration. The
                 manifest id is in --status output.
 
 Example:
-  fbrain migrate --add-field concept urgency String --default "normal"`,
+  brain migrate --add-field concept urgency String --default "normal"`,
   consolidate: `brain consolidate --topic T [--prove] [--json]
 
 Collapse one topic cluster to one live canonical slug.
@@ -940,10 +936,10 @@ losers park. Pure duplicates delete. Ephemeral rows expire by day hash.
 
 The --prove pass must exit 0 on the live node. It writes only
 lifecycle-ship-proof-* slugs and deletes them before returning.`,
-  mcp: `fbrain mcp [install|instructions]
+  mcp: `brain mcp [install|instructions]
 
-fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
-  One-shot agent wiring: do the whole "connect fbrain to my agent" ritual in
+brain mcp install [--yes] [--claude-md PATH]   (alias: brain mcp setup)
+  One-shot agent wiring: do the whole "connect brain to my agent" ritual in
   a single command. It (1) verifies the \`brain-mcp\` entrypoint is on PATH,
   (2) registers the MCP server with Claude Code (\`claude mcp add brain
   brain-mcp\`; prints the command if \`claude\` isn't on PATH), and (3) appends
@@ -954,52 +950,52 @@ fbrain mcp install [--yes] [--claude-md PATH]   (alias: fbrain mcp setup)
   --claude-md  append the instructions block to PATH instead of ./CLAUDE.md
   --claude-settings  add the SessionStart hook to PATH instead of ./.claude/settings.json
   If \`brain-mcp\` isn't on PATH yet, it exits non-zero and tells you to
-  (re)install fbrain (\`bun add -g github:EdgeVector/fbrain\`, or \`bun link\`
-  from a contributor checkout) first. Verify the result with \`fbrain doctor --mcp\`.
+  (re)install brain (\`bun add -g github:EdgeVector/brain\`, or \`bun link\`
+  from a contributor checkout) first. Verify the result with \`brain doctor --mcp\`.
 
-fbrain mcp instructions
+brain mcp instructions
   Print the copy-paste CLAUDE.md block (the agent usage-loop + the
   record-type table) to stdout — nothing else, so the output is paste-ready.
-  Wire the brain into your agent in one step (or just run \`fbrain mcp install\`):
-    fbrain mcp instructions >> CLAUDE.md      # append to your agent's instructions
-    fbrain mcp instructions | pbcopy          # or copy it to the clipboard
-  The block tells the agent to recall before answering (fbrain_ask),
-  checkpoint settled decisions as it goes (fbrain_put), and pick the right
+  Wire the brain into your agent in one step (or just run \`brain mcp install\`):
+    brain mcp instructions >> CLAUDE.md      # append to your agent's instructions
+    brain mcp instructions | pbcopy          # or copy it to the clipboard
+  The block tells the agent to recall before answering (brain_ask),
+  checkpoint settled decisions as it goes (brain_put), and pick the right
   record type. (Same content as docs/agent-instructions.md, kept in sync.)
 
-fbrain mcp
-  Start a Model Context Protocol server over stdio. Exposes ${FBRAIN_MCP_TOOL_NAMES.length} tools so
-MCP clients (Claude Code, Codex, etc.) can read and write fbrain
+brain mcp
+  Start a Model Context Protocol server over stdio. Exposes ${BRAIN_MCP_TOOL_NAMES.length} tools so
+MCP clients (Claude Code, Codex, etc.) can read and write brain
 in-process:
-  read:  ${FBRAIN_MCP_READ_TOOL_NAMES.join(", ")}
-  write: ${FBRAIN_MCP_WRITE_TOOL_NAMES.join(", ")}
+  read:  ${BRAIN_MCP_READ_TOOL_NAMES.join(", ")}
+  write: ${BRAIN_MCP_WRITE_TOOL_NAMES.join(", ")}
 
-fbrain_ask is the recommended retrieval primitive — it fuses BM25 +
-vector (RRF hybrid) for better recall than pure-vector fbrain_search.
+brain_ask is the recommended retrieval primitive — it fuses BM25 +
+vector (RRF hybrid) for better recall than pure-vector brain_search.
 
-Register with Claude Code (the global \`bun add -g github:EdgeVector/fbrain\`
+Register with Claude Code (the global \`bun add -g github:EdgeVector/brain\`
 install already put \`brain-mcp\` on your PATH):
   claude mcp add brain brain-mcp
 
 The \`brain-mcp\` bin is global, so the command works from any directory.
-Contributing to fbrain itself? \`bun link\` from your source checkout puts
+Contributing to brain itself? \`bun link\` from your source checkout puts
 the same bin on PATH. From a source checkout you don't want to link, use
 the path-based form from the repo root:
   claude mcp add brain bun $(realpath src/mcp/main.ts)
 
-The server reads ~/.fbrain/config.json (same as the CLI). Exits non-zero
-if config is missing — run \`fbrain init\` first.`,
-  hook: `fbrain hook session-start
+The server reads ~/.brain/config.json (same as the CLI). Exits non-zero
+if config is missing — run \`brain init\` first.`,
+  hook: `brain hook session-start
 
 Claude Code SessionStart hook entrypoint. Reads the hook JSON event from stdin,
-runs \`fbrain ask\` against the opening session context (cwd/repo plus any
+runs \`brain ask\` against the opening session context (cwd/repo plus any
 prompt/transcript text present in the event), and emits Claude's
 \`hookSpecificOutput.additionalContext\` JSON only when the matches are
 strong-confidence. Weak/no matches and hook-time errors are quiet no-ops so a
 missing or unavailable brain never blocks session startup.
 
-This command is installed by \`fbrain mcp install\` into ./.claude/settings.json.`,
-  help: `fbrain help <command>`,
+This command is installed by \`brain mcp install\` into ./.claude/settings.json.`,
+  help: `brain help <command>`,
 };
 
 // Per-command parseArgs option sets. Exported so `test/unit/cli-help.test.ts`
@@ -1030,7 +1026,7 @@ const DESIGN_OPTIONS = {
   // Machine-readable mode: emit a `{ok,type,slug}` success object on stdout
   // and route the human `created …` line to stderr — same convention as the
   // read verbs (get/list/status). Accepted so an agent/script that uniformly
-  // appends `--json` to every fbrain call doesn't dead-end on a write verb
+  // appends `--json` to every brain call doesn't dead-end on a write verb
   // with parseArgs's bare "Unknown option".
   json: { type: "boolean", default: false },
 } as const;
@@ -1105,7 +1101,7 @@ const WHICH_OPTIONS = {
 } as const;
 const STATUS_OPTIONS = {
   type: { type: "string" },
-  // Machine-readable mode for show form (`fbrain status <slug> --json`):
+  // Machine-readable mode for show form (`brain status <slug> --json`):
   // emit a single `{slug, type, status}` JSON object on stdout, matching the
   // `get --json` field-naming convention. Closes the read-surface parity gap
   // — `status` show mode was the only read command rejecting `--json`. No
@@ -1210,7 +1206,7 @@ const DOCTOR_OPTIONS = {
 } as const;
 const DELETE_OPTIONS = {
   type: { type: "string" },
-  // Filter-mode (bulk) selectors — the SAME `--status`/`--tag` `fbrain list`
+  // Filter-mode (bulk) selectors — the SAME `--status`/`--tag` `brain list`
   // accepts. With no positional <slug>, a delete carrying any of
   // --tag/--type/--status switches to filter mode: soft-delete every live
   // record matching the filter, dry-run by default (`--yes` to apply).
@@ -1290,7 +1286,7 @@ const CONSOLIDATE_OPTIONS = {
 } as const;
 const EMPTY_OPTIONS = {} as const;
 
-// `fbrain mcp install` (alias `setup`) flags. The other mcp subcommands
+// `brain mcp install` (alias `setup`) flags. The other mcp subcommands
 // (`instructions`, bare `mcp`) take no flags; `runMcpCmd` selects this set only
 // when the subcommand is install/setup.
 const MCP_OPTIONS = {
@@ -1305,7 +1301,6 @@ const MCP_OPTIONS = {
 } as const;
 
 export const CLI_SPEC = {
-  "multi-key-convert": {apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"},"retire-legacy":{type:"boolean"}},
   init: INIT_OPTIONS,
   design: DESIGN_OPTIONS,
   task: TASK_OPTIONS,
@@ -1370,15 +1365,15 @@ export async function main(argv: Argv): Promise<number> {
   const stripped = argv.slice();
   const verbose = consumeFlag(stripped, "--verbose");
   if (consumeFlag(stripped, "--version") || consumeFlag(stripped, "-V")) {
-    console.log(`brain ${getFbrainVersion()}`);
+    console.log(`brain ${getBrainVersion()}`);
     return 0;
   }
-  // Bare `fbrain version` is muscle memory from `git/docker/go version`. It
+  // Bare `brain version` is muscle memory from `git/docker/go version`. It
   // isn't a registered command (records are created per type, not via a global
   // `version` verb), so without this it would fall through to the unknown-command
   // path and dump the entire help wall. Alias it to the `--version`/`-V` output.
   if (stripped[0] === "version" && stripped.length === 1) {
-    console.log(`brain ${getFbrainVersion()}`);
+    console.log(`brain ${getBrainVersion()}`);
     return 0;
   }
   if (consumeFlag(stripped, "--help") || consumeFlag(stripped, "-h")) {
@@ -1399,10 +1394,10 @@ export async function main(argv: Argv): Promise<number> {
     // mislabeling the option as a "command".
     if (cmd.startsWith("-")) {
       // `-v` is muscle memory for "show the version" (node/npm/bun -v), but in
-      // fbrain the version flag is `-V`/`--version`. Don't silently alias it
+      // brain the version flag is `-V`/`--version`. Don't silently alias it
       // (other tools split `-v` verbose vs `-V` version) — point at the real
       // spelling instead of the generic flag-placement hint, which would
-      // falsely imply `fbrain init -v <value>` is valid.
+      // falsely imply `brain init -v <value>` is valid.
       if (cmd === "-v") {
         console.error(
           "error: `-v` isn't a flag; did you mean `-V` / `--version`?",
@@ -1413,12 +1408,12 @@ export async function main(argv: Argv): Promise<number> {
         `error: \`${cmd}\` looks like an option, but it's in the command position.`,
       );
       console.error(
-        `hint:  Flags go after the subcommand, e.g. \`fbrain init ${cmd} <value>\`. Run \`fbrain --help\` for global flags.`,
+        `hint:  Flags go after the subcommand, e.g. \`brain init ${cmd} <value>\`. Run \`brain --help\` for global flags.`,
       );
       return USAGE_ERROR;
     }
     // A top-level create-verb (`new`/`create`/`add`) is muscle memory from
-    // git/gh/cargo/npm/fkanban, but fbrain creates records *per type*
+    // git/gh/cargo/npm/fkanban, but brain creates records *per type*
     // (`<type> new <slug>`). Pure Levenshtein lands these on an unrelated read
     // verb (`new`→`get`, `add`→`ask`) — a misleading suggestion is worse than
     // none on the highest-traffic new-dev action. Point at the real create
@@ -1426,14 +1421,14 @@ export async function main(argv: Argv): Promise<number> {
     if (CREATE_SYNONYMS.includes(cmd)) {
       const types = RECORD_TYPES.join(" | ");
       console.error(
-        `error: \`fbrain ${cmd}\` isn't a command — records are created per type.`,
+        `error: \`brain ${cmd}\` isn't a command — records are created per type.`,
       );
       console.error(
-        `hint:  Use \`fbrain <type> new <slug>\`, e.g. \`fbrain design new my-first-idea\`.`,
+        `hint:  Use \`brain <type> new <slug>\`, e.g. \`brain design new my-first-idea\`.`,
       );
       console.error(`       Types: ${types}`);
       console.error(
-        `       (or pipe markdown:  fbrain put <slug> --type <type>)`,
+        `       (or pipe markdown:  brain put <slug> --type <type>)`,
       );
       return USAGE_ERROR;
     }
@@ -1462,19 +1457,19 @@ export async function main(argv: Argv): Promise<number> {
     // is unaffected. Commands reached `dispatch` and threw *before* writing
     // their own success payload, so there's no double-print on the failure path.
     if (jsonMode) {
-      const hint = err instanceof FbrainError ? (err.hint ?? null) : null;
+      const hint = err instanceof BrainError ? (err.hint ?? null) : null;
       const message = err instanceof Error ? err.message : String(err);
       console.log(JSON.stringify({ error: message, hint }));
     }
-    if (err instanceof FbrainError) {
+    if (err instanceof BrainError) {
       console.error(`error: ${err.message}`);
       if (err.hint) console.error(`hint:  ${err.hint}`);
-      // A usage/argument FbrainError (unknown/misapplied flag, missing flag
+      // A usage/argument BrainError (unknown/misapplied flag, missing flag
       // value, bad flag combination, malformed --type/--min-score/--limit,
       // extra/unexpected positionals) is "you invoked it wrong" → exit 2.
-      // Operational FbrainErrors (record not found, node unreachable,
+      // Operational BrainErrors (record not found, node unreachable,
       // write/consent failures, non-2xx from `raw`) stay 1.
-      // ConfigMissingError / ConfigInvalidError now extend FbrainError
+      // ConfigMissingError / ConfigInvalidError now extend BrainError
       // (codes `config_missing` / `config_invalid`, neither in
       // USAGE_ERROR_CODES), so the branch above prints their `error:`/`hint:`
       // lines and classifies them as operational exit 1 — no dedicated case
@@ -1484,7 +1479,7 @@ export async function main(argv: Argv): Promise<number> {
     if (err instanceof Error) {
       console.error(`error: ${err.message}`);
       // A raw parseArgs failure that no per-command handler turned into a
-      // friendlier FbrainError (an unknown flag with no near-miss suggestion,
+      // friendlier BrainError (an unknown flag with no near-miss suggestion,
       // a missing flag value, a stray positional) is still a usage error —
       // "you invoked it wrong" → exit 2. The message above is parseArgs's own
       // (unchanged); only the exit code is classified here. Every other
@@ -1501,14 +1496,14 @@ function isCommand(s: string): s is Command {
 }
 
 // Every record type has a `<type> new` subcommand. Derived from RECORD_TYPES
-// so adding a new record type wires up "Did you mean?" and `fbrain help
+// so adding a new record type wires up "Did you mean?" and `brain help
 // "<type> new"` automatically.
 const COMPOUND_COMMANDS: readonly string[] = RECORD_TYPES.map(
   (t) => `${t} new`,
 );
 
 // Top-level record-creation synonyms a new dev reaches for by analogy with
-// other CLIs (git/gh/cargo/npm/fkanban). None is a real fbrain command —
+// other CLIs (git/gh/cargo/npm/fkanban). None is a real brain command —
 // records are created via `<type> new <slug>` — so these get a targeted
 // create-family hint instead of a misleading nearest-match (see the unknown-
 // command handler above).
@@ -1639,7 +1634,7 @@ function strictInt(
   const trimmed = raw.trim();
   const n = parseInt(trimmed, 10);
   if (!Number.isFinite(n) || String(n) !== trimmed || n < opts.min) {
-    throw new FbrainError({
+    throw new BrainError({
       code: opts.code,
       message: `${opts.flag} must be a ${
         opts.min === 0 ? "non-negative" : "positive"
@@ -1668,7 +1663,7 @@ function strictFloat(
   const trimmed = raw.trim();
   const n = Number(trimmed);
   if (trimmed.length === 0 || !Number.isFinite(n) || n < opts.min) {
-    throw new FbrainError({
+    throw new BrainError({
       code: opts.code,
       message: `${opts.flag} must be a finite number >= ${opts.min} (got "${raw}").`,
     });
@@ -1748,12 +1743,12 @@ function suggestInitOption(
 }
 
 // Single funnel for every non-init command's parseArgs. Wraps the call so a
-// muscle-memory `fbrain <cmd> --node-url <URL>` / `--schema-service-url <URL>`
+// muscle-memory `brain <cmd> --node-url <URL>` / `--schema-service-url <URL>`
 // (the user re-using the flag they learned at `init`) becomes an actionable
 // nudge instead of parseArgs's bare "Unknown option" — or, worse on commands
 // that take positionals like `get`, its actively-misleading
 // `-- "--node-url"` advice. The node and schema-service are pinned in
-// `~/.fbrain/config.json` at init time and not overridable per-command; the
+// `~/.brain/config.json` at init time and not overridable per-command; the
 // hint points at the right path to change them. `init` itself does NOT go
 // through this helper — it accepts both flags via INIT_OPTIONS and we must
 // not regress that.
@@ -1761,7 +1756,7 @@ function suggestInitOption(
 // unknown flag, a flag missing its value, or an unexpected positional. These
 // are usage errors ("you invoked it wrong"), so when one reaches main()'s
 // catch unwrapped (no per-command handler upgraded it to a friendlier
-// FbrainError) it should still classify as exit 2, not 1.
+// BrainError) it should still classify as exit 2, not 1.
 const PARSE_ARGS_USAGE_CODES: ReadonlySet<string> = new Set([
   "ERR_PARSE_ARGS_UNKNOWN_OPTION",
   "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
@@ -1846,11 +1841,11 @@ function parseCommandArgs<T extends ParseArgsConfig>(
         args.includes("--node-url") ||
         args.includes("--schema-service-url")
       ) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "node_url_is_init_only",
           message:
-            "--node-url / --schema-service-url are only accepted by `fbrain init`. The node and schema-service are pinned in ~/.fbrain/config.json at init time.",
-          hint: "To point fbrain at a different node, re-run `fbrain init --node-url <URL> [--schema-service-url <URL>]` (or edit ~/.fbrain/config.json directly).",
+            "--node-url / --schema-service-url are only accepted by `brain init`. The node and schema-service are pinned in ~/.brain/config.json at init time.",
+          hint: "To point brain at a different node, re-run `brain init --node-url <URL> [--schema-service-url <URL>]` (or edit ~/.brain/config.json directly).",
         });
       }
       // A near-miss spelling of one of THIS command's own flags (the classic:
@@ -1875,7 +1870,7 @@ function parseCommandArgs<T extends ParseArgsConfig>(
           const example = opt?.multiple
             ? `Repeat the flag per value: \`--${suggestion} foo --${suggestion} bar\`.`
             : `Did you mean \`--${suggestion}\`?`;
-          throw new FbrainError({
+          throw new BrainError({
             code: "unknown_option",
             message: `Unknown option \`--${unknown}\`. Did you mean \`--${suggestion}\`?`,
             hint: example,
@@ -1902,7 +1897,7 @@ function parseCommandArgs<T extends ParseArgsConfig>(
           : validOptions.length > 0
             ? `Valid options: ${validOptions}. `
             : "";
-        throw new FbrainError({
+        throw new BrainError({
           code: "unknown_option",
           message: `Unknown option \`--${unknown}\`.`,
           hint: `${optionsPart}Run \`brain help${helpTarget}\` for usage.`,
@@ -1936,15 +1931,6 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
     ? (msg: string) => console.error(`[verbose] ${msg}`)
     : undefined;
   switch (cmd) {
-    case "multi-key-convert": {
-      const {values}=parseArgs({args,strict:true,allowPositionals:false,options:{
-        apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"},"retire-legacy":{type:"boolean"}}});
-      const cfg=readConfig();
-      const {"retire-legacy":retireLegacy,...flags}=values;
-      // The native conversion uses the app write client and its supported owner mode.
-      console.log(JSON.stringify(await convertMultiKey(newWriteClientFromCfg(cfg,verboseFn).node,cfg,{...flags,retireLegacy})));
-      return 0;
-    }
     case "init":
       return runInitCmd(args, verboseFn);
     case "design":
@@ -2046,7 +2032,7 @@ type Verbose = ((msg: string) => void) | undefined;
 // `init` deliberately does NOT route through parseCommandArgs (it's the one
 // command that legitimately accepts --node-url / --schema-service-url, which
 // that helper rejects). But it still owes a friendly unknown-option nudge: the
-// new-dev path's literal first command is often `fbrain init --node <url>`
+// new-dev path's literal first command is often `brain init --node <url>`
 // (the obvious abbreviation of --node-url), and bare parseArgs dead-ends it
 // with `error: Unknown option '--node'` and no recovery. Catch
 // ERR_PARSE_ARGS_UNKNOWN_OPTION and upgrade it to a prefix-aware suggestion so
@@ -2071,10 +2057,10 @@ function parseInitArgs(args: Argv) {
       if (unknown !== undefined) {
         const suggestion = suggestInitOption(unknown, knownKeys);
         if (suggestion !== undefined) {
-          throw new FbrainError({
+          throw new BrainError({
             code: "unknown_init_option",
             message: `Unknown option \`--${unknown}\`. Did you mean \`--${suggestion}\`?`,
-            hint: `Run \`fbrain init --${suggestion} <value>\` (see \`fbrain help init\`).`,
+            hint: `Run \`brain init --${suggestion} <value>\` (see \`brain help init\`).`,
           });
         }
         const validOptions = knownKeys
@@ -2082,10 +2068,10 @@ function parseInitArgs(args: Argv) {
           .sort()
           .map((k) => `--${k}`)
           .join(", ");
-        throw new FbrainError({
+        throw new BrainError({
           code: "unknown_init_option",
           message: `Unknown option \`--${unknown}\`.`,
-          hint: `Valid options: ${validOptions}. Run \`fbrain help init\` for usage.`,
+          hint: `Valid options: ${validOptions}. Run \`brain help init\` for usage.`,
         });
       }
     }
@@ -2097,7 +2083,7 @@ async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parseInitArgs(args);
   // Defaults are resolved inside runInit so it can auto-heal a stale config
   // (e.g. previously-baked `:9101 / :9102` URLs) without clobbering a user
-  // override the next time `fbrain init` runs without flags.
+  // override the next time `brain init` runs without flags.
   const initOpts: Parameters<typeof runInit>[0] = {
     bootstrapName: values.name,
     verbose,
@@ -2135,11 +2121,11 @@ async function runRecordNew(
     }
     // "I want to change this record's status" recovery. By analogy with most
     // CLIs (`git branch <name> --move`, `kubectl set ...`), a dev who knows
-    // `fbrain <type> new <slug>` and `fbrain status <slug>` naturally reaches
-    // for `fbrain <type> <slug> --status <value>` to move a record. That guess
+    // `brain <type> new <slug>` and `brain status <slug>` naturally reaches
+    // for `brain <type> <slug> --status <value>` to move a record. That guess
     // dead-ends here: `<slug>` is an unknown subcommand and `--status` is
     // silently swallowed. Rather than dump the misleading `<type> new` usage,
-    // point at the real verb — `fbrain status <slug> <new-status>` — and echo
+    // point at the real verb — `brain status <slug> <new-status>` — and echo
     // back what they typed so the swallowed `--status` is acknowledged. We do
     // NOT auto-perform the update; the explicit verb is intentional. Mirrors
     // the accepted `--tags → --tag` recovery-hint pattern in parseCommandArgs.
@@ -2166,7 +2152,7 @@ async function runRecordNew(
           ? ` (you asked to set "${slugPart}" → "${statusPart}")`
           : "";
       console.error(
-        `Did you mean to change status? Use: fbrain status ${slugPart} ${statusPart}${echo}`,
+        `Did you mean to change status? Use: brain status ${slugPart} ${statusPart}${echo}`,
       );
       return USAGE_ERROR;
     }
@@ -2192,8 +2178,8 @@ async function runRecordNew(
     console.error(COMMAND_HELP[type]);
     return USAGE_ERROR;
   }
-  // `fbrain <type> new <slug>` accepts exactly one positional. Without this
-  // guard, `fbrain task new my-slug --tag a b` silently dropped `b` (parseArgs
+  // `brain <type> new <slug>` accepts exactly one positional. Without this
+  // guard, `brain task new my-slug --tag a b` silently dropped `b` (parseArgs
   // consumed `a` as the --tag value, then `b` became positional[1] which the
   // dispatcher ignored — the record was created with tags=["a"] while the
   // user thought both landed). Same for unquoted titles: `--title two words`
@@ -2201,7 +2187,7 @@ async function runRecordNew(
   // a partial-truth payload. Same papercut shape as PRs #177 / #181 / #112
   // (put / link / delete extra-positional guards).
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `${type} new takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
       hint: `Title, body, and tags are flags, not positionals. Wrap multi-word titles in quotes: \`--title "..."\`. Repeat \`--tag\` per tag: \`--tag a --tag b\`.`,
@@ -2212,7 +2198,7 @@ async function runRecordNew(
   // a one-line breadcrumb BEFORE the (potentially indefinite) blocking read so
   // the new-dev path doesn't silently hang on an empty inherited pipe. The
   // notice only fires when a read will actually happen (non-TTY and not
-  // FBRAIN_NO_STDIN=1) — those cases short-circuit inside maybeReadStdin.
+  // BRAIN_NO_STDIN=1) — those cases short-circuit inside maybeReadStdin.
   const body = values.body ?? (await maybeReadStdin({ announce: true }));
   const opts: Parameters<typeof recordNew>[0] = {
     cfg,
@@ -2268,12 +2254,12 @@ const PUT_VALUE_FLAGS = new Set(
 // Best-effort recovery of `put`'s slug positional when parseArgs already
 // threw — we can't trust its output, so scan args BEFORE the offending flag
 // and pick the first non-flag token. We must skip an option's VALUE: in
-// `fbrain put --type design my-note --title X`, `design` is the value of
+// `brain put --type design my-note --title X`, `design` is the value of
 // `--type`, not the positional slug, so a naive "first non-flag token" scan
 // grabs `design`. Skip any token whose preceding token is a value-taking
 // option (e.g. `--type`). The inline `--type=design` form carries its value
 // in the same token, so it's already harmless. If the user typed e.g.
-// `fbrain put --body X` with no slug, there's nothing before the flag and we
+// `brain put --body X` with no slug, there's nothing before the flag and we
 // fall back to `<slug>` rather than mis-quoting the flag's (or --type's) VALUE.
 function recoverPutSlug(args: Argv, flag: string): string {
   const idx = args.indexOf(flag);
@@ -2289,7 +2275,7 @@ function recoverPutSlug(args: Argv, flag: string): string {
 
 // Best-effort recovery of `put`'s `--type <T>` value when parseArgs already
 // threw — used by the `--title` recovery hint so the suggested
-// `fbrain <T> new <slug> --title "..."` is copy-pasteable. If the user already
+// `brain <T> new <slug> --title "..."` is copy-pasteable. If the user already
 // typed `--type concept`, thread it through; otherwise fall back to a concrete
 // example (`concept`), mirroring the sibling `--body` hint. Never emit the
 // literal `<type>` placeholder — a fresh user would copy it verbatim.
@@ -2322,36 +2308,36 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   } catch (err) {
     // An unknown option reaches here either as Node's raw
     // ERR_PARSE_ARGS_UNKNOWN_OPTION or — now that parseCommandArgs upgrades the
-    // no-suggestion case to a clean FbrainError — as `unknown_option`. Either
+    // no-suggestion case to a clean BrainError — as `unknown_option`. Either
     // way, `put`'s own `--title`/`--body`/`--tag` papercut hints are more
     // specific than the generic valid-options list, so give them first crack;
     // anything they don't recognise falls through to `throw err` (the clean
-    // generic FbrainError, or the raw parseArgs error for non-unknown-option
+    // generic BrainError, or the raw parseArgs error for non-unknown-option
     // parse failures).
     if (
       err instanceof Error &&
       ((err as NodeJS.ErrnoException).code ===
         "ERR_PARSE_ARGS_UNKNOWN_OPTION" ||
-        (err instanceof FbrainError && err.code === "unknown_option"))
+        (err instanceof BrainError && err.code === "unknown_option"))
     ) {
       // `put` is intentionally frontmatter-driven — title comes from the
       // `title:` key or the first `# H1`. But every `<type> new` subcommand
       // takes `--title`, so a fresh user reflexively types
-      // `fbrain put <slug> --title X` and dead-ends on parseArgs's bare
+      // `brain put <slug> --title X` and dead-ends on parseArgs's bare
       // "Unknown option '--title'" with no nudge toward the right form.
       // Re-throw with a hint that points at `<type> new` instead.
       if (args.includes("--title")) {
         const slug = recoverPutSlug(args, "--title");
         const type = recoverPutType(args);
-        throw new FbrainError({
+        throw new BrainError({
           code: "unknown_option",
           message:
             "`put` does not accept --title. The title comes from frontmatter (`title:` between leading `---` lines) or the first `# H1` of the body.",
-          hint: `To set the title via a flag, use \`fbrain ${type} new ${slug} --title "..."\` instead.`,
+          hint: `To set the title via a flag, use \`brain ${type} new ${slug} --title "..."\` instead.`,
         });
       }
       // Same papercut for `--body` / `--content` / `--text`: a fresh user
-      // reflexively types `fbrain put my-note --type concept --body "..."`
+      // reflexively types `brain put my-note --type concept --body "..."`
       // and dead-ends on parseArgs's bare "Unknown option". The body comes
       // from stdin (with optional YAML frontmatter) — point them there.
       const bodyFlag = ["--body", "--content", "--text"].find((f) =>
@@ -2364,32 +2350,32 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
         // above. Without this, `put x --type design --body "..."` wrongly
         // suggested `--type concept`, contradicting what the user typed.
         const type = recoverPutType(args);
-        throw new FbrainError({
+        throw new BrainError({
           code: "unknown_option",
           message: `\`put\` does not accept ${bodyFlag}. The record body comes from stdin (with optional YAML frontmatter).`,
-          hint: `Pipe the body in:  echo "..." | fbrain put ${slug} --type ${type}   (or:  fbrain put ${slug} --type ${type} < note.md)`,
+          hint: `Pipe the body in:  echo "..." | brain put ${slug} --type ${type}   (or:  brain put ${slug} --type ${type} < note.md)`,
         });
       }
       // Same papercut for `--tag` / `--tags`: `<type> new` accepts a
       // repeatable `--tag` flag, so a fresh user carries it over to `put`
-      // (`fbrain put my-note --type concept --tags perf`) and dead-ends on
+      // (`brain put my-note --type concept --tags perf`) and dead-ends on
       // parseArgs's bare "Unknown option". `put` is frontmatter-driven —
       // tags come from a `tags:` line in the YAML frontmatter, not a flag.
       const tagFlag = ["--tag", "--tags"].find((f) => args.includes(f));
       if (tagFlag) {
         const slug = recoverPutSlug(args, tagFlag);
-        throw new FbrainError({
+        throw new BrainError({
           code: "unknown_option",
           message: `\`put\` does not accept ${tagFlag}. Tags come from frontmatter (a \`tags:\` line between leading \`---\` lines).`,
-          hint: `Add a \`tags:\` line to the frontmatter:  printf '---\\ntype: concept\\ntags: [perf, infra]\\n---\\n# Title\\nbody\\n' | fbrain put ${slug}`,
+          hint: `Add a \`tags:\` line to the frontmatter:  printf '---\\ntype: concept\\ntags: [perf, infra]\\n---\\n# Title\\nbody\\n' | brain put ${slug}`,
         });
       }
     }
     throw err;
   }
   const { values, positionals } = parsed;
-  // `fbrain put <slug>` accepts exactly one positional (type is `--type
-  // <T>`). Without this guard, `fbrain put design storage-decision --type
+  // `brain put <slug>` accepts exactly one positional (type is `--type
+  // <T>`). Without this guard, `brain put design storage-decision --type
   // concept` silently dropped `storage-decision` and created a concept
   // slugged `design` — wrong-slug data, no warning. Mirror delete's
   // extra-positional guard. When the first surplus token is a known
@@ -2398,9 +2384,9 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   if (positionals.length > 1) {
     const first = positionals[0]!;
     const hint = isRecordType(first)
-      ? `"${first}" is a record type — did you mean \`fbrain put ${positionals[1]} --type ${first}\`, or \`fbrain ${first} new ${positionals[1]}\`? Slug is the only positional on \`put\` — type is \`--type <T>\`.`
-      : "Run `fbrain put <slug> --type <T>` (slug is the only positional).";
-    throw new FbrainError({
+      ? `"${first}" is a record type — did you mean \`brain put ${positionals[1]} --type ${first}\`, or \`brain ${first} new ${positionals[1]}\`? Slug is the only positional on \`put\` — type is \`--type <T>\`.`
+      : "Run `brain put <slug> --type <T>` (slug is the only positional).";
+    throw new BrainError({
       code: "extra_positional_args",
       message: `put takes one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
       hint,
@@ -2422,7 +2408,7 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
   try {
     result = await putCmd(pOpts);
   } catch (err) {
-    // `fbrain put design` (single type-name positional, no --type, no
+    // `brain put design` (single type-name positional, no --type, no
     // frontmatter `type:`) lands here. Without this re-throw, the user
     // gets the generic "list of valid types" hint and never notices that
     // their first arg already IS a valid type — the same gap fixed for
@@ -2430,15 +2416,15 @@ async function runPut(args: Argv, verbose: Verbose): Promise<number> {
     // on `missing_type` only, so a real record slugged "design" (whose
     // frontmatter resolves a type) is unaffected.
     if (
-      err instanceof FbrainError &&
+      err instanceof BrainError &&
       err.code === "missing_type" &&
       positionals[0] &&
       isRecordType(positionals[0])
     ) {
-      throw new FbrainError({
+      throw new BrainError({
         code: err.code,
         message: err.message,
-        hint: `"${positionals[0]}" is a record type — did you mean \`fbrain put <slug> --type ${positionals[0]}\`, or \`fbrain ${positionals[0]} new <slug>\`?`,
+        hint: `"${positionals[0]}" is a record type — did you mean \`brain put <slug> --type ${positionals[0]}\`, or \`brain ${positionals[0]} new <slug>\`?`,
       });
     }
     throw err;
@@ -2535,7 +2521,7 @@ async function runAppend(args: Argv, verbose: Verbose): Promise<number> {
 
 // Re-throw a `not_found` from a slug-lookup command (get / status / delete)
 // with a `--type` hint when the user typed a known record type as the slug
-// (e.g. `fbrain get task` instead of `fbrain list --type task`). Other
+// (e.g. `brain get task` instead of `brain list --type task`). Other
 // errors pass through untouched. Only nudges when no record actually exists
 // with that slug — if a real concept slugged "task" lives in the brain, the
 // lookup succeeds and we never get here.
@@ -2547,14 +2533,14 @@ export async function withTypeAsPositionalHint<T>(
     return await inner();
   } catch (err) {
     if (
-      err instanceof FbrainError &&
+      err instanceof BrainError &&
       err.code === "not_found" &&
       isRecordType(slug)
     ) {
-      throw new FbrainError({
+      throw new BrainError({
         code: err.code,
         message: err.message,
-        hint: `"${slug}" is a record type — did you mean \`fbrain list --type ${slug}\`?`,
+        hint: `"${slug}" is a record type — did you mean \`brain list --type ${slug}\`?`,
       });
     }
     throw err;
@@ -2580,28 +2566,28 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.get);
     return USAGE_ERROR;
   }
-  // `fbrain get <type> <slug>` (type-then-slug) is the muscle-memory mirror of
-  // `fbrain design new <slug>`, `fbrain list --type design`, and the MCP
-  // `fbrain_get(slug, type)`. With two positionals, `slug = positionals[0]`
+  // `brain get <type> <slug>` (type-then-slug) is the muscle-memory mirror of
+  // `brain design new <slug>`, `brain list --type design`, and the MCP
+  // `brain_get(slug, type)`. With two positionals, `slug = positionals[0]`
   // would take the TYPE as the slug and silently drop the real slug — and the
   // single-arg `withTypeAsPositionalHint` would then nudge at `list --type`,
   // the wrong intent (the user wants one specific record, not a type listing).
   // Catch the shape BEFORE the network call: route them at the correct
   // `get <slug> --type <type>` form. This is the same recovery-hint family as
-  // put's extra-positional guard above. Single-positional `fbrain get design`
+  // put's extra-positional guard above. Single-positional `brain get design`
   // is untouched — it still gets the `list --type design` hint below.
   if (positionals.length > 1 && isRecordType(slug)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "unexpected_positional",
       message: `No record with slug "${slug}".`,
-      hint: `"${slug}" is a record type — did you mean \`fbrain get ${positionals[1]} --type ${slug}\`?`,
+      hint: `"${slug}" is a record type — did you mean \`brain get ${positionals[1]} --type ${slug}\`?`,
     });
   }
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `get takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain get <slug>` once per record, or use `--type T` to disambiguate a slug.",
+      hint: "Run `brain get <slug>` once per record, or use `--type T` to disambiguate a slug.",
     });
   }
   const type = parseRecordType(values.type);
@@ -2631,7 +2617,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
     // in the primary brain (gbrain). Human output only; --json / --field keep
     // their exact contract and still report the miss.
     if (
-      err instanceof FbrainError &&
+      err instanceof BrainError &&
       err.code === "not_found" &&
       !getOpts.json &&
       (getOpts.fields === undefined || getOpts.fields.length === 0)
@@ -2665,7 +2651,7 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
       "list",
     );
   } catch (err) {
-    // A fresh user's instinct is `fbrain list task`, not `fbrain list --type
+    // A fresh user's instinct is `brain list task`, not `brain list --type
     // task`. parseArgs rejects the positional with ERR_PARSE_ARGS_UNEXPECTED_
     // POSITIONAL; when the rejected positional is a known record type, add a
     // hint pointing at the `--type` form rather than dead-ending on parseArgs's
@@ -2677,10 +2663,10 @@ async function runList(args: Argv, verbose: Verbose): Promise<number> {
     ) {
       const positional = args.find((a) => !a.startsWith("-"));
       if (positional && isRecordType(positional)) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "unexpected_positional",
           message: err.message,
-          hint: `did you mean \`fbrain list --type ${positional}\`?`,
+          hint: `did you mean \`brain list --type ${positional}\`?`,
         });
       }
     }
@@ -2723,10 +2709,10 @@ async function runWhich(args: Argv): Promise<number> {
     "which",
   );
   if (positionals.length > 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `which takes no positional arguments (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain which --json` for machine-readable install details.",
+      hint: "Run `brain which --json` for machine-readable install details.",
     });
   }
 
@@ -2761,11 +2747,11 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
   // Symmetric recovery for the `status set/update <slug> <value>` guess. The
   // CLI is noun-verb everywhere a new dev looks (`design new`, `task new`,
   // `mcp install`), so `status` *looks* like it should take a `set`/`update`
-  // verb — but the real form is `fbrain status <slug> [<new-status>]`. Without
+  // verb — but the real form is `brain status <slug> [<new-status>]`. Without
   // this guard, `set`/`update` is parsed as the slug positional and
   // `resolveBySlug` dead-ends with the misleading `No record with slug "set"`
-  // hint that sends devs to `fbrain list` — the wrong remedy (the fix is to
-  // *drop* the verb). This is the twin of the `fbrain <type> <slug> --status`
+  // hint that sends devs to `brain list` — the wrong remedy (the fix is to
+  // *drop* the verb). This is the twin of the `brain <type> <slug> --status`
   // recovery in runRecordNew above; same intent, same message shape, so the two
   // paths read identically. We do NOT auto-perform the update — the explicit
   // verb is intentional, matching the runRecordNew precedent.
@@ -2773,7 +2759,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
   // Gate: pseudo-verb (`set`/`update`) AND a following positional (the slug
   // they meant). The `>= 2` requirement keeps it tight — a record literally
   // slugged `set`/`update` still resolves via the unambiguous bare
-  // `fbrain status set` (one positional) path.
+  // `brain status set` (one positional) path.
   if ((slug === "set" || slug === "update") && positionals.length >= 2) {
     const slugPart = positionals[1];
     const statusPart = positionals[2] ?? "<new-status>";
@@ -2782,7 +2768,7 @@ async function runStatus(args: Argv, verbose: Verbose): Promise<number> {
         ? ` (you asked to set "${slugPart}" → "${statusPart}")`
         : "";
     console.error(
-      `Did you mean to change status? Use: fbrain status ${slugPart} ${statusPart}${echo}`,
+      `Did you mean to change status? Use: brain status ${slugPart} ${statusPart}${echo}`,
     );
     return USAGE_ERROR;
   }
@@ -2812,10 +2798,10 @@ async function runTag(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `tag takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain tag <slug> --add T` once per record; repeat `--add`/`--rm` for multiple tags.",
+      hint: "Run `brain tag <slug> --add T` once per record; repeat `--add`/`--rm` for multiple tags.",
     });
   }
   const cfg = readConfig();
@@ -2857,10 +2843,10 @@ async function runAttach(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 2) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `attach takes a slug and a file path (got ${positionals.length} positionals).`,
-      hint: "Run `fbrain attach <slug> <file>`; use --name to override the attachment name.",
+      hint: "Run `brain attach <slug> <file>`; use --name to override the attachment name.",
     });
   }
   const cfg = readConfig();
@@ -2902,15 +2888,15 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     },
     "attachments",
   );
-  // `fbrain attachments migrate [slug]` — v1→v2 storage migration subcommand.
+  // `brain attachments migrate [slug]` — v1→v2 storage migration subcommand.
   // "migrate" is a reserved word here; a record cannot shadow it because
   // record slugs are resolved only in the list form.
   if (positionals[0] === "migrate") {
     if (positionals.length > 2) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "extra_positional_args",
         message: `attachments migrate takes at most one slug (got ${positionals.length - 1}).`,
-        hint: "Run `fbrain attachments migrate [<slug>]`.",
+        hint: "Run `brain attachments migrate [<slug>]`.",
       });
     }
     const cfg = readConfig();
@@ -2933,10 +2919,10 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `attachments takes exactly one slug (got ${positionals.length}).`,
-      hint: "Run `fbrain attachments <slug>` (or `fbrain attachments migrate [<slug>]`).",
+      hint: "Run `brain attachments <slug>` (or `brain attachments migrate [<slug>]`).",
     });
   }
   const cfg = readConfig();
@@ -2971,10 +2957,10 @@ async function runDetach(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 2) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `detach takes a slug and a name-or-ref (got ${positionals.length} positionals).`,
-      hint: "Run `fbrain detach <slug> <name-or-ref>` once per attachment.",
+      hint: "Run `brain detach <slug> <name-or-ref>` once per attachment.",
     });
   }
   const cfg = readConfig();
@@ -3002,7 +2988,7 @@ async function runDetach(args: Argv, verbose: Verbose): Promise<number> {
   return 0;
 }
 
-// `fbrain attachment get <slug> <name-or-ref>` — `get` is the only
+// `brain attachment get <slug> <name-or-ref>` — `get` is the only
 // subcommand today; the two-token shape leaves room for future verbs
 // (e.g. `attachment open`) without breaking invocations.
 async function runAttachmentGet(args: Argv, verbose: Verbose): Promise<number> {
@@ -3026,10 +3012,10 @@ async function runAttachmentGet(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 3) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `attachment get takes a slug and a name-or-ref (got ${positionals.length - 1} positionals).`,
-      hint: "Run `fbrain attachment get <slug> <name-or-ref> [-o PATH]`.",
+      hint: "Run `brain attachment get <slug> <name-or-ref> [-o PATH]`.",
     });
   }
   const cfg = readConfig();
@@ -3077,16 +3063,16 @@ async function runLink(args: Argv, verbose: Verbose): Promise<number> {
     console.error(COMMAND_HELP.link);
     return USAGE_ERROR;
   }
-  // `fbrain link <task-slug> <design-slug>` accepts exactly two positionals.
-  // Without this check, `fbrain link t1 d1 t2 d2` silently linked only
+  // `brain link <task-slug> <design-slug>` accepts exactly two positionals.
+  // Without this check, `brain link t1 d1 t2 d2` silently linked only
   // t1→d1 and dropped the trailing pair, while the user thought both pairs
   // landed — same silent partial-action shape delete (PR #112) and put
   // (PR #177) already fixed. Reject loudly before any I/O.
   if (positionals.length > 2) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `link takes exactly two positionals: <task-slug> <design-slug> (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain link <task-slug> <design-slug>` once per pair; bulk linking is not supported.",
+      hint: "Run `brain link <task-slug> <design-slug>` once per pair; bulk linking is not supported.",
     });
   }
   const cfg = readConfig();
@@ -3145,10 +3131,10 @@ async function runBacklinks(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `backlinks takes exactly one positional: <slug> (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain backlinks <slug>` once per target slug.",
+      hint: "Run `brain backlinks <slug>` once per target slug.",
     });
   }
   const cfg = readConfig();
@@ -3201,7 +3187,7 @@ async function runSearch(args: Argv, verbose: Verbose): Promise<number> {
   if (minScoreRaw !== undefined) {
     const n = Number(minScoreRaw);
     if (minScoreRaw.trim().length === 0 || !Number.isFinite(n)) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "invalid_min_score",
         message: `--min-score must be a number (got "${minScoreRaw}").`,
       });
@@ -3457,12 +3443,12 @@ export function parseDoctorOptions(
 
   // `--usage` and `--freshness` pick mutually exclusive top-level paths:
   // doctor()'s `if (opts.usage)` short-circuit returns before the freshness
-  // probes ever run, so `fbrain doctor --usage --freshness` ran the usage
+  // probes ever run, so `brain doctor --usage --freshness` ran the usage
   // report and silently dropped --freshness. Reject the combo before
   // doctor() so the user can fix the invocation instead of debugging a
   // no-op. Same flavor as PR #93 (migrate mode conflict).
   if (values.usage && values.freshness) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "doctor_mode_conflict",
       message: "--usage and --freshness are mutually exclusive — pick one.",
     });
@@ -3470,7 +3456,7 @@ export function parseDoctorOptions(
 
   // `--usage-window` and `--usage-path` only mean anything under `--usage`
   // (COMMAND_HELP.doctor documents them nested under it). Without `--usage`,
-  // the dispatcher below never reads them — so `fbrain doctor --usage-window
+  // the dispatcher below never reads them — so `brain doctor --usage-window
   // 14` ran a normal health check and silently dropped the override. Reject
   // the combo before doctor() so the user can fix the invocation instead of
   // debugging a no-op. Same flavor as PRs #93/#94 (migrate orphan flags).
@@ -3479,7 +3465,7 @@ export function parseDoctorOptions(
     if (values["usage-window"] !== undefined) orphans.push("--usage-window");
     if (values["usage-path"] !== undefined) orphans.push("--usage-path");
     if (orphans.length > 0) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "doctor_flag_requires_usage",
         message: `${orphans.join(", ")} only ${orphans.length === 1 ? "applies" : "apply"} to --usage.`,
       });
@@ -3518,7 +3504,7 @@ async function runShare(args: Argv): Promise<number> {
     "share",
   );
   if (positionals.length > 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `share takes no positional arguments (got ${positionals.length}: ${positionals.join(", ")}).`,
     });
@@ -3543,7 +3529,7 @@ async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
   );
   // First positional is the subcommand; anything further is a typo.
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `admin-snapshot ${sub} takes no extra positional arguments (got: ${positionals.slice(1).join(", ")}).`,
     });
@@ -3570,7 +3556,7 @@ async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
   if (maxRecordsRaw !== undefined) {
     const parsed = Number(maxRecordsRaw);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "invalid_limit",
         message: `invalid --max-records ${maxRecordsRaw}`,
       });
@@ -3581,23 +3567,23 @@ async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
   const recipient: DeliveryRecipient = {
     recipientPubkey: firstNonEmpty(
       values["recipient-pubkey"],
-      process.env.FBRAIN_ADMIN_RECIPIENT_PUBKEY,
+      process.env.BRAIN_ADMIN_RECIPIENT_PUBKEY,
       process.env.ROUTINES_ADMIN_RECIPIENT_PUBKEY,
     ),
     messagingPublicKey: firstNonEmpty(
       values["messaging-public-key"],
-      process.env.FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY,
+      process.env.BRAIN_ADMIN_MESSAGING_PUBLIC_KEY,
       process.env.ROUTINES_ADMIN_MESSAGING_PUBLIC_KEY,
     ),
     messagingPseudonym: firstNonEmpty(
       values["messaging-pseudonym"],
-      process.env.FBRAIN_ADMIN_MESSAGING_PSEUDONYM,
+      process.env.BRAIN_ADMIN_MESSAGING_PSEUDONYM,
       process.env.ROUTINES_ADMIN_MESSAGING_PSEUDONYM,
     ),
     recipientDisplayName:
       firstNonEmpty(
         values["recipient-name"],
-        process.env.FBRAIN_ADMIN_RECIPIENT_NAME,
+        process.env.BRAIN_ADMIN_RECIPIENT_NAME,
         process.env.ROUTINES_ADMIN_RECIPIENT_NAME,
       ) || undefined,
   };
@@ -3607,11 +3593,11 @@ async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
     ["--messaging-pseudonym", recipient.messagingPseudonym],
   ].filter(([, value]) => !value);
   if (missing.length > 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "missing_slug",
       message:
         `missing ${missing.map(([flag]) => flag).join(", ")} ` +
-        `(or FBRAIN_ADMIN_RECIPIENT_PUBKEY / FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY / FBRAIN_ADMIN_MESSAGING_PSEUDONYM; ` +
+        `(or BRAIN_ADMIN_RECIPIENT_PUBKEY / BRAIN_ADMIN_MESSAGING_PUBLIC_KEY / BRAIN_ADMIN_MESSAGING_PSEUDONYM; ` +
         `ROUTINES_ADMIN_* aliases also accepted)`,
       hint: "Use the public keys from the enrolled admin kanban-consumer bundle — same recipient as kanban/routines deliver.",
     });
@@ -3680,7 +3666,7 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
       // top-level JSON error handler or stdout would contain two JSON docs.
       if (
         values.json &&
-        err instanceof FbrainError &&
+        err instanceof BrainError &&
         err.code === "batch_delete_failed"
       ) {
         return 1;
@@ -3694,23 +3680,23 @@ async function runDelete(args: Argv, verbose: Verbose): Promise<number> {
   // are filter-mode-only; mixing them with a slug is a usage error (we don't
   // silently ignore them on a destructive command).
   if (hasFilter) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "slug_and_filter",
       message: `delete takes EITHER a <slug> OR filter selectors (--tag/--status), not both (got slug "${slug}" with a filter).`,
-      hint: "Delete one record with `fbrain delete <slug>`, or bulk-delete with `fbrain delete --tag T [--type T] [--status S] --yes` (no slug).",
+      hint: "Delete one record with `brain delete <slug>`, or bulk-delete with `brain delete --tag T [--type T] [--status S] --yes` (no slug).",
     });
   }
-  // `fbrain delete <slug>` accepts exactly one positional. Without this
-  // check, extra positionals were silently dropped: `fbrain delete slug1
+  // `brain delete <slug>` accepts exactly one positional. Without this
+  // check, extra positionals were silently dropped: `brain delete slug1
   // slug2` soft-deleted slug1 and threw slug2 away with no warning. Worst
   // class of silent drop — a destructive command claiming success while
   // half the user's intent vanished. Same shape as the silently-dropped
   // flag fixes in PRs #93/#94/#96/#108: reject loudly before any I/O.
   if (positionals.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `delete takes exactly one slug (got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: "Run `fbrain delete <slug>` once per record, or bulk-delete with `fbrain delete --tag T --yes`.",
+      hint: "Run `brain delete <slug>` once per record, or bulk-delete with `brain delete --tag T --yes`.",
     });
   }
   const cfg = readConfig();
@@ -3738,7 +3724,7 @@ export async function runMcpCmd(args: Argv): Promise<number> {
   // (flags can't precede it) before parsing so each gets the right option set.
   const sub = args[0]?.startsWith("-") ? undefined : args[0];
 
-  // `fbrain mcp install` (alias `setup`) — the one-shot agent-wiring command:
+  // `brain mcp install` (alias `setup`) — the one-shot agent-wiring command:
   // verify the `brain-mcp` entrypoint, register the MCP server with Claude
   // Code, and append the instructions block to ./CLAUDE.md. Gated by [Y/n]
   // unless `--yes` (mirrors `init --grant-consent`). See commands/mcp-install.ts.
@@ -3779,9 +3765,9 @@ export async function runMcpCmd(args: Argv): Promise<number> {
     },
     "mcp",
   );
-  // `fbrain mcp instructions` — print ONLY the copy-paste CLAUDE.md block to
+  // `brain mcp instructions` — print ONLY the copy-paste CLAUDE.md block to
   // stdout (the agent usage-loop + the record-type table) so a new dev can wire
-  // the brain into their agent in one step: `fbrain mcp instructions >> CLAUDE.md`
+  // the brain into their agent in one step: `brain mcp instructions >> CLAUDE.md`
   // (or `| pbcopy`). No surrounding prose, no ANSI, exit 0 — paste-ready. The
   // block is single-sourced from buildAgentInstructionsBlock() (schemas.ts), the
   // same source docs/agent-instructions.md is asserted against, so they can't
@@ -3800,12 +3786,12 @@ export async function runMcpCmd(args: Argv): Promise<number> {
     );
     return USAGE_ERROR;
   }
-  // Bare `fbrain mcp` — start the stdio MCP server.
+  // Bare `brain mcp` — start the stdio MCP server.
   //
   // This is the machine-facing entrypoint: it speaks JSON-RPC over stdin and is
   // meant to be `exec`'d by an AI client, never typed by hand. A human who runs
   // it at an interactive terminal (a natural thing to try after seeing
-  // `fbrain mcp install` / `fbrain mcp instructions` in the help) used to get a
+  // `brain mcp install` / `brain mcp instructions` in the help) used to get a
   // silently frozen prompt — the server started and then blocked forever on the
   // `await new Promise(() => {})` below with zero output, because an interactive
   // stdin never EOFs and no client ever speaks. Guard the interactive case:
@@ -3816,15 +3802,15 @@ export async function runMcpCmd(args: Argv): Promise<number> {
   // as the put/--body stdin fallback in maybeReadStdin().
   if ((process.stdin as unknown as { isTTY?: boolean }).isTTY) {
     console.error(
-      "`fbrain mcp` is the stdio MCP server for AI clients (Claude Code, Codex, …); it speaks JSON-RPC over stdin and is not meant to be run by hand.\n" +
+      "`brain mcp` is the stdio MCP server for AI clients (Claude Code, Codex, …); it speaks JSON-RPC over stdin and is not meant to be run by hand.\n" +
         "You probably want one of:\n" +
-        "  fbrain mcp install        # wire fbrain into your agent in one step\n" +
-        "  fbrain mcp instructions   # print the CLAUDE.md usage block\n" +
-        "To run the server manually for debugging, pipe a request: printf '{}' | fbrain mcp",
+        "  brain mcp install        # wire brain into your agent in one step\n" +
+        "  brain mcp instructions   # print the CLAUDE.md usage block\n" +
+        "To run the server manually for debugging, pipe a request: printf '{}' | brain mcp",
     );
     return USAGE_ERROR;
   }
-  // Lazy-import so the SDK only loads when the user runs `fbrain mcp`.
+  // Lazy-import so the SDK only loads when the user runs `brain mcp`.
   // Keeps CLI startup fast for non-MCP commands.
   const { runMcp } = await import("./mcp/main.ts");
   const code = await runMcp();
@@ -3887,7 +3873,7 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
   if (typeof values["max-records"] === "string") {
     const max = Number.parseInt(values["max-records"], 10);
     if (!Number.isInteger(max) || max < 1) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "invalid_limit",
         message: `--max-records must be a positive integer, got ${JSON.stringify(values["max-records"])}.`,
       });
@@ -3915,7 +3901,7 @@ function parseGraphIntFlag(raw: unknown, flag: string): number | undefined {
   if (typeof raw !== "string") return undefined;
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_limit",
       message: `--${flag} must be a positive integer, got ${JSON.stringify(raw)}.`,
     });
@@ -3926,7 +3912,7 @@ function parseGraphIntFlag(raw: unknown, flag: string): number | undefined {
 function parseGraphDirection(raw: unknown): GraphDirection | undefined {
   if (typeof raw !== "string") return undefined;
   if (raw === "out" || raw === "in" || raw === "both") return raw;
-  throw new FbrainError({
+  throw new BrainError({
     code: "unknown_option",
     message: `--direction must be one of: out | in | both (got ${JSON.stringify(raw)}).`,
   });
@@ -3943,7 +3929,7 @@ function parseGraphEdgeTypes(raw: unknown): GraphEdgeType[] | undefined {
     // unknown type to "mentions" on the WRITE path, which is right there;
     // doing it here would answer a filtered query with the wrong filter.
     if (!(GRAPH_EDGE_TYPE_VALUES as readonly string[]).includes(value)) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "unknown_option",
         message: `--edge-type ${JSON.stringify(entry)} is not a known edge type.`,
         hint: `Expected one of: ${GRAPH_EDGE_TYPE_VALUES.join(", ")}.`,
@@ -3961,7 +3947,7 @@ async function runGraph(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (!(GRAPH_SUBCOMMANDS as readonly string[]).includes(sub)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "unknown_option",
       message: `Unknown graph subcommand: ${sub}`,
       hint: `Expected one of: ${GRAPH_SUBCOMMANDS.join(" | ")}.`,
@@ -4033,12 +4019,12 @@ function requireGraphPositional(
     return null;
   }
   if (positionals.length > need) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message:
         `graph ${sub} takes exactly ${need} positional(s): ${shape} ` +
         `(got ${positionals.length}: ${positionals.join(", ")}).`,
-      hint: `Run \`fbrain graph ${sub} ${shape}\`.`,
+      hint: `Run \`brain graph ${sub} ${shape}\`.`,
     });
   }
   return positionals[0] as string;
@@ -4097,9 +4083,9 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
   // --status / --resume / --add-field pick three mutually exclusive modes,
   // but the dispatch below is if/else if/else — when more than one is set
   // the first branch silently wins and the others' args are dropped:
-  //   fbrain migrate --status --add-field concept urgency String
+  //   brain migrate --status --add-field concept urgency String
   //     → ran --status, silently ignored the add-field args.
-  //   fbrain migrate --resume m-1234 --add-field concept urgency String
+  //   brain migrate --resume m-1234 --add-field concept urgency String
   //     → ran --resume, silently ignored --add-field.
   // Reject the conflict before readConfig so the user can fix the
   // invocation instead of debugging a no-op migration. Same spirit as
@@ -4109,7 +4095,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
   if (values.resume) modes.push("--resume");
   if (values["add-field"]) modes.push("--add-field");
   if (modes.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "migrate_mode_conflict",
       message: `${modes.join(", ")} are mutually exclusive — pick one.`,
     });
@@ -4117,7 +4103,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
 
   // `--default` and `--dry-run` only mean anything under `--add-field` (see
   // COMMAND_HELP.migrate). With `--status` or `--resume` they were silently
-  // dropped — e.g. `fbrain migrate --status --dry-run` ran a normal status
+  // dropped — e.g. `brain migrate --status --dry-run` ran a normal status
   // listing and discarded `--dry-run`. Reject the combo before readConfig
   // so the user can fix the invocation. Same flavor as PR #93 and PR #56.
   if (!values["add-field"]) {
@@ -4125,7 +4111,7 @@ async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
     if (values.default !== undefined) orphans.push("--default");
     if (values["dry-run"]) orphans.push("--dry-run");
     if (orphans.length > 0) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "migrate_flag_requires_add_field",
         message: `${orphans.join(", ")} only ${orphans.length === 1 ? "applies" : "apply"} to --add-field.`,
       });
@@ -4186,7 +4172,7 @@ async function runRaw(args: Argv, verbose: Verbose): Promise<number> {
     return USAGE_ERROR;
   }
   if (positionals.length > 3) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "extra_positional_args",
       message: `raw takes method, path, and optional body (got ${positionals.length}: ${positionals.join(", ")}).`,
     });
@@ -4211,7 +4197,7 @@ function parseRecordType(raw: string | undefined): RecordType | undefined {
   if (raw === undefined) return undefined;
   const normalised = raw.trim().toLowerCase();
   if (isRecordType(normalised)) return normalised;
-  throw new FbrainError({
+  throw new BrainError({
     code: "invalid_type",
     message: `--type must be one of ${RECORD_TYPES.join(" | ")} (got "${raw}").`,
     hint: suggestRecordTypeHint(normalised),
@@ -4258,7 +4244,7 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
   // Bun's process.stdin.isTTY is the same as Node's. In test contexts the
   // stdin stream may already be closed; tolerate that with a try/catch.
   if ((process.stdin as unknown as { isTTY?: boolean }).isTTY) return "";
-  if (process.env.FBRAIN_NO_STDIN === "1") return "";
+  if (process.env.BRAIN_NO_STDIN === "1") return "";
   // We're past the early returns, so a blocking read is about to happen. For
   // callers where stdin is a FALLBACK (the `<type> new` path with no --body),
   // the wait is invisible: an inherited-but-empty pipe never EOFs, so the
@@ -4271,7 +4257,7 @@ async function maybeReadStdin(opts?: { announce?: boolean }): Promise<string> {
     console.error(
       "note: no --body given; reading the record body from piped stdin. " +
         "If nothing is piped (e.g. an inherited-but-empty pipe) this will hang " +
-        "— pass --body or set FBRAIN_NO_STDIN=1 to skip.",
+        "— pass --body or set BRAIN_NO_STDIN=1 to skip.",
     );
   }
   try {
@@ -4298,11 +4284,11 @@ async function initCliSentry(): Promise<CaptureSentryException> {
   }
   const sentry = await import("./observability/sentry.ts");
   await sentry.initSentry({
-    service: "fbrain-cli",
+    service: "brain-cli",
     env: {
       ...process.env,
       OBS_SENTRY_RELEASE:
-        process.env.OBS_SENTRY_RELEASE ?? `fbrain@${pkg.version}`,
+        process.env.OBS_SENTRY_RELEASE ?? `brain@${pkg.version}`,
     },
   });
   return sentry.captureSentryException;

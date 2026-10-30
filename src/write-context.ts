@@ -17,8 +17,8 @@ import type { FieldAliasProfiles } from "./field-alias-transport.ts";
 // LastDB 0.22.4 moved BEHIND capability enforcement (a header-less search now
 // gets `403 {reason:"capability_required"}` where older nodes bypassed reads).
 // It wraps `search` under the capability contract — best-effort replay of the
-// cached grant, then acquire+retry on a genuine rejection — so `fbrain ask` /
-// `fbrain search` and the MCP `fbrain_ask` / `fbrain_search` tools keep working
+// cached grant, then acquire+retry on a genuine rejection — so `brain ask` /
+// `brain search` and the MCP `brain_ask` / `brain_search` tools keep working
 // on an enforcing node. All OTHER reads (get / list / query / raw) still bypass
 // enforcement on the node, so they stay on the plain `newReadClientFromCfg`.
 //
@@ -76,14 +76,14 @@ export type WriteNodeClient = {
 /**
  * Client-side enforcement switch, mirroring the node's `APP_IDENTITY_ENFORCE`.
  * Defaults ON (matching the node, which enforces unless explicitly disabled).
- * Set `FBRAIN_APP_IDENTITY_ENFORCE` to one of false/0/no/off to make fbrain
+ * Set `BRAIN_APP_IDENTITY_ENFORCE` to one of false/0/no/off to make brain
  * skip consent acquisition and send no capability headers — writes then land
  * as NodeOwner on a node that also has enforcement off (dogfood / local-dev /
  * test stacks). The node is the real enforcement boundary; this is the
  * client-side convenience escape hatch.
  */
 export function appIdentityEnforceEnabled(): boolean {
-  const raw = process.env.FBRAIN_APP_IDENTITY_ENFORCE;
+  const raw = process.env.BRAIN_APP_IDENTITY_ENFORCE;
   if (raw !== undefined) {
     const v = raw.trim().toLowerCase();
     return !(v === "false" || v === "0" || v === "no" || v === "off");
@@ -172,7 +172,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
  * delegates straight through to the plain client — get/list/query/raw are not
  * capability-gated on the node, so they stay header-less.
  *
- * Enforcement off (or `FBRAIN_APP_IDENTITY_ENFORCE` unset-to-off) → a plain
+ * Enforcement off (or `BRAIN_APP_IDENTITY_ENFORCE` unset-to-off) → a plain
  * client with no capability headers, exactly like the write factory.
  */
 export function newSearchNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
@@ -262,7 +262,7 @@ export function newWriteClientFromCfg(
   return newWriteNodeClient(opts);
 }
 
-// The search analogue of `newWriteClientFromCfg`: `fbrain ask` / `fbrain search`
+// The search analogue of `newWriteClientFromCfg`: `brain ask` / `brain search`
 // and the post-write vector-index confirmation open a capability-aware search
 // client from config in one line. Returns the same `{ node, session }` shape;
 // callers use `.node`.

@@ -1,5 +1,5 @@
-// `fbrain status <slug>` — read (getter, respects read-verb instinct).
-// `fbrain status <slug> <new-status>` — update.
+// `brain status <slug>` — read (getter, respects read-verb instinct).
+// `brain status <slug> <new-status>` — update.
 
 import { type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
@@ -41,7 +41,7 @@ export type StatusOptions = {
   print?: (line: string) => void;
   // Structured-output sink, mirroring the read/write commands' `onResult`:
   // fires once per successful invocation with the SAME resolved
-  // `type`/`slug`/status the printed line uses, so the MCP `fbrain_status`
+  // `type`/`slug`/status the printed line uses, so the MCP `brain_status`
   // tool's `structuredContent` can't drift from the human text. On the UPDATE
   // path it carries the `status_changed` transition; on the SHOW path (slug,
   // no new status) it carries a `status` read payload. The MCP tool declares
@@ -50,7 +50,7 @@ export type StatusOptions = {
   onResult?: (payload: StatusResult | StatusShowResult) => void;
 };
 
-// The structured payload the MCP `fbrain_status` tool returns in
+// The structured payload the MCP `brain_status` tool returns in
 // `structuredContent` (mirrors the printed `<type> <slug>: <from> → <to>`
 // transition line). `action` is always `status_changed` so an agent can key
 // on the mutation kind uniformly with the other write tools' `action`.

@@ -1,12 +1,12 @@
 // File-backed capability store (0600) for app-side capability storage.
 //
 // Storage is @lastdb/app-sdk's `FileCapabilityStore`: a 0600 file store under
-// `~/.brain/capabilities/` (or legacy `~/.fbrain/capabilities/`), keyed `capabilityStoreKey(appId, nodeUrl)` =
-// `fbrain@<sha256(nodeUrl)[:16]>` with a `boundNode` envelope, so a capability
+// `~/.brain/capabilities/`, keyed `capabilityStoreKey(appId, nodeUrl)` =
+// `brain@<sha256(nodeUrl)[:16]>` with a `boundNode` envelope, so a capability
 // minted by one node is never replayed against another (the SDK's wrong-node
-// guard). This module adapts that store to fbrain's `CapabilityStore`
-// interface (StoredCapability keyed by node URL) and keeps fbrain's on-disk
-// identity: the file fallback lives under the brain data dir (FBRAIN_CAPABILITY_DIR
+// guard). This module adapts that store to brain's `CapabilityStore`
+// interface (StoredCapability keyed by node URL) and keeps brain's on-disk
+// identity: the file fallback lives under the brain data dir (BRAIN_CAPABILITY_DIR
 // honored), at `capabilities/<key>.cap`.
 
 import { createHash } from "node:crypto";
@@ -21,8 +21,8 @@ import type { CapabilityStore, StoredCapability } from "./capability.ts";
 import { brainDataDir } from "./config.ts";
 
 /** Directory holding the file store (and the existing config). */
-export function fbrainDir(): string {
-  const override = process.env.FBRAIN_CAPABILITY_DIR;
+export function brainDir(): string {
+  const override = process.env.BRAIN_CAPABILITY_DIR;
   if (override && override.length > 0) return override;
   return brainDataDir();
 }
@@ -32,13 +32,13 @@ export function fbrainDir(): string {
 // ---------------------------------------------------------------------------
 
 // The default app id used when load/clear are called without a
-// StoredCapability in hand (they only carry a nodeUrl). fbrain is the only
+// StoredCapability in hand (they only carry a nodeUrl). brain is the only
 // app today.
 function defaultAppId(): string {
-  return "fbrain";
+  return "brain";
 }
 
-// Rebuild fbrain's StoredCapability view from an SDK-stored blob. A blob that
+// Rebuild brain's StoredCapability view from an SDK-stored blob. A blob that
 // no longer decodes is still surfaced (with empty derived fields) so the
 // session's own decode + integrity check decides to discard it — the same
 // "corrupt cache is discarded downstream" behavior as before.
@@ -54,7 +54,7 @@ function storedFromBlob(appId: string, nodeUrl: string, blob: string): StoredCap
 }
 
 /**
- * Adapt an SDK capability store to fbrain's CapabilityStore interface.
+ * Adapt an SDK capability store to brain's CapabilityStore interface.
  * Exported for tests (inject any SDK store); production callers use
  * {@link defaultCapabilityStore}.
  */
@@ -84,10 +84,10 @@ export function sdkBackedCapabilityStore(
 
 /**
  * Build the default capability store: the SDK's 0600 file store under
- * brain's data directory, adapted to fbrain's interface.
+ * brain's data directory, adapted to brain's interface.
  */
 export function defaultCapabilityStore(): CapabilityStore {
-  return sdkBackedCapabilityStore(new FileCapabilityStore(fbrainDir()));
+  return sdkBackedCapabilityStore(new FileCapabilityStore(brainDir()));
 }
 
 /**

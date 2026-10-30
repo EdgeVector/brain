@@ -108,7 +108,7 @@ export type GraphTraverseOptions = {
  * Validate a caller-supplied hop count against the hard ceiling.
  *
  * Returns the effective hop count. Throws a plain `Error` with a message the
- * CLI layer wraps in an `FbrainError`; this module stays free of CLI types so
+ * CLI layer wraps in an `BrainError`; this module stays free of CLI types so
  * the MCP surface can reuse it.
  */
 export function resolveMaxHops(requested?: number): number {

@@ -112,7 +112,7 @@ export interface QueryRow {
  * which one is present.
  */
 export interface ConnectOptions {
-    /** Canonical app id this client acts as (e.g. `"fbrain"`). */
+    /** Canonical app id this client acts as (e.g. `"brain"`). */
     appId: string;
     /** HTTP base URL of the node, e.g. `http://127.0.0.1:9101`. */
     baseUrl?: string;
@@ -587,7 +587,7 @@ export interface LoadedSchema {
 }
 /** Descriptor used to resolve an app-owned loaded schema from `/api/schemas`. */
 export interface SchemaDescriptor {
-    /** Owning app namespace, e.g. `fbrain` or `fsituations`. */
+    /** Owning app namespace, e.g. `brain` or `fsituations`. */
     ownerAppId: string;
     /** The schema's declarative `descriptive_name`, e.g. `Situation`. */
     descriptiveName: string;

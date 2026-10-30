@@ -162,7 +162,7 @@ export function resolveAdjacencyWeight(requested?: number): number {
 export function graphBoostEnabledByEnv(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  const raw = env.BRAIN_GRAPH_BOOST ?? env.FBRAIN_GRAPH_BOOST;
+  const raw = env.BRAIN_GRAPH_BOOST;
   if (raw === undefined) return false;
   const normalized = raw.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "on" || normalized === "yes";

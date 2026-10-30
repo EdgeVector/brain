@@ -10,12 +10,12 @@
 //   3. `runWrite(fn)` wraps a write closure and applies the design's 403
 //      contract — discard + re-acquire, retry-once, or surface — transparently.
 //
-// fbrain remains a token carrier: the session never signs. It verifies a
+// brain remains a token carrier: the session never signs. It verifies a
 // cached token's JCS integrity binding (the "or invalid" branch) before reuse,
 // and on a wrong-node 403 discards the per-node-keyed cache and re-acquires.
 
 import {
-  FBRAIN_APP_ID,
+  BRAIN_APP_ID,
   acquireCapability,
   isCapability403Reason,
   reactionFor,
@@ -24,7 +24,7 @@ import {
   type ConsentTransport,
   type StoredCapability,
 } from "./capability.ts";
-import { FbrainError, type CapabilityProvider, type Verbose } from "./client.ts";
+import { BrainError, type CapabilityProvider, type Verbose } from "./client.ts";
 
 type CapabilitySessionOptions = {
   nodeUrl: string;
@@ -52,7 +52,7 @@ export class CapabilitySession {
 
   constructor(opts: CapabilitySessionOptions) {
     this.opts = opts;
-    this.appId = opts.appId ?? FBRAIN_APP_ID;
+    this.appId = opts.appId ?? BRAIN_APP_ID;
   }
 
   /** A provider for newNodeClient — always returns the session's current blob. */
@@ -141,7 +141,7 @@ export class CapabilitySession {
         if (reason === null) throw err; // not a capability 403 — propagate
         const reaction = reactionFor(
           reason,
-          err instanceof FbrainError ? toReactionDetail(err.capabilityDetail) : undefined,
+          err instanceof BrainError ? toReactionDetail(err.capabilityDetail) : undefined,
         );
 
         if (reaction.discardToken) {
@@ -160,11 +160,11 @@ export class CapabilitySession {
         }
 
         // Surface (or exhausted re-acquire/retry budget): rethrow a clear error.
-        throw new FbrainError({
+        throw new BrainError({
           code: `capability_${reason}`,
-          message: reaction.surface ?? `fbrain write rejected: ${reason}.`,
+          message: reaction.surface ?? `brain write rejected: ${reason}.`,
           capabilityReason: reason,
-          ...(err instanceof FbrainError && err.capabilityDetail
+          ...(err instanceof BrainError && err.capabilityDetail
             ? { capabilityDetail: err.capabilityDetail }
             : {}),
         });
@@ -223,7 +223,7 @@ export class CapabilitySession {
         if (reason === null) throw err; // not a capability 403 — propagate
         const reaction = reactionFor(
           reason,
-          err instanceof FbrainError ? toReactionDetail(err.capabilityDetail) : undefined,
+          err instanceof BrainError ? toReactionDetail(err.capabilityDetail) : undefined,
         );
 
         if (reaction.discardToken) {
@@ -240,11 +240,11 @@ export class CapabilitySession {
           continue;
         }
 
-        throw new FbrainError({
+        throw new BrainError({
           code: `capability_${reason}`,
-          message: reaction.surface ?? `fbrain search rejected: ${reason}.`,
+          message: reaction.surface ?? `brain search rejected: ${reason}.`,
           capabilityReason: reason,
-          ...(err instanceof FbrainError && err.capabilityDetail
+          ...(err instanceof BrainError && err.capabilityDetail
             ? { capabilityDetail: err.capabilityDetail }
             : {}),
         });
@@ -271,7 +271,7 @@ export class CapabilitySession {
  * predicate; it means "this node gates search but no capability was presented".
  */
 function isCapabilityRequired(err: unknown): boolean {
-  return err instanceof FbrainError && err.capabilityReason === "capability_required";
+  return err instanceof BrainError && err.capabilityReason === "capability_required";
 }
 
 function capabilityReasonOf(err: unknown): ReturnType<typeof reasonOrNull> {
@@ -279,14 +279,14 @@ function capabilityReasonOf(err: unknown): ReturnType<typeof reasonOrNull> {
 }
 
 function reasonOrNull(err: unknown) {
-  if (err instanceof FbrainError && err.capabilityReason !== undefined) {
+  if (err instanceof BrainError && err.capabilityReason !== undefined) {
     return isCapability403Reason(err.capabilityReason) ? err.capabilityReason : null;
   }
   return null;
 }
 
 function toReactionDetail(
-  d: FbrainError["capabilityDetail"],
+  d: BrainError["capabilityDetail"],
 ): { schema?: string; capabilityId?: string; timestampSkewSecs?: number } | undefined {
   if (!d) return undefined;
   const out: { schema?: string; capabilityId?: string; timestampSkewSecs?: number } = {};

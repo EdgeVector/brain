@@ -1,14 +1,14 @@
-// One-shot agent wiring for fbrain: `fbrain mcp install` (alias `setup`).
+// One-shot agent wiring for brain: `brain mcp install` (alias `setup`).
 //
 // Today a new dev who finishes `bun link` still has to run THREE manual
 // commands to get an AI agent actually USING the brain (the highest-leverage
-// step), surfaced from both `fbrain init`'s next-steps and the README `## MCP`
+// step), surfaced from both `brain init`'s next-steps and the README `## MCP`
 // section:
 //   1. `bun link`                            (puts `brain-mcp` on PATH)
 //   2. `claude mcp add brain brain-mcp`    (registers the MCP server)
-//   3. `fbrain mcp instructions >> CLAUDE.md`(tells the agent to USE it)
+//   3. `brain mcp instructions >> CLAUDE.md`(tells the agent to USE it)
 //
-// `fbrain mcp install` collapses 2 + 3 + 4 (and verifies 1) into one shot:
+// `brain mcp install` collapses 2 + 3 + 4 (and verifies 1) into one shot:
 //   1. Resolve the `brain-mcp` entrypoint on PATH (reusing doctor's
 //      `mcp-entrypoint` resolver). If absent, print the exact `bun link` fix
 //      and exit non-zero — we do NOT run `bun link` for the user (it depends on
@@ -18,15 +18,15 @@
 //      success (idempotent — detect/skip, never error). If `claude` is NOT on
 //      PATH, print the exact command for the user to run (plus the path-based
 //      form for a source checkout without `bun link`, matching the README).
-//   3. Append the `fbrain mcp instructions` block to ./CLAUDE.md (configurable
+//   3. Append the `brain mcp instructions` block to ./CLAUDE.md (configurable
 //      via `--claude-md <path>`), idempotently — skip if the block is already
-//      present (stable marker: the `## fbrain (persistent memory)` heading).
+//      present (stable marker: the `## brain (persistent memory)` heading).
 //   4. Add a Claude Code SessionStart hook to ./.claude/settings.json
 //      (configurable via `--claude-settings <path>`), idempotently, so
-//      strong-confidence fbrain matches are injected proactively at session
+//      strong-confidence brain matches are injected proactively at session
 //      start.
 //
-// Gating mirrors `fbrain init --grant-consent` exactly: the side effects (the
+// Gating mirrors `brain init --grant-consent` exactly: the side effects (the
 // `claude mcp add` shell-out + the CLAUDE.md/settings writes) are prompted
 // unless `--yes` is passed; the flag IS the explicit approval. A final pointer to
 // `brain doctor --mcp` proves the agent surface boots.
@@ -48,8 +48,8 @@ import { resolvePrintSink } from "../format.ts";
 // Stable marker for the appended instructions block — the first heading of
 // buildAgentInstructionsBlock(). If it's already in the target file we skip the
 // append so re-running `mcp install` never duplicates the block.
-export const INSTRUCTIONS_MARKER = "## fbrain (persistent memory)";
-export const SESSION_START_HOOK_COMMAND = "fbrain hook session-start";
+export const INSTRUCTIONS_MARKER = "## brain (persistent memory)";
+export const SESSION_START_HOOK_COMMAND = "brain hook session-start";
 
 const CLAUDE_BIN = "claude";
 const MCP_ENTRYPOINT = "brain-mcp";
@@ -108,12 +108,12 @@ export async function runMcpInstall(
   // exact fix instead of registering a server the agent can't reach. The global
   // `bun add -g` install puts `brain-mcp` on PATH alongside `brain`; if it's
   // missing the primary remedy is to (re)install. We do NOT run `bun link` for
-  // the user: it only applies to a contributor checkout (cwd = the fbrain repo).
+  // the user: it only applies to a contributor checkout (cwd = the brain repo).
   const entrypoint = which(MCP_ENTRYPOINT);
   if (entrypoint === null) {
     print(`[mcp install] \`${MCP_ENTRYPOINT}\` is not on PATH — nothing to register.`);
-    print(`  Fix: (re)install brain — \`bun add -g github:EdgeVector/brain\` puts \`${MCP_ENTRYPOINT}\` on PATH alongside \`fbrain\` — then re-run \`fbrain mcp install\`.`);
-    print(`  Contributing from a source checkout? Run \`bun link\` in the brain repo instead, then re-run \`fbrain mcp install\`.`);
+    print(`  Fix: (re)install brain — \`bun add -g github:EdgeVector/brain\` puts \`${MCP_ENTRYPOINT}\` on PATH alongside \`brain\` — then re-run \`brain mcp install\`.`);
+    print(`  Contributing from a source checkout? Run \`bun link\` in the brain repo instead, then re-run \`brain mcp install\`.`);
     print(`  From a source checkout you don't want to link, use the path-based form: \`claude mcp add ${MCP_SERVER_NAME} bun "$(realpath src/mcp/main.ts)"\`.`);
     return { code: 1 };
   }
@@ -159,7 +159,7 @@ export async function runMcpInstall(
   return { code: 0 };
 }
 
-// Register the fbrain MCP server with Claude Code. If `claude` is on PATH we
+// Register the brain MCP server with Claude Code. If `claude` is on PATH we
 // shell out to `claude mcp add brain brain-mcp` and treat an
 // already-registered result as success (idempotent — detect/skip, don't error).
 // If `claude` is NOT on PATH we print the exact command for the user (plus the
@@ -183,7 +183,7 @@ function registerWithClaude(
     return;
   }
   // `claude mcp add` errors when the server name already exists. That's not a
-  // failure for us — the desired end state (fbrain registered) already holds —
+  // failure for us — the desired end state (brain registered) already holds —
   // so detect it and report a skip rather than erroring. Match on the combined
   // output so we tolerate minor wording drift.
   const combined = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;

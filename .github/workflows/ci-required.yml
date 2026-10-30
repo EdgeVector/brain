@@ -50,40 +50,39 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Compile + sign fbrain-mcp
+      - name: Compile + sign brain-mcp
         run: bun run build:mcp
 
       - name: Verify signature matches manifest bundle id
         run: |
-          codesign -dv dist/fbrain-mcp 2>&1 | tee /tmp/codesign.txt
-          grep -q 'Identifier=com.edgevector.fbrain' /tmp/codesign.txt
-          codesign --verify --verbose dist/fbrain-mcp
+          codesign -dv dist/brain-mcp 2>&1 | tee /tmp/codesign.txt
+          grep -q 'Identifier=com.edgevector.brain' /tmp/codesign.txt
+          codesign --verify --verbose dist/brain-mcp
 
       - name: Check the compiled MCP surface
         env:
           BRAIN_CONFIG: ${{ runner.temp }}/brain-artifact-absent/config.json
-          FBRAIN_CONFIG: ${{ runner.temp }}/brain-artifact-absent/config.json
-          FBRAIN_FOLDDB_SOCKET: ${{ runner.temp }}/brain-artifact-absent/node.sock
+          BRAIN_FOLDDB_SOCKET: ${{ runner.temp }}/brain-artifact-absent/node.sock
           LASTDB_HOME: ${{ runner.temp }}/brain-artifact-absent/node-home
         run: |
           test ! -e "$BRAIN_CONFIG"
-          test ! -e "$FBRAIN_FOLDDB_SOCKET"
+          test ! -e "$BRAIN_FOLDDB_SOCKET"
           test ! -e "$LASTDB_HOME"
           printf '%s\n%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-            | ./dist/fbrain-mcp 2>/tmp/mcp-stderr.log > /tmp/mcp-out.txt
+            | ./dist/brain-mcp 2>/tmp/mcp-stderr.log > /tmp/mcp-out.txt
           cat /tmp/mcp-stderr.log
           n=$(bun -e 'const ls=require("fs").readFileSync("/tmp/mcp-out.txt","utf8").trim().split("\n"); const r=JSON.parse(ls[1]); const names=r.result.tools.map(t=>t.name); console.log(names.join(",")); process.stderr.write(String(names.length));' 2>/tmp/mcp-count.txt)
           echo "tools: $n"
-          expected=$(bun -e 'import { FBRAIN_MCP_TOOL_NAMES } from "./src/mcp/tools.ts"; process.stdout.write(String(FBRAIN_MCP_TOOL_NAMES.length));')
+          expected=$(bun -e 'import { BRAIN_MCP_TOOL_NAMES } from "./src/mcp/tools.ts"; process.stdout.write(String(BRAIN_MCP_TOOL_NAMES.length));')
           test "$(cat /tmp/mcp-count.txt)" = "$expected"
 
-      - name: Upload fbrain-mcp artifact
+      - name: Upload brain-mcp artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fbrain-mcp
-          path: dist/fbrain-mcp
+          name: brain-mcp
+          path: dist/brain-mcp
           if-no-files-found: error
 
   ci-required:

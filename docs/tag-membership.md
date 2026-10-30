@@ -9,7 +9,7 @@ Tag membership and backlink membership use one schema,
 `TagMembership_hashrange_v1` (config key `__tagmember__`).
 
 - Hash `tmb_h`: `__tagidx__<sha256(tag)>`. A backlink target uses the tag
-  `__fbrain_backlink__:<target slug>`.
+  `__brain_backlink__:<target slug>`.
 - Range `tmb_r`: the member key `type:slug`.
 - One small row per (tag, member). Adding a member is one create. Removing a
   member is one delete. A read is one range query under the hash.
@@ -124,7 +124,7 @@ excludes such a record.
 
 A cut snapshot is not a record, and the types enforce it. A reader gets an
 `IndexSnapshot`: a whole record, or a `SnapshotSummary` that has no `body` and is
-not assignable to `FbrainRecord`. To get the record, complete it with a keyed
+not assignable to `BrainRecord`. To get the record, complete it with a keyed
 read of the product schema (`completeSnapshots`, `readFullRecords` in
 `record.ts`). That read retries an empty answer (a known flake) and then THROWS
 `index_row_incomplete` or skips; it never returns the head as if it were the

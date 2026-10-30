@@ -9,8 +9,8 @@ if (process.env.GITHUB_ACTIONS !== "true" || process.env.LASTDB_ISOLATED_COPY !=
 const [phase, settingsPath, outputPath] = process.argv.slice(2);
 if (!phase || !settingsPath || !outputPath) throw Error("Expected phase, settings, and output paths");
 const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
-const source = settings.label === "before" || (["setup", "seed"].includes(phase) && settings.label !== "fresh")
-  ? settings.baseline : settings.candidate;
+// Each arm uses its own app on its own fresh home. No arm converts another app's home.
+const source = settings.label === "before" ? settings.baseline : settings.candidate;
 const load = (root, name) => import(join(resolve(root), "src", name + ".ts"));
 const require = (condition, message) => { if (!condition) throw Error(message); };
 const quiet = () => {};
@@ -84,7 +84,7 @@ async function client(root, cfg, canonicalVocabulary = false) {
 }
 
 async function setup() {
-  if (settings.label === "fresh") {
+  if (settings.label === "after") {
     const { runInit } = await load(settings.candidate, "commands/init");
     const result = await runInit({ configPath: settings.config, nodeUrl: "http://127.0.0.1", nodeSocketPath: settings.socket,
       bootstrapName: "CI Brain named-key operations", print: quiet });
@@ -144,17 +144,9 @@ async function run() {
     require(receipt.durability === "durable", "The initial generated counters lack a durable receipt");
     return;
   }
-  const root = phase === "seed" && settings.label !== "fresh" ? settings.baseline : source;
+  const root = source;
   const cfg = JSON.parse(readFileSync(settings.config, "utf8")), node = await client(root, cfg);
   const r = await load(root, "record");
-  if (phase === "convert") {
-    const { convertMultiKey } = await load(settings.candidate, "commands/multi-key-convert");
-    verification = await convertMultiKey(await client(settings.candidate, cfg), cfg,
-      { apply: true, maintenance: true, configPath: settings.config });
-    require(verification.phase === "complete" && verification.selected_keys === verification.expected_selected_keys,
-      "The app conversion is incomplete");
-    return;
-  }
   if (phase === "seed" || phase === "create") {
     const acceptedWrites = [];
     for (const item of corpus) {
@@ -366,7 +358,6 @@ async function primaryRows(node, cfg, numbers) {
 }
 
 let requests = 0, responseBytes = 0, profile = new Map();
-const conversionMetadata = Object.create(null);
 globalThis.fetch = new Proxy(globalThis.fetch, {
   async apply(target, receiver, args) {
     requests++;
@@ -375,19 +366,6 @@ globalThis.fetch = new Proxy(globalThis.fetch, {
     const label = JSON.stringify({ path: String(args[0]).split("?")[0], schema: request.schema_name,
       fields: request.fields, key_name: request.key_name, filter: Object.keys(request.filter ?? {})[0], response_format: request.response_format });
     const response = await Reflect.apply(target, receiver, args);
-    // Preserve existing metadata replies only in this untimed conversion process.
-    // No request is added; all homes and inputs belong to the hosted CI run.
-    if (phase === "convert") {
-      const path = new URL(String(args[0]), "http://localhost").pathname;
-      if (path.startsWith("/api/schema/") && response.status === 200)
-        conversionMetadata[path] = await response.clone().json();
-      if (path === "/api/db/alternate-keys" && response.status >= 400 && request.action !== "app_status") {
-        const reason = (await response.clone().text()).slice(0, 4096);
-        verification = { maintenance_error: { action: request.action, status: response.status, body: reason },
-          schema_metadata: conversionMetadata };
-        console.error(`Actual generated-home maintenance ${request.action}: HTTP ${response.status}: ${reason}`);
-      }
-    }
     const reader = response.body?.getReader();
     if (!reader) return response;
     let bytes = 0;

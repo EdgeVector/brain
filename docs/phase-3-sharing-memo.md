@@ -3,7 +3,7 @@
 **Date:** 2026-05-23
 **Spike duration:** ~2h (cold Rust build for the second node dominated wall time; active HTTP work was ~20min)
 **fold ref:** same monorepo SHA used in Phase 0/1/2 (built locally at `/Users/tomtang/code/edgevector/fold`)
-**Spike nodes:** `/tmp/fbrain-share-spike-A` (port 9103, schema 9104, user_hash `b75af16dca4e6406bd10f42aeb215288`) and `/tmp/fbrain-share-spike-B` (port 9105, schema 9106, user_hash `8c83b55e4452d77693aa97c563c33fcb`) — both torn down at end of spike
+**Spike nodes:** `/tmp/brain-share-spike-A` (port 9103, schema 9104, user_hash `b75af16dca4e6406bd10f42aeb215288`) and `/tmp/brain-share-spike-B` (port 9105, schema 9106, user_hash `8c83b55e4452d77693aa97c563c33fcb`) — both torn down at end of spike
 
 ## VERDICT: MEMO — cross-node data flow is structurally unprovable on a localhost-only spike
 
@@ -27,7 +27,7 @@ Every `/api/sharing/*` endpoint requires `X-User-Hash`. Missing the header gets 
 ```json
 {
   "recipient_pubkey": "<base64 Ed25519, must be exactly 32 bytes decoded>",
-  "recipient_display_name": "fbrain-B",
+  "recipient_display_name": "brain-B",
   "scope": { "Schema": "Design" }
 }
 ```
@@ -44,7 +44,7 @@ Every `/api/sharing/*` endpoint requires `X-User-Hash`. Missing the header gets 
   "rule": {
     "rule_id": "b3374e44-8745-407d-be24-75cd43b2fc86",
     "recipient_pubkey": "0JgE4ced8l6tBMyLjtFhvMnl2lLWhls+RupSI4vvU6Y=",
-    "recipient_display_name": "fbrain-B",
+    "recipient_display_name": "brain-B",
     "scope": { "Schema": "Design" },
     "share_prefix": "share:b75af16dca4e6406bd10f42aeb215288:8c83b55e4452d77693aa97c563c33fcb",
     "share_e2e_secret": [36, 26, 207, 30, /* 32 bytes */],
@@ -108,7 +108,7 @@ The contact book is populated only via the discovery connection flow between two
 {
   "invite": {
     "sender_pubkey": "wGMj0qkayHDiCwz1qEXh9MZY7WIXbmXzXYh6XBZjVT8=",
-    "sender_display_name": "fbrain-A",
+    "sender_display_name": "brain-A",
     "share_prefix": "share:b75af16dca4e6406bd10f42aeb215288:8c83b55e4452d77693aa97c563c33fcb",
     "share_e2e_secret": [36, 26, 207, 30, /* 32 bytes */],
     "scope_description": "Design schema cross-node share"
@@ -172,11 +172,11 @@ or
 }
 ```
 
-Contact book + domain policy posture. The 13 `personal` schemas are auto-loaded fold-shipped defaults (org/contact/personal-info schemas; fbrain doesn't touch them).
+Contact book + domain policy posture. The 13 `personal` schemas are auto-loaded fold-shipped defaults (org/contact/personal-info schemas; brain doesn't touch them).
 
 ### `GET /api/sharing/roles`
 
-**Response (200):** A dictionary of seven built-in role names mapping to `{description, domain, name, tier}` — `acquaintance`, `close_friend`, `doctor`, `family`, `financial_advisor`, `friend`, `trainer`. fbrain's `Design`/`Task` schemas don't currently use these.
+**Response (200):** A dictionary of seven built-in role names mapping to `{description, domain, name, tier}` — `acquaintance`, `close_friend`, `doctor`, `family`, `financial_advisor`, `friend`, `trainer`. brain's `Design`/`Task` schemas don't currently use these.
 
 ### Other routes (touched but not exercised end-to-end)
 
@@ -246,17 +246,17 @@ This sidesteps fold's sync engine entirely — it's basically a hand-rolled brid
 
 So while you can write code that satisfies "B has a record that originated on A", it's not testing fold_db sharing.
 
-## Recommendation for FBRAIN_PLAN.md Workstream
+## Recommendation for BRAIN_PLAN.md Workstream
 
 The production sharing plan should be aware that fold_db sharing is **infrastructure-coupled**:
 
 1. **Sharing has two layers, both required.**
-   - *Metadata layer* (rules, invites, subscriptions): works locally, fully testable on a single machine without cloud infra. fbrain can implement the metadata side end-to-end without depending on anything remote.
-   - *Transport layer* (encrypted log replication via S3 + Auth Lambda + discovery): requires deployed cloud infra. fbrain cannot drive this in tests without standing up — or pointing at — fold's exemem service.
+   - *Metadata layer* (rules, invites, subscriptions): works locally, fully testable on a single machine without cloud infra. brain can implement the metadata side end-to-end without depending on anything remote.
+   - *Transport layer* (encrypted log replication via S3 + Auth Lambda + discovery): requires deployed cloud infra. brain cannot drive this in tests without standing up — or pointing at — fold's exemem service.
 
 2. **Integration tests for sharing require either** (a) a deployed dev exemem stack, or (b) a hand-rolled S3 emulator + Auth Lambda mock. (a) is probably what production wants anyway; (b) is overkill for a CLI prototype.
 
-3. **The CLI should distinguish "rule created" from "share active".** A naive `fbrain share <slug> --to <user_hash>` that creates a ShareRule and prints "done" misrepresents what happened. The data won't actually move until sync is configured. A real `fbrain share` command should:
+3. **The CLI should distinguish "rule created" from "share active".** A naive `brain share <slug> --to <user_hash>` that creates a ShareRule and prints "done" misrepresents what happened. The data won't actually move until sync is configured. A real `brain share` command should:
    - Check `GET /api/sharing/exemem-status`; require `connected:true` before claiming a share will actually work.
    - Create the ShareRule via `POST /api/sharing/rules`.
    - Attempt `POST /api/sharing/invite` (the discovery-mediated path); fall back to printing the JSON invite for manual delivery on 400.
@@ -273,5 +273,5 @@ The production sharing plan should be aware that fold_db sharing is **infrastruc
 
 - Both nodes killed (`kill <pids>`); confirmed no orphan `folddb_server` processes remain (memory `project_kanban_orphan_folddb_server.md`).
 - `~/.folddb-slots/9103.json` and `~/.folddb-slots/9105.json` removed.
-- `/tmp/fbrain-share-spike-A` and `/tmp/fbrain-share-spike-B` directories removed.
+- `/tmp/brain-share-spike-A` and `/tmp/brain-share-spike-B` directories removed.
 - Daily node (`/tmp/dogfood-2026-05-23/home` on 9101) untouched.

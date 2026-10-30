@@ -24,23 +24,19 @@ The app requires a durable receipt before it reports a durable write.
 
 ## Existing app data
 
-CAUTION: Existing app data requires explicit conversion before the new reader starts.
+CAUTION: Existing app data moves to this release only by the home copy (EdgeVector/last-stack#377). This release has no in-place conversion.
 
-The steps, the flags, and the required LastDB release are in `docs/multi-key-schemas.md`.
-
-The converter uses the type directory and exact counts as the membership source.
-It checks each expected key and the count guard.
-It retains record values, stored bodies, and canonical field definitions.
-It changes the local schema ownership and adds the named keys.
+The home copy reads the old home and writes a new home. The old home stays unchanged.
+The steps and the name mapping are in `docs/multi-key-schemas.md`.
 Normal initialization creates the new layout directly.
 Source changes do not authorize a change to the primary database or its archive.
 
 ## CI measurements
 
 The Brain read workflow compares exact app and daemon revisions.
-The earlier app creates equal generated homes on the compatible daemon.
-The candidate explicitly converts its home before the native daemon starts.
-A separate operational arm uses normal initialization on a new generated home.
+The earlier app creates its generated home on the compatible daemon.
+This app uses normal initialization on its own generated home on the removal daemon.
+No arm converts a home in place. The comparison does not measure the home copy.
 
 Read measurements retain 1,000 and 10,000 records, three paired repeats,
 one restart call per operation, and five subsequent warm calls.

@@ -4,13 +4,13 @@
 // (`fold_dev_node/sdk/typescript/src/jcs.ts`) — the same canonicalizer every
 // FoldDB app uses, pinned byte-for-byte against the Rust
 // `app_identity_crypto::canonicalize` golden vectors
-// (`fold/app_identity_crypto/tests/golden_vectors.rs`). fbrain's
+// (`fold/app_identity_crypto/tests/golden_vectors.rs`). brain's
 // `test/unit/jcs.test.ts` keeps reproducing those vectors through this module
-// so any SDK drift from the Rust canonicalizer fails fbrain's suite too —
+// so any SDK drift from the Rust canonicalizer fails brain's suite too —
 // the envelope `payload_hash` is `sha256(JCS(payload))`, so drift here would
-// break every capability-integrity check fbrain performs.
+// break every capability-integrity check brain performs.
 //
-// This module is a re-export shim so fbrain call sites keep one import
+// This module is a re-export shim so brain call sites keep one import
 // surface (`src/jcs.ts`) for canonicalization.
 
 export { canonicalize, canonicalizeBytes, JcsError } from "@lastdb/app-sdk";

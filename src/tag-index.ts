@@ -41,7 +41,7 @@
 // to the legacy row. `brain init` is the only place that registers the schema.
 
 import {
-  FbrainError,
+  BrainError,
   type BatchMutationOp,
   type NodeClient,
   type QueryRow,
@@ -53,7 +53,7 @@ import {
   arrayStringField,
   nowIso,
   TOMBSTONE_TAG,
-  type FbrainRecord,
+  type BrainRecord,
 } from "./record.ts";
 import {
   RECORD_TYPES,
@@ -108,7 +108,7 @@ export type TagIndexRecord = {
   members: string[];
 };
 
-export type TaggedRecord = { type: RecordType; record: FbrainRecord };
+export type TaggedRecord = { type: RecordType; record: BrainRecord };
 
 /** One membership change: add or remove `member` under `tag`. */
 export type TagMemberChange = {
@@ -425,7 +425,7 @@ function emptyLegacyStamp(memberHash: string, tag: string, legacy: LegacyRow): B
 
 function isPersistQueueFull(error: unknown): boolean {
   return (
-    error instanceof FbrainError &&
+    error instanceof BrainError &&
     error.code === "node_http_503" &&
     error.message.includes("persist_queue_full")
   );
@@ -958,7 +958,7 @@ export async function resolveRecordsByTag(
       type: RecordType,
       schemaHash: string,
       slug: string,
-    ) => Promise<FbrainRecord | null>;
+    ) => Promise<BrainRecord | null>;
     schemaHashFor: (type: RecordType) => string;
   },
 ): Promise<TaggedRecord[] | null> {

@@ -1,17 +1,17 @@
 // Stored list pages. One page is one HashRangeKey on blp_page.
 // backlinkIndexTag and backlinkTargetSlugs still name the old membership layout.
 
-import { FbrainError, type NodeClient } from "./client.ts";
+import { BrainError, type NodeClient } from "./client.ts";
 import { HEAD_RANGE } from "./list-page.ts";
 import {
   normalizeSlug,
   parseGenericLinkTag,
   wikiLinkSlugs,
-  type FbrainRecord,
+  type BrainRecord,
 } from "./record.ts";
 import { type RecordType } from "./schemas.ts";
 
-const BACKLINK_INDEX_TAG_PREFIX = "__fbrain_backlink__:";
+const BACKLINK_INDEX_TAG_PREFIX = "__brain_backlink__:";
 
 const PAGE_BYTE_CAP = 8 * 1024;
 const PAGE_LIMIT_CAP = 100;
@@ -36,7 +36,7 @@ export function pageBackfill(hash: string, source: string): string {
 
 export function pageRangeOrThrow(pageId: string): string {
   if (pageId === HEAD_RANGE || PAGE_ID.test(pageId)) return pageId;
-  throw new FbrainError({
+  throw new BrainError({
     code: "invalid_page",
     message: `page id ${pageId} is not a list page id`,
     hint: "Use __head__ or a page id of p plus eight digits.",
@@ -112,7 +112,7 @@ export function backlinkIndexTag(targetSlug: string): string {
 }
 
 export function backlinkTargetSlugs(
-  record: FbrainRecord,
+  record: BrainRecord,
   sourceType: RecordType,
 ): string[] {
   const targets = new Set<string>();

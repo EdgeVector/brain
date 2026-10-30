@@ -1,7 +1,7 @@
 /**
  * `ownerClient` — the ergonomic entry point for OWNER / HOST-context apps.
  *
- * Some apps (fbrain, fsituations, and other first-party host tools) run in the
+ * Some apps (brain, fsituations, and other first-party host tools) run in the
  * node OWNER's own context: they authenticate with an `X-User-Hash` identity
  * header only, never go through the consent/capability flow, and resolve their
  * OWN socket path from their config. For them the async {@link connect} does not

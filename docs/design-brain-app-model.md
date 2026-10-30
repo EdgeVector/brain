@@ -1,17 +1,17 @@
-# Design — fbrain's app model: attestation-scoped app (Model C)
+# Design — brain's app model: attestation-scoped app (Model C)
 
 **Date:** 2026-06-20
 **Owner:** Tom Tang
-**Status:** Decided — **Model C (attestation-scoped app, no OS jail).** fbrain
+**Status:** Decided — **Model C (attestation-scoped app, no OS jail).** brain
 graduates from a trusted owner-process into a scoped folddb *app*, but does
 **not** adopt the `folddb app run` OS sandbox. Migration is phased (below);
 this doc is the decision record + plan, not the migration itself.
 
 ## TL;DR
 
-fbrain runs today as the node **owner** — it connects over the owner control
+brain runs today as the node **owner** — it connects over the owner control
 socket, does owner-session attestation, and `init` calls owner-only verbs. That
-is honest for a first-party tool, but fbrain is meant to be *the* reference
+is honest for a first-party tool, but brain is meant to be *the* reference
 third-party app on fold_db, so it should eat the platform's own app-identity dog
 food rather than attest as node-owner.
 
@@ -31,18 +31,18 @@ capability-enforced, and at-rest confidentiality is a crypto property. (C) is
 cross-platform (no macOS-Seatbelt dependency) and keeps MCP-over-stdio trivial
 (the agent launches the signed binary directly; no `folddb app run` parent). The
 one thing (B) adds over (C) — runtime containment of a compromised/RCE'd binary
-— is not fbrain's threat model. (B) remains opt-in hardening the platform can
-offer high-risk third-party apps; fbrain does not depend on it.
+— is not brain's threat model. (B) remains opt-in hardening the platform can
+offer high-risk third-party apps; brain does not depend on it.
 
-## Where fbrain is today (code-verified, dogfood run 31, 2026-06-16)
+## Where brain is today (code-verified, dogfood run 31, 2026-06-16)
 
-fbrain runs as the **node OWNER**, not as a sandboxed app:
+brain runs as the **node OWNER**, not as a sandboxed app:
 
-- No `folddb.toml` manifest and no `[code_signature]` anywhere in the fbrain repo.
-- It connects over the **owner control socket** (`FBRAIN_FOLDDB_SOCKET` →
+- No `folddb.toml` manifest and no `[code_signature]` anywhere in the brain repo.
+- It connects over the **owner control socket** (`BRAIN_FOLDDB_SOCKET` →
   `folddb.sock` inside the data dir) and does **owner-session attestation** (the
   app-isolation flip, fold#739 — `src/client.ts:546`, `src/commands/init.ts:332`),
-  plus a one-time `folddb consent grant fbrain`.
+  plus a one-time `folddb consent grant brain`.
 - `init` calls **owner-only verbs**: `/api/schemas/load` and pairing-code mint
   over the control socket.
 
@@ -62,7 +62,7 @@ The OS sandbox is a different mechanism
 - `folddb app install` — verifies the app binary against the manifest's
   `[code_signature]`, registers the namespace + code requirement, grants consent.
 
-fbrain uses **none** of `app install` / `app run` / the data-plane socket today.
+brain uses **none** of `app install` / `app run` / the data-plane socket today.
 
 ## Rationale — why isolation does not need the jail
 
@@ -93,21 +93,21 @@ So real isolation is achieved by (C): the privilege boundary is structural,
 namespace isolation is via capabilities, and disk confidentiality is via
 encryption.
 
-### Additional reasons (C) is the right destination for fbrain
+### Additional reasons (C) is the right destination for brain
 
 - **Cross-platform.** (C) has no macOS-Seatbelt dependency. (B)'s jail is
   macOS-only today (Linux is a Phase-3 TODO) and carries the fail-open
   un-canonicalized-subpath trap.
 - **MCP-over-stdio stays trivial.** Under (C) the agent's MCP command launches
   the signed binary directly. Under (B) it would become `folddb app run <signed
-  fbrain-mcp binary> --data-dir <dir> -- mcp` — folddb is the launching parent,
-  the agent pipes JSON-RPC through it → `sandbox-exec` → fbrain-mcp. (MCP *does*
+  brain-mcp binary> --data-dir <dir> -- mcp` — folddb is the launching parent,
+  the agent pipes JSON-RPC through it → `sandbox-exec` → brain-mcp. (MCP *does*
   survive the jail — `folddb app run` inherits stdio straight through,
   `app_runtime/macos.rs:208-219` — but (C) avoids the launcher entirely.)
-- **(A) is not the destination.** Staying owner-process keeps fbrain attesting as
+- **(A) is not the destination.** Staying owner-process keeps brain attesting as
   node-owner, which contradicts its purpose as the reference third-party app. (A)
   remains the honest *label* for today's shipped behavior — documented in the
-  parallel interim-distribution card — but it is not where fbrain is going.
+  parallel interim-distribution card — but it is not where brain is going.
 
 ## What only (B) adds over (C)
 
@@ -117,28 +117,28 @@ Attestation proves identity *at launch*, not runtime behavior.
 
 Threat-model decision:
 
-- honest-but-overreaching / buggy apps → **(C) suffices** (fbrain: first-party
+- honest-but-overreaching / buggy apps → **(C) suffices** (brain: first-party
   authored, honest-but-buggy);
 - actively-malicious / exploitable binaries → want **(B)**.
 
-fbrain's threat model is the former, so (C) is the default and (B) is treated as
+brain's threat model is the former, so (C) is the default and (B) is treated as
 opt-in hardening the platform *offers* high-risk third-party apps.
 
 ## Phased migration plan (C)
 
 Each phase below is filed as a follow-up fkanban card. Implementation spans both
-**EdgeVector/fbrain** and **EdgeVector/fold**.
+**EdgeVector/brain** and **EdgeVector/fold**.
 
-1. **Manifest.** Add `folddb.toml` with `[code_signature]` to the fbrain repo.
-2. **Signed binary.** `bun build --compile` → a single signed `fbrain-mcp`
+1. **Manifest.** Add `folddb.toml` with `[code_signature]` to the brain repo.
+2. **Signed binary.** `bun build --compile` → a single signed `brain-mcp`
    binary (the jail-free app surface) + signing wiring. The app surface must be a
    compiled binary, not `bun run src/cli.ts`.
 3. **Socket split.** `init` / consent stays an **OWNER** step run out-of-band on
    the owner control socket; steady-state reads/writes move to the **app
    data-plane socket** (`FOLDDB_SOCKET_PATH`) as the scoped app principal. Audit
    which verbs are owner-only — `init`'s `/api/schemas/load`, pairing-code mint,
-   self-serving consent — vs app-scoped — the `fbrain_*` namespace CRUD, all
-   allowed. (fbrain already encodes this split as the `app_in_sandbox` 403,
+   self-serving consent — vs app-scoped — the `brain_*` namespace CRUD, all
+   allowed. (brain already encodes this split as the `app_in_sandbox` 403,
    `src/client.ts:782`.)
 4. **Install + restricted-socket connect.** `folddb app install` wiring (manifest
    + `code_requirement` registration + consent) and a per-app
@@ -152,11 +152,11 @@ Each phase below is filed as a follow-up fkanban card. Implementation spans both
 ## Scope of this card
 
 This card delivers the design doc and files the phase cards. There is **no
-code/behavior change in fbrain beyond this document.**
+code/behavior change in brain beyond this document.**
 
 ## References
 
-- fkanban card: `fbrain-sandboxed-app-design` (the decision + reframe context).
+- fkanban card: `brain-sandboxed-app-design` (the decision + reframe context).
 - App-identity integration (client half): [`app-identity-integration.md`](./app-identity-integration.md).
 - fold app-isolation invariants: `fold_db_node/src/server/{uds_router.rs,app_isolation_invariants.rs}`,
   `app_runtime/{mod.rs,macos.rs}`, `app_registry.rs`; fold#739/#857/#869/#870/#873.

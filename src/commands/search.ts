@@ -303,7 +303,7 @@ export async function searchCmd(opts: SearchOptions): Promise<void> {
   const trimmed = ranked.hits;
   const showWeakNote = trimmed.some((hit) => hit.confidence === "weak");
   const weakMatchNote = opts.agent
-    ? `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or use the \`fbrain_ask\` tool.`
+    ? `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or use the \`brain_ask\` tool.`
     : `note:  no strong matches for "${opts.query}" — showing closest by similarity. Try different terms or \`brain ask ${opts.query}\`.`;
 
   if (trimmed.length === 0) {

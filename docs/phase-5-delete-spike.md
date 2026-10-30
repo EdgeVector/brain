@@ -1,4 +1,4 @@
-# fbrain Phase 5 delete spike — fold_db append-only delete
+# brain Phase 5 delete spike — fold_db append-only delete
 
 **CURRENT 2026-09-10:** LastDB native Delete now converges tip absence. This
 spike is the 2026-05-23 probe. Do not treat the verdict below as live product
@@ -17,20 +17,20 @@ A later get misses.
 
 The orchestrator was therefore right that "the delete returned 200" — it did, and the server-side behavior was the documented one — and wrong that the contradiction was a caching artifact. There is no cache to invalidate; the record is still on disk.
 
-For fbrain, this means a "real" `fbrain delete <slug>` cannot rely on fold_db to remove anything. The CLI must implement a soft-delete workaround at the fbrain layer that:
+For brain, this means a "real" `brain delete <slug>` cannot rely on fold_db to remove anything. The CLI must implement a soft-delete workaround at the brain layer that:
 
 1. Overwrites every user-visible field with sentinel/empty values via an `update` mutation.
-2. Marks the record with a tombstone tag (`__fbrain_deleted__`) so all fbrain read paths can filter it out at the client layer.
+2. Marks the record with a tombstone tag (`__brain_deleted__`) so all brain read paths can filter it out at the client layer.
 3. Also fires the fold_db `mutation_type=delete` for symbolic intent and to populate the sync-log marker (forward-compat — see "Follow-up to file" below).
 4. Verifies post-delete by reading the record back and asserting the tombstone tag is present.
 
-The result: `fbrain get`, `fbrain list`, `fbrain status`, `fbrain link`, and `fbrain search` all behave as if the record were gone (because all of them resolve through `findBySlug` / `listRecords`, and those filter tombstoned records). Re-creating the same slug with `fbrain design new <slug>` (no `--force`) works because the tombstone makes the slug "look free" to the duplicate-check.
+The result: `brain get`, `brain list`, `brain status`, `brain link`, and `brain search` all behave as if the record were gone (because all of them resolve through `findBySlug` / `listRecords`, and those filter tombstoned records). Re-creating the same slug with `brain design new <slug>` (no `--force`) works because the tombstone makes the slug "look free" to the duplicate-check.
 
-The slug itself, the molecule, the prior atoms, and the per-mutation sync-log entries are all retained on disk. fbrain doesn't pretend otherwise — the `deleted <type> <slug>` success line names this as a soft-delete and points back to this doc.
+The slug itself, the molecule, the prior atoms, and the per-mutation sync-log entries are all retained on disk. brain doesn't pretend otherwise — the `deleted <type> <slug>` success line names this as a soft-delete and points back to this doc.
 
 ## Reproduced behavior
 
-Two delete-mutation bodies were probed against an existing fbrain-registered Design (`spike-delete-probe-1`, `body: "indexed body content for the spike"`).
+Two delete-mutation bodies were probed against an existing brain-registered Design (`spike-delete-probe-1`, `body: "indexed body content for the spike"`).
 
 ### Probe A — orchestrator's exact body (with `fields_and_values: {slug: …}`)
 
@@ -43,7 +43,7 @@ curl -s -X POST http://127.0.0.1:9101/api/mutation \
 
 **Response:** `{"ok":true,"mutation_id":"abb32da0…","success":true}`
 
-**Immediate `fbrain get spike-delete-probe-1 --type design`:** record returns in full, unchanged. `fbrain list --type design` includes it; `fbrain search "spike body content"` still hits it with the same score it had pre-delete.
+**Immediate `brain get spike-delete-probe-1 --type design`:** record returns in full, unchanged. `brain list --type design` includes it; `brain search "spike body content"` still hits it with the same score it had pre-delete.
 
 This body also has the side-effect of *writing* an atom whose payload is the slug string itself, then pointing the molecule's slug-field at that atom. So calling this body actually rewrites the slug field with the slug value — visibly a no-op, but it does generate an extra atom on storage.
 
@@ -58,36 +58,36 @@ curl -s -X POST http://127.0.0.1:9101/api/mutation \
 
 **Response:** `{"ok":true,"mutation_id":"88f64116…","success":true}`
 
-**Immediate `fbrain get spike-delete-probe-1 --type design`:** record still returns in full, unchanged. Identical observable outcome to Probe A, but without the spurious slug-field rewrite (since no fields were supplied, the per-field atom-build loop iterates zero times).
+**Immediate `brain get spike-delete-probe-1 --type design`:** record still returns in full, unchanged. Identical observable outcome to Probe A, but without the spurious slug-field rewrite (since no fields were supplied, the per-field atom-build loop iterates zero times).
 
-**Conclusion from probes A + B:** the delete mutation is essentially a no-op at the read-path. The only difference between the two bodies is that the orchestrator's body costs an extra atom write for no benefit. fbrain should use Probe B's body if it fires the delete at all.
+**Conclusion from probes A + B:** the delete mutation is essentially a no-op at the read-path. The only difference between the two bodies is that the orchestrator's body costs an extra atom write for no benefit. brain should use Probe B's body if it fires the delete at all.
 
 ### Probe C — soft-delete workaround via UPDATE
 
 ```bash
 curl -s -X POST http://127.0.0.1:9101/api/mutation \
-  -d '{"type":"mutation","schema":"<design hash>","mutation_type":"update","fields_and_values":{"slug":"spike-delete-probe-1","title":"(deleted)","body":"","status":"archived","tags":["__fbrain_deleted__"],"created_at":"<preserved>","updated_at":"<now>"},"key_value":{"hash":"spike-delete-probe-1","range":null}}'
+  -d '{"type":"mutation","schema":"<design hash>","mutation_type":"update","fields_and_values":{"slug":"spike-delete-probe-1","title":"(deleted)","body":"","status":"archived","tags":["__brain_deleted__"],"created_at":"<preserved>","updated_at":"<now>"},"key_value":{"hash":"spike-delete-probe-1","range":null}}'
 ```
 
 **Response:** `{"ok":true,"mutation_id":"c1a74c24…","success":true}`
 
-**Immediate `fbrain get spike-delete-probe-1 --type design`:**
+**Immediate `brain get spike-delete-probe-1 --type design`:**
 ```
 [design] spike-delete-probe-1
 title:      (deleted)
 status:     archived
-tags:       __fbrain_deleted__
+tags:       __brain_deleted__
 created_at: 2026-05-23T22:51:56.767Z
 updated_at: 2026-05-23T22:55:12.000Z
 ```
 
-The record's content is fully wiped. The tombstone tag is observable from the client side, which is exactly what fbrain needs to filter on.
+The record's content is fully wiped. The tombstone tag is observable from the client side, which is exactly what brain needs to filter on.
 
 ### Probe D — re-create after wipe
 
 ```bash
-fbrain design new spike-delete-probe-1 --title "after re-create" --body "fresh content" --force
-fbrain get spike-delete-probe-1 --type design
+brain design new spike-delete-probe-1 --title "after re-create" --body "fresh content" --force
+brain get spike-delete-probe-1 --type design
 # → [design] spike-delete-probe-1
 #   title:      after re-create
 #   status:     draft
@@ -96,7 +96,7 @@ fbrain get spike-delete-probe-1 --type design
 #   fresh content
 ```
 
-After the wipe-via-update, the slug is reusable: fold_db's `set_atom_uuid` just rebinds the molecule's hash → atom_uuid mapping to the newly-created atom. (The current `--force` is needed because `findBySlug` doesn't yet treat tombstoned records as gone — once fbrain's `findBySlug` filters tombstones, re-creating without `--force` will also work.)
+After the wipe-via-update, the slug is reusable: fold_db's `set_atom_uuid` just rebinds the molecule's hash → atom_uuid mapping to the newly-created atom. (The current `--force` is needed because `findBySlug` doesn't yet treat tombstoned records as gone — once brain's `findBySlug` filters tombstones, re-creating without `--force` will also work.)
 
 ## fold_db source references (why this is documented behavior)
 
@@ -116,23 +116,23 @@ After the wipe-via-update, the slug is reusable: fold_db's `set_atom_uuid` just 
 
 So the contradiction the orchestrator saw was not eventual consistency, not a cache, not a malformed body — it was the literal documented design. The delete mutation is, today, a synchronous write of a sync-log marker; it makes no claim about removing what came before.
 
-## What the fbrain delete CLI does (Phase 5 implementation contract)
+## What the brain delete CLI does (Phase 5 implementation contract)
 
 ```
-fbrain delete <slug> [--type design|task]
+brain delete <slug> [--type design|task]
 ```
 
-1. **Resolve `--type`** the same way `fbrain get` does (probe both schemas if omitted; error on ambiguous slug; error with "No <type>: <slug>" if absent).
+1. **Resolve `--type`** the same way `brain get` does (probe both schemas if omitted; error on ambiguous slug; error with "No <type>: <slug>" if absent).
 2. **Build a soft-delete update** with these fields, using the freshly-read record so `created_at` is preserved:
    - `title = "(deleted)"`
    - `body = ""`
    - `status = "archived"` (design) or `"cancelled"` (task) — both already exist in the per-type enum, no schema change needed
-   - `tags = ["__fbrain_deleted__"]` (the tombstone sentinel — exported from `src/record.ts` so test code references it directly)
+   - `tags = ["__brain_deleted__"]` (the tombstone sentinel — exported from `src/record.ts` so test code references it directly)
    - `design_slug = ""` (task only)
    - `updated_at = nowIso()`
 3. **Fire the update** via `node.updateRecord({ schemaHash, fields, keyHash: slug })`.
-4. **Fire the fold_db delete mutation** via `node.deleteRecord({ schemaHash, keyHash: slug })`, where `deleteRecord` is fixed to send `fields_and_values: {}` (Probe B's minimal body — no spurious slug-field write). Forward-compatibility: when fold_db ever grows a real delete, this call starts mattering and fbrain's behavior stays correct.
-5. **Verify** by re-reading the record raw (a new `findBySlugRaw` that bypasses the tombstone filter) and asserting `tags.includes("__fbrain_deleted__")`. If verification fails, throw `FbrainError{code: "delete_not_applied"}` with a hint to re-run with `--verbose` and check the node log.
+4. **Fire the fold_db delete mutation** via `node.deleteRecord({ schemaHash, keyHash: slug })`, where `deleteRecord` is fixed to send `fields_and_values: {}` (Probe B's minimal body — no spurious slug-field write). Forward-compatibility: when fold_db ever grows a real delete, this call starts mattering and brain's behavior stays correct.
+5. **Verify** by re-reading the record raw (a new `findBySlugRaw` that bypasses the tombstone filter) and asserting `tags.includes("__brain_deleted__")`. If verification fails, throw `BrainError{code: "delete_not_applied"}` with a hint to re-run with `--verbose` and check the node log.
 6. **Print** the result honestly:
    ```
    deleted <type> <slug>
@@ -144,21 +144,21 @@ fbrain delete <slug> [--type design|task]
 
 | Command | After soft-delete | Why |
 |---|---|---|
-| `fbrain get <slug>` | `error: No <type>: <slug>` | `findBySlug` returns `null` |
-| `fbrain list` | record absent from output | list filters tombstones |
-| `fbrain status <slug>` | `error: No <type>: <slug>` | uses `findBySlug` |
-| `fbrain link t d` (where `d` is tombstoned) | rejects `--design` | uses `findBySlug` |
-| `fbrain search <q>` | tombstoned hits silently skipped | already calls `findBySlug` per hit and skips on `null` |
-| `fbrain design new <slug>` (no `--force`) | re-create succeeds | `findBySlug` returns `null`, so the duplicate-check passes |
+| `brain get <slug>` | `error: No <type>: <slug>` | `findBySlug` returns `null` |
+| `brain list` | record absent from output | list filters tombstones |
+| `brain status <slug>` | `error: No <type>: <slug>` | uses `findBySlug` |
+| `brain link t d` (where `d` is tombstoned) | rejects `--design` | uses `findBySlug` |
+| `brain search <q>` | tombstoned hits silently skipped | already calls `findBySlug` per hit and skips on `null` |
+| `brain design new <slug>` (no `--force`) | re-create succeeds | `findBySlug` returns `null`, so the duplicate-check passes |
 
-`fbrain raw GET /api/query ...` still returns the wiped molecule directly — that's the escape hatch. Anyone going around fbrain sees the raw fold_db state.
+`brain raw GET /api/query ...` still returns the wiped molecule directly — that's the escape hatch. Anyone going around brain sees the raw fold_db state.
 
 ## Edge cases the implementation handles
 
-- **Slug exists in both Design and Task with `--type` omitted** → error mirrors `fbrain get`'s ambiguous-slug path; user must specify `--type`. No deletes occur.
-- **Slug exists in neither** → `error: No <type>: <slug>` (or `No design or task with slug "<slug>"` if `--type` omitted). Matches `fbrain get`'s message exactly. Exit 1.
+- **Slug exists in both Design and Task with `--type` omitted** → error mirrors `brain get`'s ambiguous-slug path; user must specify `--type`. No deletes occur.
+- **Slug exists in neither** → `error: No <type>: <slug>` (or `No design or task with slug "<slug>"` if `--type` omitted). Matches `brain get`'s message exactly. Exit 1.
 - **Slug is already tombstoned** (re-delete) → `findBySlug` returns `null` (because tombstoned), so the user sees `error: No <type>: <slug>`. Symmetric with how a real hard-delete would behave on a missing slug.
-- **Network failure mid-flow** (update succeeds, fold_db delete fails) → the soft-delete is already applied via update, but the error from `deleteRecord` propagates and the user sees a non-zero exit. The record is functionally deleted from fbrain's perspective; re-running `fbrain delete <slug>` returns "no such record" because the tombstone is in place. The fold_db sync-log marker is missing — acceptable v0 since fold_db's own pipeline doesn't act on it for local-only state.
+- **Network failure mid-flow** (update succeeds, fold_db delete fails) → the soft-delete is already applied via update, but the error from `deleteRecord` propagates and the user sees a non-zero exit. The record is functionally deleted from brain's perspective; re-running `brain delete <slug>` returns "no such record" because the tombstone is in place. The fold_db sync-log marker is missing — acceptable v0 since fold_db's own pipeline doesn't act on it for local-only state.
 
 ## Follow-up to file in fold_db
 
@@ -166,11 +166,11 @@ fbrain delete <slug> [--type design|task]
 > - **(a)** Add a response field like `"semantics": "append-only-marker"` so any client probe makes the actual behavior legible.
 > - **(b)** Implement an actual hard-delete path that prunes the molecule's hash → atom_uuid binding for the supplied key, behind an opt-in body field (`hard_delete: true`) so existing append-only semantics don't break.
 >
-> fbrain Phase 5 does NOT touch fold_db. The workaround above is purely fbrain-layer; if fold_db ever ships (b), the soft-delete tombstone becomes the wrapper around it (fbrain still wants the read-path filter for in-flight delete events).
+> brain Phase 5 does NOT touch fold_db. The workaround above is purely brain-layer; if fold_db ever ships (b), the soft-delete tombstone becomes the wrapper around it (brain still wants the read-path filter for in-flight delete events).
 >
 > File location: this monorepo lives at `EdgeVector/fold`. Suggested label: `area:mutation-api`, `kind:dx`.
 
-## What does NOT change in fbrain Phase 5
+## What does NOT change in brain Phase 5
 
 - `src/schemas.ts` — schema definitions are byte-identical (no new fields, no schema bump). Phase 6 stays unblocked.
 - `src/commands/{design,task}.ts` — create still uses `findBySlug` for the duplicate check; with the new filter, a tombstoned slug counts as gone (intended). No behavior change for non-tombstoned slugs.
@@ -180,13 +180,13 @@ fbrain delete <slug> [--type design|task]
 ## Reproduction recipe (for future agents)
 
 ```bash
-# Against a fresh local fold node (or any existing fbrain-init'd node):
-fbrain design new spike-delete-probe --title "delete probe" --body "indexed body content"
-fbrain get spike-delete-probe --type design                # confirms present
-fbrain raw POST /api/mutation '{"type":"mutation","schema":"<DESIGN_HASH from ~/.fbrain/config.json>","mutation_type":"delete","fields_and_values":{},"key_value":{"hash":"spike-delete-probe","range":null}}'
-fbrain get spike-delete-probe --type design                # still present — that's the spike's whole point
-fbrain delete spike-delete-probe --type design             # the Phase 5 workaround
-fbrain get spike-delete-probe --type design                # error: No design: spike-delete-probe
-fbrain raw POST /api/query '{"schema_name":"<DESIGN_HASH>","fields":["slug","title","body","status","tags"]}' | jq '.results[]|select(.fields.slug=="spike-delete-probe")'
-# → still present at the raw layer, with tags=["__fbrain_deleted__"] — exactly what we expect
+# Against a fresh local fold node (or any existing brain-init'd node):
+brain design new spike-delete-probe --title "delete probe" --body "indexed body content"
+brain get spike-delete-probe --type design                # confirms present
+brain raw POST /api/mutation '{"type":"mutation","schema":"<DESIGN_HASH from ~/.brain/config.json>","mutation_type":"delete","fields_and_values":{},"key_value":{"hash":"spike-delete-probe","range":null}}'
+brain get spike-delete-probe --type design                # still present — that's the spike's whole point
+brain delete spike-delete-probe --type design             # the Phase 5 workaround
+brain get spike-delete-probe --type design                # error: No design: spike-delete-probe
+brain raw POST /api/query '{"schema_name":"<DESIGN_HASH>","fields":["slug","title","body","status","tags"]}' | jq '.results[]|select(.fields.slug=="spike-delete-probe")'
+# → still present at the raw layer, with tags=["__brain_deleted__"] — exactly what we expect
 ```

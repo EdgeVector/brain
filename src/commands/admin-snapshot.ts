@@ -10,9 +10,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { FbrainError, newReadClientFromCfg, type NodeClient, type QueryRow, type Verbose } from "../client.ts";
+import { BrainError, newReadClientFromCfg, type NodeClient, type QueryRow, type Verbose } from "../client.ts";
 import { writeConfig, type Config } from "../config.ts";
-import { findBySlug, isTombstoned, schemaHashFor, type FbrainRecord } from "../record.ts";
+import { findBySlug, isTombstoned, schemaHashFor, type BrainRecord } from "../record.ts";
 import { parseListCount } from "../count-state.ts";
 import {
   ADMIN_SNAPSHOT_SCHEMA_KEY,
@@ -38,7 +38,7 @@ export const SNAPSHOT_FIELDS = [
 
 export type BrainAdminSnapshot = {
   slug: string;
-  source_app: "fbrain";
+  source_app: "brain";
   schema_version: string;
   captured_at: string;
   /**
@@ -310,7 +310,7 @@ export async function buildBrainAdminSnapshot(
 
   return {
     slug,
-    source_app: "fbrain",
+    source_app: "brain",
     schema_version: ADMIN_SNAPSHOT_SCHEMA_VERSION,
     captured_at: now.toISOString(),
     type_counts: typeCounts,
@@ -377,7 +377,7 @@ export function newLastDbDeliveryClient(node: NodeClient): LastDbDeliveryClient 
     async stageDelivery(request) {
       const res = await node.rawCall("POST", "/api/sharing/deliver", request);
       if (res.status < 200 || res.status >= 300) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "delivery_stage_failed",
           message: `LastDB deliver stage returned ${res.status}: ${messageFor(res.json ?? res.body)}`,
           hint: "Confirm Mini is signed in to Exemem and the recipient keys match the admin kanban-consumer bundle.",
@@ -388,7 +388,7 @@ export function newLastDbDeliveryClient(node: NodeClient): LastDbDeliveryClient 
       const preview = dataObject(delivery.preview);
       const deliveryId = objectString(delivery, "delivery_id");
       if (!deliveryId) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "delivery_stage_bad_response",
           message: "LastDB deliver stage returned no delivery_id.",
         });
@@ -406,7 +406,7 @@ export function newLastDbDeliveryClient(node: NodeClient): LastDbDeliveryClient 
         `/api/sharing/deliveries/${encodeURIComponent(deliveryId)}/approve`,
       );
       if (res.status < 200 || res.status >= 300) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "delivery_approve_failed",
           message: `LastDB deliver approve returned ${res.status}: ${messageFor(res.json ?? res.body)}`,
         });
@@ -429,10 +429,10 @@ async function ensureAdminSnapshotSchema(
   const existing = cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY];
   if (existing) return existing;
   if (!node.declareAppSchema) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "admin_snapshot_schema_unavailable",
-      message: "This node cannot declare the fbrain admin snapshot schema.",
-      hint: "Run `fbrain init` against a current Mini node, then retry `fbrain admin-snapshot publish`.",
+      message: "This node cannot declare the brain admin snapshot schema.",
+      hint: "Run `brain init` against a current Mini node, then retry `brain admin-snapshot publish`.",
     });
   }
   const declared = await node.declareAppSchema(OWNER_APP_ID, adminSnapshotSchema.schema);
@@ -463,7 +463,7 @@ async function findSnapshotRow(
   schemaHash: string,
   slug: string,
 ): Promise<QueryRow | null> {
-  if (!node.queryByKey) throw new FbrainError({ code: "keyed_read_required", message: "The snapshot requires a keyed read client." });
+  if (!node.queryByKey) throw new BrainError({ code: "keyed_read_required", message: "The snapshot requires a keyed read client." });
   return node.queryByKey({ schemaHash, fields: ["slug"], keyHash: slug });
 }
 
@@ -486,7 +486,7 @@ async function readTypeCounts(
       if (RECORD_TYPES.includes(type as RecordType) && count && count.count >= 0) counts.set(type as RecordType, { count: count.count });
     }
   } catch (err) {
-    const code = err instanceof FbrainError ? `${err.code}: ` : "";
+    const code = err instanceof BrainError ? `${err.code}: ` : "";
     const message = err instanceof Error ? err.message : String(err);
     for (const type of RECORD_TYPES) counts.set(type, { unavailable: `${code}${message}`.slice(0, 200) });
   }
@@ -554,7 +554,7 @@ async function safeFindBySlug(
   cfg: Config,
   type: RecordType,
   slug: string,
-): Promise<FbrainRecord | null> {
+): Promise<BrainRecord | null> {
   try {
     const record = await findBySlug(node, type, schemaHashFor(type, cfg), slug);
     return record && !isTombstoned(record) ? record : null;

@@ -1,4 +1,4 @@
-// `fbrain find` — retrieval by an explicit array of match probes.
+// `brain find` — retrieval by an explicit array of match probes.
 //
 // Unlike `search` (one query) or `ask` (one query, optionally LLM-expanded
 // into a few alternate phrasings), `find` takes N caller-supplied probes —
@@ -38,7 +38,7 @@ import {
   resolveTypeFilter,
   schemaHashFor,
   uniqueSchemaHashes,
-  type FbrainRecord,
+  type BrainRecord,
 } from "../record.ts";
 import type { RecordType } from "../schemas.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
@@ -84,7 +84,7 @@ export type FindHit = {
   // Which probe indices ranked this hit, and at what rank — mirrors ask.ts's
   // expansionHits, labeled by probe index instead of expansion index.
   matchHits: Array<{ idx: number; rank: number }>;
-  record: FbrainRecord;
+  record: BrainRecord;
 };
 
 export type FindResult = {
@@ -101,7 +101,7 @@ export async function findCmd(opts: FindOptions): Promise<FindResult> {
   });
 
   const node = newSearchClientFromCfg(opts.cfg, opts.verbose).node;
-  const fbrainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
+  const brainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
 
   const rankers: RankerInput[] = [];
   const perMatchTopId = new Map<number, Map<string, number>>();
@@ -112,12 +112,12 @@ export async function findCmd(opts: FindOptions): Promise<FindResult> {
     const label = `match[${mi}]`;
 
     const clientOpts: ClientSearchOptions = {};
-    if (fbrainSchemas.length > 0) clientOpts.schemas = fbrainSchemas;
+    if (brainSchemas.length > 0) clientOpts.schemas = brainSchemas;
     const plane = await querySearchPlane({
       query: probe,
       k: RANKER_LIMIT,
       caller: "brain/find",
-      schemas: fbrainSchemas.length > 0 ? fbrainSchemas : undefined,
+      schemas: brainSchemas.length > 0 ? brainSchemas : undefined,
       verbose: opts.verbose,
     });
     let raw: Awaited<ReturnType<typeof node.search>> = [];
@@ -171,7 +171,7 @@ export async function findCmd(opts: FindOptions): Promise<FindResult> {
     const f = fused[i]!;
     const parsed = parseDocId(f.id);
     if (!parsed) continue;
-    let rec: FbrainRecord | null;
+    let rec: BrainRecord | null;
     try {
       rec = await findBySlug(node, parsed.type, schemaHashFor(parsed.type, opts.cfg), parsed.slug);
     } catch {

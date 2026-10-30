@@ -1,11 +1,11 @@
-// `fbrain gates` / `fbrain gate ...` — structured accessor over the single
+// `brain gates` / `brain gate ...` — structured accessor over the single
 // canonical `open-decisions` reference record. This deliberately does NOT add
 // a gate schema: the markdown record remains the source of truth, with stable
 // one-line field entries that a CLI can parse mechanically.
 
 import { spawn } from "bun";
 
-import { FbrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
+import { BrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import {
@@ -15,7 +15,7 @@ import {
   schemaHashFor,
   verifyRecordVisible,
   writeRecordFields,
-  type FbrainRecord,
+  type BrainRecord,
 } from "../record.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import { RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
@@ -38,7 +38,7 @@ export type GateEntry = {
 };
 
 type LoadedLedger = {
-  record: FbrainRecord;
+  record: BrainRecord;
   body: string;
 };
 
@@ -122,10 +122,10 @@ export async function gateClear(opts: GateClearOptions): Promise<GateEntry> {
     opts.cleared ?? today(),
   );
   if (!result.cleared) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "not_found",
       message: `No open gate with slug "${opts.slug}".`,
-      hint: "Run `fbrain gates --open` to see live gates.",
+      hint: "Run `brain gates --open` to see live gates.",
     });
   }
   await writeOpenDecisions(opts.cfg, loaded.record, result.body, opts.verbose);
@@ -175,7 +175,7 @@ async function loadOpenDecisions(
 
 async function writeOpenDecisions(
   cfg: Config,
-  existing: FbrainRecord,
+  existing: BrainRecord,
   body: string,
   verbose?: Verbose,
 ): Promise<void> {
@@ -203,10 +203,10 @@ async function writeOpenDecisions(
     OPEN_DECISIONS_SLUG,
   );
   if (visible === null) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "put_not_visible",
       message: `Updated ${OPEN_DECISIONS_TYPE} "${OPEN_DECISIONS_SLUG}" but the row was not visible to a follow-up read within the retry budget.`,
-      hint: "Re-run `fbrain get open-decisions` shortly; if it stays stale the write may not have persisted.",
+      hint: "Re-run `brain get open-decisions` shortly; if it stays stale the write may not have persisted.",
     });
   }
 }
@@ -261,7 +261,7 @@ function warnSkippedGateLine(line: string, err: unknown): void {
 function requiredField(fields: Map<string, string>, key: string): string {
   const value = fields.get(key);
   if (value === undefined || value.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "malformed_gate_line",
       message: `Structured gate line is missing ${key}=...`,
     });
@@ -418,7 +418,7 @@ function splitEvidence(evidence: string): string[] {
     .filter((s) => s.length > 0)
     .filter(
       (s) =>
-        s.startsWith("fbrain:") ||
+        s.startsWith("brain:") ||
         s.startsWith("[[") ||
         s.startsWith("origin/main:"),
     );
@@ -428,11 +428,11 @@ async function verifyOneEvidence(
   evidence: string,
   cfg: Config,
 ): Promise<EvidenceCheck> {
-  if (evidence.startsWith("fbrain:")) {
-    return verifyFbrainEvidence(evidence.slice("fbrain:".length), cfg);
+  if (evidence.startsWith("brain:")) {
+    return verifyBrainEvidence(evidence.slice("brain:".length), cfg);
   }
   if (evidence.startsWith("[[") && evidence.endsWith("]]")) {
-    return verifyFbrainEvidence(evidence.slice(2, -2), cfg);
+    return verifyBrainEvidence(evidence.slice(2, -2), cfg);
   }
   if (evidence.startsWith("origin/main:")) {
     return verifyOriginMainEvidence(evidence.slice("origin/main:".length));
@@ -440,7 +440,7 @@ async function verifyOneEvidence(
   return { stale: false, detail: `unchecked ${evidence}` };
 }
 
-async function verifyFbrainEvidence(
+async function verifyBrainEvidence(
   raw: string,
   cfg: Config,
 ): Promise<EvidenceCheck> {
@@ -458,15 +458,15 @@ async function verifyFbrainEvidence(
     if (isResolvedStatus(record.status)) {
       return {
         stale: true,
-        detail: `evidence fbrain:${slug} is ${record.status}`,
+        detail: `evidence brain:${slug} is ${record.status}`,
       };
     }
     return {
       stale: false,
-      detail: `evidence fbrain:${slug} is ${record.status}`,
+      detail: `evidence brain:${slug} is ${record.status}`,
     };
   }
-  return { stale: true, detail: `evidence fbrain:${slug} is missing` };
+  return { stale: true, detail: `evidence brain:${slug} is missing` };
 }
 
 function isEvidenceRecordType(value: string): value is RecordType {

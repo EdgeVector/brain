@@ -1,7 +1,7 @@
 // Tag helpers for topic, series, and day tags.
 // The lifecycle schemas are retired. These helpers stay for tag text.
 
-import type { FbrainRecord } from "./record.ts";
+import type { BrainRecord } from "./record.ts";
 import type { RecordType } from "./schemas.ts";
 
 export const TOPIC_TAG_PREFIX = "topic:";
@@ -37,7 +37,7 @@ export function ephDayFromTags(tags: readonly string[]): string | null {
   return tagValue(tags, EPH_DAY_TAG_PREFIX);
 }
 
-export function isEphRecord(record: FbrainRecord): boolean {
+export function isEphRecord(record: BrainRecord): boolean {
   return seriesFromTags(record.tags) !== null && ephDayFromTags(record.tags) !== null;
 }
 
@@ -84,7 +84,7 @@ export function factBlock(fact: string, sourceSlug: string, date: string): strin
 export type ClusterMember = {
   type: RecordType;
   slug: string;
-  record: FbrainRecord;
+  record: BrainRecord;
 };
 
 export function pickCanonical(members: ClusterMember[]): ClusterMember {

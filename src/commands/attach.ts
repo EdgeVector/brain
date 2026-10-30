@@ -1,5 +1,5 @@
-// `fbrain attach <slug> <file>` / `fbrain attachments <slug>` /
-// `fbrain detach <slug> <name-or-ref>` / `fbrain attachment get <slug>
+// `brain attach <slug> <file>` / `brain attachments <slug>` /
+// `brain detach <slug> <name-or-ref>` / `brain attachment get <slug>
 // <name-or-ref> [-o PATH]` — file attachments on knowledge records.
 //
 // Storage model + search-exclusion rationale: src/attachments.ts and
@@ -21,7 +21,7 @@ import {
   type AttachmentEntry,
   type AttachmentMigrationReport,
 } from "../attachments.ts";
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { formatTable, resolvePrintSink } from "../format.ts";
 import { normalizeSlug, resolveBySlug } from "../record.ts";
@@ -56,10 +56,10 @@ export async function attachCmd(
   const print = resolvePrintSink(opts);
   const slug = normalizeSlug(opts.slug);
   if (!existsSync(opts.file)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_file_missing",
       message: `File not found: ${opts.file}`,
-      hint: "Pass a readable file path: `fbrain attach <slug> <file>`.",
+      hint: "Pass a readable file path: `brain attach <slug> <file>`.",
     });
   }
   const bytes = new Uint8Array(readFileSync(opts.file));
@@ -145,7 +145,7 @@ export type AttachmentsMigrateCmdResult = {
   report: AttachmentMigrationReport;
 };
 
-// `fbrain attachments migrate [slug]` — move v1 record-stored attachment
+// `brain attachments migrate [slug]` — move v1 record-stored attachment
 // blobs into the node's file plane (encrypted B2 CAS + $lastdb_file pointer)
 // and delete the legacy stand-in records. Scoped to one record when a slug is
 // given, otherwise sweeps every attachment index. Idempotent.
@@ -271,16 +271,16 @@ export async function attachmentGetCmd(
   const index = await readAttachmentIndex(node, opts.cfg, resolved.type, slug);
   const entry = findEntry(index?.entries ?? [], opts.nameOrRef);
   if (entry === null) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_not_found",
       message: `No attachment "${opts.nameOrRef}" on ${resolved.type} ${slug}.`,
-      hint: `Run \`fbrain attachments ${slug}\` to list what is attached.`,
+      hint: `Run \`brain attachments ${slug}\` to list what is attached.`,
     });
   }
   const blob = await getAttachmentBlob(node, opts.cfg, entry.blob_ref);
   const outPath = opts.output ?? entry.name;
   if (outPath !== "-" && existsSync(outPath) && opts.force !== true) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_output_exists",
       message: `Refusing to overwrite ${outPath}.`,
       hint: "Pass `-o <other-path>` or `--force` to overwrite.",

@@ -9,7 +9,7 @@ import {
   type SpilledField,
 } from "./body-spill.ts";
 import {
-  FbrainError,
+  BrainError,
   type BatchMutationResult,
   type NodeClient,
   type QueryRow,
@@ -31,7 +31,7 @@ import {
   type HeadCommit,
   type ListSidePlan,
 } from "./list-page.ts";
-import { schemaHashFor, type FbrainRecord } from "./record.ts";
+import { schemaHashFor, type BrainRecord } from "./record.ts";
 
 export type ProjectionKind =
   | "primary"
@@ -130,8 +130,8 @@ function countOps(ops: PlannedMutation[]): ExactProjectionCounts {
 function planChildTaskOps(opts: {
   cfg: Pick<Config, "schemaHashes">;
   type: RecordType;
-  record: FbrainRecord;
-  previous: FbrainRecord | null;
+  record: BrainRecord;
+  previous: BrainRecord | null;
   upsertType: "create" | "update";
 }): PlannedMutation[] {
   // Page atoms replaced this payload.
@@ -161,8 +161,8 @@ export async function buildResidentWritePlan(opts: {
   cfg: Config;
   type: RecordType;
   schemaHash: string;
-  previous: FbrainRecord | null;
-  next: FbrainRecord;
+  previous: BrainRecord | null;
+  next: BrainRecord;
   primaryFields: Record<string, unknown>;
   frontmatterEdges?: readonly string[];
   now?: string;
@@ -331,7 +331,7 @@ export async function commitResidentWritePlans(opts: {
   if (!first) return { ...emptyBatchResult(), indexNotes: [] };
   for (const write of opts.writes) assertOpsFitAtomBudget(write.type, write.slug, write.plan.ops);
   if (!opts.node.mutateBatch) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "resident_commit_unavailable",
       message: "this node client cannot send a Fold resident batch",
       hint: "Upgrade brain so NodeClient.mutateBatch is present.",
@@ -352,7 +352,7 @@ export async function commitResidentWritePlans(opts: {
   ).concat(counts));
   assertOpsFitAtomBudget(first.type, first.slug, ops);
   if (ops.length > WRITE_BATCH_MAX) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "resident_batch_too_large",
       message: `resident batch has ${ops.length} mutations; the cap is ${WRITE_BATCH_MAX}.`,
       hint: "The command does not report success. The record was not written.",
@@ -393,7 +393,7 @@ export async function commitResidentRemoval(opts: {
   side: ListSidePlan;
 }): Promise<ResidentCommitResult> {
   if (!opts.node.mutateBatch) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "resident_commit_unavailable",
       message: "this node client cannot send a Fold resident batch",
       hint: "Upgrade brain so NodeClient.mutateBatch is present.",
@@ -430,7 +430,7 @@ export async function commitResidentRemoval(opts: {
     ...pages,
   ];
   if (ops.length > WRITE_BATCH_MAX) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "resident_batch_too_large",
       message: `delete batch has ${ops.length} mutations; the cap is ${WRITE_BATCH_MAX}.`,
       hint: "The command does not report success. The record was not written.",
@@ -457,9 +457,9 @@ function indexPartialMiss(
   type: RecordType,
   slug: string,
   notes: readonly string[],
-): FbrainError {
+): BrainError {
   const why = notes.filter((line) => line.length > 0 && line !== INDEX_PARTIAL);
-  return new FbrainError({
+  return new BrainError({
     code: "index_partial",
     message:
       `index partial for ${type} ${slug}` +
@@ -474,8 +474,8 @@ function durableMiss(
   type: RecordType,
   slug: string,
   reported: string | undefined,
-): FbrainError {
-  return new FbrainError({
+): BrainError {
+  return new BrainError({
     code: "durability_not_confirmed",
     message:
       `the node did not confirm durable storage for ${type} ${slug} ` +
@@ -491,11 +491,11 @@ function wrapCommitError(
   type: RecordType,
   slug: string,
   ops: readonly PlannedMutation[],
-): FbrainError {
-  if (err instanceof FbrainError) return err;
+): BrainError {
+  if (err instanceof BrainError) return err;
   const detail = err instanceof Error ? err.message : String(err);
   const projections = [...new Set(ops.map((op) => op.projection))].join(", ");
-  return new FbrainError({
+  return new BrainError({
     code: "resident_commit_failed",
     message:
       `resident commit failed for ${type} ${slug} ` +
@@ -772,11 +772,11 @@ function dedupeOps(ops: PlannedMutation[]): PlannedMutation[] {
 
 export function recordFromPrimaryFields(
   fields: Record<string, unknown>,
-): FbrainRecord {
+): BrainRecord {
   const tags = Array.isArray(fields.tags)
     ? fields.tags.filter((tag): tag is string => typeof tag === "string")
     : [];
-  const record: FbrainRecord = {
+  const record: BrainRecord = {
     slug: String(fields.slug ?? ""),
     title: String(fields.title ?? ""),
     body: String(fields.body ?? ""),

@@ -38,7 +38,7 @@ export function primaryBrain(path = brainConfigPath()): string | null {
 /** True when another store (for example gbrain) is primary on this host. */
 export function lastdbBrainIsNotPrimary(path = brainConfigPath()): boolean {
   const p = primaryBrain(path);
-  return p !== null && p !== "brain" && p !== "fbrain";
+  return p !== null && p !== "brain" && p !== "brain";
 }
 
 /**
