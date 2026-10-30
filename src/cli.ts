@@ -9,12 +9,13 @@ import { parseArgs, type ParseArgsConfig } from "node:util";
 
 import pkg from "../package.json" with { type: "json" };
 import { getFbrainVersion } from "./version.ts";
-import { FbrainError, newReadClientFromCfg } from "./client.ts";
+import { FbrainError } from "./client.ts";
 import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
 import { primaryBrain, readFromPrimary } from "./primary-brain.ts";
 import { parseFieldProjection } from "./field-projection.ts";
 import { convertMultiKey } from "./commands/multi-key-convert.ts";
+import { newWriteClientFromCfg } from "./write-context.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
 import { getRecord } from "./commands/get.ts";
@@ -1940,7 +1941,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
         apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"},"retire-legacy":{type:"boolean"}}});
       const cfg=readConfig();
       const {"retire-legacy":retireLegacy,...flags}=values;
-      console.log(JSON.stringify(await convertMultiKey(newReadClientFromCfg(cfg,verboseFn),cfg,{...flags,retireLegacy})));
+      // A split record type is copied with ordinary app writes, so the client carries the app capability.
+      console.log(JSON.stringify(await convertMultiKey(newWriteClientFromCfg(cfg,verboseFn).node,cfg,{...flags,retireLegacy})));
       return 0;
     }
     case "init":

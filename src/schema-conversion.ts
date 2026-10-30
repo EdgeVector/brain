@@ -103,7 +103,11 @@ export async function conversionPlan(node: NodeClient, cfg: Config, entries: Con
 }
 export async function executeConversion(node: NodeClient, cfg: Config, path: string,
   plan: Awaited<ReturnType<typeof conversionPlan>>,
-  options: {apply?:boolean; maintenance?:boolean; abort?:boolean; retireLegacy?:boolean}) {
+  options: {apply?:boolean; maintenance?:boolean; abort?:boolean; retireLegacy?:boolean;
+    /** Runs once before app_begin, while requests still run. */
+    beforeBegin?: () => Promise<void>;
+    /** Pins for schemas outside the kept sources. They enter the one config write. */
+    extraPins?: () => Promise<Record<string,string>>}) {
   if (!options.apply) return {phase:"plan", schemas:plan.sources.map(({request}) => request),retire:plan.retire,legacy:plan.legacy};
   if (!options.maintenance) fail("Use --apply --maintenance for the explicit request pause and conversion.");
   let report: ConversionReport | undefined;
@@ -130,6 +134,7 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
         + "Review them. Add --retire-legacy to drop them in this conversion. The removal release does not start while they remain.");
     }
     const retire=options.retireLegacy ? [...new Set([...plan.retire,...plan.legacy])] : plan.retire;
+    await options.beforeBegin?.();
     report=await conversionCall<ConversionReport>(node,"POST","/api/db/alternate-keys",
       {action:"app_begin",schemas:plan.sources.map(({request})=>request),retire,maintenance:true});
   }
@@ -143,7 +148,8 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
       const current=await conversionCall<Metadata>(node,"GET",`/api/schema/${encodeURIComponent(source.name)}`);
       if (!current.independent_fields || !same(current.alternate_keys ?? {},request.alternate_keys)) fail("The published key layout differs.");
     }
-    const schemaHashes=Object.fromEntries(plan.sources.flatMap(({entry})=>entry.keys.map((key)=>[key,cfg.schemaHashes[key]!])));
+    const schemaHashes={...Object.fromEntries(plan.sources.flatMap(({entry})=>entry.keys.map((key)=>[key,cfg.schemaHashes[key]!]))),
+      ...(await options.extraPins?.() ?? {})};
     writeConfig({...cfg,storageModel:MULTI_KEY_MODEL,schemaHashes},path);
     report=await step("app_finish");
     return report;

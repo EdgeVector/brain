@@ -19,11 +19,17 @@ Do these steps in this order:
    - `schemas`: the Brain schemas that the conversion keeps. Each one gets its own values and its named keys.
    - `retire`: local aliases that map only kept schemas. They hold no values of their own.
    - `legacy`: Brain schemas that this release does not read, for example `Papercut` or the old graph edge schemas.
+   - `fresh`: Brain schemas with no pin or no installed schema, for example `__braincompactlocator__`. They hold no values. The apply declares them new. A record type with a non-zero count and no installed schema stops the plan.
+   - `split`: a record type that an older Brain stored in another type's schema, for example `sop` in the Concept schema. The kept schema selects only its own type from the type directory.
 4. If `legacy` is empty, run `brain multi-key-convert --apply --maintenance`.
 5. If `legacy` is not empty, run `brain multi-key-convert --apply --maintenance --retire-legacy`. The apply refuses a non-empty list without this flag.
 6. Upgrade LastDB to the removal release only after the command reports the `complete` phase.
 
 CAUTION: `--retire-legacy` drops each legacy schema and its values. No Brain command reads those values. Keep a backup of the home before the apply.
+
+CAUTION: Stop other Brain writers before the apply. The apply copies each `split` type before the request pause. A write to that type after the copy does not reach the new schema.
+
+Before the request pause, the apply declares the `fresh` and `split` schemas. It copies each `split` record as stored into the type's new schema and reads each copy back. The list, the per-type count, and the type directory must agree, or the apply stops before the conversion. The one config write pins the new schemas. An abort before publication keeps the new schemas. They hold only copies.
 
 Init and ordinary mutations do not run the conversion.
 
