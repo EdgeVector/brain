@@ -1,4 +1,5 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { alternateKeyWire } from "./alternate-key-wire.ts";
 import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Typed HTTP wrappers for fold_db_node + schema_service.
 //
@@ -1638,6 +1639,7 @@ export function newNodeClient(opts: {
       if (canonicalVocabulary) await requireCanonicalHome();
       const local = schema;
       if (canonicalVocabulary) schema = canonicalSchema(local);
+      if (schema.alternate_keys !== undefined) schema = { ...schema, alternate_keys: alternateKeyWire(schema.alternate_keys) };
       const body = await callJsonOk("/api/apps/declare-schema", "POST", {
         app_id: appId,
         schema,

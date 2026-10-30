@@ -2,6 +2,7 @@
 import vocabulary from "./canonical-fields.json" with { type: "json" };
 import { UNIQUE_SCHEMAS, schemaConfigKeys, type SchemaDefinition } from "./schemas.ts";
 import type { FieldAliasProfiles } from "./field-alias-transport.ts";
+import { alternateKeyWire } from "./alternate-key-wire.ts";
 
 type Definition = { description: string; field_type: unknown; version: number; classification: unknown };
 const definitions = vocabulary.fields as Record<string, Definition>;
@@ -29,12 +30,12 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   const result = structuredClone(schema) as unknown as Record<string, unknown>;
   result.fields = schema.fields.map(rename);
   if (schema.alternate_keys) {
-    result.alternate_keys = Object.fromEntries(Object.entries(schema.alternate_keys).map(([name, key]) => [name, {
+    result.alternate_keys = alternateKeyWire(Object.fromEntries(Object.entries(schema.alternate_keys).map(([name, key]) => [name, {
       ...key,
       ...(key.hash_field ? { hash_field: rename(key.hash_field) } : {}),
       ...(key.range_field != null ? { range_field: rename(key.range_field) } : {}),
       ...(key.range_parts ? { range_parts: key.range_parts.map((part) => ({ ...part, field: rename(part.field) })) } : {}),
-    }]));
+    }])));
   }
   result.key = Object.fromEntries(Object.entries(schema.key ?? {}).filter(([,field]) => typeof field === "string").map(([role, field]) => [role, rename(field)]));
   for (const property of ["field_classifications", "field_interest_categories", "ref_fields", "transform_fields"]) {

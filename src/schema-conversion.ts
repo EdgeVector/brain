@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { FbrainError, type NodeClient } from "./client.ts";
+import { alternateKeyWire } from "./alternate-key-wire.ts";
 import { configBytes, readConfig, writeConfig, type Config } from "./config.ts";
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
 import { MULTI_KEY_MODEL } from "./multi-key.ts";
@@ -134,7 +135,13 @@ function receipt(value: unknown): ConversionReport {
     fail(
       "The node did not return a valid durable receipt. No next phase follows.",
     );
-  return report as ConversionReport;
+  return {
+    ...report,
+    schemas: report.schemas.map((request: Request) => ({
+      ...request,
+      alternate_keys: alternateKeyWire(request.alternate_keys),
+    })),
+  } as ConversionReport;
 }
 export async function conversionCall<T>(
   node: NodeClient,
@@ -145,7 +152,9 @@ export async function conversionCall<T>(
   const response = await node.rawCall(method, path, body);
   if (response.status !== 200 || object(response.json).ok === false)
     // Keep the node's refusal text: a bare status hides which rule refused the request.
-    fail(`${path} returned HTTP ${response.status}: ${response.body.slice(0, 800)}. No next phase follows.`);
+    fail(
+      `${path} returned HTTP ${response.status}: ${response.body.slice(0, 800)}. No next phase follows.`,
+    );
   if (path === ROUTE) return receipt(response.json) as T;
   const payload = data(response.json);
   return (payload.schema ?? payload) as T;
@@ -218,6 +227,13 @@ function readScope(path: string): {
     !names(saved.retire)
   )
     fail("The saved scope is invalid. Owner review is required.");
+  saved = {
+    ...saved,
+    schemas: saved.schemas.map((request) => ({
+      ...request,
+      alternate_keys: alternateKeyWire(request.alternate_keys),
+    })),
+  };
   return { raw, saved };
 }
 function barrier(path: string): void {
@@ -414,7 +430,7 @@ export async function conversionPlan(
     sources.map(async ({ entry, source, definition }): Promise<Request> => ({
       schema: source.name,
       expected_identity: source.identity_hash,
-      alternate_keys: definition.alternate_keys ?? {},
+      alternate_keys: alternateKeyWire(definition.alternate_keys),
       membership: pending
         ? saved!.schemas.find((request) => request.schema === source.name)
             ?.membership
@@ -542,7 +558,10 @@ export async function executeConversion(
     if (
       sources.some(
         ({ source }, index) =>
-          !same(source.alternate_keys ?? {}, requests[index]!.alternate_keys),
+          !same(
+            alternateKeyWire(source.alternate_keys),
+            requests[index]!.alternate_keys,
+          ),
       )
     )
       fail("An existing alternate-key layout differs.");
@@ -646,7 +665,10 @@ export async function executeConversion(
         if (
           source.independent_fields !== true ||
           source.identity_hash !== requests[index]!.expected_identity ||
-          !same(source.alternate_keys ?? {}, requests[index]!.alternate_keys) ||
+          !same(
+            alternateKeyWire(source.alternate_keys),
+            requests[index]!.alternate_keys,
+          ) ||
           Object.keys(source.field_mappers ?? {}).length
         )
           fail("A published definition or key layout differs.");
