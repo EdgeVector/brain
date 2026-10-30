@@ -271,7 +271,14 @@ async function run() {
 }
 
 function checkRecords(items, expected, selectedFields, allowed) {
-  require(Array.isArray(items) && items.length === expected && new Set(items.map((item) => item.slug)).size === expected, "The read membership differs");
+  if (!Array.isArray(items) || items.length !== expected || new Set(items.map((item) => item.slug)).size !== expected) {
+    // Name the difference so a failed CI sample says what the read returned.
+    const slugs = Array.isArray(items) ? items.map((item) => String(item?.slug)) : [];
+    const outside = slugs.filter((slug) => { const number = Number(slug.slice(5));
+      return !(Number.isInteger(number) && number >= 0 && number < settings.records && allowed(number)); });
+    throw Error(`The read membership differs: expected ${expected}, read ${slugs.length} (${new Set(slugs).size} distinct),`
+      + ` ${outside.length} outside the selection, first: ${outside.slice(0, 5).join(" ") || "-"}`);
+  }
   for (const item of items) {
     const number = Number(String(item.slug).slice(5));
     require(Number.isInteger(number) && number >= 0 && number < settings.records && allowed(number), "An unexpected record is present");

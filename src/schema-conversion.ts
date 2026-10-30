@@ -61,7 +61,7 @@ export async function conversionPlan(node: NodeClient, cfg: Config, entries: Con
     const source = await conversionCall<Metadata>(node,"GET",`/api/schema/${encodeURIComponent(pin)}`);
     const definition = cfg.schemaFieldAliases?.[pin] ? canonicalSchema(entry.schema) : entry.schema;
     if (source.owner_app_id !== OWNER_APP_ID || source.descriptive_name !== definition.descriptive_name
-      || !same([...source.fields].sort(),[...definition.fields].sort()) || !same([source.key.hash_field,source.key.range_field ?? null],[definition.key.hash_field,definition.key.range_field ?? null])
+      || !same([...source.fields].sort(),[...definition.fields].sort()) || !same([source.key?.hash_field ?? null,source.key?.range_field ?? null],[definition.key?.hash_field ?? null,definition.key?.range_field ?? null])
       || !same(source.field_types,definition.field_types) || !same(source.field_descriptions,definition.field_descriptions)) {
       fail(`The installed ${entry.keys[0]} definition differs. Review this schema before conversion.`);
     }
