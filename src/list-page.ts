@@ -724,7 +724,7 @@ export async function planRecordListSide(opts: {
       ? uniqueDests([...previousEdgeIds, ...previousFrontmatterIds])
       : previousDests;
     const oldSlots = opts.previous
-      ? slotsFor(opts.type, opts.previous, storedDests, details)
+      ? slotsFor(opts.type, opts.previous, storedDests, details, multiKey(opts.cfg))
       : knownOld;
     const extraLocators = oldSlots.filter((slot) => {
       if (slot.kind !== "list") return false;
@@ -814,7 +814,7 @@ export async function planRecordListSide(opts: {
     preservedEdgeIds = nextIds.filter((id) => !suppliedIds.has(id));
 
     const finalNew = opts.next
-      ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details)
+      ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details, multiKey(opts.cfg))
       : [];
     const unreadByHash = new Map<string, Slot>();
     for (const slot of [...finalNew, ...oldSlots]) {
@@ -2606,7 +2606,7 @@ export async function planNamedSlugBackfill(opts: {
       ? `symptom#${textField(record, "symptom_hash")}`
       : target.hash;
     const slotNotes: string[] = [];
-    const slots = slotsFor(opts.sourceType, record, [], slotNotes);
+    const slots = slotsFor(opts.sourceType, record, [], slotNotes, multiKey(opts.cfg));
     const slot = slots.find((item) => item.hash === hash) ?? null;
     if (!slot) continue;
     if (located.has(slug)) {
@@ -2646,7 +2646,7 @@ export async function planNamedSlugBackfill(opts: {
       }
       if (!found.includes(dest)) continue;
       const slotNotes: string[] = [];
-      const slots = slotsFor(opts.sourceType, record, [dest], slotNotes);
+      const slots = slotsFor(opts.sourceType, record, [dest], slotNotes, multiKey(opts.cfg));
       const slot = slots.find((item) => item.hash === target.hash) ?? null;
       if (!slot) continue;
       chosen.set(record.slug, slot);

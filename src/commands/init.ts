@@ -425,7 +425,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     const config = await syncOwnedModel(nodeClient, {
       configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
       designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
-    }, existing);
+    }, existing, canonicalVocabulary);
     writeConfig(config, configPath);
     const consent = { state: "skipped", reason: "enforce_off" } as const;
     printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });

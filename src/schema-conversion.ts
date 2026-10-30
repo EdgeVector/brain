@@ -84,6 +84,10 @@ export async function executeConversion(node: NodeClient, cfg: Config, path: str
   }
   const step = (action: string) => conversionCall<ConversionReport>(node,"POST","/api/db/alternate-keys",
     {action,change_id:report!.change_id});
+  if (!options.abort && cfg.storageModel===MULTI_KEY_MODEL && plan.sources.every(({source})=>source.independent_fields)
+    && (!report || ["complete","aborted"].includes(report.phase))) {
+    return {phase:"complete",already_converted:true,converted_schemas:names};
+  }
   if (options.abort) {
     if (!report || ["complete","aborted"].includes(report.phase)) fail("No unpublished conversion is active.");
     for (let page=0;page<100000;page++) { report=await step("app_abort"); if(report.phase==="aborted") return report; }
