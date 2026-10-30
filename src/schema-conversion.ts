@@ -16,11 +16,17 @@ import { alternateKeyWire } from "./alternate-key-wire.ts";
 import { configBytes, readConfig, writeConfig, type Config } from "./config.ts";
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
 import { MULTI_KEY_MODEL } from "./multi-key.ts";
-import { OWNER_APP_ID, type SchemaDefinition } from "./schemas.ts";
+import {
+  BRAIN_COMPACT_LOCATOR_SCHEMA_KEY,
+  OWNER_APP_ID,
+  type SchemaDefinition,
+} from "./schemas.ts";
 
 export type ConversionEntry = {
   keys: string[];
   schema: SchemaDefinition;
+  /** This exact reviewed layout owns one value by an external hash. */
+  opaqueHash?: true;
 };
 export type Metadata = {
   name: string;
@@ -36,6 +42,7 @@ export type Metadata = {
   alternate_keys?: unknown;
   field_mappers?: Record<string, string>;
   transform_fields?: Record<string, unknown>;
+  ref_fields?: Record<string, unknown>;
 };
 type Request = {
   schema: string;
@@ -375,6 +382,34 @@ export async function conversionPlan(
     const source = matches[0]!,
       matched = conversionDefinition(source, entry.schema);
     if (
+      entry.opaqueHash ||
+      (!source.key?.hash_field && !source.key?.range_field)
+    ) {
+      if (
+        entry.opaqueHash !== true ||
+        entry.keys.length !== 1 ||
+        entry.keys[0] !== BRAIN_COMPACT_LOCATOR_SCHEMA_KEY ||
+        source.schema_type !== "Hash" ||
+        source.key?.hash_field ||
+        source.key?.range_field ||
+        source.fields.length !== 1 ||
+        entry.schema.fields[0] !== "bcl_page" ||
+        Object.keys(alternateKeyWire(source.alternate_keys)).length ||
+        Object.keys(alternateKeyWire(matched.definition.alternate_keys))
+          .length ||
+        Object.keys(source.field_mappers ?? {}).length ||
+        Object.keys(source.transform_fields ?? {}).length ||
+        Object.keys(source.ref_fields ?? {}).length
+      )
+        fail(
+          "The reviewed compact locator must retain its exact single-field Hash coordinates, with no alternate keys, maps, transforms, or references.",
+        );
+      if (!version.capabilities?.app_schema_opaque_hash_ownership_v1)
+        fail(
+          "The compact locator needs app_schema_opaque_hash_ownership_v1 before ownership conversion.",
+        );
+    }
+    if (
       entry.keys.some(
         (key) =>
           cfg.schemaIdentities?.[key] &&
@@ -440,6 +475,15 @@ export async function conversionPlan(
   if (pending && !same(requests, saved!.schemas))
     fail(
       "The saved definitions, key layouts, or membership differ. No next phase follows.",
+    );
+  if (
+    sources.some(
+      ({ entry }, index) =>
+        entry.opaqueHash && requests[index]!.membership !== null,
+    )
+  )
+    fail(
+      "The compact locator retains every original coordinate; a membership filter is not allowed.",
     );
   const retainedProfiles = new Set(
     sources.flatMap(({ source, entry }) => [
@@ -589,7 +633,15 @@ export async function executeConversion(
     sources.some(({ source }) => source.independent_fields === true)
   )
     fail("This app mixes legacy and owned schemas. Owner review is required.");
-  if (!options.apply) return { phase: "plan", schemas: requests, retire };
+  if (!options.apply)
+    return {
+      phase: "plan",
+      schemas: requests,
+      retire,
+      retained_coordinate_schemas: sources
+        .filter(({ entry }) => entry.opaqueHash)
+        .map(({ source }) => source.name),
+    };
   if (!options.maintenance)
     fail("Use --apply --maintenance for the explicit node request pause.");
   if (!pending) {

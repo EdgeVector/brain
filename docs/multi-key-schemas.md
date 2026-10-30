@@ -3,6 +3,11 @@
 New installations declare independent record values. Canonical fields still reuse their definitions.
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.
 
+The compact list locator keeps its external digest key and sole page field. Its schema key stays empty and it has no alternate keys.
+Owned setup and conversion require `app_schema_opaque_hash_ownership_v1` for this exact shape.
+The node must prove exclusive ownership and retain the original molecule, current atoms, author metadata, and stored coordinates in place.
+The request has no membership filter, field transition, transform, or reference. The app does not invent a stored hash field or reconstruct API keys.
+
 Each record kind uses recent and status keys. Task also uses a design key. Ranges contain the reverse UTC timestamp and the slug. Tags, links, graph edges, counts, and body files remain separate records with independent values. A list cursor belongs to one filter.
 
 ## Existing installations

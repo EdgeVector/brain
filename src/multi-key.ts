@@ -1,6 +1,6 @@
 // Named keys belong to one record schema. Relationship records keep their own values.
 import { FbrainError, type NodeClient, type QueryRow } from "./client.ts";
-import { RECORD_TYPES, UNIQUE_SCHEMAS, schemaConfigKeys, type RecordType, type SchemaDefinition } from "./schemas.ts";
+import { BRAIN_COMPACT_LOCATOR_SCHEMA_KEY, RECORD_TYPES, UNIQUE_SCHEMAS, schemaConfigKeys, type RecordType, type SchemaDefinition } from "./schemas.ts";
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
 export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
@@ -20,7 +20,8 @@ export function ownedSchemas() {
         ...ordered(), hash_literal: undefined, hash_field: "design_slug", missing: "omit", omit_empty_hash: true,
       };
     }
-    return { keys: schemaConfigKeys(entry), schema };
+    return { keys: schemaConfigKeys(entry), schema,
+      ...(entry.key === BRAIN_COMPACT_LOCATOR_SCHEMA_KEY ? { opaqueHash: true as const } : {}) };
   });
 }
 
