@@ -59,8 +59,16 @@ jobs:
           grep -q 'Identifier=com.edgevector.fbrain' /tmp/codesign.txt
           codesign --verify --verbose dist/fbrain-mcp
 
-      - name: Smoke-test the compiled MCP surface
+      - name: Check the compiled MCP surface
+        env:
+          BRAIN_CONFIG: ${{ runner.temp }}/brain-artifact-absent/config.json
+          FBRAIN_CONFIG: ${{ runner.temp }}/brain-artifact-absent/config.json
+          FBRAIN_FOLDDB_SOCKET: ${{ runner.temp }}/brain-artifact-absent/node.sock
+          LASTDB_HOME: ${{ runner.temp }}/brain-artifact-absent/node-home
         run: |
+          test ! -e "$BRAIN_CONFIG"
+          test ! -e "$FBRAIN_FOLDDB_SOCKET"
+          test ! -e "$LASTDB_HOME"
           printf '%s\n%s\n' \
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \

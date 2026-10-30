@@ -49,6 +49,8 @@ export type Config = {
   schemaServiceUrl: string;
   userHash: string;
   schemaHashes: Record<string, string>;
+  /** Definition identities are separate from runtime addresses. */
+  schemaIdentities?: Record<string, string>;
   schemaFieldAliases?: FieldAliasProfiles;
   // Mirror of schemaHashes.design / schemaHashes.task — present on disk
   // for backward compat with v1 readers. Always kept in sync on write.
@@ -146,10 +148,25 @@ export function tryReadConfig(path: string = defaultConfigPath()): Config | null
 export function writeConfig(
   config: Config,
   path: string = defaultConfigPath(),
+  expected?: string | null,
+  conversionScope?: string,
 ): void {
   mkdirSync(dirname(path), { recursive: true });
-  const synced = syncMirrors(config);
-  writeConfigFile(path, JSON.stringify(synced, null, 2) + "\n");
+  const scopePath = path + ".conversion.json";
+  if (existsSync(scopePath) && readFileSync(scopePath, "utf8") !== conversionScope) {
+    throw new ConfigInvalidError(path, "resume the saved app conversion before a config change");
+  }
+  writeConfigFile(path, configBytes(config), expected);
+}
+
+export function configBytes(config: Config): string {
+  const ordered = (value: unknown): unknown => Array.isArray(value)
+    ? value.map(ordered)
+    : value && typeof value === "object"
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => [key, ordered(item)]))
+      : value;
+  return JSON.stringify(ordered(syncMirrors(config)), null, 2) + "\n";
 }
 
 // Keep designSchemaHash/taskSchemaHash mirrored against schemaHashes
@@ -241,6 +258,14 @@ function assertConfigShape(path: string, raw: unknown): Config {
     designSchemaHash: r.designSchemaHash as string,
     taskSchemaHash: r.taskSchemaHash as string,
   };
+  const identities = r.schemaIdentities;
+  if (identities !== undefined) {
+    if (!identities || typeof identities !== "object" || Array.isArray(identities)
+      || Object.values(identities).some((value) => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))) {
+      throw new ConfigInvalidError(path, "schemaIdentities must contain exact definition identities");
+    }
+    config.schemaIdentities = { ...identities } as Record<string, string>;
+  }
   // Optional owner-session socket override — only carried when present and a
   // non-empty string, so existing configs (which never wrote it) round-trip
   // unchanged.

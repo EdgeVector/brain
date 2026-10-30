@@ -161,7 +161,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | Command | What it does |
 |---|---|
 | `brain init` | Bootstraps the node + registers schemas + writes `~/.brain/config.json` with canonical hashes |
-| `brain multi-key-convert [--apply --maintenance [--retire-legacy]] [--abort]` | Shows the explicit conversion plan for an existing home. The apply gives each Brain schema its own values and named keys. Run it on the compatible LastDB release before the removal release. See `docs/multi-key-schemas.md` |
+| `brain multi-key-convert [--apply --maintenance] [--abort]` | Shows the explicit conversion plan for an existing home. The apply gives each Brain schema its own values and named keys. Run it on the compatible LastDB release before the removal release. See `docs/multi-key-schemas.md` |
 | `brain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of type `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, or `decision`. Status defaults to the type's first enum value |
 | `brain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
 | `brain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |

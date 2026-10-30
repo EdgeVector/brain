@@ -292,7 +292,7 @@ function simpleNewHelp(type: RecordType): string {
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
-  "multi-key-convert": "brain multi-key-convert [--apply --maintenance [--retire-legacy]] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. Init leaves existing values unchanged.\nThe plan lists legacy Brain schemas that this release does not read. --retire-legacy drops them and their values in the same conversion. The apply refuses while that list is not empty and the flag is absent.",
+  "multi-key-convert": "brain multi-key-convert [--apply --maintenance] [--abort]\n\nShow the conversion plan. The explicit apply pauses requests, copies current values, and changes the config. Init leaves existing values unchanged.\nUnknown legacy schemas and a type inside another type need a separate reviewed conversion. This command does not drop unique legacy values.",
   init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
 Probe the node, bootstrap if needed, register every schema, load them,
@@ -1941,7 +1941,7 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
         apply:{type:"boolean"},maintenance:{type:"boolean"},abort:{type:"boolean"},"retire-legacy":{type:"boolean"}}});
       const cfg=readConfig();
       const {"retire-legacy":retireLegacy,...flags}=values;
-      // A split record type is copied with ordinary app writes, so the client carries the app capability.
+      // The native conversion uses the app write client and its supported owner mode.
       console.log(JSON.stringify(await convertMultiKey(newWriteClientFromCfg(cfg,verboseFn).node,cfg,{...flags,retireLegacy})));
       return 0;
     }

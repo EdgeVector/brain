@@ -1647,6 +1647,10 @@ export function newNodeClient(opts: {
       const schemaName = typeof b.schema === "string" ? b.schema : "";
       const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
       const independentFields = b.independent_fields === true;
+      if (local.independent_fields && (!independentFields || !identityHash || !/^[a-f0-9]{64}$/.test(identityHash)
+        || b.app_id !== appId || b.schema_name !== `${appId}/${local.name}`)) {
+        throw new FbrainError({ code: "owned_schema_receipt_invalid", message: "The declaration did not confirm the exact owned app schema." });
+      }
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
       if (!canonical || !schemaName || !resolution) {
         throw new FbrainError({

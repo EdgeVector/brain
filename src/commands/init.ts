@@ -23,6 +23,7 @@ import { canonicalProfilesForHashes, canonicalSchema } from "../canonical-vocabu
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 
 import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
 import {
@@ -273,6 +274,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const verbose = opts.verbose;
   const bootstrapName = opts.bootstrapName ?? "fbrain";
   const configPath = opts.configPath ?? defaultConfigPath();
+  if (existsSync(configPath + ".conversion.json")) {
+    throw new FbrainError({ code: "app_conversion_active", message: "Resume the saved app conversion before init." });
+  }
+  const priorConfig = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
 
   // `tryReadConfig` returns null when the file is absent but THROWS when it
   // exists with malformed contents (truncated JSON, missing field, unknown
@@ -295,6 +300,9 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
   if (existing) {
+    if (!multiKey(existing)) {
+      throw new FbrainError({ code: "multi_key_conversion_required", message: "Existing Brain values need the explicit multi-key conversion before init." });
+    }
     print(`[init] existing config at ${configPath} — verifying`);
   }
 
@@ -426,7 +434,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
       designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
     }, existing, canonicalVocabulary);
-    writeConfig(config, configPath);
+    writeConfig(config, configPath, priorConfig);
     const consent = config.appIdentityEnforce === false
       ? { state: "skipped", reason: "enforce_off" } as const
       : await establishConsentInline({nodeUrl,userHash,print,verbose,socketPath:nodeSocketPath,
