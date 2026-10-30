@@ -144,7 +144,8 @@ export async function conversionCall<T>(
 ): Promise<T> {
   const response = await node.rawCall(method, path, body);
   if (response.status !== 200 || object(response.json).ok === false)
-    fail(`${path} returned HTTP ${response.status}. No next phase follows.`);
+    // Keep the node's refusal text: a bare status hides which rule refused the request.
+    fail(`${path} returned HTTP ${response.status}: ${response.body.slice(0, 800)}. No next phase follows.`);
   if (path === ROUTE) return receipt(response.json) as T;
   const payload = data(response.json);
   return (payload.schema ?? payload) as T;
