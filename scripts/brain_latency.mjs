@@ -229,7 +229,7 @@ async function run() {
   }
   const [get, list, snapshot, search] = await Promise.all(["get", "list", "admin-snapshot", "search"].map((name) => load(root, "commands/" + name)));
   for (let sample = 0; sample < settings.samples; sample++) {
-    let result;
+    let result, sharedValueRows;
     const before = requests, bytes = responseBytes, start = performance.now();
     profile = new Map();
     if (phase === "get") {
@@ -263,10 +263,22 @@ async function run() {
     } else {
       const full = ["get", "all_records", "migration_read"].includes(phase);
       const expected = phase === "get" ? 1 : phase === "first_page" ? 20 : phase === "migration_read" ? settings.records / 2 : settings.records;
-      checkRecords(phase === "get" ? [result] : result, expected, full ? fields : ["slug", "title", "status", "updated_at"],
+      let items = phase === "get" ? [result] : result;
+      if (phase === "migration_read" && settings.label === "before" && Array.isArray(items)) {
+        // The old shared-value layout also lists each reference slug under the concept key
+        // molecule (CI read 1000 rows for 500 concept records). The conversion removes these
+        // rows. Count them, check that they are reference slugs, and check concept exactly.
+        const other = items.filter((item) => Number(String(item?.slug).slice(5)) % 2 === 1);
+        require(new Set(other.map((item) => item.slug)).size === other.length
+          && other.every((item) => Number(String(item.slug).slice(5)) < settings.records), "A shared-value row is not a reference slug");
+        sharedValueRows = other.length;
+        items = items.filter((item) => !other.includes(item));
+      }
+      checkRecords(items, expected, full ? fields : ["slug", "title", "status", "updated_at"],
         (number) => phase === "get" ? number === 0 : phase === "first_page" ? number % 2 === 0 && number >= settings.records - 40 : phase !== "migration_read" || number % 2 === 0);
     }
-    samples.push({ elapsed_ms: elapsed, requests: requests - before, response_bytes: responseBytes - bytes, verified: true, profile: Object.fromEntries(profile) });
+    samples.push({ elapsed_ms: elapsed, requests: requests - before, response_bytes: responseBytes - bytes, verified: true,
+      ...(sharedValueRows === undefined ? {} : { shared_value_rows: sharedValueRows }), profile: Object.fromEntries(profile) });
   }
 }
 
