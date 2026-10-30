@@ -1020,10 +1020,7 @@ function parseQueryPage(body, returnedRows) {
     const limit = body['limit'];
     const offset = body['offset'];
     const hasMore = body['has_more'];
-    // A continuation is opaque. Keep comparison and future server fields;
-    // parseKeyValue remains the separate primary-row address parser.
-    const rawCursor = body['next_cursor'];
-    const nextCursor = parseKeyValue(rawCursor) === null ? null : { ...rawCursor };
+    const nextCursor = parseQueryCursor(body['next_cursor']);
     if (typeof limit !== 'number' ||
         typeof offset !== 'number' ||
         typeof hasMore !== 'boolean') {
@@ -1246,6 +1243,27 @@ function parseKeyValue(rawKey) {
     const hash = typeof rawKey['hash'] === 'string' ? rawKey['hash'] : null;
     const range = typeof rawKey['range'] === 'string' ? rawKey['range'] : null;
     return hash !== null || range !== null ? { hash, range } : null;
+}
+// Cursor validation stays separate from primary-row key parsing. Preserve
+// all server properties so comparison and future continuation fields survive.
+function parseQueryCursor(raw) {
+    if (raw === null || raw === undefined) return null;
+    const key = parseKeyValue(raw);
+    if (!key || !isObject(raw)) {
+        throw new UnexpectedResponseError('query returned an invalid cursor', 200, raw);
+    }
+    for (const name of ['hash', 'range']) {
+        const value = raw[name];
+        if (value !== null && value !== undefined && typeof value !== 'string') {
+            throw new UnexpectedResponseError('query returned an invalid cursor coordinate', 200, raw);
+        }
+    }
+    const comparison = raw['comparison'];
+    if (comparison !== null && comparison !== undefined
+        && (typeof comparison !== 'string' || comparison.length === 0)) {
+        throw new UnexpectedResponseError('query returned an invalid comparison cursor', 200, raw);
+    }
+    return { ...raw, ...key };
 }
 /** Parse a successful `POST /api/app/changes` cursor page. */
 export function parseChangesResponse(body) {
