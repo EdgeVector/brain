@@ -62,15 +62,6 @@ export async function syncOwnedModel(
     });
   }
   const declarations = ownedSchemas();
-  if (
-    declarations.some((entry) => entry.opaqueHash) &&
-    !capabilities.app_schema_opaque_hash_ownership_v1
-  )
-    throw new BrainError({
-      code: "opaque_hash_upgrade_required",
-      message:
-        "The compact locator needs app_schema_opaque_hash_ownership_v1 before owned setup.",
-    });
   const known = declarations;
   const installed = catalog.schemas.filter(
     (schema) => schema.owner_app_id === OWNER_APP_ID,
