@@ -2,6 +2,7 @@ import { profilesFor } from "./canonical-vocabulary.ts";
 import { BrainError, type NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
 import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
+import { ownsValues } from "./runtime.ts";
 import { OWNER_APP_ID } from "./schemas.ts";
 
 /** One installed schema, as the node's schema directory reports it. */
@@ -26,9 +27,13 @@ export async function syncOwnedModel(
   canonicalVocabulary: boolean,
 ): Promise<Config> {
   const version = await node.rawCall("GET", "/api/version");
-  const capabilities = (
-    version.json as { capabilities?: Record<string, boolean> }
-  )?.capabilities;
+  const versionReply = version.json as {
+    capabilities?: Record<string, boolean>;
+    api_version?: unknown;
+  };
+  const capabilities = versionReply?.capabilities;
+  const apiVersion =
+    typeof versionReply?.api_version === "number" ? versionReply.api_version : 0;
   if (
     version.status !== 200 ||
     !capabilities?.compound_alternate_keys_v1 ||
@@ -92,7 +97,9 @@ export async function syncOwnedModel(
       message:
         "Several installed schemas claim one app record type. Init leaves them unchanged.",
     });
-  if (installed.some((schema) => schema.independent_fields !== true)) {
+  if (
+    installed.some((schema) => !ownsValues(schema.independent_fields, apiVersion))
+  ) {
     throw new BrainError({
       code: "home_copy_required",
       message:
