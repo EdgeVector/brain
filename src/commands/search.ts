@@ -20,8 +20,8 @@ import {
   missingSchemaHashReadNote,
   resolveTypeFilter,
   TOMBSTONE_TAG,
-  uniqueSchemaHashes,
 } from "../record.ts";
+import { lastSeekScope } from "../lastseek-scope.ts";
 import { RANKER_PAGE, READ_KEY_CAP, rankKeywordQuery } from "../list-page.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
@@ -200,7 +200,10 @@ export async function retrieveRankedPage(opts: {
 }): Promise<{ hits: RetrievedHit[]; sample: boolean }> {
   const page = pageLimit(opts.limit);
   const active = new Set(opts.activeTypes);
-  const schemas = uniqueSchemaHashes(opts.cfg, opts.activeTypes);
+  const schemas = await lastSeekScope(opts.node, opts.cfg, opts.activeTypes, opts.verbose);
+  // Every walked type is empty: nothing to find, and an unscoped query would
+  // rank other apps' rows.
+  if (opts.activeTypes.length > 0 && schemas.length === 0) return { hits: [], sample: false };
   const seek = queryLastSeek({
     query: opts.query,
     k: RANKER_PAGE,
