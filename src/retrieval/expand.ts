@@ -6,7 +6,7 @@
 // don't pull in the SDK — keeps the dep tree thin and the cost surface
 // auditable. Key resolution order:
 //   1) process.env.ANTHROPIC_API_KEY
-//   2) ~/.fbrain/config.json's `anthropicApiKey` field (optional, undocumented)
+//   2) ~/.brain/config.json's `anthropicApiKey` field (optional, undocumented)
 //
 // When the key is missing, the caller is expected to fall back to
 // "no expansion" mode automatically — see ask.ts.
@@ -48,10 +48,10 @@ export function resolveAnthropicKey(): string | null {
   if (env && env.length > 0) return env;
   // Optional config field — undocumented because env is the conventional
   // path. We read it so users on machines without a shell-env can still
-  // wire ask up by editing ~/.fbrain/config.json.
-  // Same path resolution as everywhere else (FBRAIN_CONFIG override, else the
+  // wire ask up by editing ~/.brain/config.json.
+  // Same path resolution as everywhere else (BRAIN_CONFIG override, else the
   // guarded home base) so a broken HOME fails loud rather than reading a
-  // relative `undefined/.fbrain/config.json`.
+  // relative `undefined/.brain/config.json`.
   const cfgPath = defaultConfigPath();
   if (!existsSync(cfgPath)) return null;
   try {
@@ -154,7 +154,7 @@ export function parseExpansions(raw: string, count: number): string[] {
       // entire content (line is just `-`, `*`, or `•`, optionally indented).
       // Without the `$` alternative those bare-bullet lines didn't match
       // any strip, survived `.trim()` as a single-character "expansion",
-      // and flowed into ask.ts as a wasteful vector query (`fbrain ask`
+      // and flowed into ask.ts as a wasteful vector query (`brain ask`
       // would round-trip the node for a `-` search whose garbage hits
       // then polluted the RRF fused ranking). Same shape as PR #119's
       // quote-only-line skip — collapse to empty, let the existing

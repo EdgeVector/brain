@@ -6,12 +6,13 @@ import {
 } from "./index-payload.ts";
 import type { NodeClient, QueryRow } from "./client.ts";
 import {
-  FbrainError,
+  BrainError,
   QUERY_PAGE_LIMIT,
   QUERY_PAGE_SIZE,
   isLoopbackNodeUrl,
 } from "./client.ts";
 import { newSearchClientFromCfg } from "./write-context.ts";
+import { keyPage, multiKey } from "./multi-key.ts";
 import type { Config } from "./config.ts";
 import {
   hydrateRecord,
@@ -30,7 +31,7 @@ import {
 
 
 
-export type FbrainRecord = {
+export type BrainRecord = {
   slug: string;
   title: string;
   body: string;
@@ -56,9 +57,9 @@ export type Backlink = {
   updated_at: string;
 };
 
-// The index-only backlink shape `fbrain get` renders: type + slug straight
+// The index-only backlink shape `brain get` renders: type + slug straight
 // from the membership record. `status`/`via` are present only when a caller
-// paid for hydration (`fbrain backlinks`), so a `Backlink` is a `BacklinkRef`.
+// paid for hydration (`brain backlinks`), so a `Backlink` is a `BacklinkRef`.
 export type BacklinkRef = {
   type: RecordType;
   slug: string;
@@ -97,9 +98,9 @@ export function wikiLinkSlugs(body: string): string[] {
   return Array.from(found);
 }
 
-// Tombstone sentinel. `fbrain delete` still stamps this tag so older read
+// Tombstone sentinel. `brain delete` still stamps this tag so older read
 // paths hide the row. Native LastDB Delete also converges tip absence.
-export const TOMBSTONE_TAG = "__fbrain_deleted__";
+export const TOMBSTONE_TAG = "__brain_deleted__";
 
 export function isTombstoned(r: { tags: readonly string[] }): boolean {
   return r.tags.includes(TOMBSTONE_TAG);
@@ -119,12 +120,12 @@ export function schemaHashFor(
 ): string {
   const hash = cfg.schemaHashes[type];
   if (!hash || hash.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "missing_schema_hash",
       message: `No canonical hash registered for type "${type}" in config.`,
       hint:
         "This config is stale or partial. Routine reads skip unavailable types; " +
-        "for setup/repair, run `fbrain init --grant-consent` against the configured " +
+        "for setup/repair, run `brain init --grant-consent` against the configured " +
         "socket-backed node to refresh schema hashes.",
     });
   }
@@ -138,12 +139,12 @@ export function missingSchemaHashReadNote(
   return (
     `note: skipping type(s) ${skipped.join(", ")} — schema unavailable in this config or node ` +
     `(${action}). Routine reads continue over available socket-backed schemas; ` +
-    "repair the stale config with a deliberate `fbrain init --grant-consent`."
+    "repair the stale config with a deliberate `brain init --grant-consent`."
   );
 }
 
 export function isSchemaNotFoundReadError(err: unknown): boolean {
-  if (!(err instanceof FbrainError)) return false;
+  if (!(err instanceof BrainError)) return false;
   if (err.code === "missing_schema_hash") return true;
   if (err.code !== "node_http_404" && err.code !== "node_http_400") {
     return false;
@@ -157,7 +158,7 @@ export function isSchemaNotFoundReadError(err: unknown): boolean {
 }
 
 // Deduped list of canonical schema hashes for the given record types. Used
-// by `search` and `ask` to scope native-index queries to fbrain's schemas
+// by `search` and `ask` to scope native-index queries to brain's schemas
 // (the `schemas` filter on /api/native-index/search). Phase 6 types
 // concept/preference/reference/agent/project/spike all map to the same
 // unified MEMO schema, so the per-type lookups return the same hash six
@@ -184,7 +185,7 @@ export function uniqueSchemaHashes(
 // branch on the null instead of a length check. `activeTypes` preserves
 // RECORD_TYPES order regardless of the order the user passed `--type` in.
 //
-// Config-guard (papercut-fbrain-decision-type-hash-missing): every downstream
+// Config-guard (papercut-brain-decision-type-hash-missing): every downstream
 // consumer of `activeTypes` calls `schemaHashFor(t, cfg)`, which THROWS
 // `missing_schema_hash` for a type absent from the local config. A partially
 // initialised config (e.g. one predating the `decision` schema) therefore made
@@ -231,9 +232,9 @@ export function resolveTypeFilter(
   return { typeFilter, activeTypes };
 }
 
-export function rowToRecord(row: QueryRow, type: RecordType): FbrainRecord {
+export function rowToRecord(row: QueryRow, type: RecordType): BrainRecord {
   const f = (row.fields ?? {}) as Record<string, unknown>;
-  const base: FbrainRecord = {
+  const base: BrainRecord = {
     slug: stringField(f, "slug"),
     title: stringField(f, "title"),
     body: stringField(f, "body"),
@@ -323,7 +324,7 @@ export function buildRecordFields(
 }
 
 export function updateFieldsFrom(
-  record: FbrainRecord,
+  record: BrainRecord,
   type: RecordType,
   patch: RecordFieldPatch,
 ): Record<string, unknown> {
@@ -342,8 +343,8 @@ export function arrayStringField(f: Record<string, unknown>, key: string): strin
   // Mirror put.ts's inline-list parser (`.filter(s => s.length > 0)`): the
   // write path treats empty strings as non-tags, so the read path must too —
   // otherwise a phantom empty tag from the server (legacy data, the block-list
-  // parser's unfiltered branch, or a non-fbrain client) surfaces as a stray
-  // `,` separator in `fbrain get` / `fbrain list`, inflates `r.tags.length`,
+  // parser's unfiltered branch, or a non-brain client) surfaces as a stray
+  // `,` separator in `brain get` / `brain list`, inflates `r.tags.length`,
   // and — worst — propagates back to the server on the next `put` / `link`
   // / `migrate`, since those write paths preserve `existing.tags` verbatim
   // (`put.ts:buildFields` `tags: tags ?? existing?.tags ?? []`).
@@ -377,13 +378,13 @@ export async function listRecords(
   type: RecordType,
   cfg: ListRecordsCfg,
   opts: CompleteOptions & { summary?: false },
-): Promise<FbrainRecord[]>;
+): Promise<BrainRecord[]>;
 export async function listRecords(
   node: NodeClient,
   type: RecordType,
   cfg: ListRecordsCfg,
   opts: (CompleteOptions & { summary?: false }) | { summary: true },
-): Promise<FbrainRecord[] | SnapshotSummary[]> {
+): Promise<BrainRecord[] | SnapshotSummary[]> {
   const cards = await typePageCards(node, cfg, type);
   if ("summary" in opts && opts.summary === true) {
     return cards.map((card) => ({
@@ -407,7 +408,7 @@ export async function listRecords(
     opts.skipped?.push(...missing);
     warnSkippedRows(type, missing);
   }
-  const out: FbrainRecord[] = [];
+  const out: BrainRecord[] = [];
   for (const card of cards) {
     const record = records.get(card.slug);
     if (record) out.push(record);
@@ -494,8 +495,8 @@ export async function readFullRecords(
   slugs: readonly string[],
   onMissing: OnMissing,
   options?: ReadRetryOptions,
-): Promise<{ records: Map<string, FbrainRecord | null>; missing: string[] }> {
-  const complete = new Map<string, FbrainRecord | null>();
+): Promise<{ records: Map<string, BrainRecord | null>; missing: string[] }> {
+  const complete = new Map<string, BrainRecord | null>();
   let pending = [...new Set(slugs)];
   if (pending.length === 0) return { records: complete, missing: [] };
   const hash = schemaHashFor(type, cfg);
@@ -515,7 +516,7 @@ export async function readFullRecords(
     pending = missed;
   }
   if (pending.length > 0 && onMissing === "throw") {
-    throw new FbrainError({
+    throw new BrainError({
       code: "index_row_incomplete",
       message:
         `${pending.length} ${type} record(s) could not be read from the product schema ` +
@@ -547,7 +548,7 @@ export async function completeSnapshots(
   snapshots: readonly IndexSnapshot[],
   onMissing: OnMissing,
   options?: ReadRetryOptions & { skipped?: string[] },
-): Promise<FbrainRecord[]> {
+): Promise<BrainRecord[]> {
   const cutSlugs = snapshots.flatMap((s) => (s.cut ? [s.summary.slug] : []));
   const { records, missing } = await readFullRecords(
     node,
@@ -561,7 +562,7 @@ export async function completeSnapshots(
     options?.skipped?.push(...missing);
     warnSkippedRows(type, missing);
   }
-  const out: FbrainRecord[] = [];
+  const out: BrainRecord[] = [];
   for (const snapshot of snapshots) {
     if (!snapshot.cut) {
       out.push(snapshot.record);
@@ -583,15 +584,15 @@ export async function listRecordsAdminScan(
   type: RecordType,
   schemaHash: string,
   opts?: {
-    seedIndex?: (records: FbrainRecord[]) => Promise<void>;
+    seedIndex?: (records: BrainRecord[]) => Promise<void>;
     includeTombstones?: boolean;
     // Called periodically with the number of storage keys considered so far.
     // Each keys page is read in bounded native batches, never one call per key.
     onProgress?: (scanned: number) => void;
   },
-): Promise<FbrainRecord[]> {
+): Promise<BrainRecord[]> {
   if (!node.listRecordKeys || !node.queryByKeys) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "admin_list_not_supported",
       message: "This node client does not support the keys-only admin list path.",
       hint: "Use the production NodeClient against a Mini version that serves GET /api/list.",
@@ -636,7 +637,7 @@ export async function listRecordsAdminScan(
       break;
     }
     if (page.nextCursor === null || seenCursors.has(page.nextCursor)) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "list_keys_pagination_stalled",
         message: `Node GET /api/list did not advance its cursor while listing ${type} records.`,
         hint: "Retry after checking the node's keys-only list route; brain will not return a silently incomplete admin drain.",
@@ -646,7 +647,7 @@ export async function listRecordsAdminScan(
     cursor = page.nextCursor;
   }
   if (!complete) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "list_keys_pagination_limit",
       message: `Node GET /api/list exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
       hint: "Retry with a healthy node; brain will not return a silently truncated admin drain.",
@@ -759,7 +760,7 @@ const LIVE_SLUG_PAGE_FIELDS = ["slug", "tags"];
 // ONE small `/api/query` page of live (non-tombstoned) slugs for a schema —
 // slug+tags projection only, `limit` rows max, never paginated. This is the
 // bounded primitive behind the no-match hint paths: the empty-brain probe
-// (`hasAnyLiveRecord`) and the MCP fbrain_get nearest-slug candidate scan.
+// (`hasAnyLiveRecord`) and the MCP brain_get nearest-slug candidate scan.
 // Both are best-effort decoration, so sampling the first page is the
 // contract — callers that need the COMPLETE row set use `listRecords` /
 // `listRecordKeys` (paginated, guarded) instead. Falls back to `queryAll`
@@ -769,8 +770,11 @@ export async function listLiveSlugsPage(
   node: NodeClient,
   schemaHash: string,
   limit: number = NO_MATCH_PROBE_PAGE_LIMIT,
+  cfg: { storageModel?: string } = {},
 ): Promise<string[]> {
-  const rows = node.queryPage
+  const rows = multiKey(cfg)
+    ? (await keyPage(node, schemaHash, "recent", { HashKey: "all" }, LIVE_SLUG_PAGE_FIELDS, limit)).results
+    : node.queryPage
     ? await node.queryPage({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS, limit })
     : (await node.queryAll({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS })).results.slice(
         0,
@@ -789,36 +793,22 @@ export async function listLiveSlugsPage(
   return slugs;
 }
 
-// Cheap "does this brain hold ANY live record?" probe, used only on the
-// search/ask/list no-match path to distinguish a brand-new EMPTY brain (a new
-// dev who hasn't created anything yet) from a populated brain whose query
-// simply matched nothing. Walks fbrain's distinct schema hashes and asks each
-// for ONE small slug+tags page (`listLiveSlugsPage` — never a paginated
-// full-field fetch), returning true on the FIRST live (non-tombstone) row
-// seen. The types in `RECORD_TYPES` collapse onto a handful of unique schema
-// hashes (the Phase 6 types share the unified MEMO hash), so this is at most
-// a few single-page round trips and short-circuits the instant any record is
-// found.
-//
-// Returns `false` only when every schema hash comes back with no live row —
-// i.e. the empty-brain case. Errors propagate (a probe that can't reach the
-// node should surface, not silently claim "empty").
+// One body-free sample per distinct record schema, read in parallel. A sample
+// with no live slug is not a complete membership count. Read errors propagate.
 export async function hasAnyLiveRecord(
   node: NodeClient,
-  cfg: { schemaHashes: Record<string, string> },
+  cfg: { schemaHashes: Record<string, string>; storageModel?: string },
 ): Promise<boolean> {
   const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
-  for (const schemaHash of hashes) {
-    let slugs: string[];
+  const pages = await Promise.all(hashes.map(async (schemaHash) => {
     try {
-      slugs = await listLiveSlugsPage(node, schemaHash);
+      return await listLiveSlugsPage(node, schemaHash, NO_MATCH_PROBE_PAGE_LIMIT, cfg);
     } catch (err) {
-      if (isSchemaNotFoundReadError(err)) continue;
+      if (isSchemaNotFoundReadError(err)) return [];
       throw err;
     }
-    if (slugs.length > 0) return true;
-  }
-  return false;
+  }));
+  return pages.some((slugs) => slugs.length > 0);
 }
 
 // A single-record read returns the full text. `cfg` only saves a schema-hash
@@ -830,13 +820,13 @@ export async function findBySlug(
   slug: string,
   cfg?: ListRecordsCfg,
   opts?: { hydrate?: boolean },
-): Promise<FbrainRecord | null> {
+): Promise<BrainRecord | null> {
   const r = await findBySlugRaw(node, type, schemaHash, slug, cfg, opts);
   if (r === null) return null;
   return isTombstoned(r) ? null : r;
 }
 
-// Unfiltered variant — returns tombstoned records too. Only `fbrain delete`
+// Unfiltered variant — returns tombstoned records too. Only `brain delete`
 // needs this (to verify its own soft-delete landed). All other read paths
 // MUST use `findBySlug` so they treat tombstones as gone.
 // POINT-READ by key: the node resolves `filter:{HashKey:<slug>}` as an indexed
@@ -855,7 +845,7 @@ export async function findBySlugRaw(
   // `hydrate: false` returns the stored head. Only a deliberate overwrite of a
   // record whose body file is unreadable uses it (`put --allow-shrink`).
   opts?: { hydrate?: boolean },
-): Promise<FbrainRecord | null> {
+): Promise<BrainRecord | null> {
   const fields = fieldsFor(type);
   const readRow = async (): Promise<QueryRow | null> =>
     node.queryByKey
@@ -872,7 +862,7 @@ export async function findBySlugRaw(
   try {
     return await hydrateRecord(node, cfg ?? null, type, record);
   } catch (err) {
-    if (!(err instanceof FbrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
+    if (!(err instanceof BrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
     const again = await readRow();
     if (again === null) return null;
     return hydrateRecord(node, cfg ?? null, type, rowToRecord(again, type));
@@ -915,9 +905,9 @@ export async function findBySlugs(
   type: RecordType,
   schemaHash: string,
   slugs: readonly string[],
-): Promise<Map<string, FbrainRecord | null>> {
+): Promise<Map<string, BrainRecord | null>> {
   const raw = await findBySlugsRaw(node, type, schemaHash, slugs);
-  const out = new Map<string, FbrainRecord | null>();
+  const out = new Map<string, BrainRecord | null>();
   for (const slug of slugs) {
     const record = raw.get(slug) ?? null;
     out.set(slug, record !== null && !isTombstoned(record) ? record : null);
@@ -933,18 +923,18 @@ export async function findBySlugsRaw(
   type: RecordType,
   schemaHash: string,
   slugs: readonly string[],
-): Promise<Map<string, FbrainRecord | null>> {
-  const out = new Map<string, FbrainRecord | null>();
+): Promise<Map<string, BrainRecord | null>> {
+  const out = new Map<string, BrainRecord | null>();
   if (slugs.length === 0) return out;
   if (!node.queryByKeys) {
-    throw new FbrainError({ code: "keyed_read_required", message: "This read requires a client with batched keyed reads." });
+    throw new BrainError({ code: "keyed_read_required", message: "This read requires a client with batched keyed reads." });
   }
   const rows = await node.queryByKeys({
     schemaHash,
     fields: fieldsFor(type),
     keys: slugs.map((slug) => ({ hash: slug })),
   });
-  const bySlug = new Map<string, FbrainRecord>();
+  const bySlug = new Map<string, BrainRecord>();
   for (const row of rows) {
     const record = rowToRecord(row, type);
     if (record.slug.length > 0) bySlug.set(record.slug, record);
@@ -956,9 +946,9 @@ export async function findBySlugsRaw(
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
 // case). The same /api/query intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:
-// `fbrain put` lands and `fbrain search` returns the row, but `fbrain get`
+// `brain put` lands and `brain search` returns the row, but `brain get`
 // flakes ~1/5 of the time. scripts/parity-smoketest.sh rides this out by
-// retrying each `fbrain get` 5× at 250 ms; the user-facing CLI now does the
+// retrying each `brain get` 5× at 250 ms; the user-facing CLI now does the
 // same so users don't see "No record" for a row they just wrote.
 //
 // 5 × 250 ms is the smoketest's empirical setting — adjust together, not
@@ -1042,7 +1032,7 @@ export async function withReadRetry<T>(
   return result;
 }
 
-// Verify-after-write helper. Used by `fbrain put` after `createRecord` /
+// Verify-after-write helper. Used by `brain put` after `createRecord` /
 // `updateRecord` resolves: read the row back with the FULL withReadRetry
 // budget (5×250 ms) before reporting "created"/"updated" to the caller. The
 // underlying fold_db `/api/mutation` is not read-your-writes consistent —
@@ -1068,7 +1058,7 @@ export async function verifyRecordVisible(
   schemaHash: string,
   slug: string,
   options?: ReadRetryOptions,
-): Promise<FbrainRecord | null> {
+): Promise<BrainRecord | null> {
   return withReadRetry(
     () => findBySlug(node, type, schemaHash, slug),
     (r) => r !== null,
@@ -1077,14 +1067,14 @@ export async function verifyRecordVisible(
 }
 
 // Vector-index visibility check for the WRITE confirmation path (MCP
-// `fbrain_put` only — see mcp/server.ts). `verifyRecordVisible` above proves
+// `brain_put` only — see mcp/server.ts). `verifyRecordVisible` above proves
 // the row is queryable via /api/query (the record-list / BM25 surface that
 // `ask` and `list` read), but it says NOTHING about the NATIVE (vector) index
-// that `fbrain_search` and `ask`'s vector leg read: fold_db indexes the
+// that `brain_search` and `ask`'s vector leg read: fold_db indexes the
 // embedding asynchronously AFTER the mutation returns, so a tight
 // put→search in one warm process (the MCP-agent loop) lands inside a
 // sub-second-to-~1s window where the row is record-list-visible but NOT yet
-// in the vector index, and `fbrain_search` returns every OTHER record except
+// in the vector index, and `brain_search` returns every OTHER record except
 // the one just written. We close that window at the confirmation layer:
 // after the put's `verifyRecordVisible` passes, poll the native index until
 // the slug appears among the hits for a probe query (the record's own
@@ -1161,9 +1151,9 @@ export async function verifyVectorIndexed(
 
 // CLI write-path read-after-write confirmation, shared by `putCmd` and
 // `recordNew`. After the write's record-list verify-read passes, confirm the
-// record also landed in the NATIVE (vector) index that `fbrain search` reads —
+// record also landed in the NATIVE (vector) index that `brain search` reads —
 // closing the same put→search window the MCP path closes (mcp/server.ts), so a
-// human's first `fbrain search` after their first create returns the record.
+// human's first `brain search` after their first create returns the record.
 //
 // Returns `indexPending`: false once the slug is in the vector index, true if
 // the bounded budget is spent without seeing it (the caller appends an honest
@@ -1202,12 +1192,12 @@ export async function confirmVectorIndexed(
   } catch {
     // A confirmation-probe failure (config/transport) must never fail a write
     // that already persisted — report the index as pending so the user knows
-    // an immediate `fbrain search` may miss it and to retry shortly.
+    // an immediate `brain search` may miss it and to retry shortly.
     return { indexPending: true };
   }
 }
 
-// Batch hydrate for the SEARCH resolver. `fbrain search` resolves N deduped
+// Batch hydrate for the SEARCH resolver. `brain search` resolves N deduped
 // hits to their full records; pre-fix it called `findBySlug` once per hit,
 // and that helper fetches the WHOLE schema page (`listRecords` →
 // `queryAll`) and client-filters for one slug. So a 50-hit search that all
@@ -1240,12 +1230,12 @@ export async function hydrateSchemaBySlug(
   slugs: readonly string[],
   onMissing: OnMissing,
   options?: ReadRetryOptions,
-): Promise<Map<string, FbrainRecord>> {
+): Promise<Map<string, BrainRecord>> {
   const hash = schemaHashFor(type, cfg);
   const maxAttempts = options?.emptyPageAttempts ?? EMPTY_PAGE_RETRY_ATTEMPTS;
   const ceilingMs = options?.backoffMs ?? READ_RETRY_BACKOFF_MS;
   const sleep = options?.sleep ?? defaultSleep;
-  const bySlug = new Map<string, FbrainRecord>();
+  const bySlug = new Map<string, BrainRecord>();
   let pending = [...slugs];
   for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
     const wait = computeBackoffMs(attempt, ceilingMs);
@@ -1263,7 +1253,7 @@ export async function hydrateSchemaBySlug(
     pending = missed;
   }
   if (pending.length > 0 && onMissing === "throw") {
-    throw new FbrainError({
+    throw new BrainError({
       code: "index_row_incomplete",
       message:
         `${pending.length} ${type} record(s) could not be read from the product schema ` +
@@ -1279,7 +1269,7 @@ export async function hydrateSchemaBySlug(
 // filtered slice with no retry, even if zero rows match); only an EMPTY task
 // page retries (capped at `EMPTY_PAGE_RETRY_ATTEMPTS`) to ride out the
 // saturated-daemon empty-result flake. Without that cap, every
-// `fbrain get <design>` on a fresh node — where the task schema page is
+// `brain get <design>` on a fresh node — where the task schema page is
 // legitimately empty until its first task lands — would burn the full 5×250 ms
 // read-retry budget just to confirm "no children".
 /**
@@ -1292,7 +1282,7 @@ export async function hydrateSchemaBySlug(
  * projection turns into a confident wrong answer.
  */
 export type ChildTasksLookup =
-  | { status: "ok"; tasks: FbrainRecord[] }
+  | { status: "ok"; tasks: BrainRecord[] }
   | { status: "unavailable"; reason: string; hint?: string };
 
 /**
@@ -1324,7 +1314,7 @@ export async function findChildTasksByDesign(
   designSlug: string,
   cfg: ListRecordsCfg,
   options?: ReadRetryOptions,
-): Promise<FbrainRecord[]> {
+): Promise<BrainRecord[]> {
   void options;
   const { readPageChain } = await import("./list-page.ts");
   const parent = normalizeSlug(designSlug).toLowerCase();
@@ -1332,7 +1322,7 @@ export async function findChildTasksByDesign(
   if (cards === null || cards.length === 0) return [];
   const slugs = [...new Set(cards.map((card) => card.slug).filter((slug) => slug.length > 0))];
   const found = await findBySlugs(node, "task", schemaHashFor("task", cfg), slugs);
-  const tasks: FbrainRecord[] = [];
+  const tasks: BrainRecord[] = [];
   for (const slug of slugs) {
     const record = found.get(slug);
     if (record && normalizeSlug(record.design_slug ?? "").toLowerCase() === parent) tasks.push(record);
@@ -1399,7 +1389,7 @@ export function crossTypeSlugNote(
       : `${collisions.slice(0, -1).join(", ")} and ${collisions[collisions.length - 1]} records`;
   return (
     `note: slug "${slug}" also exists as ${also} — bare-slug get/status/delete ` +
-    `will now need --type (e.g. \`fbrain get ${slug} --type ${selfType}\`).`
+    `will now need --type (e.g. \`brain get ${slug} --type ${selfType}\`).`
   );
 }
 
@@ -1412,7 +1402,7 @@ export type SlugTwin = {
 
 export type ResolvedRecord = {
   type: RecordType;
-  record: FbrainRecord;
+  record: BrainRecord;
   // Non-empty only when an UNTYPED lookup matched more than one schema and
   // `ambiguousTypePrecedence` picked this one. The other matches are already
   // paid for — `resolveBySlug` point-reads every type in parallel — so dropping
@@ -1421,7 +1411,7 @@ export type ResolvedRecord = {
   // Measured 2026-09-01 on the primary: 55 `papercut-*` slugs exist as BOTH a
   // `reference` (the pre-2026-08-04 prose ledger record, `status: archived`)
   // and a `papercut` (the typed ledger row, `status: open`). `reference`
-  // outranks `papercut` in GET_RECORD_TYPE_PRECEDENCE, so `fbrain get <slug>`
+  // outranks `papercut` in GET_RECORD_TYPE_PRECEDENCE, so `brain get <slug>`
   // returned the archived ancestor and never mentioned the open twin. 52 of
   // those disagree on status, and 55 of 58 are component `lastgit`, so the
   // LastGit backlog was being read two different ways by two different verbs.
@@ -1456,13 +1446,13 @@ export interface ResolveBySlugOpts {
   // Narrow the sweep to one type. Omit to scan every registered type.
   type?: RecordType;
   // Raw mode bypasses the tombstone filter at the lookup layer (findBySlugRaw)
-  // so callers like `fbrain delete` can apply their own row-level logic. The
+  // so callers like `brain delete` can apply their own row-level logic. The
   // helper still drops tombstones afterward — there is no current caller that
   // wants to see them. Default false (uses tombstone-aware findBySlug).
   raw?: boolean;
   // Extra per-row filter applied after tombstone drop. Returning false skips
   // the row.
-  filter?: (r: FbrainRecord, t: RecordType) => boolean;
+  filter?: (r: BrainRecord, t: RecordType) => boolean;
   // Override the not_found error message. `typed` fires when opts.type is set;
   // `untyped` fires otherwise. Defaults match the pre-refactor strings.
   notFoundMessage?: {
@@ -1471,7 +1461,7 @@ export interface ResolveBySlugOpts {
   };
   // The CLI verb the caller is implementing. The ambiguous-slug `hint` echoes
   // it so the suggested recovery command is runnable as-is for the command the
-  // user actually ran (`fbrain status …`/`fbrain delete …`, not always `get`).
+  // user actually ran (`brain status …`/`brain delete …`, not always `get`).
   // Callers share this sweep; each passes its own verb. Defaults to
   // "get" so the throw stays well-formed for any future caller that omits it.
   recoveryVerb?:
@@ -1549,11 +1539,11 @@ function throwDirectoryNotFound(opts: ResolveBySlugOpts): never {
   const base = opts.notFoundMessage?.untyped?.(slug) ?? `No record with slug "${slug}".`;
   const backfill = directoryBackfill(slug);
   const memoryHint = memoryFilenameStemHint(slug);
-  throw new FbrainError({
+  throw new BrainError({
     code: "not_found",
     message: `${base} Pass --type, or run \`${backfill}\`.`,
     hint: appendHint(
-      `Pass --type (\`fbrain ${verb} ${slug} --type <type>\`), or run \`${backfill}\`.`,
+      `Pass --type (\`brain ${verb} ${slug} --type <type>\`), or run \`${backfill}\`.`,
       memoryHint?.hint,
     ),
     agentHint: appendHint(
@@ -1569,10 +1559,10 @@ function throwDirectoryAmbiguous(
 ): never {
   const exampleType = types[0]!;
   const verb = opts.recoveryVerb ?? "get";
-  throw new FbrainError({
+  throw new BrainError({
     code: "ambiguous_slug",
     message: `Slug "${opts.slug}" exists in multiple schemas (${types.join(", ")}). Specify a \`type\`.`,
-    hint: `Re-run with --type, e.g. \`fbrain ${verb} ${opts.slug} --type ${exampleType}\`.`,
+    hint: `Re-run with --type, e.g. \`brain ${verb} ${opts.slug} --type ${exampleType}\`.`,
     agentHint: `Pass the \`type\` argument, e.g. type: "${exampleType}".`,
   });
 }
@@ -1662,7 +1652,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   // papercut-brain-get-issues-33-node-requests-for-one-record). The trade: a
   // hinted HIT does not detect a twin under another type, so `also_types` is
   // absent for it. `--type` still overrides, a hinted MISS still pays the
-  // full sweep with the twin contract intact, and `fbrain status`/`delete`
+  // full sweep with the twin contract intact, and `brain status`/`delete`
   // callers that need the twin check pass `type` explicitly today.
   let missedHint: RecordType | null = null;
   if (opts.type === undefined) {
@@ -1681,7 +1671,7 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   // flake nulls a real row out of one schema's slice on the same
   // attempt another schema catches its row. With the outer-retry
   // shape, an untyped lookup of an ambiguous slug then surfaced as a
-  // single match: `fbrain get` / `status` / `delete` would silently
+  // single match: `brain get` / `status` / `delete` would silently
   // operate on the one type that caught it and skip the sibling.
   // Giving each type its own retry budget lets the flaked type
   // recover within its own loop, so ambiguity is detected before the
@@ -1711,30 +1701,30 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
     if (opts.type !== undefined) {
       // Typed lookup: the slug may exist under a DIFFERENT type that `--type`
       // hid. Point the dev at dropping the flag to widen the search.
-      throw new FbrainError({
+      throw new BrainError({
         code: "not_found",
         message,
         hint: appendHint(
-          `No ${opts.type} with that slug. Drop --type to search every type (\`fbrain ${verb} ${opts.slug}\`), or \`fbrain list\` to see existing slugs.`,
+          `No ${opts.type} with that slug. Drop --type to search every type (\`brain ${verb} ${opts.slug}\`), or \`brain list\` to see existing slugs.`,
           memoryHint?.hint,
         ),
         agentHint: appendHint(
-          `Omit the \`type\` argument to search all record types, or call fbrain_list to see existing slugs.`,
+          `Omit the \`type\` argument to search all record types, or call brain_list to see existing slugs.`,
           memoryHint?.agentHint,
         ),
       });
     }
     // Untyped lookup: every type was scanned, so the slug truly doesn't exist
     // anywhere — the recovery is to discover the real slugs.
-    throw new FbrainError({
+    throw new BrainError({
       code: "not_found",
       message,
       hint: appendHint(
-        `Run \`fbrain list\` to see existing slugs (slugs are case-sensitive).`,
+        `Run \`brain list\` to see existing slugs (slugs are case-sensitive).`,
         memoryHint?.hint,
       ),
       agentHint: appendHint(
-        `Call fbrain_list to see existing slugs (slugs are case-sensitive).`,
+        `Call brain_list to see existing slugs (slugs are case-sensitive).`,
         memoryHint?.agentHint,
       ),
     });
@@ -1762,10 +1752,10 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
     // instead (its tools take a `type` ARGUMENT, not a CLI flag — see
     // mcp/server.ts and its test), so the flag spelling never leaks to agents.
     const exampleType = matches[0]!.type;
-    throw new FbrainError({
+    throw new BrainError({
       code: "ambiguous_slug",
       message: `Slug "${opts.slug}" exists in multiple schemas (${matchedTypes}). Specify a \`type\`.`,
-      hint: `Re-run with --type, e.g. \`fbrain ${opts.recoveryVerb ?? "get"} ${opts.slug} --type ${exampleType}\`.`,
+      hint: `Re-run with --type, e.g. \`brain ${opts.recoveryVerb ?? "get"} ${opts.slug} --type ${exampleType}\`.`,
       agentHint: `Pass the \`type\` argument, e.g. type: "${exampleType}".`,
     });
   }
@@ -1821,7 +1811,7 @@ function memoryFilenameStemHint(
 ): { hint: string; agentHint: string } | undefined {
   if (!slug.includes("_")) return undefined;
   const path = `memory/${slug}.md`;
-  const text = `MEMORY files are not fbrain slugs; read ${path} instead.`;
+  const text = `MEMORY files are not brain slugs; read ${path} instead.`;
   return { hint: text, agentHint: text };
 }
 
@@ -1866,7 +1856,7 @@ export function typeHintFromSlug(slug: string): RecordType | null {
 }
 
 // Shared "newest first, then slug ascending" record comparator. Both
-// `fbrain get` (sorting a design's child tasks) and `fbrain list` (sorting
+// `brain get` (sorting a design's child tasks) and `brain list` (sorting
 // the global sweep) need the same updated_at-desc + slug-asc ordering — the
 // `list` sort additionally splits ties by `type` because (type, slug) is
 // globally unique, but the date and final slug comparisons are identical.
@@ -1875,8 +1865,8 @@ export function typeHintFromSlug(slug: string): RecordType | null {
 // in-repo input. The function operates on bare records; callers wrapping
 // records in `{type, record}` adapt at the call site (see `listCmd`).
 export function compareByUpdatedThenSlug(
-  a: FbrainRecord,
-  b: FbrainRecord,
+  a: BrainRecord,
+  b: BrainRecord,
 ): number {
   const ts = Date.parse(b.updated_at) - Date.parse(a.updated_at);
   return ts !== 0 ? ts : a.slug.localeCompare(b.slug);
@@ -1884,13 +1874,13 @@ export function compareByUpdatedThenSlug(
 
 export function validateSlug(slug: string): void {
   if (slug.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_slug",
       message: "Slug must be non-empty.",
     });
   }
   if (!/^[a-z0-9][a-z0-9-_]*$/.test(slug)) {
-    // First-time-user trap: `fbrain design new "My Title"` lands the title
+    // First-time-user trap: `brain design new "My Title"` lands the title
     // in the slug positional. Spotting spaces or uppercase in an otherwise-
     // free-form input is a strong hint they meant `--title`; surface the
     // exact slug we'd suggest so they can copy-paste.
@@ -1901,7 +1891,7 @@ export function validateSlug(slug: string): void {
       : looksLikeTitle
       ? `the first argument is a slug (identifier); pass your title with --title and use a slug like "${suggestSlug(slug)}".`
       : "Slugs are lowercase, start with a letter or digit, and use [a-z0-9-_].";
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_slug",
       message: `Slug "${slug}" is invalid.`,
       hint,
@@ -1944,7 +1934,7 @@ export function normalizeStatus(type: RecordType, status: string): string {
 export function ensureStatus(type: RecordType, status: string): void {
   if (!isValidStatus(type, status)) {
     const valid = statusValuesFor(type).join(" | ");
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_status",
       message: `"${status}" is not a valid ${type} status.`,
       hint: `Valid: ${valid}`,
@@ -1953,8 +1943,8 @@ export function ensureStatus(type: RecordType, status: string): void {
 }
 
 // ── Body-shrink guard (data-loss protection on re-put) ───────────────────
-// `fbrain put` is a full REPLACE, and the MCP `fbrain_put` body defaults to
-// empty. The natural agent loop `fbrain_get` (which WINDOWS a large body at
+// `brain put` is a full REPLACE, and the MCP `brain_put` body defaults to
+// empty. The natural agent loop `brain_get` (which WINDOWS a large body at
 // ~40K chars) → edit → re-put therefore silently destroys the tail of any
 // record larger than one get-window, and a status-only touch-up re-put with
 // no body wipes the body entirely (the run132 clobber incident). This guard
@@ -2002,7 +1992,7 @@ export function ensureNotShrinking(
   const newLen = newBody.length;
   const pct = Math.round(((oldLen - newLen) / oldLen) * 100);
   const toEmpty = newLen === 0;
-  throw new FbrainError({
+  throw new BrainError({
     code: "body_shrink_guard",
     message:
       `Refusing to re-put ${type} "${slug}": the new body ` +
@@ -2011,16 +2001,16 @@ export function ensureNotShrinking(
         : `is ${newLen} chars, ${pct}% smaller than the existing ${oldLen}`) +
       ` — this looks like accidental truncation, not an edit.`,
     hint:
-      "fbrain_put/`fbrain put` is a FULL REPLACE, not an append. If you did a " +
-      "get→edit→re-put, note that `fbrain_get` WINDOWS large bodies (~40K chars) " +
+      "brain_put/`brain put` is a FULL REPLACE, not an append. If you did a " +
+      "get→edit→re-put, note that `brain_get` WINDOWS large bodies (~40K chars) " +
       "— re-read the FULL body first (page a windowed get to the end via " +
-      "`body_offset`), or use `fbrain_append` to add to the body without a " +
+      "`body_offset`), or use `brain_append` to add to the body without a " +
       "rewrite. To truncate on purpose, pass `--allow-shrink` (CLI) / " +
       "`allow_shrink: true` (MCP).",
     agentHint:
-      "fbrain_put is a FULL REPLACE. fbrain_get windows large bodies (~40K " +
+      "brain_put is a FULL REPLACE. brain_get windows large bodies (~40K " +
       "chars) — page the whole body (body_offset) before re-putting, or use " +
-      "fbrain_append to add without a rewrite. Pass allow_shrink: true only to " +
+      "brain_append to add without a rewrite. Pass allow_shrink: true only to " +
       "truncate on purpose.",
   });
 }

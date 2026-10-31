@@ -1,12 +1,15 @@
-// Schema definitions for fbrain's record types.
+// Schema definitions for brain's record types.
+// The canonical definitions feed the owned layouts in multi-key.ts.
+// Existing values move to a new home by the home copy (last-stack#377).
+// Canonical field aliases describe fields; they do not authorize value aliases.
 //
-// Pattern status: fbrain's per-kind, purpose-split schemas are
+// Pattern status: brain's per-kind, purpose-split schemas are
 // grandfathered historical catalog identities. Do not copy this as the
 // default pattern for new apps; decision-2026-07-16-schema-identity-system-treatment
 // says new apps use starter templates plus an explicit `kind` field for
 // app-level meaning.
 //
-// fbrain registers one schema per record type, plus internal support schemas:
+// brain registers one schema per record type, plus internal support schemas:
 //
 //   - **Design**, **Task** — Phase 1, unchanged.
 //   - **Concept**, **Preference**, **Reference**, **Agent**, **Project**,
@@ -21,30 +24,30 @@
 //     storing standard operating procedures agents follow on recurring tasks.
 //
 // Why dedicated schemas now? Pre-Phase-E we used one shared
-// `FbrainKindNote` schema + a `kind` discriminator + `v1_marker_a/b`
+// `BrainKindNote` schema + a `kind` discriminator + `v1_marker_a/b`
 // structural-distinctness markers to defeat fold's structural
 // canonicalization. With dual-signal canonicalization default-on,
 // the structural collision is solved at the schema-service layer
 // (distinct purpose statements veto the merge), so the workaround
 // is unnecessary. After the consolidation migration (PR #63) moved
-// every pre-Phase-E `FbrainKindNote` row into its per-kind canonical,
+// every pre-Phase-E `BrainKindNote` row into its per-kind canonical,
 // the legacy schema is no longer registered or read from.
 //
 // `POST /v1/schemas` accepts these bodies; the response's `schema.name`
 // IS THE CANONICAL HASH that every subsequent mutation/query MUST pin
 // to. The descriptive_name is for human-facing display only.
 
-// The app id that owns every fbrain schema. Under app_identity v3.1,
+// The app id that owns every brain schema. Under app_identity v3.1,
 // `owner_app_id` is part of the schema's identity: the schema_service resolver
-// normalizes `name: "Concept"` + `owner_app_id: "fbrain"` to the canonical
-// name `fbrain/Concept` (design doc, "owner_app_id participates in
-// identity_hash"). So `fbrain/Concept` and `kanban/Concept` are distinct
+// normalizes `name: "Concept"` + `owner_app_id: "brain"` to the canonical
+// name `brain/Concept` (design doc, "owner_app_id participates in
+// identity_hash"). So `brain/Concept` and `kanban/Concept` are distinct
 // identities even with identical fields. The publish path (`folddb-dev app
-// publish` / `schema publish --app fbrain`, run by the developer in the
-// migration runbook) authorizes this claim with a dev cert; fbrain's own
+// publish` / `schema publish --app brain`, run by the developer in the
+// migration runbook) authorizes this claim with a dev cert; brain's own
 // schema definitions just declare ownership so re-registration is idempotent
-// and the node resolves short names to the fbrain/* namespace at boot.
-export const OWNER_APP_ID = "fbrain";
+// and the node resolves short names to the brain/* namespace at boot.
+export const OWNER_APP_ID = "brain";
 
 export type FieldType = "String" | "DateTime" | "Any" | { Array: "String" };
 
@@ -52,9 +55,9 @@ export type SchemaDefinition = {
   name: string;
   // App-identity ownership. The schema_service folds this into the identity
   // hash and stores the schema under the canonical name `{owner_app_id}/{name}`
-  // (= `fbrain/<Name>`). Set on every fbrain schema; optional in the TS type
+  // (= `brain/<Name>`). Set on every brain schema; optional in the TS type
   // so externally-loaded schema definitions (e.g. legacy definitions, or future
-  // non-fbrain catalogues) can omit it without a TS error.
+  // non-brain catalogues) can omit it without a TS error.
   owner_app_id?: string;
   descriptive_name: string;
   // Phase A of dual-signal canonicalization (PR #303): the schema service
@@ -67,6 +70,17 @@ export type SchemaDefinition = {
   // exists for a page key. A page row uses a hash and a range.
   schema_type: "Hash" | "HashRange";
   key: { hash_field?: string; range_field?: string };
+  /** Reuse canonical field definitions without sharing record values. */
+  independent_fields?: boolean;
+  alternate_keys?: Record<string, {
+    hash_field?: string;
+    hash_literal?: string;
+    range_field?: string | null;
+    range_parts?: Array<{ field: string; format?: "text" | "reverse_time_millis" | { padded_text: { width: number } } }>;
+    range_separator?: string;
+    omit_empty_hash?: boolean;
+    missing?: "reject" | "omit";
+  }>;
   fields: string[];
   field_types: Record<string, FieldType>;
   field_descriptions: Record<string, string>;
@@ -267,7 +281,7 @@ export const taskSchema: AddSchemaRequest = {
 
 // Per-kind schemas, structurally identical (7 fields) and distinguished
 // solely by descriptive_name + purpose_statement. This is retained for
-// fbrain's existing catalog identities; new apps should use schema starter
+// brain's existing catalog identities; new apps should use schema starter
 // templates plus a `kind` discriminator per
 // decision-2026-07-16-schema-identity-system-treatment.
 export const conceptSchema: AddSchemaRequest = phase6Schema(
@@ -310,7 +324,7 @@ export const sopSchema: AddSchemaRequest = phase6Schema(
 // is to make them queryable, so the things you filter/sort by are real
 // columns — `program`, `gate_slug`, `decided_by`, `decided_on` — not buried
 // in prose or tags. LastDB stores arbitrary schema fields fine; the extra
-// columns are plumbed through fbrain's generic record path via
+// columns are plumbed through brain's generic record path via
 // `RecordTypeDef.extraStringFields`. The distinct field shape also keeps its
 // canonical hash separate from every other type without relying on the
 // dual-signal purpose gate.
@@ -403,11 +417,11 @@ export function recordTypeCount(): number {
 }
 
 // Internal tag secondary index. This is intentionally NOT a RecordType: it is
-// registered and stored in config like other fbrain schemas, but never appears
+// registered and stored in config like other brain schemas, but never appears
 // on user-facing list/get/search surfaces.
 export const TAG_INDEX_SCHEMA_KEY = "__tagindex__";
 export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
-// File attachments (`fbrain attach` / `attachments` / `detach` /
+// File attachments (`brain attach` / `attachments` / `detach` /
 // `attachment get`). Two internal support schemas, NOT RecordTypes.
 // Attachments stay ADDITIVE by design: registering these schemas changes no
 // existing schema's identity hash and migrates no existing record — a
@@ -1183,7 +1197,7 @@ export const brainBackfillCursorSchema = supportSchema({
   ],
 });
 
-// UNIQUE_SCHEMAS lists every schema `fbrain init` must register. Each
+// UNIQUE_SCHEMAS lists every schema `brain init` must register. Each
 // entry binds a config-key (where `init` writes the canonical hash) to
 // the AddSchemaRequest. One entry per RecordType — no legacy alias.
 export type UniqueSchemaEntry = {
@@ -1300,11 +1314,11 @@ export function schemaConfigKeys(entry: {
   return [...entry.types, ...(entry.extraKeys ?? [])];
 }
 
-// Resolve an already-published fbrain schema's canonical hash from the set
+// Resolve an already-published brain schema's canonical hash from the set
 // the node loaded out of the schema-service catalog (GET /api/schemas). The
 // match key is (descriptive_name, owner_app_id) — exactly the two signals the
 // schema service folds into a namespaced identity. This is the fresh-consumer
-// path: the `fbrain/*` record schemas are pre-published org-wide, so init reads
+// path: the `brain/*` record schemas are pre-published org-wide, so init reads
 // their canonical hashes here instead of re-POSTing (which needs a DevCert).
 export function resolveOwnedSchemaHash(
   req: AddSchemaRequest,
@@ -1373,30 +1387,30 @@ export function recordStatusLines(): string {
 }
 
 // The single copy-paste CLAUDE.md block that teaches an agent *when* and *why*
-// to reach for the fbrain MCP tools — the agent usage-loop plus the record-type
-// table. SINGLE SOURCE: `fbrain mcp instructions` prints exactly this, and the
+// to reach for the brain MCP tools — the agent usage-loop plus the record-type
+// table. SINGLE SOURCE: `brain mcp instructions` prints exactly this, and the
 // fenced block in `docs/agent-instructions.md` is asserted equal to it by a
 // drift test, so the on-ramp command and the doc can never diverge. The table's
 // "Use it for" column renders from RECORD_PURPOSES (above), so it also can't
-// drift from the README / bare-`fbrain` help. Output is plain markdown — no
+// drift from the README / bare-`brain` help. Output is plain markdown — no
 // ANSI, pipe-safe, paste-ready (the caller appends a trailing newline).
 export function buildAgentInstructionsBlock(): string {
   const tableRows = RECORD_TYPES.map(
     (t) => `   | \`${t}\` | ${RECORD_PURPOSES[t]} |`,
   ).join("\n");
-  return `## fbrain (persistent memory)
+  return `## brain (persistent memory)
 
-You have an \`fbrain\` MCP brain — a searchable store of prior decisions, learnings,
+You have an \`brain\` MCP brain — a searchable store of prior decisions, learnings,
 and context that survives across sessions. Use it as a loop, not a filing cabinet:
 
 1. **Recall first.** Before answering a non-trivial question or starting a task,
-   call \`fbrain_ask\` (hybrid BM25 + vector recall — the strongest retrieval) to
+   call \`brain_ask\` (hybrid BM25 + vector recall — the strongest retrieval) to
    pull relevant prior context. Don't answer from memory alone when the brain may
-   already hold the answer. Use \`fbrain_search\` for a pure-semantic lookup,
-   \`fbrain_get\`/\`fbrain_list\` when you know the slug or want to browse a type.
+   already hold the answer. Use \`brain_search\` for a pure-semantic lookup,
+   \`brain_get\`/\`brain_list\` when you know the slug or want to browse a type.
 
 2. **Checkpoint as you go.** When a decision, learning, or durable fact is
-   settled, write it with \`fbrain_put\` *then* — don't wait to be asked, and don't
+   settled, write it with \`brain_put\` *then* — don't wait to be asked, and don't
    batch it all to the end of the session where it gets lost. A one-line note now
    beats a perfect note never. Unless the body is a short single line, stage it
    to a file and pass \`body_path\` (or pass \`body_b64\`) instead of inlining
@@ -1404,40 +1418,40 @@ and context that survives across sessions. Use it as a loop, not a filing cabine
    (an opaque \`could not be parsed as JSON\` error) or be dropped in transit at
    ANY size, so this is not size-gated; a short path/base64 always survives. To
    UPDATE an existing record, reach for the
-   right-sized tool instead of a full \`fbrain_put\`: \`fbrain_status\` changes only
-   the status, and \`fbrain_append\` adds to the body without a rewrite. This
-   matters because \`fbrain_put\` is a FULL REPLACE whose body defaults to empty —
+   right-sized tool instead of a full \`brain_put\`: \`brain_status\` changes only
+   the status, and \`brain_append\` adds to the body without a rewrite. This
+   matters because \`brain_put\` is a FULL REPLACE whose body defaults to empty —
    a status-only re-put wipes the body, and a get-then-re-put truncates any
-   record bigger than one \`fbrain_get\` window. \`fbrain_put\` guards against that
+   record bigger than one \`brain_get\` window. \`brain_put\` guards against that
    (it refuses a re-put that would shrink the body dramatically), so let the
-   guard route you to \`fbrain_append\`/\`fbrain_status\` rather than overriding it.
+   guard route you to \`brain_append\`/\`brain_status\` rather than overriding it.
 
 3. **Pick the right type.** Every record has a type; choose the one whose purpose
-   matches what you're recording (\`fbrain_put\` requires a type — there is no
+   matches what you're recording (\`brain_put\` requires a type — there is no
    silent default):
 
    | Type | Use it for |
    |---|---|
 ${tableRows}
 
-   Link records with \`fbrain_link\`. Passing only \`from_slug\` and \`to_slug\`
+   Link records with \`brain_link\`. Passing only \`from_slug\` and \`to_slug\`
    preserves the legacy task → design default; pass \`from_type\`/\`to_type\` for
-   non-default explicit links. \`fbrain_get\`'s \`linked_from\` field lists the
+   non-default explicit links. \`brain_get\`'s \`linked_from\` field lists the
    type and slug of every record that links here (one index read, cheap to
-   crawl); call \`fbrain_backlinks\` when you also need each source's status
+   crawl); call \`brain_backlinks\` when you also need each source's status
    and whether it links by explicit edge or body \`[[slug]]\` reference.
-   Slugs are per-type, so pass \`type\` to \`fbrain_get\`/\`fbrain_delete\`
+   Slugs are per-type, so pass \`type\` to \`brain_get\`/\`brain_delete\`
    whenever a slug could be ambiguous; without it, the type named by the
    slug prefix (\`design-…\`, \`decision-…\`) is tried first.
 
-4. **It scales — call it liberally.** Point lookups (\`fbrain_get\`, a filtered
-   \`fbrain_list\`) are index-backed and stay flat, well under a millisecond, from
+4. **It scales — call it liberally.** Point lookups (\`brain_get\`, a filtered
+   \`brain_list\`) are index-backed and stay flat, well under a millisecond, from
    a thousand records to well past a hundred thousand — recalling a known slug
-   never gets slower as the brain grows. \`fbrain_ask\`/\`fbrain_search\` run over
+   never gets slower as the brain grows. \`brain_ask\`/\`brain_search\` run over
    an ANN-indexed vector store, around 4ms at 120K embedded fragments versus
    around 46ms for an exhaustive scan — fast enough to call before every
    non-trivial answer, not just the hard ones. The one call whose cost tracks
-   corpus size is an unfiltered \`fbrain_list\` with no type, tag, or status — it
+   corpus size is an unfiltered \`brain_list\` with no type, tag, or status — it
    returns every live record, so scope it when browsing a large brain.`;
 }
 

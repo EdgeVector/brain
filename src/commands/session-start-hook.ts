@@ -124,7 +124,7 @@ export function buildClaudeSessionStartOutput(matches: SearchHitJson[]): unknown
 
 export function buildAdditionalContext(matches: readonly SearchHitJson[]): string {
   const lines = [
-    "fbrain surfaced strong-confidence records relevant to this session:",
+    "brain surfaced strong-confidence records relevant to this session:",
   ];
   for (const match of matches) {
     lines.push(`- ${match.slug} - ${match.title}`);

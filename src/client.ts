@@ -1,4 +1,7 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
+import { alternateKeyWire } from "./alternate-key-wire.ts";
+import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
+export { QUERY_PAGE_SIZE };
 import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Typed HTTP wrappers for fold_db_node + schema_service.
 //
@@ -9,7 +12,7 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 //
 // As of the @lastdb/app-sdk port, the app data path rides the SDK's
 // `LastDbClient` — the same wire client every LastDB app uses — with the SDK's
-// typed errors translated back into fbrain's FbrainError registry (see
+// typed errors translated back into brain's BrainError registry (see
 // `mapSdkDataError`). That covers consent, query/queryAll, mutation, and
 // app-scoped search. The remaining hand-rolled node surface is deliberately
 // Brain-specific owner/admin glue the SDK contract does not expose:
@@ -69,9 +72,9 @@ export const APP_CAPABILITY_HEADER = "X-App-Capability";
 export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
 
 // Owner-session attestation header (the OWNER-session axis, distinct from the
-// X-App-Capability / X-Capability-Ts third-party-app axis above). fbrain runs
+// X-App-Capability / X-Capability-Ts third-party-app axis above). brain runs
 // as the node owner; post app-isolation-flip (fold#739) the node's owner verbs
-// and owner-isolation bypass require an ATTESTED transport. fbrain mints a
+// and owner-isolation bypass require an ATTESTED transport. brain mints a
 // one-time pairing code over the node's UDS control socket, exchanges it for a
 // session token over the full-surface UDS when available (TCP on older nodes),
 // and presents that token here on every request — the exact pairing the CLI's
@@ -80,7 +83,7 @@ export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
 export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
 
 // The node's body discriminator for "this transport is not attested" — fold's
-// owner-verb gate returns `403 {"error":"transport_not_attested"}`. fbrain
+// owner-verb gate returns `403 {"error":"transport_not_attested"}`. brain
 // re-pairs once and retries when it sees this (a restarted node invalidates the
 // in-memory session token).
 export const TRANSPORT_NOT_ATTESTED = "transport_not_attested";
@@ -96,7 +99,7 @@ const FULL_SURFACE_SOCKET_FILE_NAME = "folddb-full.sock";
 // Resolve the running node's data home (the dir holding `port` and `data/`).
 //
 // The FoldDB→LastDB rebrand is mid-flight: there is NO single fixed default
-// home, so fbrain must work against BOTH and pick the one that's actually live:
+// home, so brain must work against BOTH and pick the one that's actually live:
 //   - the shipped LastDB.app desktop node uses `~/.folddb` as its data home,
 //   - a v0.15.1+ CLI / brew `lastdb` node uses `~/.lastdb`.
 // A mixed-version machine can have BOTH dirs on disk (e.g. a dev who first ran a
@@ -127,7 +130,7 @@ export function resolveNodeHome(): string {
   // Both default node-home paths derive from the guarded home base so a broken
   // HOME fails loud rather than resolving to a relative `undefined/.lastdb`.
   // (An explicit LASTDB_HOME/FOLDDB_HOME override above already bypasses this.)
-  return resolveDefaultNodeHome(fbrainHomeBase(), existsSync);
+  return resolveDefaultNodeHome(brainHomeBase(), existsSync);
 }
 
 // The pure default-home resolver behind `resolveNodeHome` (after the env
@@ -136,7 +139,7 @@ export function resolveNodeHome(): string {
 // probe — in-process `os.homedir()` reads the passwd entry (not $HOME) and the
 // real machine's `~/.lastdb`/`~/.folddb` state can't be driven from a test, so
 // this seam lets a test assert the mixed-version cases deterministically.
-// Production code calls `resolveNodeHome`, which passes `fbrainHomeBase()` and
+// Production code calls `resolveNodeHome`, which passes `brainHomeBase()` and
 // the real `existsSync`. Precedence (steps 3–5 of resolveNodeHome's doc):
 //   3. the default home whose live control socket (`data/folddb.sock`) exists —
 //      `~/.lastdb` first, then `~/.folddb`,
@@ -177,12 +180,12 @@ export function onboardingResetConfigDir(): string {
 // `~/.folddb` for the LastDB.app desktop node) has a live socket on disk, so on
 // a mixed-version machine this returns the socket that's actually there rather
 // than a dead path under a stale home dir. An explicit override (config field /
-// FBRAIN_FOLDDB_SOCKET env) wins for ephemeral / non-default nodes.
+// BRAIN_FOLDDB_SOCKET env) wins for ephemeral / non-default nodes.
 export function defaultFolddbSocketPath(override?: string): string {
-  // Precedence: the FBRAIN_FOLDDB_SOCKET env wins (the ad-hoc / test override),
+  // Precedence: the BRAIN_FOLDDB_SOCKET env wins (the ad-hoc / test override),
   // then an explicit config-supplied path, then the default
   // `<resolveNodeHome()>/data/folddb.sock`.
-  const envOverride = process.env.FBRAIN_FOLDDB_SOCKET;
+  const envOverride = process.env.BRAIN_FOLDDB_SOCKET;
   if (envOverride && envOverride.length > 0) return envOverride;
   if (override && override.length > 0) return override;
   return join(resolveNodeHome(), "data", SOCKET_FILE_NAME);
@@ -230,7 +233,7 @@ export async function attestOwnerSession(
   // (L1137): one controller spans the whole request lifecycle so a stall in
   // either the headers or the body read trips the same deadline. The
   // genuinely-soft outcomes (refused, missing fields, connection error) still
-  // fail soft with `return null` so fbrain proceeds unattested exactly as
+  // fail soft with `return null` so brain proceeds unattested exactly as
   // before; only a TIMEOUT surfaces the canonical `service_timeout` error, so a
   // contended/wedged node yields the bounded heavy-load/idempotent-retry hint
   // instead of a silent unbounded hang.
@@ -272,7 +275,7 @@ export async function attestOwnerSession(
 
   // Mint over the UDS control socket (a verb that exists ONLY on the
   // owner-attested channel). Bun's fetch speaks HTTP over a Unix socket via the
-  // `unix` option, keeping fbrain on its single global-fetch HTTP stack.
+  // `unix` option, keeping brain on its single global-fetch HTTP stack.
   let pairingCode: string;
   try {
     // trace-egress: loopback (UDS control socket on the local machine; pairing
@@ -290,7 +293,7 @@ export async function attestOwnerSession(
     pairingCode = code;
   } catch (err) {
     // service_timeout surfaces; only genuinely-soft failures degrade to null.
-    if (err instanceof FbrainError && err.code === "service_timeout") throw err;
+    if (err instanceof BrainError && err.code === "service_timeout") throw err;
     verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
@@ -322,7 +325,7 @@ export async function attestOwnerSession(
     verbose("owner-session attested");
     return token;
   } catch (err) {
-    if (err instanceof FbrainError && err.code === "service_timeout") throw err;
+    if (err instanceof BrainError && err.code === "service_timeout") throw err;
     verbose(`owner-session exchange failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
@@ -344,11 +347,11 @@ export type SearchOptions = {
   // SearchHit.schemaName). Brain's semantic path depends on the node-mediated
   // Search app (`POST /api/app/search`); scoped targets keep unrelated schemas
   // on the same daemon (Persona, User Accounts, Contacts, CalendarEvent, ...)
-  // from drowning fbrain hits out of the top-K. Empty / omitted => no filter.
+  // from drowning brain hits out of the top-K. Empty / omitted => no filter.
   //
-  // Under app_identity v3.1 this filter is largely REDUNDANT: fbrain's schemas
-  // are namespaced under `fbrain/*` (owner_app_id folds into the identity hash),
-  // so the hashes fbrain queries no longer collide with other apps' schemas on
+  // Under app_identity v3.1 this filter is largely REDUNDANT: brain's schemas
+  // are namespaced under `brain/*` (owner_app_id folds into the identity hash),
+  // so the hashes brain queries no longer collide with other apps' schemas on
   // a shared daemon. The design's optional `X-App-ID` read hint is the eventual
   // replacement. We keep this filter for now — it stays correct (it filters by
   // the app-namespaced hash) and harmless, and it protects search quality
@@ -378,7 +381,7 @@ export type QueryRow = {
   key: { hash: string | null; range: string | null };
   // The base64-encoded ed25519 public key of whoever wrote the record's
   // head atoms. `pubkeyToUserHash` derives the fold_db user_hash from it
-  // for telemetry (G13 `fbrain doctor --usage`).
+  // for telemetry (G13 `brain doctor --usage`).
   author_pub_key?: string;
   // metadata also exists (per-field atom_uuid + writer_pubkey) but only
   // author_pub_key is needed by current code paths.
@@ -405,18 +408,7 @@ export type SchemaRecordKeyPage = {
   hasMore: boolean;
 };
 
-// Single-request page size for the `/api/query` pagination loop. The node
-// caps individual page requests at MAX_QUERY_LIMIT (1000); we ride that
-// cap directly so a database of N records resolves in ceil(N/1000) round
-// trips. The server's INTERNAL_FETCH_CAP (10000) is a separate ceiling
-// on the post-filter result set per-request — beyond that the node sets
-// `has_more` and we'd need to keep iterating.
-export const QUERY_PAGE_SIZE = 1000;
-
-// Safety cap to prevent an infinite pagination loop if the node ever
-// returns `has_more: true` together with an empty `results` page. At a
-// page size of 1000 this still permits 1,000,000 records before bailing
-// — well beyond fbrain's expected scale, but bounded.
+// A drain stays bounded even when the server returns a stalled continuation.
 export const QUERY_PAGE_LIMIT = 1000;
 
 // Detail fields carried by a capability 403 (the node may include `schema`,
@@ -427,12 +419,12 @@ export type Capability403Detail = {
   timestampSkewSecs?: number;
 };
 
-export class FbrainError extends Error {
+export class BrainError extends Error {
   readonly code: string;
   readonly hint?: string;
   // Channel-neutral alternative to `hint` for non-interactive callers (the
   // MCP server). `hint` carries CLI/brew remediation an agent can't run
-  // (`fbrain doctor`, `folddb daemon …`); when an error sets `agentHint` the
+  // (`brain doctor`, `folddb daemon …`); when an error sets `agentHint` the
   // MCP boundary shows that instead. See errorResult in src/mcp/server.ts.
   readonly agentHint?: string;
   override readonly cause?: unknown;
@@ -451,7 +443,7 @@ export class FbrainError extends Error {
     capabilityDetail?: Capability403Detail;
   }) {
     super(opts.message);
-    this.name = "FbrainError";
+    this.name = "BrainError";
     this.code = opts.code;
     this.hint = opts.hint;
     this.agentHint = opts.agentHint;
@@ -462,8 +454,8 @@ export class FbrainError extends Error {
 }
 
 // Raised when the OS cannot give us a usable home directory and we therefore
-// cannot derive ANY of fbrain's on-disk paths (config, keychain, migrations,
-// caches, usage log, node home). Extends FbrainError so it carries a stable
+// cannot derive ANY of brain's on-disk paths (config, keychain, migrations,
+// caches, usage log, node home). Extends BrainError so it carries a stable
 // `code` + structured `hint` like every other operational error. Its code is
 // NOT in USAGE_ERROR_CODES, so it stays exit 1 (operational, not a usage
 // error).
@@ -472,21 +464,21 @@ export class FbrainError extends Error {
 // spawn passes a JS-`undefined` HOME (`env: { ...process.env, HOME: fakeHome }`
 // with `fakeHome` undefined — several test harnesses + dogfood scripts do
 // exactly this), Bun/Node return the LITERAL string `"undefined"`. Every
-// `join(homedir(), ".fbrain", …)` (and `~/.lastdb` / `~/.folddb` node-home)
-// then becomes a RELATIVE path like `undefined/.fbrain/…`, and the first
+// `join(homedir(), ".brain", …)` (and `~/.lastdb` / `~/.folddb` node-home)
+// then becomes a RELATIVE path like `undefined/.brain/…`, and the first
 // `mkdirSync(dirname(path), …)` + `writeFileSync` silently scatters config +
 // keychain + caches under whatever cwd the process happened to be standing in
-// (observed: a stray `./undefined/.fbrain/config.json` committed-adjacent in
+// (observed: a stray `./undefined/.brain/config.json` committed-adjacent in
 // the repo root). An *empty/unset* HOME is FINE — `homedir()` falls back to
 // the passwd entry and returns an absolute path; only a garbage VALUE (the
 // literal `"undefined"`/`"null"`) or any non-absolute result triggers the
 // scatter. We fail loud here instead.
 //
-// Defined here (the lowest layer, alongside FbrainError) so both client.ts's
+// Defined here (the lowest layer, alongside BrainError) so both client.ts's
 // `resolveNodeHome` and config.ts's path resolvers can share ONE guard with no
-// import cycle; config.ts re-exports `fbrainHomeBase`/`HomeUnresolvedError` so
+// import cycle; config.ts re-exports `brainHomeBase`/`HomeUnresolvedError` so
 // the rest of the codebase imports them from there.
-export class HomeUnresolvedError extends FbrainError {
+export class HomeUnresolvedError extends BrainError {
   constructor(resolved: string) {
     super({
       code: "home_unresolved",
@@ -495,36 +487,36 @@ export class HomeUnresolvedError extends FbrainError {
         `${JSON.stringify(resolved)}, which is not an absolute path.`,
       hint:
         "Set a valid $HOME (an absolute path), or pin the config path " +
-        "explicitly with the FBRAIN_CONFIG env var. A common cause is a " +
+        "explicitly with the BRAIN_CONFIG env var. A common cause is a " +
         'spawn passing an undefined HOME (`env: { HOME: undefined }`), which ' +
         'makes os.homedir() return the literal string "undefined".',
       agentHint:
         "The HOME environment variable is unset or invalid (os.homedir() " +
         `returned ${JSON.stringify(resolved)}). Set HOME to an absolute path, ` +
-        "or set FBRAIN_CONFIG to an absolute config path.",
+        "or set BRAIN_CONFIG to an absolute config path.",
     });
     this.name = "HomeUnresolvedError";
   }
 }
 
-// The single guarded home resolver. Every fbrain on-disk path derives from
+// The single guarded home resolver. Every brain on-disk path derives from
 // here (config / keychain / migrations / bm25 cache / expand cache / usage /
 // node home), so a broken HOME can never `mkdir`/write a relative
 // `undefined/…` path — it fails loud with HomeUnresolvedError instead. Returns
 // the same value as `homedir()` on the happy path (a valid absolute home), so
 // behavior is identical for every real developer; this is pure hardening.
-export function fbrainHomeBase(): string {
+export function brainHomeBase(): string {
   return validateHomeBase(homedir());
 }
 
-// The pure guard predicate behind `fbrainHomeBase`, split out so it is
+// The pure guard predicate behind `brainHomeBase`, split out so it is
 // directly unit-testable with literal inputs (in-process `os.homedir()` on
 // macOS reads the passwd entry, NOT $HOME, so a test cannot exercise the bad
 // shapes by overriding process.env.HOME — only a spawned child can). Rejects
 // the three failure shapes the dogfood found: a missing/empty result, the
 // literal garbage strings Bun/Node yield from an `undefined`/`null` HOME, and
 // any other non-absolute path (which would resolve relative to cwd). Exported
-// for tests; production code calls `fbrainHomeBase`.
+// for tests; production code calls `brainHomeBase`.
 export function validateHomeBase(h: string): string {
   if (!h || h === "undefined" || h === "null" || !isAbsolute(h)) {
     throw new HomeUnresolvedError(h);
@@ -535,12 +527,12 @@ export function validateHomeBase(h: string): string {
 // Every node/schema HTTP request gets a deadline that bounds BOTH the fetch
 // AND the response-body read, so a node that returns headers fast then stalls
 // while streaming the body (the cold-schema-init failure mode) can never hang
-// the CLI unbounded. Overridable via FBRAIN_HTTP_TIMEOUT_MS for a genuinely
+// the CLI unbounded. Overridable via BRAIN_HTTP_TIMEOUT_MS for a genuinely
 // slow node.
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 function defaultTimeoutMs(): number {
-  const raw = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+  const raw = process.env.BRAIN_HTTP_TIMEOUT_MS;
   const n = raw === undefined ? NaN : parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
 }
@@ -558,13 +550,13 @@ const PER_KB_MS = 300;
 const MAX_WRITE_TIMEOUT_MS = 240_000;
 
 // Deadline for a write whose body is `bodyBytes` long. An explicit
-// FBRAIN_HTTP_TIMEOUT_MS still wins unchanged — that's authoritative user
+// BRAIN_HTTP_TIMEOUT_MS still wins unchanged — that's authoritative user
 // intent and must not be silently rescaled. Otherwise grow the base 30s
 // deadline by `PER_KB_MS` per KB of body, clamped to [DEFAULT, MAX]. A
 // zero-byte body (a GET / bodyless request routed through a write transport)
 // resolves to exactly DEFAULT_TIMEOUT_MS, so reads are never slowed.
 export function writeTimeoutMs(bodyBytes: number): number {
-  const raw = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+  const raw = process.env.BRAIN_HTTP_TIMEOUT_MS;
   const override = raw === undefined ? NaN : parseInt(raw, 10);
   if (Number.isFinite(override) && override > 0) return override;
   const scaled = DEFAULT_TIMEOUT_MS + Math.ceil(Math.max(0, bodyBytes) / 1024) * PER_KB_MS;
@@ -606,7 +598,7 @@ export function timeoutHint(
   loadProbe: () => { load1: number; cores: number } = defaultLoadProbe,
 ): string {
   const idempotentTail =
-    "Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with FBRAIN_HTTP_TIMEOUT_MS if it's just slow.";
+    "Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with BRAIN_HTTP_TIMEOUT_MS if it's just slow.";
   if (service === "node") {
     const { load1, cores } = loadProbe();
     // load1 > 0 guards the "unmeasurable" platforms; cores > 0 is defensive.
@@ -630,21 +622,21 @@ export function timeoutHint(
 }
 
 // A stalled request/body-read fails fast with the idempotent-retry hint: every
-// fbrain write is an upsert keyed by slug, so re-running the command is safe.
+// brain write is an upsert keyed by slug, so re-running the command is safe.
 function timeoutError(
   path: string,
   method: string,
   service: "node" | "schema",
   timeoutMs: number,
   cause: unknown,
-): FbrainError {
+): BrainError {
   const which = service === "node" ? "node" : "schema service";
-  return new FbrainError({
+  return new BrainError({
     code: "service_timeout",
     // No DOCTOR_TIP here. A timeout means BUSY, not down, and the standing
     // workspace rule is: do not run doctor/restart for a timeout — retry, and
     // name the load with `lastdb ops`. The tip sent routines toward doctor on
-    // every busy read (papercut-fbrain-busy-timeout-suggests-doctor-20260922).
+    // every busy read (papercut-brain-busy-timeout-suggests-doctor-20260922).
     message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) — busy, not down: retry with backoff; \`lastdb ops\` names the load. Do not run doctor or restart for a timeout.`,
     hint: timeoutHint(service),
     cause,
@@ -652,13 +644,13 @@ function timeoutError(
 }
 
 // Appended by every node + schema-service error message so non-doctor callers
-// (list/put/etc.) point users at `fbrain doctor`. `doctor` itself must strip
+// (list/put/etc.) point users at `brain doctor`. `doctor` itself must strip
 // this back off — see stripDoctorTip below.
-export const DOCTOR_TIP = "— run `fbrain doctor` for a full diagnosis";
+export const DOCTOR_TIP = "— run `brain doctor` for a full diagnosis";
 
-// Strip the trailing " ${DOCTOR_TIP}." that client.ts appends to FbrainError
-// messages, preserving the natural trailing period. Used inside `fbrain doctor`
-// so its own output doesn't tell the user to run `fbrain doctor`.
+// Strip the trailing " ${DOCTOR_TIP}." that client.ts appends to BrainError
+// messages, preserving the natural trailing period. Used inside `brain doctor`
+// so its own output doesn't tell the user to run `brain doctor`.
 export function stripDoctorTip(message: string): string {
   const suffix = ` ${DOCTOR_TIP}.`;
   if (message.endsWith(suffix)) {
@@ -693,7 +685,7 @@ export type CapabilityProvider = () => string | null;
 // diverge: catalog-pinned `name` equals the write-path hash while recomputed
 // `identity_hash` omits `:key:` layout. Callers that ask "is config hash X
 // present for writes?" must accept either field.
-// `owner_app_id` is present on app-owned schemas (e.g. `"fbrain"`).
+// `owner_app_id` is present on app-owned schemas (e.g. `"brain"`).
 export type LoadedSchema = {
   fields?: string[];
   field_types?: Record<string,unknown>;
@@ -709,13 +701,15 @@ export type AppSchemaDeclaration = {
   app_id: string;
   schema: string;
   canonical: string;
+  identityHash?: string;
+  independentFields?: boolean;
   resolution: "mint" | "link" | string;
   decision?: string;
 };
 
 // Parsed `GET /api/health` response. `version` is the running fold_db_node's
 // release string (e.g. "0.14.1"); it is OPTIONAL because an older node may not
-// report one — callers that surface it (e.g. `fbrain doctor`) must tolerate its
+// report one — callers that surface it (e.g. `brain doctor`) must tolerate its
 // absence and fall back gracefully.
 export type HealthResult = {
   ok: boolean;
@@ -755,7 +749,7 @@ export type NodeClient = {
   >;
   // GET /api/health — the node's liveness + version probe. Returns the parsed
   // `{ ok, uptime_s, version }`; `version` is tolerated-missing (older nodes
-  // omit it). Informational only — `fbrain doctor` surfaces the reported
+  // omit it). Informational only — `brain doctor` surfaces the reported
   // version on its node-reachable line; a failure here must NOT be treated as
   // the node being down (the auto-identity probe owns that verdict).
   health(): Promise<HealthResult>;
@@ -791,7 +785,7 @@ export type NodeClient = {
   declareAppSchema?(appId: string, schema: AddSchemaRequest["schema"]): Promise<AppSchemaDeclaration>;
   // GET /api/schemas — the schemas currently loaded into this node's DB,
   // each carrying the authoritative `identity_hash` the node computed. Used
-  // by `fbrain init` to RESOLVE an already-published `fbrain/*` schema's
+  // by `brain init` to RESOLVE an already-published `brain/*` schema's
   // canonical hash without a cert-gated re-POST (the fresh-consumer path).
   listLoadedSchemas(): Promise<LoadedSchema[]>;
   // `keyRange` addresses one row of a HashRange schema (RecordListEntry).
@@ -845,7 +839,7 @@ export type NodeClient = {
   // dedup/total_count guards. For probes and best-effort hint decoration that
   // only need a small sample of rows (projected fields, capped limit) and must
   // NEVER escalate into a full corpus fetch on a no-match path: the
-  // empty-brain probe (`hasAnyLiveRecord`) and the fbrain_get nearest-slug
+  // empty-brain probe (`hasAnyLiveRecord`) and the brain_get nearest-slug
   // candidate scan. Real data reads keep using `queryAll` (complete, guarded)
   // or `queryByKey` (point-read). Optional so hand-built NodeClient test mocks
   // don't all have to grow it; callers fall back to `queryAll` when absent.
@@ -900,10 +894,10 @@ export function newSchemaServiceClient(
       const canonicalHash =
         schemaObj && typeof schemaObj.name === "string" ? (schemaObj.name as string) : null;
       if (!canonicalHash) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "schema_register_no_hash",
           message: `Schema service did not return a canonical hash for ${req.schema.descriptive_name}.`,
-          hint: "Inspect the schema service response — fbrain expects `schema.name` to carry the identity hash.",
+          hint: "Inspect the schema service response — brain expects `schema.name` to carry the identity hash.",
         });
       }
       const replacedSchema =
@@ -937,7 +931,7 @@ export function newSchemaServiceClient(
       // Prefer the envelope; fall back to treating the body as the schema.
       const obj = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
       if (!obj) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "schema_lookup_bad_response",
           message: `Schema service ${path} returned a non-JSON or non-object body: ${JSON.stringify(body).slice(0, 200)}`,
         });
@@ -945,7 +939,7 @@ export function newSchemaServiceClient(
       const wrapped = obj.schema as Record<string, unknown> | undefined;
       const schemaObj = wrapped && typeof wrapped === "object" ? wrapped : obj;
       if (!schemaObj.fields && !schemaObj.field_types && !schemaObj.descriptive_name) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "schema_lookup_no_schema",
           message: `Schema service ${path} returned unrecognised body: ${JSON.stringify(body).slice(0, 200)}`,
         });
@@ -993,13 +987,13 @@ export function newNodeClient(opts: {
   // capability headers (NodeOwner fallback / enforcement off).
   capability?: CapabilityProvider;
   // The canonical app id the SDK client acts as on the consent + mutation
-  // paths. Defaults to "fbrain" (the only app this CLI is).
+  // paths. Defaults to "brain" (the only app this CLI is).
   appId?: string;
   // Path to the node's UDS control socket, used to mint the owner-session
   // pairing code (see `attestOwnerSession`). Defaults to
   // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock` (overridable via the
-  // `FBRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
-  // socket is absent (a non-isolation node) mint fails fast and fbrain proceeds
+  // `BRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
+  // socket is absent (a non-isolation node) mint fails fast and brain proceeds
   // unattested, exactly as today.
   socketPath?: string;
   // Skip the client↔node version gate. Only `brain doctor` sets this: doctor
@@ -1013,14 +1007,14 @@ export function newNodeClient(opts: {
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
   const capability = opts.capability;
-  const appId = opts.appId ?? "fbrain";
+  const appId = opts.appId ?? "brain";
   const socketPath = defaultFolddbSocketPath(opts.socketPath);
 
   // Owner-session attestation (app-isolation flip, fold#739). Attest ONCE per
   // client: the first node request that needs the token resolves a shared
   // promise; subsequent requests reuse the cached token. On a node whose
   // control socket is absent this resolves to `null` and no `X-Folddb-Session`
-  // header is ever attached — fbrain behaves exactly
+  // header is ever attached — brain behaves exactly
   // as before. `invalidateSession()` clears the cache so a `transport_not_
   // attested` 403 (a restarted node dropped its in-memory session) triggers a
   // single re-pair on retry.
@@ -1046,7 +1040,7 @@ export function newNodeClient(opts: {
   // node's HTTP server is stateless — identity comes from the header; gap #1,
   // fold_dev_node #127). One transport is shared by every SDK client this
   // node client mints. It is a fetch-backed implementation of the SDK's
-  // Transport seam rather than the SDK's node:http default, so fbrain keeps
+  // Transport seam rather than the SDK's node:http default, so brain keeps
   // exactly one HTTP stack: the same global `fetch` every other node call
   // uses (and the same one the unit suite stubs to capture outgoing
   // requests — the SDK's node:http transport would bypass that stub and leak
@@ -1086,7 +1080,7 @@ export function newNodeClient(opts: {
   ), fieldProfiles);
 
   // SDK clients constructed here never use the SDK's capability store —
-  // fbrain's CapabilitySession owns acquisition/storage (via keychain.ts) and
+  // brain's CapabilitySession owns acquisition/storage (via keychain.ts) and
   // hands the current blob in per call. A no-op store keeps the SDK from ever
   // touching a real keychain on this path.
   const sdkStore: SdkCapabilityStore = {
@@ -1238,7 +1232,7 @@ export function newNodeClient(opts: {
       verbose(`← NODE POST /api/mutation status=200`);
     } catch (err) {
       if (err instanceof CasConflictError) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "cas_conflict",
           message: `Node refused a guarded write on schema ${schemaHash.slice(0, 12)}…: the compare-and-set precondition did not hold.`,
           cause: err,
@@ -1292,7 +1286,7 @@ export function newNodeClient(opts: {
         "HashRangePrefix" in filter ||
         "HashRangeRange" in filter);
     if (!keyed && allowFullScan !== true) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "full_scan_not_allowed",
         message:
           `queryAll on schema ${schemaHash.slice(0, 12)}… has no key filter and allowFullScan is not set — ` +
@@ -1300,35 +1294,11 @@ export function newNodeClient(opts: {
         hint: "Use queryByKey / RecordListEntry / TagIndex, or allowFullScan: true for deliberate admin drains.",
       });
     }
-    // The node's /api/query handler silently defaults to limit=100
-    // (`DEFAULT_QUERY_LIMIT` in fold_db_node/src/handlers/query.rs) and
-    // does NOT support a body-side tag/status filter — so any caller
-    // that wants to filter by a record field has to fetch everything
-    // and filter in-memory. We paginate up to QUERY_PAGE_SIZE rows per
-    // request and stop once the node reports `has_more: false`.
-    //
-    // CLIENT-SIDE GUARDS — fold_db_node's offset pagination is broken
-    // (handler `fold_db_node/src/handlers/query.rs`: `.skip(offset)
-    // .take(limit)` over an unstably-ordered result set). Verified
-    // 2026-05-30: paging a 177-row schema by 100 returns 177 rows but
-    // only 134 unique — ~43 dups + ~43 silently dropped. fbrain is
-    // safe today only because QUERY_PAGE_SIZE (1000) exceeds every
-    // current schema's row count, so the second page is never
-    // requested. To stay safe once any schema grows past the page
-    // size, we never trust offset-paged results blindly:
-    //   1. Dedupe rows by record key across pages — so a stable-
-    //      ordering future node fix transparently keeps working,
-    //      and an unstable node can never inflate the set with
-    //      duplicates.
-    //   2. If a follow-up page returns ONLY already-seen keys but
-    //      claims has_more=true, throw — pagination is stalled
-    //      mid-table and looping further would either spin to the
-    //      QUERY_PAGE_LIMIT cap or return a silently-truncated set.
-    //   3. After the loop terminates (has_more=false), if the
-    //      node's own total_count is greater than our deduped row
-    //      count, throw — the node dropped rows we cannot recover.
-    // The proper root-cause fix lives in fold_db_node/query.rs
-    // (stable ordering); this guard lets fbrain land independently.
+    // Bound native field work per IPC request. Complete membership still comes
+    // from the full cursor drain, never from a single page or a raw row count.
+    const pageSize = queryPageSize(fields.length);
+    // Keep the complete server cursor, deduplicate keys, reject stalled cursors,
+    // and refuse an incomplete drain. A nullable total count does not replace has_more.
     const allResults: QueryRow[] = [];
     const seenKeys = new Set<string>();
     let offset = 0;
@@ -1341,7 +1311,7 @@ export function newNodeClient(opts: {
         schemaHash,
         {
           fields,
-          limit: QUERY_PAGE_SIZE,
+          limit: pageSize,
           ...(cursor ? { cursor } : { offset }),
           ...(filter ? { filter: filter as SdkQueryFilter["filter"] } : {}),
         },
@@ -1362,17 +1332,17 @@ export function newNodeClient(opts: {
         newOnPage++;
       }
       // Stop on explicit `has_more: false`. Absent page envelope used to mean
-      // "done" even when the page was full (QUERY_PAGE_SIZE) — that silently
+      // "done" even when the page was full (the requested page size) — that silently
       // stopped at the MAX_QUERY_LIMIT=1000 cliff when a node returned
       // page:null (measured on primary for large type partitions). Treat a
       // full page with no envelope as "maybe more" and keep paging; a short
       // or empty follow-up page ends the loop via the empty/newOnPage guards.
       const hasMore = pageResult.page?.hasMore === true;
       const fullPageMaybeMore =
-        pageResult.page === null && pageResults.length >= QUERY_PAGE_SIZE;
+        pageResult.page === null && pageResults.length >= pageSize;
       if (!hasMore && !fullPageMaybeMore) { complete = true; break; }
       if (newOnPage === 0) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "query_pagination_stalled",
           message:
             `Node /api/query returned page ${page + 1} at offset=${offset} ` +
@@ -1401,17 +1371,17 @@ export function newNodeClient(opts: {
       const nextCursor = pageResult.page?.nextCursor;
       if (nextCursor) {
         const token = JSON.stringify(nextCursor);
-        if (seenCursors.has(token)) throw new FbrainError({ code: "query_pagination_stalled", message: "The node repeated a query cursor." });
+        if (seenCursors.has(token)) throw new BrainError({ code: "query_pagination_stalled", message: "The node repeated a query cursor." });
         seenCursors.add(token);
         cursor = nextCursor;
       } else if (cursor) {
-        throw new FbrainError({ code: "query_pagination_incomplete", message: "The node omitted the next cursor during a keyed continuation." });
+        throw new BrainError({ code: "query_pagination_incomplete", message: "The node omitted the next cursor during a keyed continuation." });
       }
       offset += pageResults.length;
     }
-    if (!complete) throw new FbrainError({ code: "query_pagination_incomplete", message: `The query exceeded ${QUERY_PAGE_LIMIT} pages.` });
+    if (!complete) throw new BrainError({ code: "query_pagination_incomplete", message: `The query exceeded ${QUERY_PAGE_LIMIT} pages.` });
     if (lastTotalCount !== null && allResults.length < lastTotalCount) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "query_pagination_incomplete",
         message:
           `Node /api/query finished with has_more=false but only ${allResults.length} ` +
@@ -1419,7 +1389,7 @@ export function newNodeClient(opts: {
           `was ${lastTotalCount}. This means total_count includes record keys the node ` +
           `never returned in any page: either deleted/tombstoned keys counted in the ` +
           `total, or rows silently dropped by unstable offset pagination on a schema ` +
-          `larger than QUERY_PAGE_SIZE (${QUERY_PAGE_SIZE}) ${DOCTOR_TIP}.`,
+          `larger than page size (${pageSize}) ${DOCTOR_TIP}.`,
         hint:
           "Do NOT assume this is an outdated node — the tombstone-aware count fix " +
           "(fold #995) has a deployed successor, and checking for it by commit " +
@@ -1446,12 +1416,12 @@ export function newNodeClient(opts: {
   const requireCanonicalHome = (): Promise<void> => canonicalReadiness ??= (async () => {
     const raw = await callJsonOk("/api/schemas", "GET") as Record<string, unknown>;
     const catalog = raw.data && typeof raw.data === "object" ? raw.data as Record<string,unknown> : raw;
-    if (!Array.isArray(catalog.schemas)) throw new FbrainError({code:"schema_catalog_invalid",message:"Cannot confirm the local schema format before declaration."});
+    if (!Array.isArray(catalog.schemas)) throw new BrainError({code:"schema_catalog_invalid",message:"Cannot confirm the local schema format before declaration."});
     for (const item of catalog.schemas) {
       if (!item || typeof item !== "object") continue;
       const schema = item as Record<string,unknown>;
-      if (schema.owner_app_id === "fbrain" && Array.isArray(schema.fields) && schema.fields.some((field) => field === "slug" || field === "body" || field === "blp_h")) {
-        throw new FbrainError({code:"canonical_migration_required",message:"This home uses legacy knowledge fields. An explicit data migration is required before new schema publication."});
+      if (schema.owner_app_id === "brain" && Array.isArray(schema.fields) && schema.fields.some((field) => field === "slug" || field === "body" || field === "blp_h")) {
+        throw new BrainError({code:"canonical_migration_required",message:"This home uses legacy knowledge fields. An explicit data migration is required before new schema publication."});
       }
     }
   })();
@@ -1478,7 +1448,7 @@ export function newNodeClient(opts: {
     },
     async health() {
       // GET /api/health → `{ ok, uptime_s, version }`. The node reports its
-      // release string here (`fbrain doctor` surfaces it on node-reachable).
+      // release string here (`brain doctor` surfaces it on node-reachable).
       // `version` (and `uptime_s`) are read defensively: an older node may omit
       // either, so each is only carried through when it's the expected type.
       const { status, body } = await callJson("/api/health", "GET");
@@ -1497,7 +1467,7 @@ export function newNodeClient(opts: {
       if (status === 200) {
         const uh = body && typeof body === "object" ? (body as Record<string, unknown>).user_hash : undefined;
         if (typeof uh !== "string" || uh.length === 0) {
-          throw new FbrainError({
+          throw new BrainError({
             code: "bootstrap_no_user_hash",
             message: "Bootstrap succeeded but the node did not return a user_hash.",
             hint: "Inspect the response from POST /api/setup/bootstrap.",
@@ -1510,26 +1480,26 @@ export function newNodeClient(opts: {
         // "not provisioned", bootstrap says "already provisioned". Surface
         // the node's own message field (typically a pointer to
         // POST /api/auth/restore) — the caller (init.ts) decides whether
-        // to recover from an existing ~/.fbrain/config.json or rethrow.
+        // to recover from an existing ~/.brain/config.json or rethrow.
         const nodeMsg = bodyMessage(body);
-        throw new FbrainError({
+        throw new BrainError({
           code: "onboarding_already_complete",
           message:
             `Node rejected POST /api/setup/bootstrap with 410 — already provisioned` +
             (nodeMsg ? `: ${nodeMsg}` : ".") +
             ` (auto-identity simultaneously reports the node as not provisioned — a contradictory state from the daemon).`,
           hint:
-            "Recovery: (a) if ~/.fbrain/config.json from this node still exists, re-run `fbrain init` so it reuses the saved userHash; " +
+            "Recovery: (a) if ~/.brain/config.json from this node still exists, re-run `brain init` so it reuses the saved userHash; " +
             "(b) follow the node's own instruction above (typically `POST /api/auth/restore` with the recovery phrase); " +
             "(c) to start fresh, stop the daemon and clear its onboarding state " +
-            `(homebrew default: \`rm -rf ${onboardingResetConfigDir()}\`), then re-run \`fbrain init\`.`,
+            `(homebrew default: \`rm -rf ${onboardingResetConfigDir()}\`), then re-run \`brain init\`.`,
         });
       }
       throw mapNodeError(status, body, "/api/setup/bootstrap");
     },
     async requestConsent(consentAppId, scope) {
       // Rides the SDK client's consent flow, translated back to the raw
-      // {status, body} contract the capability layer (and `fbrain doctor`'s
+      // {status, body} contract the capability layer (and `brain doctor`'s
       // write-ready probe) branches on — 202 / 404 / 403 / 400 per the
       // consent contract.
       verbose(`→ NODE POST /api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
@@ -1636,6 +1606,7 @@ export function newNodeClient(opts: {
       if (canonicalVocabulary) await requireCanonicalHome();
       const local = schema;
       if (canonicalVocabulary) schema = canonicalSchema(local);
+      if (schema.alternate_keys !== undefined) schema = { ...schema, alternate_keys: alternateKeyWire(schema.alternate_keys) };
       const body = await callJsonOk("/api/apps/declare-schema", "POST", {
         app_id: appId,
         schema,
@@ -1643,19 +1614,25 @@ export function newNodeClient(opts: {
       const b = body as Record<string, unknown>;
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema === "string" ? b.schema : "";
+      const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
+      const independentFields = b.independent_fields === true;
+      if (local.independent_fields && (!independentFields || !identityHash || !/^[a-f0-9]{64}$/.test(identityHash)
+        || b.app_id !== appId || b.schema_name !== `${appId}/${local.name}`)) {
+        throw new BrainError({ code: "owned_schema_receipt_invalid", message: "The declaration did not confirm the exact owned app schema." });
+      }
       const resolution = typeof b.resolution === "string" ? b.resolution : "";
       if (!canonical || !schemaName || !resolution) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "app_schema_declare_bad_response",
           message: `Node /api/apps/declare-schema returned an incomplete response: ${JSON.stringify(body).slice(0, 300)}.`,
           hint: "Upgrade the node or inspect the app-schema declaration response.",
         });
       }
-      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName]));
+      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName, identityHash ?? ""]));
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
-        canonical,
+        canonical, identityHash, independentFields,
         resolution,
         decision: typeof b.decision === "string" ? b.decision : undefined,
       };
@@ -1711,7 +1688,7 @@ export function newNodeClient(opts: {
         );
         return "applied";
       } catch (err) {
-        if (err instanceof FbrainError && err.code === "cas_conflict") {
+        if (err instanceof BrainError && err.code === "cas_conflict") {
           return "conflict";
         }
         throw err;
@@ -1844,7 +1821,7 @@ export function newNodeClient(opts: {
           ? (envelope.list as Record<string, unknown>)
           : null;
       if (list === null || !Array.isArray(list.keys) || typeof list.has_more !== "boolean") {
-        throw new FbrainError({
+        throw new BrainError({
           code: "list_keys_bad_response",
           message: `Node GET /api/list returned an invalid keys page for schema ${schemaHash.slice(0, 12)}….`,
           hint: "Inspect the node response; brain expects list.keys[] and list.has_more from a Mini version with the keys-only list route.",
@@ -1853,7 +1830,7 @@ export function newNodeClient(opts: {
       const keys: SchemaRecordKey[] = list.keys.map((raw, index) => {
         const key = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
         if (typeof key.hash !== "string" || key.hash.length === 0) {
-          throw new FbrainError({
+          throw new BrainError({
             code: "list_keys_bad_response",
             message: `Node GET /api/list returned an invalid key at index ${index} for schema ${schemaHash.slice(0, 12)}….`,
             hint: "Inspect the node response; every listed brain record must have a non-empty hash key.",
@@ -1868,7 +1845,7 @@ export function newNodeClient(opts: {
       });
       const nextCursor = typeof list.next_cursor === "string" ? list.next_cursor : null;
       if (list.has_more && nextCursor === null) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "list_keys_bad_response",
           message: `Node GET /api/list reported has_more=true without a next_cursor for schema ${schemaHash.slice(0, 12)}….`,
           hint: "Inspect the node response; a truncated keys page must carry the cursor for the next page.",
@@ -1930,7 +1907,7 @@ function sdkSearchHitsToNative(
       schema_name: hit.schemaName,
       schema_display_name: hit.schemaDisplayName,
       field: "body",
-      key_value: sdkKeyToFbrainKey(hit.keyValue, hit.key),
+      key_value: sdkKeyToBrainKey(hit.keyValue, hit.key),
       value: text,
       metadata: {
         score,
@@ -1950,12 +1927,12 @@ function searchHitText(hit: SdkSearchHit): string {
 function fromSdkRows(rows: readonly SdkQueryRow[]): QueryRow[] {
   return rows.map((row) => ({
     fields: row.fields as Record<string, unknown>,
-    key: sdkKeyToFbrainKey(row.keyValue, row.key),
+    key: sdkKeyToBrainKey(row.keyValue, row.key),
     author_pub_key: row.authorPubKey ?? undefined,
   }));
 }
 
-function sdkKeyToFbrainKey(
+function sdkKeyToBrainKey(
   keyValue: SdkKeyValue | null,
   renderedKey: string,
 ): { hash: string | null; range: string | null } {
@@ -2201,7 +2178,7 @@ class BoundedFetchFailure extends Error {
   }
 }
 
-class FbrainTransportError extends TransportError {
+class BrainTransportError extends TransportError {
   readonly failureCtx: BoundedFetchFailureContext;
 
   constructor(message: string, failureCtx: BoundedFetchFailureContext) {
@@ -2339,7 +2316,7 @@ async function verboseFetch(opts: {
   // Scale the deadline by body size for writes: a bodyless request (GET/read)
   // has 0 bytes → exactly DEFAULT_TIMEOUT_MS (reads stay snappy), while a large
   // write body grows the deadline so it isn't capped by the small-record flat
-  // 30s. An explicit per-call `timeoutMs` or FBRAIN_HTTP_TIMEOUT_MS still wins.
+  // 30s. An explicit per-call `timeoutMs` or BRAIN_HTTP_TIMEOUT_MS still wins.
   const timeoutMs = opts.timeoutMs ?? writeTimeoutMs(Buffer.byteLength(bodyStr ?? ""));
   let result: BoundedFetchResult;
   try {
@@ -2369,7 +2346,7 @@ async function verboseFetch(opts: {
       if (readOpts?.asText) return result.text;
       return parseBody(result.text);
     } catch (err) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "response_parse_failed",
         message: `Failed to parse ${opts.method} ${opts.path} response body: ${err instanceof Error ? err.message : String(err)}.`,
         cause: err,
@@ -2423,11 +2400,11 @@ export function isLoopbackNodeUrl(url: string): boolean {
 }
 
 // True when the prebuilt `folddb` binary is on PATH (Homebrew install or
-// `FBRAIN_FOLDDB_BIN` override). Mirrors the probe in init-consent.ts so
+// `BRAIN_FOLDDB_BIN` override). Mirrors the probe in init-consent.ts so
 // callers don't need to reach across modules. Injectable in `nodeDownHint`
 // for tests so the assertion doesn't depend on the host PATH.
 export function defaultIsFolddbBinaryInstalled(): boolean {
-  const override = process.env.FBRAIN_FOLDDB_BIN;
+  const override = process.env.BRAIN_FOLDDB_BIN;
   if (override && override.length > 0) return true;
   const probe = spawnSync("/bin/sh", ["-c", "command -v folddb"], { encoding: "utf8" });
   return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
@@ -2471,7 +2448,7 @@ export function defaultIsTargetPortListening(url: string): boolean {
 }
 
 // True when a node URL is the default local CLI install marker. Used ONLY by
-// `nodeDownHint` for install guidance — fbrain reaches a loopback node over
+// `nodeDownHint` for install guidance — brain reaches a loopback node over
 // its Unix socket and never dials TCP. Matches the current portless default
 // (`http://127.0.0.1` / `http://localhost`) and the historical retired
 // `:9001` marker so existing configs still get the right recovery text.
@@ -2506,10 +2483,10 @@ function socketFirstNodeHint(
     ? " If this is an intentional CLI/Homebrew node, start the foreground daemon with `lastdb daemon start` or repair its launchd service."
     : "";
   return (
-    `fbrain uses the local LastDB Unix socket at ${socketPath}; run \`fbrain doctor\` for a full diagnosis. ` +
+    `brain uses the local LastDB Unix socket at ${socketPath}; run \`brain doctor\` for a full diagnosis. ` +
     "Start or reopen LastDB.app so that socket exists. " +
     `Contributors running from source: \`cd fold/fold_db_node && ./run.sh --local\`${sourceNote}. ` +
-    "If your node uses a different home, set `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+    "If your node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
     "or `LASTDB_HOME=<node-home>`." +
     cliNote
   );
@@ -2520,7 +2497,7 @@ function socketFirstNodeHint(
 //   1. SOMETHING is bound and LISTENING on the TARGET port but the socket isn't
 //      answering — the node is wedged, mid-boot, or hung (it did NOT just "not
 //      start"). A restart of a wedged node just re-hangs, so point them at the
-//      socket, `fbrain doctor`, logs, and stop-before-start recovery. This
+//      socket, `brain doctor`, logs, and stop-before-start recovery. This
 //      branch wins first because a live-but-dead node is the most misdiagnosed
 //      failure. The probe is scoped to the TARGET port — a sibling node serving
 //      a DIFFERENT port must NOT make this down port look "wedged".
@@ -2542,7 +2519,7 @@ export function nodeDownHint(
       : "";
     return (
       `A node is bound to ${url} but isn't responding — it may still be starting up, or it may be wedged. ` +
-      `fbrain uses the local LastDB Unix socket at ${socketPath}; run \`fbrain doctor\` for a full diagnosis. ` +
+      `brain uses the local LastDB Unix socket at ${socketPath}; run \`brain doctor\` for a full diagnosis. ` +
       "Check the node log; if it's wedged, stop it before restarting: stop the existing node process before starting it again. " +
       "Desktop app: quit LastDB.app, then reopen it. " +
       "Contributors running from source: stop the existing `lastdb_server`/`folddb_server` process, then `cd fold/fold_db_node && ./run.sh --local`." +
@@ -2558,9 +2535,9 @@ export function nodeDownHint(
 function socketMissingHint(socketPath: string): string {
   return (
     `Start or reopen LastDB.app so it creates the Unix socket at ${socketPath}. ` +
-    "Run `fbrain doctor` for a full diagnosis. Contributors running from source: " +
+    "Run `brain doctor` for a full diagnosis. Contributors running from source: " +
     "`cd fold/fold_db_node && ./run.sh --local`. " +
-    "If your node uses a different home, set `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+    "If your node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
     "or `LASTDB_HOME=<node-home>`."
   );
 }
@@ -2568,7 +2545,7 @@ function socketMissingHint(socketPath: string): string {
 function socketMissingAgentHint(socketPath: string): string {
   return (
     `The local node socket is absent at ${socketPath}. Start LastDB, or point ` +
-    "`FBRAIN_FOLDDB_SOCKET` / `LASTDB_HOME` at the running node's socket."
+    "`BRAIN_FOLDDB_SOCKET` / `LASTDB_HOME` at the running node's socket."
   );
 }
 
@@ -2595,13 +2572,13 @@ function socketUnreachableAgentHint(socketPath: string): string {
 // `service_unreachable` as "reachable but erroring" so the caller can avoid
 // the misleading "start the node" hint. See nodeHttpErrorHint.
 export function isNodeReachableButErroring(err: unknown): boolean {
-  return err instanceof FbrainError && err.code !== "service_unreachable";
+  return err instanceof BrainError && err.code !== "service_unreachable";
 }
 
 // Returns the FOLDDB_MASTER_KEY remedy when the node's error text names the
 // node-identity / master-key / keychain decryption path (the homebrew daemon's
 // most common "up but 500" failure), else null. Shared by `nodeHttpErrorHint`
-// (used by `fbrain doctor`'s reachability check) and `mapNodeError`'s generic
+// (used by `brain doctor`'s reachability check) and `mapNodeError`'s generic
 // 5xx fallthrough (used by runtime commands: search/list/put/get/…) so the
 // heuristic + wording live in exactly one place.
 function identityFailureRemedy(msg: string): string | null {
@@ -2625,12 +2602,12 @@ function identityFailureRemedy(msg: string): string | null {
 // and wastes their time: the node is plainly up (it answered), and its own
 // error body already names the real cause. The error's `detail` already
 // surfaces the node's message verbatim, so this only supplies the actionable
-// remedy. Used by `fbrain doctor`'s reachability check — do NOT add a `fbrain
+// remedy. Used by `brain doctor`'s reachability check — do NOT add a `brain
 // doctor` pointer here, since doctor consumes this string as its own `fix`.
 export function nodeHttpErrorHint(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   // Status, when the generic `node_http_<status>` code carried it.
-  const code = err instanceof FbrainError ? err.code : "";
+  const code = err instanceof BrainError ? err.code : "";
   const statusMatch = /^node_http_(\d+)$/.exec(code);
   const status = statusMatch ? statusMatch[1] : undefined;
   const identityRemedy = identityFailureRemedy(msg);
@@ -2642,7 +2619,7 @@ export function nodeHttpErrorHint(err: unknown): string {
   );
 }
 
-// fbrain talks to a deployed cloud schema-service Lambda by default —
+// brain talks to a deployed cloud schema-service Lambda by default —
 // there is no local schema_service to "start" unless you're a fold
 // contributor pointing at localhost. So an unreachable schema service is
 // almost always a network/outage issue for a downloaded user.
@@ -2650,7 +2627,7 @@ export function schemaDownHint(url: string): string {
   if (/localhost|127\.0\.0\.1/.test(url)) {
     return "Start fold's schema service (`./run.sh --local --local-schema` runs both).";
   }
-  return "fbrain uses a cloud schema service (no local schema_service to run) — check your network connection or for a service outage.";
+  return "brain uses a cloud schema service (no local schema_service to run) — check your network connection or for a service outage.";
 }
 
 function connectionError(
@@ -2658,7 +2635,7 @@ function connectionError(
   service: "node" | "schema",
   cause: unknown,
   ctx: ConnectionErrorContext = {},
-): FbrainError {
+): BrainError {
   const which = service === "node" ? "node" : "schema service";
   if (
     service === "node" &&
@@ -2666,7 +2643,7 @@ function connectionError(
     ctx.socketCause !== undefined &&
     (ctx.phase === "body" || existsSync(ctx.routeSocket.socketPath))
   ) {
-    return new FbrainError({
+    return new BrainError({
       code: "service_unreachable",
       message: `node socket not reachable at unix:${ctx.routeSocket.socketPath} ${DOCTOR_TIP}.`,
       hint: socketUnreachableHint(ctx.routeSocket.socketPath),
@@ -2677,7 +2654,7 @@ function connectionError(
   // Any LOCAL (loopback) node is socket-only — no TCP fallback — so an absent
   // socket means the node isn't running, whatever the loopback port.
   if (service === "node" && ctx.socketPath && isLoopbackNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
-    return new FbrainError({
+    return new BrainError({
       code: "service_unreachable",
       message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,
       hint: socketMissingHint(ctx.socketPath),
@@ -2685,7 +2662,7 @@ function connectionError(
       cause,
     });
   }
-  return new FbrainError({
+  return new BrainError({
     code: "service_unreachable",
     message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
     hint: service === "node" ? nodeDownHint(baseUrl) : schemaDownHint(baseUrl),
@@ -2699,11 +2676,11 @@ function connectionError(
 
 /**
  * A fetch-backed implementation of the SDK's pluggable Transport. The SDK's
- * built-in `httpTransport` rides node:http; fbrain deliberately injects this
- * one so that (a) every HTTP request fbrain makes — SDK paths included — goes
+ * built-in `httpTransport` rides node:http; brain deliberately injects this
+ * one so that (a) every HTTP request brain makes — SDK paths included — goes
  * through the same global `fetch` (which the unit suite stubs to capture
  * outgoing requests), and (b) a non-JSON body degrades to `body: null`
- * instead of a hard transport error, matching fbrain's tolerant `parseBody`.
+ * instead of a hard transport error, matching brain's tolerant `parseBody`.
  */
 // Resolve the version gate: the SDK's NodeTooOldError propagates to the
 // caller (it is the one line that names the fix), so this only narrows the
@@ -2772,7 +2749,7 @@ function fetchTransport(
       } catch (err) {
         if (err instanceof BoundedFetchFailure) {
           if (err.timeout) throw timeoutError(path, method, "node", timeoutMs, err.cause);
-          throw new FbrainTransportError(
+          throw new BrainTransportError(
             `request to ${baseUrl}${path} failed: ${err.message}`,
             err.failureCtx,
           );
@@ -2820,7 +2797,7 @@ function fetchTransport(
   };
 }
 
-// `capabilityStoreKey` validates the app-id shape; fbrain's SDK clients never
+// `capabilityStoreKey` validates the app-id shape; brain's SDK clients never
 // persist through the SDK store (no-op store), so an out-of-shape app id must
 // not turn into a client-side throw where the node used to answer. Fall back
 // to the raw app id as the (unused) key.
@@ -2832,7 +2809,7 @@ function safeStoreKey(appId: string, target: string): string {
   }
 }
 
-// fbrain's consent layer carries scope as the node's wire string; the SDK
+// brain's consent layer carries scope as the node's wire string; the SDK
 // takes the structured ConsentScope and serializes it back to the same
 // string. Only "wildcard" is used today; "explicit:a,b" maps onto the SDK's
 // explicit form. Anything else is forwarded as a single explicit entry so the
@@ -2846,7 +2823,7 @@ function parseScope(scope: string): ConsentScope {
 }
 
 /**
- * Translate an @lastdb/app-sdk typed error back into fbrain's FbrainError
+ * Translate an @lastdb/app-sdk typed error back into brain's BrainError
  * registry. The SDK discriminates exactly what `mapNodeError`'s dispatch
  * table reads off the raw response, so each arm reconstructs the body shape
  * the node sent and funnels through `mapNodeError` — keeping the registry the
@@ -2859,7 +2836,7 @@ function parseScope(scope: string): ConsentScope {
  * - `RequestRejectedError` (400) carries the node's `kind` + `error` text.
  * - `PermissionDeniedError` (403 without a reason) carries the node's
  *   discriminated reason text.
- * - `TransportError` → fbrain's `service_unreachable` with the start-the-node
+ * - `TransportError` → brain's `service_unreachable` with the start-the-node
  *   hint.
  */
 // True when an @lastdb/app-sdk error represents the node's
@@ -2919,7 +2896,7 @@ export function sdkTransportReachableError(
   err: TransportError,
   method: string,
   path: string,
-): FbrainError | null {
+): BrainError | null {
   const msg = typeof err.message === "string" ? err.message : "";
 
   const timedOut = SDK_TIMEOUT_RE.exec(msg);
@@ -2933,7 +2910,7 @@ export function sdkTransportReachableError(
   const nonJson = SDK_NON_JSON_RE.exec(msg);
   if (nonJson) {
     const status = Number(nonJson[1]);
-    return new FbrainError({
+    return new BrainError({
       code: "node_non_json_response",
       message:
         `node answered ${method} ${path} with HTTP ${status} but a non-JSON body ` +
@@ -2955,13 +2932,13 @@ function mapSdkDataError(
   method: string,
   path: string,
   socketPath?: string,
-): FbrainError {
+): BrainError {
   // NB: NodeTooOldError subclasses RequestRejectedError — order matters. Its
   // message is already the one line an operator needs (who needs what, what
   // the node reports, the brew command); wrapping it as "HTTP 400" would bury
   // the fact that the NODE is the side that moved.
   if (err instanceof NodeTooOldError) {
-    return new FbrainError({
+    return new BrainError({
       code: "node_too_old",
       message: err.message,
       agentHint:
@@ -2988,7 +2965,7 @@ function mapSdkDataError(
   if (err instanceof UnexpectedResponseError) {
     return mapNodeError(err.status, err.body, path);
   }
-  if (err instanceof FbrainTransportError) {
+  if (err instanceof BrainTransportError) {
     return connectionError(baseUrl, "node", err, err.failureCtx);
   }
   if (err instanceof TransportError) {
@@ -3007,8 +2984,8 @@ function mapSdkDataError(
       socketCause: err,
     });
   }
-  if (err instanceof FbrainError) return err;
-  return new FbrainError({
+  if (err instanceof BrainError) return err;
+  return new BrainError({
     code: "sdk_error",
     message: `SDK call to ${path} failed: ${err instanceof Error ? err.message : String(err)}.`,
     cause: err,
@@ -3038,11 +3015,11 @@ type NodeErrorContext = {
   messageBlob: string;
 };
 
-type FbrainErrorInit = ConstructorParameters<typeof FbrainError>[0];
+type BrainErrorInit = ConstructorParameters<typeof BrainError>[0];
 
 type NodeErrorRule = {
   match: (ctx: NodeErrorContext) => boolean;
-  build: (ctx: NodeErrorContext) => FbrainErrorInit;
+  build: (ctx: NodeErrorContext) => BrainErrorInit;
 };
 
 // Ordered dispatch table for node HTTP errors. First match wins; some arms are
@@ -3091,12 +3068,12 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
   // Owner-verb attestation 403 (app-isolation flip, fold#739). The node gates
   // owner verbs — `/api/schemas/load`, owner-isolation bypass, etc. — behind an
   // attested transport and returns `403 {"error":"transport_not_attested"}` to
-  // bare loopback TCP. fbrain attests by minting a pairing code over the node's
+  // bare loopback TCP. brain attests by minting a pairing code over the node's
   // UDS control socket (see `attestOwnerSession`); when it can't find that
   // socket it proceeds unattested and the verb 403s. The bite is the documented
   // CONTRIBUTOR path: README tells devs to run a from-source node via `./run.sh`
   // (a non-default data dir, so its socket is NOT at `~/.folddb/data/folddb.sock`)
-  // and then `fbrain init --node-url …`. Without this rule that lands as an
+  // and then `brain init --node-url …`. Without this rule that lands as an
   // opaque `node_http_403` at init step 4/6 with zero guidance. Resolve the
   // socket path the client would have used (env/HOME-derived; a config-supplied
   // `nodeSocketPath` override isn't visible to this pure mapper) and tell the
@@ -3110,8 +3087,8 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
       const socketPath = defaultFolddbSocketPath();
       const found = existsSync(socketPath);
       const where = found
-        ? `fbrain found a control socket at ${socketPath} but the node rejected the session it minted there`
-        : `fbrain found no control socket at ${socketPath}`;
+        ? `brain found a control socket at ${socketPath} but the node rejected the session it minted there`
+        : `brain found no control socket at ${socketPath}`;
       return {
         code: "transport_not_attested",
         message:
@@ -3121,25 +3098,25 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
           (found
             ? "The socket exists but attestation failed — the node may have restarted (its in-memory " +
               "session dropped) or it isn't the node serving your --node-url. "
-            : "fbrain attests by minting a pairing code over the node's UDS control socket, which lives at " +
+            : "brain attests by minting a pairing code over the node's UDS control socket, which lives at " +
               "`<node-data-home>/data/folddb.sock` — that's `~/.folddb/data/folddb.sock` for the LastDB.app " +
-              "desktop node and `~/.lastdb/data/folddb.sock` for a v0.15.1+ CLI/brew node. fbrain probes " +
+              "desktop node and `~/.lastdb/data/folddb.sock` for a v0.15.1+ CLI/brew node. brain probes " +
               "both and picks whichever socket exists; if your node uses a different home (a from-source " +
               "`./run.sh` node, or one launched with a custom `LASTDB_HOME`/`FOLDDB_HOME`) the probe won't find it. ") +
-          "Point fbrain at the right socket with `FBRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+          "Point brain at the right socket with `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
           "(or `LASTDB_HOME=<node-home>` / `FOLDDB_HOME=<node-home>`), then re-run. The socket is created " +
-          "by the OS user that owns the node, so run fbrain as that user on the same machine.",
+          "by the OS user that owns the node, so run brain as that user on the same machine.",
         agentHint:
           `This node gates owner verbs behind an attested UDS control socket (fold#739). ${where}. ` +
-          "Set the FBRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` (LastDB.app " +
+          "Set the BRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` (LastDB.app " +
           "desktop: `~/.folddb/data/folddb.sock`; v0.15.1+ CLI/brew: `~/.lastdb/data/folddb.sock`) and " +
-          "retry. fbrain must run as the OS user that owns the node.",
+          "retry. brain must run as the OS user that owns the node.",
       };
     },
   },
   // Discriminated capability 403 (app_identity v3.1). Body is verbatim
   // `{"status":403,"reason":"<reason>", ...}`. Carry the reason + any detail
-  // on the FbrainError so the capability layer can apply the contract behavior
+  // on the BrainError so the capability layer can apply the contract behavior
   // (discard / re-acquire / retry-once / surface). A 403 without a recognised
   // `reason` falls through to the generic mapping below.
   {
@@ -3170,7 +3147,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
     build: (ctx) => ({
       code: "missing_user_context",
       message: `Node rejected ${ctx.path}: missing X-User-Hash ${DOCTOR_TIP}.`,
-      hint: "Re-run `fbrain init` so the config's userHash is regenerated.",
+      hint: "Re-run `brain init` so the config's userHash is regenerated.",
     }),
   },
   {
@@ -3178,7 +3155,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
     build: () => ({
       code: "node_not_provisioned",
       message: `Node not set up ${DOCTOR_TIP}.`,
-      hint: "Run `fbrain init` to bootstrap the node.",
+      hint: "Run `brain init` to bootstrap the node.",
     }),
   },
   {
@@ -3189,8 +3166,8 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
         code: "ambiguous_schema_name",
         message:
           `Node rejected ${ctx.path}: schema collision (canonical hashes ${candidates.join(", ")}); ` +
-          `fbrain config out of date — run \`fbrain init\` ${DOCTOR_TIP}.`,
-        hint: "Re-run `fbrain init` — config will pick up the current canonical hash.",
+          `brain config out of date — run \`brain init\` ${DOCTOR_TIP}.`,
+        hint: "Re-run `brain init` — config will pick up the current canonical hash.",
       };
     },
   },
@@ -3200,7 +3177,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
     build: (ctx) => ({
       code: "unknown_fields",
       message: `Node rejected ${ctx.path}: ${ctx.msg ?? "unknown field name"} ${DOCTOR_TIP}.`,
-      hint: "Compare fbrain's schemas.ts against the registered schema; re-run `fbrain init` after editing.",
+      hint: "Compare brain's schemas.ts against the registered schema; re-run `brain init` after editing.",
     }),
   },
   // The fold_db_node's embedding subsystem lazily loads `model.onnx` from a
@@ -3209,7 +3186,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
   // the node returns a 400 whose body carries
   // "...Failed to init embedding model: Failed to retrieve model.onnx" —
   // sometimes under `message`, sometimes under `error`. Without translation
-  // the user sees an opaque error on `fbrain search` / `fbrain ask`; with
+  // the user sees an opaque error on `brain search` / `brain ask`; with
   // translation they get a single, actionable recovery command.
   {
     match: (ctx) =>
@@ -3223,7 +3200,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
       hint:
         "Restart the node so it re-fetches the ONNX file from the embedding cache " +
         "(homebrew: `lastdb daemon stop && lastdb daemon start`). " +
-        "If the failure persists, run `fbrain doctor --freshness` and capture " +
+        "If the failure persists, run `brain doctor --freshness` and capture " +
         "the node log (the latest file under ~/Library/Logs/Homebrew/lastdb/).",
       agentHint:
         "This is a node-side issue, not something this tool can fix — ask the " +
@@ -3232,7 +3209,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
   },
 ];
 
-export function mapNodeError(status: number, body: unknown, path: string): FbrainError {
+export function mapNodeError(status: number, body: unknown, path: string): BrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
   const ctx: NodeErrorContext = {
@@ -3246,22 +3223,22 @@ export function mapNodeError(status: number, body: unknown, path: string): Fbrai
     messageBlob: [msg, errCode].filter((s): s is string => typeof s === "string").join(" "),
   };
   for (const rule of NODE_ERROR_RULES) {
-    if (rule.match(ctx)) return new FbrainError(rule.build(ctx));
+    if (rule.match(ctx)) return new BrainError(rule.build(ctx));
   }
   // Build a 5xx hint that names the real cause when the body text points at
   // the node-identity / master-key / keychain decrypt path (the homebrew
   // daemon's most common "up but 500" failure — PR #227 fixed this for
-  // `fbrain doctor`, but runtime commands like search/list/put/get all
+  // `brain doctor`, but runtime commands like search/list/put/get all
   // funnel through this generic mapping and need the same actionable fix).
-  // Non-identity 5xx points the user at `fbrain doctor` since they probably
+  // Non-identity 5xx points the user at `brain doctor` since they probably
   // ran search/list/get and have no other diagnostic surface to fall back on.
   let hint: string | undefined;
   if (status >= 500) {
     const identityRemedy = identityFailureRemedy(ctx.messageBlob);
     hint = identityRemedy
-      ?? "Check the node log; this looks like a node-side bug. Run `fbrain doctor` for a full diagnosis.";
+      ?? "Check the node log; this looks like a node-side bug. Run `brain doctor` for a full diagnosis.";
   }
-  return new FbrainError({
+  return new BrainError({
     code: `node_http_${status}`,
     message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
     hint,
@@ -3273,23 +3250,23 @@ export function mapNodeError(status: number, body: unknown, path: string): Fbrai
 // `runSchemaPublishGateProbe` (doctor's stand-alone diagnosis). Keeping a
 // single source so the two surfaces never drift.
 export const CERT_REQUIRED_HINT =
-  "fbrain's schemas under `fbrain/*` are namespaced — POSTing them to the " +
+  "brain's schemas under `brain/*` are namespaced — POSTing them to the " +
   "schema service requires a DevCert held by a maintainer (per app_identity v3.1). " +
   "A fresh consumer is expected to skip publishing entirely; init resolves the " +
   "already-published canonical hashes from the node after the cert-free catalog " +
   "load. You'll only see this error if the schemas have not yet been published " +
   "to this schema service at all. Remedies, any one of: " +
-  "(a) ask a maintainer with a DevCert to run `fbrain init` once against this schema service so the canonical hashes are published; " +
-  "(b) point fbrain at a different schema service that already has fbrain/* published (e.g. the prod cloud Lambda — the default).";
+  "(a) ask a maintainer with a DevCert to run `brain init` once against this schema service so the canonical hashes are published; " +
+  "(b) point brain at a different schema service that already has brain/* published (e.g. the prod cloud Lambda — the default).";
 
-export function mapSchemaServiceError(res: Response, body: unknown, path: string): FbrainError {
+export function mapSchemaServiceError(res: Response, body: unknown, path: string): BrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
   const reason = bodyStringField(body, "reason");
   // App-identity v3.1 publish gate. The schema service rejects an
   // `owner_app_id`-tagged schema POST from a caller without a DevCert with
-  // `401 {"reason":"cert_required"}`. For fbrain — whose schemas under
-  // `fbrain/*` are pre-published org-wide — this is the canonical "fresh
+  // `401 {"reason":"cert_required"}`. For brain — whose schemas under
+  // `brain/*` are pre-published org-wide — this is the canonical "fresh
   // consumer following the documented path" failure: re-POSTing canonical
   // hashes requires publish authority the consumer doesn't (and shouldn't) have.
   // Surface a discriminated code + actionable remedy instead of a raw
@@ -3299,16 +3276,16 @@ export function mapSchemaServiceError(res: Response, body: unknown, path: string
     (reason === "cert_required" ||
       /publish key required|cert_required/i.test(`${reason ?? ""} ${msg ?? ""} ${errCode ?? ""}`))
   ) {
-    return new FbrainError({
+    return new BrainError({
       code: "schema_cert_required",
       message:
         `Schema service ${path} rejected publish with 401 cert_required — ` +
-        `registering fbrain's namespaced schemas requires a one-time DevCert publish ` +
+        `registering brain's namespaced schemas requires a one-time DevCert publish ` +
         `by a maintainer (this is expected for a fresh consumer) ${DOCTOR_TIP}.`,
       hint: CERT_REQUIRED_HINT,
     });
   }
-  return new FbrainError({
+  return new BrainError({
     code: `schema_http_${res.status}`,
     message: `Schema service ${path} returned HTTP ${res.status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""} ${DOCTOR_TIP}.`,
   });
@@ -3351,7 +3328,7 @@ export function recordTypeForHash(
 // fold_db's user_hash is the first 32 hex chars of sha256(raw pubkey).
 // Verified against `auto-identity`: for our local node, sha256 of the
 // base64-decoded `public_key` truncated to 16 bytes matches the
-// `user_hash` field. Used by `fbrain doctor --usage` to partition writes
+// `user_hash` field. Used by `brain doctor --usage` to partition writes
 // across teammates without leaking the full pubkey.
 export function pubkeyToUserHash(pubkey: string): string {
   const raw = Buffer.from(pubkey, "base64");

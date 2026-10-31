@@ -38,7 +38,7 @@ Cards moved from a full head can acquire a compact locator before their old
 locator is read. A later named write or backfill reads both copies and removes
 the old copy.
 
-Stop older Brain writers before a layout conversion. An older app does not
+Stop older Brain writers before a home copy. An older app does not
 read the new support schema. Existing deletion markers and old file bytes can
 remain until the supported storage maintenance or a later format transfer.
 This change does not promise an immediate physical disk reduction.

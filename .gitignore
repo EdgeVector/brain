@@ -13,9 +13,9 @@ dist/
 # Bun
 bun.lockb
 
-# fbrain local config (~/.fbrain/ is the canonical home, but never commit a sample with creds)
+# brain local config (~/.brain/ is the canonical home, but never commit a sample with creds)
 config.json
-.fbrain/
+.brain/
 
 # scratch
 /tmp/
@@ -34,7 +34,7 @@ config.json
 
 # dev-channel node datadir: the `folddb-dev` binary (app-identity publish flow,
 # `folddb-dev app publish`) drops a relative ./.folddb-dev sled tree in whatever
-# cwd it ran from. Same hazard as ./data above — and because `fbrain --version`
+# cwd it ran from. Same hazard as ./data above — and because `brain --version`
 # (src/version.ts) flags `-dirty` on any `git status --porcelain` output, a
 # stray .folddb-dev makes every build self-report dirty. Keep it out of git.
 /.folddb-dev/

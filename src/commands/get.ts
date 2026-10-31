@@ -14,11 +14,13 @@ import {
   type StoredPage,
 } from "../backlink-index.ts";
 import { hydrateRecord, parseSpillMarker, spillFieldsFor } from "../body-spill.ts";
-import { FbrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
+import { BrainError, newReadClientFromCfg, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
 import { BACKLINK_PAGE, CHILD_PAGE, HEAD_RANGE } from "../list-page.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedRecordPage } from "../named-records.ts";
 import {
   findBySlug,
   NOT_FOUND_TYPED,
@@ -26,7 +28,7 @@ import {
   resolveBySlug,
   schemaHashFor,
   type BacklinkRef,
-  type FbrainRecord,
+  type BrainRecord,
   type SlugTwin,
 } from "../record.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY, isRecordType, RECORDS, type RecordType } from "../schemas.ts";
@@ -65,13 +67,13 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   let childRange = HEAD_RANGE;
   if (opts.page !== undefined && opts.page.length > 0) {
     if (opts.type !== "design") {
-      throw new FbrainError({
+      throw new BrainError({
         code: "page_needs_design",
         message: "--page is valid only when --type is design",
         hint: "Pass --type design with --page.",
       });
     }
-    childRange = pageRangeOrThrow(opts.page);
+    childRange = multiKey(opts.cfg) ? opts.page : pageRangeOrThrow(opts.page);
   }
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
@@ -96,7 +98,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   // looking pointer. Uses the fast-miss helper so a deleted parent surfaces
   // in ~one query (populated design schema, parent absent ⇒ authoritative
   // miss) instead of burning the full 5×250 ms read-retry budget on EVERY
-  // `fbrain get` of an orphaned task; empty design page still rides out the
+  // `brain get` of an orphaned task; empty design page still rides out the
   // saturated-daemon flake, so a live parent isn't mislabeled as deleted.
   let designMissing = false;
   const designSlug = found.record.design_slug;
@@ -111,7 +113,15 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   const pageSchema = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
   let designChildren: Array<{ slug: string; status: string }> | undefined;
   let tasksLines: string[] | undefined;
-  if (found.type === "design") {
+  let nextChildPage: string | undefined;
+  if (found.type === "design" && multiKey(opts.cfg)) {
+    const page = await namedRecordPage(node, opts.cfg, { type: "task", design: found.record.slug },
+      Math.min(opts.limit ?? CHILD_PAGE, 100), childRange);
+    designChildren = page.items.map((card) => ({ slug: card.slug, status: card.status }));
+    tasksLines = [`${"tasks:".padEnd(12)}${designChildren.map((card) => `${card.slug} (${card.status})`).join(", ")}`];
+    if (page.next_page) tasksLines.push(`sample ${page.next_page}`);
+    nextChildPage = page.next_page;
+  } else if (found.type === "design") {
     const childHash = `child#${found.record.slug}`;
     const childPage = await readStoredPage(node, pageSchema, childHash, childRange);
     const childView = memberLines(`tasks:`.padEnd(12), childPage, {
@@ -167,6 +177,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
     found.also_types,
     { tasks: tasksLines, linkedFrom: linkView.lines },
   );
+  if (nextChildPage) json.next_child_page = nextChildPage;
   opts.onResult?.(json);
 
   if (opts.fields !== undefined && opts.fields.length > 0) {
@@ -225,9 +236,9 @@ function printShowsField(
 async function textForPrint(
   node: ReturnType<typeof newReadClientFromCfg>,
   opts: GetOptions,
-  found: { type: RecordType; record: FbrainRecord },
-): Promise<FbrainRecord> {
-  const output: FbrainRecord = { ...found.record };
+  found: { type: RecordType; record: BrainRecord },
+): Promise<BrainRecord> {
+  const output: BrainRecord = { ...found.record };
   const toHydrate: string[] = [];
   for (const field of spillFieldsFor(found.type)) {
     if (!printShowsField(opts.fields, field, RECORDS[found.type].extraStringFields ?? [])) continue;
@@ -247,11 +258,11 @@ async function textForPrint(
   }
   if (toHydrate.length === 0) return output;
 
-  let full: FbrainRecord;
+  let full: BrainRecord;
   try {
     full = await hydrateRecord(node, opts.cfg, found.type, found.record, { fields: toHydrate });
   } catch (err) {
-    if (!(err instanceof FbrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
+    if (!(err instanceof BrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
     const hash = schemaHashFor(found.type, opts.cfg);
     const again = await findBySlug(node, found.type, hash, found.record.slug, opts.cfg, {
       hydrate: false,
@@ -294,7 +305,7 @@ export type RecordJson = {
   // decided_on). Present only when the type declares `extraStringFields`;
   // each key maps to its stored value (empty string when unset). Without
   // this the write path stores these columns but the read surface drops
-  // them, so `fbrain get --json`/human output showed nothing for them.
+  // them, so `brain get --json`/human output showed nothing for them.
   extra_fields?: Record<string, string>;
   // Only present for type=design — child task summaries for the
   // reverse-direction parent ↔ child link the human surface renders
@@ -330,7 +341,7 @@ export type RecordJson = {
 };
 
 export function recordToJson(
-  r: FbrainRecord,
+  r: BrainRecord,
   type: RecordType,
   designMissing = false,
   children?: ReadonlyArray<{ slug: string; status: string }>,
@@ -385,7 +396,7 @@ export function recordToJson(
 }
 
 export function formatRecord(
-  r: FbrainRecord,
+  r: BrainRecord,
   type: RecordType,
   designMissing = false,
   children?: ReadonlyArray<{ slug: string; status: string }>,
@@ -449,11 +460,11 @@ export function formatRecord(
 // Re-render a record's human text from a `RecordJson` (the structured shape),
 // substituting `body` with a possibly-windowed slice and appending a visible
 // truncation note when the window doesn't cover the whole body. Used by the
-// MCP `fbrain_get` handler, which caps the body it returns so a large record
+// MCP `brain_get` handler, which caps the body it returns so a large record
 // can't overflow the agent harness token budget. The header/metadata lines are
 // rendered identically to `formatRecord` (so the two surfaces stay in sync),
 // but driven off `RecordJson` because that is the only shape the MCP handler
-// holds after `getRecord`'s structured sink fires. The CLI `fbrain get` does
+// holds after `getRecord`'s structured sink fires. The CLI `brain get` does
 // NOT use this — a terminal has no token cap — so its output is unaffected.
 export function formatRecordJsonWindow(
   json: RecordJson,
@@ -510,7 +521,7 @@ export function formatRecordJsonWindow(
       lines.push(
         `… [body truncated: showing chars ${window.offset}–${shownEnd} of ${window.total}` +
           (window.truncated
-            ? `; re-call fbrain_get with body_offset=${shownEnd} for more]`
+            ? `; re-call brain_get with body_offset=${shownEnd} for more]`
             : ` (end of body)]`),
       );
     }
@@ -531,7 +542,7 @@ function formatAlsoTypes(
     .map((t) => `${t.type} (status ${t.status})`)
     .join(", ");
   const example = twins[0]!.type;
-  return `${rendered} — read with \`fbrain get ${slug} --type ${example}\``;
+  return `${rendered} — read with \`brain get ${slug} --type ${example}\``;
 }
 
 function memberLines(

@@ -103,7 +103,7 @@ export interface SecurityRunResult {
  * to simulate a hung keychain prompt (`status: null` + `error`), a locked
  * keychain (non-zero `status`), or a missing item (`status: 44` on
  * `find-generic-password`) without touching a real keychain — the seam apps
- * like fbrain previously had to hand-roll (`__setSecuritySpawn`).
+ * like brain previously had to hand-roll (`__setSecuritySpawn`).
  */
 export type SecurityRunner = (args: string[]) => SecurityRunResult;
 /**
@@ -112,13 +112,13 @@ export type SecurityRunner = (args: string[]) => SecurityRunResult;
  * key stays a safe, bounded identifier regardless of the node URL/socket-path
  * shape, while remaining stable for the same (appId, nodeTarget) pair.
  *
- * Example: `capabilityStoreKey('fbrain', 'http://127.0.0.1:9101')` →
- * `fbrain@<16-hex>`.
+ * Example: `capabilityStoreKey('brain', 'http://127.0.0.1:9101')` →
+ * `brain@<16-hex>`.
  */
 export declare function capabilityStoreKey(appId: string, nodeTarget: string): string;
 /**
  * macOS Keychain store via the `security` CLI. Each call is bounded by a
- * timeout — a hung keychain prompt must not wedge the app (see the fbrain
+ * timeout — a hung keychain prompt must not wedge the app (see the brain
  * keychain first-write-hang lesson). On any keychain failure the caller falls
  * back to the file store.
  *

@@ -1,9 +1,9 @@
-// `fbrain link <from-slug> <to-slug>` — store an explicit record edge.
+// `brain link <from-slug> <to-slug>` — store an explicit record edge.
 // The legacy task → design pair still writes task.design_slug for
 // compatibility; all other pairs store a link:<type>:<slug> tag on the
 // source record. Explicit edges reject missing targets.
 
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import { hydrateRecord } from "../body-spill.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
@@ -16,7 +16,7 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
-  type FbrainRecord,
+  type BrainRecord,
 } from "../record.ts";
 import { RECORD_TYPES, type RecordType } from "../schemas.ts";
 import {
@@ -43,7 +43,7 @@ export type LinkOptions = {
   onResult?: (payload: LinkResult) => void;
 };
 
-// The structured payload the MCP `fbrain_link` tool returns in
+// The structured payload the MCP `brain_link` tool returns in
 // `structuredContent` (mirrors the printed `linked <from_type> ...` line).
 export type LinkResult = {
   action: "linked";
@@ -75,10 +75,10 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   });
   if (!source) {
     if (fromType !== "task" || toType !== "design") {
-      throw new FbrainError({
+      throw new BrainError({
         code: "not_found",
         message: `No ${fromType}: ${fromSlug}`,
-        hint: `Create the ${fromType} first or check the slug with \`fbrain list --type ${fromType}\`.`,
+        hint: `Create the ${fromType} first or check the slug with \`brain list --type ${fromType}\`.`,
       });
     }
     // `link` is directional — <task-slug> first, <design-slug> second — and
@@ -108,12 +108,12 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
           ? null
           : await findBySlug(node, "task", taskHash, toSlug, opts.cfg, { hydrate: false });
       hint = asTask
-        ? `'${fromSlug}' is a design, not a task. \`link\` takes the task first — try \`fbrain link ${toSlug} ${fromSlug}\` (usage: \`fbrain link <task-slug> <design-slug>\`).`
-        : `'${fromSlug}' is a design, not a task — \`link\` takes a TASK first. Name a real task (\`fbrain list --type task\`), then the design (usage: \`fbrain link <task-slug> <design-slug>\`).`;
+        ? `'${fromSlug}' is a design, not a task. \`link\` takes the task first — try \`brain link ${toSlug} ${fromSlug}\` (usage: \`brain link <task-slug> <design-slug>\`).`
+        : `'${fromSlug}' is a design, not a task — \`link\` takes a TASK first. Name a real task (\`brain list --type task\`), then the design (usage: \`brain link <task-slug> <design-slug>\`).`;
     } else {
-      hint = `Create the task first (\`fbrain task new ${fromSlug}\`) or check the slug with \`fbrain list --type task\` (usage: \`fbrain link <task-slug> <design-slug>\`).`;
+      hint = `Create the task first (\`brain task new ${fromSlug}\`) or check the slug with \`brain list --type task\` (usage: \`brain link <task-slug> <design-slug>\`).`;
     }
-    throw new FbrainError({
+    throw new BrainError({
       code: "not_found",
       message: `No task: ${fromSlug}`,
       hint,
@@ -126,7 +126,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
   if (!target) {
     // Wrong-type detection: if `designSlug` names a record of another type
     // (concept/reference/project/...), telling the user to "create the
-    // design first" is actively misleading — `fbrain get <slug>` returns
+    // design first" is actively misleading — `brain get <slug>` returns
     // the row. Sweep the non-design types and, on a hit, say WHICH type
     // the slug is so the user can pick a real design instead. Best-effort:
     // each lookup swallows its own flake / missing-hash error and falls
@@ -135,16 +135,16 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
     const wrongType = await findOtherTypeForSlug(node, opts.cfg, toSlug, toType);
     const code = toType === "design" ? "dangling_design_slug" : "dangling_link_target";
     if (wrongType !== null) {
-      throw new FbrainError({
+      throw new BrainError({
         code,
         message: `'${toSlug}' is a ${wrongType}, not a ${toType}.`,
-        hint: `Pick a ${toType} (\`fbrain list --type ${toType}\`), or create one with \`fbrain ${toType} new <slug>\`.`,
+        hint: `Pick a ${toType} (\`brain list --type ${toType}\`), or create one with \`brain ${toType} new <slug>\`.`,
       });
     }
-    throw new FbrainError({
+    throw new BrainError({
       code,
       message: `No ${toType}: ${toSlug}`,
-      hint: `Create the ${toType} first (\`fbrain ${toType} new ...\`).`,
+      hint: `Create the ${toType} first (\`brain ${toType} new ...\`).`,
     });
   }
 
@@ -187,7 +187,7 @@ export async function linkCmd(opts: LinkOptions): Promise<void> {
 }
 
 function fieldsForLinkUpdate(
-  source: FbrainRecord,
+  source: BrainRecord,
   fromType: RecordType,
   toType: RecordType,
   toSlug: string,

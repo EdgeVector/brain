@@ -1,7 +1,7 @@
 // `brain reindex --target H --source-hash T --slug S` repairs the named keys.
 // Page heads commit conditionally. The command does not walk the corpus.
 
-import { FbrainError, type BatchMutationOp, type NodeClient, type Verbose } from "../client.ts";
+import { BrainError, type BatchMutationOp, type NodeClient, type Verbose } from "../client.ts";
 import { pageBackfill } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
@@ -12,7 +12,7 @@ import {
   isTombstoned,
   rowToRecord,
   schemaHashFor,
-  type FbrainRecord,
+  type BrainRecord,
 } from "../record.ts";
 import {
   BACKFILL_PAGE,
@@ -68,7 +68,7 @@ function validSubject(raw: unknown): raw is CountedSubject {
       typeof value.createdAt === "string" && value.createdAt.length > 0);
 }
 
-function subjectSnapshot(slugs: readonly string[], records: ReadonlyMap<string, FbrainRecord>): CountedSubject[] {
+function subjectSnapshot(slugs: readonly string[], records: ReadonlyMap<string, BrainRecord>): CountedSubject[] {
   return slugs.map((slug) => {
     const record = records.get(slug);
     if (record && record.created_at.length === 0) {
@@ -274,7 +274,7 @@ export type ReindexResult = {
 };
 
 function refuse(message: string): never {
-  throw new FbrainError({
+  throw new BrainError({
     code: "reindex_refused",
     message,
   });
@@ -401,7 +401,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     fields: fieldsFor(source),
     keys: slugs.map((slug) => ({ hash: slug })),
   });
-  const bySlug = new Map<string, FbrainRecord>();
+  const bySlug = new Map<string, BrainRecord>();
   for (const row of rows) {
     const record = rowToRecord(row, source);
     if (record.slug.length > 0) bySlug.set(record.slug, record);
@@ -476,7 +476,7 @@ export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
     const headNotes = await commitHeadPages(node, plan.heads);
     for (const note of headNotes) if (!plan.notes.includes(note)) plan.notes.push(note);
     if (headNotes.includes(INDEX_PARTIAL)) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "index_partial",
         message: `reindex index partial (${headNotes.filter((note) => note !== INDEX_PARTIAL).join(", ")}).`,
         hint: counted

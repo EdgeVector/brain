@@ -1,4 +1,4 @@
-// Pure helpers for the `fbrain migrate` command (G15 — schema
+// Pure helpers for the `brain migrate` command (G15 — schema
 // evolution playbook). Kept network- and config-free so the unit suite
 // stays fast.
 //
@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { brainDataDir } from "./config.ts";
 import type { AddSchemaRequest, FieldType, RecordType } from "./schemas.ts";
 
-export const MIGRATION_DIR_ENV = "FBRAIN_MIGRATIONS_DIR";
+export const MIGRATION_DIR_ENV = "BRAIN_MIGRATIONS_DIR";
 
 export type MigrationStatus = "in_progress" | "complete" | "dry_run";
 
@@ -93,7 +93,7 @@ export function listManifests(dir: string = defaultMigrationsDir()): MigrationMa
   // `a < b ? 1 : -1` shape returned -1 for ties, which TimSort treats as
   // "swap" and ends up rotating tied entries out of readdir order. With a
   // correct comparator the stable sort leaves ties in readdir order, so
-  // `fbrain migrate --status` shows a deterministic display order for any
+  // `brain migrate --status` shows a deterministic display order for any
   // migrations sharing an applied_at millisecond.
   out.sort((a, b) => {
     if (a.applied_at < b.applied_at) return 1;
@@ -144,7 +144,7 @@ export function schemaWithExtraField(opts: {
     schema: {
       name: newDescriptiveName,
       // Carry the owning app forward so the migrated schema stays in the same
-      // `fbrain/*` namespace and its identity hash continues to fold in
+      // `brain/*` namespace and its identity hash continues to fold in
       // owner_app_id (app_identity v3.1). Spread-with-guard so an externally-
       // loaded schema definition without `owner_app_id` doesn't get
       // `owner_app_id: undefined` emitted into the migrated schema.
@@ -203,7 +203,7 @@ export function versionMarkerValue(descriptiveName: string): string {
   return descriptiveName;
 }
 
-// Bump `FbrainKindNote` → `FbrainKindNote_v2` → `..._v3`. For Design /
+// Bump `BrainKindNote` → `BrainKindNote_v2` → `..._v3`. For Design /
 // Task this also gives `Design_v2`, `Task_v2`, etc. The "version"
 // number comes from manifests already on disk that target the same
 // scope, so successive `migrate` invocations stay deterministic.
@@ -264,7 +264,7 @@ export function shortHash(hash: string): string {
   return hash.length > 12 ? `${hash.slice(0, 12)}…` : hash;
 }
 
-// Pretty-print the migration manifest table for `fbrain migrate --status`.
+// Pretty-print the migration manifest table for `brain migrate --status`.
 export function formatStatusTable(manifests: MigrationManifest[]): string {
   if (manifests.length === 0) {
     return "(no migrations recorded under " + defaultMigrationsDir() + ")";
@@ -290,7 +290,7 @@ export function formatStatusTable(manifests: MigrationManifest[]): string {
 
 // Resolve the unique base directory shared between writes; useful so
 // the caller can pass a single override to test code (Bun test sets
-// FBRAIN_MIGRATIONS_DIR per-test).
+// BRAIN_MIGRATIONS_DIR per-test).
 export function ensureMigrationsDir(dir: string = defaultMigrationsDir()): string {
   mkdirSync(dir, { recursive: true });
   return dir;

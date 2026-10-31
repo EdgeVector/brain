@@ -27,8 +27,8 @@
 //               process start").
 //
 // The report is one stderr line, printed only when the total crosses
-// `FBRAIN_SLOW_CALL_THRESHOLD_MS` (default 10 s; `0` disables) or always
-// under `FBRAIN_PHASE_TIMING=1`. Threshold crossings are the papercut's
+// `BRAIN_SLOW_CALL_THRESHOLD_MS` (default 10 s; `0` disables) or always
+// under `BRAIN_PHASE_TIMING=1`. Threshold crossings are the papercut's
 // stall shape, so the breakdown self-reports exactly when someone needs it,
 // without anyone re-running a vanished stall under a debug flag.
 
@@ -228,11 +228,11 @@ export function formatSlowCallReport(s: SlowCallSegments): string {
   );
 }
 
-/** Threshold from env: `FBRAIN_PHASE_TIMING=1` → -1 (always print);
- * explicit non-negative `FBRAIN_SLOW_CALL_THRESHOLD_MS` wins; `0` disables. */
+/** Threshold from env: `BRAIN_PHASE_TIMING=1` → -1 (always print);
+ * explicit non-negative `BRAIN_SLOW_CALL_THRESHOLD_MS` wins; `0` disables. */
 export function slowCallThresholdMs(env: Record<string, string | undefined>): number {
-  if (env.FBRAIN_PHASE_TIMING === "1") return -1;
-  const raw = env.FBRAIN_SLOW_CALL_THRESHOLD_MS;
+  if (env.BRAIN_PHASE_TIMING === "1") return -1;
+  const raw = env.BRAIN_SLOW_CALL_THRESHOLD_MS;
   if (raw !== undefined) {
     const n = Number(raw);
     if (Number.isFinite(n) && n >= 0) return n;
@@ -243,7 +243,7 @@ export function slowCallThresholdMs(env: Record<string, string | undefined>): nu
 /** Whether a call of `totalMs` should print, under `env`. */
 export function shouldReport(totalMs: number, env: Record<string, string | undefined>): boolean {
   const threshold = slowCallThresholdMs(env);
-  if (threshold < 0) return true; // FBRAIN_PHASE_TIMING=1: always
+  if (threshold < 0) return true; // BRAIN_PHASE_TIMING=1: always
   if (threshold === 0) return false; // explicit opt-out
   return totalMs >= threshold;
 }

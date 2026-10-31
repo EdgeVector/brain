@@ -1,4 +1,4 @@
-// `fbrain delete <slug> [--type T]` — delete a record.
+// `brain delete <slug> [--type T]` — delete a record.
 //
 // One mutation call carries the product tombstone and the page changes.
 // The call updates the product fields to the tombstone tag, then deletes
@@ -11,7 +11,7 @@
 // only. That is no longer true. See docs/phase-5-delete-spike.md for the
 // old probe, not for live product truth.
 
-import { FbrainError, type NodeClient, type Verbose } from "../client.ts";
+import { BrainError, type NodeClient, type Verbose } from "../client.ts";
 import { pageBackfill, readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
@@ -29,6 +29,8 @@ import {
 } from "../record.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY, RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
 import { commitResidentRemoval } from "../resident-write-plan.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedRecordPage } from "../named-records.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type DeleteOptions = {
@@ -50,7 +52,7 @@ export type DeleteOptions = {
   onResult?: (payload: DeleteResult) => void;
 };
 
-// The structured payload the MCP `fbrain_delete` tool returns in
+// The structured payload the MCP `brain_delete` tool returns in
 // `structuredContent` (mirrors the printed `deleted <type> <slug>` line).
 // `soft` is invariant `true` on the payload, not in the printed text.
 export type DeleteResult = {
@@ -66,13 +68,17 @@ async function findLinkedTaskSlugs(
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
+  if (multiKey(cfg)) {
+    const page=await namedRecordPage(node,cfg,{type:"task",design:designSlug},20);
+    return page.items.map((task)=>task.slug);
+  }
   const hash = `child#${designSlug}`;
   const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
   const seen = new Set<string>();
   let range = HEAD_RANGE;
   for (;;) {
     if (seen.has(range)) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "child_page_unproven",
         message: `Cannot delete design "${designSlug}" — child page repeats.`,
         hint: pageBackfill(hash, "task"),
@@ -81,14 +87,14 @@ async function findLinkedTaskSlugs(
     seen.add(range);
     const page = await readStoredPage(node, schemaHash, hash, range);
     if (page.kind === "absent") {
-      throw new FbrainError({
+      throw new BrainError({
         code: "child_page_unproven",
         message: `Cannot delete design "${designSlug}" — child page absent.`,
         hint: pageBackfill(hash, "task"),
       });
     }
     if (page.kind === "bad") {
-      throw new FbrainError({
+      throw new BrainError({
         code: "child_page_unproven",
         message: `Cannot delete design "${designSlug}" — child page is partial.`,
         hint: pageBackfill(hash, "task"),
@@ -110,7 +116,7 @@ async function linkedTasksForDelete(
   try {
     return await findLinkedTaskSlugs(node, cfg, designSlug);
   } catch (err) {
-    if (!(force && err instanceof FbrainError && err.code === "child_page_unproven")) throw err;
+    if (!(force && err instanceof BrainError && err.code === "child_page_unproven")) throw err;
     // Force explicitly permits dangling references. Do not claim the absent
     // or damaged child page proves that the design has no linked tasks.
     print(`warning: child references for design "${designSlug}" are unknown; --force permits dangling references.`);
@@ -121,7 +127,7 @@ async function linkedTasksForDelete(
 // Tombstone status per type — pick a value from each type's status enum
 // that semantically fits "this is gone". Validated on write by the
 // record's schema (statuses are free-form strings in fold_db itself, but
-// fbrain ensures the value is in the enum via ensureStatus elsewhere).
+// brain ensures the value is in the enum via ensureStatus elsewhere).
 export const TOMBSTONE_STATUS: Record<RecordType, string> = {
   design: "archived",
   task: "cancelled",
@@ -183,10 +189,10 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
       const noun = n === 1 ? "task" : "tasks";
       const verb = n === 1 ? "links" : "link";
       if (!opts.force) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "design_has_linked_tasks",
           message: `Cannot delete design "${slug}" — ${n} ${noun} still ${verb} to it: ${linked.join(", ")}.`,
-          hint: "Re-link those tasks to another design (`fbrain link <task> <design>`) or delete them first (`fbrain delete <task> --type task`), or pass --force to delete anyway (their design references will dangle).",
+          hint: "Re-link those tasks to another design (`brain link <task> <design>`) or delete them first (`brain delete <task> --type task`), or pass --force to delete anyway (their design references will dangle).",
         });
       }
       print(
@@ -225,7 +231,7 @@ type FilterMatch = {
   created_at: string;
 };
 
-// The structured payload `fbrain delete --tag …` emits under `--json`. `deleted`
+// The structured payload `brain delete --tag …` emits under `--json`. `deleted`
 // is the list that WAS (or, under `dryRun`, WOULD BE) tombstoned. In dry-run
 // mode nothing is mutated, so the same list is the preview.
 export type DeleteBatchFailure = {
@@ -286,7 +292,8 @@ async function resolveFilterMatches(
   const types = opts.type ? [opts.type] : RECORD_TYPES.filter(type => Boolean(opts.cfg.schemaHashes[type]));
   // Older homes can lack a status page until backfill. Preserve the type
   // membership source, then check current status without fetching any bodies.
-  const hashes = opts.tag ? [`tag#${opts.tag}`] : types;
+  const hashes = opts.tag ? [`tag#${opts.tag}`] : multiKey(opts.cfg) && opts.status
+    ? types.map((type)=>`${type}#${opts.status}`) : types;
   if (opts.tag) {
     const head = await readStoredPage(node, opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "", hashes[0]!, HEAD_RANGE);
     if (head.kind !== "page") return { matches: [], partial: true };
@@ -300,7 +307,7 @@ async function resolveFilterMatches(
     const slugs = byType.get(type) ?? new Set<string>();
     slugs.add(card.slug); byType.set(type, slugs);
   }
-  if (!node.queryByKeys) throw new FbrainError({ code: "keyed_read_required", message: "Bulk selection requires batch reads." });
+  if (!node.queryByKeys) throw new BrainError({ code: "keyed_read_required", message: "Bulk selection requires batch reads." });
   // Read only selection fields. Recheck the current record's status and tags;
   // a stale summary cannot authorize a delete, and bodies are unnecessary.
   const batches = await Promise.all([...byType].map(async ([type, slugs]) => {
@@ -329,11 +336,11 @@ function describeSelector(opts: DeleteByFilterOptions): string {
 }
 
 function isNotFound(err: unknown): boolean {
-  return err instanceof FbrainError && err.code === "not_found";
+  return err instanceof BrainError && err.code === "not_found";
 }
 
 function formatBatchError(err: unknown): string {
-  if (err instanceof FbrainError) return `${err.code}: ${err.message}`;
+  if (err instanceof BrainError) return `${err.code}: ${err.message}`;
   if (err instanceof Error) return err.message;
   return String(err);
 }
@@ -347,11 +354,11 @@ export async function deleteByFilter(
   // but a bare filter delete that matched EVERYTHING would be catastrophic, so
   // re-assert the bound here. (`onResult`/MCP callers go through the same gate.)
   if (!opts.tag && !opts.status && !opts.type) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "unbounded_delete_selector",
       message:
         "Bulk delete requires a filter — refusing to select every record.",
-      hint: "Narrow with --tag T, --type T, and/or --status S (or delete one record with `fbrain delete <slug>`).",
+      hint: "Narrow with --tag T, --type T, and/or --status S (or delete one record with `brain delete <slug>`).",
     });
   }
 
@@ -471,7 +478,7 @@ export async function deleteByFilter(
     `deleted ${deleted.length} ${noun} matching ${selector}; ${failed.length} ${fnoun} failed.`,
   );
   opts.onResult?.({ ok: false, deleted, failed, dryRun: false });
-  throw new FbrainError({
+  throw new BrainError({
     code: "batch_delete_failed",
     message: `Bulk delete matching ${selector} failed for ${failed.length} ${fnoun}.`,
     hint: "Review the failed slug(s) above and retry once the node error is resolved.",

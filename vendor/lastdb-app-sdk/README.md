@@ -47,21 +47,21 @@ const fold = await connect({
   socketPath: process.env.LASTDB_SOCKET_PATH
     ?? process.env.FOLDDB_SOCKET_PATH
     ?? join(homedir(), '.lastdb', 'data', 'folddb.sock'),
-  appId: 'fbrain',
+  appId: 'brain',
 });
 
 if (!fold.hasCapability) {                                    // first run: no stored capability
-  const { requestId } = await fold.requestConsent('wildcard'); // ask for fbrain/*
-  console.log('Run: folddb consent grant fbrain');             // owner grants in their terminal
+  const { requestId } = await fold.requestConsent('wildcard'); // ask for brain/*
+  console.log('Run: folddb consent grant brain');             // owner grants in their terminal
   await fold.awaitConsent(requestId, { timeoutMs: 120_000 });  // polls; stores the capability
 }
 
-await fold.mutate('fbrain/Concept', {                          // capability auto-attached
+await fold.mutate('brain/Concept', {                          // capability auto-attached
   mutationType: 'create',
   fields: { id: 'c1', title: 'hello' },
   key: { hash: null, range: 'c1' },
 });
-const { rows } = await fold.query('fbrain/Concept', { fields: ['id', 'title'] });
+const { rows } = await fold.query('brain/Concept', { fields: ['id', 'title'] });
 for (const row of rows) {
   console.log(row.key, row.fields, row.authorPubKey); // full envelope per row
 }
@@ -142,7 +142,7 @@ self-authored code just uses the owner socket: you already trust it.
 
 An app you write yourself connects to your node's **owner socket** and runs as
 **NodeOwner**: full read/write, no namespace restriction, no consent flow. This
-is how LastDB's own tools (fbrain, fkanban, fsituations, lastsecrets) run —
+is how LastDB's own tools (brain, fkanban, fsituations, lastsecrets) run —
 same user, owner socket. `ownerClient` is synchronous and keychain-free (it
 never mints, stores, or replays a capability); it authenticates by the OS user
 (the socket's kernel peer credentials over UDS, or an `X-User-Hash` header on a
@@ -156,15 +156,15 @@ import { ownerClient } from '@lastdb/app-sdk';
 // brand-forward alias); over UDS peer credentials authenticate you, so no
 // X-User-Hash header is needed.
 const db = ownerClient({
-  appId: 'fbrain',
+  appId: 'brain',
   socketPath: process.env.FOLDDB_SOCKET_PATH,
   // baseUrl: 'http://127.0.0.1:9001',  // loopback TCP fallback; then pass
   // defaultHeaders: { 'X-User-Hash': userHash }  // (from autoIdentity())
 });
 
 // Full read/write across any schema — device trust, no write-own restriction.
-const rows = await db.queryAll('fbrain/Concept', { fields: ['id', 'title'] });
-await db.mutate('fbrain/Concept', {
+const rows = await db.queryAll('brain/Concept', { fields: ['id', 'title'] });
+await db.mutate('brain/Concept', {
   mutationType: 'create',
   fields: { id: 'c1', title: 'hello' },
   key: { hash: null, range: 'c1' },
@@ -249,8 +249,8 @@ This keeps storage global and catalog-shaped. A resolver returning
 callers; creating a new shared-surface language remains a separate publisher
 flow, not a runtime fallback.
 
-[d1]: fbrain `decision-2026-07-10-apps-read-all-write-own-namespace`
-[d2]: fbrain `decision-local-security-loose-stance`
+[d1]: brain `decision-2026-07-10-apps-read-all-write-own-namespace`
+[d2]: brain `decision-local-security-loose-stance`
 
 ## Transports
 
@@ -261,10 +261,10 @@ nodes should always use `socketPath`** (or let socket-first discovery land on
 
 ```ts
 // Explicit UDS — preferred for Mini / lastdbd:
-await connect({ socketPath: join(homedir(), '.lastdb', 'data', 'folddb.sock'), appId: 'fbrain' });
+await connect({ socketPath: join(homedir(), '.lastdb', 'data', 'folddb.sock'), appId: 'brain' });
 
 // Optional: TCP baseUrl triggers socket-first discovery, then TCP fallback:
-await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain' });
+await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'brain' });
 ```
 
 ### Socket-first discovery (the default app path)
@@ -298,13 +298,13 @@ remote or non-Unix clients. This mirrors the discovery order the Rust client
 ```ts
 // Prefer the socket; fall back to TCP if no node serves one. Discovery is
 // silent — `fold.target` reports where it landed (`unix:…` or `http://…`).
-const fold = await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain' });
+const fold = await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'brain' });
 
 // Force the TCP listener (e.g. a remote node, or a browser-style HTTP path):
-await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain', discoverSocket: false });
+await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'brain', discoverSocket: false });
 
 // An explicit socket is always used verbatim — no discovery, no fallback:
-await connect({ socketPath: '/path/to/<session>.sock', appId: 'fbrain' });
+await connect({ socketPath: '/path/to/<session>.sock', appId: 'brain' });
 ```
 
 `discoverTransport({ fallbackBaseUrl, defaultHeaders?, timeoutMs?, env? })` is
@@ -323,7 +323,7 @@ sends (consent flow + data path):
 ```ts
 await connect({
   baseUrl: 'http://127.0.0.1:9001',
-  appId: 'fbrain',
+  appId: 'brain',
   defaultHeaders: { 'X-User-Hash': userHash },
 });
 ```
@@ -340,7 +340,7 @@ Every transport request has a 30s timeout by default, so a hung or wedged node
 cannot leave SDK calls pending forever. Override it per client when needed:
 
 ```ts
-await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'fbrain', timeoutMs: 5000 });
+await connect({ baseUrl: 'http://127.0.0.1:9001', appId: 'brain', timeoutMs: 5000 });
 ```
 
 An exact durable Delete with `cloudPublication: 'wait'` raises the effective
@@ -463,7 +463,7 @@ exposes the node's pagination params and metadata:
   semantics, so the drain follows `page.hasMore` identically.
 
 ```ts
-const all = await fold.queryAll('fbrain/Concept', { fields: ['id', 'title'] });
+const all = await fold.queryAll('brain/Concept', { fields: ['id', 'title'] });
 console.log(all.rowCount, all.page?.hasMore); // every row; false unless maxRows hit
 ```
 
@@ -512,7 +512,7 @@ it is enforced **by the node, not the SDK**:
 ```ts
 // `target` can only SHRINK the result set to within the app's scope.
 // A target outside S(A) is intersected away → { hits: [] }, normal 200.
-const scoped = await fold.search('quantum computing', { target: 'fbrain/Concept' });
+const scoped = await fold.search('quantum computing', { target: 'brain/Concept' });
 ```
 
 A header-less (capability-less) call is refused by the node with
@@ -760,9 +760,9 @@ Connect with `socketPath`, not `baseUrl`, for local work. So:
 > `{ mutationType, fields, key: { hash, range } }` (camelCase, schema as the
 > 1st arg). The CLI's `POST /dev/mutations` wraps a *batch* with snake_case
 > keys — `{ "mutations": [ { schema, mutation_type, key: { range }, fields } ] }`.
-> Both paths name the schema `fbrain/Note`: the SDK uses the **canonical
+> Both paths name the schema `brain/Note`: the SDK uses the **canonical
 > published** name, and the CLI uses the **namespaced registered** name
-> `folddb dev post dev/schemas --app fbrain` produces (it prefixes `<app>/`
+> `folddb dev post dev/schemas --app brain` produces (it prefixes `<app>/`
 > to the file's bare `name`). They agree by construction. See the onboarding
 > doc's "CLI vs SDK mutation shape" table:
 > [`docs/developer-onboarding.md`](../../docs/developer-onboarding.md#cli-vs-sdk-mutation-shape).
@@ -788,7 +788,7 @@ kept hand-rolling while using the SDK for the app data plane:
 
 These helpers do not attach `X-App-Capability` and do not represent an app's
 capability-scoped access set `S(A)`. They are for owner-side setup, diagnostics,
-and host-context tools such as fbrain and fsituations.
+and host-context tools such as brain and fsituations.
 
 ## Capability 403 contract + client-side verification (gap #4)
 

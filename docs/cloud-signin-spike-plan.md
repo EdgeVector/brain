@@ -1,4 +1,4 @@
-# Cloud sign-in spike plan — light up exemem on the fbrain daemon
+# Cloud sign-in spike plan — light up exemem on the brain daemon
 
 **Status:** DRAFT — no implementation yet.
 **Filed:** 2026-05-25
@@ -12,7 +12,7 @@
 | Sharing surface (Rust) | [`fold/fold_db/crates/core/src/sharing/`](https://github.com/EdgeVector/fold/blob/main/fold_db/crates/core/src/sharing/) — `ShareRule`, `ShareInvite`, `ShareSubscription`, signing | Built. All `/api/sharing/*` endpoints in [`fold_db_node/src/handlers/sharing.rs`](https://github.com/EdgeVector/fold/blob/main/fold_db_node/src/handlers/sharing.rs) work on loopback (Phase 3 memo). |
 | Cloud transport (TS Lambdas) | [`exemem-infra/lambdas/`](https://github.com/EdgeVector/exemem-infra/tree/main/lambdas) — `auth_service`, `discovery`, `messaging_service`, `storage_service`, `storage_admin_service`, `storage_counter`, `org_service`, `subscription_service`, `billing_service`, `dashboard_service` | Deployed. Dev: `us-west-2`. Prod: `us-east-1`. Both deploy pipelines green. |
 | Cloud-sign-in CLI (Rust) | [`fold/fold_db_node/src/bin/folddb/commands/cloud.rs`](https://github.com/EdgeVector/fold/blob/main/fold_db_node/src/bin/folddb/commands/cloud.rs) | Built (legacy Tauri-app path also handles it via "Settings > Cloud Backup"). |
-| `fbrain share` CLI (TS) | `fbrain/src/commands/share.ts` | **Stub** — prints memo pointer, exits 1. |
+| `brain share` CLI (TS) | `brain/src/commands/share.ts` | **Stub** — prints memo pointer, exits 1. |
 | End-to-end cross-node validation | — | **Never run.** Phase 3 was explicit about this being out of scope. |
 
 ## 2. Live state on Tom's daemon (probed 2026-05-25)
@@ -46,7 +46,7 @@ The daemon was launched via homebrew (`/opt/homebrew/bin/folddb_server --port 90
 
 Acceptance: `GET /api/sharing/exemem-status` returns `{"connected": true, "discovery_url": "...", "token": {"valid": true, ...}}`.
 
-**Risk:** the daemon binary may need a restart-with-env or a per-user keychain entry the homebrew install never sets up. May require packaging changes upstream in `EdgeVector/fold` — out of fbrain repo scope.
+**Risk:** the daemon binary may need a restart-with-env or a per-user keychain entry the homebrew install never sets up. May require packaging changes upstream in `EdgeVector/fold` — out of brain repo scope.
 
 ### S2. Provision a second identity (laptop ↔ desktop, OR Tom-A ↔ Tom-B)
 
@@ -66,13 +66,13 @@ Acceptance: both nodes' `/api/sharing/posture` shows `contacts_per_domain: {pers
 
 The thing nobody has actually run yet. From [`docs/phase-3-sharing-memo.md`](phase-3-sharing-memo.md) §"Why a positive cross-node test can't be conclusive on one machine":
 
-1. Node A: `fbrain put shared-doc-1` (a Design with body "alpha bravo").
+1. Node A: `brain put shared-doc-1` (a Design with body "alpha bravo").
 2. Node A: `POST /api/sharing/rules` with B's pubkey, `scope: {Schema: "Design"}`.
 3. Node A: `POST /api/sharing/invite` (cloud-mediated path, not manual).
 4. Node B: `GET /api/sharing/pending-invites` — assert invite arrived.
 5. Node B: `POST /api/sharing/accept` with the pending invite.
 6. **Wait for sync** (TTL TBD — probably tens of seconds; instrument it).
-7. Node B: `fbrain get shared-doc-1` (or `fbrain search "alpha bravo"`) — **must return the record**.
+7. Node B: `brain get shared-doc-1` (or `brain search "alpha bravo"`) — **must return the record**.
 
 Acceptance: step 7 succeeds. Capture timing + S3 object inspection (the encrypted blobs under `share:<owner>:<recipient>/`) as evidence.
 
@@ -80,18 +80,18 @@ Acceptance: step 7 succeeds. Capture timing + S3 object inspection (the encrypte
 
 Phase 3 called this "B cannot read an unshared record." With transport working, this becomes meaningful:
 
-1. Node A: `fbrain put private-doc-1` (Task — different schema than the ShareRule).
+1. Node A: `brain put private-doc-1` (Task — different schema than the ShareRule).
 2. Node B: wait the same sync window.
-3. Node B: `fbrain get private-doc-1` and `/api/query` for Task — **must return empty / not-found**.
+3. Node B: `brain get private-doc-1` and `/api/query` for Task — **must return empty / not-found**.
 
 Acceptance: step 3 finds nothing, confirming `scope: {Schema: "Design"}` actually restricts the share.
 
-### S6. `fbrain share` CLI implementation
+### S6. `brain share` CLI implementation
 
 Replace the stub at `src/commands/share.ts` with a real implementation:
 
 ```
-fbrain share <slug> --to <recipient-user-hash-or-pubkey-or-display-name>
+brain share <slug> --to <recipient-user-hash-or-pubkey-or-display-name>
   [--scope schema|all]
   [--no-cloud]   # creates the rule but doesn't try /invite (manual transport)
 ```
@@ -103,13 +103,13 @@ Logic:
 4. `POST /api/sharing/invite` (cloud path); fall back to printing the JSON invite on 400.
 5. Print a success message that clearly distinguishes "rule created" from "share active" — data flow waits on recipient `accept` + sync window.
 
-Acceptance: green path of S4 reduces to two CLI calls — `fbrain share shared-doc-1 --to fbrain-B` on A, `fbrain share-accept` on B (or auto-accept from pending-invites poll).
+Acceptance: green path of S4 reduces to two CLI calls — `brain share shared-doc-1 --to brain-B` on A, `brain share-accept` on B (or auto-accept from pending-invites poll).
 
 ## 4. Scope decisions to make before starting
 
 - **Is this part of the G0 gate?** Current §6 framing says NO. Adding it would change the contract — material 5-6 week extension. Recommendation: keep out of G0, schedule as G16-prime / post-flip work, but treat the misframe-correction (this doc + the §6 clarification) as the deliverable for now.
 - **Dev or prod exemem stack?** Dev (us-west-2) for the spike. Prod (us-east-1) is for daily-use data, not destructive cross-node probing.
-- **Reversibility.** Signing the daemon into the cloud is reversible (`folddb cloud signout`). But any record A writes during the spike that gets pushed to S3 may persist — coordinate with exemem-infra's data-retention story before pushing real fbrain records through.
+- **Reversibility.** Signing the daemon into the cloud is reversible (`folddb cloud signout`). But any record A writes during the spike that gets pushed to S3 may persist — coordinate with exemem-infra's data-retention story before pushing real brain records through.
 
 ## 5. Pointers
 
@@ -121,4 +121,4 @@ Acceptance: green path of S4 reduces to two CLI calls — `fbrain share shared-d
 
 ## 6. Status
 
-**No work in flight.** This doc exists so the next person who asks "why is fbrain laptop-only?" gets the honest answer (it isn't, structurally) instead of the misframe.
+**No work in flight.** This doc exists so the next person who asks "why is brain laptop-only?" gets the honest answer (it isn't, structurally) instead of the misframe.

@@ -3,7 +3,7 @@
 //
 // The implementation now comes from @lastdb/app-sdk (`sha256Hex` in
 // `capabilityToken.ts`), which is synchronous (node:crypto). The previous
-// fbrain implementation was async (WebCrypto); call sites that `await` a
+// brain implementation was async (WebCrypto); call sites that `await` a
 // plain string keep working unchanged, so this re-export is drop-in.
 
 export { sha256Hex } from "@lastdb/app-sdk";

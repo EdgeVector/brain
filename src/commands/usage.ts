@@ -1,4 +1,4 @@
-// `fbrain doctor --usage` — team-adoption telemetry (G13).
+// `brain doctor --usage` — team-adoption telemetry (G13).
 //
 // Iterates every record across the registered schemas via
 // /api/query, derives a per-record userHash from the author public key,
@@ -129,7 +129,7 @@ export async function runUsageReport(
   const totalWrites = users.reduce((s, u) => s + u.total, 0);
   const report: UsageReport = { windowDays, totalWrites, users };
 
-  print(`fbrain usage (last ${windowDays} days, by userHash):`);
+  print(`brain usage (last ${windowDays} days, by userHash):`);
   if (users.length === 0) {
     print("  (no records created in window)");
   } else {

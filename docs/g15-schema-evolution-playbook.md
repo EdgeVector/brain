@@ -1,15 +1,15 @@
-# G15: fbrain schema evolution playbook
+# G15: brain schema evolution playbook
 
 **Date:** 2026-05-24
 **Status:** spike + playbook (no production migration in this PR)
-**Command:** `fbrain migrate --add-field <type> <field> <type-spec> [--default V]`
+**Command:** `brain migrate --add-field <type> <field> <type-spec> [--default V]`
 **Related:** `docs/phase-5-delete-spike.md` (append-only constraint),
 `docs/phase-7-search-latency-spike.md` (reindex precedent)
 
 ## What this is
 
-A safe way to add a new field to an fbrain record type — Design, Task,
-or any of the six Phase 6 kinds backed by `FbrainKindNote` — without
+A safe way to add a new field to an brain record type — Design, Task,
+or any of the six Phase 6 kinds backed by `BrainKindNote` — without
 orphaning records that were written under the old shape. It's the
 direct response to the gap left after Phase 6: the schema set is
 locked, and we needed a credible answer to "what happens when we want
@@ -19,7 +19,7 @@ The command is implemented; the doc is the model. Both are paired so
 the playbook isn't theoretical and the spike has a place to land its
 weight.
 
-**Pattern status:** this playbook documents fbrain's historical,
+**Pattern status:** this playbook documents brain's historical,
 grandfathered per-kind schema lineage. For new apps, do not create
 purpose-split schemas only to encode app-level kind; use schema starter
 templates plus an explicit `kind` field per
@@ -39,7 +39,7 @@ and:
   pinned to the old hash.
 - fold_db is append-only (Phase 5 spike), so we cannot remove the old
   records once we've migrated. They orphan harmlessly at the old
-  hash, reachable only via `fbrain raw GET /api/query` with the old
+  hash, reachable only via `brain raw GET /api/query` with the old
   hash spelled out.
 
 There is no in-place "evolve" API in fold_db. The only existing
@@ -50,7 +50,7 @@ generalises that pattern to a CLI command.
 
 ## The model — re-register, re-`put`, atomic config swap
 
-`fbrain migrate --add-field` runs these seven steps. Each is logged
+`brain migrate --add-field` runs these seven steps. Each is logged
 with a `[N/7]` prefix in the command's stdout so a failure is legible.
 
 ```
@@ -65,15 +65,15 @@ with a `[N/7]` prefix in the command's stdout so a failure is legible.
 
 ### Why descriptive_name bumps
 
-`FbrainKindNote` → `FbrainKindNote_v2` → `..._v3`. The version is
+`BrainKindNote` → `BrainKindNote_v2` → `..._v3`. The version is
 legible in `/api/schemas`, and future name-based queries (currently
-none in fbrain — we resolve by canonical hash — but defensive against
+none in brain — we resolve by canonical hash — but defensive against
 later code paths) can't ambiguously resolve.
 
 ### Why the per-migration version marker field
 
 Each migration's new schema gets an extra field named
-`_<descriptive_name>_marker` (e.g. `_FbrainKindNote_v2_marker`),
+`_<descriptive_name>_marker` (e.g. `_BrainKindNote_v2_marker`),
 defaulted to the descriptive_name itself. This is the same
 structural-distinctness trick that `v1_marker_a` / `v1_marker_b`
 play for the original Phase 6 noteSchema (`src/schemas.ts:9-20`):
@@ -91,7 +91,7 @@ returned schema's fields list. If not, it bails with
 `schema_overlap_merge` and a hint pointing here. This catches the
 escape case where the merge happens despite the marker — which can
 happen on a shared / dev schema service that has accumulated many
-similar `FbrainKindNote_v2` registrations from prior runs.
+similar `BrainKindNote_v2` registrations from prior runs.
 
 If you hit `schema_overlap_merge` against a shared dev schema service,
 the workaround is: bump your descriptive_name past the polluted
@@ -111,13 +111,13 @@ named type moves.
 
 ### Why the manifest
 
-Every migration writes `~/.fbrain/migrations/<ts>-add-<scope>-<field>.json`
+Every migration writes `~/.brain/migrations/<ts>-add-<scope>-<field>.json`
 **before** any record writes. The manifest is the single source of
 truth for:
 
-- `fbrain migrate --status` (tabular history)
-- `fbrain migrate --resume <id>` (crash recovery)
-- `fbrain doctor`'s drift-check softening (see "Doctor interaction"
+- `brain migrate --status` (tabular history)
+- `brain migrate --resume <id>` (crash recovery)
+- `brain doctor`'s drift-check softening (see "Doctor interaction"
   below)
 
 Schema:
@@ -128,8 +128,8 @@ Schema:
   "scope": { "schema_key": "note", "affected_types": ["concept", "preference", ...] },
   "from_hash": "...64-hex...",
   "to_hash":   "...64-hex...",
-  "descriptive_name_from": "FbrainKindNote",
-  "descriptive_name_to":   "FbrainKindNote_v2",
+  "descriptive_name_from": "BrainKindNote",
+  "descriptive_name_to":   "BrainKindNote_v2",
   "field_added": "urgency",
   "field_type": "String",
   "default": "normal",
@@ -147,15 +147,15 @@ step 5 or 6 dies mid-flight (network blip, ^C, exception):
 
 1. The config still points at `from_hash` — reads stay correct.
 2. The records already re-put under `to_hash` are reachable via raw
-   query but invisible to fbrain's normal read paths (which still pin
+   query but invisible to brain's normal read paths (which still pin
    to `from_hash`).
-3. `fbrain migrate --status` shows `migrated_count < total_count` with
+3. `brain migrate --status` shows `migrated_count < total_count` with
    `status: "in_progress"`.
 
 Recovery:
 
 ```
-fbrain migrate --resume <manifest-id>
+brain migrate --resume <manifest-id>
 ```
 
 This re-enumerates records under `from_hash`, skips ones already
@@ -164,7 +164,7 @@ rest, and runs steps 6 + 7. Safe to re-run as many times as needed.
 
 ### Dry-run
 
-`fbrain migrate --add-field … --dry-run`:
+`brain migrate --add-field … --dry-run`:
 
 - Computes the field-added schema request and would-be
   `descriptive_name`.
@@ -183,12 +183,12 @@ writes.
 ## CLI
 
 ```
-fbrain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
-fbrain migrate --status
-fbrain migrate --resume <manifest-id>
+brain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
+brain migrate --status
+brain migrate --resume <manifest-id>
 ```
 
-`<type-spec>` is `String` or `Array:String` — matches fbrain's
+`<type-spec>` is `String` or `Array:String` — matches brain's
 existing `FieldType`. `--default` is **required** for `String` (no
 implicit empty default; too easy to silently corrupt
 post-migration records); optional for `Array:String` where it
@@ -198,13 +198,13 @@ defaults to `[]`.
 
 ```bash
 # Add `urgency` (String) to every Phase 6 record, defaulted to "normal":
-fbrain migrate --add-field concept urgency String --default "normal"
+brain migrate --add-field concept urgency String --default "normal"
 
 # Check what happened:
-fbrain migrate --status
+brain migrate --status
 
 # Probe a single migrated record:
-fbrain get my-first-concept --type concept   # `urgency: normal` will be present
+brain get my-first-concept --type concept   # `urgency: normal` will be present
 ```
 
 ## After a migration — update `src/schemas.ts`
@@ -217,31 +217,31 @@ migration completes:
    `field_data_classifications` entry).
 2. Commit.
 
-If you skip this, `fbrain doctor` will surface drift (now demoted to
+If you skip this, `brain doctor` will surface drift (now demoted to
 **WARN** because the manifest explains it — see "Doctor interaction")
-and the next `fbrain init` will register the *old* schemas.ts shape,
+and the next `brain init` will register the *old* schemas.ts shape,
 get the *old* hash back, and write that to config. All migrated
 records would then look orphaned.
 
 The migrate command's final stdout line is a reminder:
 
 ```
-note: update src/schemas.ts to add "urgency" to the affected schema so the next `fbrain init` keeps the new hash.
+note: update src/schemas.ts to add "urgency" to the affected schema so the next `brain init` keeps the new hash.
 ```
 
 ## Doctor interaction
 
-`fbrain doctor`'s schema-drift check (`src/commands/doctor.ts:243-280`)
+`brain doctor`'s schema-drift check (`src/commands/doctor.ts:243-280`)
 normally FAILs when the registered schema disagrees with `schemas.ts`.
 After a migration, that's the *expected* state until the human follow-up
 in the section above lands. The doctor reads
-`~/.fbrain/migrations/*.json` and, when it finds a `status: "complete"`
+`~/.brain/migrations/*.json` and, when it finds a `status: "complete"`
 manifest whose `to_hash` matches the live config hash for that schema,
 demotes the drift to **WARN** with a fix-pointer:
 
 ```
-[WARN] schema-drift[FbrainKindNote]  — fields missing from registered schema: urgency — explained by migration 2026-05-24T22-30-00-000Z-add-note-urgency
-       fix:   update src/schemas.ts to add "urgency" to the note schema so the next `fbrain init` keeps the new hash
+[WARN] schema-drift[BrainKindNote]  — fields missing from registered schema: urgency — explained by migration 2026-05-24T22-30-00-000Z-add-note-urgency
+       fix:   update src/schemas.ts to add "urgency" to the note schema so the next `brain init` keeps the new hash
 ```
 
 WARN entries don't flip the doctor exit code, so this stays
@@ -253,18 +253,18 @@ resolves.
 | Failure | What you see | Recovery |
 |---|---|---|
 | Schema service rejects registration | step 1 errors with `schema_http_<status>` | Manifest never written. Re-run after fixing the service. |
-| `/api/schemas/load` returns `failed_schemas: [...]` | step 2 errors with `schema_load_partial` | New schema is registered but not loaded into the node. Re-run `fbrain migrate --add-field` (idempotent; will register again to the same hash and re-load). |
-| Mid-flight crash during step 5 | manifest `status: "in_progress"`, `migrated_count < total_count`. `fbrain doctor` flags drift only after the swap; until then config still points at `from_hash`. | `fbrain migrate --resume <id>`. Idempotent — already-migrated records are skipped. |
-| Config swap (step 6) fails (disk full, permission) | step 6 throws; manifest still `in_progress`; records already re-put under `to_hash` (orphans of a half-done migration) | Fix the disk/permission issue and `fbrain migrate --resume <id>`. The records under `to_hash` are detected via `findBySlug` and not duplicated. |
-| You re-ran `fbrain init` post-migration before editing schemas.ts | config gets schemaHashes reverted to the old hashes; migrated records orphan | The migration manifest is still on disk. Edit schemas.ts to match the migrated shape and re-run `fbrain init`; the new shape will register, get the migrated hash back, and config will land correctly. |
-| Field name already exists in schema | step 0 errors with `field_already_present` | Pick a different name, or check `fbrain migrate --status` for a prior migration that already added it. |
+| `/api/schemas/load` returns `failed_schemas: [...]` | step 2 errors with `schema_load_partial` | New schema is registered but not loaded into the node. Re-run `brain migrate --add-field` (idempotent; will register again to the same hash and re-load). |
+| Mid-flight crash during step 5 | manifest `status: "in_progress"`, `migrated_count < total_count`. `brain doctor` flags drift only after the swap; until then config still points at `from_hash`. | `brain migrate --resume <id>`. Idempotent — already-migrated records are skipped. |
+| Config swap (step 6) fails (disk full, permission) | step 6 throws; manifest still `in_progress`; records already re-put under `to_hash` (orphans of a half-done migration) | Fix the disk/permission issue and `brain migrate --resume <id>`. The records under `to_hash` are detected via `findBySlug` and not duplicated. |
+| You re-ran `brain init` post-migration before editing schemas.ts | config gets schemaHashes reverted to the old hashes; migrated records orphan | The migration manifest is still on disk. Edit schemas.ts to match the migrated shape and re-run `brain init`; the new shape will register, get the migrated hash back, and config will land correctly. |
+| Field name already exists in schema | step 0 errors with `field_already_present` | Pick a different name, or check `brain migrate --status` for a prior migration that already added it. |
 | `--default` missing for String field | command refuses to start with a message about implicit empties | Re-run with `--default <value>`. |
 
 ## What is NOT supported (by design)
 
 - **Field removal.** fold_db is append-only — old records carrying the
   removed field would orphan with no recovery path. Soft-deprecate
-  via a tag (the `__fbrain_deleted__` tombstone pattern from
+  via a tag (the `__brain_deleted__` tombstone pattern from
   `docs/phase-5-delete-spike.md`); set the deprecated field to a
   sentinel value, then ignore it on read.
 - **Field type change.** Same root cause as removal — old records carry
@@ -285,7 +285,7 @@ resolves.
 
 G15 = "schema evolution playbook + working spike", filed against the
 G0 replacement-readiness gate (`docs/g0-replacement-readiness-gate.md`).
-It's a precondition for trusting fbrain as a long-lived store: every
+It's a precondition for trusting brain as a long-lived store: every
 shipped schema represents a future migration target, and the cost of
 the first migration sets the ceiling for how fast subsequent ones can
 ship. Today: ~7 steps, one CLI command, manifest-resumable. Tomorrow:

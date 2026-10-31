@@ -1,16 +1,16 @@
-// MCP server for fbrain — exposes both read (`fbrain_search`, `fbrain_ask`,
-// `fbrain_get`, `fbrain_list`, `fbrain_backlinks`) and write (`fbrain_put`, `fbrain_status`,
-// `fbrain_append`, `fbrain_tag`, `fbrain_delete`, `fbrain_link`) tools to MCP
-// clients (Claude Code, Codex, etc.) over stdio. `fbrain_status` (status-only
-// patch), `fbrain_append` (grow a body without a full rewrite), and
-// `fbrain_tag` (tag-only patch) close the read/write asymmetry: without them
-// the only write was `fbrain_put`, a FULL replace whose body defaults to empty,
+// MCP server for brain — exposes both read (`brain_search`, `brain_ask`,
+// `brain_get`, `brain_list`, `brain_backlinks`) and write (`brain_put`, `brain_status`,
+// `brain_append`, `brain_tag`, `brain_delete`, `brain_link`) tools to MCP
+// clients (Claude Code, Codex, etc.) over stdio. `brain_status` (status-only
+// patch), `brain_append` (grow a body without a full rewrite), and
+// `brain_tag` (tag-only patch) close the read/write asymmetry: without them
+// the only write was `brain_put`, a FULL replace whose body defaults to empty,
 // so the natural get(windowed)→edit→re-put loop silently truncated records.
 //
 // Each handler wraps the existing CLI command function and captures its
 // printed output as a single text content block. No shell-out — the
 // command functions are called in-process so the agent sees the same
-// results as the matching `fbrain` subcommand from the terminal.
+// results as the matching `brain` subcommand from the terminal.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -19,7 +19,7 @@ import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { TextDecoder } from "node:util";
 
-import { getFbrainVersion } from "../version.ts";
+import { getBrainVersion } from "../version.ts";
 import { ConfigInvalidError, ConfigMissingError, type Config } from "../config.ts";
 import { searchCmd, type SearchHitJson } from "../commands/search.ts";
 import { askCmd } from "../commands/ask.ts";
@@ -35,7 +35,7 @@ import { tagCmd, parseTagList } from "../commands/tag.ts";
 import { deleteRecord } from "../commands/delete.ts";
 import { linkCmd } from "../commands/link.ts";
 import { backlinksCmd, type BacklinksJson } from "../commands/backlinks.ts";
-import { FbrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
+import { BrainError, newReadClientFromCfg, stripDoctorTip } from "../client.ts";
 import {
   recordStatusLines,
   recordTypeCount,
@@ -48,38 +48,38 @@ import {
   listLiveSlugsPage,
   schemaHashFor,
 } from "../record.ts";
-export { FBRAIN_MCP_TOOL_NAMES } from "./tools.ts";
+export { BRAIN_MCP_TOOL_NAMES } from "./tools.ts";
 
-export const FBRAIN_MCP_NAME = "fbrain";
+export const BRAIN_MCP_NAME = "brain";
 // The complete agent-integration surface is single-sourced in mcp/tools.ts so
 // the `doctor --mcp` boot probe can assert the live `tools/list` reports
 // EXACTLY this set without re-listing the names.
-// Single-sourced via getFbrainVersion() so `fbrain --version` (cli.ts) and
+// Single-sourced via getBrainVersion() so `brain --version` (cli.ts) and
 // the MCP `serverInfo.version` reported here can't drift. Includes the git
 // short-SHA suffix when the running source lives in a git checkout, so MCP
 // clients (Claude Code, Codex) see the same build identifier the CLI does.
-export const FBRAIN_MCP_VERSION: string = getFbrainVersion();
+export const BRAIN_MCP_VERSION: string = getBrainVersion();
 
 // Default idle-reap window: exit an MCP server that has received no request for
 // 30 minutes. A host can abandon a stdio MCP server while keeping the pipe open,
 // so transport close never fires and the process lingers. Reaping an idle server
 // is transparent: the host respawns it on the next tool call. Override via
-// FBRAIN_MCP_IDLE_TIMEOUT_MS; set it <= 0 to disable.
+// BRAIN_MCP_IDLE_TIMEOUT_MS; set it <= 0 to disable.
 export const DEFAULT_MCP_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function mcpIdleTimeoutMs(): number {
-  const raw = process.env.FBRAIN_MCP_IDLE_TIMEOUT_MS;
+  const raw = process.env.BRAIN_MCP_IDLE_TIMEOUT_MS;
   if (raw === undefined) return DEFAULT_MCP_IDLE_TIMEOUT_MS;
   const trimmed = raw.trim();
   if (!/^-?\d+$/.test(trimmed)) {
     throw new Error(
-      `FBRAIN_MCP_IDLE_TIMEOUT_MS must be an integer number of milliseconds; got ${JSON.stringify(raw)}.`,
+      `BRAIN_MCP_IDLE_TIMEOUT_MS must be an integer number of milliseconds; got ${JSON.stringify(raw)}.`,
     );
   }
   const n = Number(trimmed);
   if (!Number.isSafeInteger(n)) {
     throw new Error(
-      `FBRAIN_MCP_IDLE_TIMEOUT_MS must be a safe integer number of milliseconds; got ${JSON.stringify(raw)}.`,
+      `BRAIN_MCP_IDLE_TIMEOUT_MS must be a safe integer number of milliseconds; got ${JSON.stringify(raw)}.`,
     );
   }
   return n;
@@ -225,14 +225,14 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 
 // Config can be supplied two ways:
 //   - `cfg`    — an already-loaded Config (the common case; what the CLI
-//                `fbrain mcp` subcommand and the test suite pass).
+//                `brain mcp` subcommand and the test suite pass).
 //   - `getCfg` — a thunk that loads the Config on demand (calls `readConfig()`
-//                inside). This is what the `fbrain-mcp` bin entrypoint passes
+//                inside). This is what the `brain-mcp` bin entrypoint passes
 //                so the server can START even when no config exists yet: the
 //                handshake + `tools/list` succeed, and config resolution is
 //                deferred to the moment a tool is actually CALLED. A
 //                `ConfigMissingError`/`ConfigInvalidError` thrown by the thunk
-//                surfaces as a clean per-tool `isError` "run `fbrain init`"
+//                surfaces as a clean per-tool `isError` "run `brain init`"
 //                hint (see the tool runners) instead of a server that dies on startup.
 // Exactly one of the two is required; `cfg` is normalized to a `getCfg` thunk
 // internally so every tool handler resolves config through the same lazy path.
@@ -241,7 +241,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 // capability self-warm path (see runTool write mode). Production
 // never sets it — the server uses the real `establishConsentInline` — but tests
 // drive the retry deterministically without standing up a node or enabling
-// enforcement (the unit suite runs with FBRAIN_APP_IDENTITY_ENFORCE=false, so
+// enforcement (the unit suite runs with BRAIN_APP_IDENTITY_ENFORCE=false, so
 // the real write path never reaches the consent throw). It is gated behind the
 // same opt-in env regardless, so wiring a stub can never auto-grant unless the
 // operator opted in.
@@ -260,64 +260,64 @@ export type AutoGrantFn = (cfg: Config) => Promise<boolean>;
 
 // Surfaced (as an `isError` tool result) when a tool is called on a server
 // that started without a usable config — the new-developer case where
-// `fbrain mcp` was registered before `fbrain init` ran. Actionable + concise:
+// `brain mcp` was registered before `brain init` ran. Actionable + concise:
 // names the one command that fixes it and where it writes.
 export const CONFIG_MISSING_HINT =
-  "fbrain is not initialized on this machine — run `fbrain init` first " +
-  "(writes ~/.fbrain/config.json), then retry.";
+  "brain is not initialized on this machine — run `brain init` first " +
+  "(writes ~/.brain/config.json), then retry.";
 
 // Recovery hint surfaced when a required field arrives `undefined` — i.e. the
 // tool was called with no value for it. The bite-y case is an empty `{}`: an
 // MCP client occasionally delivers a tool call whose real arguments were
 // dropped before reaching the server (observed repeatedly with large
-// `fbrain_put` bodies in long agent sessions — the call lands with every
+// `brain_put` bodies in long agent sessions — the call lands with every
 // field undefined). zod is the ONLY layer that sees this: the MCP SDK
 // validates a tool's `inputSchema` and returns a JSON-RPC -32602 BEFORE the
 // tool handler ever runs, so a handler-level guard would never fire on the
 // real path. Putting the hint on the schema means the agent gets an
 // actionable message instead of a bare "expected string, received undefined".
 export const DROPPED_INPUT_HINT =
-  "fbrain received no value for a required field — the tool arguments were " +
+  "brain received no value for a required field — the tool arguments were " +
   "likely dropped before reaching the server. This happens when a call " +
-  "carries a multiline/quote-heavy/emoji `fbrain_put` body inline (at ANY " +
+  "carries a multiline/quote-heavy/emoji `brain_put` body inline (at ANY " +
   "size — not just large bodies): the inline body fails to serialize as JSON " +
   "or is dropped in transit before it reaches the server. RECOVER " +
   "by staging the body to a file and passing its path as `body_path` (a " +
   "short path always survives where a large inline `body` is dropped), or " +
   "pass `body_b64` (UTF-8 body bytes encoded as standard base64), or use the " +
-  "CLI `fbrain put <slug> --type <type> < body.md`, or split the write into " +
+  "CLI `brain put <slug> --type <type> < body.md`, or split the write into " +
   "smaller records.";
 
 export const ASK_QUERY_REQUIRED_HINT =
-  "fbrain_ask requires a non-empty `query` string (`question` is accepted " +
+  "brain_ask requires a non-empty `query` string (`question` is accepted " +
   "as an alias). Example: " +
-  '`fbrain_ask({"query":"deployment rollback decision","limit":5})`.';
+  '`brain_ask({"query":"deployment rollback decision","limit":5})`.';
 
 export const GET_SLUG_REQUIRED_HINT =
-  "fbrain_get requires a non-empty `slug` OR `query` string. Pass `slug` for " +
+  "brain_get requires a non-empty `slug` OR `query` string. Pass `slug` for " +
   "an exact-key get (example: " +
-  '`fbrain_get({"slug":"deployment-rollback-decision","type":"concept"})`), ' +
+  '`brain_get({"slug":"deployment-rollback-decision","type":"concept"})`), ' +
   "or `query` for a fuzzy/text lookup when you don't have the exact slug " +
-  '(example: `fbrain_get({"query":"deployment rollback decision"})`).';
+  '(example: `brain_get({"query":"deployment rollback decision"})`).';
 
 export const BACKLINKS_SLUG_REQUIRED_HINT =
-  "fbrain_backlinks requires a non-empty `slug` string (the TARGET record " +
+  "brain_backlinks requires a non-empty `slug` string (the TARGET record " +
   "whose inbound links you want). Example: " +
-  '`fbrain_backlinks({"slug":"deployment-rollback-decision"})`. ' +
-  "To find a record by text instead, call fbrain_ask first.";
+  '`brain_backlinks({"slug":"deployment-rollback-decision"})`. ' +
+  "To find a record by text instead, call brain_ask first.";
 
-// Default char cap on the body a single `fbrain_get` returns. A record body
+// Default char cap on the body a single `brain_get` returns. A record body
 // counts toward the agent harness's tool-result token budget twice over (the
 // human text block AND the `structuredContent` body), and a large note can be
 // huge — the live repro was a 186,356-char project tracker (~47K tokens) that
-// overflowed the budget outright, so `fbrain_get` returned a hard error and
+// overflowed the budget outright, so `brain_get` returned a hard error and
 // ZERO usable content. 40,000 chars is ~10K tokens, comfortably under the
 // limit even counted twice, and big enough that almost every record fits in
 // one window. Bodies at or under this cap (with offset 0) are returned whole
 // and unchanged. Overridable per-call via the `body_limit` input.
-export const FBRAIN_GET_BODY_LIMIT_DEFAULT = 40_000;
+export const BRAIN_GET_BODY_LIMIT_DEFAULT = 40_000;
 
-// Compute the body window for one `fbrain_get` call and the pagination
+// Compute the body window for one `brain_get` call and the pagination
 // metadata that tells the agent whether more remains. `offset`/`limit` are the
 // (already-validated) request values; `total` is the full body length.
 // Returns `truncated: false` with `next: null` for the common single-window
@@ -361,7 +361,7 @@ export function bodyWindow(
 // — and is `null` only when the node reported no score for a search hit.
 // `snippet` is a short deterministic body extract (a window around the first
 // matching query term, or the body head for a pure-vector hit) so an agent
-// can read the answer inline without a follow-up `fbrain_get`. `confidence`
+// can read the answer inline without a follow-up `brain_get`. `confidence`
 // labels the existing weak-match classifier: weak rows are additive closest
 // candidates, not trusted answers.
 const matchSchema = z.object({
@@ -377,7 +377,7 @@ const matchSchema = z.object({
   snippet: z
     .string()
     .describe(
-      "Short body extract (~120 chars) around the first matching query term — or the body head for a pure-vector hit — so the answer is visible inline without a follow-up fbrain_get. Empty only when the record body is empty.",
+      "Short body extract (~120 chars) around the first matching query term — or the body head for a pure-vector hit — so the answer is visible inline without a follow-up brain_get. Empty only when the record body is empty.",
     ),
   confidence: z
     .enum(["strong", "weak", "sample"])
@@ -401,8 +401,8 @@ const collectSkippedType = (acc: RecordType[], skipped: readonly RecordType[]): 
   }
 };
 
-// One `fbrain_list` row — the compact summary the CLI `list --json` emits
-// (body intentionally omitted; use `fbrain_get` for the full record).
+// One `brain_list` row — the compact summary the CLI `list --json` emits
+// (body intentionally omitted; use `brain_get` for the full record).
 const summarySchema = z.object({
   type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type."),
   slug: z.string().describe("Record slug."),
@@ -415,7 +415,7 @@ const summarySchema = z.object({
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),
 });
 
-// The full single record `fbrain_get` returns (mirrors RecordJson) — the
+// The full single record `brain_get` returns (mirrors RecordJson) — the
 // summary fields plus the markdown `body` and the optional design-link /
 // child-task relationship fields.
 const recordSchema = z.object({
@@ -448,17 +448,17 @@ const recordSchema = z.object({
     .optional()
     .describe(
       "Backlinks to this slug, read from the backlink index (type + slug only). " +
-        "Call fbrain_backlinks for each source's status and how it links.",
+        "Call brain_backlinks for each source's status and how it links.",
     ),
   created_at: z.string().describe("ISO-8601 creation timestamp."),
   updated_at: z.string().describe("ISO-8601 last-update timestamp."),
   body: z
     .string()
     .describe(
-      "Markdown body. May be a WINDOW of the full body when it exceeds the char cap — see `bodyTruncated`/`bodyTotalChars`/`bodyNextOffset` (and the `[body truncated …]` note in the text rendering). Page to the rest by re-calling fbrain_get with `body_offset`.",
+      "Markdown body. May be a WINDOW of the full body when it exceeds the char cap — see `bodyTruncated`/`bodyTotalChars`/`bodyNextOffset` (and the `[body truncated …]` note in the text rendering). Page to the rest by re-calling brain_get with `body_offset`.",
     ),
   // ── Body-pagination window fields ──────────────────────────────────────
-  // `fbrain_get` caps how much of a record's body it returns in one call so a
+  // `brain_get` caps how much of a record's body it returns in one call so a
   // large note (a 186K-char project tracker is ~47K tokens) can't overflow the
   // agent harness's tool-result token budget. When the body fits in one window
   // (≤ cap and offset 0) these fields are OMITTED entirely — the result is
@@ -492,11 +492,11 @@ const recordSchema = z.object({
     .nullable()
     .optional()
     .describe(
-      "The `body_offset` to pass on the next fbrain_get call to read the following window; `null` when this window reaches the end of the body. Present only when the body was windowed.",
+      "The `body_offset` to pass on the next brain_get call to read the following window; `null` when this window reaches the end of the body. Present only when the body was windowed.",
     ),
-  // Present ONLY when `fbrain_get` was called with `query` (not `slug`) and no
+  // Present ONLY when `brain_get` was called with `query` (not `slug`) and no
   // exact-slug match was found, so it fell back to the same fuzzy resolver
-  // `fbrain_ask` uses. Carries the original query text; the returned record is
+  // `brain_ask` uses. Carries the original query text; the returned record is
   // the TOP fuzzy hit — a best match, NOT a verified exact-slug get. Absent on
   // every exact-slug get (whether `slug` was passed directly or `query` matched
   // a slug exactly), so the common path is byte-for-byte the pre-change shape.
@@ -517,7 +517,7 @@ const recordSchema = z.object({
 // command function / handler already computes for its printed line (the
 // command's `onResult` sink), so structuredContent can't drift from the text.
 
-// `fbrain_put` → `{action, type, slug}`, mirroring the CLI's
+// `brain_put` → `{action, type, slug}`, mirroring the CLI's
 // `created|updated <type> <slug>` line. `action` distinguishes a fresh insert
 // from an in-place update so an agent knows whether it created or overwrote.
 const putResultSchema = z.object({
@@ -527,11 +527,11 @@ const putResultSchema = z.object({
   type: z.enum(RECORD_TYPES).describe("Canonical lowercase record type written."),
   slug: z.string().describe("Resolved record slug."),
   // Read-after-write honesty for the agent loop. The write is ALWAYS
-  // persisted and record-list-visible before `fbrain_put` returns (the
+  // persisted and record-list-visible before `brain_put` returns (the
   // put's own verify-read guarantees that). `indexPending` reports the
   // separate, lagging VECTOR index: `true` means the just-written record
   // was NOT yet in the native (semantic) index when the short confirmation
-  // budget expired, so an immediate `fbrain_search`/`fbrain_ask` in this
+  // budget expired, so an immediate `brain_search`/`brain_ask` in this
   // same session may not surface it yet (re-query in a moment). `false`
   // means it IS already vector-searchable. Defaults to `false` — the common
   // warm-node case where indexing caught up inside the budget.
@@ -540,12 +540,12 @@ const putResultSchema = z.object({
     .describe(
       "`true` only when the record landed but the semantic (vector) index " +
         "had not caught up within the post-write confirmation budget, so an " +
-        "immediate fbrain_search/fbrain_ask may miss it — re-query shortly. " +
+        "immediate brain_search/brain_ask may miss it — re-query shortly. " +
         "`false` (the default) means it is already vector-searchable.",
     ),
 });
 
-// `fbrain_delete` → `{action, type, slug, soft}`. `soft` stays `true`
+// `brain_delete` → `{action, type, slug, soft}`. `soft` stays `true`
 // because the CLI still stamps a tombstone tag. Native LastDB Delete also
 // runs and a later get misses.
 const deleteResultSchema = z.object({
@@ -574,7 +574,7 @@ const backlinksResultSchema = z.object({
     .describe("Records linking to the target slug."),
 });
 
-// `fbrain_link` → `{action, from_type, from_slug, to_type, to_slug}`.
+// `brain_link` → `{action, from_type, from_slug, to_type, to_slug}`.
 const linkResultSchema = z.object({
   action: z.literal("linked").describe("Always `linked`."),
   from_type: z.enum(RECORD_TYPES).describe("Source record type."),
@@ -583,7 +583,7 @@ const linkResultSchema = z.object({
   to_slug: z.string().describe("Target record slug."),
 });
 
-// `fbrain_status` returns one of two payloads depending on how it was called:
+// `brain_status` returns one of two payloads depending on how it was called:
 //   • per-record patch (`slug` AND `status` given) → `{action:"status_changed",
 //     type, slug, from, to}`, mirroring the CLI's `<type> <slug>: <from> → <to>`
 //     transition line (`from`/`to` bracket the change).
@@ -594,7 +594,7 @@ const linkResultSchema = z.object({
 //     result without structuredContent.
 //   • node/overall status (NO `slug`) → `{action:"node_status", reachable,
 //     provisioned, nodeUrl, version?, uptimeSeconds?, detail?}` — the health
-//     check an agent expects from a bare `fbrain_status {}` (a READ; it never
+//     check an agent expects from a bare `brain_status {}` (a READ; it never
 //     touches the write/consent path, so it works with zero write capability).
 //
 // MCP builds a single `z.object` from the shape handed to `registerTool`, so
@@ -648,7 +648,7 @@ const statusOutputShape = {
     .describe("Reason when the node is unreachable or not provisioned (node_status mode)."),
 };
 
-// `fbrain_append` → `{action:"appended", type, slug, oldBodyChars, newBodyChars,
+// `brain_append` → `{action:"appended", type, slug, oldBodyChars, newBodyChars,
 // bytesAppended}`. The char counts bracket the growth so an agent can confirm
 // the body GREW (never shrank/truncated) — the whole point of the primitive.
 const appendResultSchema = z.object({
@@ -663,7 +663,7 @@ const appendResultSchema = z.object({
     .describe("Characters added (chunk length plus any auto-inserted separator)."),
 });
 
-// `fbrain_tag` → `{action:"tags_changed", type, slug, added, removed, tags}`.
+// `brain_tag` → `{action:"tags_changed", type, slug, added, removed, tags}`.
 // `added`/`removed` are EFFECTIVE changes; idempotent no-ops return empty
 // arrays and the current tag set.
 const tagResultSchema = z.object({
@@ -676,26 +676,26 @@ const tagResultSchema = z.object({
 });
 
 // ── Cold-capability self-warm (opt-in) ───────────────────────────────────
-// The MCP server is launched with FBRAIN_FORCE_FILE_KEYCHAIN=1, so it reads
-// its write capability from the file store (~/.fbrain/capabilities/), not the
-// OS keychain. `fbrain init --grant-consent` (the CLI default) warms only the
+// The MCP server is launched with BRAIN_FORCE_FILE_KEYCHAIN=1, so it reads
+// its write capability from the file store (~/.brain/capabilities/), not the
+// OS keychain. `brain init --grant-consent` (the CLI default) warms only the
 // keychain, so the file store stays cold and every MCP write fast-fails with
 // `consent_required_non_interactive` ("No write capability is cached …"). The
-// validated manual fix is `FBRAIN_FORCE_FILE_KEYCHAIN=1 fbrain init
+// validated manual fix is `BRAIN_FORCE_FILE_KEYCHAIN=1 brain init
 // --grant-consent`, which warms the SAME file store the server reads.
 //
 // This self-warm path runs that grant automatically on the first cold-cache
-// write — BUT ONLY when the operator opted in via FBRAIN_MCP_AUTO_GRANT_CONSENT.
+// write — BUT ONLY when the operator opted in via BRAIN_MCP_AUTO_GRANT_CONSENT.
 // Security: auto-grant is no stronger than the owner running the grant by hand.
 // `establishConsentInline(nonInteractiveGrant:true)` reuses the exact same
 // machinery (`defaultRunFolddbGrant` shells out to `folddb consent grant
-// fbrain --yes`, then `acquireCapability` polls + stores), which still requires
+// brain --yes`, then `acquireCapability` polls + stores), which still requires
 // an owner-local `folddb` on PATH and the node's master key to be available —
-// the grant fast-fails otherwise. We do NOT touch FBRAIN_APP_IDENTITY_ENFORCE.
+// the grant fast-fails otherwise. We do NOT touch BRAIN_APP_IDENTITY_ENFORCE.
 // The grant lands in the store `defaultCapabilityStore()` selects, which honors
-// FBRAIN_FORCE_FILE_KEYCHAIN — so it warms precisely the store the server reads.
+// BRAIN_FORCE_FILE_KEYCHAIN — so it warms precisely the store the server reads.
 
-export const MCP_AUTO_GRANT_ENV = "FBRAIN_MCP_AUTO_GRANT_CONSENT";
+export const MCP_AUTO_GRANT_ENV = "BRAIN_MCP_AUTO_GRANT_CONSENT";
 
 // Opt-in gate. Off unless the operator set the env to an affirmative value, so
 // the human consent gate is preserved by default — a cold-cache write
@@ -711,12 +711,12 @@ export function mcpAutoGrantConsentEnabled(): boolean {
 // write path: `acquireCapability` fast-fails with this code when no capability
 // is cached and it can't request a grant non-interactively (capability.ts).
 function isColdCapabilityError(err: unknown): boolean {
-  return err instanceof FbrainError && err.code === "consent_required_non_interactive";
+  return err instanceof BrainError && err.code === "consent_required_non_interactive";
 }
 
-// Production auto-grant: drive the same non-interactive grant `fbrain init
+// Production auto-grant: drive the same non-interactive grant `brain init
 // --grant-consent` runs, against the configured node, writing into the store
-// `defaultCapabilityStore()` selects (honoring FBRAIN_FORCE_FILE_KEYCHAIN). On
+// `defaultCapabilityStore()` selects (honoring BRAIN_FORCE_FILE_KEYCHAIN). On
 // any failure (folddb not on PATH, master key unavailable, denial, timeout) it
 // returns false so the original cold-capability error surfaces unchanged —
 // auto-grant never masks a genuine failure with a misleading message.
@@ -739,11 +739,11 @@ async function defaultAutoGrant(cfg: Config): Promise<boolean> {
   }
 }
 
-export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
+export function createBrainMcpServer(opts: CreateServerOptions): McpServer {
   // Normalize both option shapes to a single lazy loader. When an eager `cfg`
   // is supplied it's wrapped in a thunk that just returns it, so the resolution
   // path is identical whether config was loaded up-front (CLI subcommand,
-  // tests) or is deferred until first tool call (the `fbrain-mcp` bin, where
+  // tests) or is deferred until first tool call (the `brain-mcp` bin, where
   // the server must start even with no config on disk).
   const getCfg: () => Config = opts.getCfg ?? (() => opts.cfg);
   // The cold-capability self-warm grant. Default = the real inline grant;
@@ -751,8 +751,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   // (mcpAutoGrantConsentEnabled) — see runTool write mode.
   const autoGrant: AutoGrantFn = opts.autoGrant ?? defaultAutoGrant;
   const server = new McpServer({
-    name: FBRAIN_MCP_NAME,
-    version: FBRAIN_MCP_VERSION,
+    name: BRAIN_MCP_NAME,
+    version: BRAIN_MCP_VERSION,
   });
 
   const typeEnum = z.enum(RECORD_TYPES);
@@ -780,11 +780,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       .describe(description);
 
   server.registerTool(
-    "fbrain_search",
+    "brain_search",
     {
-      title: "Search fbrain",
+      title: "Search brain",
       description:
-        `Pure-vector semantic search across indexed fbrain records (${recordTypeList(", ")}). Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns one line per match: \`slug · score · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`: non-empty means some requested/walked types were skipped because their schema hash is unavailable, so empty matches are degraded rather than definitive. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer \`fbrain_ask\`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to \`fbrain_ask\` when this returns weak or missing matches.`,
+        `Pure-vector semantic search across indexed brain records (${recordTypeList(", ")}). Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns one line per match: \`slug · score · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`brain_get\`. \`structuredContent.confident\` is false when the result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`: non-empty means some requested/walked types were skipped because their schema hash is unavailable, so empty matches are degraded rather than definitive. For better recall — especially on rare tokens, acronyms, and exact keyword matches that pure-vector ranks out — prefer \`brain_ask\`, which fuses BM25 + vector (the eval-winning hybrid). Escalate to \`brain_ask\` when this returns weak or missing matches.`,
       inputSchema: {
         query: requiredText("Search query."),
         type: typeEnum
@@ -846,8 +846,8 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             onResult,
             onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
             // Agent channel: render the empty/no-match recovery hint in
-            // MCP-tool terms (`fbrain_put`/`fbrain_ask`), never CLI verbs or
-            // the no-MCP-tool `fbrain reindex` / repo doc-path dead-end.
+            // MCP-tool terms (`brain_put`/`brain_ask`), never CLI verbs or
+            // the no-MCP-tool `brain reindex` / repo doc-path dead-end.
             agent: true,
           }),
         wrap: (matches) => ({
@@ -860,11 +860,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_ask",
+    "brain_ask",
     {
-      title: "Ask fbrain (hybrid retrieval)",
+      title: "Ask brain (hybrid retrieval)",
       description:
-        `Hybrid retrieval over fbrain records (${recordTypeList(", ")}): runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so \`fbrain_ask\` surfaces keyword-relevant records that pure-vector \`fbrain_search\` ranks out of the top results. Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first) — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`fbrain_get\`. \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`: non-empty means some requested/walked types were skipped because their schema hash is unavailable, so empty matches are degraded rather than definitive. The \`score\` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to \`fbrain_search\`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over \`fbrain_search\` when you want the best recall.`,
+        `Hybrid retrieval over brain records (${recordTypeList(", ")}): runs BM25 (keyword) AND vector (semantic) ranking and fuses them via Reciprocal Rank Fusion (RRF). This is the eval-winning, recommended primitive for recall — vector handles paraphrase while BM25 catches rare tokens, acronyms, and exact-keyword matches the embedding model misses, so \`brain_ask\` surfaces keyword-relevant records that pure-vector \`brain_search\` ranks out of the top results. Pass \`type\` to restrict to one or more record types (mirrors the CLI's repeatable \`--type\` flag); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first) — the \`snippet\` is a deterministic ~120-char body extract around the first matching query term (body head for a pure-vector hit), so you can read the answer inline without a follow-up \`brain_get\`. \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`: non-empty means some requested/walked types were skipped because their schema hash is unavailable, so empty matches are degraded rather than definitive. The \`score\` is a fused-RRF value that is SMALL by construction — a TOP hit is ~0.02–0.03, NOT a 0–1 relevance and NOT comparable to \`brain_search\`'s cosine; read rank order, never magnitude. Needs no API key (LLM query expansion is intentionally not used here). Prefer this over \`brain_search\` when you want the best recall.`,
       inputSchema: {
         query: z
           .string()
@@ -895,14 +895,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
       // `structuredContent` is `{ matches: [{slug,score,type,title,...}, …], confident }` —
-      // identical shape to `fbrain_search`; `score` here is the fused RRF
+      // identical shape to `brain_search`; `score` here is the fused RRF
       // score (always non-null for ask hits) — small by construction (a top
       // hit is ~0.02–0.03), so rank, never magnitude, is the signal.
       outputSchema: {
         matches: z
           .array(matchSchema)
           .describe(
-            "Fused (BM25 + vector) matches, highest score first (empty on no matches). Scores are small by construction (a top hit is ~0.02–0.03) and are NOT comparable to fbrain_search's 0–1 cosine — read rank order, not magnitude.",
+            "Fused (BM25 + vector) matches, highest score first (empty on no matches). Scores are small by construction (a top hit is ~0.02–0.03) and are NOT comparable to brain_search's 0–1 cosine — read rank order, not magnitude.",
           ),
         confident: z
           .boolean()
@@ -937,7 +937,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             onResult,
             onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
             // Agent channel: render the empty-brain recovery hint in MCP-tool
-            // terms (`fbrain_put`), never the `fbrain <type> new` CLI verb.
+            // terms (`brain_put`), never the `brain <type> new` CLI verb.
             agent: true,
             // LLM query expansion stays OFF (the default): the eval winner is
             // plain BM25 + vector + RRF, and keeping it off means the tool
@@ -955,11 +955,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_find",
+    "brain_find",
     {
-      title: "Find fbrain records (array of match probes)",
+      title: "Find brain records (array of match probes)",
       description:
-        `Retrieval by an explicit array of match probes — each \`match\` entry is an independent semantic probe run against the vector plane. Unlike \`fbrain_ask\` (one query, optionally paraphrased), \`fbrain_find\` takes probes YOU supply — each MAY be huge (a paragraph, a whole record body, an error dump) — and does not distill or embed anything itself; fbrain never runs an embedding model (that stays the Search app's job). Each probe's ranked list is fused via Reciprocal Rank Fusion (RRF), so a record surfaced by multiple probes outranks one hit by only one. Pass \`type\` to restrict to one or more record types (${recordTypeList(", ")}); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first). \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`. The \`score\` is a fused-RRF value that is SMALL by construction (a top hit is ~0.02-0.03) — read rank order, never magnitude. Needs no API key and makes no LLM call. Prefer this over \`fbrain_ask\` when you already have several strong probes (e.g. a design doc's several key paragraphs, or a few candidate error strings) and want their union ranked, instead of one query brain would otherwise have to paraphrase itself.`,
+        `Retrieval by an explicit array of match probes — each \`match\` entry is an independent semantic probe run against the vector plane. Unlike \`brain_ask\` (one query, optionally paraphrased), \`brain_find\` takes probes YOU supply — each MAY be huge (a paragraph, a whole record body, an error dump) — and does not distill or embed anything itself; brain never runs an embedding model (that stays the Search app's job). Each probe's ranked list is fused via Reciprocal Rank Fusion (RRF), so a record surfaced by multiple probes outranks one hit by only one. Pass \`type\` to restrict to one or more record types (${recordTypeList(", ")}); omit to search all ${recordTypeCount()}. Returns a best-first ranked list, one line per match: \`rank · slug · type · title\`, with a short matching body snippet under each. \`structuredContent.matches[]\` carries \`{slug, score, type, title, snippet, confidence}\` (already ordered best-first). \`structuredContent.confident\` is false when the whole result set looks like the noise floor; if \`confident:false\`, treat it as not-found and do not trust the rows. Always check \`structuredContent.skipped_types\`. The \`score\` is a fused-RRF value that is SMALL by construction (a top hit is ~0.02-0.03) — read rank order, never magnitude. Needs no API key and makes no LLM call. Prefer this over \`brain_ask\` when you already have several strong probes (e.g. a design doc's several key paragraphs, or a few candidate error strings) and want their union ranked, instead of one query brain would otherwise have to paraphrase itself.`,
       inputSchema: {
         match: z
           .array(z.string())
@@ -981,7 +981,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe("Max results (default 5)."),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
-      // Same shape as `fbrain_ask`'s structuredContent — `score` here is also
+      // Same shape as `brain_ask`'s structuredContent — `score` here is also
       // the fused RRF score (rankers are the caller's probes instead of
       // BM25/vector/expansions).
       outputSchema: {
@@ -1025,32 +1025,32 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_get",
+    "brain_get",
     {
-      title: "Get fbrain record",
+      title: "Get brain record",
       description:
-        "Print a single fbrain record. Pass `slug` for an exact-key get, or " +
+        "Print a single brain record. Pass `slug` for an exact-key get, or " +
         "`query` (fuzzy/text) when you don't have the exact slug — a `query` " +
         "first tries an exact slug match and, on a miss, falls back to the same " +
-        "hybrid resolver `fbrain_ask` uses and returns the top hit (the result " +
+        "hybrid resolver `brain_ask` uses and returns the top hit (the result " +
         "then carries `matched_query` to flag that it was a best match, not an " +
         "exact get). Provide `slug` OR `query`; passing neither is the only " +
         "input error. `type` filters both paths. Without `type`, an exact get " +
         "queries every registered schema and errors if the slug exists in " +
         "multiple types. Large bodies are PAGINATED: the body is capped at " +
-        `~${FBRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")} chars per ` +
+        `~${BRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")} chars per ` +
         "call so a big record (a long design/project note) can't overflow the " +
         "tool-result token budget. When the body is windowed the result carries " +
         "`bodyTruncated=true`, `bodyTotalChars`, `bodyOffset`, and `bodyNextOffset` " +
         "(and a `[body truncated …]` note in the text); read the rest by re-calling " +
-        "fbrain_get with `body_offset` set to the previous `bodyNextOffset` (repeat " +
+        "brain_get with `body_offset` set to the previous `bodyNextOffset` (repeat " +
         "until `bodyNextOffset` is null). `body_limit` overrides the per-call cap. " +
         "A record that fits in one window returns unchanged (no window fields).",
       inputSchema: {
         // `slug` is OPTIONAL at the schema layer because `query` is an
         // alternative lookup key — the cross-field "one of slug/query is
         // required" rule can't live on a single field's schema, so (like
-        // fbrain_ask's query/question) the handler enforces it. A bare `{}`
+        // brain_ask's query/question) the handler enforces it. A bare `{}`
         // therefore passes schema validation and the actionable hint is raised
         // by runGetTool.
         slug: z
@@ -1065,7 +1065,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .describe(
             "Fuzzy/text lookup for when you don't have the exact slug. Tries an " +
               "exact slug match first, then falls back to the same hybrid " +
-              "resolver `fbrain_ask` uses and returns the top hit. Provide this " +
+              "resolver `brain_ask` uses and returns the top hit. Provide this " +
               "OR `slug`; `slug` wins when both are given.",
           ),
         type: typeEnum
@@ -1087,7 +1087,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .positive()
           .optional()
           .describe(
-            `Max body characters to return in this call (default ~${FBRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")}, ~10K tokens). Lower it to stay further under the token budget; the metadata + non-body fields are always returned.`,
+            `Max body characters to return in this call (default ~${BRAIN_GET_BODY_LIMIT_DEFAULT.toLocaleString("en-US")}, ~10K tokens). Lower it to stay further under the token budget; the metadata + non-body fields are always returned.`,
           ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -1103,14 +1103,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         query: args.query,
         type: args.type,
         bodyOffset: args.body_offset ?? 0,
-        bodyLimit: args.body_limit ?? FBRAIN_GET_BODY_LIMIT_DEFAULT,
+        bodyLimit: args.body_limit ?? BRAIN_GET_BODY_LIMIT_DEFAULT,
       }),
   );
 
   server.registerTool(
-    "fbrain_list",
+    "brain_list",
     {
-      title: "List fbrain records",
+      title: "List brain records",
       description:
         "List one page of cards, optionally filtered by type, status, tag, and " +
         "`updated_since` (cards on that page changed at or after an instant). " +
@@ -1161,7 +1161,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
       // `structuredContent` is either the honesty envelope
       // `{ records, total, truncated }` (row mode — same `items` the CLI
-      // `list --json` emits as `items`, body omitted; use `fbrain_get` for
+      // `list --json` emits as `items`, body omitted; use `brain_get` for
       // the full record) or `{ count: N }` (count mode). `truncated` is an
       // honesty signal only: list is a sample, never a census.
       outputSchema: {
@@ -1188,6 +1188,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             "True when the print cut the page, the atom names an older page, " +
               "or the page atom is absent.",
           ),
+        next_page: z.string().optional().describe("Opaque continuation for a named-key list. Repeat the same filters with page."),
         count: z
           .number()
           .int()
@@ -1223,7 +1224,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
             onResult,
             onSkippedTypes: (skipped) => collectSkippedType(skippedTypes, skipped),
             // Agent channel: render the empty/filter-no-match recovery hint in
-            // MCP-tool terms (`fbrain_put`/`fbrain_list`), never CLI verbs.
+            // MCP-tool terms (`brain_put`/`brain_list`), never CLI verbs.
             agent: true,
           };
           if (args.updated_since !== undefined) {
@@ -1237,6 +1238,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
                 records: result.items,
                 total: result.total,
                 truncated: result.truncated,
+                ...(result.next_page ? { next_page: result.next_page } : {}),
                 skipped_types: skippedTypes,
               }
             : "count" in result
@@ -1247,9 +1249,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_backlinks",
+    "brain_backlinks",
     {
-      title: "List fbrain backlinks",
+      title: "List brain backlinks",
       description:
         "List records that link to a target slug through explicit stored edges " +
         "or body [[slug]] references. This read does not require the target " +
@@ -1281,9 +1283,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_put",
+    "brain_put",
     {
-      title: "Put fbrain record",
+      title: "Put brain record",
       description:
         "Upsert a record. Re-puts update in place — no duplicate, no 409. " +
         "One of `type` or a `type:` field in `frontmatter` is required — " +
@@ -1305,7 +1307,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "write is confirmed read-after-write consistent: the record is " +
         "record-list-visible AND a short bounded poll waits for it to land in " +
         "the semantic (vector) index, so an immediate follow-up " +
-        "`fbrain_search`/`fbrain_ask` in the same session returns it. If the " +
+        "`brain_search`/`brain_ask` in the same session returns it. If the " +
         "vector index has not caught up within that budget the write still " +
         "succeeds but `indexPending: true` is set (and noted in the text) so " +
         "you know to re-query shortly.",
@@ -1385,13 +1387,13 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .boolean()
           .optional()
           .describe(
-            "Bypass the body-shrink guard. fbrain_put is a FULL REPLACE, so a " +
+            "Bypass the body-shrink guard. brain_put is a FULL REPLACE, so a " +
               "re-put whose body drops >half of an existing non-empty body — or " +
               "clears it to empty — is REFUSED with `body_shrink_guard` by " +
               "default (the common get(windowed)→edit→re-put truncation, or a " +
               "status-only re-put that wipes the body). To ADD to a body without " +
-              "a rewrite use `fbrain_append`; to change only status use " +
-              "`fbrain_status`. Set `allow_shrink: true` ONLY to truncate on " +
+              "a rewrite use `brain_append`; to change only status use " +
+              "`brain_status`. Set `allow_shrink: true` ONLY to truncate on " +
               "purpose.",
           ),
       },
@@ -1417,7 +1419,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           // guarantees the row is record-list-visible (its own verify-read), AND
           // — as of the CLI search-parity change (#295 CLI half) — confirms the
           // record landed in the SEMANTIC (vector) index that
-          // `fbrain_search`/`fbrain_ask` read, surfacing `result.indexPending`.
+          // `brain_search`/`brain_ask` read, surfacing `result.indexPending`.
           // fold_db indexes the embedding asynchronously AFTER the mutation
           // returns, so in one warm process a follow-up search can fire inside
           // that sub-second window and miss the just-written record; `putCmd`'s
@@ -1445,14 +1447,14 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_status",
+    "brain_status",
     {
-      title: "Get or set fbrain status",
+      title: "Get or set brain status",
       description:
         "Three modes, keyed on `slug`/`status`:\n" +
         "• With NO `slug` → NODE/OVERALL STATUS: a cheap health check of the " +
         "configured LastDB node (reachable? provisioned? version/uptime). This " +
-        "is a READ — it needs no write capability. A bare `fbrain_status {}` " +
+        "is a READ — it needs no write capability. A bare `brain_status {}` " +
         "returns this instead of erroring on a missing slug.\n" +
         "• With a `slug` but NO `status` → READ one record's current status " +
         "(`{action:\"status\", slug, type, status}`). Also a read — no write " +
@@ -1460,7 +1462,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         "• With a `slug` and `status` → PATCH one record's status WITHOUT a " +
         "full re-put: reads the live record, swaps in the new `status`, and " +
         "writes back preserving body/title/tags/created_at. Prefer this over " +
-        "`fbrain_put` for a status change (`fbrain_put` is a FULL REPLACE whose " +
+        "`brain_put` for a status change (`brain_put` is a FULL REPLACE whose " +
         "body defaults to empty, so a status-only re-put WIPES the body). The " +
         "status is validated against the resolved type's enum BEFORE any write. " +
         "Without `type`, resolves across every type and errors on an ambiguous " +
@@ -1471,7 +1473,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .optional()
           .describe(
             "Record slug to read or patch. OMIT to get the node/overall " +
-              "status (a bare `fbrain_status {}` is a node health check). " +
+              "status (a bare `brain_status {}` is a node health check). " +
               "With `slug` but no `status`, reads the record's current status.",
           ),
         status: z
@@ -1498,7 +1500,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
     (args) => {
       // No slug → node/overall status. This is a READ (auto-identity + health),
       // so it runs on the read path and never demands write capability. This is
-      // the papercut fix: a bare `fbrain_status {}` health check no longer
+      // the papercut fix: a bare `brain_status {}` health check no longer
       // errors on a missing slug.
       if (args.slug === undefined || args.slug.trim().length === 0) {
         return runTool<NodeStatusPayload>({
@@ -1553,15 +1555,15 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_append",
+    "brain_append",
     {
-      title: "Append to fbrain record body",
+      title: "Append to brain record body",
       description:
         "Append a chunk to an existing record's body WITHOUT a full rewrite. " +
         "This is the primitive that unblocks growing a LARGE record: " +
-        "`fbrain_get` WINDOWS a big body (~40K chars) and `fbrain_put` is a " +
+        "`brain_get` WINDOWS a big body (~40K chars) and `brain_put` is a " +
         "full replace, so the get→edit→re-put loop truncates past the window " +
-        "AND times out on a big record. `fbrain_append` instead reads the " +
+        "AND times out on a big record. `brain_append` instead reads the " +
         "live record server-side (full body, no window), concatenates your " +
         "chunk, and writes it back preserving title/tags/status/created_at. " +
         "It can only GROW the body, so it never truncates and never trips the " +
@@ -1598,7 +1600,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Alias for `chunk`, matching `fbrain_put`'s inline body field. " +
+            "Alias for `chunk`, matching `brain_put`'s inline body field. " +
               "Mapped to `chunk` when `chunk`/`text` are absent. Mutually " +
               "exclusive with path/base64 chunk sources.",
           ),
@@ -1613,7 +1615,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Alias for `chunk_path`, matching `fbrain_put`'s staged body file " +
+            "Alias for `chunk_path`, matching `brain_put`'s staged body file " +
               "field. Mapped to `chunk_path` when `chunk_path` is absent.",
           ),
         chunk_b64: z
@@ -1628,7 +1630,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
           .string()
           .optional()
           .describe(
-            "Alias for `chunk_b64`, matching `fbrain_put`'s base64 body field. " +
+            "Alias for `chunk_b64`, matching `brain_put`'s base64 body field. " +
               "Mapped to `chunk_b64` when `chunk_b64` is absent.",
           ),
         type: typeEnum
@@ -1668,12 +1670,12 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_tag",
+    "brain_tag",
     {
-      title: "Add or remove fbrain tags",
+      title: "Add or remove brain tags",
       description:
         "Add/remove tags on an existing record WITHOUT a full re-put. This is " +
-        "the tag-side sibling of fbrain_status: it reads the live record, " +
+        "the tag-side sibling of brain_status: it reads the live record, " +
         "applies set-add/remove to `tags`, and writes back preserving " +
         "body/title/status/created_at. Re-adding an existing tag or removing " +
         "an absent one is a no-op success. Pass at least one of `add` or `rm`; " +
@@ -1687,7 +1689,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
         add: z
           .preprocess((v) => normalizeTagMutationArg(v), z.array(z.string()))
           .optional()
-          .describe("Tags to add. Use a JSON array, e.g. `[\"owner:fbrain\"]`."),
+          .describe("Tags to add. Use a JSON array, e.g. `[\"owner:brain\"]`."),
         rm: z
           .preprocess((v) => normalizeTagMutationArg(v), z.array(z.string()))
           .optional()
@@ -1720,9 +1722,9 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_delete",
+    "brain_delete",
     {
-      title: "Delete fbrain record",
+      title: "Delete brain record",
       description:
         "Delete a record. LastDB native Delete converges tip absence so a " +
         "later get misses. The CLI also stamps a tombstone tag so older " +
@@ -1769,11 +1771,11 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   );
 
   server.registerTool(
-    "fbrain_link",
+    "brain_link",
     {
-      title: "Link fbrain records",
+      title: "Link brain records",
       description:
-        "Link fbrain records. Pass just `{from_slug, to_slug}` for the " +
+        "Link brain records. Pass just `{from_slug, to_slug}` for the " +
         "legacy task → design pair; `from_type`/`to_type` default to " +
         "`task`/`design`. Other type pairs are valid explicit stored edges " +
         "and are recorded on the source as a generic link tag. Missing " +
@@ -1813,7 +1815,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
   return server;
 }
 
-// Resolve `fbrain_ask`'s query, accepting `question` as an alias for `query`
+// Resolve `brain_ask`'s query, accepting `question` as an alias for `query`
 // (agents naturally guess `question`). `query` wins when both are present.
 // Neither present, or all-whitespace → the same actionable hint the old
 // required-`query` schema raised, surfaced through `runTool`'s error
@@ -1821,7 +1823,7 @@ export function createFbrainMcpServer(opts: CreateServerOptions): McpServer {
 export function resolveAskQuery(args: { query?: string; question?: string }): string {
   const raw = args.query ?? args.question;
   if (raw === undefined || raw.trim().length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "missing_query",
       message: ASK_QUERY_REQUIRED_HINT,
       agentHint: ASK_QUERY_REQUIRED_HINT,
@@ -1830,7 +1832,7 @@ export function resolveAskQuery(args: { query?: string; question?: string }): st
   return raw;
 }
 
-// The structured payload `fbrain_status {}` returns: a node/overall health
+// The structured payload `brain_status {}` returns: a node/overall health
 // snapshot (mirrors nodeStatusResultSchema).
 export type NodeStatusPayload = {
   action: "node_status";
@@ -1845,7 +1847,7 @@ export type NodeStatusPayload = {
 // Probe the configured node's overall status via the read client: auto-identity
 // (reachable + provisioned) and health (version/uptime). Best-effort — a
 // probe failure is reported as `reachable:false` with a detail, never thrown,
-// so a bare `fbrain_status {}` always returns a status object rather than an
+// so a bare `brain_status {}` always returns a status object rather than an
 // error envelope for a merely-down node.
 export async function probeNodeStatus(cfg: Config): Promise<NodeStatusPayload> {
   const node = newReadClientFromCfg(cfg);
@@ -1863,7 +1865,7 @@ export async function probeNodeStatus(cfg: Config): Promise<NodeStatusPayload> {
   } catch (err) {
     payload.reachable = false;
     payload.detail =
-      err instanceof FbrainError
+      err instanceof BrainError
         ? stripDoctorTip(err.message)
         : err instanceof Error
           ? err.message
@@ -1917,12 +1919,12 @@ export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: 
     inline: rest.body,
     path: body_path,
     b64: body_b64,
-    tool: "fbrain_put",
+    tool: "brain_put",
     field: "body",
     pathField: "body_path",
     b64Field: "body_b64",
     codePrefix: "body",
-    multiSourceMessage: "fbrain_put: pass only one of `body`, `body_path`, or `body_b64`.",
+    multiSourceMessage: "brain_put: pass only one of `body`, `body_path`, or `body_b64`.",
     multiSourceHint:
       "Use `body_b64` for inline multiline/emoji bodies, or `body_path` for large bodies; do not combine them.",
     pathHint: "Pass an absolute path to a readable UTF-8 file.",
@@ -1934,7 +1936,7 @@ export function resolvePutBody(args: PutArgs & { body_path?: string; body_b64?: 
 type AppendChunkArgs = {
   chunk?: string;
   // `text` is an alias for `chunk` — the natural param name agents guess.
-  // `body` is also accepted to mirror `fbrain_put`'s body/body_path/body_b64
+  // `body` is also accepted to mirror `brain_put`'s body/body_path/body_b64
   // transport names. Canonical chunk* fields win when both are present.
   text?: string;
   body?: string;
@@ -1959,18 +1961,18 @@ export function resolveAppendChunk(args: AppendChunkArgs): string {
     inline: inlineChunk,
     path: chunkPath,
     b64: chunkB64,
-    tool: "fbrain_append",
+    tool: "brain_append",
     field: "chunk",
     pathField: "chunk_path",
     b64Field: "chunk_b64",
     codePrefix: "chunk",
     multiSourceMessage:
-      "fbrain_append: pass only one of `chunk` (aliases `text`/`body`), `chunk_path` (alias `body_path`), or `chunk_b64` (alias `body_b64`).",
+      "brain_append: pass only one of `chunk` (aliases `text`/`body`), `chunk_path` (alias `body_path`), or `chunk_b64` (alias `body_b64`).",
     multiSourceHint:
       "Use `chunk_b64`/`body_b64` for inline multiline/emoji chunks, or `chunk_path`/`body_path` for large chunks; do not combine source kinds.",
     missingCode: "missing_chunk",
     missingMessage:
-      "fbrain_append: one of `chunk` (aliases `text`/`body`), `chunk_path` (alias `body_path`), or `chunk_b64` (alias `body_b64`) is required.",
+      "brain_append: one of `chunk` (aliases `text`/`body`), `chunk_path` (alias `body_path`), or `chunk_b64` (alias `body_b64`) is required.",
     missingHint:
       "Pass the text to append as `chunk`/`text`/`body` (inline), `chunk_b64`/`body_b64` (base64), or `chunk_path`/`body_path` (a staged file).",
     pathHint: "Pass an absolute path to a readable UTF-8 file.",
@@ -1981,7 +1983,7 @@ type TextSourceOptions = {
   inline?: string;
   path?: string;
   b64?: string;
-  tool: "fbrain_put" | "fbrain_append";
+  tool: "brain_put" | "brain_append";
   field: "body" | "chunk";
   pathField: "body_path" | "chunk_path";
   b64Field: "body_b64" | "chunk_b64";
@@ -2000,7 +2002,7 @@ type TextSourceOptions = {
 export function resolveTextSource(opts: TextSourceOptions): string | undefined {
   const sources = [opts.inline, opts.path, opts.b64].filter((v) => v !== undefined);
   if (sources.length > 1) {
-    throw new FbrainError({
+    throw new BrainError({
       code: `multiple_${opts.codePrefix}_sources`,
       message: opts.multiSourceMessage,
       hint: opts.multiSourceHint,
@@ -2008,7 +2010,7 @@ export function resolveTextSource(opts: TextSourceOptions): string | undefined {
   }
   if (sources.length === 0) {
     if (opts.missingCode !== undefined) {
-      throw new FbrainError({
+      throw new BrainError({
         code: opts.missingCode,
         message: opts.missingMessage!,
         hint: opts.missingHint,
@@ -2021,7 +2023,7 @@ export function resolveTextSource(opts: TextSourceOptions): string | undefined {
   try {
     return readFileSync(opts.path!, "utf8");
   } catch (err) {
-    throw new FbrainError({
+    throw new BrainError({
       code: `${opts.pathField}_unreadable`,
       message:
         `${opts.tool}: could not read ${opts.pathField} '${opts.path!}': ` +
@@ -2031,13 +2033,13 @@ export function resolveTextSource(opts: TextSourceOptions): string | undefined {
   }
 }
 
-// Decode a `*_b64` input into UTF-8 text. Serves BOTH `fbrain_put` (`body_b64`)
-// and `fbrain_append` (`chunk_b64`), so the error strings are parameterized by
-// the calling tool + field — a bad `chunk_b64` must name fbrain_append and
-// `chunk_b64`/`chunk_path`, never fbrain_put's field names.
+// Decode a `*_b64` input into UTF-8 text. Serves BOTH `brain_put` (`body_b64`)
+// and `brain_append` (`chunk_b64`), so the error strings are parameterized by
+// the calling tool + field — a bad `chunk_b64` must name brain_append and
+// `chunk_b64`/`chunk_path`, never brain_put's field names.
 function decodeB64Field(
   b64: string,
-  tool: "fbrain_put" | "fbrain_append",
+  tool: "brain_put" | "brain_append",
   field: "body_b64" | "chunk_b64",
 ): string {
   const pathField = field === "body_b64" ? "body_path" : "chunk_path";
@@ -2047,7 +2049,7 @@ function decodeB64Field(
     !/^[A-Za-z0-9+/]*={0,2}$/.test(compact) ||
     /={1,2}[A-Za-z0-9+/]/.test(compact)
   ) {
-    throw new FbrainError({
+    throw new BrainError({
       code: `${field}_invalid`,
       message: `${tool}: ${field} is not valid standard base64.`,
       hint: `Pass UTF-8 text bytes encoded as standard base64, or use \`${pathField}\`.`,
@@ -2057,7 +2059,7 @@ function decodeB64Field(
     const padded = compact.padEnd(compact.length + ((4 - (compact.length % 4)) % 4), "=");
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(padded, "base64"));
   } catch (err) {
-    throw new FbrainError({
+    throw new BrainError({
       code: `${field}_invalid_utf8`,
       message:
         `${tool}: ${field} decoded, but the bytes are not valid UTF-8: ` +
@@ -2081,10 +2083,10 @@ export function buildPutInput(args: PutArgs): string {
   // row — the exact footgun #70 removed from the CLI. Require an explicit
   // type; the `frontmatter` path above carries its own `type:` instead.
   if (args.type === undefined || args.type.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "missing_type",
       message:
-        "fbrain_put requires a `type` (or a `type:` field in `frontmatter`).",
+        "brain_put requires a `type` (or a `type:` field in `frontmatter`).",
       hint: `One of: ${recordTypeList()}.`,
     });
   }
@@ -2178,7 +2180,7 @@ type ToolResult = {
 // server construction. That's what lets the server start with no config on
 // disk: `initialize`/`tools/list` never touch config, and a missing/invalid
 // config only surfaces when a tool is actually called, as a clean `isError`
-// "run `fbrain init` first" hint rather than a startup crash.
+// "run `brain init` first" hint rather than a startup crash.
 
 type ToolMode = "read" | "write";
 type ToolExec<P> = (
@@ -2270,13 +2272,13 @@ async function runGetTool(
   const hasSlug = slug !== undefined && slug.length > 0;
   const hasQuery = query !== undefined && query.length > 0;
 
-  // Cross-field guard: exactly the fbrain_ask pattern. Neither key present →
-  // the actionable hint through the error envelope, so a bare `fbrain_get({})`
+  // Cross-field guard: exactly the brain_ask pattern. Neither key present →
+  // the actionable hint through the error envelope, so a bare `brain_get({})`
   // still gets a helpful example instead of an opaque arg error. This is the
   // ONLY input-validation error the tool raises now.
   if (!hasSlug && !hasQuery) {
     return errorResult(
-      new FbrainError({
+      new BrainError({
         code: "missing_slug",
         message: GET_SLUG_REQUIRED_HINT,
         agentHint: GET_SLUG_REQUIRED_HINT,
@@ -2302,27 +2304,27 @@ async function runGetTool(
       }
 
       // `query` path: try an exact slug match first (the query often IS a
-      // slug), then fall back to the same hybrid resolver fbrain_ask uses.
+      // slug), then fall back to the same hybrid resolver brain_ask uses.
       try {
         await getRecord({ cfg, slug: query!, type: args.type, print: () => {}, onResult });
         return;
       } catch (err) {
         // Only a genuine miss triggers the fuzzy fallback; any other failure
         // (node down, ambiguous type, etc.) surfaces unchanged.
-        if (!(err instanceof FbrainError) || err.code !== "not_found") throw err;
+        if (!(err instanceof BrainError) || err.code !== "not_found") throw err;
       }
 
       const resolved = await resolveQueryToSlug(cfg, query!, args.type);
       if (resolved === undefined) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "not_found",
           message: `No record matched query: ${query!}`,
           hint:
-            `fbrain_get found no exact slug for "${query!}" and the fuzzy ` +
+            `brain_get found no exact slug for "${query!}" and the fuzzy ` +
             "resolver returned no candidate.",
           agentHint:
-            `fbrain_get found no exact slug for "${query!}" and fbrain_ask ` +
-            `returned no match. Try fbrain_ask({"query":"${query!}"}) to browse candidates.`,
+            `brain_get found no exact slug for "${query!}" and brain_ask ` +
+            `returned no match. Try brain_ask({"query":"${query!}"}) to browse candidates.`,
         });
       }
       matchedQuery = query!;
@@ -2336,7 +2338,7 @@ async function runGetTool(
     },
     onError: (err, cfg) => enrichGetNotFoundError(cfg, err, { slug: lookupText, type: args.type }),
     render: (record) => {
-      if (record === undefined) return errorResult(new Error("fbrain_get: no record resolved"));
+      if (record === undefined) return errorResult(new Error("brain_get: no record resolved"));
 
       const fullBody = record.body;
       const total = fullBody.length;
@@ -2368,7 +2370,7 @@ async function runGetTool(
         matchedQuery !== undefined
           ? `note: no exact slug for query "${matchedQuery}" — resolved via fuzzy ` +
             `match to ${record.slug} (${record.type}). For an exact get: ` +
-            `fbrain_get({"slug":"${record.slug}"}).\n${body}`
+            `brain_get({"slug":"${record.slug}"}).\n${body}`
           : body;
 
       const result = textResult(text);
@@ -2379,7 +2381,7 @@ async function runGetTool(
 }
 
 // Route a `query` (no exact slug matched) through the SAME hybrid BM25+vector
-// resolver fbrain_ask uses and return the single top hit's slug+type, or
+// resolver brain_ask uses and return the single top hit's slug+type, or
 // undefined when there is no candidate. `limit: 1` — we only need the best
 // match. `type` is preserved as a single-type filter. LLM query expansion
 // stays off (askCmd default), so no API key is ever required.
@@ -2407,14 +2409,14 @@ async function enrichGetNotFoundError(
   err: unknown,
   args: { slug: string; type?: RecordJson["type"] },
 ): Promise<unknown> {
-  if (!(err instanceof FbrainError) || err.code !== "not_found") return err;
+  if (!(err instanceof BrainError) || err.code !== "not_found") return err;
   const candidates = await nearestSlugCandidates(cfg, args.slug, args.type);
   if (candidates.length === 0) return err;
   const rendered = candidates
     .map((c) => (args.type ? c.slug : `${c.slug} (${c.type})`))
     .join(", ");
   const suffix = `Nearest candidate slugs: ${rendered}.`;
-  return new FbrainError({
+  return new BrainError({
     code: err.code,
     message: err.message,
     hint: err.hint ? `${err.hint} ${suffix}` : suffix,
@@ -2437,9 +2439,9 @@ async function nearestSlugCandidates(
   const node = newReadClientFromCfg(cfg);
   const types = type ? [type] : RECORD_TYPES;
   const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
-  for (const t of types) {
+  await Promise.all(types.map(async (t) => {
     try {
-      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg));
+      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg), undefined, cfg);
       for (const candidateSlug of slugs) {
         candidates.push({
           slug: candidateSlug,
@@ -2450,7 +2452,7 @@ async function nearestSlugCandidates(
     } catch {
       // Best-effort error hint only; preserve the original not_found error.
     }
-  }
+  }));
   return candidates
     .sort((a, b) => a.score - b.score || a.slug.localeCompare(b.slug) || a.type.localeCompare(b.type))
     .slice(0, 3)
@@ -2500,9 +2502,9 @@ function textResult(text: string): ToolResult {
 
 function errorResult(err: unknown, overrideMessage?: string): ToolResult {
   let message: string;
-  if (err instanceof FbrainError) {
+  if (err instanceof BrainError) {
     // This channel is consumed by agents, not a human at a terminal: the CLI
-    // `fbrain doctor` tip and brew/daemon remediation in `hint` aren't
+    // `brain doctor` tip and brew/daemon remediation in `hint` aren't
     // actionable here. Drop the doctor tip from the message and prefer a
     // channel-neutral `agentHint` over the CLI-flavored `hint` when set.
     const base = overrideMessage ?? stripDoctorTip(err.message);

@@ -1,22 +1,22 @@
-export const FBRAIN_MCP_READ_TOOL_NAMES = [
-  "fbrain_search",
-  "fbrain_ask",
-  "fbrain_find",
-  "fbrain_get",
-  "fbrain_list",
-  "fbrain_backlinks",
+export const BRAIN_MCP_READ_TOOL_NAMES = [
+  "brain_search",
+  "brain_ask",
+  "brain_find",
+  "brain_get",
+  "brain_list",
+  "brain_backlinks",
 ] as const;
 
-export const FBRAIN_MCP_WRITE_TOOL_NAMES = [
-  "fbrain_put",
-  "fbrain_status",
-  "fbrain_append",
-  "fbrain_tag",
-  "fbrain_delete",
-  "fbrain_link",
+export const BRAIN_MCP_WRITE_TOOL_NAMES = [
+  "brain_put",
+  "brain_status",
+  "brain_append",
+  "brain_tag",
+  "brain_delete",
+  "brain_link",
 ] as const;
 
-export const FBRAIN_MCP_TOOL_NAMES = [
-  ...FBRAIN_MCP_READ_TOOL_NAMES,
-  ...FBRAIN_MCP_WRITE_TOOL_NAMES,
+export const BRAIN_MCP_TOOL_NAMES = [
+  ...BRAIN_MCP_READ_TOOL_NAMES,
+  ...BRAIN_MCP_WRITE_TOOL_NAMES,
 ] as const;

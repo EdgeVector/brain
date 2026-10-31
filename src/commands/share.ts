@@ -1,11 +1,11 @@
-// `fbrain share` — placeholder.
+// `brain share` — placeholder.
 //
 // The Phase 3 sharing spike concluded that cross-node data flow is a
 // sign-in gap, not a missing-infra gap. Both halves of the transport
 // are built and deployed: fold_db's sync engine (local Sled →
 // SyncEngine → Auth Lambda → S3) and the exemem cloud lambdas
 // (auth_service, discovery, storage_service, …, live in both dev and
-// prod). What's missing is signing fbrain's homebrew daemon into them
+// prod). What's missing is signing brain's homebrew daemon into them
 // and running an end-to-end positive test: `GET
 // /api/sharing/exemem-status` on the local daemon at `:9001` returns
 // `{"connected": false}` because nobody has called the sign-in path.
@@ -14,7 +14,7 @@
 // docs/cloud-signin-spike-plan.md for what it would take to flip
 // this on.
 //
-// Until then, calling `fbrain share` prints the same pointer and exits
+// Until then, calling `brain share` prints the same pointer and exits
 // non-zero so callers don't believe a no-op succeeded.
 
 export type ShareOptions = {
@@ -24,7 +24,7 @@ export type ShareOptions = {
 export function shareCmd(opts: ShareOptions = {}): number {
   const print = opts.print ?? ((line: string) => console.error(line));
   print(
-    "fbrain share is a placeholder — team sync is not wired up yet.",
+    "brain share is a placeholder — team sync is not wired up yet.",
   );
   print(
     "Short version: the cross-node transport is deployed (fold_db's sync",

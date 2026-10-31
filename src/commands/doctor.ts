@@ -1,8 +1,8 @@
 import { canonicalSchema } from "../canonical-vocabulary.ts";
-// `fbrain doctor` — live health check for the local fbrain setup.
+// `brain doctor` — live health check for the local brain setup.
 //
 // Contract:
-// - plain `fbrain doctor` is read-only and never creates consent requests,
+// - plain `brain doctor` is read-only and never creates consent requests,
 //   records, schema loads, or child MCP processes.
 // - Node-dependent checks keep a stable shape: unmet prerequisites render
 //   neutral SKIP rows, not vanished rows and not FAILs.
@@ -12,7 +12,7 @@ import { canonicalSchema } from "../canonical-vocabulary.ts";
 import {
   defaultFolddbSocketPath,
   discoverFullSurfaceSocket,
-  FbrainError,
+  BrainError,
   isNodeReachableButErroring,
   newNodeClient,
   newSchemaServiceClient,
@@ -104,7 +104,7 @@ export type DoctorOptions = {
   freshness?: boolean;
   freshnessTrials?: number;            // default 5
   freshnessMinScore?: number;          // default 0.5
-  pollutionQuery?: string;             // default "fbrain"
+  pollutionQuery?: string;             // default "brain"
   pollutionWarnThreshold?: number;     // default 0.25
   pollutionFailThreshold?: number;     // default 0.5
   pollutionMinSample?: number;         // default 10 — below this the ratio is low-N noise; report raw counts only
@@ -117,7 +117,7 @@ export type DoctorOptions = {
   usageOptions?: UsageOptions;
   // --write probe: do a real put → get → soft-delete round-trip under a
   // reserved slug to verify writes land end-to-end. Off by default so plain
-  // `fbrain doctor` never mutates.
+  // `brain doctor` never mutates.
   write?: boolean;
   // Override for tests: the capability store the write-ready probe inspects
   // and the round-trip writes use. Defaults to the OS keychain store.
@@ -126,7 +126,7 @@ export type DoctorOptions = {
   // probe. Defaults to newWriteNodeClient.
   writeNodeFactory?: (opts: WriteNodeClientOptions) => WriteNodeClient;
   // Override for tests: resolve a bin name to its absolute path on PATH (or
-  // null when unresolved). Defaults to Bun.which. Lets the fbrain-entrypoint
+  // null when unresolved). Defaults to Bun.which. Lets the brain-entrypoint
   // and mcp-entrypoint probes be exercised in both the resolved + unresolved
   // states without mutating the test process's real PATH.
   whichBin?: (name: string) => string | null;
@@ -134,14 +134,14 @@ export type DoctorOptions = {
   // global-bin locations for stale/dangling symlinks. Defaults to process.env.HOME.
   homeDir?: string;
   // Override for tests: the running Bun version the `runtime` check compares
-  // against fbrain's documented minimum (MIN_BUN_VERSION). Defaults to the live
+  // against brain's documented minimum (MIN_BUN_VERSION). Defaults to the live
   // `Bun.version`. An explicit seam (like `whichBin`) so doctor.test.ts can
   // drive both the too-old FAIL branch and the supported PASS branch
   // deterministically without depending on the host's installed Bun.
   bunVersion?: string;
   // --mcp boot probe: actually SPAWN the resolved `brain-mcp` entrypoint,
   // drive a JSON-RPC initialize + tools/list handshake over stdio, and assert
-  // the 10-tool agent surface. OFF by default so plain `fbrain doctor` never
+  // the 10-tool agent surface. OFF by default so plain `brain doctor` never
   // spawns the server (stays cheap + offline, like --write / --freshness).
   mcp?: boolean;
   // Override for tests: spawn the MCP boot probe against a fake transport
@@ -152,7 +152,7 @@ export type DoctorOptions = {
   // Override for tests: the running CLI's version string the mcp-boot probe
   // compares against the booted agent surface's `serverInfo.version` to detect
   // a build skew (a stale `bun link`ed brain-mcp from a different checkout).
-  // Defaults to `getFbrainVersion()` — the same single-sourced string the MCP
+  // Defaults to `getBrainVersion()` — the same single-sourced string the MCP
   // server reports — so a real run compares like-for-like.
   cliVersion?: string;
   // --json: emit the structured check results as a single JSON object on
@@ -189,8 +189,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push({
       name: "config",
       ok: false,
-      detail: "no ~/.fbrain/config.json",
-      fix: "run `fbrain init`",
+      detail: "no ~/.brain/config.json",
+      fix: "run `brain init`",
     });
     // Break the init↔doctor dead-end: if init's step 3 keeps failing with
     // `401 cert_required`, the user has no config to load — pre-this-PR
@@ -209,7 +209,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       name: "config",
       ok: false,
       detail: cfgIssues.join("; "),
-      fix: "re-run `fbrain init` to refresh canonical hashes",
+      fix: "re-run `brain init` to refresh canonical hashes",
     });
   } else {
     checks.push({
@@ -335,7 +335,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         name: "node-provisioned",
         ok: false,
         detail: identity.reason,
-        fix: "run `fbrain init` to bootstrap",
+        fix: "run `brain init` to bootstrap",
       });
       verbose?.(`node-provisioned: FAIL — ${identity.reason}`);
     }
@@ -364,16 +364,16 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // 5. schemas loaded — verified via the READ path (GET /api/schemas), NOT by
   // POSTing /api/schemas/load. Two reasons the old active-reload was wrong:
   //   (a) A health check must not mutate. This file's own contract (see the
-  //       header + the `--write` gate) is that plain `fbrain doctor` never
+  //       header + the `--write` gate) is that plain `brain doctor` never
   //       writes; an unconditional /api/schemas/load violated that.
   //   (b) Since the app-isolation flip (fold#739), /api/schemas/load is an
   //       owner-attested verb. On a node whose owner-session attestation is
-  //       unavailable — a stale daemon with a wedged control socket, or fbrain
+  //       unavailable — a stale daemon with a wedged control socket, or brain
   //       pointed at a node with no reachable local socket — the POST returns
   //       `403 transport_not_attested` and the old check misdiagnosed a fully
   //       healthy, fully-loaded node as "schemas not loaded — re-run init"
   //       (re-running init can't fix a wedged socket). The read path needs
-  //       only X-User-Hash, so it answers the real question — "are fbrain's
+  //       only X-User-Hash, so it answers the real question — "are brain's
   //       record schemas present in the node's DB under the exact hashes we
   //       write against?" — accurately regardless of attestation state.
   //
@@ -403,7 +403,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         checks.push({
           name: "schemas-loaded",
           ok: true,
-          detail: `${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length} fbrain record schemas present in the node DB`,
+          detail: `${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length} brain record schemas present in the node DB`,
         });
         verbose?.(`schemas-loaded: ok (${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length})`);
       } else {
@@ -411,7 +411,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
           name: "schemas-loaded",
           ok: false,
           detail: `not loaded into the node: ${missing.join(", ")}`,
-          fix: "re-run `fbrain init` (it loads fbrain's schemas into the node)",
+          fix: "re-run `brain init` (it loads brain's schemas into the node)",
         });
         verbose?.(`schemas-loaded: FAIL — ${missing.join(", ")}`);
       }
@@ -420,12 +420,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         name: "schemas-loaded",
         ok: false,
         detail: errMsg(err),
-        fix: "re-run `fbrain init`",
+        fix: "re-run `brain init`",
       });
       verbose?.(`schemas-loaded: FAIL`);
     }
   } else if (!nodeReachable) {
-    // Node is down — reading the node DB to confirm fbrain's schemas are
+    // Node is down — reading the node DB to confirm brain's schemas are
     // loaded is impossible. SKIP rather than drop the check.
     checks.push(skippedByNodeUnreachable("schemas-loaded", "can't read the node DB"));
   } else {
@@ -435,12 +435,12 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // 6. schema drift — check each unique schema once. Iterates 8 entries:
   // Design + Task + six per-kind Phase 6 schemas. Two flavors of drift are
   // demoted to WARN instead of failing the verdict:
-  //   - extras-only: the schema service expanded fbrain's canonical against
+  //   - extras-only: the schema service expanded brain's canonical against
   //     an existing schema of the same descriptive_name (often a
   //     Schema.org starter_seed) and the registered schema now carries
-  //     extra fields. `fbrain init` cannot shrink registered schemas —
+  //     extra fields. `brain init` cannot shrink registered schemas —
   //     handled inside checkSchemaDrift().
-  //   - migration-explained: a completed `fbrain migrate --add-field`
+  //   - migration-explained: a completed `brain migrate --add-field`
   //     manifest's to_hash matches the live config hash, so the registered
   //     schema's extra field is expected — softened here by
   //     softenDriftIfMigrated().
@@ -465,7 +465,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
           name: `schema-drift[${label}]`,
           ok: false,
           detail: `no canonical hash for "${entry.key}" in config.schemaHashes`,
-          fix: "re-run `fbrain init`",
+          fix: "re-run `brain init`",
         });
         continue;
       }
@@ -487,7 +487,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // Embedding-runtime probe — issue one trivial Search app query so the node
   // is forced to load its ONNX model. Surfaces the
   // `embedding_model_unavailable` failure as a structured FAIL, separate
-  // from schema-drift, so `fbrain doctor` is the one source of truth for
+  // from schema-drift, so `brain doctor` is the one source of truth for
   // "is search end-to-end usable?" — not just "are the schemas right?".
   // Cheap when it passes (one app-search request); the heavy freshness probe stays
   // gated behind --freshness.
@@ -509,7 +509,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // (cold app registry, revoked capability, missing grant, …) still
   // reported all-PASS. This probe asks both questions a write needs:
   //   (a) is a valid CapabilityToken cached for this node, and
-  //   (b) does the node's app registry know about fbrain (does
+  //   (b) does the node's app registry know about brain (does
   //       request-consent return 202, not 404)?
   // Read-only: it polls request-consent for the HTTP status but never
   // grants or waits, so the leftover pending request times out naturally.
@@ -553,9 +553,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByPrereqs(TAG_INDEX_CHECK));
   }
 
-  // Runtime probe — compare the running Bun against fbrain's documented
+  // Runtime probe — compare the running Bun against brain's documented
   // minimum (README Prerequisites: "Bun ≥ <MIN_BUN_VERSION>"). The README tells
-  // every new dev to run `fbrain doctor`, but until this check nothing
+  // every new dev to run `brain doctor`, but until this check nothing
   // enforced the version, so a dev on an older Bun hit an opaque low-level
   // failure with no pointer to the real cause. Cheap + offline (string compare
   // only; never touches the node) — fits the same slot as mcp-entrypoint. FAIL
@@ -564,7 +564,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   checks.push(runtimeCheck);
 
   // CLI-entrypoint probe — catches the common "global install left a dangling
-  // ~/.bun/bin/fbrain symlink" state before agent/routine shells fail with
+  // ~/.bun/bin/brain symlink" state before agent/routine shells fail with
   // `command not found`. WARN, never FAIL: source-checkout users can still run
   // `bun run src/cli.ts`, and the fix is local relinking rather than a node or
   // schema problem.
@@ -573,9 +573,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 
   // MCP-entrypoint probe — the headline agent-integration path. The README
   // front-loads `claude mcp add brain brain-mcp`, which only works if the
-  // `brain-mcp` bin (declared in package.json `bin` alongside `fbrain`) is
-  // on PATH. On a real machine a stale hand-installed `fbrain` shim that
-  // predates the `brain-mcp` bin leaves `fbrain` resolvable but `brain-mcp`
+  // `brain-mcp` bin (declared in package.json `bin` alongside `brain`) is
+  // on PATH. On a real machine a stale hand-installed `brain` shim that
+  // predates the `brain-mcp` bin leaves `brain` resolvable but `brain-mcp`
   // missing — and pre-this-check doctor was all-PASS, so a broken agent
   // integration failed silently. Cheap + offline (PATH resolution only; we
   // do NOT spawn the MCP server). WARN, never FAIL: MCP is optional for
@@ -593,7 +593,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // opt-in probe spawns the server, drives a JSON-RPC initialize + tools/list
   // handshake over stdio under a bounded deadline, and FAILs (not WARNs) on a
   // boot/handshake/tool-set mismatch — mirroring the --write / --freshness
-  // opt-in-deep-probe pattern so plain `fbrain doctor` stays spawn-free. Kept
+  // opt-in-deep-probe pattern so plain `brain doctor` stays spawn-free. Kept
   // SKIPPED (not FAIL) when mcp-entrypoint itself didn't resolve, so the
   // verdict stays coherent: there is nothing to boot yet.
   if (opts.mcp) {
@@ -612,22 +612,22 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // Disclosure probes — always WARN, no detection. They surface the
   // multi-machine + team-sharing limits called out in
   // docs/g0-replacement-readiness-gate.md §6 so the gate stays honest
-  // about what fbrain does and doesn't do today.
+  // about what brain does and doesn't do today.
   checks.push({
     name: "single-machine-slice",
     ok: true,
     tag: "WARN",
     detail:
       "you're on this daemon; record set is local — multi-machine reads " +
-      "require fbrain to drive fold_db's sync transport (deployed but not " +
-      "yet wired up from fbrain; tracked as G16)",
+      "require brain to drive fold_db's sync transport (deployed but not " +
+      "yet wired up from brain; tracked as G16)",
   });
   checks.push({
     name: "no-team-sync",
     ok: true,
     tag: "WARN",
     detail:
-      "no team-sync transport — `fbrain share` is a placeholder until " +
+      "no team-sync transport — `brain share` is a placeholder until " +
       "cloud sync is signed in and validated end-to-end",
   });
 
@@ -635,7 +635,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // reserved slug. The write-ready probe above is a static check; this is
   // the active proof that capability headers attach + the consent path
   // resolves + the node accepts the mutation. OFF by default so plain
-  // `fbrain doctor` never mutates.
+  // `brain doctor` never mutates.
   if (opts.write) {
     if (cfgIssues.length === 0 && schemasLoadedOk) {
       const writeProbe = await runWriteRoundtripProbe(cfg, opts, verbose);
@@ -695,11 +695,11 @@ function doctorNodeConfigDetail(nodeUrl: string, socketPath: string): string {
   return `nodeUrl=${nodeUrl}`;
 }
 
-// client.ts appends "— run `fbrain doctor` for a full diagnosis" to every
-// FbrainError message so non-doctor commands point users here. Doctor strips
+// client.ts appends "— run `brain doctor` for a full diagnosis" to every
+// BrainError message so non-doctor commands point users here. Doctor strips
 // that circular tip from its own output.
 function doctorReachabilityDetail(err: unknown, which: string, baseUrl: string): string {
-  if (err instanceof FbrainError && err.code === "service_unreachable") {
+  if (err instanceof BrainError && err.code === "service_unreachable") {
     return `${which} not reachable at ${baseUrl}`;
   }
   return stripDoctorTip(errMsg(err));

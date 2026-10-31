@@ -1,6 +1,6 @@
-// Single-source version string for `fbrain --version` (cli.ts) and the MCP
+// Single-source version string for `brain --version` (cli.ts) and the MCP
 // `serverInfo.version` (mcp/server.ts). Appends a git short-SHA suffix when
-// the running source lives in a git checkout — the global `fbrain` shim runs
+// the running source lives in a git checkout — the global `brain` shim runs
 // src/cli.ts directly out of the repo, so the SHA distinguishes one downloaded
 // build from another in bug reports. Falls back to bare `pkg.version` when git or
 // `.git` is unavailable (installed outside a repo, sandboxed run, etc.).
@@ -19,7 +19,7 @@ export type VersionOptions = {
   anchorDir?: string;
 };
 
-export function getFbrainVersion(opts: VersionOptions = {}): string {
+export function getBrainVersion(opts: VersionOptions = {}): string {
   const suffix = gitSuffix(opts.anchorDir ?? import.meta.dir);
   return suffix ? `${pkg.version} (${suffix})` : pkg.version;
 }

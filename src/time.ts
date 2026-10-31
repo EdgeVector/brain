@@ -1,4 +1,4 @@
-import { FbrainError } from "./client.ts";
+import { BrainError } from "./client.ts";
 
 // Parse an updated-since value into epoch-millis. Accepts either an absolute
 // ISO-8601 timestamp or a relative "ago" token such as `45s`, `30m`, `24h`,
@@ -21,14 +21,14 @@ export function parseUpdatedSince(raw: string, now: number = Date.now()): number
     return now - magnitude * unitMs;
   }
   if (/^\d+$/.test(trimmed)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_updated_since",
       message: `--updated-since "${raw}" is ambiguous — add a unit for a relative window (e.g. \`${trimmed}d\`) or pass a full ISO-8601 timestamp.`,
     });
   }
   const ms = Date.parse(trimmed);
   if (!Number.isFinite(ms)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_updated_since",
       message: `--updated-since "${raw}" is not a valid ISO-8601 timestamp or relative window (e.g. \`7d\`, \`24h\`, \`2026-07-01\`).`,
     });

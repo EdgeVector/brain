@@ -4,9 +4,9 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 
 import { createHash } from "node:crypto";
 
-import { FbrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
+import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
 import { writeConfig, type Config } from "./config.ts";
-import type { FbrainRecord } from "./record.ts";
+import type { BrainRecord } from "./record.ts";
 import {
   BODY_FILE_SCHEMA_KEY,
   OWNER_APP_ID,
@@ -236,7 +236,7 @@ export async function ensureBodyFileSchema(
   const have = cfg.schemaHashes[BODY_FILE_SCHEMA_KEY];
   if (have) return have;
   if (!node.declareAppSchema) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_schema_unavailable",
       message: "This node cannot declare the brain body-file schema.",
       hint: "Run `brain init` against a current Mini node, then retry.",
@@ -254,23 +254,23 @@ export async function ensureBodyFileSchema(
 
 // ── blob plane ──────────────────────────────────────────────────────────────
 
-function blobPlaneError(path: string, status: number, body: string): FbrainError {
+function blobPlaneError(path: string, status: number, body: string): BrainError {
   const excerpt = body.slice(0, 300);
   if (status === 413) {
-    return new FbrainError({
+    return new BrainError({
       code: "body_spill_too_large",
       message: `Node ${path} refused the text as too large (413): ${excerpt}`,
       hint: "A local blob is at most 16 MiB. Split the text across records.",
     });
   }
   if (status === 404 || status === 405) {
-    return new FbrainError({
+    return new BrainError({
       code: "body_spill_unavailable",
       message: `Node ${path} answered ${status}: this node has no local blob route.`,
       hint: "Long bodies need a LastDB Mini that serves POST /api/db/put-blob-local. Upgrade the node.",
     });
   }
-  return new FbrainError({
+  return new BrainError({
     code: "body_spill_blob_error",
     message: `Node ${path} failed (${status}): ${excerpt}`,
     hint: "Retry. If it persists, read the node log for the file-blob plane failure.",
@@ -290,7 +290,7 @@ async function putBlobLocal(node: NodeClient, bytes: Uint8Array): Promise<Record
     | undefined;
   const pointer = pointerOf(fileBlob?.pointer);
   if (pointer === null) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_blob_error",
       message: `Node ${path} returned no $lastdb_file pointer: ${res.body.slice(0, 300)}`,
       hint: "The node and brain disagree on the put-blob-local response. Upgrade both.",
@@ -303,7 +303,7 @@ async function fetchBlob(node: NodeClient, pointer: Record<string, unknown>): Pr
   const path = "/api/db/fetch-file-blob";
   const res = await node.rawCall("POST", path, { pointer });
   if (res.status === 404) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_blob_missing",
       message: "The long text blob is not on this node.",
       hint:
@@ -323,7 +323,7 @@ async function fetchBlob(node: NodeClient, pointer: Record<string, unknown>): Pr
 function verifyBytes(bytes: Uint8Array, sha256: string, size: number, what: string): void {
   const got = sha256Hex(bytes);
   if (got !== sha256 || bytes.length !== size) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_integrity_error",
       message: `${what}: blob hashes ${got} (${bytes.length} bytes), expected ${sha256} (${size} bytes).`,
       hint: "The stored blob is corrupt. Restore the text from another copy and write the record again.",
@@ -336,7 +336,7 @@ function verifyBytes(bytes: Uint8Array, sha256: string, size: number, what: stri
 /** The stored (marker) form of each hydrated field. Not enumerable, never serialized. */
 export const STORED_FORM = Symbol("brain.storedForm");
 
-type HydratedRecord = FbrainRecord & { [STORED_FORM]?: Record<string, string> };
+type HydratedRecord = BrainRecord & { [STORED_FORM]?: Record<string, string> };
 
 // The sidecar schema hash. A caller that holds the config passes it (no extra
 // call). A caller that does not (a read helper called without `cfg`) falls
@@ -360,7 +360,7 @@ async function bodyFileSchemaHash(node: NodeClient, cfg: SpillCfg | null): Promi
   const hash = await lookup;
   if (!hash) {
     nodeBodyFileHash.delete(node);
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_schema_missing",
       message: "This record keeps its long text in a body file, but the node has no BrainBodyFile schema loaded.",
       hint: "Run `brain init` so the BrainBodyFile schema registers, then retry.",
@@ -386,7 +386,7 @@ async function resolveSpilledField(
   const key = bodyFileKey(type, slug, marker.field || field, marker.sha256);
   const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, marker.field || field, marker.sha256);
   if (sidecar === null) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_sidecar_missing",
       message: `${type} ${slug}: field ${field} points at a body file record that does not exist (${key}).`,
       hint: "The record may have synced before its sidecar. Retry; if it stays, write the record again with its full text.",
@@ -396,14 +396,14 @@ async function resolveSpilledField(
     const message =
       `${type} ${slug}: field ${field} names text ${marker.sha256.slice(0, 12)}, ` +
       `but the body file record holds ${sidecar.contentHash.slice(0, 12)}.`;
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_sidecar_mismatch",
       message,
       hint: "The stored text reference does not match this record revision. Read the record again or restore its full text.",
     });
   }
   if (sidecar.pointer === null) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_pointer_invalid",
       message: `${type} ${slug}: body file record ${key} does not carry a $lastdb_file pointer.`,
       hint: "The sidecar record is corrupt. Write the record again with its full text to replace it (brain put --allow-shrink).",
@@ -424,9 +424,9 @@ export async function hydrateRecord(
   node: NodeClient,
   cfg: SpillCfg | null,
   type: RecordType,
-  record: FbrainRecord,
+  record: BrainRecord,
   opts?: HydrateOptions,
-): Promise<FbrainRecord> {
+): Promise<BrainRecord> {
   const pending: Array<{ field: string; marker: SpillMarker; stored: string }> = [];
   const only = opts?.fields;
   for (const field of spillFieldsFor(type)) {
@@ -451,7 +451,7 @@ export async function hydrateRecord(
 }
 
 /** The fields of `record` as the node stores them: spilled fields in marker form. */
-export function storedFieldsOf(record: FbrainRecord): Record<string, unknown> {
+export function storedFieldsOf(record: BrainRecord): Record<string, unknown> {
   const stored = (record as HydratedRecord)[STORED_FORM];
   return stored === undefined ? { ...record } : { ...record, ...stored };
 }
@@ -506,7 +506,7 @@ function planSeal(type: RecordType, slug: string, fields: Record<string, unknown
     const marker = parseSpillMarker(value);
     if (marker !== null) {
       if (marker.field !== field || headHashOf(marker.head) !== marker.headHash) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "body_spill_marker_conflict",
           message:
             `${type} ${slug}: field ${field} ends with a brain-body-file marker, ` +
@@ -520,7 +520,7 @@ function planSeal(type: RecordType, slug: string, fields: Record<string, unknown
       continue;
     }
     if (ANY_MARKER_LINE_RE.test(value)) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "body_spill_marker_misplaced",
         message:
           `${type} ${slug}: field ${field} holds a brain-body-file marker line that is not the last line.`,
@@ -595,7 +595,7 @@ async function commitSidecar(opts: {
 }): Promise<{ reused: boolean }> {
   const { node, schemaHash, type, slug, field, full } = opts;
   if (full.buf.length > SPILL_BLOB_MAX_BYTES) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "body_spill_too_large",
       message: `${type} ${slug}: field ${field} is ${full.buf.length} bytes; the limit is ${SPILL_BLOB_MAX_BYTES} (16 MiB).`,
       hint: "Split the text across records.",
@@ -675,7 +675,7 @@ export async function sealRecordFields(opts: {
       plan.pass.map(async ({ field, marker }) => {
         const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, field, marker.sha256);
         if (sidecar === null || sidecar.pointer === null || sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
-          throw new FbrainError({
+          throw new BrainError({
             code: "body_spill_sidecar_mismatch",
             message: `${type} ${slug}: field ${field} carries a marker with no matching body file record.`,
             hint: "Read the record again with `brain get` and write the full text.",
@@ -705,7 +705,7 @@ export function assertFieldBudget(
   for (const [name, value] of Object.entries(fields)) {
     const size = serializedBytes(value);
     if (size > FIELD_MAX_BYTES) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "record_field_too_large",
         message:
           `${type} ${slug}: field ${name} is ${size} bytes serialized; ` +
@@ -733,7 +733,7 @@ export function assertOpsFitAtomBudget(
     for (const [name, value] of Object.entries(op.fields)) {
       const size = serializedBytes(value);
       if (size > FIELD_MAX_BYTES) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "record_field_too_large",
           message:
             `${type} ${slug}: ${op.projection} row ${op.keyHash} field ${name} is ${size} bytes serialized; ` +

@@ -1,10 +1,12 @@
-import { FbrainError, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
+import { BrainError, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
 import { countAfterDelta, parseListCount } from "./count-state.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
-import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type FbrainRecord } from "./record.ts";
+import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type BrainRecord } from "./record.ts";
 import { tokenize } from "./tokenize.ts";
+import { multiKey } from "./multi-key.ts";
+import { namedCards } from "./named-records.ts";
 import { locatorMutations, locatorSchema, readLocators } from "./list-locator.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
@@ -38,7 +40,7 @@ const TITLE_BYTES_TIGHT = 32;
 export const INDEX_PARTIAL = "index partial";
 export const COUNT_UNCONFIRMED = "the count did not confirm";
 
-type SchemaCfg = { schemaHashes: Record<string, string> };
+type SchemaCfg = { schemaHashes: Record<string, string>; storageModel?: "multi-key-v1" };
 
 export type ListCard = {
   type?: string;
@@ -157,7 +159,7 @@ function userTags(tags: readonly string[]): string[] {
   return out;
 }
 
-function textField(record: FbrainRecord, key: string): string {
+function textField(record: BrainRecord, key: string): string {
   const value = record[key];
   return typeof value === "string" ? value : "";
 }
@@ -211,7 +213,7 @@ function parseKeywordCards(raw: string | null, strict = false): KeywordCard[] {
   if (raw === null) return [];
   const invalid = (): KeywordCard[] => {
     if (strict) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "keyword_page_invalid",
         message: "Cannot update a malformed keyword page.",
         hint: "Repair the named keyword page before a manual retry.",
@@ -372,7 +374,7 @@ function renderPage(page: PageBody, symptom: boolean): string | null {
   return null;
 }
 
-function subjectCard(type: RecordType, record: FbrainRecord): ListCard {
+function subjectCard(type: RecordType, record: BrainRecord): ListCard {
   return {
     type,
     slug: record.slug,
@@ -469,15 +471,16 @@ async function readExact(
 
 function slotsFor(
   type: RecordType,
-  record: FbrainRecord,
+  record: BrainRecord,
   linkDests: readonly string[],
   details: string[],
+  native = false,
 ): Slot[] {
-  const slots: Slot[] = [
+  const slots: Slot[] = native ? [] : [
     { hash: "all", kind: "list", bound: LIST_PAGE },
     { hash: type, kind: "list", bound: LIST_PAGE },
   ];
-  if (record.status.length > 0) {
+  if (!native && record.status.length > 0) {
     slots.push({
       hash: `${type}#${record.status}`,
       kind: "list",
@@ -493,7 +496,7 @@ function slotsFor(
   for (const dest of linkDests.slice(0, LINK_CAP)) {
     slots.push({ hash: `link#${dest}`, kind: "list", bound: BACKLINK_PAGE });
   }
-  if (type === "task" && record.design_slug && record.design_slug.length > 0) {
+  if (!native && type === "task" && record.design_slug && record.design_slug.length > 0) {
     slots.push({
       hash: `child#${record.design_slug}`,
       kind: "list",
@@ -506,7 +509,7 @@ function slotsFor(
 /** Explicit record relationships belong to the same graph as body links. */
 export function recordGraphEdges(
   type: RecordType,
-  record: FbrainRecord,
+  record: BrainRecord,
   frontmatterEdges: readonly string[] = [],
   now?: string,
 ): GraphEdge[] {
@@ -535,7 +538,7 @@ export function recordGraphEdges(
   return [...edges.values()];
 }
 
-function linkDestsFromRecord(type: RecordType, record: FbrainRecord | null): string[] {
+function linkDestsFromRecord(type: RecordType, record: BrainRecord | null): string[] {
   if (!record) return [];
   return uniqueDests(edgeIdsOf(recordGraphEdges(type, record)));
 }
@@ -544,8 +547,8 @@ export async function planRecordListSide(opts: {
   node: NodeClient;
   cfg: SchemaCfg;
   type: RecordType;
-  previous: FbrainRecord | null;
-  next: FbrainRecord | null;
+  previous: BrainRecord | null;
+  next: BrainRecord | null;
   /** Sealed product body. Keyword tokens must not see the pre-seal tail. */
   sealedBody?: string;
   nextEdges: readonly GraphEdge[];
@@ -576,10 +579,10 @@ export async function planRecordListSide(opts: {
   const nextDests = uniqueDests(nextIds);
   const previousDests = linkDestsFromRecord(opts.type, opts.previous);
   const knownOld = opts.previous
-    ? slotsFor(opts.type, opts.previous, previousDests, details)
+    ? slotsFor(opts.type, opts.previous, previousDests, details, multiKey(opts.cfg))
     : [];
   const knownNew = opts.next
-    ? slotsFor(opts.type, opts.next, nextDests, details)
+    ? slotsFor(opts.type, opts.next, nextDests, details, multiKey(opts.cfg))
     : [];
 
   const pages = new Map<string, MemPage>();
@@ -694,7 +697,7 @@ export async function planRecordListSide(opts: {
         parsed = null;
       }
       if (!Array.isArray(parsed) || parsed.some((id) => typeof id !== "string")) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "frontmatter_edges_invalid",
           message: `Cannot update malformed frontmatter edges for ${opts.type} ${slug}.`,
         });
@@ -721,7 +724,7 @@ export async function planRecordListSide(opts: {
       ? uniqueDests([...previousEdgeIds, ...previousFrontmatterIds])
       : previousDests;
     const oldSlots = opts.previous
-      ? slotsFor(opts.type, opts.previous, storedDests, details)
+      ? slotsFor(opts.type, opts.previous, storedDests, details, multiKey(opts.cfg))
       : knownOld;
     const extraLocators = oldSlots.filter((slot) => {
       if (slot.kind !== "list") return false;
@@ -811,7 +814,7 @@ export async function planRecordListSide(opts: {
     preservedEdgeIds = nextIds.filter((id) => !suppliedIds.has(id));
 
     const finalNew = opts.next
-      ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details)
+      ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details, multiKey(opts.cfg))
       : [];
     const unreadByHash = new Map<string, Slot>();
     for (const slot of [...finalNew, ...oldSlots]) {
@@ -1177,7 +1180,7 @@ function actionFor(
   page: MemPage,
   type: RecordType,
   slug: string,
-  next: FbrainRecord | null,
+  next: BrainRecord | null,
 ): HeadReplay | null {
   if (page.symptom) {
     const held = page.cards[0]?.slug ?? "";
@@ -1259,7 +1262,7 @@ async function validatePageLocatorSubjects(opts: {
     }
   }
   const refuse = (hash: string, slug: string): never => {
-    throw new FbrainError({
+    throw new BrainError({
       code: "list_membership_unproven",
       message: `Cannot prove list membership for ${opts.type} ${slug} in ${hash}.`,
       hint: "The list update was not sent. Read the product record and repair the named list before a manual retry.",
@@ -1301,8 +1304,8 @@ async function validatePageLocatorSubjects(opts: {
 function applyMembership(opts: {
   type: RecordType;
   slug: string;
-  previous: FbrainRecord | null;
-  next: FbrainRecord | null;
+  previous: BrainRecord | null;
+  next: BrainRecord | null;
   oldSlots: Slot[];
   newSlots: Slot[];
   pages: Map<string, MemPage>;
@@ -1476,10 +1479,14 @@ async function readOnePage(
 /** Cards on one list hash. Absent head is an empty list. A missing schema is null. */
 export async function readPageChain(
   node: NodeClient,
-  cfg: { schemaHashes: Record<string, string> },
+  cfg: SchemaCfg,
   hash: string,
   maxPages = 1000,
 ): Promise<ListCard[] | null> {
+  if (multiKey(cfg)) {
+    const cards = await namedCards(node, cfg, hash, maxPages === 1);
+    if (cards !== null) return cards;
+  }
   const schemaHash = schemaOf(cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
   if (schemaHash.length === 0) return null;
   const cards: ListCard[] = [];
@@ -1498,25 +1505,25 @@ export async function readPageChain(
     }
   }
   for (let depth = 0; depth < maxPages; depth++) {
-    if (seen.has(range)) throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} repeats a page.` });
+    if (seen.has(range)) throw new BrainError({ code: "list_chain_incomplete", message: `The list ${hash} repeats a page.` });
     seen.add(range);
     const raw = maxPages > 1 ? pages.get(range) ?? null : await readOnePage(node, schemaHash, hash, range);
     if (raw === null) {
       if (range === HEAD_RANGE) return [];
-      throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} is missing page ${range}.` });
+      throw new BrainError({ code: "list_chain_incomplete", message: `The list ${hash} is missing page ${range}.` });
     }
     try {
       const value = JSON.parse(raw);
       if (!value || !Array.isArray(value.cards) || (value.older !== undefined && typeof value.older !== "string")) throw new Error("Invalid page");
     } catch {
-      throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} has an invalid page ${range}.` });
+      throw new BrainError({ code: "list_chain_incomplete", message: `The list ${hash} has an invalid page ${range}.` });
     }
     const page = parsePage(raw);
     for (const card of page.cards) cards.push(card);
     if (page.older.length === 0 || maxPages === 1) return cards;
     range = page.older;
   }
-  throw new FbrainError({ code: "list_chain_incomplete", message: `The list ${hash} exceeded ${maxPages} pages.` });
+  throw new BrainError({ code: "list_chain_incomplete", message: `The list ${hash} exceeded ${maxPages} pages.` });
 }
 
 /**
@@ -2026,7 +2033,7 @@ export async function readCount(
   if (!row) return null;
   const raw = row.fields?.bln_n;
   if (typeof raw !== "string") {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_list_count",
       message: `The count for ${hash} has an invalid value.`,
       hint: "Repair the named count before another count change.",
@@ -2270,12 +2277,12 @@ export async function planNamedSlugBackfill(opts: {
   sourceType: RecordType;
   target: NamedBackfillTarget;
   slugOrder: readonly string[];
-  records: readonly FbrainRecord[];
+  records: readonly BrainRecord[];
 }): Promise<NamedBackfillPlan> {
   const traces: string[] = [];
   const notes: string[] = [];
   const lastSlug = opts.slugOrder[opts.slugOrder.length - 1] ?? "";
-  const bySlug = new Map<string, FbrainRecord>();
+  const bySlug = new Map<string, BrainRecord>();
   for (const record of opts.records) {
     if (record.slug.length > 0) bySlug.set(record.slug, record);
   }
@@ -2582,7 +2589,7 @@ export async function planNamedSlugBackfill(opts: {
   }
 
   const chosen = new Map<string, Slot>();
-  let pending: FbrainRecord[] = [];
+  let pending: BrainRecord[] = [];
   let covered = 0;
   for (const slug of opts.slugOrder) {
     const record = bySlug.get(slug);
@@ -2599,7 +2606,7 @@ export async function planNamedSlugBackfill(opts: {
       ? `symptom#${textField(record, "symptom_hash")}`
       : target.hash;
     const slotNotes: string[] = [];
-    const slots = slotsFor(opts.sourceType, record, [], slotNotes);
+    const slots = slotsFor(opts.sourceType, record, [], slotNotes, multiKey(opts.cfg));
     const slot = slots.find((item) => item.hash === hash) ?? null;
     if (!slot) continue;
     if (located.has(slug)) {
@@ -2630,7 +2637,7 @@ export async function planNamedSlugBackfill(opts: {
       if (!hash.startsWith(prefix)) continue;
       dests.set(hash.slice(prefix.length), uniqueDests(parseStringList(rowField(row, "bes_ids"))));
     }
-    const kept: FbrainRecord[] = [];
+    const kept: BrainRecord[] = [];
     for (const record of pending) {
       const found = dests.get(record.slug);
       if (!found) {
@@ -2639,7 +2646,7 @@ export async function planNamedSlugBackfill(opts: {
       }
       if (!found.includes(dest)) continue;
       const slotNotes: string[] = [];
-      const slots = slotsFor(opts.sourceType, record, [dest], slotNotes);
+      const slots = slotsFor(opts.sourceType, record, [dest], slotNotes, multiKey(opts.cfg));
       const slot = slots.find((item) => item.hash === target.hash) ?? null;
       if (!slot) continue;
       chosen.set(record.slug, slot);
@@ -2683,7 +2690,7 @@ export async function planNamedSlugBackfill(opts: {
       ensureMemPage(pages, key.hash, HEAD_RANGE, symptomByHash.get(key.hash) === true);
     }
 
-    const still: FbrainRecord[] = [];
+    const still: BrainRecord[] = [];
     for (const record of pending) {
       const slot = chosen.get(record.slug);
       if (!slot) continue;

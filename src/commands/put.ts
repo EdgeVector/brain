@@ -1,12 +1,12 @@
-// `fbrain put [<slug>]` — read body from stdin, parse YAML-subset
-// frontmatter, upsert any of fbrain's record types. The slug may be
+// `brain put [<slug>]` — read body from stdin, parse YAML-subset
+// frontmatter, upsert any of brain's record types. The slug may be
 // passed as a positional arg or set via frontmatter `slug:` — at least
 // one is required, and disagreement between the two errors with
 // `slug_conflict` (mirrors the `type_conflict` contract).
 //
 // Designed to match the gbrain `put` contract closely enough for the
-// `brain` wrapper at ~/.claude/scripts/brain to route writes to fbrain
-// transparently when primary=fbrain.
+// `brain` wrapper at ~/.claude/scripts/brain to route writes to brain
+// transparently when primary=brain.
 //
 // Frontmatter is the gbrain YAML SUBSET, not full YAML:
 //   - `key: value` on a single line (inline scalar; quoted optional)
@@ -17,7 +17,7 @@
 // Every type in RECORDS routes to a real write.
 // An unrecognised `type:` errors as `unsupported_type`.
 
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import {
@@ -32,7 +32,7 @@ import {
   type ReadRetryOptions,
   schemaHashFor,
   validateSlug,
-  type FbrainRecord,
+  type BrainRecord,
   type RecordFieldPatch,
 } from "../record.ts";
 import {
@@ -56,7 +56,7 @@ export type PutOptions = {
   slug?: string;
   input: string;
   // Override / supply the record type from the command line. Useful when
-  // piping schema-less notes: `cat note.md | fbrain put slug --type concept`.
+  // piping schema-less notes: `cat note.md | brain put slug --type concept`.
   // If frontmatter also carries `type:` and the two disagree, putCmd errors
   // with `type_conflict` rather than silently picking one.
   typeOverride?: string;
@@ -67,7 +67,7 @@ export type PutOptions = {
   // attempt count + replace real sleep so they don't pay backoff.
   verifyOptions?: ReadRetryOptions;
   // Tunables for the post-write VECTOR-index confirmation (the read-after-write
-  // `fbrain search` parity check — see `confirmVectorIndexed`). Production
+  // `brain search` parity check — see `confirmVectorIndexed`). Production
   // callers leave this unset and inherit the short bounded budget
   // (VECTOR_INDEX_VERIFY_ATTEMPTS × VECTOR_INDEX_VERIFY_BACKOFF_MS). Tests pin
   // attempt count + inject a no-op sleep so a timed-out probe is observable
@@ -93,7 +93,7 @@ export type PutResult = {
   // landed in the semantic (vector) index — see `verifyVectorIndexed`.
   title: string;
   // True when the write persisted (and is record-list-visible) but the bounded
-  // vector-index confirmation timed out — an immediate `fbrain search` may miss
+  // vector-index confirmation timed out — an immediate `brain search` may miss
   // it. Mirrors the MCP `structuredContent.indexPending` so the CLI surface has
   // read-after-write `search` parity with the agent path. False when the record
   // is confirmed in the vector index, or when the confirmation was skipped (a
@@ -121,17 +121,17 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   const { frontmatter, body } = splitFrontmatter(opts.input);
   // Refuse a silent-default record when stdin carried nothing: with no
   // frontmatter AND no body the upsert would otherwise mint a blank
-  // design row with the slug as title. A scripted `cat $note | fbrain
+  // design row with the slug as title. A scripted `cat $note | brain
   // put $slug` where $note is accidentally empty hits this trap.
   // Frontmatter-with-empty-body is still valid (explicit intent).
   if (
     (frontmatter === null || frontmatter.trim().length === 0) &&
     body.trim().length === 0
   ) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "empty_stdin",
       message: "put: stdin was empty — nothing to write.",
-      hint: "Pipe a body (with optional YAML frontmatter) into `fbrain put <slug>`.",
+      hint: "Pipe a body (with optional YAML frontmatter) into `brain put <slug>`.",
     });
   }
   const parsed = parseFrontmatter(frontmatter);
@@ -153,7 +153,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
   // resolves it as an indexed key lookup, so it is authoritative (found-or-not)
   // without scanning the schema — a genuinely-new slug returns absent in one
   // query, and an existing slug is never missed by a flaked empty page.
-  let existing: FbrainRecord | null;
+  let existing: BrainRecord | null;
   try {
     existing = await findBySlug(node, type, hash, slug, opts.cfg);
   } catch (err) {
@@ -161,7 +161,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
     // `--allow-shrink` is that intent: read the stored head, then overwrite it.
     if (
       opts.allowShrink === true &&
-      err instanceof FbrainError &&
+      err instanceof BrainError &&
       err.code.startsWith("body_spill_")
     ) {
       console.error(
@@ -200,7 +200,7 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
       ? parsed.raw.created_at
       : undefined;
 
-  const base: FbrainRecord = existing ?? {
+  const base: BrainRecord = existing ?? {
     slug,
     title,
     body,
@@ -304,8 +304,8 @@ export async function putCmd(opts: PutOptions): Promise<PutResult> {
 function resolveDualSource<T>(
   a: T | undefined,
   b: T | undefined,
-  conflictErr: (a: T, b: T) => FbrainError,
-  missingErr: () => FbrainError,
+  conflictErr: (a: T, b: T) => BrainError,
+  missingErr: () => BrainError,
 ): T {
   if (a !== undefined && b !== undefined && a !== b) throw conflictErr(a, b);
   const chosen = a ?? b;
@@ -323,17 +323,17 @@ function resolveSlug(
     pos,
     fm,
     (p, f) =>
-      new FbrainError({
+      new BrainError({
         code: "slug_conflict",
         message: `positional slug "${p}" conflicts with frontmatter \`slug: ${f}\`.`,
         hint: "Drop one — they must agree. Frontmatter and the positional arg can't be set to different slugs.",
       }),
     () =>
-      new FbrainError({
+      new BrainError({
         code: "missing_slug",
         message:
-          "fbrain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
-        hint: "Example: `fbrain put my-note` OR include `slug: my-note` in the YAML frontmatter.",
+          "brain put requires a slug — pass it as a positional arg or set `slug:` in frontmatter.",
+        hint: "Example: `brain put my-note` OR include `slug: my-note` in the YAML frontmatter.",
       }),
   );
 }
@@ -353,16 +353,16 @@ function resolveRecordType(
     fmType,
     ovType,
     (fm, ov) =>
-      new FbrainError({
+      new BrainError({
         code: "type_conflict",
         message: `--type ${ov} conflicts with frontmatter \`type: ${fm}\`.`,
         hint: "Drop one — they must agree. Frontmatter and --type can't both be set to different types.",
       }),
     () =>
-      new FbrainError({
+      new BrainError({
         code: "missing_type",
         message:
-          "fbrain put requires a `type:` field in frontmatter (or pass --type <T>).",
+          "brain put requires a `type:` field in frontmatter (or pass --type <T>).",
         hint: `One of: ${recordTypeList()}.`,
       }),
   );
@@ -372,9 +372,9 @@ function normaliseType(raw: string | undefined): RecordType | undefined {
   if (raw === undefined || raw === "") return undefined;
   const normalised = raw.toLowerCase();
   if (isRecordType(normalised)) return normalised;
-  throw new FbrainError({
+  throw new BrainError({
     code: "unsupported_type",
-    message: `type "${raw}" is not a recognised fbrain record type.`,
+    message: `type "${raw}" is not a recognised brain record type.`,
     hint: `Supported: ${recordTypeList()}. Check spelling or pick the closest type.`,
   });
 }
@@ -440,7 +440,7 @@ export function splitFrontmatter(input: string): {
     // they did. Mirrors the targeted `frontmatter_unclosed` diagnosis.
     const firstNonEmpty = input.split(/\r?\n/).find((l) => l.trim().length > 0);
     if (firstNonEmpty && UNFENCED_KEY_PATTERN.test(firstNonEmpty.trimStart())) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "frontmatter_unfenced",
         message:
           "It looks like you wrote frontmatter keys but didn't fence them with `---`.",
@@ -462,7 +462,7 @@ export function splitFrontmatter(input: string): {
   // failed to match too. Both flavors fell through to "no frontmatter,
   // body = entire input verbatim", which silently dropped the user's
   // YAML keys and pasted the `---` text into the body — a script that
-  // truncates stdin then writes via `fbrain put <slug> --type X` saw a
+  // truncates stdin then writes via `brain put <slug> --type X` saw a
   // record with YAML-looking gunk in its body and no parsed title/type.
   //
   // Closing fence may sit at the very start of the remainder (empty
@@ -470,7 +470,7 @@ export function splitFrontmatter(input: string): {
   const after = input.slice(opening[0].length);
   const close = after.match(/(?:^|\r?\n)---(?:\r?\n|$)/);
   if (!close) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "frontmatter_unclosed",
       message: "Frontmatter opened with `---` but never closed.",
       hint: "Add a closing `---` on its own line before the body, or drop the leading `---` if you didn't mean to write frontmatter.",
@@ -549,12 +549,12 @@ export function parseFrontmatter(raw: string | null): ParsedFrontmatter {
     }
     if (!kv) {
       const indented = /^[ \t]+[A-Za-z_][A-Za-z0-9_]*\s*:/.test(line);
-      throw new FbrainError({
+      throw new BrainError({
         code: "frontmatter_malformed",
         message: `Frontmatter line ${i + 1} is not "key: value": ${JSON.stringify(line)}.`,
         hint: indented
           ? "The line is an indented key inside a block list. Top-level keys start at column 0; list items are `  - value`."
-          : "fbrain accepts a YAML SUBSET: `key: value` per line, optional inline `[a, b]`, optional block `\\n  - a`.",
+          : "brain accepts a YAML SUBSET: `key: value` per line, optional inline `[a, b]`, optional block `\\n  - a`.",
       });
     }
 

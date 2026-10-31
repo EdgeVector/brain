@@ -1,4 +1,4 @@
-import { FbrainError, newSchemaServiceClient, stripDoctorTip, type RegisteredSchema, type SchemaServiceClient, type Verbose } from "../../client.ts";
+import { BrainError, newSchemaServiceClient, stripDoctorTip, type RegisteredSchema, type SchemaServiceClient, type Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
 import { DEFAULT_SCHEMA_SERVICE_URL } from "../init.ts";
 import { listManifests, type MigrationManifest } from "../../migration.ts";
@@ -17,12 +17,12 @@ export async function checkSchemaDrift(
   try {
     registered = await schemaClient.getSchemaByHash(hash);
   } catch (err) {
-    if (err instanceof FbrainError) {
+    if (err instanceof BrainError) {
       return {
         name,
         ok: false,
         detail: err.message,
-        fix: "re-run `fbrain init`",
+        fix: "re-run `brain init`",
       };
     }
     throw err;
@@ -32,7 +32,7 @@ export async function checkSchemaDrift(
       name,
       ok: false,
       detail: `canonical hash ${hash} not found in schema service (deleted there?)`,
-      fix: "re-run `fbrain init`",
+      fix: "re-run `brain init`",
     };
   }
   // A canonical identity can serve several explicit local record-type names.
@@ -45,12 +45,12 @@ export async function checkSchemaDrift(
     case "none":
       return { name, ok: true, detail: `${registered.descriptive_name} @ ${hash.slice(0, 12)}…` };
     case "extras_only":
-      // The schema service expanded fbrain's canonical schema against an
+      // The schema service expanded brain's canonical schema against an
       // existing one (often a Schema.org starter_seed sharing the same
-      // descriptive_name) and kept the extra fields. `fbrain init` cannot
+      // descriptive_name) and kept the extra fields. `brain init` cannot
       // shrink this — the service expands schemas, never deletes fields —
       // so the old fix-hint ("re-run init") was a dead end. The extras are
-      // harmless: fbrain only writes the fields in schemas.ts. Demote to
+      // harmless: brain only writes the fields in schemas.ts. Demote to
       // WARN and explain the real recovery (bump descriptive_name) so the
       // user knows the doctor verdict isn't blocked on a re-init they've
       // already tried.
@@ -63,9 +63,9 @@ export async function checkSchemaDrift(
           `not in schemas.ts: ${classification.extras.join(", ")}`,
         fix:
           "schema service expanded against an existing schema with the same descriptive_name; " +
-          "extras are harmless (fbrain doesn't write them). `fbrain init` can't remove them — " +
+          "extras are harmless (brain doesn't write them). `brain init` can't remove them — " +
           "the service grows fields via expansion only. To force a clean schema, bump " +
-          `descriptive_name on the ${type} schema in src/schemas.ts and re-run \`fbrain init\`.`,
+          `descriptive_name on the ${type} schema in src/schemas.ts and re-run \`brain init\`.`,
       };
     case "real_drift":
       return {
@@ -79,7 +79,7 @@ export async function checkSchemaDrift(
         // first step; if it persists, schemas.ts and the registered schema
         // have genuinely diverged and need a descriptive_name bump.
         fix:
-          "re-run `fbrain init` so the config picks up the current canonical hash. " +
+          "re-run `brain init` so the config picks up the current canonical hash. " +
           "If drift persists, the schema service can't shrink registered schemas — " +
           "bump descriptive_name in src/schemas.ts to force a fresh registration.",
       };
@@ -93,7 +93,7 @@ export function boundSchemaNames(cfg: Config, hash: string): string[] {
     .map((entry) => entry.schema.schema.descriptive_name);
 }
 
-// Classify a drift comparison so doctor can tell "fbrain's canonical is a
+// Classify a drift comparison so doctor can tell "brain's canonical is a
 // subset of the registered schema" (harmless expansion — schema service
 // merged with a starter seed of the same descriptive_name) apart from
 // genuine drift (missing fields, type mismatches). Extras-only never fails
@@ -211,7 +211,7 @@ export function softenDriftIfMigrated(
     ok: true,
     tag: "WARN",
     detail: `${drift.detail ?? "drift detected"} — explained by migration ${matching.id}`,
-    fix: `update src/schemas.ts to add "${matching.field_added}" to the ${schemaKey} schema so the next \`fbrain init\` keeps the new hash`,
+    fix: `update src/schemas.ts to add "${matching.field_added}" to the ${schemaKey} schema so the next \`brain init\` keeps the new hash`,
   };
 }
 
@@ -224,7 +224,7 @@ const SCHEMA_SERVICE_URL_DEV =
 const SCHEMA_SERVICE_URL_PROD = DEFAULT_SCHEMA_SERVICE_URL;
 
 // Branch the schema-service-reachable fix hint on the configured URL.
-// Most fbrain users run against a deployed Lambda, so the original
+// Most brain users run against a deployed Lambda, so the original
 // "start fold's schema service --local-schema" suggestion is only right
 // for fold contributors pointing at localhost.
 export function schemaServiceFixHint(url: string): string {
@@ -238,7 +238,7 @@ export function schemaServiceFixHint(url: string): string {
     return `check your network or switch to dev (\`${SCHEMA_SERVICE_URL_DEV}\`)`;
   }
   return (
-    `set \`schemaServiceUrl\` in ~/.fbrain/config.json to dev ` +
+    `set \`schemaServiceUrl\` in ~/.brain/config.json to dev ` +
     `(\`${SCHEMA_SERVICE_URL_DEV}\`) or prod (\`${SCHEMA_SERVICE_URL_PROD}\`)`
   );
 }
@@ -268,10 +268,10 @@ export function validateConfigShape(cfg: Config): string[] {
 
 // One-token search probe: forces the node's lazy ONNX load so the
 // `embedding_model_unavailable` failure surfaces as a structured FAIL in
-// the doctor verdict rather than being hidden behind an `fbrain search`
+// the doctor verdict rather than being hidden behind an `brain search`
 // call. We don't care about the hit list — only whether the call
 // completes. The probe is read-only and cheap, so it runs on every
-// `fbrain doctor` invocation (no --freshness gate).
+// `brain doctor` invocation (no --freshness gate).
 
 export async function runSchemaPublishGateProbe(
   opts: DoctorOptions,
@@ -280,47 +280,47 @@ export async function runSchemaPublishGateProbe(
   const url = DEFAULT_SCHEMA_SERVICE_URL;
   const factory = opts.schemaClientFactory ?? newSchemaServiceClient;
   const client = factory(url, verbose);
-  // Pick a fbrain-namespaced schema with a stable hash; any fbrain schema
+  // Pick a brain-namespaced schema with a stable hash; any brain schema
   // would trip the same cert_required gate, since the schema service checks
   // for a DevCert before deciding the operation is idempotent.
   const probe = UNIQUE_SCHEMAS.find((s) => s.key === "design") ?? UNIQUE_SCHEMAS[0];
   if (!probe) return null;
   try {
     await client.registerSchema(probe.schema);
-    // EXPECTED on prod: fbrain's schemas are ALREADY published there (that's
+    // EXPECTED on prod: brain's schemas are ALREADY published there (that's
     // how `init` resolves their canonical hashes without a DevCert), so this
     // re-register is idempotent and succeeds. Success means the publish gate
     // isn't blocking onboarding — a calm PASS, not an alarm. Don't imply
     // doctor "published" anything; the no-config `[FAIL] config`
-    // (→ "run `fbrain init`") line already drives doctor's red verdict.
-    verbose?.(`schema-publish-gate: fbrain/* already published (idempotent re-register) PASS`);
+    // (→ "run `brain init`") line already drives doctor's red verdict.
+    verbose?.(`schema-publish-gate: brain/* already published (idempotent re-register) PASS`);
     return {
       name: "schema-publish-gate",
       ok: true,
       detail:
-        `schema service at ${url} already has fbrain/* published ` +
+        `schema service at ${url} already has brain/* published ` +
         `(idempotent re-register succeeded) — the publish gate isn't blocking; ` +
-        `run \`fbrain init\` to finish onboarding`,
+        `run \`brain init\` to finish onboarding`,
     };
   } catch (err) {
-    if (err instanceof FbrainError && err.code === "schema_cert_required") {
+    if (err instanceof BrainError && err.code === "schema_cert_required") {
       // `cert_required` is the EXPECTED state for a fresh consumer, NOT a
       // blocker. The schema service gates POST /v1/schemas behind a DevCert
-      // for the namespaced `fbrain/*` schemas — but `fbrain init` never needs
+      // for the namespaced `brain/*` schemas — but `brain init` never needs
       // to publish: it loads the cert-free catalog and resolves the
       // already-published canonical hashes from the node (proven by the
       // init.ts "cert_required POST → resolves all hashes, no throw" path).
       // Reporting this as a FAIL with "init cannot complete" is a false
       // dead-end that scares fresh adopters away before they've even run
       // init. Surface it as a calm PASS; the no-config `[FAIL] config` line
-      // (→ "run `fbrain init`") already drives doctor's red verdict.
+      // (→ "run `brain init`") already drives doctor's red verdict.
       verbose?.(`schema-publish-gate: cert_required (expected consumer state) PASS`);
       return {
         name: "schema-publish-gate",
         ok: true,
         detail:
-          `schema service at ${url} gates fbrain/* publishing behind a DevCert ` +
-          `(cert_required) — expected for a consumer; \`fbrain init\` resolves the ` +
+          `schema service at ${url} gates brain/* publishing behind a DevCert ` +
+          `(cert_required) — expected for a consumer; \`brain init\` resolves the ` +
           `already-published canonical hashes from the node, no DevCert needed`,
       };
     }

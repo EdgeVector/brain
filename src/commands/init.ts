@@ -1,13 +1,15 @@
+import { multiKey } from "../multi-key.ts";
+import { syncOwnedModel } from "../owned-schema-init.ts";
 import { canonicalProfilesForHashes, canonicalSchema } from "../canonical-vocabulary.ts";
-// `fbrain init` — bootstrap a node (if needed), register every fbrain
-// schema, load them, persist canonical hashes to ~/.fbrain/config.json.
+// `brain init` — bootstrap a node (if needed), register every brain
+// schema, load them, persist canonical hashes to ~/.brain/config.json.
 //
 // 6 steps:
 //   0. probe /api/system/auto-identity
 //   1. POST /api/setup/bootstrap if 503
 //   2. obtain every canonical hash: POST each schema (maintainer w/ DevCert)
 //      OR, when the cert gate returns 401 for a fresh consumer, defer and
-//      resolve the already-published fbrain/* hashes from the node (step 3)
+//      resolve the already-published brain/* hashes from the node (step 3)
 //   3. POST /api/schemas/load, then resolve any cert-gated hashes via
 //      GET /api/schemas (the node's identity_hash IS the canonical hash)
 //   4. verify failed_schemas empty + persist config
@@ -21,8 +23,9 @@ import { canonicalProfilesForHashes, canonicalSchema } from "../canonical-vocabu
 // existing URLs still point at the dead `:9101 / :9102` local-schema).
 
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 
-import { newNodeClient, newSchemaServiceClient, FbrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
+import { newNodeClient, newSchemaServiceClient, BrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
 import {
   OWNER_APP_ID,
   RECORD_TYPES,
@@ -50,7 +53,7 @@ import { appIdentityEnforceEnabled } from "../write-context.ts";
 export type InitOptions = {
   // Optional — when undefined, the resolver below picks either the existing
   // config's URL (if it isn't a dead local-schema default) or the new
-  // default. This lets `fbrain init` (no flags) auto-heal a stale config
+  // default. This lets `brain init` (no flags) auto-heal a stale config
   // without clobbering a user-supplied override.
   nodeUrl?: string;
   schemaServiceUrl?: string;
@@ -63,9 +66,9 @@ export type InitOptions = {
   sleep?: (ms: number) => Promise<void>;
   /**
    * Drive Step 6's consent grant non-interactively (no TTY required) —
-   * surfaced as `fbrain init --grant-consent`. Scripted / CI / agent
+   * surfaced as `brain init --grant-consent`. Scripted / CI / agent
    * installs use this to reach a ready-to-write state in one shot. No-op
-   * under FBRAIN_APP_IDENTITY_ENFORCE=off (printed clearly) and idempotent
+   * under BRAIN_APP_IDENTITY_ENFORCE=off (printed clearly) and idempotent
    * when a live capability is already cached.
    */
   grantConsent?: boolean;
@@ -119,7 +122,7 @@ const RETRY_RAMP_MS = [2000, 3000];
 export const MAX_RETRY_GAP_MS = 5000;
 export const RETRY_TOTAL_BUDGET_MS = 185_000; // matches the old schedule's total
 // Non-interactive (no TTY) runs are the documented CI / agent / scripted
-// install path (`fbrain init --grant-consent </dev/null`). For an unattended
+// install path (`brain init --grant-consent </dev/null`). For an unattended
 // caller the node-down hint is already actionable on the FIRST probe, so a
 // ~3-minute retry against a down node is pure dead time — it can't read the
 // hint and start the daemon mid-wait. Fail fast after surfacing the hint:
@@ -154,7 +157,7 @@ function buildRetrySchedule(totalBudgetMs: number): number[] {
 }
 
 function envRetryDelays(): number[] | null {
-  const raw = process.env.FBRAIN_INIT_RETRY_DELAYS_MS;
+  const raw = process.env.BRAIN_INIT_RETRY_DELAYS_MS;
   if (raw === undefined) return null;
   if (raw.length === 0) return [];
   return raw
@@ -182,7 +185,7 @@ const STEPS = 6;
 export const DEFAULT_DECLARE_CONCURRENCY = 6;
 
 export function declareConcurrency(): number {
-  const raw = process.env.FBRAIN_INIT_DECLARE_CONCURRENCY;
+  const raw = process.env.BRAIN_INIT_DECLARE_CONCURRENCY;
   if (raw === undefined || raw.length === 0) return DEFAULT_DECLARE_CONCURRENCY;
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 1) return DEFAULT_DECLARE_CONCURRENCY;
@@ -193,7 +196,7 @@ export function declareConcurrency(): number {
 export const DEFAULT_DEFERRED_RETRY_BUDGET_MS = 20_000;
 
 export function deferredRetryBudgetMs(): number {
-  const raw = process.env.FBRAIN_INIT_DEFERRED_RETRY_BUDGET_MS;
+  const raw = process.env.BRAIN_INIT_DEFERRED_RETRY_BUDGET_MS;
   if (raw === undefined || raw.length === 0) return DEFAULT_DEFERRED_RETRY_BUDGET_MS;
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0) return DEFAULT_DEFERRED_RETRY_BUDGET_MS;
@@ -269,14 +272,15 @@ export async function mapWithConcurrency<T, R>(
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
-  const bootstrapName = opts.bootstrapName ?? "fbrain";
+  const bootstrapName = opts.bootstrapName ?? "brain";
   const configPath = opts.configPath ?? defaultConfigPath();
+  const priorConfig = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
 
   // `tryReadConfig` returns null when the file is absent but THROWS when it
   // exists with malformed contents (truncated JSON, missing field, unknown
   // configVersion from a downgrade, …). Without this catch the throw escapes
   // before any bootstrap work runs — and ConfigInvalidError's own message
-  // tells the user to "Re-run `fbrain init`", trapping them in a dead-end
+  // tells the user to "Re-run `brain init`", trapping them in a dead-end
   // loop where the documented remedy can't recover. Init's whole job is to
   // write a valid config, so treat a corrupt existing file as a fresh init
   // (with a visible notice — silently overwriting user data is worse than
@@ -293,13 +297,17 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
   if (existing) {
+    if (!multiKey(existing)) {
+      throw new BrainError({ code: "home_copy_required", message: "This config names the old shared-value Brain layout. Init leaves it unchanged.",
+        hint: "Move Brain data to a new home with the home copy. See docs/multi-key-schemas.md." });
+    }
     print(`[init] existing config at ${configPath} — verifying`);
   }
 
   const resolved = resolveUrls(opts, existing);
   if (resolved.healed.length > 0) {
     print(
-      `fbrain: auto-upgraded config to v${CONFIG_VERSION} with new schema-service URL` +
+      `brain: auto-upgraded config to v${CONFIG_VERSION} with new schema-service URL` +
         ` (replaced ${resolved.healed.join(", ")})`,
     );
   }
@@ -308,7 +316,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Resolve the socket path that will actually be used for owner-session
   // attestation. This is what newNodeClient will use internally when
   // connecting, so we persist it to the config so later commands use the same
-  // socket without needing to re-supply FBRAIN_FOLDDB_SOCKET or LASTDB_HOME.
+  // socket without needing to re-supply BRAIN_FOLDDB_SOCKET or LASTDB_HOME.
   const nodeSocketPath = isLoopbackNodeUrl(nodeUrl)
     ? defaultFolddbSocketPath(existing?.nodeSocketPath)
     : undefined;
@@ -356,10 +364,10 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       // config as authoritative and continue — the downstream
       // schemas-load step exercises X-User-Hash and will surface
       // `missing_user_context` if the saved userHash is genuinely wrong.
-      // No usable config ⇒ rethrow the FbrainError so the user sees the
+      // No usable config ⇒ rethrow the BrainError so the user sees the
       // node's actual message (e.g. "POST /api/auth/restore …").
       if (
-        err instanceof FbrainError &&
+        err instanceof BrainError &&
         err.code === "onboarding_already_complete" &&
         hasUsableExistingConfig(existing)
       ) {
@@ -376,13 +384,13 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // Step 2/6: obtain canonical hashes for every per-kind schema. Each entry has
   // exactly one RecordType, so the hash is written once under that key.
   //
-  // Nodes expose `/api/apps/declare-schema`: fbrain declares its owned schema
+  // Nodes expose `/api/apps/declare-schema`: brain declares its owned schema
   // definitions; the node returns catalog/schema-service resolutions
   // (reuse / expand / compose / …) with authoritative canonical identity hashes.
   // Novel schemas that are not yet published fall through to the schema_service
   // register+load path below. Local mint is retired.
   //
-  // Compatibility fallback: the fbrain/* schemas are pre-published org-wide on
+  // Compatibility fallback: the brain/* schemas are pre-published org-wide on
   // the canonical schema
   // service, so for a fresh consumer (no DevCert) the re-POST is rejected
   // with `401 cert_required`. That is the EXPECTED, documented state — not a
@@ -392,19 +400,19 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // canonical hash). A maintainer who DOES hold a DevCert still publishes
   // here (POST 200) on the same code path.
   //
-  // `FBRAIN_APP_IDENTITY_ENFORCE=off` does NOT change the schema identity:
+  // `BRAIN_APP_IDENTITY_ENFORCE=off` does NOT change the schema identity:
   // bare (un-namespaced) publishing would produce hashes that don't match the
-  // fbrain/* schemas the node already loaded, and is rejected outright by any
+  // brain/* schemas the node already loaded, and is rejected outright by any
   // schema service with `APP_IDENTITY_ROOT_PUBKEYS` set (i.e. the cloud
   // service, which is the only allowed one). Enforce-off only governs the
   // WRITE side — no consent step, no capability headers, writes land as
   // NodeOwner — so on this read-side step it follows the same
   // namespaced-publish-or-resolve path as enforce-on.
   const enforceOn = appIdentityEnforceEnabled();
-  print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} fbrain schemas`);
+  print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} brain schemas`);
   if (!enforceOn) {
     print(
-      `        FBRAIN_APP_IDENTITY_ENFORCE=off → namespaced fbrain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
+      `        BRAIN_APP_IDENTITY_ENFORCE=off → namespaced brain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
     );
   }
   // Existing configs retain their data identities. A fresh home may opt in.
@@ -419,6 +427,19 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     verbose: verbose ?? (() => {}),
     socketPath: nodeSocketPath,
   });
+  if (!existing || multiKey(existing)) {
+    const config = await syncOwnedModel(nodeClient, {
+      configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
+      designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
+    }, existing, canonicalVocabulary);
+    writeConfig(config, configPath, priorConfig);
+    const consent = config.appIdentityEnforce === false
+      ? { state: "skipped", reason: "enforce_off" } as const
+      : await establishConsentInline({nodeUrl,userHash,print,verbose,socketPath:nodeSocketPath,
+        nonInteractiveGrant:opts.grantConsent,...opts.consent});
+    printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
+    return { config, bootstrapped, consent };
+  }
   const schemaHashes: Record<string, string> = {};
 
   // Checkpoint the config DURING declaration, not only after it.
@@ -485,7 +506,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // write. Idempotent (skips silently when a live capability is already on
   // disk); non-TTY safe (skips with a one-line note for CI/scripts); falls
   // back to the manual instruction when `folddb` is not on PATH.
-  print(`[6/${STEPS}] establishing consent (one-time grant for fbrain's namespace)`);
+  print(`[6/${STEPS}] establishing consent (one-time grant for brain's namespace)`);
   let consent: Awaited<ReturnType<typeof establishConsentInline>>;
   if (localDeclare.supported) {
     print(
@@ -546,9 +567,9 @@ function buildConfig(parts: {
   };
   // Persist the owner-session socket path that init actually connected through
   // (app-isolation flip, fold#739). When set, later commands attest against the
-  // same node without re-supplying FBRAIN_FOLDDB_SOCKET or LASTDB_HOME. Unset
+  // same node without re-supplying BRAIN_FOLDDB_SOCKET or LASTDB_HOME. Unset
   // → omitted, and attestation falls back to the default resolution (checking
-  // FBRAIN_FOLDDB_SOCKET env, then deriving from LASTDB_HOME/FOLDDB_HOME).
+  // BRAIN_FOLDDB_SOCKET env, then deriving from LASTDB_HOME/FOLDDB_HOME).
   if (parts.nodeSocketPath && parts.nodeSocketPath.length > 0) {
     config.nodeSocketPath = parts.nodeSocketPath;
   }
@@ -559,7 +580,7 @@ type InitNodeClient = ReturnType<typeof newNodeClient>;
 
 function isDeclareConflict(err: unknown): boolean {
   return (
-    err instanceof FbrainError &&
+    err instanceof BrainError &&
     (err.code === "node_http_409" || err.code === "ambiguous_schema_name")
   );
 }
@@ -600,7 +621,7 @@ async function tryDeclareOwnedSchemasLocally(
 ): Promise<{ supported: true } | { supported: false; reason: string }> {
   const width = declareConcurrency();
   print(
-    `[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} fbrain-owned schemas via node ` +
+    `[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} brain-owned schemas via node ` +
       `(${width} at a time)`,
   );
   if (!nodeClient.declareAppSchema) {
@@ -708,7 +729,7 @@ async function declareOneOwnedSchema(
     // (reuse / expand / compose / mint) whose `canonical` is the schema-service
     // identity hash. Accept any successful declare; only reject missing canonical.
     if (!declared.canonical || typeof declared.canonical !== "string") {
-      throw new FbrainError({
+      throw new BrainError({
         code: "app_schema_declare_missing_canonical",
         message:
           `Node declared ${entry.schema.schema.descriptive_name} without a canonical ` +
@@ -730,7 +751,7 @@ async function declareOneOwnedSchema(
     );
     return "ok";
   } catch (err) {
-    if (err instanceof FbrainError && err.code === "node_http_404") return "unsupported";
+    if (err instanceof BrainError && err.code === "node_http_404") return "unsupported";
     if (!isDeclareConflict(err)) throw err;
     const recovered = await recoverDeclaredCanonical(nodeClient, entry, canonicalVocabulary);
     if (recovered) {
@@ -788,11 +809,11 @@ async function registerAndLoadSchemasFromCatalog(opts: {
       }
       print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${schemaConfigKeys(entry).join(", ")})`);
     } catch (err) {
-      // Cert-gated re-POST of an already-published fbrain/* schema — defer it
+      // Cert-gated re-POST of an already-published brain/* schema — defer it
       // and resolve the canonical hash from the node catalog after load. Same
       // behavior under enforce-on and enforce-off; the schema identity is
       // identical, only the write-time auth differs.
-      if (err instanceof FbrainError && err.code === "schema_cert_required") {
+      if (err instanceof BrainError && err.code === "schema_cert_required") {
         certBlocked.push(entry);
         print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → published already (cert-gated re-POST skipped; resolving from node)`);
       } else {
@@ -801,7 +822,7 @@ async function registerAndLoadSchemasFromCatalog(opts: {
     }
   }
 
-  // Load schemas into the node — scoped to JUST fbrain's schemas (fold #877),
+  // Load schemas into the node — scoped to JUST brain's schemas (fold #877),
   // so a fresh node stays clean instead of pulling the entire global published
   // catalog. This is only the compatibility path for nodes that predate local
   // app-schema declaration.
@@ -818,13 +839,13 @@ async function registerAndLoadSchemasFromCatalog(opts: {
   }
   const loaded = loadResult.schemas_loaded_to_db;
   if (loaded <= loadScope.length) {
-    print(`[4/${STEPS}] loading schemas into the node (scoped to fbrain's ${loadScope.length})`);
+    print(`[4/${STEPS}] loading schemas into the node (scoped to brain's ${loadScope.length})`);
     print(`        loaded ${loaded}/${loadScope.length} schemas (failed_schemas empty ✓)`);
   } else {
-    print(`[4/${STEPS}] loading fbrain's ${loadScope.length} schemas into the node`);
+    print(`[4/${STEPS}] loading brain's ${loadScope.length} schemas into the node`);
     print(
       `        node predates scoped load (fold #877) — loaded the full published catalog (${loaded}); ` +
-        `fbrain's ${loadScope.length} schemas resolved from it ✓`,
+        `brain's ${loadScope.length} schemas resolved from it ✓`,
     );
   }
 
@@ -837,13 +858,13 @@ async function registerAndLoadSchemasFromCatalog(opts: {
         for (const key of schemaConfigKeys(entry)) {
           schemaHashes[key] = hash;
         }
-        print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published fbrain/* schema; no DevCert needed)`);
+        print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published brain/* schema; no DevCert needed)`);
       } else {
         stillMissing.push(entry.schema.schema.descriptive_name);
       }
     }
     if (stillMissing.length > 0) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "schema_cert_required",
         message:
           `Schema service rejected publish with 401 cert_required, and these schemas are not yet ` +
@@ -890,19 +911,19 @@ export function printNextSteps(
   print(`  3. Find it again:              brain search "<term>"   ·   brain ask "<question>"`);
   print(`  4. If something looks wrong:   brain doctor`);
   print(`  5. Connect it to your AI agent: brain mcp install`);
-  print(`        (one shot — gives your agent the fbrain_* tools by registering fbrain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; \`brain-mcp\` is already on your PATH from the global \`bun add -g\` install — from a contributor source checkout, run \`bun link\` first)`);
-  print(`        → then \`brain doctor --mcp\` to confirm the agent surface boots and serves the fbrain_* tools. (Doing it by hand instead? \`claude mcp add brain brain-mcp\` then \`brain mcp instructions >> CLAUDE.md\`.)`);
+  print(`        (one shot — gives your agent the brain_* tools by registering brain with Claude Code AND appends the usage instructions to ./CLAUDE.md so it actually uses the brain; \`brain-mcp\` is already on your PATH from the global \`bun add -g\` install — from a contributor source checkout, run \`bun link\` first)`);
+  print(`        → then \`brain doctor --mcp\` to confirm the agent surface boots and serves the brain_* tools. (Doing it by hand instead? \`claude mcp add brain brain-mcp\` then \`brain mcp instructions >> CLAUDE.md\`.)`);
   print(`  Data lives on the node at ${formatNodeTarget(ctx.nodeUrl)} (config: ${ctx.configPath}).`);
 
   // When consent wasn't established (non-TTY scripted/CI run without
   // --grant-consent), the first write will need a grant — point at the
   // one-shot path so the operator isn't surprised mid-script.
   if (ctx.consent.state === "skipped" && ctx.consent.reason === "non_tty") {
-    print(`  Note: running non-interactively — re-run \`fbrain init --grant-consent\` to authorize writes in one shot.`);
+    print(`  Note: running non-interactively — re-run \`brain init --grant-consent\` to authorize writes in one shot.`);
   }
   if (ctx.consent.state === "skipped" && ctx.consent.reason === "no_folddb_bin") {
     print(
-      `  Note: \`lastdb\` was not found, so \`--grant-consent\` could not authorize writes. Install the lastdb CLI, then re-run \`fbrain init --grant-consent\`.`,
+      `  Note: \`lastdb\` was not found, so \`--grant-consent\` could not authorize writes. Install the lastdb CLI, then re-run \`brain init --grant-consent\`.`,
     );
   }
 }
@@ -935,7 +956,7 @@ export async function probeWithRetry(
   } catch (err) {
     if (!isUnreachable(err)) throw err;
     // Budget precedence (most explicit wins): a test/caller-injected
-    // `retryDelaysMs` → the `FBRAIN_INIT_RETRY_DELAYS_MS` env override → the
+    // `retryDelaysMs` → the `BRAIN_INIT_RETRY_DELAYS_MS` env override → the
     // interactivity-aware default. Non-interactive runs (no TTY — the CI /
     // agent / scripted install path) fail fast on a down node after surfacing
     // the actionable hint; interactive runs keep the long compile-wait budget.
@@ -988,7 +1009,7 @@ export function resolveUrls(
   const healed: string[] = [];
 
   // When no explicit --node-url is given and there's no existing config URL to
-  // reuse, default to the loopback marker. fbrain reaches a local node ONLY
+  // reuse, default to the loopback marker. brain reaches a local node ONLY
   // over its Unix socket; the URL is not dialed as TCP.
   let nodeUrl: string;
   if (opts.nodeUrl) {
@@ -1018,7 +1039,7 @@ export function resolveUrls(
 }
 
 function isUnreachable(err: unknown): boolean {
-  return err instanceof FbrainError && err.code === "service_unreachable";
+  return err instanceof BrainError && err.code === "service_unreachable";
 }
 
 // Option C gate: only reuse a saved userHash when the config carries

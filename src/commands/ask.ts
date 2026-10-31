@@ -345,7 +345,7 @@ export async function askCmd(opts: AskOptions): Promise<AskResult> {
 
   if (resolved.length === 0) {
     const hint = opts.agent
-      ? "hint:  nothing matched — try fewer or different terms, or create a record with `fbrain_put`"
+      ? "hint:  nothing matched — try fewer or different terms, or create a record with `brain_put`"
       : "hint:  nothing matched — try fewer or different terms";
     if (opts.json) {
       print(JSON.stringify(payload));

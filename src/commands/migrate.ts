@@ -1,4 +1,4 @@
-// `fbrain migrate` — schema-evolution playbook command (G15).
+// `brain migrate` — schema-evolution playbook command (G15).
 //
 // fold_db is append-only and computes a schema's identity hash from
 // `(descriptive_name, sorted_field_names)` (see fold_db
@@ -11,19 +11,19 @@
 // The dance this command implements (see
 // docs/g15-schema-evolution-playbook.md):
 //   1. Build a new AddSchemaRequest by cloning the base and appending
-//      the new field; bump descriptive_name (FbrainKindNote_v2, etc).
+//      the new field; bump descriptive_name (BrainKindNote_v2, etc).
 //   2. Register the new schema with the schema service → new hash.
 //   3. Load schemas into the node (POST /api/schemas/load).
-//   4. Write a manifest under ~/.fbrain/migrations/ as `in_progress`.
+//   4. Write a manifest under ~/.brain/migrations/ as `in_progress`.
 //   5. Enumerate records under the old hash; for each, probe new hash;
 //      if absent, re-put with the new field at the configured default.
-//   6. Atomic config swap: rewrite ~/.fbrain/config.json with all
+//   6. Atomic config swap: rewrite ~/.brain/config.json with all
 //      affected schemaHashes entries pointing at the new hash, via
 //      tmp-file + rename.
 //   7. Mark manifest `complete`.
 //
 // Crash recovery: if step 5 dies mid-flight, the manifest stays
-// `in_progress`; `fbrain migrate --resume <manifest-id>` re-enters at
+// `in_progress`; `brain migrate --resume <manifest-id>` re-enters at
 // step 5 and finishes through step 7. Resume is idempotent — a single
 // bulk `listRecords(to_hash)` per affected type pre-builds the skip
 // set, then the loop checks each record's slug in O(1).
@@ -37,7 +37,7 @@ import { join, dirname, basename } from "node:path";
 
 import {
   newSchemaServiceClient,
-  FbrainError,
+  BrainError,
   type NodeClient,
   type Verbose,
 } from "../client.ts";
@@ -53,7 +53,7 @@ import {
   nowIso,
   schemaHashFor,
   updateFieldsFrom,
-  type FbrainRecord,
+  type BrainRecord,
 } from "../record.ts";
 import {
   UNIQUE_SCHEMAS,
@@ -119,9 +119,9 @@ export async function migrateCmd(opts: MigrateOptions): Promise<MigrateResult> {
       return { manifest };
     }
     if (manifest.status === "dry_run") {
-      throw new FbrainError({
+      throw new BrainError({
         code: "resume_dry_run",
-        message: `Cannot --resume a dry-run manifest (${manifest.id}). Re-run \`fbrain migrate --add-field\` to start a real migration.`,
+        message: `Cannot --resume a dry-run manifest (${manifest.id}). Re-run \`brain migrate --add-field\` to start a real migration.`,
       });
     }
     return resumeMigration({
@@ -170,10 +170,10 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   const fieldType: FieldType = parseFieldType(mode.fieldSpec);
   const defaultValue = validateDefault(fieldType, mode.defaultRaw);
   if (baseSchema.schema.fields.includes(mode.fieldName)) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "field_already_present",
       message: `Field "${mode.fieldName}" already exists on schema "${baseSchema.schema.descriptive_name}".`,
-      hint: "Pick a new field name or check `fbrain migrate --status` for a prior migration.",
+      hint: "Pick a new field name or check `brain migrate --status` for a prior migration.",
     });
   }
 
@@ -238,7 +238,7 @@ async function startAddFieldMigration(ctx: StartCtx): Promise<MigrateResult> {
   const { node } = newWriteClientFromCfg(cfg, verbose);
   const loadResult = await node.loadSchemas();
   if (loadResult.failed_schemas.length > 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "schema_load_partial",
       message: `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
       hint: "check the node logs; the new schema is registered but not loaded.",
@@ -340,7 +340,7 @@ type RePutCtx = {
   cfg: Config;
   node: NodeClient;
   manifest: MigrationManifest;
-  records: Array<{ type: RecordType; record: FbrainRecord }>;
+  records: Array<{ type: RecordType; record: BrainRecord }>;
   defaultValue: unknown;
   print: (line: string) => void;
   verbose?: Verbose;
@@ -387,7 +387,7 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
 
   for (const { type, record } of records) {
     if (ctx.failAfterRecords !== undefined && writtenThisRun >= ctx.failAfterRecords) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "injected_failure",
         message: `Injected mid-flight failure after ${writtenThisRun} record writes (test hook).`,
       });
@@ -423,7 +423,7 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
   }
 
   // [6/7] Atomic config swap. We write a sibling temp file then
-  // rename(2). The renamed file replaces ~/.fbrain/config.json
+  // rename(2). The renamed file replaces ~/.brain/config.json
   // atomically on the same filesystem.
   const configPath = ctx.configPath ?? defaultConfigPath();
   const swapped: Config = {
@@ -454,7 +454,7 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
       ` · field=${manifest.field_added}=${JSON.stringify(defaultValue)}`,
   );
   print(
-    `note: update src/schemas.ts to add "${manifest.field_added}" to the affected schema so the next \`fbrain init\` keeps the new hash.`,
+    `note: update src/schemas.ts to add "${manifest.field_added}" to the affected schema so the next \`brain init\` keeps the new hash.`,
   );
 }
 
@@ -474,7 +474,7 @@ function resolveScope(type: RecordType): ScopeInfo {
       };
     }
   }
-  throw new FbrainError({
+  throw new BrainError({
     code: "unknown_record_type",
     message: `RecordType "${type}" is not present in UNIQUE_SCHEMAS — internal mismatch.`,
   });
@@ -483,7 +483,7 @@ function resolveScope(type: RecordType): ScopeInfo {
 function lookupUniqueSchema(schemaKey: string): (typeof UNIQUE_SCHEMAS)[number] {
   const found = UNIQUE_SCHEMAS.find((e) => e.key === schemaKey);
   if (!found) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "manifest_unknown_schema_key",
       message: `Manifest references schema_key "${schemaKey}" but UNIQUE_SCHEMAS has no such entry.`,
       hint: "If the schema list changed, the manifest is for a retired schema — re-run init or trash the manifest.",
@@ -506,11 +506,11 @@ async function enumerateAllRecords(
   node: NodeClient,
   scope: ScopeInfo,
   fromHash: string,
-): Promise<Array<{ type: RecordType; record: FbrainRecord }>> {
+): Promise<Array<{ type: RecordType; record: BrainRecord }>> {
   // For Phase 6 (kind-discriminated) we still walk per-type since
   // listRecords already filters by `kind` for us. For Design/Task this
   // is a single iteration.
-  const out: Array<{ type: RecordType; record: FbrainRecord }> = [];
+  const out: Array<{ type: RecordType; record: BrainRecord }> = [];
   for (const t of scope.affectedTypes) {
     // Admin migrate source walk: explicit full drain of from_hash.
     const list = await listRecordsAdminScan(node, t, fromHash);
@@ -528,7 +528,7 @@ async function enumerateAllRecords(
 // distinct from any prior registration.
 export function buildMigratedFields(
   type: RecordType,
-  record: FbrainRecord,
+  record: BrainRecord,
   fieldAdded: string,
   defaultValue: unknown,
   now: string,
@@ -564,7 +564,7 @@ async function assertFieldRegistered(
 ): Promise<void> {
   const registered = await schemaClient.getSchemaByHash(hash);
   if (!registered) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "post_register_schema_missing",
       message: `Registered schema ${hash} was not retrievable from the schema service.`,
       hint: "Check the schema service logs — registration claimed success but lookup returned 404.",
@@ -575,7 +575,7 @@ async function assertFieldRegistered(
   if (!registered.fields.includes(fieldName)) missing.push(fieldName);
   if (!registered.fields.includes(markerName)) missing.push(markerName);
   if (missing.length > 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "schema_overlap_merge",
       message:
         `Schema service collapsed "${descriptiveName}" onto an existing canonical hash ` +
@@ -595,14 +595,14 @@ async function assertFieldRegistered(
 // Register the new (field-added) schema, re-framing the schema-service
 // publish gate (`401 cert_required`) for the migrate context.
 //
-// `client.ts` raises a `schema_cert_required` FbrainError carrying the
+// `client.ts` raises a `schema_cert_required` BrainError carrying the
 // shared `CERT_REQUIRED_HINT` for every schema-publish 401. That hint is
 // written for the INIT flow — "a fresh consumer is expected to skip
 // publishing entirely; init resolves the already-published canonical
 // hashes for you." That framing is actively wrong for `migrate`: migrate's
 // entire job is to publish a NEW schema hash (<Type>_v<N>), so there is no
 // "skip publishing" path and no "init resolves it" out. A consumer who runs
-// the documented `fbrain migrate` example would otherwise dead-end on
+// the documented `brain migrate` example would otherwise dead-end on
 // guidance that cannot apply to the command they ran. Re-frame it as the
 // maintainer-only operation it is. (We do NOT touch the init/catalog-load
 // use of CERT_REQUIRED_HINT — that flow's framing is correct there.)
@@ -615,19 +615,19 @@ async function registerNewSchema(
   try {
     return await schemaClient.registerSchema(newSchema);
   } catch (err) {
-    if (err instanceof FbrainError && err.code === "schema_cert_required") {
-      throw new FbrainError({
+    if (err instanceof BrainError && err.code === "schema_cert_required") {
+      throw new BrainError({
         code: "migrate_cert_required",
         message:
           `Schema evolution is a maintainer-only operation. Adding a field publishes a new ` +
           `schema hash (${newDescriptiveName}), which requires a maintainer DevCert that the ` +
           `schema service (${cfg.schemaServiceUrl}) rejected (401 cert_required).`,
         hint:
-          "As a consumer you don't run `fbrain migrate` — fbrain's canonical fbrain/* schemas " +
-          "are published centrally, and `fbrain init` resolves them for you. If you ARE an " +
-          "fbrain maintainer, you need a DevCert for this schema service (see app_identity v3.1 " +
+          "As a consumer you don't run `brain migrate` — brain's canonical brain/* schemas " +
+          "are published centrally, and `brain init` resolves them for you. If you ARE an " +
+          "brain maintainer, you need a DevCert for this schema service (see app_identity v3.1 " +
           "/ the developer-enroll flow). To target a local/dev schema service you control, re-run " +
-          "`fbrain init --schema-service-url <URL>` to pin it, then migrate against that.",
+          "`brain init --schema-service-url <URL>` to pin it, then migrate against that.",
         cause: err,
       });
     }

@@ -24,13 +24,13 @@
 //
 // A CUT SNAPSHOT IS NOT A RECORD. The types enforce it: a reader gets an
 // `IndexSnapshot`, which is either a whole record or a `SnapshotSummary` with no
-// `body`. A summary is not assignable to `FbrainRecord`, so a function that
+// `body`. A summary is not assignable to `BrainRecord`, so a function that
 // needs the body cannot be handed one by mistake. To get the record, complete it
 // with a keyed read of the product schema (`completeSnapshots` in record.ts),
 // which retries and then THROWS when the record cannot be read. It never
 // returns the cut snapshot as if it were whole.
 
-import { TOMBSTONE_TAG, type FbrainRecord } from "./record.ts";
+import { TOMBSTONE_TAG, type BrainRecord } from "./record.ts";
 
 /** Largest index payload atom, in bytes as the node measures it (the JSON-quoted string). */
 export const INDEX_PAYLOAD_MAX_BYTES = 8 * 1024;
@@ -89,7 +89,7 @@ export type IndexPayloadOptions = {
 };
 
 function cutOtherFields(
-  record: FbrainRecord,
+  record: BrainRecord,
   out: Record<string, unknown>,
   head: number,
 ): string[] {
@@ -104,7 +104,7 @@ function cutOtherFields(
 }
 
 /** Slug, status, timestamps, a short title and a bounded list of short tags. */
-function keysOnly(record: FbrainRecord, truncatedKey: string): Record<string, unknown> {
+function keysOnly(record: BrainRecord, truncatedKey: string): Record<string, unknown> {
   const out: Record<string, unknown> = {
     slug: record.slug,
     title: utf8Head(typeof record.title === "string" ? record.title : "", MINIMAL_TITLE_BYTES),
@@ -133,7 +133,7 @@ function keysOnly(record: FbrainRecord, truncatedKey: string): Record<string, un
 
 /** The JSON payload for one record under the rule above. Always bounded. */
 export function indexPayload(
-  record: FbrainRecord,
+  record: BrainRecord,
   opts: IndexPayloadOptions = {},
 ): string {
   const truncatedKey = opts.truncatedKey ?? INDEX_TRUNCATED_KEY;
@@ -194,7 +194,7 @@ export function isPayloadTruncated(
 /**
  * The fields every index snapshot carries and a reader may use without reading
  * the record. There is no `body` field: `body` is typed as maybe-missing, so a
- * summary cannot be passed where a `FbrainRecord` is required.
+ * summary cannot be passed where a `BrainRecord` is required.
  */
 export type SnapshotSummary = {
   slug: string;
@@ -209,7 +209,7 @@ export type SnapshotSummary = {
 
 /** One parsed index payload: the whole record, or a cut summary that needs completing. */
 export type IndexSnapshot =
-  | { cut: false; record: FbrainRecord }
+  | { cut: false; record: BrainRecord }
   | { cut: true; summary: SnapshotSummary; cutFields: string[] };
 
 /** The summary fields of a snapshot, whether it was cut or not. */
@@ -229,7 +229,7 @@ export function snapshotFromParsed(
   if (typeof obj.slug !== "string" || obj.slug.length === 0) return null;
   const cutFields = truncatedFieldsOf(obj, truncatedKey);
   if (cutFields.length === 0) {
-    return { cut: false, record: parsed as FbrainRecord };
+    return { cut: false, record: parsed as BrainRecord };
   }
   const summary: { [key: string]: unknown } = { ...obj };
   delete summary.body;

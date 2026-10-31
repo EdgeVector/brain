@@ -1,4 +1,4 @@
-import { FbrainError } from "./client.ts";
+import { BrainError } from "./client.ts";
 
 export type FieldProjectionSource = Record<string, unknown>;
 
@@ -10,7 +10,7 @@ export function parseFieldProjection(raw: string | string[] | undefined): string
     .map((value) => value.trim())
     .filter((value) => value.length > 0);
   if (fields.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "invalid_field",
       message: "--field requires at least one non-empty field path.",
     });
@@ -82,8 +82,8 @@ function parsePath(path: string): Array<string | number> {
   return segments;
 }
 
-function invalidFieldPath(path: string): FbrainError {
-  return new FbrainError({
+function invalidFieldPath(path: string): BrainError {
+  return new BrainError({
     code: "invalid_field",
     message: `Invalid --field path "${path}".`,
     hint: "Use dot paths like `slug` or `extra_fields.program`, and array indexes like `tags[0]`.",

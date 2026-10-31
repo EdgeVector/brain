@@ -1,7 +1,7 @@
-// `fbrain <type> new <slug>` — table-driven record creator.
+// `brain <type> new <slug>` — table-driven record creator.
 //
 // One creator for all record types. Pre-Phase-6 only `design new` and
-// `task new` existed as ergonomic verbs; later types were reachable only via `fbrain put
+// `task new` existed as ergonomic verbs; later types were reachable only via `brain put
 // --type <t>` even though their schemas were fully registered. This shared
 // implementation closes that gap without duplicating the slug-exists guard,
 // the /api/query top-100 read-flake hedge, or the parent-design dangling-ref
@@ -11,7 +11,7 @@
 // common option set. The flag is rejected loudly on non-task types rather
 // than silently ignored.
 
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { capitalize } from "../format.ts";
@@ -49,7 +49,7 @@ export type RecordNewOptions = {
   force?: boolean;
   verbose?: Verbose;
   // Tunables for the post-write VECTOR-index confirmation (read-after-write
-  // `fbrain search` parity — see `confirmVectorIndexed`). Production callers
+  // `brain search` parity — see `confirmVectorIndexed`). Production callers
   // leave this unset and inherit the short bounded budget; tests pin attempts +
   // inject a no-op sleep so a timed-out probe is observable without backoff.
   vectorVerifyOptions?: ReadRetryOptions;
@@ -57,7 +57,7 @@ export type RecordNewOptions = {
 
 export type RecordNewResult = {
   // True when the record persisted but the bounded vector-index confirmation
-  // timed out — an immediate `fbrain search` may miss it. Mirrors
+  // timed out — an immediate `brain search` may miss it. Mirrors
   // `PutResult.indexPending`; the CLI prints an honest "index still catching
   // up" note and surfaces it under `--json`.
   indexPending: boolean;
@@ -75,10 +75,10 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
   const entry = RECORDS[opts.type];
 
   if (opts.designSlug && opts.designSlug.length > 0 && !entry.hasDesignSlug) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "design_flag_unsupported",
       message: `--design is only valid for task records (got ${opts.type}).`,
-      hint: "Drop --design, or use `fbrain task new` to link a task to a parent design.",
+      hint: "Drop --design, or use `brain task new` to link a task to a parent design.",
     });
   }
 
@@ -92,7 +92,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     // point-read put.ts uses for its existence check.
     const existing = await findBySlug(node, opts.type, hash, opts.slug);
     if (existing) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "slug_already_exists",
         message: `${capitalize(opts.type)} with slug "${opts.slug}" already exists.`,
         hint:
@@ -111,10 +111,10 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
     const designHash = schemaHashFor("design", opts.cfg);
     const parent = await findBySlug(node, "design", designHash, opts.designSlug);
     if (!parent) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "dangling_design_slug",
         message: `Cannot link task "${opts.slug}" to design "${opts.designSlug}" — that design does not exist.`,
-        hint: "Create the design first (`fbrain design new ...`), or omit --design.",
+        hint: "Create the design first (`brain design new ...`), or omit --design.",
       });
     }
   }
@@ -135,7 +135,7 @@ export async function recordNew(opts: RecordNewOptions): Promise<RecordNewResult
 
   // --force intentionally skips the lookup and stamps a fresh created_at.
   // It's a deliberate "re-create from scratch" — callers wanting upsert
-  // semantics (preserve created_at) should use `fbrain put` instead.
+  // semantics (preserve created_at) should use `brain put` instead.
   const now = nowIso();
   const fields: Record<string, unknown> = {
     slug: opts.slug,

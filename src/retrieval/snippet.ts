@@ -1,7 +1,7 @@
-// Deterministic body-snippet extraction for `fbrain search` / `fbrain ask`
+// Deterministic body-snippet extraction for `brain search` / `brain ask`
 // result rows. Pure retrieval-UX: given the (already-hydrated) record body
 // and the user's query, return a short matching window so the answer is
-// visible inline under each hit — no second `fbrain get`, and NO LLM (this
+// visible inline under each hit — no second `brain get`, and NO LLM (this
 // is plain substring extraction, distinct from the deliberately-dropped LLM
 // query expansion).
 //

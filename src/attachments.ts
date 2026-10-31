@@ -1,5 +1,5 @@
 import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
-// File attachments for fbrain knowledge records.
+// File attachments for brain knowledge records.
 //
 // Model (additive by construction — no existing schema changes, no record
 // migration):
@@ -26,7 +26,7 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
 
-import { FbrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
+import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
 import { writeConfig, type Config } from "./config.ts";
 import { nowIso } from "./record.ts";
 import {
@@ -120,7 +120,7 @@ export function mediaTypeFor(filename: string): string {
 }
 
 // Lazy schema declare (the admin-snapshot pattern): installs that ran
-// `fbrain init` before attachments existed get the index + file schemas
+// `brain init` before attachments existed get the index + file schemas
 // minted on first use, without a re-init. Persists the canonical hashes to
 // config. The legacy v1 blob schema is intentionally NOT declared here — an
 // install only has legacy blob records if it already declared that schema
@@ -134,10 +134,10 @@ export async function ensureAttachmentSchemas(
   const haveFile = cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY];
   if (haveIndex && haveFile) return { indexHash: haveIndex, fileHash: haveFile };
   if (!node.declareAppSchema) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_schema_unavailable",
-      message: "This node cannot declare the fbrain attachment schemas.",
-      hint: "Run `fbrain init` against a current Mini node, then retry.",
+      message: "This node cannot declare the brain attachment schemas.",
+      hint: "Run `brain init` against a current Mini node, then retry.",
     });
   }
   const declaredIndex =
@@ -241,10 +241,10 @@ async function writeAttachmentIndex(
 ): Promise<void> {
   const schemaHash = cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY];
   if (!schemaHash) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_schema_unavailable",
       message: "Attachment index schema hash missing from config.",
-      hint: "Run `fbrain init`, then retry.",
+      hint: "Run `brain init`, then retry.",
     });
   }
   const key = attachmentIndexSlug(type, slug);
@@ -275,36 +275,36 @@ type BlobRecord = {
 function requireFileSchemaHash(cfg: Config): string {
   const schemaHash = cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY];
   if (!schemaHash) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_schema_unavailable",
       message: "Attachment file schema hash missing from config.",
-      hint: "Run `fbrain init` (or any `fbrain attach`), then retry.",
+      hint: "Run `brain init` (or any `brain attach`), then retry.",
     });
   }
   return schemaHash;
 }
 
 // Map file-route failures. Local write holds differ from legacy cloud setup.
-function filePlaneError(path: string, status: number, body: string): FbrainError {
+function filePlaneError(path: string, status: number, body: string): BrainError {
   const excerpt = body.slice(0, 300);
   if (status === 501) {
-    return new FbrainError({
+    return new BrainError({
       code: "attachment_file_plane_unavailable",
       message: `Node ${path} says cloud-sync support is not compiled into this daemon.`,
       hint: "Attachments need a cloud-sync-capable lastdbd. Upgrade the node binary.",
     });
   }
   if (path === "/api/db/put-blob-local" && status === 409) {
-    return new FbrainError({code:"attachment_local_file_write_paused",message:"LastDB paused local file writes.",hint:"Read the node status before the next attempt."});
+    return new BrainError({code:"attachment_local_file_write_paused",message:"LastDB paused local file writes.",hint:"Read the node status before the next attempt."});
   }
   if (status === 409) {
-    return new FbrainError({
+    return new BrainError({
       code: "attachment_file_plane_unavailable",
       message: `Node ${path} says cloud sync is not configured on this node.`,
       hint: "Attachment bytes upload through cloud sync. Configure/enable cloud sync, then retry.",
     });
   }
-  return new FbrainError({
+  return new BrainError({
     code: "attachment_file_plane_error",
     message: `Node ${path} failed (${status}): ${excerpt}`,
     hint: "Retry; if it persists, inspect the node logs for the file-blob plane failure.",
@@ -328,7 +328,7 @@ function pointerFromFileRow(row: QueryRow, hash: string): Record<string, unknown
     typeof pointer !== "object" ||
     typeof (pointer as Record<string, unknown>).$lastdb_file !== "object"
   ) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_pointer_invalid",
       message: `Attachment file record sha256:${hash} does not carry a $lastdb_file pointer.`,
       hint: "The pointer record is corrupt. Re-attach the file from the original source.",
@@ -366,7 +366,7 @@ export async function putAttachmentBlob(
       ? (pointer as Record<string,unknown>).$lastdb_file : null;
     if (!marker || typeof marker !== "object" || fileBlob?.file_hash !== hash
       || typeof fileBlob.blob_ref !== "string" || !/^sha256:[a-f0-9]{64}$/.test(fileBlob.blob_ref)) {
-      throw new FbrainError({code:"attachment_pointer_invalid",message:"Local file storage returned an invalid attachment pointer."});
+      throw new BrainError({code:"attachment_pointer_invalid",message:"Local file storage returned an invalid attachment pointer."});
     }
     await node.createRecord({schemaHash,keyHash:hash,fields:{
       content_hash:hash,size:String(bytes.length),media_type:mediaType,file:pointer,created_at:nowIso(),
@@ -403,7 +403,7 @@ export async function putAttachmentBlob(
       ? ((res.json as Record<string, unknown>).file_blob as Record<string, unknown> | undefined)
       : undefined;
   if (!fileBlob || typeof fileBlob.blob_ref !== "string") {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_file_plane_error",
       message: `Node /api/db/file-blob returned an incomplete response: ${res.body.slice(0, 300)}.`,
       hint: "Upgrade the node or inspect the file-blob response shape.",
@@ -430,7 +430,7 @@ export async function getAttachmentBlob(
       const pointer = pointerFromFileRow(row, hash);
       const res = await node.rawCall("POST", "/api/db/fetch-file-blob", { pointer });
       if (res.status === 404) {
-        throw new FbrainError({
+        throw new BrainError({
           code: "attachment_blob_missing",
           message: `Attachment blob sha256:${hash} was not found locally or in remote CAS.`,
           hint: "The blob may not have synced yet; retry, or re-attach the file.",
@@ -459,7 +459,7 @@ export async function getAttachmentBlob(
     }
   }
 
-  throw new FbrainError({
+  throw new BrainError({
     code: "attachment_blob_missing",
     message: `Attachment blob sha256:${hash} is referenced but not present on this node.`,
     hint: "The blob record may not have synced yet; retry, or re-attach the file.",
@@ -469,7 +469,7 @@ export async function getAttachmentBlob(
 function verifiedBlob(hash: string, bytes: Uint8Array, mediaType: string): BlobRecord {
   const got = sha256HexOf(bytes);
   if (got !== hash) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_integrity_error",
       message: `Attachment blob sha256:${hash} decoded to bytes hashing ${got}.`,
       hint: "The stored blob is corrupt. Re-attach the file from the original source.",
@@ -505,19 +505,19 @@ export async function attachToRecord(opts: {
   const { node, cfg, type, slug, bytes } = opts;
   const name = basename(opts.name);
   if (name.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_bad_name",
       message: "Attachment name is empty.",
     });
   }
   if (bytes.length === 0) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_empty_file",
       message: `Refusing to attach zero-byte file "${name}".`,
     });
   }
   if (bytes.length > MAX_ATTACHMENT_BYTES) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_too_large",
       message: `"${name}" is ${bytes.length} bytes; the attachment cap is ${MAX_ATTACHMENT_BYTES} (32 MiB).`,
       hint: "Store the file elsewhere and attach a smaller pointer document, or split it.",
@@ -532,7 +532,7 @@ export async function attachToRecord(opts: {
     return { entry: prior, blobDeduplicated: true, replaced: false };
   }
   if (prior && opts.force !== true) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_name_conflict",
       message: `"${name}" is already attached to ${type} ${slug} with different content (${prior.blob_ref}).`,
       hint: "Pass --force to replace it, or attach under a different name.",
@@ -570,10 +570,10 @@ export async function detachFromRecord(opts: {
   const entries = index?.entries ?? [];
   const match = findEntry(entries, nameOrRef);
   if (match === null) {
-    throw new FbrainError({
+    throw new BrainError({
       code: "attachment_not_found",
       message: `No attachment "${nameOrRef}" on ${type} ${slug}.`,
-      hint: `Run \`fbrain attachments ${slug}\` to list what is attached.`,
+      hint: `Run \`brain attachments ${slug}\` to list what is attached.`,
     });
   }
   const next = entries.filter((e) => e !== match);

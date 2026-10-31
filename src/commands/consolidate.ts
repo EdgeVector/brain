@@ -1,6 +1,6 @@
 // `brain consolidate` is retired with the lifecycle schemas.
 
-import { FbrainError, type Verbose } from "../client.ts";
+import { BrainError, type Verbose } from "../client.ts";
 import type { Config } from "../config.ts";
 
 export const PROVE_TOPIC = "lifecycle-ship-proof";
@@ -28,7 +28,7 @@ export async function consolidateCmd(
   opts: ConsolidateOptions,
 ): Promise<ConsolidateResult> {
   void opts;
-  throw new FbrainError({
+  throw new BrainError({
     code: "lifecycle_retired",
     message: "The lifecycle schema is retired. brain consolidate does not run.",
   });

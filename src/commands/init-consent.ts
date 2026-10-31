@@ -1,10 +1,10 @@
-// Inline consent handshake for `fbrain init`.
+// Inline consent handshake for `brain init`.
 //
-// Removes the "two-terminal dance" on the brew happy path: today `fbrain init`
-// stops at "schemas loaded" and the FIRST `fbrain put` (or design/task new)
-// has to print "First-run setup — run: `folddb consent grant fbrain` in your
+// Removes the "two-terminal dance" on the brew happy path: today `brain init`
+// stops at "schemas loaded" and the FIRST `brain put` (or design/task new)
+// has to print "First-run setup — run: `folddb consent grant brain` in your
 // terminal" and poll while the user opens a second terminal. For the
-// single-user local CLI (the person running fbrain IS the node owner), that's
+// single-user local CLI (the person running brain IS the node owner), that's
 // a papercut.
 //
 // What this module adds at the END of init (after schemas load):
@@ -19,7 +19,7 @@
 //      polling loop still completes when the user runs it.
 //   5. Non-TTY (CI/scripts) or declined prompt: skip with a one-line note;
 //      the existing in-write polling path stays as the fallback.
-//   6. `nonInteractiveGrant: true` (driven by `fbrain init --grant-consent`):
+//   6. `nonInteractiveGrant: true` (driven by `brain init --grant-consent`):
 //      same handshake without a TTY — request-consent, shell out, poll —
 //      so scripted / CI / agent installs reach a ready-to-write state in
 //      one shot. The flag IS the explicit approval (the operator typed it),
@@ -36,7 +36,7 @@ import { createInterface } from "node:readline/promises";
 
 import {
   acquireCapability,
-  FBRAIN_APP_ID,
+  BRAIN_APP_ID,
   hasValidCachedCapability,
   type CapabilityStore,
   type ConsentTransport,
@@ -64,7 +64,7 @@ export type EstablishConsentOptions = {
   /** Locate the folddb CLI; default scans PATH. */
   resolveFolddb?: () => string | null;
   /**
-   * Invoke `folddb consent grant`. Receives the fbrain `--node-url` so the
+   * Invoke `folddb consent grant`. Receives the brain `--node-url` so the
    * default implementation can pin `FOLDDB_PORT` and avoid the grant landing on
    * a sibling daemon (see defaultRunFolddbGrant). Default: `spawnSync`-shells
    * out.
@@ -103,18 +103,18 @@ export type GrantResult = {
 
 // How long to wait for `folddb consent grant` before giving up. Generous for a
 // healthy grant (the daemon round-trip is sub-second), bounded so a wedged /
-// slow CLI can't freeze `fbrain init --grant-consent` forever (the 0.15.0 brew
+// slow CLI can't freeze `brain init --grant-consent` forever (the 0.15.0 brew
 // binary hangs on ANY startup — see init-grant-consent-shellout-timeout). Env
-// override `FBRAIN_FOLDDB_GRANT_TIMEOUT_MS` for slow machines / debugging.
+// override `BRAIN_FOLDDB_GRANT_TIMEOUT_MS` for slow machines / debugging.
 const DEFAULT_FOLDDB_GRANT_TIMEOUT_MS = 45_000;
 
 /**
  * Resolve the grant shell-out timeout in ms. Honours
- * `FBRAIN_FOLDDB_GRANT_TIMEOUT_MS` when it parses to a positive integer;
+ * `BRAIN_FOLDDB_GRANT_TIMEOUT_MS` when it parses to a positive integer;
  * otherwise falls back to the default. Exported for tests.
  */
 export function folddbGrantTimeoutMs(): number {
-  const raw = process.env.FBRAIN_FOLDDB_GRANT_TIMEOUT_MS;
+  const raw = process.env.BRAIN_FOLDDB_GRANT_TIMEOUT_MS;
   if (raw !== undefined && raw.length > 0) {
     const n = Number(raw);
     if (Number.isInteger(n) && n > 0) return n;
@@ -137,7 +137,7 @@ const FOLDDB_BIN = "lastdb";
 const LEGACY_FOLDDB_BIN = "folddb";
 
 /**
- * Run the inline consent handshake at the end of `fbrain init`. Returns a
+ * Run the inline consent handshake at the end of `brain init`. Returns a
  * structured result so callers (and tests) can introspect why init did or
  * didn't acquire a capability. Never throws on a "user said no" branch — only
  * a genuine consent error (denial, expiry, transport failure) propagates.
@@ -146,10 +146,10 @@ export async function establishConsentInline(
   opts: EstablishConsentOptions,
 ): Promise<EstablishConsentResult> {
   const print = resolvePrintSink(opts);
-  const appId = opts.appId ?? FBRAIN_APP_ID;
+  const appId = opts.appId ?? BRAIN_APP_ID;
   const store = opts.store ?? defaultCapabilityStore();
 
-  // Enforcement off (FBRAIN_APP_IDENTITY_ENFORCE=false): no capability needed.
+  // Enforcement off (BRAIN_APP_IDENTITY_ENFORCE=false): no capability needed.
   // --grant-consent is a no-op here; print a friendly note so the operator
   // doesn't think the flag silently failed.
   if (!appIdentityEnforceEnabled()) {
@@ -194,7 +194,7 @@ export async function establishConsentInline(
     const isTty = (opts.isTty ?? defaultIsTty)();
     if (!isTty) {
       print(
-        `        non-interactive shell — skipping consent prompt. Re-run \`fbrain init --grant-consent\` before your first write — it creates the consent request, grants it, and stores the capability headlessly. (A bare \`${FOLDDB_BIN} consent grant ${appId}\` needs a pending request first, so it dead-ends on a fresh node.)`,
+        `        non-interactive shell — skipping consent prompt. Re-run \`brain init --grant-consent\` before your first write — it creates the consent request, grants it, and stores the capability headlessly. (A bare \`${FOLDDB_BIN} consent grant ${appId}\` needs a pending request first, so it dead-ends on a fresh node.)`,
       );
       return { state: "skipped", reason: "non_tty" };
     }
@@ -202,11 +202,11 @@ export async function establishConsentInline(
     // Explicit one-time approval.
     const ask = opts.ask ?? defaultAsk;
     const answer = await ask(
-      `fbrain wants read/write access to its namespace on this node. Grant now? [Y/n] `,
+      `brain wants read/write access to its namespace on this node. Grant now? [Y/n] `,
     );
     if (!isAffirmative(answer)) {
       print(
-        `        skipped — run \`${FOLDDB_BIN} consent grant ${appId}\` later, or fbrain will prompt on first write.`,
+        `        skipped — run \`${FOLDDB_BIN} consent grant ${appId}\` later, or brain will prompt on first write.`,
       );
       return { state: "skipped", reason: "declined" };
     }
@@ -247,7 +247,7 @@ export async function establishConsentInline(
         // acquireCapability's poll, which is the AUTHORITATIVE verdict. The
         // grant frequently DID land despite the CLI being slow to return, in
         // which case the poll prints `Access granted. Capability stored.` and a
-        // "grant manually / re-run fbrain doctor" instruction here would be
+        // "grant manually / re-run brain doctor" instruction here would be
         // stale and contradictory. So print a neutral "the CLI was slow,
         // confirming whether the grant landed anyway" note and let the poll own
         // the guidance — success on success; `consent_timeout`/`consent_denied`/
@@ -265,10 +265,10 @@ export async function establishConsentInline(
         // node was provisioned with a plist-pinned FOLDDB_MASTER_KEY, but this
         // shell doesn't have the key exported, so the subprocess can't decrypt
         // the on-disk node identity. The raw folddb error names the env var
-        // but not what fbrain operators should actually run — guide them.
+        // but not what brain operators should actually run — guide them.
         if (looksLikeMasterKeyFailure(result.stderr)) {
           ctx.print(
-            `        this node was provisioned with \`FOLDDB_MASTER_KEY\` — re-run as \`FOLDDB_MASTER_KEY=<hex> fbrain init --grant-consent\`, or run \`${FOLDDB_BIN} consent grant ${ctx.appId}\` in a shell that has the key exported.`,
+            `        this node was provisioned with \`FOLDDB_MASTER_KEY\` — re-run as \`FOLDDB_MASTER_KEY=<hex> brain init --grant-consent\`, or run \`${FOLDDB_BIN} consent grant ${ctx.appId}\` in a shell that has the key exported.`,
           );
         } else {
           ctx.print(
@@ -330,7 +330,7 @@ function defaultIsTty(): boolean {
 function defaultResolveFolddb(): string | null {
   // Honour an explicit override first (tests + contributors who have folddb
   // outside their PATH can point at it directly).
-  const override = process.env.FBRAIN_FOLDDB_BIN;
+  const override = process.env.BRAIN_FOLDDB_BIN;
   if (override && override.length > 0) return override;
   // Use `command -v` instead of `which` — it's POSIX and behaves identically
   // on macOS + Linux. Run via /bin/sh so PATH expansion uses the user's env.
@@ -357,12 +357,12 @@ export function defaultRunFolddbGrant(
   appId: string,
   nodeUrl: string,
 ): GrantResult {
-  // Pin `FOLDDB_PORT` when fbrain is talking to a local node on a parseable
+  // Pin `FOLDDB_PORT` when brain is talking to a local node on a parseable
   // port — otherwise `folddb consent grant` discovers its target by reading
   // `$FOLDDB_HOME/port`, which reflects the LAST daemon started under that
-  // HOME, not the one fbrain init was pointed at. Without this, running
-  // `fbrain init --node-url http://127.0.0.1:<slot>` while a brew daemon is
-  // also up on 9001 silently grants on 9001 and fbrain's first write stalls.
+  // HOME, not the one brain init was pointed at. Without this, running
+  // `brain init --node-url http://127.0.0.1:<slot>` while a brew daemon is
+  // also up on 9001 silently grants on 9001 and brain's first write stalls.
   //
   // Defensive: only pin when nodeUrl is loopback with a numeric port. Remote
   // hosts and unparseable URLs fall back to today's discovery behavior so we
@@ -377,7 +377,7 @@ export function defaultRunFolddbGrant(
   // (the grant is fast but the daemon may print a one-line confirmation).
   //
   // Bound the call with a timeout: without it, a wedged folddb CLI (the 0.15.0
-  // brew binary hangs on ANY startup) freezes `fbrain init --grant-consent`
+  // brew binary hangs on ANY startup) freezes `brain init --grant-consent`
   // forever at step [6/6] with zero feedback. On timeout spawnSync sends
   // SIGTERM and surfaces it via res.error (code "ETIMEDOUT") + res.signal
   // ("SIGTERM") with res.status === null.
@@ -451,7 +451,7 @@ function isLoopbackHost(hostname: string): boolean {
 /**
  * Heuristic for the `folddb consent grant` failure where the target node was
  * provisioned with `FOLDDB_MASTER_KEY` (its on-disk identity is encrypted)
- * but the shell running `fbrain init` doesn't have the key exported — the
+ * but the shell running `brain init` doesn't have the key exported — the
  * exact Lane-D durable-autostart shape. Matches on either the env-var name
  * or the keychain-feature phrasing so we catch the message regardless of
  * minor wording drift in folddb's error text.

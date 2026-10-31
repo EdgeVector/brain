@@ -2,8 +2,8 @@ import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { stripDoctorTip, type Verbose } from "../../client.ts";
-import { FBRAIN_MCP_TOOL_NAMES } from "../../mcp/server.ts";
-import { getFbrainVersion } from "../../version.ts";
+import { BRAIN_MCP_TOOL_NAMES } from "../../mcp/server.ts";
+import { getBrainVersion } from "../../version.ts";
 import type { CheckResult, DoctorOptions } from "../doctor.ts";
 
 export function runCliEntrypointProbe(
@@ -129,10 +129,10 @@ export type McpBootResult = {
 };
 
 // Bounded deadline for the boot probe, env-overridable via the same
-// FBRAIN_HTTP_TIMEOUT_MS knob the node transports honor (kept consistent with
+// BRAIN_HTTP_TIMEOUT_MS knob the node transports honor (kept consistent with
 // client.ts defaultTimeoutMs; replicated here because that helper is private).
 function mcpBootDeadlineMs(): number {
-  const raw = process.env.FBRAIN_HTTP_TIMEOUT_MS;
+  const raw = process.env.BRAIN_HTTP_TIMEOUT_MS;
   const n = raw === undefined ? NaN : parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : 30_000;
 }
@@ -172,7 +172,7 @@ export async function runMcpBootProbe(
     };
   }
 
-  const expected = [...FBRAIN_MCP_TOOL_NAMES];
+  const expected = [...BRAIN_MCP_TOOL_NAMES];
   const got = result.tools ?? [];
   const gotSet = new Set(got);
   const expectedSet = new Set<string>(expected);
@@ -194,16 +194,16 @@ export async function runMcpBootProbe(
   const info = result.serverInfo;
   const infoStr = info ? `serverInfo ${info.name} ${info.version}` : "serverInfo (none)";
 
-  // Version-skew WARN: the agent surface is the same fbrain *codebase* but a
+  // Version-skew WARN: the agent surface is the same brain *codebase* but a
   // DIFFERENT *build* than the CLI we're running. `serverInfo.version` and the
-  // CLI's `getFbrainVersion()` are single-sourced (mcp/server.ts +
+  // CLI's `getBrainVersion()` are single-sourced (mcp/server.ts +
   // version.ts), so they can't drift WITHIN one checkout — but `brain-mcp` on
   // PATH can resolve to a stale `bun link`ed checkout / second worktree at a
   // different commit. When the version strings differ, the AI agent may be
-  // serving stale `fbrain_*` tool behavior while the human CLI is current — a
+  // serving stale `brain_*` tool behavior while the human CLI is current — a
   // real, hard-to-diagnose state. WARN (ok:true, doesn't trip the verdict),
   // never the tool-surface FAIL above.
-  const cliVersion = opts.cliVersion ?? getFbrainVersion();
+  const cliVersion = opts.cliVersion ?? getBrainVersion();
   if (info && info.version !== cliVersion) {
     return {
       name: "mcp-boot",
@@ -211,8 +211,8 @@ export async function runMcpBootProbe(
       tag: "WARN",
       detail:
         `brain-mcp booted + served the full agent surface (tools=${got.length}), ` +
-        `but it's a DIFFERENT fbrain build than this CLI (CLI ${cliVersion}, agent ${info.version}) — ` +
-        "your AI agent may be serving stale fbrain_* tools.",
+        `but it's a DIFFERENT brain build than this CLI (CLI ${cliVersion}, agent ${info.version}) — ` +
+        "your AI agent may be serving stale brain_* tools.",
       fix: relinkFix,
     };
   }
@@ -268,7 +268,7 @@ async function defaultMcpBootRunner(
       params: {
         protocolVersion: "2025-06-18",
         capabilities: {},
-        clientInfo: { name: "fbrain-doctor-mcp-probe", version: "1" },
+        clientInfo: { name: "brain-doctor-mcp-probe", version: "1" },
       },
     };
     const listReq = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };

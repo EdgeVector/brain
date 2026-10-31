@@ -1,7 +1,7 @@
-// `fbrain list [--type T] [--status S] [--tag T] [-n N]` — newest-first list with filters.
+// `brain list [--type T] [--status S] [--tag T] [-n N]` — newest-first list with filters.
 
 import {
-  FbrainError,
+  BrainError,
   newReadClientFromCfg,
   type NodeClient,
   type Verbose,
@@ -11,6 +11,8 @@ import { parseListCount } from "../count-state.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import { HEAD_RANGE } from "../list-page.ts";
+import { multiKey } from "../multi-key.ts";
+import { namedRecordPage } from "../named-records.ts";
 import {
   completeKeyTags,
   findBySlug,
@@ -21,7 +23,7 @@ import {
   missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
-  type FbrainRecord,
+  type BrainRecord,
   type RecordKey,
 } from "../record.ts";
 import {
@@ -32,7 +34,7 @@ import {
 } from "../schemas.ts";
 import { resolveRecordsByTag } from "../tag-index.ts";
 
-// Default cap for an unfiltered `fbrain list`. Without it an
+// Default cap for an unfiltered `brain list`. Without it an
 // unfiltered list dumps every record in the index — 80+ already, and
 // growing. A `-n N` flag overrides this; the truncation hint tells the
 // user what they're missing.
@@ -62,11 +64,11 @@ export type ListOptions = {
   verbose?: Verbose;
   print?: (line: string) => void;
   printErr?: (line: string) => void;
-  // Agent-channel signal. Set by the MCP `fbrain_list` wrapper (NOT the human
+  // Agent-channel signal. Set by the MCP `brain_list` wrapper (NOT the human
   // CLI). When true, the empty/filter-no-match recovery hint is rendered in
-  // MCP-tool terms (`fbrain_put` / `fbrain_list`) instead of the CLI verbs the
-  // agent has no tools for (`fbrain <type> new`, `fbrain list`). Mirrors
-  // `FbrainError.agentHint` for the ERROR path. Default (undefined) keeps the
+  // MCP-tool terms (`brain_put` / `brain_list`) instead of the CLI verbs the
+  // agent has no tools for (`brain <type> new`, `brain list`). Mirrors
+  // `BrainError.agentHint` for the ERROR path. Default (undefined) keeps the
   // human CLI output byte-identical.
   agent?: boolean;
   // Same payload as `--json`. Row mode is the page envelope. Count mode is
@@ -86,6 +88,7 @@ export type ListOptions = {
 // that need completeness-dependent sweeps must use search / point reads.
 // `--count` mode still returns the match count only.
 export type ListPageResult = {
+  next_page?: string;
   items: RecordSummary[];
   /** Cards on this page after the page filter, before the limit. */
   total: number;
@@ -97,7 +100,7 @@ export type ListPageResult = {
 };
 export type ListResult = ListPageResult | { count: number } | { miss: true };
 
-export type ListEntry = { type: RecordType; record: FbrainRecord };
+export type ListEntry = { type: RecordType; record: BrainRecord };
 
 const LIST_LIMIT_CAP = 100;
 const PAGE_ID = /^p\d{8}$/;
@@ -136,6 +139,24 @@ export async function listCmd(opts: ListOptions): Promise<void> {
   const { print, printErr } = resolvePrintSinks(opts);
   if (opts.count) {
     await printListCount(opts, print, printErr);
+    return;
+  }
+  if (multiKey(opts.cfg) && !opts.tag) {
+    const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+    const page = await namedRecordPage(node, opts.cfg, {
+      ...(opts.type ? { type: opts.type } : {}), ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.updatedSinceMs !== undefined ? { updatedSinceMs: opts.updatedSinceMs } : {}),
+    }, Math.min(opts.limit ?? DEFAULT_LIST_LIMIT, LIST_LIMIT_CAP), opts.page);
+    const result: ListPageResult = { items: page.items, total: page.items.length, truncated: page.has_more,
+      ...(page.next_page ? { next_page: page.next_page } : {}) };
+    opts.onResult?.(result);
+    if (opts.fields?.length) printFieldProjection(result.items, opts.fields, print);
+    else if (opts.json) print(JSON.stringify(result));
+    else {
+      if (!result.items.length) print("no records");
+      for (const line of formatTable(result.items.map((item) => [item.type, item.slug, item.status, item.title]))) print(line);
+    }
+    if (page.next_page) (opts.json || opts.fields?.length ? printErr : print)(`sample ${page.next_page}`);
     return;
   }
   await printListPage(opts, print, printErr);
@@ -238,7 +259,7 @@ async function printListPage(
     hash = `tag#${opts.tag}`;
   } else if (opts.status && opts.status.length > 0) {
     if (!opts.type) {
-      throw new FbrainError({
+      throw new BrainError({
         code: "status_needs_type",
         message: "a status list needs --type",
         hint: "Pass --type with --status.",
@@ -253,7 +274,7 @@ async function printListPage(
   if (pageId !== undefined && pageId.length > 0) {
     if (pageId === HEAD_RANGE || PAGE_ID.test(pageId)) range = pageId;
     else {
-      throw new FbrainError({
+      throw new BrainError({
         code: "invalid_page",
         message: `page id ${pageId} is not a list page id`,
         hint: "Use __head__ or a page id of p plus eight digits.",
@@ -473,7 +494,7 @@ export async function resolveListEntries(
 
   const acc: ListEntry[] = [];
   for (const t of types) {
-    let rs: FbrainRecord[];
+    let rs: BrainRecord[];
     try {
       // A display path: a stale list row with no record behind it is skipped
       // (one warning), the other rows are listed.
@@ -492,7 +513,7 @@ export async function resolveListEntries(
 }
 
 export function matchesListFilters(
-  record: FbrainRecord,
+  record: BrainRecord,
   opts: Pick<ListOptions, "status" | "tag" | "updatedSinceMs">,
 ): boolean {
   if (isTombstoned(record)) return false;
@@ -566,7 +587,7 @@ export function matchesListKeyFilters(
   if (opts.tag) {
     if (key.tagsCut === true) {
       // Never answer from a bounded subset of the tags: that would undercount.
-      throw new FbrainError({
+      throw new BrainError({
         code: "list_tags_incomplete",
         message: `the list row of ${key.type} ${key.slug} keeps only part of its tags, so it cannot be matched against --tag ${opts.tag}.`,
         hint: "Complete the key first (completeKeyTags in record.ts); the list command does.",

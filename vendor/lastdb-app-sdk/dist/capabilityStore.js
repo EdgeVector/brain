@@ -60,7 +60,7 @@ export class KeychainUnavailableError extends Error {
 /**
  * The real runner: `spawnSync('security', args)` bounded by
  * {@link KEYCHAIN_TIMEOUT_MS} — a hung keychain prompt must not wedge the
- * app (see the fbrain keychain first-write-hang lesson). A timeout kills the
+ * app (see the brain keychain first-write-hang lesson). A timeout kills the
  * subprocess and reports `status: null` + `error`.
  */
 function spawnSecurityRunner(args) {
@@ -81,8 +81,8 @@ function spawnSecurityRunner(args) {
  * key stays a safe, bounded identifier regardless of the node URL/socket-path
  * shape, while remaining stable for the same (appId, nodeTarget) pair.
  *
- * Example: `capabilityStoreKey('fbrain', 'http://127.0.0.1:9101')` →
- * `fbrain@<16-hex>`.
+ * Example: `capabilityStoreKey('brain', 'http://127.0.0.1:9101')` →
+ * `brain@<16-hex>`.
  */
 export function capabilityStoreKey(appId, nodeTarget) {
     if (!/^[a-z][a-z0-9-]{0,39}$/.test(appId)) {
@@ -134,7 +134,7 @@ function decodeEnvelope(raw, expectedNode) {
 }
 /**
  * macOS Keychain store via the `security` CLI. Each call is bounded by a
- * timeout — a hung keychain prompt must not wedge the app (see the fbrain
+ * timeout — a hung keychain prompt must not wedge the app (see the brain
  * keychain first-write-hang lesson). On any keychain failure the caller falls
  * back to the file store.
  *

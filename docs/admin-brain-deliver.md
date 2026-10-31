@@ -1,13 +1,13 @@
 # Brain Admin Deliver Slice
 
-`fbrain admin-snapshot` dogfoods the Mini → Exemem → admin path used by kanban
+`brain admin-snapshot` dogfoods the Mini → Exemem → admin path used by kanban
 and routines. It publishes a privacy-safe rollup into the internal
 `BrainAdminSnapshot` schema, then stages/approve-sends a `delivery_slice` to
 the **existing admin kanban-consumer** (no second enroll).
 
 The snapshot intentionally contains only:
 
-- live record counts by fbrain type (`type_counts_json`). A type that could not
+- live record counts by brain type (`type_counts_json`). A type that could not
   be counted is `null` there (never 0) and is named, with the reason, in the
   `unavailable_types` field of the snapshot output
 - open-decisions **live** ledger lines — slug + short title only
@@ -21,8 +21,8 @@ socket access to the primary brain.
 ## Publish
 
 ```bash
-fbrain admin-snapshot publish --json
-fbrain admin-snapshot publish --dry-run --json
+brain admin-snapshot publish --json
+brain admin-snapshot publish --dry-run --json
 ```
 
 The JSON output includes:
@@ -40,13 +40,13 @@ them. Reuse the public fields from the enrolled kanban-consumer bundle
 `ExememKanbanConsumer-{dev,prod}`).
 
 ```bash
-export FBRAIN_ADMIN_RECIPIENT_PUBKEY=...          # ed25519 public
-export FBRAIN_ADMIN_MESSAGING_PUBLIC_KEY=...      # x25519 public
-export FBRAIN_ADMIN_MESSAGING_PSEUDONYM=...
+export BRAIN_ADMIN_RECIPIENT_PUBKEY=...          # ed25519 public
+export BRAIN_ADMIN_MESSAGING_PUBLIC_KEY=...      # x25519 public
+export BRAIN_ADMIN_MESSAGING_PSEUDONYM=...
 
-fbrain admin-snapshot deliver --dry-run --json
-fbrain admin-snapshot deliver --max-records 5
-fbrain admin-snapshot deliver --approve --max-records 5
+brain admin-snapshot deliver --dry-run --json
+brain admin-snapshot deliver --max-records 5
+brain admin-snapshot deliver --approve --max-records 5
 ```
 
 `ROUTINES_ADMIN_*` aliases are also accepted (same keys as
@@ -62,9 +62,9 @@ Mailbox poll + `openDelivery` stay on the admin SPA / consumer tooling.
 If you need to stage by hand:
 
 ```bash
-fbrain raw POST /api/sharing/deliver "$(cat /tmp/brain-admin-deliver.json)"
-fbrain raw GET /api/sharing/deliveries
-fbrain raw POST /api/sharing/deliveries/<delivery_id>/approve
+brain raw POST /api/sharing/deliver "$(cat /tmp/brain-admin-deliver.json)"
+brain raw GET /api/sharing/deliveries
+brain raw POST /api/sharing/deliveries/<delivery_id>/approve
 ```
 
 Stage body shape:
@@ -79,7 +79,7 @@ Stage body shape:
   "max_records": 5,
   "legs": [
     {
-      "schema_name": "<schema_hash from fbrain admin-snapshot publish --json>",
+      "schema_name": "<schema_hash from brain admin-snapshot publish --json>",
       "fields": [
         "slug",
         "source_app",
