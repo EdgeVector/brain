@@ -178,16 +178,19 @@ export async function buildResidentWritePlan(opts: {
 
   // Blob and sidecar land before the record. `next` stays the full text so
   // graph edges and backlinks see the whole body. Index copies use the head.
+  // The previous stored fields let the whole-record check count the fields a
+  // partial write leaves in place.
+  const previousStored = opts.previous ? storedFieldsOf(opts.previous) : null;
   const sealed = await sealRecordFields({
     node: opts.node,
     cfg: opts.cfg,
     type: opts.type,
     slug: opts.next.slug,
     fields: opts.primaryFields,
+    ...(previousStored !== null ? { existing: previousStored } : {}),
     ...(opts.verbose !== undefined ? { verbose: opts.verbose } : {}),
   });
   const stored = recordFromPrimaryFields(sealed.fields);
-  const previousStored = opts.previous ? storedFieldsOf(opts.previous) : null;
 
   if (
     previousStored &&

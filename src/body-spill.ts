@@ -7,9 +7,11 @@ import { createHash } from "node:crypto";
 import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
 import { writeConfig, type Config } from "./config.ts";
 import type { BrainRecord } from "./record.ts";
+import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 import {
   BODY_FILE_SCHEMA_KEY,
   OWNER_APP_ID,
+  RECORDS,
   bodyFileSchema,
   type RecordType,
 } from "./schemas.ts";
@@ -497,7 +499,12 @@ function fullOf(entry: InlineEntry): { buf: Buffer; sha256: string } {
 }
 
 /** Pure planning step: decide which fields spill and what the stored form is. */
-function planSeal(type: RecordType, slug: string, fields: Record<string, unknown>): SealPlan {
+function planSeal(
+  type: RecordType,
+  slug: string,
+  fields: Record<string, unknown>,
+  existing?: Record<string, unknown>,
+): SealPlan {
   const entries: InlineEntry[] = [];
   const pass: SealPlan["pass"] = [];
   for (const field of spillFieldsFor(type)) {
@@ -552,9 +559,17 @@ function planSeal(type: RecordType, slug: string, fields: Record<string, unknown
   let built = build();
   // Index rows copy the whole record as JSON in a JSON string, so escapes can
   // grow a record past the budget even when each field is under the threshold.
-  // Spill the next-largest field, then shrink the heads, until the copy fits.
+  // A format 7 home also caps the whole stored record (fields plus one stamp
+  // per field). Spill the next-largest field, then shrink the heads, until
+  // both fit. A record that still does not fit is refused by
+  // assertRecordBudget before anything is written.
   for (;;) {
-    if (derivedPayloadBytes(built.stored) <= DERIVED_PAYLOAD_MAX_BYTES) break;
+    if (
+      derivedPayloadBytes(built.stored) <= DERIVED_PAYLOAD_MAX_BYTES &&
+      recordBytes(wholeRecord(type, built.stored, existing)) <= RECORD_BUDGET_BYTES
+    ) {
+      break;
+    }
     const next = entries
       .filter((e) => !spillSet.has(e.field) && e.serialized > MIN_FORCE_SPILL_BYTES)
       .sort((a, b) => b.serialized - a.serialized)[0];
@@ -646,12 +661,19 @@ export async function sealRecordFields(opts: {
   type: RecordType;
   slug: string;
   fields: Record<string, unknown>;
+  /**
+   * The stored fields of the record before this write. A write that sends
+   * only some fields leaves the others in the stored record, so the whole
+   * record check counts them too.
+   */
+  existing?: Record<string, unknown>;
   verbose?: Verbose;
 }): Promise<SealResult> {
   const { node, cfg, type, slug } = opts;
-  const plan = planSeal(type, slug, opts.fields);
+  const plan = planSeal(type, slug, opts.fields, opts.existing);
   // Reject invalid fields before schema declarations or blob/sidecar writes.
   assertFieldBudget(type, slug, plan.stored);
+  assertRecordBudget(type, slug, plan.stored, opts.existing);
   const spilled: SpilledField[] = [];
 
   if (plan.spill.length > 0 || plan.pass.length > 0) {
@@ -717,6 +739,58 @@ export function assertFieldBudget(
       });
     }
   }
+}
+
+/**
+ * The record as the node stores it after this write: the schema fields of the
+ * stored record that the write does not send, plus the fields it sends.
+ */
+function wholeRecord(
+  type: RecordType,
+  fields: Record<string, unknown>,
+  existing?: Record<string, unknown>,
+): Record<string, unknown> {
+  if (existing === undefined) return fields;
+  const kept: Record<string, unknown> = {};
+  for (const name of RECORDS[type].schema.schema.fields) {
+    if (!(name in fields) && existing[name] !== undefined) kept[name] = existing[name];
+  }
+  return { ...kept, ...fields };
+}
+
+/**
+ * Throw a clear error when the whole record is over the format 7 record
+ * budget (src/record-cap.ts). Runs after the seal plan, which already spilled
+ * the body and shrank its head as far as it can, so what is left is too much
+ * text in fields that do not spill.
+ */
+export function assertRecordBudget(
+  type: RecordType,
+  slug: string,
+  fields: Record<string, unknown>,
+  existing?: Record<string, unknown>,
+): void {
+  const whole = wholeRecord(type, fields, existing);
+  const bytes = recordBytes(whole);
+  if (bytes <= RECORD_BUDGET_BYTES) return;
+  let largest = "";
+  let largestBytes = -1;
+  for (const [name, value] of Object.entries(whole)) {
+    const size = serializedBytes(value);
+    if (size > largestBytes) {
+      largest = name;
+      largestBytes = size;
+    }
+  }
+  throw new BrainError({
+    code: "record_too_large",
+    message:
+      recordBudgetMessage(`${type} ${slug}`, bytes) +
+      ` The largest field is ${largest} (${largestBytes} bytes). Nothing was written.`,
+    hint:
+      "Only the body spills to a body file. Shorten the title, the tags, or the other short " +
+      "fields, or move that text into the body.",
+  });
 }
 
 /** Projections that copy the whole record into an index row. Guarded by the plan. */
