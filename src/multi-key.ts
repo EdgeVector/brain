@@ -8,7 +8,6 @@ export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storage
 export function ownedSchemas() {
   return UNIQUE_SCHEMAS.map((entry) => {
     const schema = structuredClone(entry.schema.schema);
-    schema.independent_fields = true;
     const ordered = (): NonNullable<SchemaDefinition["alternate_keys"]>[string] => ({
       hash_literal: "all", range_separator: "#", range_parts: [
         { field: "updated_at", format: "reverse_time_millis" }, { field: "slug" },

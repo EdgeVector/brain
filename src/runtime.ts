@@ -89,13 +89,11 @@ export function bunVersionMeetsMinimum(
 }
 
 // LastDB API 13 (lastdb #803) is the first node that refuses a home with the
-// retired shared-value layout at startup. Every schema such a node lists owns
-// its values, so its replies may omit the per-schema `independent_fields` key
-// (lastdb removes it in stage 2 of the protein removal). An explicit `false`
-// still means "not owned", and an older node must still send `true`.
+// retired shared-value layout at startup and owns the values of every schema
+// it declares. The node, not the app, decides ownership; an older node can
+// still share values between schemas.
 export const OWNED_HOME_API_VERSION = 13;
 
-/** Whether a node reply's `independent_fields` value confirms owned values. */
-export const ownsValues = (independentFields: unknown, apiVersion: number): boolean =>
-  independentFields === true ||
-  (independentFields === undefined && apiVersion >= OWNED_HOME_API_VERSION);
+/** Whether a node at this API version owns the values of every schema. */
+export const ownedHome = (apiVersion: number): boolean =>
+  apiVersion >= OWNED_HOME_API_VERSION;
