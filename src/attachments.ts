@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
 import { writeConfig, type Config } from "./config.ts";
 import { nowIso } from "./record.ts";
+import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 import {
   ATTACHMENT_BLOB_SCHEMA_KEY,
   ATTACHMENT_FILE_SCHEMA_KEY,
@@ -248,9 +249,23 @@ async function writeAttachmentIndex(
     });
   }
   const key = attachmentIndexSlug(type, slug);
-  const now = nowIso();
-  const fields = {
-    slug: key,
+  const fields = attachmentIndexFields(type, slug, entries, existing, nowIso());
+  if (existing) {
+    await node.updateRecord({ schemaHash, fields, keyHash: key });
+  } else {
+    await node.createRecord({ schemaHash, fields, keyHash: key });
+  }
+}
+
+function attachmentIndexFields(
+  type: RecordType,
+  slug: string,
+  entries: readonly AttachmentEntry[],
+  existing: AttachmentIndexRecord | null,
+  now: string,
+): Record<string, unknown> {
+  return {
+    slug: attachmentIndexSlug(type, slug),
     record_type: type,
     record_slug: slug,
     filenames: entries.map((e) => e.name),
@@ -258,11 +273,28 @@ async function writeAttachmentIndex(
     created_at: existing?.created_at || now,
     updated_at: now,
   };
-  if (existing) {
-    await node.updateRecord({ schemaHash, fields, keyHash: key });
-  } else {
-    await node.createRecord({ schemaHash, fields, keyHash: key });
-  }
+}
+
+// One index record holds every entry of one knowledge record, and a format 7
+// home caps a whole record (src/record-cap.ts). Check before the file is
+// stored, so a refused attach leaves no new file behind.
+function assertIndexFitsRecordBudget(
+  type: RecordType,
+  slug: string,
+  entries: readonly AttachmentEntry[],
+  existing: AttachmentIndexRecord | null,
+): void {
+  const bytes = recordBytes(attachmentIndexFields(type, slug, entries, existing, nowIso()));
+  if (bytes <= RECORD_BUDGET_BYTES) return;
+  throw new BrainError({
+    code: "attachment_index_full",
+    message:
+      recordBudgetMessage(`${type} ${slug} attachment index (${entries.length} entries)`, bytes) +
+      " Nothing was written.",
+    hint:
+      "Detach files this record no longer needs, use shorter file names, or attach the files " +
+      "to a successor record.",
+  });
 }
 
 type BlobRecord = {
@@ -540,7 +572,6 @@ export async function attachToRecord(opts: {
   }
 
   const mediaType = mediaTypeFor(name);
-  const put = await putAttachmentBlob(node, cfg, bytes, mediaType, { name });
   const entry: AttachmentEntry = {
     name,
     blob_ref: blobRef,
@@ -549,6 +580,8 @@ export async function attachToRecord(opts: {
     added_at: nowIso(),
   };
   const next = prior ? entries.map((e) => (e.name === name ? entry : e)) : [...entries, entry];
+  assertIndexFitsRecordBudget(type, slug, next, existingIndex);
+  const put = await putAttachmentBlob(node, cfg, bytes, mediaType, { name });
   await writeAttachmentIndex(node, cfg, type, slug, next, existingIndex);
   return { entry, blobDeduplicated: put.deduplicated, replaced: prior !== undefined };
 }

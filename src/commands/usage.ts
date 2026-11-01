@@ -14,6 +14,11 @@
 // Per G0 readiness-gate definition-of-shipped: "2+ daily users with
 // userHash-distinguishable writes for 7 consecutive days" — this
 // command is what makes that condition measurable.
+//
+// A LastDB format 7 home stores one value per record and names no writer
+// (record model decision D7), so its query rows carry no author key. Those
+// rows are counted as unattributed and printed on their own line, so the
+// report does not read as "no records created" on such a home.
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -52,8 +57,11 @@ export type UsagePerUser = {
 
 export type UsageReport = {
   windowDays: number;
+  /** Writes attributed to a userHash (the sum over `users`). */
   totalWrites: number;
   users: UsagePerUser[];
+  /** Writes in the window whose row names no author key (a format 7 home). */
+  unattributedWrites: number;
 };
 
 export async function runUsageReport(
@@ -70,6 +78,7 @@ export async function runUsageReport(
 
   type Counts = { total: number; today: number; byType: Map<RecordType, number> };
   const perUser = new Map<string, Counts>();
+  let unattributed = 0;
 
   for (const entry of UNIQUE_SCHEMAS) {
     if (entry.types.length === 0) continue;
@@ -101,7 +110,8 @@ export async function runUsageReport(
 
       const pubkey = row.author_pub_key;
       if (typeof pubkey !== "string" || pubkey.length === 0) {
-        verbose?.(`usage: skipping row with no author_pub_key (slug=${row.key.hash})`);
+        unattributed++;
+        verbose?.(`usage: row with no author_pub_key counted as unattributed (slug=${row.key.hash})`);
         continue;
       }
       const uh = pubkeyToUserHash(pubkey);
@@ -127,10 +137,10 @@ export async function runUsageReport(
     .sort((a, b) => b.total - a.total);
 
   const totalWrites = users.reduce((s, u) => s + u.total, 0);
-  const report: UsageReport = { windowDays, totalWrites, users };
+  const report: UsageReport = { windowDays, totalWrites, users, unattributedWrites: unattributed };
 
   print(`brain usage (last ${windowDays} days, by userHash):`);
-  if (users.length === 0) {
+  if (users.length === 0 && unattributed === 0) {
     print("  (no records created in window)");
   } else {
     for (const u of users) {
@@ -142,6 +152,12 @@ export async function runUsageReport(
         `  ${u.userHashPrefix}  ${u.total} writes  (${u.today} today)  types: ${types}`,
       );
     }
+  }
+  if (unattributed > 0) {
+    print(
+      `  unattributed: ${unattributed} write${unattributed === 1 ? "" : "s"} with no author key ` +
+        "(a format 7 home names no writer per record)",
+    );
   }
   print(
     `total: ${totalWrites} write${totalWrites === 1 ? "" : "s"} across ${users.length} user${users.length === 1 ? "" : "s"}`,

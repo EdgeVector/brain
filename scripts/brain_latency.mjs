@@ -192,8 +192,12 @@ async function run() {
       const after = await primaryRows(node, cfg, Array.from({ length: 8 }, (_, i) => settings.records - 16 + i));
       for (const [slug, prior] of partialBefore) {
         const next = after.get(slug);
-        require(prior.metadata?.body?.atom_uuid && prior.metadata.body.atom_uuid === next?.metadata?.body?.atom_uuid,
-          "A title-only update replaced its body atom");
+        // A format 6 home names the atom behind each field: a title-only update keeps the body atom.
+        // A format 7 home stores one value per record and returns an empty atom id, so there the
+        // proof is the unchanged body value checked below.
+        const atoms = [prior.metadata?.body?.atom_uuid, next?.metadata?.body?.atom_uuid];
+        require(settings.recordHome ? atoms.every((atom) => atom === "") : Boolean(atoms[0]) && atoms[0] === atoms[1],
+          settings.recordHome ? "A format 7 reply names a body atom" : "A title-only update replaced its body atom");
         for (const field of ["body", "tags", "status", "created_at"]) require(stable(prior.fields[field]) === stable(next.fields[field]), "A title-only update changed " + field);
       }
       verification = { content_atoms: Object.fromEntries([...after].map(([slug, row]) => [slug, row.metadata.body.atom_uuid])) };

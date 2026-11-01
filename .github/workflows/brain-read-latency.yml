@@ -21,7 +21,9 @@ env:
   ENVIRONMENT: dev
   APP_BEFORE: 648cef807fcd9e08615eb8d9065649baf8a2f0f3
   DAEMON_BEFORE: 60d50847609a953ef2eda64829f525800fccd4a8
-  DAEMON_AFTER: 4df57d28b554d5a455e3d20e72a2dab0de1d73e2
+  # LastDB main after record model 8c (#938, #941): every new home is format 7,
+  # one stored record per key with a 64 KiB record cap.
+  DAEMON_AFTER: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:

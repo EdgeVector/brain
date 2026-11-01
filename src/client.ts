@@ -1,6 +1,7 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
 import { alternateKeyWire } from "./alternate-key-wire.ts";
 import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
+import { RECORD_BUDGET_BYTES, RECORD_CAP_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 export { QUERY_PAGE_SIZE };
 import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Typed HTTP wrappers for fold_db_node + schema_service.
@@ -728,6 +729,37 @@ export type BatchMutationOp = {
     | { type: "value"; field: string; value: string };
 };
 
+/**
+ * Refuse one write whose fields are over the whole-record budget
+ * (src/record-cap.ts) before it is sent. Every brain write passes here, so a
+ * support record (list page, edge or token set, attachment index, snapshot,
+ * tag membership row) that a format 7 home would refuse fails with its schema,
+ * key and size named. A write that sends only some fields is measured by what
+ * it sends; the record-type seal path also counts the fields it leaves in place.
+ */
+export function assertWriteFitsRecordBudget(op: {
+  mutationType: "create" | "update" | "delete";
+  schemaHash: string;
+  keyHash: string;
+  keyRange?: string | null;
+  fields: Record<string, unknown>;
+}): void {
+  if (op.mutationType === "delete") return;
+  const bytes = recordBytes(op.fields);
+  if (bytes <= RECORD_BUDGET_BYTES) return;
+  const key = op.keyRange ? `${op.keyHash} / ${op.keyRange}` : op.keyHash;
+  const shown = key.length > 120 ? `${key.slice(0, 117)}...` : key;
+  throw new BrainError({
+    code: "record_too_large",
+    message:
+      recordBudgetMessage(`schema ${op.schemaHash.slice(0, 12)}… key ${shown}`, bytes) +
+      " This write was not sent.",
+    hint:
+      "A record holds structured fields, not a log or a file. Keep a large value in a file blob " +
+      "with its pointer in the record, or split the value across records.",
+  });
+}
+
 export type BatchMutationResult = {
   mutationIds: string[];
   count: number;
@@ -1215,6 +1247,7 @@ export function newNodeClient(opts: {
     keyRange?: string,
     expected?: SdkCasExpectation,
   ): Promise<void> => {
+    assertWriteFitsRecordBudget({ mutationType: kind, schemaHash, keyHash, keyRange, fields });
     const blob = capability?.() ?? null;
     verbose(`→ NODE POST /api/mutation (sdk) schema=${schemaHash} type=${kind}`);
     try {
@@ -1706,6 +1739,8 @@ export function newNodeClient(opts: {
           convergencePending: false,
         };
       }
+      // Check every op first: one refused record refuses the whole batch unsent.
+      for (const op of ops) assertWriteFitsRecordBudget(op);
       const blob = capability?.() ?? null;
       const extraHeaders: Record<string, string> = {};
       if (blob) {
@@ -3020,6 +3055,10 @@ type NodeErrorContext = {
 
 type BrainErrorInit = ConstructorParameters<typeof BrainError>[0];
 
+// The text of lastdb_model `RecordValueError::TooLarge` inside the 400 a
+// format 7 home returns for a record above its cap.
+const FORMAT7_RECORD_CAP_RE = /the record is (\d+) bytes; the cap is (\d+) bytes/;
+
 type NodeErrorRule = {
   match: (ctx: NodeErrorContext) => boolean;
   build: (ctx: NodeErrorContext) => BrainErrorInit;
@@ -3065,6 +3104,35 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
           "refused with nothing stored. Create a successor record `<slug>-<YYYYMMDD>` with " +
           "`brain put`, add a `Continues: <slug>` line to it and a `Continued-In: <successor>` " +
           "line to the original, then `brain append` the successor. Never retry the same append.",
+      };
+    },
+  },
+  // A format 7 home (one stored value per record key) refuses a record whose
+  // encoded value is above 64 KiB. The node answers 400 with the text of
+  // `RecordValueError::TooLarge` (lastdb_model record_value.rs): "the record
+  // write is refused: the record is N bytes; the cap is 65536 bytes". Brain's
+  // own budget (assertWriteFitsRecordBudget) refuses first in normal use. This
+  // arm names the remedy when a write that sends some fields lands on a stored
+  // record that is already large, which the client cannot see.
+  {
+    match: (ctx) => ctx.status === 400 && FORMAT7_RECORD_CAP_RE.test(ctx.messageBlob),
+    build: (ctx) => {
+      const m = FORMAT7_RECORD_CAP_RE.exec(ctx.messageBlob);
+      const size = m?.[1] ?? "?";
+      const cap = m?.[2] ?? String(RECORD_CAP_BYTES);
+      return {
+        code: "record_too_large",
+        message:
+          `Node rejected ${ctx.path}: the record is ${size} bytes as one stored value; ` +
+          `this LastDB home caps a record at ${cap} bytes. The node refused the write.`,
+        hint:
+          "This record is full. Shorten its fields, or start a successor record (same type, " +
+          "slug suffixed with a date such as `<slug>-20261101`) and link the two. For a large " +
+          "opaque value use a file blob and keep only the pointer in the record.",
+        agentHint:
+          "record_too_large: the stored record would exceed the format 7 record cap and the " +
+          "node refused the write. Do not retry the same write. Shorten the record or create a " +
+          "successor record `<slug>-<YYYYMMDD>` and link the two.",
       };
     },
   },
