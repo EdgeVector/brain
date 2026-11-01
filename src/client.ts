@@ -1374,7 +1374,11 @@ export function newNodeClient(opts: {
       const fullPageMaybeMore =
         pageResult.page === null && pageResults.length >= pageSize;
       if (!hasMore && !fullPageMaybeMore) { complete = true; break; }
-      if (newOnPage === 0) {
+      // A format 7 page that a run of deleted records ended early can hold no
+      // new row; its cursor still moves past the keys it examined.
+      const nextCursor = pageResult.page?.nextCursor;
+      const cursorMoved = !!nextCursor && !seenCursors.has(JSON.stringify(nextCursor));
+      if (newOnPage === 0 && !cursorMoved) {
         throw new BrainError({
           code: "query_pagination_stalled",
           message:
@@ -1400,8 +1404,7 @@ export function newNodeClient(opts: {
       // guard above already covers this (0 new keys), but keep an
       // explicit break for clarity and so the throw above can only
       // ever fire on a real overlap.
-      if (pageResults.length === 0) break;
-      const nextCursor = pageResult.page?.nextCursor;
+      if (pageResults.length === 0 && !cursorMoved) break;
       if (nextCursor) {
         const token = JSON.stringify(nextCursor);
         if (seenCursors.has(token)) throw new BrainError({ code: "query_pagination_stalled", message: "The node repeated a query cursor." });
