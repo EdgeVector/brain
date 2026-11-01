@@ -503,7 +503,12 @@ export class LastDbClient {
                 truncatedByMaxRows = true;
                 break;
             }
-            if (newRows === 0) {
+            // A page that a run of deleted records ended early can hold no new
+            // row; its cursor still moves past the keys it examined.
+            const nextCursor = page.page?.nextCursor ?? null;
+            const moved = nextCursor !== null
+                && JSON.stringify(nextCursor) !== JSON.stringify(cursor);
+            if (newRows === 0 && !moved) {
                 throw new QueryPaginationError('stalled_page', {
                     totalCount: page.page?.totalCount,
                     collectedCount: rows.length,
@@ -512,7 +517,7 @@ export class LastDbClient {
                     offset,
                 });
             }
-            cursor = page.page?.nextCursor ?? null;
+            cursor = nextCursor;
             if (cursor === null) {
                 offset += page.rows.length;
             }
@@ -1248,8 +1253,17 @@ function parseKeyValue(rawKey) {
 // all server properties so comparison and future continuation fields survive.
 function parseQueryCursor(raw) {
     if (raw === null || raw === undefined) return null;
-    const key = parseKeyValue(raw);
-    if (!key || !isObject(raw)) {
+    if (!isObject(raw)) {
+        throw new UnexpectedResponseError('query returned an invalid cursor', 200, raw);
+    }
+    const record = raw['record'];
+    if (record !== null && record !== undefined
+        && (typeof record !== 'string' || record.length === 0)) {
+        throw new UnexpectedResponseError('query returned an invalid record cursor', 200, raw);
+    }
+    // A record walk cursor names a record key position, not a row key.
+    const key = typeof record === 'string' ? { hash: null, range: null } : parseKeyValue(raw);
+    if (!key) {
         throw new UnexpectedResponseError('query returned an invalid cursor', 200, raw);
     }
     for (const name of ['hash', 'range']) {
