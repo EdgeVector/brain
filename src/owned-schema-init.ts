@@ -2,7 +2,7 @@ import { profilesFor } from "./canonical-vocabulary.ts";
 import { BrainError, type NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
 import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
-import { ownsValues } from "./runtime.ts";
+import { ownedHome } from "./runtime.ts";
 import { OWNER_APP_ID } from "./schemas.ts";
 
 /** One installed schema, as the node's schema directory reports it. */
@@ -16,7 +16,6 @@ type Metadata = {
   key: Record<string, string>;
   field_types: Record<string, unknown>;
   field_descriptions: Record<string, string>;
-  independent_fields?: boolean;
   alternate_keys?: unknown;
 };
 
@@ -88,14 +87,13 @@ export async function syncOwnedModel(
       message:
         "Several installed schemas claim one app record type. Init leaves them unchanged.",
     });
-  if (
-    installed.some((schema) => !ownsValues(schema.independent_fields, apiVersion))
-  ) {
+  // An API 13+ node owns every schema's values and refuses a shared-value home.
+  if (!ownedHome(apiVersion)) {
     throw new BrainError({
       code: "home_copy_required",
       message:
-        "This home holds Brain values in the old shared-value layout. Init leaves them unchanged.",
-      hint: "Move Brain data to a new home with the home copy. See docs/multi-key-schemas.md.",
+        "This node is older than LastDB API 13 and can hold Brain values in the old shared-value layout. Init leaves the home unchanged.",
+      hint: "Upgrade LastDB to API 13 or later. Move old Brain data to a new home with the home copy. See docs/multi-key-schemas.md.",
     });
   }
   if (
@@ -121,7 +119,6 @@ export async function syncOwnedModel(
         entry.schema,
       );
       if (
-        !declaration.independentFields ||
         !declaration.identityHash ||
         !/^[a-f0-9]{64}$/.test(declaration.identityHash) ||
         declaration.app_id !== OWNER_APP_ID ||
@@ -131,7 +128,7 @@ export async function syncOwnedModel(
         throw new BrainError({
           code: "owned_schema_receipt_invalid",
           message:
-            "The declaration did not confirm independent values and a definition identity.",
+            "The declaration did not confirm the owned app schema and a definition identity.",
         });
       }
       return {

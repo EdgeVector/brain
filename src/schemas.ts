@@ -70,8 +70,6 @@ export type SchemaDefinition = {
   // exists for a page key. A page row uses a hash and a range.
   schema_type: "Hash" | "HashRange";
   key: { hash_field?: string; range_field?: string };
-  /** Reuse canonical field definitions without sharing record values. */
-  independent_fields?: boolean;
   alternate_keys?: Record<string, {
     hash_field?: string;
     hash_literal?: string;

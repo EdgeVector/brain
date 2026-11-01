@@ -1,19 +1,20 @@
 # Brain multi-key schemas
 
-New installations declare independent record values. Canonical fields still reuse their definitions.
+Each Brain schema owns its record values. Canonical fields still reuse their definitions.
+`brain init` requires LastDB API 13 or later (lastdb #803). That node owns the values of every schema that an app declares.
 Named keys belong to the source record schema. A mutation updates the record and its keys in one native request.
 
 The compact list locator keeps its external digest key and sole page field. Its schema key stays empty and it has no alternate keys.
 Owned setup declares this shape like the other schemas. It needs no conversion capability, because a fresh home holds no shared locator.
 The app does not invent a stored hash field or reconstruct API keys.
 
-Each record kind uses recent and status keys. Task also uses a design key. Ranges contain the reverse UTC timestamp and the slug. Tags, links, graph edges, counts, and body files remain separate records with independent values. A list cursor belongs to one filter.
+Each record kind uses recent and status keys. Task also uses a design key. Ranges contain the reverse UTC timestamp and the slug. Tags, links, graph edges, counts, and body files remain separate records that own their values. A list cursor belongs to one filter.
 
 ## Existing installations
 
 This release does not convert a home in place. It has no conversion command.
 
-CAUTION: Do not start this release on a home that holds the old shared-value Brain layout. Init refuses that home with `home_copy_required` and makes no change.
+CAUTION: Do not start this release on a home that holds the old shared-value Brain layout. A LastDB node at API 13 or later refuses to start on that home. Init refuses a node older than API 13, and a config that names the old layout, with `home_copy_required`. Init makes no change.
 
 An existing home moves to this release only by the home copy (EdgeVector/last-stack#377):
 
