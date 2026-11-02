@@ -102,9 +102,9 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
-    uses: EdgeVector/last-stack/.github/workflows/host-track-artifact.yml@main
+    uses: EdgeVector/last-stack/.github/workflows/registry-app-package.yml@main
     with:
-      config: .lastgit/artifacts.json
+      config: .last-stack/package.json
 
   registry-commit:
     name: Registry commit identity
