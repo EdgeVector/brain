@@ -10,5 +10,2346 @@
   "run": {
     "runtime": "bun",
     "entrypoint": "src/cli.ts"
-  }
+  },
+  "schemas": [
+    {
+      "name": "Design",
+      "owner_app_id": "brain",
+      "descriptive_name": "Design",
+      "purpose_statement": "Design",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Task",
+      "owner_app_id": "brain",
+      "descriptive_name": "Task",
+      "purpose_statement": "Task",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "parent_design_slug",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "parent_design_slug": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "parent_design_slug": "the slug of the parent design of a knowledge task; empty when no parent is assigned",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "parent_design_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_design": {
+          "hash_field": "parent_design_slug",
+          "range_field": null,
+          "missing": "omit",
+          "range_separator": "#",
+          "omit_empty_hash": true,
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "parent_design_slug": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Concept",
+      "owner_app_id": "brain",
+      "descriptive_name": "Concept",
+      "purpose_statement": "Reusable framework, pattern, or protocol recorded for cross-session reuse",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Preference",
+      "owner_app_id": "brain",
+      "descriptive_name": "Preference",
+      "purpose_statement": "User-stated directive applied across future decisions",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Reference",
+      "owner_app_id": "brain",
+      "descriptive_name": "Reference",
+      "purpose_statement": "Pointer to an external resource useful for future lookup",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Agent",
+      "owner_app_id": "brain",
+      "descriptive_name": "Agent",
+      "purpose_statement": "Persistent assistant identity with role and behavior conventions",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Project",
+      "owner_app_id": "brain",
+      "descriptive_name": "Project",
+      "purpose_statement": "Active in-flight feature work tracked over its lifecycle",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Spike",
+      "owner_app_id": "brain",
+      "descriptive_name": "Spike",
+      "purpose_statement": "Time-boxed investigation or exploration with a defined conclusion",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Sop",
+      "owner_app_id": "brain",
+      "descriptive_name": "Sop",
+      "purpose_statement": "Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "Decision",
+      "owner_app_id": "brain",
+      "descriptive_name": "Decision",
+      "purpose_statement": "A call a human made — the choice, its rationale, and outcome — kept as an auditable trail",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_record_slug"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_record_title",
+        "knowledge_record_markdown",
+        "knowledge_record_status",
+        "north_star_slug",
+        "decision_gate_slug",
+        "decision_maker_identifier",
+        "decision_date_text",
+        "knowledge_record_tag_labels",
+        "knowledge_record_created_at",
+        "knowledge_record_updated_at"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_record_title": "String",
+        "knowledge_record_markdown": "String",
+        "knowledge_record_status": "String",
+        "north_star_slug": "String",
+        "decision_gate_slug": "String",
+        "decision_maker_identifier": "String",
+        "decision_date_text": "String",
+        "knowledge_record_tag_labels": {
+          "Array": "String"
+        },
+        "knowledge_record_created_at": "DateTime",
+        "knowledge_record_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_record_title": "the one-line title of a knowledge record",
+        "knowledge_record_markdown": "the Markdown text of a knowledge record",
+        "knowledge_record_status": "the lifecycle status of a knowledge record, interpreted by its record type",
+        "north_star_slug": "the slug of the North Star that owns the outcome; empty when no North Star is assigned",
+        "decision_gate_slug": "the slug of the decision gate that a decision clears; empty when no gate is assigned",
+        "decision_maker_identifier": "the person or agent identifier supplied as the maker of a decision",
+        "decision_date_text": "the date text supplied by the decision author; an empty value denotes no supplied date",
+        "knowledge_record_tag_labels": "the freeform tag labels attached to a knowledge record",
+        "knowledge_record_created_at": "the RFC 3339 instant when a knowledge record was created",
+        "knowledge_record_updated_at": "the RFC 3339 instant when a knowledge record was last updated"
+      },
+      "field_classifications": {
+        "knowledge_record_title": [
+          "word"
+        ],
+        "knowledge_record_markdown": [
+          "word"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_title": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_markdown": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_status": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "north_star_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "decision_gate_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "decision_maker_identifier": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "decision_date_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_tag_labels": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "alternate_keys": {
+        "recent": {
+          "hash_field": "",
+          "range_field": null,
+          "missing": "reject",
+          "hash_literal": "all",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        },
+        "by_status": {
+          "hash_field": "knowledge_record_status",
+          "range_field": null,
+          "missing": "reject",
+          "range_separator": "#",
+          "range_parts": [
+            {
+              "field": "knowledge_record_updated_at",
+              "format": "reverse_time_millis"
+            },
+            {
+              "field": "knowledge_record_slug",
+              "format": "text"
+            }
+          ]
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_record_title": 1,
+        "knowledge_record_markdown": 1,
+        "knowledge_record_status": 1,
+        "north_star_slug": 1,
+        "decision_gate_slug": 1,
+        "decision_maker_identifier": 1,
+        "decision_date_text": 1,
+        "knowledge_record_tag_labels": 1,
+        "knowledge_record_created_at": 1,
+        "knowledge_record_updated_at": 1
+      }
+    },
+    {
+      "name": "TagIndex",
+      "owner_app_id": "brain",
+      "descriptive_name": "TagIndex",
+      "purpose_statement": "Inverted index mapping a tag to the records that carry it, maintained by fbrain to make tag-filtered reads scale with tag cardinality instead of corpus size",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "tag_lookup_key"
+      },
+      "fields": [
+        "tag_lookup_key",
+        "tag_label",
+        "tagged_record_references",
+        "tag_membership_list_created_at",
+        "tag_membership_list_updated_at"
+      ],
+      "field_types": {
+        "tag_lookup_key": "String",
+        "tag_label": "String",
+        "tagged_record_references": {
+          "Array": "String"
+        },
+        "tag_membership_list_created_at": "DateTime",
+        "tag_membership_list_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "tag_lookup_key": "the key __tagidx__ followed by the lowercase SHA-256 digest of a tag label",
+        "tag_label": "the complete text label of a tag",
+        "tagged_record_references": "the knowledge record references encoded as type:slug that carry a tag",
+        "tag_membership_list_created_at": "the RFC 3339 instant when a tag membership list was created",
+        "tag_membership_list_updated_at": "the RFC 3339 instant when a tag membership list was last updated"
+      },
+      "field_classifications": {
+        "tag_lookup_key": [
+          "no_index",
+          "metadata"
+        ],
+        "tag_label": [
+          "no_index",
+          "metadata"
+        ],
+        "tagged_record_references": [
+          "no_index",
+          "metadata"
+        ],
+        "tag_membership_list_created_at": [
+          "no_index",
+          "metadata"
+        ],
+        "tag_membership_list_updated_at": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "tag_lookup_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tag_label": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tagged_record_references": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tag_membership_list_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tag_membership_list_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "tag_lookup_key": 1,
+        "tag_label": 1,
+        "tagged_record_references": 1,
+        "tag_membership_list_created_at": 1,
+        "tag_membership_list_updated_at": 1
+      }
+    },
+    {
+      "name": "TagMembership",
+      "owner_app_id": "brain",
+      "descriptive_name": "TagMembership_hashrange_v1",
+      "purpose_statement": "Per-member rows of the fbrain tag and backlink membership layout: one row names one record that carries one tag or links to one target, so adding or removing a member is a single small write and a read is a keyed partition read",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "tag_membership_bucket_key",
+        "range_field": "tag_membership_entry_key"
+      },
+      "fields": [
+        "tag_membership_bucket_key",
+        "tag_membership_entry_key",
+        "tag_label_excerpt",
+        "tag_membership_copy_state_json"
+      ],
+      "field_types": {
+        "tag_membership_bucket_key": "String",
+        "tag_membership_entry_key": "String",
+        "tag_label_excerpt": "String",
+        "tag_membership_copy_state_json": "String"
+      },
+      "field_descriptions": {
+        "tag_membership_bucket_key": "the key __tagidx__ followed by the lowercase SHA-256 digest of a tag or link-target label",
+        "tag_membership_entry_key": "the type:slug membership reference, or a reserved double-underscore key for copy state",
+        "tag_label_excerpt": "the first 1 KiB of a tag label, for display only",
+        "tag_membership_copy_state_json": "a JSON-encoded legacy membership copy stamp or short-lived copy claim"
+      },
+      "field_classifications": {
+        "tag_membership_bucket_key": [
+          "no_index",
+          "metadata"
+        ],
+        "tag_membership_entry_key": [
+          "no_index",
+          "metadata"
+        ],
+        "tag_label_excerpt": [
+          "no_index",
+          "metadata"
+        ],
+        "tag_membership_copy_state_json": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "tag_membership_bucket_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tag_membership_entry_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tag_label_excerpt": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "tag_membership_copy_state_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "tag_membership_bucket_key": 1,
+        "tag_membership_entry_key": 1,
+        "tag_label_excerpt": 1,
+        "tag_membership_copy_state_json": 1
+      }
+    },
+    {
+      "name": "BrainAdminSnapshot",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainAdminSnapshot",
+      "purpose_statement": "Privacy-safe fbrain admin dashboard rollup for delivery as a LastDB slice; stores counts and short summaries only, never full brain bodies or secrets",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_snapshot_id"
+      },
+      "fields": [
+        "knowledge_snapshot_id",
+        "snapshot_producer_app_id",
+        "snapshot_schema_version_text",
+        "snapshot_captured_at",
+        "knowledge_record_type_counts_json",
+        "open_decision_list_json",
+        "active_program_summary_list_json",
+        "recent_heartbeat_event_list_json"
+      ],
+      "field_types": {
+        "knowledge_snapshot_id": "String",
+        "snapshot_producer_app_id": "String",
+        "snapshot_schema_version_text": "String",
+        "snapshot_captured_at": "DateTime",
+        "knowledge_record_type_counts_json": "String",
+        "open_decision_list_json": "String",
+        "active_program_summary_list_json": "String",
+        "recent_heartbeat_event_list_json": "String"
+      },
+      "field_descriptions": {
+        "knowledge_snapshot_id": "the stable identifier of a knowledge metadata snapshot",
+        "snapshot_producer_app_id": "the app identifier of the producer of a metadata snapshot",
+        "snapshot_schema_version_text": "the text version of the payload contract of a metadata snapshot",
+        "snapshot_captured_at": "the RFC 3339 instant when a metadata snapshot was captured",
+        "knowledge_record_type_counts_json": "a JSON-encoded object with one live knowledge record count for each record type",
+        "open_decision_list_json": "a JSON-encoded list of open decision slugs and titles",
+        "active_program_summary_list_json": "a JSON-encoded list of summaries of active programs",
+        "recent_heartbeat_event_list_json": "a JSON-encoded list of recent heartbeat event identifiers, times and outcomes"
+      },
+      "field_data_classifications": {
+        "knowledge_snapshot_id": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "snapshot_producer_app_id": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "snapshot_schema_version_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "snapshot_captured_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_type_counts_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "open_decision_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "active_program_summary_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "recent_heartbeat_event_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_snapshot_id": 1,
+        "snapshot_producer_app_id": 1,
+        "snapshot_schema_version_text": 1,
+        "snapshot_captured_at": 1,
+        "knowledge_record_type_counts_json": 1,
+        "open_decision_list_json": 1,
+        "active_program_summary_list_json": 1,
+        "recent_heartbeat_event_list_json": 1
+      }
+    },
+    {
+      "name": "BrainAttachmentIndex",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainAttachmentIndex",
+      "purpose_statement": "Per-record list of file attachments on an fbrain knowledge record; filename metadata is searchable, attachment content is not",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "attachment_lookup_key"
+      },
+      "fields": [
+        "attachment_lookup_key",
+        "knowledge_record_type",
+        "knowledge_record_slug",
+        "attachment_file_names",
+        "attachment_metadata_list_json",
+        "attachment_list_created_at",
+        "attachment_list_updated_at"
+      ],
+      "field_types": {
+        "attachment_lookup_key": "String",
+        "knowledge_record_type": "String",
+        "knowledge_record_slug": "String",
+        "attachment_file_names": {
+          "Array": "String"
+        },
+        "attachment_metadata_list_json": "String",
+        "attachment_list_created_at": "DateTime",
+        "attachment_list_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "attachment_lookup_key": "the attachment-list key __attidx__ followed by the SHA-256 digest of the owning record type and slug",
+        "knowledge_record_type": "the record type that names one kind of knowledge record",
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "attachment_file_names": "the file names attached to a knowledge record",
+        "attachment_metadata_list_json": "a JSON-encoded list of attachment names, file references, sizes, media types and added times",
+        "attachment_list_created_at": "the RFC 3339 instant when an attachment metadata list was created",
+        "attachment_list_updated_at": "the RFC 3339 instant when an attachment metadata list was last updated"
+      },
+      "field_classifications": {
+        "attachment_lookup_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_record_type": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_record_slug": [
+          "no_index",
+          "metadata"
+        ],
+        "attachment_file_names": [
+          "word"
+        ],
+        "attachment_metadata_list_json": [
+          "no_index",
+          "metadata"
+        ],
+        "attachment_list_created_at": [
+          "no_index",
+          "metadata"
+        ],
+        "attachment_list_updated_at": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "attachment_lookup_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_type": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "attachment_file_names": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "attachment_metadata_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "attachment_list_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "attachment_list_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "attachment_lookup_key": 1,
+        "knowledge_record_type": 1,
+        "knowledge_record_slug": 1,
+        "attachment_file_names": 1,
+        "attachment_metadata_list_json": 1,
+        "attachment_list_created_at": 1,
+        "attachment_list_updated_at": 1
+      }
+    },
+    {
+      "name": "BrainAttachmentBlob",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainAttachmentBlob",
+      "purpose_statement": "Content-addressed file bytes backing fbrain attachments; binary payload intentionally excluded from all search indexes",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "file_content_sha256_hex"
+      },
+      "fields": [
+        "file_content_sha256_hex",
+        "file_size_bytes_decimal_text",
+        "file_media_type",
+        "file_content_base64",
+        "file_record_created_at"
+      ],
+      "field_types": {
+        "file_content_sha256_hex": "String",
+        "file_size_bytes_decimal_text": "String",
+        "file_media_type": "String",
+        "file_content_base64": "String",
+        "file_record_created_at": "DateTime"
+      },
+      "field_descriptions": {
+        "file_content_sha256_hex": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
+        "file_size_bytes_decimal_text": "the base-10 text encoding of a file size in bytes",
+        "file_media_type": "the MIME type of a file",
+        "file_content_base64": "the base64 encoding of the complete bytes of a file",
+        "file_record_created_at": "the RFC 3339 instant when a file metadata record was first stored"
+      },
+      "field_classifications": {
+        "file_content_sha256_hex": [
+          "no_index",
+          "metadata"
+        ],
+        "file_size_bytes_decimal_text": [
+          "no_index",
+          "metadata"
+        ],
+        "file_media_type": [
+          "no_index",
+          "metadata"
+        ],
+        "file_content_base64": [
+          "no_index",
+          "binary"
+        ],
+        "file_record_created_at": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "file_content_sha256_hex": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_size_bytes_decimal_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_media_type": {
+          "sensitivity_level": 0,
+          "data_domain": "media"
+        },
+        "file_content_base64": {
+          "sensitivity_level": 0,
+          "data_domain": "binary"
+        },
+        "file_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "file_content_sha256_hex": 1,
+        "file_size_bytes_decimal_text": 1,
+        "file_media_type": 1,
+        "file_content_base64": 1,
+        "file_record_created_at": 1
+      }
+    },
+    {
+      "name": "BrainAttachmentFile",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainAttachmentFile",
+      "purpose_statement": "Content-addressed $lastdb_file pointer backing an fbrain attachment; bytes live in the encrypted B2 CAS file plane, never in this record",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "file_content_sha256_hex"
+      },
+      "fields": [
+        "file_content_sha256_hex",
+        "file_size_bytes_decimal_text",
+        "file_media_type",
+        "native_file_reference",
+        "file_record_created_at"
+      ],
+      "field_types": {
+        "file_content_sha256_hex": "String",
+        "file_size_bytes_decimal_text": "String",
+        "file_media_type": "String",
+        "native_file_reference": "Any",
+        "file_record_created_at": "DateTime"
+      },
+      "field_descriptions": {
+        "file_content_sha256_hex": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
+        "file_size_bytes_decimal_text": "the base-10 text encoding of a file size in bytes",
+        "file_media_type": "the MIME type of a file",
+        "native_file_reference": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
+        "file_record_created_at": "the RFC 3339 instant when a file metadata record was first stored"
+      },
+      "field_classifications": {
+        "file_content_sha256_hex": [
+          "no_index",
+          "metadata"
+        ],
+        "file_size_bytes_decimal_text": [
+          "no_index",
+          "metadata"
+        ],
+        "file_media_type": [
+          "no_index",
+          "metadata"
+        ],
+        "native_file_reference": [
+          "no_index",
+          "metadata"
+        ],
+        "file_record_created_at": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "file_content_sha256_hex": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_size_bytes_decimal_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_media_type": {
+          "sensitivity_level": 0,
+          "data_domain": "media"
+        },
+        "native_file_reference": {
+          "sensitivity_level": 0,
+          "data_domain": "file-reference"
+        },
+        "file_record_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "file_content_sha256_hex": 1,
+        "file_size_bytes_decimal_text": 1,
+        "file_media_type": 1,
+        "native_file_reference": 1,
+        "file_record_created_at": 1
+      }
+    },
+    {
+      "name": "BrainBodyFile",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainBodyFile",
+      "purpose_statement": "Pointer to a local CAS file blob that holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_text_file_lookup_key"
+      },
+      "fields": [
+        "knowledge_text_file_lookup_key",
+        "knowledge_record_type",
+        "knowledge_record_slug",
+        "knowledge_text_source_local_field_name",
+        "file_content_sha256_hex",
+        "file_size_bytes_decimal_text",
+        "native_file_reference",
+        "knowledge_text_file_created_at",
+        "knowledge_text_file_updated_at"
+      ],
+      "field_types": {
+        "knowledge_text_file_lookup_key": "String",
+        "knowledge_record_type": "String",
+        "knowledge_record_slug": "String",
+        "knowledge_text_source_local_field_name": "String",
+        "file_content_sha256_hex": "String",
+        "file_size_bytes_decimal_text": "String",
+        "native_file_reference": "Any",
+        "knowledge_text_file_created_at": "DateTime",
+        "knowledge_text_file_updated_at": "DateTime"
+      },
+      "field_descriptions": {
+        "knowledge_text_file_lookup_key": "the key __bodyfile__ followed by the SHA-256 digest of source record type, slug and local field name",
+        "knowledge_record_type": "the record type that names one kind of knowledge record",
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_text_source_local_field_name": "the app-local name of the knowledge record field whose text is held in this file",
+        "file_content_sha256_hex": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
+        "file_size_bytes_decimal_text": "the base-10 text encoding of a file size in bytes",
+        "native_file_reference": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
+        "knowledge_text_file_created_at": "the RFC 3339 instant when a knowledge text file was first stored",
+        "knowledge_text_file_updated_at": "the RFC 3339 instant when a knowledge text file was last replaced"
+      },
+      "field_classifications": {
+        "knowledge_text_file_lookup_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_record_type": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_record_slug": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_text_source_local_field_name": [
+          "no_index",
+          "metadata"
+        ],
+        "file_content_sha256_hex": [
+          "no_index",
+          "metadata"
+        ],
+        "file_size_bytes_decimal_text": [
+          "no_index",
+          "metadata"
+        ],
+        "native_file_reference": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_text_file_created_at": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_text_file_updated_at": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_text_file_lookup_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_type": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_text_source_local_field_name": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_content_sha256_hex": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_size_bytes_decimal_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "native_file_reference": {
+          "sensitivity_level": 0,
+          "data_domain": "file-reference"
+        },
+        "knowledge_text_file_created_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_text_file_updated_at": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_text_file_lookup_key": 1,
+        "knowledge_record_type": 1,
+        "knowledge_record_slug": 1,
+        "knowledge_text_source_local_field_name": 1,
+        "file_content_sha256_hex": 1,
+        "file_size_bytes_decimal_text": 1,
+        "native_file_reference": 1,
+        "knowledge_text_file_created_at": 1,
+        "knowledge_text_file_updated_at": 1
+      }
+    },
+    {
+      "name": "BrainListPage",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainListPage",
+      "purpose_statement": "One thin list page for brain list, addressed by a list hash and a page id, holding card ids and a short title and no body",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "knowledge_list_scope_key",
+        "range_field": "knowledge_list_page_key"
+      },
+      "fields": [
+        "knowledge_list_scope_key",
+        "knowledge_list_page_key",
+        "knowledge_list_page_json"
+      ],
+      "field_types": {
+        "knowledge_list_scope_key": "String",
+        "knowledge_list_page_key": "String",
+        "knowledge_list_page_json": "String"
+      },
+      "field_descriptions": {
+        "knowledge_list_scope_key": "the selector for a knowledge list by type, status, tag, parent design, link target or symptom; all selects the complete list",
+        "knowledge_list_page_key": "the __head__ marker or a knowledge list page identifier p followed by eight digits",
+        "knowledge_list_page_json": "a JSON-encoded knowledge list page with short record summaries and an older page identifier; no record body"
+      },
+      "field_classifications": {
+        "knowledge_list_scope_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_list_page_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_list_page_json": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_list_scope_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_list_page_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_list_page_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_list_scope_key": 1,
+        "knowledge_list_page_key": 1,
+        "knowledge_list_page_json": 1
+      }
+    },
+    {
+      "name": "BrainListLocator",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainListLocator",
+      "purpose_statement": "One locator that names the single list page holding one brain card, so a put rewrites that page without walking the chain",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "knowledge_list_locator_scope_key",
+        "range_field": "knowledge_list_record_reference"
+      },
+      "fields": [
+        "knowledge_list_locator_scope_key",
+        "knowledge_list_record_reference",
+        "knowledge_list_record_page_id"
+      ],
+      "field_types": {
+        "knowledge_list_locator_scope_key": "String",
+        "knowledge_list_record_reference": "String",
+        "knowledge_list_record_page_id": "String"
+      },
+      "field_descriptions": {
+        "knowledge_list_locator_scope_key": "the locator scope token loc# followed by the knowledge list hash",
+        "knowledge_list_record_reference": "a knowledge record reference encoded as type#slug within one list locator",
+        "knowledge_list_record_page_id": "the page identifier assigned to one knowledge record in a particular list"
+      },
+      "field_classifications": {
+        "knowledge_list_locator_scope_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_list_record_reference": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_list_record_page_id": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_list_locator_scope_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_list_record_reference": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_list_record_page_id": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_list_locator_scope_key": 1,
+        "knowledge_list_record_reference": 1,
+        "knowledge_list_record_page_id": 1
+      }
+    },
+    {
+      "name": "BrainCompactListLocator_v1",
+      "descriptive_name": "BrainCompactListLocator_v1",
+      "owner_app_id": "brain",
+      "purpose_statement": "One exact compact list-locator value addressed by the digest of its list and card identity; no ordered range",
+      "schema_type": "Hash",
+      "key": {},
+      "fields": [
+        "knowledge_list_record_page_id"
+      ],
+      "field_types": {
+        "knowledge_list_record_page_id": "String"
+      },
+      "field_descriptions": {
+        "knowledge_list_record_page_id": "the page identifier assigned to one knowledge record in a particular list"
+      },
+      "field_classifications": {
+        "knowledge_list_record_page_id": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_list_record_page_id": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_list_record_page_id": 1
+      }
+    },
+    {
+      "name": "BrainTypeDirectory",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainTypeDirectory",
+      "purpose_statement": "One directory record per slug that lists which brain record types use that slug",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "knowledge_record_slug",
+        "range_field": "knowledge_type_directory_marker"
+      },
+      "fields": [
+        "knowledge_record_slug",
+        "knowledge_type_directory_marker",
+        "knowledge_record_type_list_json"
+      ],
+      "field_types": {
+        "knowledge_record_slug": "String",
+        "knowledge_type_directory_marker": "String",
+        "knowledge_record_type_list_json": "String"
+      },
+      "field_descriptions": {
+        "knowledge_record_slug": "the stable slug that identifies a knowledge record within its record type",
+        "knowledge_type_directory_marker": "the fixed __types__ range marker of a knowledge record type directory",
+        "knowledge_record_type_list_json": "a JSON-encoded list of the knowledge record types that use one record slug"
+      },
+      "field_classifications": {
+        "knowledge_record_slug": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_type_directory_marker": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_record_type_list_json": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_record_slug": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_type_directory_marker": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_type_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_record_slug": 1,
+        "knowledge_type_directory_marker": 1,
+        "knowledge_record_type_list_json": 1
+      }
+    },
+    {
+      "name": "BrainListCount",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainListCount",
+      "purpose_statement": "One decimal counter for the whole brain list or for one record type, not for a status, a tag, or a time window",
+      "schema_type": "Hash",
+      "key": {
+        "hash_field": "knowledge_count_scope_key"
+      },
+      "fields": [
+        "knowledge_count_scope_key",
+        "knowledge_record_count_decimal_text"
+      ],
+      "field_types": {
+        "knowledge_count_scope_key": "String",
+        "knowledge_record_count_decimal_text": "String"
+      },
+      "field_descriptions": {
+        "knowledge_count_scope_key": "the count scope token all or one knowledge record type name",
+        "knowledge_record_count_decimal_text": "the base-10 text encoding of a count of knowledge records within a named count scope"
+      },
+      "field_classifications": {
+        "knowledge_count_scope_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_record_count_decimal_text": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_count_scope_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_record_count_decimal_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_count_scope_key": 1,
+        "knowledge_record_count_decimal_text": 1
+      }
+    },
+    {
+      "name": "BrainEdgeSet",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainEdgeSet",
+      "purpose_statement": "One capped set of graph-edge ids for a brain record, so a neighbor read does not range-read the out edge schema",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "knowledge_edge_set_scope_key",
+        "range_field": "knowledge_edge_set_head_marker"
+      },
+      "fields": [
+        "knowledge_edge_set_scope_key",
+        "knowledge_edge_set_head_marker",
+        "knowledge_edge_reference_list_json"
+      ],
+      "field_types": {
+        "knowledge_edge_set_scope_key": "String",
+        "knowledge_edge_set_head_marker": "String",
+        "knowledge_edge_reference_list_json": "String"
+      },
+      "field_descriptions": {
+        "knowledge_edge_set_scope_key": "the edge-set scope key es# followed by a knowledge record type and slug",
+        "knowledge_edge_set_head_marker": "the fixed __head__ range marker of a knowledge edge set",
+        "knowledge_edge_reference_list_json": "a JSON-encoded list of at most sixteen edge references encoded as type#destination"
+      },
+      "field_classifications": {
+        "knowledge_edge_set_scope_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_edge_set_head_marker": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_edge_reference_list_json": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_edge_set_scope_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_edge_set_head_marker": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_edge_reference_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_edge_set_scope_key": 1,
+        "knowledge_edge_set_head_marker": 1,
+        "knowledge_edge_reference_list_json": 1
+      }
+    },
+    {
+      "name": "BrainTokenSet",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainTokenSet",
+      "purpose_statement": "One capped token list for a brain record. An absent record reads as an empty token list. Keyword pages are a later write",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "knowledge_token_set_scope_key",
+        "range_field": "knowledge_token_set_head_marker"
+      },
+      "fields": [
+        "knowledge_token_set_scope_key",
+        "knowledge_token_set_head_marker",
+        "knowledge_token_list_json"
+      ],
+      "field_types": {
+        "knowledge_token_set_scope_key": "String",
+        "knowledge_token_set_head_marker": "String",
+        "knowledge_token_list_json": "String"
+      },
+      "field_descriptions": {
+        "knowledge_token_set_scope_key": "the token-set scope key ts# followed by a knowledge record type and slug",
+        "knowledge_token_set_head_marker": "the fixed __head__ range marker of a knowledge token set",
+        "knowledge_token_list_json": "a JSON-encoded list of at most eight tokens written by a knowledge record"
+      },
+      "field_classifications": {
+        "knowledge_token_set_scope_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_token_set_head_marker": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_token_list_json": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_token_set_scope_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_token_set_head_marker": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_token_list_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_token_set_scope_key": 1,
+        "knowledge_token_set_head_marker": 1,
+        "knowledge_token_list_json": 1
+      }
+    },
+    {
+      "name": "BrainBackfillCursor",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainBackfillCursor",
+      "purpose_statement": "One cursor for a named-slug list backfill. The record stores the last source slug and the count added for that slug",
+      "schema_type": "HashRange",
+      "key": {
+        "hash_field": "knowledge_backfill_scope_key",
+        "range_field": "knowledge_backfill_cursor_marker"
+      },
+      "fields": [
+        "knowledge_backfill_scope_key",
+        "knowledge_backfill_cursor_marker",
+        "knowledge_backfill_cursor_json"
+      ],
+      "field_types": {
+        "knowledge_backfill_scope_key": "String",
+        "knowledge_backfill_cursor_marker": "String",
+        "knowledge_backfill_cursor_json": "String"
+      },
+      "field_descriptions": {
+        "knowledge_backfill_scope_key": "the backfill scope key bf# followed by the target list hash and source record type",
+        "knowledge_backfill_cursor_marker": "the fixed __cursor__ range marker of a knowledge list backfill",
+        "knowledge_backfill_cursor_json": "a JSON-encoded backfill cursor with the last source slug and count added for that slug"
+      },
+      "field_classifications": {
+        "knowledge_backfill_scope_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_backfill_cursor_marker": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_backfill_cursor_json": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_backfill_scope_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_backfill_cursor_marker": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_backfill_cursor_json": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "field_versions": {
+        "knowledge_backfill_scope_key": 1,
+        "knowledge_backfill_cursor_marker": 1,
+        "knowledge_backfill_cursor_json": 1
+      }
+    }
+  ]
 }
