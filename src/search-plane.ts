@@ -70,7 +70,6 @@ function resolveSearchHome(opts: SearchPlaneHomeOpts = {}): string {
   const home =
     opts.lastDbHome ||
     process.env.LASTDB_HOME?.trim() ||
-    process.env.FOLDDB_HOME?.trim() ||
     `${process.env.HOME ?? ""}/.lastdb`;
   return resolve(home, "apps/search");
 }

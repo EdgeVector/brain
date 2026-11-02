@@ -26,9 +26,9 @@ const stable = (value) => JSON.stringify(ordered(value));
 
 function input(number) {
   const time = new Date(Date.UTC(2026, 0, 1) + number * 1000).toISOString();
-  return { type: types[number % 2], record: { slug: `read-${number}`, title: `Molecule note ${number}`,
-    body: settings.bodyBytes ? (`Record ${number}. ` + "molecule ".repeat(settings.bodyBytes)).slice(0, settings.bodyBytes)
-      : `Record ${number}. ` + "molecule ".repeat(512),
+  return { type: types[number % 2], record: { slug: `read-${number}`, title: `Record note ${number}`,
+    body: settings.bodyBytes ? (`Record ${number}. ` + "keyword ".repeat(settings.bodyBytes)).slice(0, settings.bodyBytes)
+      : `Record ${number}. ` + "keyword ".repeat(512),
     status: number % 4 === 0 ? "parked" : "active", tags: ["shared"], created_at: time, updated_at: time } };
 }
 const corpus = Array.from({ length: settings.records }, (_, number) => input(number));
@@ -192,15 +192,11 @@ async function run() {
       const after = await primaryRows(node, cfg, Array.from({ length: 8 }, (_, i) => settings.records - 16 + i));
       for (const [slug, prior] of partialBefore) {
         const next = after.get(slug);
-        // A format 6 home names the atom behind each field: a title-only update keeps the body atom.
-        // A format 7 home stores one value per record and returns an empty atom id, so there the
-        // proof is the unchanged body value checked below.
-        const atoms = [prior.metadata?.body?.atom_uuid, next?.metadata?.body?.atom_uuid];
-        require(settings.recordHome ? atoms.every((atom) => atom === "") : Boolean(atoms[0]) && atoms[0] === atoms[1],
-          settings.recordHome ? "A format 7 reply names a body atom" : "A title-only update replaced its body atom");
+        // A record is one stored value, so the proof is the unchanged body value.
+        require(next, "A title-only update target is absent");
         for (const field of ["body", "tags", "status", "created_at"]) require(stable(prior.fields[field]) === stable(next.fields[field]), "A title-only update changed " + field);
       }
-      verification = { content_atoms: Object.fromEntries([...after].map(([slug, row]) => [slug, row.metadata.body.atom_uuid])) };
+      verification = { title_only_updates_verified: partialBefore.size };
     }
     return;
   }
@@ -234,10 +230,6 @@ async function run() {
     require(listed.length === found.size && new Set(listed.map((row) => row.slug)).size === found.size, "The app list differs from primary membership");
     const snapshot = await (await load(root, "commands/admin-snapshot")).buildBrainAdminSnapshot(node, cfg);
     require(snapshot.unavailable_types.length === 0 && types.every((type) => snapshot.type_counts[type] === found.size / 2), "The app count differs after deletes");
-    if (phase === "reopen_partial") {
-      const prior = JSON.parse(readFileSync(settings.partialProof, "utf8")).verification.content_atoms;
-      for (const [slug, atom] of Object.entries(prior)) require(found.get(slug)?.metadata?.body?.atom_uuid === atom, "A body atom differs after restart");
-    }
     verification = { records_verified: found.size, list_members_verified: listed.length, exact_counts: true, bodies_after_restart: true };
     return;
   }
@@ -280,7 +272,7 @@ async function run() {
     } else if (phase === "bulk_selection") {
       await deletion.deleteByFilter({ cfg, type: "concept", status: "parked", yes: false, print: quiet, onResult: (value) => { result = value; } });
     } else if (phase === "search_fallback") {
-      await search.searchCmd({ cfg, query: "molecule", limit: 5, json: true, print: quiet, printErr: quiet, onResult: (value) => { result = value; } });
+      await search.searchCmd({ cfg, query: "keyword", limit: 5, json: true, print: quiet, printErr: quiet, onResult: (value) => { result = value; } });
     } else throw Error("Unknown phase " + phase);
     const elapsed = performance.now() - start;
     // Value checks run outside the measured operation. No successful sample skips a check.
@@ -299,8 +291,8 @@ async function run() {
       const expected = phase === "get" ? 1 : phase === "first_page" ? 20 : phase === "migration_read" ? settings.records / 2 : settings.records;
       let items = phase === "get" ? [result] : result;
       if (phase === "migration_read" && settings.label === "before" && Array.isArray(items)) {
-        // The old shared-value layout also lists each reference slug under the concept key
-        // molecule (CI read 1000 rows for 500 concept records). The conversion removes these
+        // The old shared-value layout also lists each reference slug under the concept field
+        // key (CI read 1000 rows for 500 concept records). The conversion removes these
         // rows. Check every returned field and the exact set of accepted reference writes.
         // The expected keys come from acknowledged primary + directory writes, never read counts.
         const other = items.filter((item) => Number(String(item?.slug).slice(5)) % 2 === 1);
@@ -338,8 +330,7 @@ async function primaryRows(node, cfg, numbers) {
   const rows = new Map();
   for (let offset = 0; offset < numbers.length; offset += 100) {
     const keys = numbers.slice(offset, offset + 100);
-    // The SDK's ordinary record shape omits per-field metadata. This actual batch
-    // response retains the body atoms needed for the title-only operation proof.
+    // One batch read by key returns the records for the title-only operation proof.
     const queries = types.map((type) => ({ schema_name: cfg.schemaHashes[type], fields,
       filter: { HashRangeKeys: keys.filter((number) => input(number).type === type).map((number) => [`read-${number}`, ""]) }, limit: 100 }));
     const response = await node.rawCall("POST", "/api/queries/batch", { queries });

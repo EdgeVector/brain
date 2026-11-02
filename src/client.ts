@@ -21,7 +21,6 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 // raw calls, and owner-session attestation.
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
@@ -91,99 +90,40 @@ export const TRANSPORT_NOT_ATTESTED = "transport_not_attested";
 
 // Filename of the node's Unix-domain data/control socket — must match
 // `fold_db_node::server::uds::SOCKET_FILE_NAME` ("folddb.sock"), the same
-// constant the CLI's attest path uses. NOTE: the FoldDB→LastDB rebrand moved
-// the node *data home* from `~/.folddb` to `~/.lastdb` (v0.15.1+), but the
-// socket *file name* is unchanged — only the home dir moved.
+// constant the CLI's attest path uses. The socket lives under the node home.
 const SOCKET_FILE_NAME = "folddb.sock";
 const FULL_SURFACE_SOCKET_FILE_NAME = "folddb-full.sock";
 
 // Resolve the running node's data home (the dir holding `port` and `data/`).
-//
-// The FoldDB→LastDB rebrand is mid-flight: there is NO single fixed default
-// home, so brain must work against BOTH and pick the one that's actually live:
-//   - the shipped LastDB.app desktop node uses `~/.folddb` as its data home,
-//   - a v0.15.1+ CLI / brew `lastdb` node uses `~/.lastdb`.
-// A mixed-version machine can have BOTH dirs on disk (e.g. a dev who first ran a
-// 0.15.1 brew node — creating `~/.lastdb` — then switched to LastDB.app, which
-// uses `~/.folddb`). Precedence:
-//   1. `LASTDB_HOME` env (the new explicit override),
-//   2. `FOLDDB_HOME` env (the legacy explicit override — still honored),
-//   3. the candidate home whose live control socket (`data/folddb.sock`)
-//      actually exists — `~/.lastdb` first, then `~/.folddb` — so we attest
-//      against the node that's truly running rather than whichever home dir
-//      merely exists (the dir can be a stale leftover with no live socket),
-//   4. `~/.lastdb` if its dir exists (no socket on either — pre-launch default),
-//   5. `~/.folddb` otherwise (legacy fallback — also the path when neither
-//      dir exists yet, so error/hint strings keep pointing somewhere real).
+// It matches the node's own resolver: `LASTDB_HOME` when it is set, else
+// `~/.lastdb`.
 //
 // CRITICAL: every place that derives the node home (socket path + port
 // breadcrumb + init hint) MUST go through this one resolver so the owner-
 // attestation UDS socket and the node URL always derive from the SAME root —
 // a mismatch silently fails owner attestation with a misleading
-// `transport_not_attested` (the original dogfood bug). Probing for the live
-// socket here (not in `defaultFolddbSocketPath` alone) is what keeps that
-// invariant on a mixed machine.
+// `transport_not_attested` (the original dogfood bug).
 export function resolveNodeHome(): string {
   const lastdbEnv = process.env.LASTDB_HOME;
   if (lastdbEnv && lastdbEnv.length > 0) return lastdbEnv;
-  const folddbEnv = process.env.FOLDDB_HOME;
-  if (folddbEnv && folddbEnv.length > 0) return folddbEnv;
-  // Both default node-home paths derive from the guarded home base so a broken
-  // HOME fails loud rather than resolving to a relative `undefined/.lastdb`.
-  // (An explicit LASTDB_HOME/FOLDDB_HOME override above already bypasses this.)
-  return resolveDefaultNodeHome(brainHomeBase(), existsSync);
-}
-
-// The pure default-home resolver behind `resolveNodeHome` (after the env
-// overrides are consumed), split out so the socket-preference + directory
-// fallback is directly unit-testable with an injected home base and `exists`
-// probe — in-process `os.homedir()` reads the passwd entry (not $HOME) and the
-// real machine's `~/.lastdb`/`~/.folddb` state can't be driven from a test, so
-// this seam lets a test assert the mixed-version cases deterministically.
-// Production code calls `resolveNodeHome`, which passes `brainHomeBase()` and
-// the real `existsSync`. Precedence (steps 3–5 of resolveNodeHome's doc):
-//   3. the default home whose live control socket (`data/folddb.sock`) exists —
-//      `~/.lastdb` first, then `~/.folddb`,
-//   4. `~/.lastdb` if its dir exists (no socket on either — pre-launch default),
-//   5. `~/.folddb` otherwise.
-export function resolveDefaultNodeHome(
-  homeBase: string,
-  exists: (p: string) => boolean,
-): string {
-  const lastdbDefault = join(homeBase, ".lastdb");
-  const folddbDefault = join(homeBase, ".folddb");
-  // Prefer the home whose control socket actually exists: that's the node truly
-  // running on this machine, regardless of which home *directories* are present.
-  if (exists(join(lastdbDefault, "data", SOCKET_FILE_NAME))) return lastdbDefault;
-  if (exists(join(folddbDefault, "data", SOCKET_FILE_NAME))) return folddbDefault;
-  // No live socket under either default: fall back to the directory-existence
-  // heuristic (`~/.lastdb` first) so error/hint strings still point somewhere
-  // real before any node has been launched.
-  if (exists(lastdbDefault)) return lastdbDefault;
-  return folddbDefault;
+  // The default derives from the guarded home base so a broken HOME fails loud
+  // rather than resolving to a relative `undefined/.lastdb`.
+  return join(brainHomeBase(), ".lastdb");
 }
 
 // Build the `onboarding_already_complete` (HTTP 410) recovery hint's "start
-// fresh" command so it points at the dev's REAL node home rather than a
-// hardcoded `~/.folddb`. The rebrand moved the onboarding state to
-// `~/.lastdb/config/` on a v0.15.1+ node, so a hardcoded `rm -rf ~/.folddb/config/`
-// silently no-ops on a current node and the dev stays wedged. Routing through
-// `resolveNodeHome()` keeps the 0.14.x fallback (`~/.folddb`) intact while
-// printing `~/.lastdb/config/` on a current node. Exported so it is directly
-// unit-testable (the 410 path is hard to exercise end-to-end).
+// fresh" command so it points at the dev's REAL node home (`<home>/config/`).
+// Exported so it is directly reachable from the 410 path.
 export function onboardingResetConfigDir(): string {
   return `${join(resolveNodeHome(), "config")}/`;
 }
 
 // Resolve the node's UDS control-socket path. Mirrors the CLI: the socket lives
-// at `<home>/data/folddb.sock`, where `<home>` is `resolveNodeHome()` — which
-// now prefers whichever default home (`~/.lastdb` for a v0.15.1+ CLI node,
-// `~/.folddb` for the LastDB.app desktop node) has a live socket on disk, so on
-// a mixed-version machine this returns the socket that's actually there rather
-// than a dead path under a stale home dir. An explicit override (config field /
-// BRAIN_FOLDDB_SOCKET env) wins for ephemeral / non-default nodes.
+// at `<home>/data/folddb.sock`, where `<home>` is `resolveNodeHome()`. An
+// explicit override (config field / BRAIN_FOLDDB_SOCKET env) wins for
+// ephemeral / non-default nodes.
 export function defaultFolddbSocketPath(override?: string): string {
-  // Precedence: the BRAIN_FOLDDB_SOCKET env wins (the ad-hoc / test override),
+  // Precedence: the BRAIN_FOLDDB_SOCKET env wins (the ad-hoc override),
   // then an explicit config-supplied path, then the default
   // `<resolveNodeHome()>/data/folddb.sock`.
   const envOverride = process.env.BRAIN_FOLDDB_SOCKET;
@@ -380,12 +320,6 @@ export type RawResponse = {
 export type QueryRow = {
   fields: Record<string, unknown>;
   key: { hash: string | null; range: string | null };
-  // The base64-encoded ed25519 public key of whoever wrote the record's
-  // head atoms. `pubkeyToUserHash` derives the fold_db user_hash from it
-  // for telemetry (G13 `brain doctor --usage`).
-  author_pub_key?: string;
-  // metadata also exists (per-field atom_uuid + writer_pubkey) but only
-  // author_pub_key is needed by current code paths.
 };
 
 export type QueryResponse = {
@@ -465,7 +399,7 @@ export class BrainError extends Error {
 // spawn passes a JS-`undefined` HOME (`env: { ...process.env, HOME: fakeHome }`
 // with `fakeHome` undefined — several test harnesses + dogfood scripts do
 // exactly this), Bun/Node return the LITERAL string `"undefined"`. Every
-// `join(homedir(), ".brain", …)` (and `~/.lastdb` / `~/.folddb` node-home)
+// `join(homedir(), ".brain", …)` (and the `~/.lastdb` node-home)
 // then becomes a RELATIVE path like `undefined/.brain/…`, and the first
 // `mkdirSync(dirname(path), …)` + `writeFileSync` silently scatters config +
 // keychain + caches under whatever cwd the process happened to be standing in
@@ -892,7 +826,7 @@ export type NodeClient = {
     keys: Array<{ hash: string; range?: string }>;
   }): Promise<QueryRow[]>;
   // Admin/offline membership primitive: GET /api/list returns storage keys
-  // only, never atom bodies. Optional so legacy hand-built test doubles do not
+  // only, never record values. Optional so legacy hand-built test doubles do not
   // all need to grow the newly-shipped Mini route at once.
   listRecordKeys?(
     schemaHash: string,
@@ -1022,7 +956,7 @@ export function newNodeClient(opts: {
   appId?: string;
   // Path to the node's UDS control socket, used to mint the owner-session
   // pairing code (see `attestOwnerSession`). Defaults to
-  // `${FOLDDB_HOME ?? ~/.folddb}/data/folddb.sock` (overridable via the
+  // `${LASTDB_HOME ?? ~/.lastdb}/data/folddb.sock` (overridable via the
   // `BRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
   // socket is absent (a non-isolation node) mint fails fast and brain proceeds
   // unattested, exactly as today.
@@ -1388,11 +1322,7 @@ export function newNodeClient(opts: {
             `the materialized page, so has_more never clears and pagination cannot ` +
             `progress ${DOCTOR_TIP}.`,
           hint:
-            "Check `unresolved_rows` on the raw /api/query response first: " +
-            "non-zero means rows were dropped because a tip pointed at a missing " +
-            "atom (size a repair with `lastdb db repair-dangling-tips`, dry run). " +
-            "ZERO means the count and the page disagree for another reason — walk " +
-            "the offsets with limit=1 and look for a repeated record, which is the " +
+            "Walk the offsets with limit=1 and look for a repeated record, which is the " +
             "alias-key defect in brain " +
             "`papercut-lastdb-full-scan-key-list-contains-alias-keys-so-offsets-repeat-and-total-count-over-reports`. " +
             "This affects only the record type you deleted from; other types still work.",
@@ -1428,11 +1358,9 @@ export function newNodeClient(opts: {
         hint:
           "Do NOT assume this is an outdated node — the tombstone-aware count fix " +
           "(fold #995) has a deployed successor, and checking for it by commit " +
-          "ancestry gives a false negative because it was squash-merged. Triage " +
-          "instead: `unresolved_rows` non-zero on the raw /api/query response means " +
-          "dangling tips (size a repair with `lastdb db repair-dangling-tips`, dry " +
-          "run); `unresolved_rows` ZERO with a gap this size means the scan's key " +
-          "list holds alias keys that resolve to the same record — walk the offsets " +
+          "ancestry gives a false negative because it was squash-merged. A gap this " +
+          "size can mean the scan's key list holds alias keys that resolve to the " +
+          "same record — walk the offsets " +
           "with limit=1 and look for a repeat. Brain: " +
           "`papercut-lastdb-full-scan-key-list-contains-alias-keys-so-offsets-repeat-and-total-count-over-reports`. " +
           "If the gap matches records you recently deleted, only that record type is " +
@@ -1698,10 +1626,8 @@ export function newNodeClient(opts: {
       await mutate("update", schemaHash, fields, keyHash, keyRange);
     },
     async deleteRecord({ schemaHash, keyHash, keyRange }) {
-      // Empty fields_and_values is the minimal body — see
-      // docs/phase-5-delete-spike.md, Probe B. The orchestrator's earlier
-      // smoketest passed `{slug: keyHash}` which has the side-effect of
-      // writing a no-op atom rewriting the slug field with itself.
+      // Empty fields_and_values is the minimal body. A `{slug: keyHash}` body
+      // would also rewrite the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash, keyRange);
     },
     async mutateIfExpected({
@@ -1965,7 +1891,6 @@ function fromSdkRows(rows: readonly SdkQueryRow[]): QueryRow[] {
   return rows.map((row) => ({
     fields: row.fields as Record<string, unknown>,
     key: sdkKeyToBrainKey(row.keyValue, row.key),
-    author_pub_key: row.authorPubKey ?? undefined,
   }));
 }
 
@@ -3068,9 +2993,8 @@ type NodeErrorRule = {
 // tuple that matches nothing falls through to the generic `node_http_${status}`
 // mapping in `mapNodeError`.
 const NODE_ERROR_RULES: NodeErrorRule[] = [
-  // Atom content over the node's hard size limit (fold#870, won't-undo
-  // `preference-lastdb-atom-size-hard-limit-64kib`). The node answers
-  // `413 {"error":"atom_content_too_large","size":N,"limit":M,...}` and stores
+  // A field value over the node's hard size limit (fold#870). The node answers
+  // `413 {"error":"field_value_too_large","size":N,"limit":M,...}` and stores
   // nothing. Without this rule that lands as a generic `node_http_413` whose
   // text names neither the record nor the remedy, so a routine that grows one
   // record by `brain append` on every fire keeps retrying the same write until
@@ -3079,7 +3003,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
   // record crossing the raised 512 KiB ceiling by a few hundred bytes). The
   // record is full; the fix is a successor record, never a bigger limit.
   {
-    match: (ctx) => ctx.status === 413 && ctx.errCode === "atom_content_too_large",
+    match: (ctx) => ctx.status === 413 && ctx.errCode === "field_value_too_large",
     build: (ctx) => {
       const size = bodyNumberField(ctx.body, "size");
       const limit = bodyNumberField(ctx.body, "limit");
@@ -3090,16 +3014,16 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
       return {
         code: "record_too_large",
         message:
-          `Node rejected ${ctx.path}: the record body is over the atom content limit${sizes}. ` +
+          `Node rejected ${ctx.path}: the record body is over the field value limit${sizes}. ` +
           "Nothing was stored; the record is unchanged.",
         hint:
-          "This record is full. Do not raise LASTDB_MAX_ATOM_CONTENT_BYTES for it — atoms are " +
-          "structured field values, not a log. Start a successor record (same type, slug " +
+          "This record is full. Do not raise LASTDB_MAX_FIELD_VALUE_BYTES for it — field values " +
+          "are structured values, not a log. Start a successor record (same type, slug " +
           "suffixed with a date such as `<slug>-20260914`), link the two from each other, and " +
           "append new material to the successor. For a large opaque payload use file-blob/CAS " +
           "and keep only the pointer in the record.",
         agentHint:
-          "record_too_large: the body exceeds the node's atom content limit and the write was " +
+          "record_too_large: the body exceeds the node's field value limit and the write was " +
           "refused with nothing stored. Create a successor record `<slug>-<YYYYMMDD>` with " +
           "`brain put`, add a `Continues: <slug>` line to it and a `Continued-In: <successor>` " +
           "line to the original, then `brain append` the successor. Never retry the same append.",
@@ -3142,7 +3066,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
   // UDS control socket (see `attestOwnerSession`); when it can't find that
   // socket it proceeds unattested and the verb 403s. The bite is the documented
   // CONTRIBUTOR path: README tells devs to run a from-source node via `./run.sh`
-  // (a non-default data dir, so its socket is NOT at `~/.folddb/data/folddb.sock`)
+  // (a non-default data dir, so its socket is NOT at `~/.lastdb/data/folddb.sock`)
   // and then `brain init --node-url …`. Without this rule that lands as an
   // opaque `node_http_403` at init step 4/6 with zero guidance. Resolve the
   // socket path the client would have used (env/HOME-derived; a config-supplied
@@ -3169,17 +3093,16 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
             ? "The socket exists but attestation failed — the node may have restarted (its in-memory " +
               "session dropped) or it isn't the node serving your --node-url. "
             : "brain attests by minting a pairing code over the node's UDS control socket, which lives at " +
-              "`<node-data-home>/data/folddb.sock` — that's `~/.folddb/data/folddb.sock` for the LastDB.app " +
-              "desktop node and `~/.lastdb/data/folddb.sock` for a v0.15.1+ CLI/brew node. brain probes " +
-              "both and picks whichever socket exists; if your node uses a different home (a from-source " +
-              "`./run.sh` node, or one launched with a custom `LASTDB_HOME`/`FOLDDB_HOME`) the probe won't find it. ") +
+              "`<node-data-home>/data/folddb.sock`: `$LASTDB_HOME/data/folddb.sock` when `LASTDB_HOME` is " +
+              "set, else `~/.lastdb/data/folddb.sock`. If your node uses a different home (a from-source " +
+              "`./run.sh` node) brain won't find it. ") +
           "Point brain at the right socket with `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
-          "(or `LASTDB_HOME=<node-home>` / `FOLDDB_HOME=<node-home>`), then re-run. The socket is created " +
+          "(or `LASTDB_HOME=<node-home>`), then re-run. The socket is created " +
           "by the OS user that owns the node, so run brain as that user on the same machine.",
         agentHint:
           `This node gates owner verbs behind an attested UDS control socket (fold#739). ${where}. ` +
-          "Set the BRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` (LastDB.app " +
-          "desktop: `~/.folddb/data/folddb.sock`; v0.15.1+ CLI/brew: `~/.lastdb/data/folddb.sock`) and " +
+          "Set the BRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` " +
+          "(default `~/.lastdb/data/folddb.sock`, or `$LASTDB_HOME/data/folddb.sock`) and " +
           "retry. brain must run as the OS user that owns the node.",
       };
     },
@@ -3393,14 +3316,4 @@ export function recordTypeForHash(
     if (h === hash) return type as RecordType;
   }
   return null;
-}
-
-// fold_db's user_hash is the first 32 hex chars of sha256(raw pubkey).
-// Verified against `auto-identity`: for our local node, sha256 of the
-// base64-decoded `public_key` truncated to 16 bytes matches the
-// `user_hash` field. Used by `brain doctor --usage` to partition writes
-// across teammates without leaking the full pubkey.
-export function pubkeyToUserHash(pubkey: string): string {
-  const raw = Buffer.from(pubkey, "base64");
-  return createHash("sha256").update(raw).digest("hex").slice(0, 32);
 }

@@ -85,38 +85,18 @@ function expandTilde(p) {
 }
 /**
  * Resolve the node's home directory the same way the Rust `folddb_home()`
- * does, in priority order:
- *
- * 1. `LASTDB_HOME` — the new canonical override.
- * 2. `FOLDDB_HOME` — the legacy override (still honored).
- * 3. an existing `~/.lastdb` — an already-migrated install.
- * 4. an existing `~/.folddb` — an existing install, read in place.
- * 5. `~/.lastdb` — the brand-new-install default.
- *
- * Both env overrides are tilde-expanded, matching the Rust resolver.
+ * does: `LASTDB_HOME` (tilde-expanded) when it is set, else `~/.lastdb`.
  */
 function resolveFolddbHome(env) {
     const lastdbHome = env.LASTDB_HOME;
     if (lastdbHome && lastdbHome.length > 0) {
         return expandTilde(lastdbHome);
     }
-    const folddbHome = env.FOLDDB_HOME;
-    if (folddbHome && folddbHome.length > 0) {
-        return expandTilde(folddbHome);
-    }
     const home = homedir();
     if (!home) {
         return null;
     }
-    const lastdb = join(home, '.lastdb');
-    if (existsSync(lastdb)) {
-        return lastdb;
-    }
-    const folddb = join(home, '.folddb');
-    if (existsSync(folddb)) {
-        return folddb;
-    }
-    return lastdb;
+    return join(home, '.lastdb');
 }
 /**
  * Resolve the node's default data-plane socket path, mirroring the Rust
@@ -162,8 +142,7 @@ function resolveSocketPath(env) {
  *    canonical override), still honored.
  * 3. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
  * 4. `<data_dir>/folddb.sock` — the default the node binds, resolved via
- *    {@link resolveSocketPath} (honors the `LASTDB_HOME`/`FOLDDB_HOME` →
- *    `~/.lastdb`/`~/.folddb` home order).
+ *    {@link resolveSocketPath} (`LASTDB_HOME`, else `~/.lastdb`).
  * 5. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
  *
  * A socket path is only chosen when the file actually EXISTS, so a node that

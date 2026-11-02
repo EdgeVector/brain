@@ -21,23 +21,10 @@ config.json
 /tmp/
 *.tmp
 
-# Stray "~/" directory: fold_db can pass a literal "~/.folddb" to create_dir_all
-# without expanding the tilde, leaving a real "./~/" subtree in whatever cwd it
-# ran from. The data inside is safe to delete. Directory-rooted so we never
-# ignore a file literally named "~" deeper in the tree.
-/~/
-
 # fold_db node datadir: `folddb daemon start` (README "quick try" path) defaults
 # its sled DB to a RELATIVE ./data — keep that stray sled tree out of git.
 # Directory-rooted so a future src/data/ or test/data/ stays trackable.
 /data/
-
-# dev-channel node datadir: the `folddb-dev` binary (app-identity publish flow,
-# `folddb-dev app publish`) drops a relative ./.folddb-dev sled tree in whatever
-# cwd it ran from. Same hazard as ./data above — and because `brain --version`
-# (src/version.ts) flags `-dirty` on any `git status --porcelain` output, a
-# stray .folddb-dev makes every build self-report dirty. Keep it out of git.
-/.folddb-dev/
 
 # editor
 .vscode/

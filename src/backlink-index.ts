@@ -43,7 +43,7 @@ export function pageRangeOrThrow(pageId: string): string {
   });
 }
 
-// A stored atom over 8 KiB keeps the named bound. A caller limit cannot raise it.
+// A stored page value over 8 KiB keeps the named bound. A caller limit cannot raise it.
 export function displayCap(
   limit: number | undefined,
   named: number,
@@ -54,7 +54,7 @@ export function displayCap(
   return { cap: asked, partial: false };
 }
 
-// One exact page. A missing atom is absent. Bad JSON is not an empty page.
+// One exact page. A missing page record is absent. Bad JSON is not an empty page.
 export async function readStoredPage(
   node: NodeClient,
   schemaHash: string,

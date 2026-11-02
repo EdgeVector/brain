@@ -9,7 +9,7 @@
 // two devices that add different members write different rows.
 //
 // The legacy layout (TagIndex, one row per tag holding `members: string[]`)
-// is the reason for the rewrite: one atom held every member of a tag and was
+// is the reason for the rewrite: one field value held every member of a tag and was
 // rewritten whole on each add (158 KB growing 65 bytes an hour on the primary,
 // 2026-10-12). The new code NEVER writes that layout. It only reads it, to copy
 // a tag's members across (lazy dual-read):
@@ -79,7 +79,7 @@ const TAG_MEMBER_ALL_FIELDS = [...TAG_MEMBER_FIELDS];
 export const TAG_MEMBER_BATCH_SIZE = 128;
 /** Tag partitions per read in the admin rebuild. */
 const TAG_PARTITION_READ_BATCH = 8;
-/** `tmb_tag` is informational; the hash is the identity. Keep the atom small. */
+/** `tmb_tag` is informational; the hash is the identity. Keep the value small. */
 const TAG_VALUE_MAX_BYTES = 1024;
 /** Default life of a copy claim between renewals. */
 export const TAG_COPY_CLAIM_TTL_MS = 5 * 60 * 1000;
@@ -370,7 +370,7 @@ async function readRowsByKey(
  *   `empty: true`, so the tag stops re-reading the legacy row and the doctor
  *   shows it as migrated-empty.
  * - `"missing"`: the row exists but has no `members` value at all. That can be a
- *   row whose members atom has not synced from another device yet. It is "not
+ *   row whose members value has not synced from another device yet. It is "not
  *   read": never copied, never stamped, and the next read or write looks again.
  */
 type LegacyRow = {
@@ -877,7 +877,7 @@ export async function planTagMemberOps(
   changes: readonly TagMemberChange[],
   verbose?: Verbose,
 ): Promise<{ ops: BatchMutationOp[]; noOp: number }> {
-  // Page atoms replaced this payload.
+  // List page records replaced this payload.
   void node;
   void cfg;
   void changes;

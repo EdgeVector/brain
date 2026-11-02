@@ -500,8 +500,8 @@ export const tagIndexSchema: AddSchemaRequest = {
 /**
  * Tag membership, one small HashRange row per (tag, member). Replaces the
  * legacy `TagIndex` layout, whose single `members: string[]` field held EVERY
- * member of a tag and was rewritten whole on each add (a 158 KB atom growing
- * 65 bytes an hour on the primary, 2026-10-12). Atoms stay small: add or remove
+ * member of a tag and was rewritten whole on each add (a 158 KB field value
+ * growing 65 bytes an hour on the primary, 2026-10-12). Values stay small: add or remove
  * one member is one small write or one delete, never a read-modify-write of a
  * list. Two devices that add different members of one tag write different
  * rows, so nothing conflicts.
@@ -974,6 +974,10 @@ export const BRAIN_EDGE_SET_SCHEMA_KEY = "__brainedgeset__";
 export const BRAIN_TOKEN_SET_SCHEMA_KEY = "__braintokenset__";
 export const BRAIN_BACKFILL_CURSOR_SCHEMA_KEY = "__brainbackfillcursor__";
 
+// A field description is part of the installed schema definition. The node
+// refuses a repeat declare that changes the description of an existing field
+// (lastdb_node exec/schema_declare/owned.rs `field_change`), so `brain init`
+// on an existing home fails if one changes. Keep each description byte-exact.
 function supportSchema(opts: {
   name: string;
   purpose: string;
@@ -1069,7 +1073,7 @@ export const brainCompactLocatorSchema: AddSchemaRequest = {
     owner_app_id: OWNER_APP_ID,
     purpose_statement: "One exact compact list-locator value addressed by the digest of its list and card identity; no ordered range",
     schema_type: "Hash",
-    // Explicit request coordinates address the sole field's molecule. There
+    // Explicit request coordinates address the sole field's key. There
     // are no redundant hash/range fields for Mini to materialize and store.
     key: {},
     fields: ["bcl_page"],
@@ -1084,7 +1088,7 @@ export const brainCompactLocatorSchema: AddSchemaRequest = {
 export const brainTypeDirectorySchema = supportSchema({
   name: "BrainTypeDirectory",
   purpose:
-    "One directory atom per slug that lists which brain record types use that slug",
+    "One directory record per slug that lists which brain record types use that slug",
   schemaType: "HashRange",
   hashField: "btd_h",
   rangeField: "btd_r",
@@ -1149,7 +1153,7 @@ export const brainEdgeSetSchema = supportSchema({
 export const brainTokenSetSchema = supportSchema({
   name: "BrainTokenSet",
   purpose:
-    "One capped token list for a brain record. An absent atom reads as an empty token list. Keyword pages are a later write",
+    "One capped token list for a brain record. An absent record reads as an empty token list. Keyword pages are a later write",
   schemaType: "HashRange",
   hashField: "bts_h",
   rangeField: "bts_r",
@@ -1173,7 +1177,7 @@ export const brainTokenSetSchema = supportSchema({
 export const brainBackfillCursorSchema = supportSchema({
   name: "BrainBackfillCursor",
   purpose:
-    "One cursor for a named-slug list backfill. The atom stores the last source slug and the count added for that slug",
+    "One cursor for a named-slug list backfill. The record stores the last source slug and the count added for that slug",
   schemaType: "HashRange",
   hashField: "bfc_h",
   rangeField: "bfc_r",

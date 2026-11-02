@@ -1,5 +1,5 @@
 import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
-// The node refuses an atom above 64 KiB.
+// The node refuses a field value above 64 KiB.
 // Seal runs in `buildResidentWritePlan` and in `writeRecordFields` (append, tag, link, gate).
 
 import { createHash } from "node:crypto";
@@ -98,7 +98,7 @@ function headHashOf(head: string): string {
   return sha256Hex(head).slice(0, 16);
 }
 
-/** Serialized size of one field value, the way the node measures an atom. */
+/** Serialized size of one field value, the way the node measures it. */
 export function serializedBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8");
 }
@@ -718,7 +718,7 @@ export async function sealRecordFields(opts: {
 
 // ── field budget guard ──────────────────────────────────────────────────────
 
-/** Throw a clear error when one field value is above the 48 KiB atom budget. */
+/** Throw a clear error when one field value is above the 48 KiB field budget. */
 export function assertFieldBudget(
   type: RecordType,
   slug: string,
@@ -731,7 +731,7 @@ export function assertFieldBudget(
         code: "record_field_too_large",
         message:
           `${type} ${slug}: field ${name} is ${size} bytes serialized; ` +
-          `the atom budget is ${FIELD_MAX_BYTES} bytes (the node refuses 65536).`,
+          `the field budget is ${FIELD_MAX_BYTES} bytes (the node refuses 65536).`,
         hint:
           spillFieldsFor(type).includes(name)
             ? "Long text should have spilled to a body file."
@@ -794,7 +794,7 @@ export function assertRecordBudget(
 }
 
 /** Projections that copy the whole record into an index row. Guarded by the plan. */
-export function assertOpsFitAtomBudget(
+export function assertOpsFitFieldBudget(
   type: RecordType,
   slug: string,
   ops: ReadonlyArray<{ projection: string; keyHash: string; fields: Record<string, unknown> }>,
@@ -811,7 +811,7 @@ export function assertOpsFitAtomBudget(
           code: "record_field_too_large",
           message:
             `${type} ${slug}: ${op.projection} row ${op.keyHash} field ${name} is ${size} bytes serialized; ` +
-            `the atom budget is ${FIELD_MAX_BYTES} bytes (the node refuses 65536).`,
+            `the field budget is ${FIELD_MAX_BYTES} bytes (the node refuses 65536).`,
           hint: "An index row copied a record that is too large. Shorten the record fields.",
         });
       }

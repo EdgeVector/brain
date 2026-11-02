@@ -41,7 +41,7 @@ Evidence confirming, two distinct pollution sources:
 
 #### H2a — Tombstoned brain records leave phantom embeddings
 
-`brain delete` (see `docs/phase-5-delete-spike.md`) is soft: it stamps a tombstone tag so every brain read path treats the record as gone. It does **not** purge the corresponding entries from `fold_db`'s `EmbeddingIndex` — there is no API to do so (`purge_org_embeddings` exists in `native_index/mod.rs:133` but is whole-org).
+`brain delete` is soft: it stamps a tombstone tag so every brain read path treats the record as gone. It does **not** purge the corresponding entries from `fold_db`'s `EmbeddingIndex` — there is no API to do so (`purge_org_embeddings` exists in `native_index/mod.rs:133` but is whole-org).
 
 After 10 dogfood put-then-delete cycles in this spike, a `brain --verbose search h3-probe-…` produced:
 
@@ -166,7 +166,7 @@ under the no-tests policy. The functional G3a doctor command remains.
 
 - `src/commands/search.ts` — brain's resolver (dedup + `findBySlug` filter)
 - `src/client.ts:321-334` — `node.search` HTTP wrapper
-- `src/commands/delete.ts` + `docs/phase-5-delete-spike.md` — tombstone semantics (no embedding purge)
+- `src/commands/delete.ts` — tombstone semantics (no embedding purge)
 - `fold/fold_db/crates/core/src/fold_db_core/mutation_manager.rs:300-360` — synchronous indexing phase
 - `fold/fold_db/crates/core/src/fold_db_core/mutation_manager.rs:862-885` — `inline_index_mutations`
 - `fold/fold_db/crates/core/src/db_operations/native_index/mod.rs:76-175` — `index_record` + `search_all_classifications`

@@ -3,7 +3,7 @@
 
 import { backlinkIndexTag, backlinkTargetSlugs } from "./backlink-index.ts";
 import {
-  assertOpsFitAtomBudget,
+  assertOpsFitFieldBudget,
   sealRecordFields,
   storedFieldsOf,
   type SpilledField,
@@ -134,7 +134,7 @@ function planChildTaskOps(opts: {
   previous: BrainRecord | null;
   upsertType: "create" | "update";
 }): PlannedMutation[] {
-  // Page atoms replaced this payload.
+  // List page records replaced this payload.
   void opts;
   return [];
 }
@@ -151,7 +151,7 @@ async function planTagMembershipOps(opts: {
   newTags: readonly string[];
   projection: "tag" | "backlink";
 }): Promise<{ ops: PlannedMutation[]; noOp: number }> {
-  // Page atoms replaced this payload.
+  // List page records replaced this payload.
   void opts;
   return { ops: [], noOp: 0 };
 }
@@ -332,7 +332,7 @@ export async function commitResidentWritePlans(opts: {
 }): Promise<ResidentCommitResult> {
   const first = opts.writes[0];
   if (!first) return { ...emptyBatchResult(), indexNotes: [] };
-  for (const write of opts.writes) assertOpsFitAtomBudget(write.type, write.slug, write.plan.ops);
+  for (const write of opts.writes) assertOpsFitFieldBudget(write.type, write.slug, write.plan.ops);
   if (!opts.node.mutateBatch) {
     throw new BrainError({
       code: "resident_commit_unavailable",
@@ -353,7 +353,7 @@ export async function commitResidentWritePlans(opts: {
     notes,
     opts.replayKeywords === true,
   ).concat(counts));
-  assertOpsFitAtomBudget(first.type, first.slug, ops);
+  assertOpsFitFieldBudget(first.type, first.slug, ops);
   if (ops.length > WRITE_BATCH_MAX) {
     throw new BrainError({
       code: "resident_batch_too_large",

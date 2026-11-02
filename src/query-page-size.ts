@@ -1,5 +1,5 @@
 // Keep half the native key budget for layout, metadata, and conflict reads.
-// A projected row needs its key plus a tip and atom for each field. Reserve
+// A projected row needs its key plus a record value for each field. Reserve
 // one probe row. Queries in one IPC batch share the same native budget.
 const PLANNED_KEY_BUDGET = 5000;
 export const QUERY_PAGE_SIZE = 128;

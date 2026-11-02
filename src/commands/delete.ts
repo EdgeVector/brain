@@ -6,10 +6,6 @@
 // it, so a later get misses the row. The batch ack is success. A missing
 // batch client, a batch over the cap, or a failed batch fails the command
 // before any success line.
-//
-// Historical Phase 5 (2026-05-23) treated Delete as a sync-log marker
-// only. That is no longer true. See docs/phase-5-delete-spike.md for the
-// old probe, not for live product truth.
 
 import { BrainError, type NodeClient, type Verbose } from "../client.ts";
 import { pageBackfill, readStoredPage } from "../backlink-index.ts";

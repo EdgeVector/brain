@@ -359,7 +359,7 @@ export function defaultRunFolddbGrant(
 ): GrantResult {
   // Pin `FOLDDB_PORT` when brain is talking to a local node on a parseable
   // port — otherwise `folddb consent grant` discovers its target by reading
-  // `$FOLDDB_HOME/port`, which reflects the LAST daemon started under that
+  // `$LASTDB_HOME/port`, which reflects the LAST daemon started under that
   // HOME, not the one brain init was pointed at. Without this, running
   // `brain init --node-url http://127.0.0.1:<slot>` while a brew daemon is
   // also up on 9001 silently grants on 9001 and brain's first write stalls.

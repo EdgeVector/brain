@@ -88,7 +88,7 @@ export interface OwnerClientOptions {
  * const client = ownerClient({
  *   appId: 'fsituations',
  *   baseUrl: 'http://127.0.0.1:9101',
- *   socketPath: '/Users/me/.folddb/data/folddb.sock',
+ *   socketPath: '/Users/me/.lastdb/data/folddb.sock',
  *   defaultHeaders: { 'X-User-Hash': userHash },
  * });
  * const rows = await client.queryAll('MySchema', { fields: ['a', 'b'] });

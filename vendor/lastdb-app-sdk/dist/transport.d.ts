@@ -76,8 +76,7 @@ export declare function udsTransport(socketPath: string, defaultHeaders?: Record
  *    canonical override), still honored.
  * 3. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
  * 4. `<data_dir>/folddb.sock` — the default the node binds, resolved via
- *    {@link resolveSocketPath} (honors the `LASTDB_HOME`/`FOLDDB_HOME` →
- *    `~/.lastdb`/`~/.folddb` home order).
+ *    {@link resolveSocketPath} (`LASTDB_HOME`, else `~/.lastdb`).
  * 5. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
  *
  * A socket path is only chosen when the file actually EXISTS, so a node that

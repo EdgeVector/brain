@@ -93,8 +93,8 @@ export type ListPageResult = {
   /** Cards on this page after the page filter, before the limit. */
   total: number;
   /**
-   * True when the print cut the page, the atom names an older page, or the
-   * page atom is absent. Not a census.
+   * True when the print cut the page, the page names an older page, or the
+   * page record is absent. Not a census.
    */
   truncated: boolean;
 };
@@ -196,7 +196,7 @@ async function printListCount(
     return;
   }
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
-  const raw = await readCountAtom(node, schemaHash, hash);
+  const raw = await readCountRecord(node, schemaHash, hash);
   const state = parseListCount(raw);
   if (state === null) {
     missCount(opts, print, printErr, hash);
@@ -228,7 +228,7 @@ function missCount(
   );
 }
 
-async function readCountAtom(
+async function readCountRecord(
   node: NodeClient,
   schemaHash: string,
   hash: string,
@@ -287,10 +287,10 @@ async function printListPage(
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
   const countable = hash === "all" || isRecordType(hash);
 
-  const finishEmpty = async (atomPresent: boolean, older: string): Promise<void> => {
+  const finishEmpty = async (pagePresent: boolean, older: string): Promise<void> => {
     let countKind: "zero" | "positive" | "absent" = "absent";
     if (countable && countSchema.length > 0) {
-      const rawCount = await readCountAtom(node, countSchema, hash);
+      const rawCount = await readCountRecord(node, countSchema, hash);
       const state = parseListCount(rawCount);
       if (state !== null) {
         const n = state.count;
@@ -306,7 +306,7 @@ async function printListPage(
         lines.push("index record absent");
         lines.push(backfillLine(hash, opts.type));
       }
-    } else if (countKind === "zero" || (atomPresent && !countable)) {
+    } else if (countKind === "zero" || (pagePresent && !countable)) {
       truncated = false;
       lines.push("no records");
     } else if (countKind === "positive") {
@@ -458,10 +458,10 @@ export type RecordSummary = {
   slug: string;
   title: string;
   status: string;
-  // A page card omits this. The atom has no tag list.
+  // A page card omits this. The page record has no tag list.
   tags?: string[];
   design_slug?: string;
-  // A page card omits this. The atom has no create time.
+  // A page card omits this. The page record has no create time.
   created_at?: string;
   updated_at: string;
 };

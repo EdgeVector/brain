@@ -57,7 +57,7 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
   // A renamed definition receives new identities. Never reuse old identities.
   delete result.identity_hash;
   delete result.field_hashes;
-  delete result.field_molecule_uuids;
+  delete result.field_key_ids;
   return result as unknown as SchemaDefinition;
 }
 

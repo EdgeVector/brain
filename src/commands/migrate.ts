@@ -407,10 +407,9 @@ async function rePutAndSwap(ctx: RePutCtx): Promise<void> {
       manifest.descriptive_name_to,
     );
     if (inPlaceEvolve) {
-      // Update in place. fold_db's mutation pipeline is append-only —
-      // each update writes a new atom and rebinds the slug-key. On
-      // resume, re-applying the same default-fill is idempotent in
-      // value if not in atom count (a noop on read).
+      // Update in place. Each update rewrites the record at its slug key.
+      // On resume, re-applying the same default-fill is idempotent in
+      // value (a noop on read).
       await node.updateRecord({ schemaHash: manifest.to_hash, fields, keyHash: record.slug });
     } else {
       await node.createRecord({ schemaHash: manifest.to_hash, fields, keyHash: record.slug });

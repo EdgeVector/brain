@@ -19,7 +19,7 @@ Tag membership and backlink membership use one schema,
 
 The old layout (`TagIndex`, `members: string[]`, one row per tag) is read, never
 written. Its rows are never deleted or rewritten. The old layout is the reason
-for the change: one atom held every member of a tag.
+for the change: one field value held every member of a tag.
 
 ## Registration
 
@@ -46,9 +46,9 @@ A config with no TagMembership hash:
    batches of 128 and write the stamp last. The stamp note holds the count, a
    digest of the copied members, the time, and the legacy row's `updated_at`.
    The member rows are the list of what was copied; the stamp does not repeat
-   the list (a list in one atom is the defect this layout removes).
+   the list (a list in one field value is the defect this layout removes).
 3. No stamp and no legacy row, or a legacy row with no `members` VALUE: write NO
-   stamp. A device that has not synced the legacy row (or its `members` atom)
+   stamp. A device that has not synced the legacy row (or its `members` value)
    yet reads nothing, and a stamp written then would hide the members for good
    when they arrive. A first add writes only its member row. Tags that never had
    a legacy row cost one extra keyed read (a miss) per read.
@@ -108,7 +108,7 @@ reports a tag whose legacy row is newer than its copy stamp (check
 
 Index rows that keep a snapshot of the record (`RecordListEntry`, `LiveIndex`
 and its siblings, `ChildTaskIndex`) follow one rule
-(`src/index-payload.ts`). The payload is the whole record when its atom is at
+(`src/index-payload.ts`). The payload is the whole record when its value is at
 most 8 KiB. Otherwise, until it fits: the body is cut to a head of at most 2 KiB
 (then smaller); every other text field above 2 KiB is cut to 2 KiB (then 512
 bytes); last, only the keys and summary fields (slug, status, timestamps, a
