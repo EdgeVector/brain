@@ -21,7 +21,7 @@ type Metadata = {
 
 export async function syncOwnedModel(
   node: NodeClient,
-  base: Config,
+  base: Omit<Config, "storageModel">,
   existing: Config | null,
   canonicalVocabulary: boolean,
 ): Promise<Config> {
@@ -87,12 +87,12 @@ export async function syncOwnedModel(
       message:
         "Several installed schemas claim one app record type. Init leaves them unchanged.",
     });
-  // An API 13+ node owns every schema's values and refuses a shared-value home.
+  // Brain needs LastDB API 13 or later: that node owns each declared schema's values.
   if (!ownedHome(apiVersion)) {
     throw new BrainError({
       code: "home_copy_required",
       message:
-        "This node is older than LastDB API 13 and can hold Brain values in the old shared-value layout. Init leaves the home unchanged.",
+        "This node is older than LastDB API 13. Brain needs a node that owns the values of each declared schema. Init leaves the home unchanged.",
       hint: "Upgrade LastDB to API 13 or later. Move old Brain data to a new home with the home copy. See docs/multi-key-schemas.md.",
     });
   }

@@ -800,19 +800,6 @@ export type NodeClient = {
     allowFullScan?: boolean;
     filter?: { HashKey?: string; [k: string]: unknown };
   }): Promise<QueryResponse>;
-  // Single bounded page — ONE /api/query round trip, no pagination loop, no
-  // dedup/total_count guards. For probes and best-effort hint decoration that
-  // only need a small sample of rows (projected fields, capped limit) and must
-  // NEVER escalate into a full corpus fetch on a no-match path: the
-  // empty-brain probe (`hasAnyLiveRecord`) and the brain_get nearest-slug
-  // candidate scan. Real data reads keep using `queryAll` (complete, guarded)
-  // or `queryByKey` (point-read). Optional so hand-built NodeClient test mocks
-  // don't all have to grow it; callers fall back to `queryAll` when absent.
-  queryPage?(opts: {
-    schemaHash: string;
-    fields: string[];
-    limit: number;
-  }): Promise<QueryRow[]>;
   queryByKey?(opts: {
     schemaHash: string;
     fields: string[];
@@ -1725,24 +1712,6 @@ export function newNodeClient(opts: {
     },
     async queryAll({ schemaHash, fields, allowFullScan, filter }) {
       return queryAllGuarded({ schemaHash, fields, allowFullScan, filter });
-    },
-    async queryPage({ schemaHash, fields, limit }) {
-      // One page, first offset, caller-capped limit. Intentionally no
-      // has_more follow-up and none of queryAll's pagination guards — the
-      // contract is "a small sample, one round trip", and the two callers
-      // (empty-brain probe, nearest-slug hint scan) are explicitly
-      // best-effort over whatever the first page holds. Still unfiltered →
-      // admin full-scan header (Mini refuse otherwise).
-      const page = await queryPageSdk(
-        schemaHash,
-        {
-          fields,
-          limit,
-          offset: 0,
-        },
-        { allowFullScan: true },
-      );
-      return fromSdkRows(page.rows);
     },
     async queryByKey({ schemaHash, fields, keyHash }) {
       // Pure HashKey point-read — never fall back to a full schema drain.

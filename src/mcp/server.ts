@@ -2441,7 +2441,7 @@ async function nearestSlugCandidates(
   const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
   await Promise.all(types.map(async (t) => {
     try {
-      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg), undefined, cfg);
+      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg));
       for (const candidateSlug of slugs) {
         candidates.push({
           slug: candidateSlug,

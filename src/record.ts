@@ -12,7 +12,7 @@ import {
   isLoopbackNodeUrl,
 } from "./client.ts";
 import { newSearchClientFromCfg } from "./write-context.ts";
-import { keyPage, multiKey } from "./multi-key.ts";
+import { keyPage } from "./multi-key.ts";
 import type { Config } from "./config.ts";
 import {
   hydrateRecord,
@@ -757,29 +757,19 @@ export const NO_MATCH_PROBE_PAGE_LIMIT = 100;
 // the heavy fields whose fetch on every no-match path this projection removes.
 const LIVE_SLUG_PAGE_FIELDS = ["slug", "tags"];
 
-// ONE small `/api/query` page of live (non-tombstoned) slugs for a schema —
+// ONE small named-key page of live (non-tombstoned) slugs for a schema —
 // slug+tags projection only, `limit` rows max, never paginated. This is the
 // bounded primitive behind the no-match hint paths: the empty-brain probe
 // (`hasAnyLiveRecord`) and the MCP brain_get nearest-slug candidate scan.
 // Both are best-effort decoration, so sampling the first page is the
 // contract — callers that need the COMPLETE row set use `listRecords` /
-// `listRecordKeys` (paginated, guarded) instead. Falls back to `queryAll`
-// only for a NodeClient without `queryPage` (hand-built test mocks); the
-// real client always has it.
+// `listRecordKeys` (paginated, guarded) instead.
 export async function listLiveSlugsPage(
   node: NodeClient,
   schemaHash: string,
   limit: number = NO_MATCH_PROBE_PAGE_LIMIT,
-  cfg: { storageModel?: string } = {},
 ): Promise<string[]> {
-  const rows = multiKey(cfg)
-    ? (await keyPage(node, schemaHash, "recent", { HashKey: "all" }, LIVE_SLUG_PAGE_FIELDS, limit)).results
-    : node.queryPage
-    ? await node.queryPage({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS, limit })
-    : (await node.queryAll({ schemaHash, fields: LIVE_SLUG_PAGE_FIELDS })).results.slice(
-        0,
-        limit,
-      );
+  const rows = (await keyPage(node, schemaHash, "recent", { HashKey: "all" }, LIVE_SLUG_PAGE_FIELDS, limit)).results;
   const slugs: string[] = [];
   for (const row of rows) {
     const f = (row.fields ?? {}) as Record<string, unknown>;
@@ -797,12 +787,12 @@ export async function listLiveSlugsPage(
 // with no live slug is not a complete membership count. Read errors propagate.
 export async function hasAnyLiveRecord(
   node: NodeClient,
-  cfg: { schemaHashes: Record<string, string>; storageModel?: string },
+  cfg: { schemaHashes: Record<string, string> },
 ): Promise<boolean> {
   const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
   const pages = await Promise.all(hashes.map(async (schemaHash) => {
     try {
-      return await listLiveSlugsPage(node, schemaHash, NO_MATCH_PROBE_PAGE_LIMIT, cfg);
+      return await listLiveSlugsPage(node, schemaHash, NO_MATCH_PROBE_PAGE_LIMIT);
     } catch (err) {
       if (isSchemaNotFoundReadError(err)) return [];
       throw err;

@@ -37,9 +37,9 @@ Source changes do not authorize a change to the primary database or its archive.
 ## CI measurements
 
 The Brain read workflow compares exact app and daemon revisions.
-The earlier app creates its generated home on the compatible daemon.
-This app uses normal initialization on its own generated home on the removal daemon.
-No arm converts a home in place. The comparison does not measure the home copy.
+Each app uses normal initialization on its own generated home.
+Both arms use one LastDB revision at API 13 or later, so the comparison measures the app change.
+No arm converts a home in place.
 
 Read measurements use 1,000 records, three paired repeats,
 one restart call per operation, and five subsequent warm calls.

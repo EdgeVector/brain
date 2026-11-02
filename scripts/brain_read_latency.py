@@ -37,7 +37,6 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
     settings = {"label": label, "baseline": str(args.baseline), "candidate": str(args.candidate),
                 "socket": str(node.socket) if node else None, "config": str(destination / "config.json"),
                 "records": args.records, "samples": samples, "bodyBytes": args.body_bytes,
-                "seedProof": str(destination / "seed.json"),
                 "lastdbSource": str(args.lastdb_source)}
     name = tag or phase
     settings_path, output = destination / f"{name}-settings.json", destination / f"{name}.json"
@@ -162,11 +161,13 @@ def summarize(args, runs):
     rows = []
     operations = OPERATIONS if args.mode == "read" else ("create", "update", "delete", "partial")
     states = ("restart", "warm") if args.mode == "read" else ("operations",)
+    # One daemon revision for both arms isolates the app change.
+    same_daemon = args.baseline_revision == args.revision
     lines = [f"## Brain {args.mode} comparison: {args.records:,} records", "",
              f"Before app: `{args.app_baseline_revision}`. After app: `{args.app_revision}`.",
-             f"Compatible daemon: `{args.baseline_revision}`. Native daemon: `{args.revision}`.",
-             "Each app creates its own generated home on its own daemon. No home is converted in place.",
-             "An existing home moves to this app only by the home copy. This comparison does not measure that copy.",
+             f"Both arms use daemon `{args.revision}`. The comparison measures the app change only." if same_daemon else
+             f"Before daemon: `{args.baseline_revision}`. After daemon: `{args.revision}`.",
+             "Each app creates its own generated home on a fresh daemon. No home is converted in place.",
              "Canonical definitions remain shared. Record values belong to each schema.",
              f"Paired repeats: {args.repeats}. Each pair uses equal generated records and full body bytes.",
              "Restart uses the same generated files and a fresh daemon. The OS file cache is not cleared.",
@@ -207,9 +208,10 @@ def summarize(args, runs):
               "The keyword fallback uses the real app with LastSeek absent. It does not claim LastSeek latency.",
               "Operational runs verify the body value across title edits, deletion membership, exact counts, "
               "and restart recovery.",
-              "The after arm uses normal app initialization on the native daemon." if args.mode == "operations" else
+              "Both arms use normal app initialization." if args.mode == "operations" else
               "Every read cell includes one restart call and five warm calls per paired repeat.",
-              "This measures the app and daemon change. A same-layout LastDB benchmark isolates engine cost separately.",
+              ("This measures the app change. " if same_daemon else "This measures the app and daemon change. ")
+              + "A same-layout LastDB benchmark isolates engine cost separately.",
               "Raw profiles, response sizes, memory samples, disk sizes, and source identities remain in CI artifacts.",
               "No primary data, primary copy, local benchmark, or test suite participates."]
     save(args.output / "comparison.json", {"records": args.records, "app_before": args.app_baseline_revision,

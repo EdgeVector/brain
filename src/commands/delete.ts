@@ -8,7 +8,7 @@
 // before any success line.
 
 import { BrainError, type NodeClient, type Verbose } from "../client.ts";
-import { pageBackfill, readStoredPage } from "../backlink-index.ts";
+import { readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -25,7 +25,6 @@ import {
 } from "../record.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY, RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
 import { commitResidentRemoval } from "../resident-write-plan.ts";
-import { multiKey } from "../multi-key.ts";
 import { namedRecordPage } from "../named-records.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
@@ -58,66 +57,14 @@ export type DeleteResult = {
   soft: true;
 };
 
-// A child page is one HashRangeKey. Do not list every task.
+// The Task design key returns one bounded page. Do not list every task.
 async function findLinkedTaskSlugs(
   node: NodeClient,
   cfg: Config,
   designSlug: string,
 ): Promise<string[]> {
-  if (multiKey(cfg)) {
-    const page=await namedRecordPage(node,cfg,{type:"task",design:designSlug},20);
-    return page.items.map((task)=>task.slug);
-  }
-  const hash = `child#${designSlug}`;
-  const schemaHash = cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
-  const seen = new Set<string>();
-  let range = HEAD_RANGE;
-  for (;;) {
-    if (seen.has(range)) {
-      throw new BrainError({
-        code: "child_page_unproven",
-        message: `Cannot delete design "${designSlug}" — child page repeats.`,
-        hint: pageBackfill(hash, "task"),
-      });
-    }
-    seen.add(range);
-    const page = await readStoredPage(node, schemaHash, hash, range);
-    if (page.kind === "absent") {
-      throw new BrainError({
-        code: "child_page_unproven",
-        message: `Cannot delete design "${designSlug}" — child page absent.`,
-        hint: pageBackfill(hash, "task"),
-      });
-    }
-    if (page.kind === "bad") {
-      throw new BrainError({
-        code: "child_page_unproven",
-        message: `Cannot delete design "${designSlug}" — child page is partial.`,
-        hint: pageBackfill(hash, "task"),
-      });
-    }
-    if (page.cards.length > 0) return page.cards.map((card) => card.slug);
-    if (page.older.length === 0) return [];
-    range = page.older;
-  }
-}
-
-async function linkedTasksForDelete(
-  node: NodeClient,
-  cfg: Config,
-  designSlug: string,
-  force: boolean | undefined,
-  print: (line: string) => void,
-): Promise<string[]> {
-  try {
-    return await findLinkedTaskSlugs(node, cfg, designSlug);
-  } catch (err) {
-    if (!(force && err instanceof BrainError && err.code === "child_page_unproven")) throw err;
-    // Force explicitly permits dangling references. Do not claim the absent
-    // or damaged child page proves that the design has no linked tasks.
-    print(`warning: child references for design "${designSlug}" are unknown; --force permits dangling references.`);
-    return [];
-  }
+  const page = await namedRecordPage(node, cfg, { type: "task", design: designSlug }, 20);
+  return page.items.map((task) => task.slug);
 }
 
 // Tombstone status per type — pick a value from each type's status enum
@@ -179,7 +126,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   // this is a design-only concern. Runs before any mutation: a blocked delete
   // leaves the design untouched.
   if (type === "design") {
-    const linked = await linkedTasksForDelete(node, opts.cfg, slug, opts.force, print);
+    const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
     if (linked.length > 0) {
       const n = linked.length;
       const noun = n === 1 ? "task" : "tasks";
@@ -286,9 +233,9 @@ async function resolveFilterMatches(
   opts: DeleteByFilterOptions,
 ): Promise<{ matches: FilterMatch[]; partial: boolean }> {
   const types = opts.type ? [opts.type] : RECORD_TYPES.filter(type => Boolean(opts.cfg.schemaHashes[type]));
-  // Older homes can lack a status page until backfill. Preserve the type
-  // membership source, then check current status without fetching any bodies.
-  const hashes = opts.tag ? [`tag#${opts.tag}`] : multiKey(opts.cfg) && opts.status
+  // A status selection reads each type's status key. The batch read below
+  // rechecks the current status without fetching any bodies.
+  const hashes = opts.tag ? [`tag#${opts.tag}`] : opts.status
     ? types.map((type)=>`${type}#${opts.status}`) : types;
   if (opts.tag) {
     const head = await readStoredPage(node, opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "", hashes[0]!, HEAD_RANGE);
@@ -400,7 +347,7 @@ export async function deleteByFilter(
 
     try {
       if (m.type === "design") {
-        const linked = await linkedTasksForDelete(node, opts.cfg, slug, opts.force, print);
+        const linked = await findLinkedTaskSlugs(node, opts.cfg, slug);
         if (linked.length > 0) {
           const n = linked.length;
           const lnoun = n === 1 ? "task" : "tasks";

@@ -11,7 +11,6 @@ import { parseListCount } from "../count-state.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { formatTable, resolvePrintSinks } from "../format.ts";
 import { HEAD_RANGE } from "../list-page.ts";
-import { multiKey } from "../multi-key.ts";
 import { namedRecordPage } from "../named-records.ts";
 import {
   completeKeyTags,
@@ -141,7 +140,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     await printListCount(opts, print, printErr);
     return;
   }
-  if (multiKey(opts.cfg) && !opts.tag) {
+  if (!opts.tag) {
     const node = newReadClientFromCfg(opts.cfg, opts.verbose);
     const page = await namedRecordPage(node, opts.cfg, {
       ...(opts.type ? { type: opts.type } : {}), ...(opts.status ? { status: opts.status } : {}),
@@ -159,7 +158,7 @@ export async function listCmd(opts: ListOptions): Promise<void> {
     if (page.next_page) (opts.json || opts.fields?.length ? printErr : print)(`sample ${page.next_page}`);
     return;
   }
-  await printListPage(opts, print, printErr);
+  await printTagPage(opts.tag, opts, print, printErr);
 }
 
 async function printListCount(
@@ -249,26 +248,14 @@ async function readCountRecord(
   return textField(res.results[0], "bln_n");
 }
 
-async function printListPage(
+// Named keys serve every list except a tag list, which reads its stored page.
+async function printTagPage(
+  tag: string,
   opts: ListOptions,
   print: (line: string) => void,
   printErr: (line: string) => void,
 ): Promise<void> {
-  let hash: string;
-  if (opts.tag && opts.tag.length > 0) {
-    hash = `tag#${opts.tag}`;
-  } else if (opts.status && opts.status.length > 0) {
-    if (!opts.type) {
-      throw new BrainError({
-        code: "status_needs_type",
-        message: "a status list needs --type",
-        hint: "Pass --type with --status.",
-      });
-    }
-    hash = `${opts.type}#${opts.status}`;
-  } else {
-    hash = opts.type ?? "all";
-  }
+  const hash = `tag#${tag}`;
   const pageId = opts.page;
   let range = HEAD_RANGE;
   if (pageId !== undefined && pageId.length > 0) {
@@ -283,36 +270,17 @@ async function printListPage(
   }
 
   const schemaHash = opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "";
-  const countSchema = opts.cfg.schemaHashes[BRAIN_LIST_COUNT_SCHEMA_KEY] ?? "";
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
-  const countable = hash === "all" || isRecordType(hash);
 
+  // A tag list has no counter. A present page with no cards is a proven empty list.
   const finishEmpty = async (pagePresent: boolean, older: string): Promise<void> => {
-    let countKind: "zero" | "positive" | "absent" = "absent";
-    if (countable && countSchema.length > 0) {
-      const rawCount = await readCountRecord(node, countSchema, hash);
-      const state = parseListCount(rawCount);
-      if (state !== null) {
-        const n = state.count;
-        if (n === 0) countKind = "zero";
-        else if (n > 0) countKind = "positive";
-      }
-    }
     const lines: string[] = [];
     let truncated = true;
     if (older.length > 0) {
       lines.push(`sample ${older}`);
-      if (countable && countKind === "absent") {
-        lines.push("index record absent");
-        lines.push(backfillLine(hash, opts.type));
-      }
-    } else if (countKind === "zero" || (pagePresent && !countable)) {
+    } else if (pagePresent) {
       truncated = false;
       lines.push("no records");
-    } else if (countKind === "positive") {
-      lines.push("sample");
-      lines.push("index partial");
-      lines.push(backfillLine(hash, opts.type));
     } else {
       lines.push("sample");
       lines.push("index record absent");

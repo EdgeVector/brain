@@ -88,10 +88,9 @@ export function bunVersionMeetsMinimum(
   return compareVersions(found, min) >= 0;
 }
 
-// LastDB API 13 (lastdb #803) is the first node that refuses a home with the
-// retired shared-value layout at startup and owns the values of every schema
-// it declares. The node, not the app, decides ownership; an older node can
-// still share values between schemas.
+// LastDB API 13 (lastdb #803) is the first node that owns the values of every
+// schema it declares. The node, not the app, decides ownership, so Brain init
+// refuses an older node.
 export const OWNED_HOME_API_VERSION = 13;
 
 /** Whether a node at this API version owns the values of every schema. */

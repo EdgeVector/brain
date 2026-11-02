@@ -1,14 +1,13 @@
 // `brain get <slug> [--type T]` — print one record.
 // Untyped get reads the type directory, then at most one product key.
 // Typed get reads that product key and does not read the directory.
-// A design get reads child# as one HashRangeKey.
+// A design get reads one page of the Task design key.
 // linked_from reads link# as one HashRangeKey.
 // A print that omits the body does not fetch the blob.
 
 import {
   displayCap,
   pageBackfill,
-  pageRangeOrThrow,
   readStoredPage,
   type StoredCard,
   type StoredPage,
@@ -19,7 +18,6 @@ import type { Config } from "../config.ts";
 import { printFieldProjection } from "../field-projection.ts";
 import { resolvePrintSink } from "../format.ts";
 import { BACKLINK_PAGE, CHILD_PAGE, HEAD_RANGE } from "../list-page.ts";
-import { multiKey } from "../multi-key.ts";
 import { namedRecordPage } from "../named-records.ts";
 import {
   findBySlug,
@@ -73,7 +71,7 @@ export async function getRecord(opts: GetOptions): Promise<void> {
         hint: "Pass --type design with --page.",
       });
     }
-    childRange = multiKey(opts.cfg) ? opts.page : pageRangeOrThrow(opts.page);
+    childRange = opts.page;
   }
   const node = newReadClientFromCfg(opts.cfg, opts.verbose);
 
@@ -114,32 +112,13 @@ export async function getRecord(opts: GetOptions): Promise<void> {
   let designChildren: Array<{ slug: string; status: string }> | undefined;
   let tasksLines: string[] | undefined;
   let nextChildPage: string | undefined;
-  if (found.type === "design" && multiKey(opts.cfg)) {
+  if (found.type === "design") {
     const page = await namedRecordPage(node, opts.cfg, { type: "task", design: found.record.slug },
       Math.min(opts.limit ?? CHILD_PAGE, 100), childRange);
     designChildren = page.items.map((card) => ({ slug: card.slug, status: card.status }));
     tasksLines = [`${"tasks:".padEnd(12)}${designChildren.map((card) => `${card.slug} (${card.status})`).join(", ")}`];
     if (page.next_page) tasksLines.push(`sample ${page.next_page}`);
     nextChildPage = page.next_page;
-  } else if (found.type === "design") {
-    const childHash = `child#${found.record.slug}`;
-    const childPage = await readStoredPage(node, pageSchema, childHash, childRange);
-    const childView = memberLines(`tasks:`.padEnd(12), childPage, {
-      limit: opts.limit,
-      named: CHILD_PAGE,
-      absentLines: [
-        `${"tasks:".padEnd(12)}child page absent`,
-        "sample",
-        pageBackfill(childHash, "task"),
-      ],
-      render: (cards) => cards.map((card) => `${card.slug} (${card.status})`).join(", "),
-    });
-    tasksLines = childView.lines;
-    if (childPage.kind === "page" && childView.provenEmpty) {
-      designChildren = [];
-    } else if (childView.shown.length > 0) {
-      designChildren = childView.shown.map((card) => ({ slug: card.slug, status: card.status }));
-    }
   }
 
   const linkHash = `link#${found.record.slug}`;
