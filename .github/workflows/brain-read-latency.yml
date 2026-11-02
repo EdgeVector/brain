@@ -19,10 +19,12 @@ env:
   # CI uses the DEV Schema Service. The definition check and both daemons read this
   # one value, so they always name the same registry. Production needs publisher authority.
   ENVIRONMENT: dev
-  APP_BEFORE: 648cef807fcd9e08615eb8d9065649baf8a2f0f3
-  DAEMON_BEFORE: 60d50847609a953ef2eda64829f525800fccd4a8
+  # Brain main at #498. It initializes the owned multi-key model like the candidate.
+  APP_BEFORE: d629de7e2c9ed025f91bb8962d36c779afd4df7e
   # LastDB main after record model 8c (#938, #941): every new home is format 7,
-  # one stored record per key with a 64 KiB record cap.
+  # one stored record per key with a 64 KiB record cap. API 15, after #803.
+  # Both arms use this one revision, so the comparison measures the app change.
+  DAEMON_BEFORE: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
   DAEMON_AFTER: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -69,7 +71,7 @@ jobs:
             --baseline-binary "$RUNNER_TEMP/brain-binaries/before" --binary "$RUNNER_TEMP/brain-binaries/after" \
             --baseline-revision "$DAEMON_BEFORE" --revision "$DAEMON_AFTER" \
             --records 1000 --output "$RUNNER_TEMP/brain-definitions"
-      - name: Build the compatible and native daemons once
+      - name: Build the comparison daemons once
         env:
           CARGO_BUILD_JOBS: '3'
           CARGO_TERM_COLOR: never
@@ -78,6 +80,11 @@ jobs:
           mkdir "$RUNNER_TEMP/brain-binaries"
           for label in before after; do
             if [ "$label" = before ]; then revision="$DAEMON_BEFORE"; else revision="$DAEMON_AFTER"; fi
+            # One revision for both arms needs one build.
+            if [ "$label" = after ] && [ "$DAEMON_AFTER" = "$DAEMON_BEFORE" ]; then
+              cp "$RUNNER_TEMP/brain-binaries/before" "$RUNNER_TEMP/brain-binaries/after"
+              continue
+            fi
             cd "$RUNNER_TEMP/daemon-$label"
             FOLDDB_BUILD_VERSION_OVERRIDE="bench-$revision" \
               CARGO_TARGET_DIR="$RUNNER_TEMP/brain-target-$label" \

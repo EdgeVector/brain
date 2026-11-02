@@ -77,42 +77,18 @@ async function catalog() {
     `Publish or repair the exact Brain definitions in the ${process.env.ENVIRONMENT} Schema Service before this comparison`);
 }
 
-async function client(root, cfg, canonicalVocabulary = false) {
+async function client(root, cfg) {
   const { newNodeClient } = await load(root, "client");
   return newNodeClient({ baseUrl: "http://127.0.0.1", userHash: cfg?.userHash ?? "", socketPath: settings.socket,
-    schemaFieldAliases: cfg?.schemaFieldAliases, canonicalVocabulary, timeoutMs: 120000 });
+    schemaFieldAliases: cfg?.schemaFieldAliases, timeoutMs: 120000 });
 }
 
+// Both arms use normal app initialization, each with its own app source.
 async function setup() {
-  if (settings.label === "after") {
-    const { runInit } = await load(settings.candidate, "commands/init");
-    const result = await runInit({ configPath: settings.config, nodeUrl: "http://127.0.0.1", nodeSocketPath: settings.socket,
-      bootstrapName: "CI Brain named-key operations", print: quiet });
-    require(result.config.storageModel === "multi-key-v1", "Normal init did not select named keys");
-    return;
-  }
-  const root = settings.baseline;
-  let node = await client(root);
-  const identity = await node.autoIdentity();
-  const userHash = identity.provisioned ? identity.userHash : (await node.bootstrap("CI Brain latency")).userHash;
-  node = await client(root, { userHash }, true);
-  const definitions = await load(root, "schemas"), vocabulary = await load(root, "canonical-vocabulary");
-  const schemaHashes = {}, schemaFieldAliases = {};
-  for (let offset = 0; offset < definitions.UNIQUE_SCHEMAS.length; offset += 4) {
-    const resolved = await Promise.all(definitions.UNIQUE_SCHEMAS.slice(offset, offset + 4).map(async (entry) => ({
-      entry, receipt: await node.declareAppSchema(definitions.OWNER_APP_ID, entry.schema.schema),
-    })));
-    for (const { entry, receipt } of resolved) {
-      require(receipt.canonical, "The declaration lacks a canonical schema identity");
-      for (const key of definitions.schemaConfigKeys(entry)) schemaHashes[key] = receipt.canonical;
-      Object.assign(schemaFieldAliases, vocabulary.profilesFor(entry.schema.schema, [receipt.canonical, receipt.schema]));
-    }
-  }
-  const config = await load(settings.candidate, "config");
-  config.writeConfig({ configVersion: config.CONFIG_VERSION, nodeUrl: "http://127.0.0.1", nodeSocketPath: settings.socket,
-    schemaServiceUrl: schemaService(), userHash, schemaHashes,
-    schemaFieldAliases, designSchemaHash: schemaHashes.design, taskSchemaHash: schemaHashes.task,
-    appIdentityEnforce: false }, settings.config);
+  const { runInit } = await load(source, "commands/init");
+  const result = await runInit({ configPath: settings.config, nodeUrl: "http://127.0.0.1", nodeSocketPath: settings.socket,
+    bootstrapName: "CI Brain named-key operations", print: quiet });
+  require(result.config.storageModel === "multi-key-v1", "Normal init did not select named keys");
 }
 
 // One record per commit, as `brain put` writes it. No Brain command commits several records in
@@ -148,7 +124,6 @@ async function run() {
   const cfg = JSON.parse(readFileSync(settings.config, "utf8")), node = await client(root, cfg);
   const r = await load(root, "record");
   if (phase === "seed" || phase === "create") {
-    const acceptedWrites = [];
     for (const item of corpus) {
       const start = performance.now(), calls = requests, bytes = responseBytes;
       const plan = await writeRecord(root, node, cfg, item);
@@ -165,12 +140,8 @@ async function run() {
           "The accepted write lacks its authoritative type-directory key");
         const members = JSON.parse(directory[0].fields.btd_types);
         require(Array.isArray(members) && members.includes(item.type), "The accepted directory write omits the record type");
-        acceptedWrites.push({ type: item.type, slug: primary[0].keyHash, primary_schema: primary[0].schemaHash,
-          directory_schema: directory[0].schemaHash, directory_hash: directory[0].keyHash,
-          directory_range: directory[0].keyRange, directory_types: members });
       }
     }
-    if (phase === "seed") verification = { accepted_writes: acceptedWrites };
     return;
   }
   if (phase === "update" || phase === "partial") {
@@ -234,28 +205,8 @@ async function run() {
     return;
   }
   const [get, list, snapshot, search] = await Promise.all(["get", "list", "admin-snapshot", "search"].map((name) => load(root, "commands/" + name)));
-  let expectedSharedReferences;
-  if (phase === "migration_read" && settings.label === "before") {
-    const seed = JSON.parse(readFileSync(settings.seedProof, "utf8"));
-    const accepted = seed.verification?.accepted_writes;
-    require(seed.phase === "seed" && seed.source === settings.baseline && seed.input_sha256 === inputSha
-      && Array.isArray(accepted) && accepted.length === corpus.length
-      && new Set(accepted.map((entry) => entry.slug)).size === corpus.length,
-      "The migration read lacks the complete accepted seed-write set");
-    for (const entry of accepted) {
-      const number = Number(String(entry.slug).slice(5)), expected = input(number);
-      require(Number.isInteger(number) && number >= 0 && number < settings.records
-        && entry.slug === expected.record.slug && entry.type === expected.type
-        && entry.primary_schema === cfg.schemaHashes[entry.type]
-        && entry.directory_schema === cfg.schemaHashes.__braintypedirectory__
-        && entry.directory_hash === entry.slug && entry.directory_range === "__types__"
-        && Array.isArray(entry.directory_types) && entry.directory_types.includes(entry.type),
-        "An accepted seed write has different primary or directory membership");
-    }
-    expectedSharedReferences = new Set(accepted.filter((entry) => entry.type === "reference").map((entry) => entry.slug));
-  }
   for (let sample = 0; sample < settings.samples; sample++) {
-    let result, sharedValueRows;
+    let result;
     const before = requests, bytes = responseBytes, start = performance.now();
     profile = new Map();
     if (phase === "get") {
@@ -289,23 +240,12 @@ async function run() {
     } else {
       const full = ["get", "all_records", "migration_read"].includes(phase);
       const expected = phase === "get" ? 1 : phase === "first_page" ? 20 : phase === "migration_read" ? settings.records / 2 : settings.records;
-      let items = phase === "get" ? [result] : result;
-      if (phase === "migration_read" && settings.label === "before" && Array.isArray(items)) {
-        // The old shared-value layout also lists each reference slug under the concept field
-        // key (CI read 1000 rows for 500 concept records). The conversion removes these
-        // rows. Check every returned field and the exact set of accepted reference writes.
-        // The expected keys come from acknowledged primary + directory writes, never read counts.
-        const other = items.filter((item) => Number(String(item?.slug).slice(5)) % 2 === 1);
-        checkRecords(other, expectedSharedReferences.size, fields,
-          (number) => expectedSharedReferences.has(input(number).record.slug));
-        sharedValueRows = other.length;
-        items = items.filter((item) => !other.includes(item));
-      }
+      const items = phase === "get" ? [result] : result;
       checkRecords(items, expected, full ? fields : ["slug", "title", "status", "updated_at"],
         (number) => phase === "get" ? number === 0 : phase === "first_page" ? number % 2 === 0 && number >= settings.records - 40 : phase !== "migration_read" || number % 2 === 0);
     }
     samples.push({ elapsed_ms: elapsed, requests: requests - before, response_bytes: responseBytes - bytes, verified: true,
-      ...(sharedValueRows === undefined ? {} : { shared_value_rows: sharedValueRows }), profile: Object.fromEntries(profile) });
+      profile: Object.fromEntries(profile) });
   }
 }
 

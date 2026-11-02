@@ -5,7 +5,6 @@ import { utf8Head } from "./index-payload.ts";
 import { parseSpillMarker } from "./body-spill.ts";
 import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type BrainRecord } from "./record.ts";
 import { tokenize } from "./tokenize.ts";
-import { multiKey } from "./multi-key.ts";
 import { namedCards } from "./named-records.ts";
 import { locatorMutations, locatorSchema, readLocators } from "./list-locator.ts";
 import {
@@ -40,7 +39,7 @@ const TITLE_BYTES_TIGHT = 32;
 export const INDEX_PARTIAL = "index partial";
 export const COUNT_UNCONFIRMED = "the count did not confirm";
 
-type SchemaCfg = { schemaHashes: Record<string, string>; storageModel?: "multi-key-v1" };
+type SchemaCfg = { schemaHashes: Record<string, string> };
 
 export type ListCard = {
   type?: string;
@@ -469,24 +468,13 @@ async function readExact(
   return res.results;
 }
 
+// Named keys order the all, type, status and design lists. Tags and links keep stored pages.
 function slotsFor(
-  type: RecordType,
   record: BrainRecord,
   linkDests: readonly string[],
   details: string[],
-  native = false,
 ): Slot[] {
-  const slots: Slot[] = native ? [] : [
-    { hash: "all", kind: "list", bound: LIST_PAGE },
-    { hash: type, kind: "list", bound: LIST_PAGE },
-  ];
-  if (!native && record.status.length > 0) {
-    slots.push({
-      hash: `${type}#${record.status}`,
-      kind: "list",
-      bound: LIST_PAGE,
-    });
-  }
+  const slots: Slot[] = [];
   const tags = userTags(record.tags);
   if (tags.length > TAG_CAP) notePartial(details, "tag cap");
   for (const tag of tags.slice(0, TAG_CAP)) {
@@ -495,13 +483,6 @@ function slotsFor(
   if (linkDests.length > LINK_CAP) notePartial(details, "link cap");
   for (const dest of linkDests.slice(0, LINK_CAP)) {
     slots.push({ hash: `link#${dest}`, kind: "list", bound: BACKLINK_PAGE });
-  }
-  if (!native && type === "task" && record.design_slug && record.design_slug.length > 0) {
-    slots.push({
-      hash: `child#${record.design_slug}`,
-      kind: "list",
-      bound: CHILD_PAGE,
-    });
   }
   return slots;
 }
@@ -579,10 +560,10 @@ export async function planRecordListSide(opts: {
   const nextDests = uniqueDests(nextIds);
   const previousDests = linkDestsFromRecord(opts.type, opts.previous);
   const knownOld = opts.previous
-    ? slotsFor(opts.type, opts.previous, previousDests, details, multiKey(opts.cfg))
+    ? slotsFor(opts.previous, previousDests, details)
     : [];
   const knownNew = opts.next
-    ? slotsFor(opts.type, opts.next, nextDests, details, multiKey(opts.cfg))
+    ? slotsFor(opts.next, nextDests, details)
     : [];
 
   const pages = new Map<string, MemPage>();
@@ -724,7 +705,7 @@ export async function planRecordListSide(opts: {
       ? uniqueDests([...previousEdgeIds, ...previousFrontmatterIds])
       : previousDests;
     const oldSlots = opts.previous
-      ? slotsFor(opts.type, opts.previous, storedDests, details, multiKey(opts.cfg))
+      ? slotsFor(opts.previous, storedDests, details)
       : knownOld;
     const extraLocators = oldSlots.filter((slot) => {
       if (slot.kind !== "list") return false;
@@ -814,7 +795,7 @@ export async function planRecordListSide(opts: {
     preservedEdgeIds = nextIds.filter((id) => !suppliedIds.has(id));
 
     const finalNew = opts.next
-      ? slotsFor(opts.type, opts.next, uniqueDests(nextIds), details, multiKey(opts.cfg))
+      ? slotsFor(opts.next, uniqueDests(nextIds), details)
       : [];
     const unreadByHash = new Map<string, Slot>();
     for (const slot of [...finalNew, ...oldSlots]) {
@@ -1483,10 +1464,8 @@ export async function readPageChain(
   hash: string,
   maxPages = 1000,
 ): Promise<ListCard[] | null> {
-  if (multiKey(cfg)) {
-    const cards = await namedCards(node, cfg, hash, maxPages === 1);
-    if (cards !== null) return cards;
-  }
+  const named = await namedCards(node, cfg, hash, maxPages === 1);
+  if (named !== null) return named;
   const schemaHash = schemaOf(cfg, BRAIN_LIST_PAGE_SCHEMA_KEY);
   if (schemaHash.length === 0) return null;
   const cards: ListCard[] = [];
@@ -2606,7 +2585,7 @@ export async function planNamedSlugBackfill(opts: {
       ? `symptom#${textField(record, "symptom_hash")}`
       : target.hash;
     const slotNotes: string[] = [];
-    const slots = slotsFor(opts.sourceType, record, [], slotNotes, multiKey(opts.cfg));
+    const slots = slotsFor(record, [], slotNotes);
     const slot = slots.find((item) => item.hash === hash) ?? null;
     if (!slot) continue;
     if (located.has(slug)) {
@@ -2646,7 +2625,7 @@ export async function planNamedSlugBackfill(opts: {
       }
       if (!found.includes(dest)) continue;
       const slotNotes: string[] = [];
-      const slots = slotsFor(opts.sourceType, record, [dest], slotNotes, multiKey(opts.cfg));
+      const slots = slotsFor(record, [dest], slotNotes);
       const slot = slots.find((item) => item.hash === target.hash) ?? null;
       if (!slot) continue;
       chosen.set(record.slug, slot);

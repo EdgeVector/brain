@@ -113,7 +113,6 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_min_score",
   "invalid_limit",
   "invalid_page",
-  "status_needs_type",
   "invalid_updated_since",
   "invalid_body_limit",
   "invalid_field",

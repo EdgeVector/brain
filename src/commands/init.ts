@@ -1,39 +1,23 @@
-import { multiKey } from "../multi-key.ts";
 import { syncOwnedModel } from "../owned-schema-init.ts";
-import { canonicalProfilesForHashes, canonicalSchema } from "../canonical-vocabulary.ts";
-// `brain init` — bootstrap a node (if needed), register every brain
-// schema, load them, persist canonical hashes to ~/.brain/config.json.
+// `brain init` — bootstrap a node (if needed), declare every brain-owned
+// multi-key schema, persist the schema pins to ~/.brain/config.json.
 //
-// 6 steps:
-//   0. probe /api/system/auto-identity
-//   1. POST /api/setup/bootstrap if 503
-//   2. obtain every canonical hash: POST each schema (maintainer w/ DevCert)
-//      OR, when the cert gate returns 401 for a fresh consumer, defer and
-//      resolve the already-published brain/* hashes from the node (step 3)
-//   3. POST /api/schemas/load, then resolve any cert-gated hashes via
-//      GET /api/schemas (the node's identity_hash IS the canonical hash)
-//   4. verify failed_schemas empty + persist config
-//   5. inline app-identity consent grant (prompt → folddb consent grant → poll)
+//   1. probe /api/system/auto-identity
+//   2. POST /api/setup/bootstrap if the node is not provisioned
+//   3. declare the owned schemas (owned-schema-init.ts); the node must be
+//      LastDB API 13 or later
+//   4. persist config
+//   5. inline app-identity consent grant when the config enforces it
 //
-// Idempotent. Step 0 makes a re-run skip bootstrap; step 2's POST is
-// idempotent on the schema service side (identical re-POST returns 200
-// with the same canonical hash). Re-running init is the prescribed
-// remedy for `409 ambiguous_schema_name`, and also the way to upgrade
-// older configs (v1 → current; v2 → current, with URL auto-heal if the
-// existing URLs still point at the dead `:9101 / :9102` local-schema).
+// Idempotent. A re-run verifies an existing multi-key config and keeps its
+// pins, and heals URLs that still point at the dead `:9101 / :9102`
+// local-schema setup. Config load refuses a config in a retired storage
+// model with `home_copy_required`, so init never rewrites one.
 
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
-import { newNodeClient, newSchemaServiceClient, BrainError, CERT_REQUIRED_HINT, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
-import {
-  OWNER_APP_ID,
-  RECORD_TYPES,
-  UNIQUE_SCHEMAS,
-  resolveOwnedSchemaHash,
-  schemaConfigKeys,
-  type UniqueSchemaEntry,
-} from "../schemas.ts";
+import { newNodeClient, BrainError, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
+import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   ConfigInvalidError,
@@ -174,101 +158,6 @@ export type InitResult = {
 
 const STEPS = 6;
 
-// Per-schema `/api/apps/declare-schema` costs seconds on a cold node: the node
-// resolves each definition against the catalog / schema service. Measured on a
-// fresh isolated LastDB home on 2026-08-30, one at a time took 15-22 s each, so
-// the 25 owned schemas alone spent ~450 s and the public first-run smoke's
-// 120 s bound killed init in the middle of the list. The calls are independent
-// -- each writes its own `schemaHashes` keys -- so they run as a bounded pool.
-// The bound is deliberate: the node's QoS sheds bulk work, and 25 at once is a
-// self-inflicted thundering herd on the one socket init needs.
-export const DEFAULT_DECLARE_CONCURRENCY = 6;
-
-export function declareConcurrency(): number {
-  const raw = process.env.BRAIN_INIT_DECLARE_CONCURRENCY;
-  if (raw === undefined || raw.length === 0) return DEFAULT_DECLARE_CONCURRENCY;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 1) return DEFAULT_DECLARE_CONCURRENCY;
-  return n;
-}
-
-// Wall-clock budget for the best-effort deferred-409 retry pass.
-export const DEFAULT_DEFERRED_RETRY_BUDGET_MS = 20_000;
-
-export function deferredRetryBudgetMs(): number {
-  const raw = process.env.BRAIN_INIT_DEFERRED_RETRY_BUDGET_MS;
-  if (raw === undefined || raw.length === 0) return DEFAULT_DEFERRED_RETRY_BUDGET_MS;
-  const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 0) return DEFAULT_DEFERRED_RETRY_BUDGET_MS;
-  return n;
-}
-
-/**
- * Resolve `work`, or `onExpiry` if it has not settled within `ms`.
- *
- * The underlying request is not cancelled — it keeps running until its own HTTP
- * deadline and is then discarded. That is the point: the caller stops WAITING
- * on a best-effort step, without depending on the step being cancellable.
- */
-export async function withDeadline<T, E>(
-  work: Promise<T>,
-  ms: number,
-  onExpiry: E,
-): Promise<T | E> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expiry = new Promise<E>((resolve) => {
-    timer = setTimeout(() => resolve(onExpiry), ms);
-    // Don't hold the process open on the loser of the race.
-    (timer as { unref?: () => void }).unref?.();
-  });
-  // When the deadline wins, `work` is still pending. If it later REJECTS, that
-  // rejection has no handler and the runtime reports it as unhandled — which
-  // would turn a bounded skip into a crashed init. Attaching a no-op handler
-  // marks it observed; the race below still sees a rejection that arrives first.
-  work.catch(() => {});
-  try {
-    return await Promise.race([work, expiry]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-/**
- * Run `worker` over `items` with at most `limit` in flight.
- *
- * Results keep the INPUT order, not the completion order, so a caller can still
- * report the first failure by list position and stay deterministic. A worker
- * that throws stores the error; nothing is rethrown here, because the declare
- * pass has to finish the whole list before it can tell a fatal error from a
- * conflict it will retry.
- */
-export async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>,
-): Promise<Array<{ ok: true; value: R } | { ok: false; error: unknown }>> {
-  const results: Array<{ ok: true; value: R } | { ok: false; error: unknown }> = new Array(
-    items.length,
-  );
-  let next = 0;
-  const width = Math.max(1, Math.min(limit, items.length));
-  const runners = Array.from({ length: width }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      const item = items[i];
-      if (item === undefined) return;
-      try {
-        results[i] = { ok: true, value: await worker(item, i) };
-      } catch (error) {
-        results[i] = { ok: false, error };
-      }
-    }
-  });
-  await Promise.all(runners);
-  return results;
-}
-
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = resolvePrintSink(opts);
   const verbose = opts.verbose;
@@ -297,10 +186,6 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
   if (existing) {
-    if (!multiKey(existing)) {
-      throw new BrainError({ code: "home_copy_required", message: "This config names the old shared-value Brain layout. Init leaves it unchanged.",
-        hint: "Move Brain data to a new home with the home copy. See docs/multi-key-schemas.md." });
-    }
     print(`[init] existing config at ${configPath} — verifying`);
   }
 
@@ -381,33 +266,14 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     }
   }
 
-  // Step 2/6: obtain canonical hashes for every per-kind schema. Each entry has
-  // exactly one RecordType, so the hash is written once under that key.
+  // Step 3/6: declare every brain-owned schema on the node
+  // (owned-schema-init.ts). The node returns each runtime address and its
+  // definition identity; local mint and the schema_service publish fallback
+  // are retired.
   //
-  // Nodes expose `/api/apps/declare-schema`: brain declares its owned schema
-  // definitions; the node returns catalog/schema-service resolutions
-  // (reuse / expand / compose / …) with authoritative canonical identity hashes.
-  // Novel schemas that are not yet published fall through to the schema_service
-  // register+load path below. Local mint is retired.
-  //
-  // Compatibility fallback: the brain/* schemas are pre-published org-wide on
-  // the canonical schema
-  // service, so for a fresh consumer (no DevCert) the re-POST is rejected
-  // with `401 cert_required`. That is the EXPECTED, documented state — not a
-  // fatal error. Rather than dead-end, we record each cert-gated schema and
-  // RESOLVE its authoritative canonical hash from the node after the
-  // cert-free catalog load below (the node's `identity_hash` IS the published
-  // canonical hash). A maintainer who DOES hold a DevCert still publishes
-  // here (POST 200) on the same code path.
-  //
-  // `BRAIN_APP_IDENTITY_ENFORCE=off` does NOT change the schema identity:
-  // bare (un-namespaced) publishing would produce hashes that don't match the
-  // brain/* schemas the node already loaded, and is rejected outright by any
-  // schema service with `APP_IDENTITY_ROOT_PUBKEYS` set (i.e. the cloud
-  // service, which is the only allowed one). Enforce-off only governs the
-  // WRITE side — no consent step, no capability headers, writes land as
-  // NodeOwner — so on this read-side step it follows the same
-  // namespaced-publish-or-resolve path as enforce-on.
+  // `BRAIN_APP_IDENTITY_ENFORCE=off` does NOT change the schema identity.
+  // Enforce-off only governs the WRITE side — no consent step, no capability
+  // headers, writes land as NodeOwner.
   const enforceOn = appIdentityEnforceEnabled();
   print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} brain schemas`);
   if (!enforceOn) {
@@ -427,453 +293,23 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     verbose: verbose ?? (() => {}),
     socketPath: nodeSocketPath,
   });
-  if (!existing || multiKey(existing)) {
-    const config = await syncOwnedModel(nodeClient, {
-      configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
-      designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
-    }, existing, canonicalVocabulary);
-    writeConfig(config, configPath, priorConfig);
-    const consent = config.appIdentityEnforce === false
-      ? { state: "skipped", reason: "enforce_off" } as const
-      : await establishConsentInline({nodeUrl,userHash,print,verbose,socketPath:nodeSocketPath,
-        nonInteractiveGrant:opts.grantConsent,...opts.consent});
-    printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
-    return { config, bootstrapped, consent };
-  }
-  const schemaHashes: Record<string, string> = {};
-
-  // Checkpoint the config DURING declaration, not only after it.
-  //
-  // Declaration is the long step, and the public first-run smoke bounds init at
-  // 120 s. Writing the config only at the end meant a killed init left no file
-  // at all, so one slow step reported as four failures: every later command
-  // died with "Config not found at ~/.brain/config.json". A checkpoint turns
-  // that into a partial-but-valid config — the types already declared work, and
-  // re-running init idempotently fills in the rest.
-  //
-  // The first write can only happen once `design` and `task` have hashes:
-  // `assertConfigShape` rejects a config whose two legacy mirror fields are
-  // empty, so an earlier write would produce a file its own reader throws on —
-  // strictly worse than no file.
-  let checkpointed = false;
-  const writeCheckpointConfig = (): void => {
-    if (checkpointed) return;
-    if (!schemaHashes.design || !schemaHashes.task) return;
-    checkpointed = true;
-    writeConfig(buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath, canonicalVocabulary }), configPath);
-    print(`        checkpointed config to ${configPath} (partial; init still running)`);
-  };
-
-  const localDeclare = await tryDeclareOwnedSchemasLocally(
-    nodeClient,
-    schemaHashes,
-    print,
-    writeCheckpointConfig,
-    canonicalVocabulary,
-  );
-  if (!localDeclare.supported) {
-    print(
-      `        node does not expose local app-schema declaration yet (${localDeclare.reason}); ` +
-        `falling back to schema_service publish/load`,
-    );
-    await registerAndLoadSchemasFromCatalog({
-      nodeClient,
-      schemaServiceUrl,
-      canonicalVocabulary,
-      schemaHashes,
-      verbose,
-      print,
-    });
-  }
-
-  // Step 4/6: persist config (config file written before consent so a Ctrl-C
-  // mid-grant doesn't lose schema state — the next init re-runs the consent
-  // step idempotently).
-  print(`[5/${STEPS}] writing config to ${configPath}`);
-  const config = buildConfig({ nodeUrl, schemaServiceUrl, userHash, schemaHashes, nodeSocketPath, canonicalVocabulary });
-  // Mini first-run: local declare means schemas never went through
-  // schema_service, so consent-request against the cloud app registry will
-  // 404 "app not registered". Pin client enforce-off so NodeOwner writes work
-  // on the owner socket without a capability (Mini Unverified → owner).
-  if (localDeclare.supported) {
-    config.appIdentityEnforce = false;
-  }
-  writeConfig(config, configPath);
-  print(`        wrote config v${CONFIG_VERSION}`);
-
-  // A missing list page is an empty list. Init does not stamp a partition.
-  // Step 5/6: inline consent — eliminate the "two-terminal dance" on first
-  // write. Idempotent (skips silently when a live capability is already on
-  // disk); non-TTY safe (skips with a one-line note for CI/scripts); falls
-  // back to the manual instruction when `folddb` is not on PATH.
-  print(`[6/${STEPS}] establishing consent (one-time grant for brain's namespace)`);
-  let consent: Awaited<ReturnType<typeof establishConsentInline>>;
-  if (localDeclare.supported) {
-    print(
-      `        local app-schema declare path — schema_service consent skipped ` +
-        `(appIdentityEnforce=false; writes land as NodeOwner on Mini)`,
-    );
-    consent = { state: "skipped", reason: "enforce_off" };
-  } else {
-    const consentBase: EstablishConsentOptions = {
-      nodeUrl,
-      userHash,
-      print,
-    };
-    if (verbose !== undefined) consentBase.verbose = verbose;
-    if (nodeSocketPath !== undefined) consentBase.socketPath = nodeSocketPath;
-    if (opts.grantConsent) consentBase.nonInteractiveGrant = true;
-    consent = await establishConsentInline({ ...consentBase, ...(opts.consent ?? {}) });
-  }
-
-  print(`[init] ok`);
-
-  // Close the onboarding loop: a brand-new developer who reaches `[init] ok`
-  // should know their very next move without leaving the terminal to re-read
-  // the README. Emit a concise next-steps block on the same print stream.
-  // Kept off any machine-parsed surface — init's structured result is the
-  // return value; this is purely human guidance.
+  const config = await syncOwnedModel(nodeClient, {
+    configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
+    designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
+  }, existing, canonicalVocabulary);
+  writeConfig(config, configPath, priorConfig);
+  const consent = config.appIdentityEnforce === false
+    ? { state: "skipped", reason: "enforce_off" } as const
+    : await establishConsentInline({nodeUrl,userHash,print,verbose,socketPath:nodeSocketPath,
+      nonInteractiveGrant:opts.grantConsent,...opts.consent});
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
-
   return { config, bootstrapped, consent };
 }
-
-/**
- * Assemble the on-disk config from the pieces init has resolved so far.
- *
- * Shared by the mid-declaration checkpoint and the final step-5 write, so the
- * partial file a killed init leaves behind has exactly the same shape as a
- * complete one — only fewer `schemaHashes` entries.
- */
-function buildConfig(parts: {
-  nodeUrl: string;
-  schemaServiceUrl: string;
-  userHash: string;
-  schemaHashes: Record<string, string>;
-  nodeSocketPath?: string;
-  canonicalVocabulary?: boolean;
-}): Config {
-  const config: Config = {
-    configVersion: CONFIG_VERSION,
-    nodeUrl: parts.nodeUrl,
-    schemaServiceUrl: parts.schemaServiceUrl,
-    userHash: parts.userHash,
-    // Copy: the caller keeps mutating `schemaHashes` as later schemas land, and
-    // a checkpointed config must not change under the file already written.
-    schemaHashes: { ...parts.schemaHashes },
-    schemaFieldAliases:parts.canonicalVocabulary ? canonicalProfilesForHashes(parts.schemaHashes) : undefined,
-    designSchemaHash: parts.schemaHashes.design ?? "",
-    taskSchemaHash: parts.schemaHashes.task ?? "",
-  };
-  // Persist the owner-session socket path that init actually connected through
-  // (app-isolation flip, fold#739). When set, later commands attest against the
-  // same node without re-supplying BRAIN_FOLDDB_SOCKET or LASTDB_HOME. Unset
-  // → omitted, and attestation falls back to the default resolution (checking
-  // BRAIN_FOLDDB_SOCKET env, then deriving from LASTDB_HOME or ~/.lastdb).
-  if (parts.nodeSocketPath && parts.nodeSocketPath.length > 0) {
-    config.nodeSocketPath = parts.nodeSocketPath;
-  }
-  return config;
-}
-
-type InitNodeClient = ReturnType<typeof newNodeClient>;
-
-function isDeclareConflict(err: unknown): boolean {
-  return (
-    err instanceof BrainError &&
-    (err.code === "node_http_409" || err.code === "ambiguous_schema_name")
-  );
-}
-
-/**
- * After declare-schema 409, Mini may already have the catalog predecessor
- * loaded. Prefer that identity hash over aborting first-run init.
- */
-async function recoverDeclaredCanonical(
-  nodeClient: InitNodeClient,
-  entry: UniqueSchemaEntry,
-  canonicalVocabulary: boolean,
-): Promise<string | null> {
-  const fromLoaded = (loaded: Awaited<ReturnType<InitNodeClient["listLoadedSchemas"]>>) =>
-    resolveOwnedSchemaHash(canonicalVocabulary ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema, loaded, canonicalVocabulary);
-  try {
-    const existing = fromLoaded(await nodeClient.listLoadedSchemas());
-    if (existing) return existing;
-  } catch {
-    /* listing is best-effort; try a scoped load next */
-  }
-  const name = entry.schema.schema.descriptive_name;
-  if (!name || typeof nodeClient.loadSchemas !== "function") return null;
-  try {
-    await nodeClient.loadSchemas([name]);
-    return fromLoaded(await nodeClient.listLoadedSchemas());
-  } catch {
-    return null;
-  }
-}
-
-async function tryDeclareOwnedSchemasLocally(
-  nodeClient: InitNodeClient,
-  schemaHashes: Record<string, string>,
-  print: (line: string) => void,
-  onSchemaDeclared?: () => void,
-  canonicalVocabulary = false,
-): Promise<{ supported: true } | { supported: false; reason: string }> {
-  const width = declareConcurrency();
-  print(
-    `[3/${STEPS}] declaring ${UNIQUE_SCHEMAS.length} brain-owned schemas via node ` +
-      `(${width} at a time)`,
-  );
-  if (!nodeClient.declareAppSchema) {
-    return { supported: false, reason: "client does not support /api/apps/declare-schema" };
-  }
-  // Each schema resolves against the catalog independently and writes only its
-  // own `schemaHashes` keys, so the pass is safe to run concurrently. Progress
-  // is printed on completion, which is the point: a caller watching a first run
-  // can tell "slow" from "wedged" without waiting out the whole list.
-  let done = 0;
-  const settled = await mapWithConcurrency(UNIQUE_SCHEMAS, width, async (entry) => {
-    const outcome = await declareOneOwnedSchema(nodeClient, entry, schemaHashes, (line) => {
-      done += 1;
-      print(`${line}   [${done}/${UNIQUE_SCHEMAS.length}]`);
-    }, canonicalVocabulary);
-    if (outcome === "ok" || outcome === "conflict-recovered") onSchemaDeclared?.();
-    return outcome;
-  });
-  // Report by LIST position, not by completion order, so the same node state
-  // always produces the same reason string.
-  const deferred: UniqueSchemaEntry[] = [];
-  for (const [i, result] of settled.entries()) {
-    const entry = UNIQUE_SCHEMAS[i];
-    if (entry === undefined) continue;
-    if (!result.ok) throw result.error;
-    if (result.value === "unsupported") {
-      return { supported: false, reason: "/api/apps/declare-schema returned 404" };
-    }
-    if (result.value === "novel") {
-      return {
-        supported: false,
-        reason: `${entry.schema.schema.descriptive_name} declared novel — needs schema service registration`,
-      };
-    }
-    if (result.value === "conflict") deferred.push(entry);
-  }
-  if (deferred.length > 0) {
-    // One retry after the rest of the catalog is on the node. Mini's first-run
-    // 409 is often a schema-service timeout/register race on a later extra
-    // schema (BrainAttachmentFile); aborting the remaining UNIQUE_SCHEMAS is
-    // what made `brain init --grant-consent` exit 1 on an empty LASTDB_HOME.
-    //
-    // The retry is BEST-EFFORT — its own failure path already skips the schema
-    // and continues — so it gets a wall-clock bound. On a fresh isolated home
-    // on 2026-08-30 the single deferred BrainAttachmentFile retry took 60 s and
-    // returned the same 409, which alone pushed a 65 s init to 125 s and past
-    // the public first-run smoke's 120 s bound. A best-effort step must not be
-    // what decides whether first-run completes.
-    const budgetMs = deferredRetryBudgetMs();
-    const deadline = Date.now() + budgetMs;
-    print(
-      `        retrying ${deferred.length} deferred declare${deferred.length === 1 ? "" : "s"} ` +
-        `(best-effort, ${Math.round(budgetMs / 1000)}s budget)`,
-    );
-    for (const entry of deferred) {
-      const remaining = deadline - Date.now();
-      const outcome =
-        remaining > 0
-          ? await withDeadline(
-              declareOneOwnedSchema(nodeClient, entry, schemaHashes, print, canonicalVocabulary),
-              remaining,
-              "expired" as const,
-            )
-          : ("expired" as const);
-      if (outcome === "ok" || outcome === "conflict-recovered") {
-        onSchemaDeclared?.();
-        continue;
-      }
-      const why =
-        outcome === "expired"
-          ? `skipped after declare 409 (retry budget spent; continuing first-run)`
-          : `skipped after declare 409 (not loaded on node; continuing first-run)`;
-      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${why}`);
-    }
-  }
-  const missingRecordTypes = RECORD_TYPES.filter((t) => !schemaHashes[t]);
-  if (missingRecordTypes.length > 0) {
-    return {
-      supported: false,
-      reason:
-        `declare-schema left record types without hashes (${missingRecordTypes.join(", ")}) — ` +
-        `falling back to schema_service`,
-    };
-  }
-  print(`[4/${STEPS}] loading schemas into the node`);
-  print(`        app-schema declarations persisted (catalog/schema-service canonicals) ✓`);
-  return { supported: true };
-}
-
-type DeclareOneOutcome = "ok" | "conflict-recovered" | "conflict" | "novel" | "unsupported";
-
-async function declareOneOwnedSchema(
-  nodeClient: InitNodeClient,
-  entry: UniqueSchemaEntry,
-  schemaHashes: Record<string, string>,
-  print: (line: string) => void,
-  canonicalVocabulary: boolean,
-): Promise<DeclareOneOutcome> {
-  if (!nodeClient.declareAppSchema) return "unsupported";
-  // Already recovered on a prior pass (retry of a deferred entry).
-  if (schemaConfigKeys(entry).every((k) => schemaHashes[k])) return "ok";
-  try {
-    const declared = await nodeClient.declareAppSchema(OWNER_APP_ID, entry.schema.schema);
-    // Local mint is retired. Mini declare-schema returns catalog resolutions
-    // (reuse / expand / compose / mint) whose `canonical` is the schema-service
-    // identity hash. Accept any successful declare; only reject missing canonical.
-    if (!declared.canonical || typeof declared.canonical !== "string") {
-      throw new BrainError({
-        code: "app_schema_declare_missing_canonical",
-        message:
-          `Node declared ${entry.schema.schema.descriptive_name} without a canonical ` +
-          `identity hash (resolution=${declared.resolution ?? "unknown"}).`,
-        hint: "Register the schema with schema service (or fix declare-schema), then re-run `brain init`.",
-      });
-    }
-    // Novel shapes that still need schema-service registration: surface a
-    // clear handoff so init can fall back to the catalog publish path.
-    const resolution = String(declared.resolution ?? "");
-    if (resolution.toLowerCase() === "novel") return "novel";
-    for (const key of schemaConfigKeys(entry)) {
-      schemaHashes[key] = declared.canonical;
-    }
-    const covers = schemaConfigKeys(entry).join(", ");
-    print(
-      `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${declared.canonical}  ` +
-        `(${resolution || "accepted"}; covers ${covers})`,
-    );
-    return "ok";
-  } catch (err) {
-    if (err instanceof BrainError && err.code === "node_http_404") return "unsupported";
-    if (!isDeclareConflict(err)) throw err;
-    const recovered = await recoverDeclaredCanonical(nodeClient, entry, canonicalVocabulary);
-    if (recovered) {
-      for (const key of schemaConfigKeys(entry)) {
-        schemaHashes[key] = recovered;
-      }
-      const covers = schemaConfigKeys(entry).join(", ");
-      print(
-        `        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${recovered}  ` +
-          `(recovered after declare 409; covers ${covers})`,
-      );
-      return "conflict-recovered";
-    }
-    print(
-      `        ${entry.schema.schema.descriptive_name.padEnd(18)} → declare-schema 409 ` +
-        `(no loaded hash yet; not aborting remaining schemas)`,
-    );
-    return "conflict";
-  }
-}
-
 
 export function formatNodeTarget(nodeUrl: string): string {
   if (!isLoopbackNodeUrl(nodeUrl)) return nodeUrl;
   // Socket-first: never advertise the retired TCP control plane to users.
   return `unix:${defaultFolddbSocketPath()}`;
-}
-
-export function localMintIdentityHash(
-  appId: string,
-  localSchema: string,
-  fields: readonly string[],
-): string {
-  const uniqueSortedFields = [...new Set(fields)].sort();
-  const hashInput = `app:${appId}:${localSchema}:${uniqueSortedFields.join(",")}`;
-  return createHash("sha256").update(hashInput).digest("hex");
-}
-
-async function registerAndLoadSchemasFromCatalog(opts: {
-  nodeClient: InitNodeClient;
-  schemaServiceUrl: string;
-  canonicalVocabulary: boolean;
-  schemaHashes: Record<string, string>;
-  verbose?: Verbose;
-  print: (line: string) => void;
-}): Promise<void> {
-  const { nodeClient, schemaServiceUrl, schemaHashes, verbose, print } = opts;
-  const schemaClient = newSchemaServiceClient(schemaServiceUrl, verbose, opts.canonicalVocabulary);
-  const certBlocked: typeof UNIQUE_SCHEMAS = [];
-  for (const entry of UNIQUE_SCHEMAS) {
-    try {
-      const reg = await schemaClient.registerSchema(entry.schema);
-      for (const key of schemaConfigKeys(entry)) {
-        schemaHashes[key] = reg.canonicalHash;
-      }
-      print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → ${reg.canonicalHash}  (covers ${schemaConfigKeys(entry).join(", ")})`);
-    } catch (err) {
-      // Cert-gated re-POST of an already-published brain/* schema — defer it
-      // and resolve the canonical hash from the node catalog after load. Same
-      // behavior under enforce-on and enforce-off; the schema identity is
-      // identical, only the write-time auth differs.
-      if (err instanceof BrainError && err.code === "schema_cert_required") {
-        certBlocked.push(entry);
-        print(`        ${entry.schema.schema.descriptive_name.padEnd(18)} → published already (cert-gated re-POST skipped; resolving from node)`);
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  // Load schemas into the node — scoped to JUST brain's schemas (fold #877),
-  // so a fresh node stays clean instead of pulling the entire global published
-  // catalog. This is only the compatibility path for nodes that predate local
-  // app-schema declaration.
-  const loadScope = UNIQUE_SCHEMAS.map((entry) => {
-    const firstKey = schemaConfigKeys(entry)[0];
-    const hash = firstKey ? schemaHashes[firstKey] : undefined;
-    return hash ?? entry.schema.schema.descriptive_name;
-  });
-  const loadResult = await nodeClient.loadSchemas(loadScope);
-  if (loadResult.failed_schemas.length > 0) {
-    throw new Error(
-      `partial schema load — failed_schemas: ${loadResult.failed_schemas.join(", ")}`,
-    );
-  }
-  const loaded = loadResult.schemas_loaded_to_db;
-  if (loaded <= loadScope.length) {
-    print(`[4/${STEPS}] loading schemas into the node (scoped to brain's ${loadScope.length})`);
-    print(`        loaded ${loaded}/${loadScope.length} schemas (failed_schemas empty ✓)`);
-  } else {
-    print(`[4/${STEPS}] loading brain's ${loadScope.length} schemas into the node`);
-    print(
-      `        node predates scoped load (fold #877) — loaded the full published catalog (${loaded}); ` +
-        `brain's ${loadScope.length} schemas resolved from it ✓`,
-    );
-  }
-
-  if (certBlocked.length > 0) {
-    const loaded = await nodeClient.listLoadedSchemas();
-    const stillMissing: string[] = [];
-    for (const entry of certBlocked) {
-      const hash = resolveOwnedSchemaHash(opts.canonicalVocabulary ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema, loaded, opts.canonicalVocabulary);
-      if (hash) {
-        for (const key of schemaConfigKeys(entry)) {
-          schemaHashes[key] = hash;
-        }
-        print(`        resolved ${entry.schema.schema.descriptive_name.padEnd(18)} → ${hash}  (published brain/* schema; no DevCert needed)`);
-      } else {
-        stillMissing.push(entry.schema.schema.descriptive_name);
-      }
-    }
-    if (stillMissing.length > 0) {
-      throw new BrainError({
-        code: "schema_cert_required",
-        message:
-          `Schema service rejected publish with 401 cert_required, and these schemas are not yet ` +
-          `published on this schema service — so their canonical hashes could not be resolved from ` +
-          `the node either: ${stillMissing.join(", ")}. A maintainer must publish them once.`,
-        hint: CERT_REQUIRED_HINT,
-      });
-    }
-  }
 }
 
 /**

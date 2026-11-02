@@ -14,7 +14,9 @@ Each record kind uses recent and status keys. Task also uses a design key. Range
 
 This release does not convert a home in place. It has no conversion command.
 
-CAUTION: Do not start this release on a home that holds the old shared-value Brain layout. A LastDB node at API 13 or later refuses to start on that home. Init refuses a node older than API 13, and a config that names the old layout, with `home_copy_required`. Init makes no change.
+CAUTION: This release needs LastDB API 13 or later. Init refuses an older node with `home_copy_required` and makes no change.
+
+A config without `storageModel: "multi-key-v1"` uses a retired Brain storage model. This release does not read it. Config load refuses it with `home_copy_required`, so init and each other command that reads the config stop and make no change.
 
 An existing home moves to this release only by the home copy (EdgeVector/last-stack#377):
 
@@ -45,11 +47,11 @@ They stay unchanged because the Schema Service identity hash includes them.
 
 ## CI comparison
 
-The CI comparison runs the earlier app on the compatible daemon and this app on the removal daemon.
-Each app creates its own generated home. No home is converted in place.
+The CI comparison runs the earlier app and this app on one LastDB revision, so it measures the app change.
+Each app initializes its own generated home. No home is converted in place.
 The workload uses generated data on owned CI homes.
 It checks logical record membership, order, bodies, updates, and cursors.
-Physical database size may decrease. Logical record counts must remain correct.
+Logical record counts must remain correct.
 The primary does not participate in this check.
 
 Alternate-key requests, saved scopes, native receipts, and owned-layout comparisons use the exact Rust wire defaults.

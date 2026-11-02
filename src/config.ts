@@ -42,7 +42,8 @@ export const CONFIG_VERSION = 4;
 const LEGACY_NOTE_SCHEMA_KEY_V3 = "__legacy_note__";
 
 export type Config = {
-  storageModel?: "multi-key-v1";
+  // A config without this key belongs to a retired Brain storage model.
+  storageModel: "multi-key-v1";
   configVersion: number;
   nodeUrl: string;
   schemaServiceUrl: string;
@@ -230,8 +231,18 @@ function assertConfigShape(path: string, raw: unknown): Config {
     schemaHashes[k] = v;
   }
 
+  // Only the owned multi-key model is readable. The stable code tells the
+  // operator to move the data with the home copy; nothing rewrites the file.
+  if (r.storageModel === undefined) {
+    throw new BrainError({
+      code: "home_copy_required",
+      message: `Config at ${path} uses a retired Brain storage model. This release does not read it.`,
+      hint: "Move Brain data to a new home with the home copy. See docs/multi-key-schemas.md.",
+    });
+  }
+
   const config: Config = {
-    ...(r.storageModel === "multi-key-v1" ? { storageModel: "multi-key-v1" as const } : {}),
+    storageModel: "multi-key-v1",
     configVersion: CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
     schemaServiceUrl: r.schemaServiceUrl as string,

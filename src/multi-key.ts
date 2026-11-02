@@ -3,7 +3,6 @@ import { BrainError, type NodeClient, type QueryRow } from "./client.ts";
 import { RECORD_TYPES, UNIQUE_SCHEMAS, schemaConfigKeys, type RecordType, type SchemaDefinition } from "./schemas.ts";
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
-export const multiKey = (cfg: { storageModel?: string }): boolean => cfg.storageModel === MULTI_KEY_MODEL;
 
 export function ownedSchemas() {
   return UNIQUE_SCHEMAS.map((entry) => {
