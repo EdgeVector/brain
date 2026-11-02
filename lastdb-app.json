@@ -1130,7 +1130,7 @@
       "name": "Decision",
       "owner_app_id": "brain",
       "descriptive_name": "Decision",
-      "purpose_statement": "A call a human made — the choice, its rationale, and outcome — kept as an auditable trail",
+      "purpose_statement": "A call a human made \u2014 the choice, its rationale, and outcome \u2014 kept as an auditable trail",
       "schema_type": "Hash",
       "key": {
         "hash_field": "knowledge_record_slug"
@@ -2351,5 +2351,41 @@
         "knowledge_backfill_cursor_json": 1
       }
     }
-  ]
+  ],
+  "install": {
+    "prepare": [
+      {
+        "argv": [
+          "bun",
+          "install",
+          "--frozen-lockfile"
+        ],
+        "timeout_s": 300
+      }
+    ],
+    "links": [
+      {
+        "source": "bin/registry-brain",
+        "command": "brain"
+      },
+      {
+        "source": "bin/registry-brain-mcp",
+        "command": "brain-mcp"
+      }
+    ],
+    "probe": [
+      {
+        "argv": [
+          "./bin/registry-brain",
+          "get",
+          "sop-edgevector-portals",
+          "--field",
+          "title"
+        ],
+        "timeout_s": 30
+      }
+    ],
+    "post_install": [],
+    "requires": []
+  }
 }
