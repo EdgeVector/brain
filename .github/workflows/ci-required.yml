@@ -96,16 +96,6 @@ jobs:
           echo "check=${{ needs.check.result }}"
           test "${{ needs.check.result }}" = "success"
 
-  publish:
-    name: publish
-    needs: [ci-required]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    permissions:
-      contents: read
-    uses: EdgeVector/last-stack/.github/workflows/host-track-artifact.yml@main
-    with:
-      config: .lastgit/artifacts.json
-
   registry-commit:
     name: Registry commit identity
     needs: [ci-required]
