@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stable app-registry command; resolve the installed link before locating source.
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+BUN_BIN="$(command -v bun || true)"
+[ -n "$BUN_BIN" ] || BUN_BIN="$HOME/.bun/bin/bun"
+exec "$BUN_BIN" "$ROOT/src/cli.ts" "$@"
