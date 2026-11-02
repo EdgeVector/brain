@@ -1,0 +1,5 @@
+{
+  "app_id": "registry-dev-smoke",
+  "version": "0.8.0",
+  "description": "Development registry installation of the public Brain source commit."
+}

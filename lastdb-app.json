@@ -1,0 +1,13 @@
+{
+  "app_id": "brain",
+  "version": "0.8.0",
+  "source": "https://github.com/EdgeVector/brain.git",
+  "metadata": {
+    "display_name": "Brain",
+    "description": "Long-lived knowledge over LastDB: decisions, designs, references, and rationale."
+  },
+  "run": {
+    "runtime": "bun",
+    "entrypoint": "src/cli.ts"
+  }
+}
