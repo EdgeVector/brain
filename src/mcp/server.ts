@@ -1185,8 +1185,8 @@ export function createBrainMcpServer(opts: CreateServerOptions): McpServer {
           .boolean()
           .optional()
           .describe(
-            "True when the print cut the page, the atom names an older page, " +
-              "or the page atom is absent.",
+            "True when the print cut the page, the page names an older page, " +
+              "or the page record is absent.",
           ),
         next_page: z.string().optional().describe("Opaque continuation for a named-key list. Repeat the same filters with page."),
         count: z

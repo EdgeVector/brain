@@ -57,9 +57,8 @@ export type Config = {
   taskSchemaHash: string;
   // Optional override for the node's UDS control-socket path, used for
   // owner-session attestation (the app-isolation flip, fold#739). Unset →
-  // `<node-home>/data/folddb.sock`, where `<node-home>` resolves to `~/.lastdb`
-  // on a current v0.15.1+ node (the FoldDB→LastDB rebrand) or `~/.folddb` on a
-  // legacy 0.14.x node — see `resolveNodeHome` in client.ts. Set this (or the
+  // `<node-home>/data/folddb.sock`, where `<node-home>` is `LASTDB_HOME` or
+  // `~/.lastdb` — see `resolveNodeHome` in client.ts. Set this (or the
   // `BRAIN_FOLDDB_SOCKET` env) when pointing brain at a node whose data dir
   // is elsewhere (an ephemeral test node). Omitted from disk when unset —
   // backward-compatible with every existing config.

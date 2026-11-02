@@ -367,7 +367,7 @@ export class LastDbClient {
     // -------------------------------------------------------------------------
     /**
      * `GET /api/list` — return one page of live record keys without hydrating
-     * atom bodies. Use this for membership, then point-read the keys whose
+     * record values. Use this for membership, then point-read the keys whose
      * fields you need. A page is not a census: follow `next_cursor` while
      * `has_more` is true.
      */
@@ -677,8 +677,8 @@ export class LastDbClient {
      * `403 {reason: "capability_required"}` (mapped to {@link PermissionDeniedError})
      * rather than handing back the owner's whole-index search.
      *
-     * Each hit is a full {@link QueryRow} envelope (`key`, `fields`, `metadata`,
-     * `authorPubKey`) plus the relevance `score` and the `schemaName` /
+     * Each hit is a full {@link QueryRow} envelope (`key`, `fields`, `metadata`)
+     * plus the relevance `score` and the `schemaName` /
      * `schemaDisplayName` the hit came from.
      */
     async search(query, opts = {}) {
@@ -937,14 +937,7 @@ function mapQueryRow(row, nodeToAppFields) {
     return {
         ...row,
         fields: mapFieldRecord(row.fields, nodeToAppFields),
-        metadata: mapFieldKeyedJson(row.metadata, nodeToAppFields),
     };
-}
-function mapFieldKeyedJson(value, fields) {
-    if (!isObject(value)) {
-        return value;
-    }
-    return mapFieldRecord(value, fields);
 }
 /** Parse a successful keys-only `GET /api/list` response. */
 export function parseListResponse(body) {
@@ -990,9 +983,9 @@ export function parseListResponse(body) {
  *
  * The node returns its rows under `results` (production `fold_db_node`) or
  * `rows` (the `fold_db_node::dev_mode` mirror); both carry per-key objects shaped
- * `{ key, fields, metadata, author_pub_key }`. Each row is normalized to a
+ * `{ key, fields, metadata, has_conflicts }`. Each row is normalized to a
  * {@link QueryRow}. A bare field-map row (a node that pre-dates the envelope)
- * is still accepted: its `key`/`metadata`/`authorPubKey` come back empty/null
+ * is still accepted: its `key`/`metadata` come back empty/null
  * and the whole object is its `fields` — so the SDK never throws away an
  * envelope the node sends, nor invents one it doesn't.
  */
@@ -1186,9 +1179,8 @@ function parseMutationCloudPublication(raw) {
 }
 /**
  * Normalize one raw query row into a {@link QueryRow}. An enveloped row
- * (`{key, fields, metadata, author_pub_key}`) is surfaced faithfully; a bare
- * field-map row is wrapped (its fields are the whole object; key empty,
- * metadata null, author null).
+ * (`{key, fields, metadata}`) is surfaced faithfully; a bare field-map row is
+ * wrapped (its fields are the whole object; key empty, metadata null).
  *
  * The row `key` arrives in one of two node dialects: production
  * `fold_db_node` sends the structured `KeyValue` object (`{hash, range}`),
@@ -1200,14 +1192,12 @@ function parseMutationCloudPublication(raw) {
  */
 function parseQueryRow(raw) {
     if (isObject(raw) && 'fields' in raw && isObject(raw.fields)) {
-        const author = raw['author_pub_key'];
         const { key, keyValue } = parseRowKey(raw['key']);
         return {
             key,
             keyValue,
             fields: raw.fields,
-            metadata: 'metadata' in raw ? raw['metadata'] : null,
-            authorPubKey: typeof author === 'string' && author.length > 0 ? author : null,
+            metadata: parseRecordMetadata(raw['metadata']),
         };
     }
     // Bare field-map row (no envelope): the object *is* the fields.
@@ -1216,8 +1206,25 @@ function parseQueryRow(raw) {
         keyValue: null,
         fields: isObject(raw) ? raw : {},
         metadata: null,
-        authorPubKey: null,
     };
+}
+/**
+ * Read the one metadata block of a row (decision D7), or `null` when the row
+ * carries none.
+ */
+function parseRecordMetadata(raw) {
+    if (!isObject(raw)) {
+        return null;
+    }
+    const sourceFileName = raw['source_file_name'];
+    const map = raw['metadata'];
+    const metadata = {
+        source_file_name: typeof sourceFileName === 'string' ? sourceFileName : null,
+    };
+    if (isObject(map)) {
+        metadata.metadata = Object.fromEntries(Object.entries(map).filter((entry) => typeof entry[1] === 'string'));
+    }
+    return metadata;
 }
 /**
  * Parse a row's raw `key` into the (rendered string, structured KeyValue)
@@ -1333,13 +1340,13 @@ export function parseChangesResponse(body) {
  *
  * The node wraps the hits in its standard envelope: `{ ok, results: [...],
  * user_hash }` (the `ApiResponse<IndexSearchResponse>` shape). Each element of
- * `results` is a full `/api/query` row envelope (`key`, `fields`, `metadata`,
- * `author_pub_key`) with three search-only fields the node adds per hit:
+ * `results` is a full `/api/query` row envelope (`key`, `fields`, `metadata`)
+ * with three search-only fields the node adds per hit:
  * `schema_name`, `schema_display_name`, and `score`. Hits arrive in the node's
  * relevance order and are surfaced verbatim — the SDK preserves it.
  *
  * The row part is parsed by the SAME {@link parseQueryRow} used for `query()`,
- * so the envelope handling (enveloped vs bare row, null author) is identical.
+ * so the envelope handling (enveloped vs bare row, record metadata) is identical.
  */
 export function parseSearchResponse(body) {
     const b = (body ?? {});
@@ -1447,8 +1454,8 @@ function stringOrNull(value) {
     return typeof value === 'string' ? value : null;
 }
 /**
- * Normalize one raw search hit. The row envelope (`key`/`fields`/`metadata`/
- * `authorPubKey`) is parsed by {@link parseQueryRow}; the search-only
+ * Normalize one raw search hit. The row envelope (`key`/`fields`/`metadata`)
+ * is parsed by {@link parseQueryRow}; the search-only
  * attribution fields (`score`, `schema_name`, `schema_display_name`) are read
  * off the same object. `score` is `null` when the node reported none.
  */

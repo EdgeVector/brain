@@ -3,8 +3,7 @@
 **Date:** 2026-05-24
 **Status:** spike + playbook (no production migration in this PR)
 **Command:** `brain migrate --add-field <type> <field> <type-spec> [--default V]`
-**Related:** `docs/phase-5-delete-spike.md` (append-only constraint),
-`docs/phase-7-search-latency-spike.md` (reindex precedent)
+**Related:** `docs/phase-7-search-latency-spike.md` (reindex precedent)
 
 ## What this is
 
@@ -30,14 +29,14 @@ templates plus an explicit `kind` field per
 fold_db identity-hashes a schema by `SHA256(descriptive_name +
 sorted_field_names)`
 (`fold_db/crates/core/src/schema/types/declarative_schemas.rs:672-694`),
-and atoms get pinned to their `source_schema_name` at create time
-(`fold_db/crates/core/src/atom/atom_def.rs:1-30`). Combine those two
+and a record lives under the schema it was written to (each field key
+id derives from the schema name and the field name). Combine those two
 and:
 
 - Adding **any** field necessarily produces a **new** schema hash.
 - Existing records do not follow the schema as it changes — they stay
   pinned to the old hash.
-- fold_db is append-only (Phase 5 spike), so we cannot remove the old
+- The migration does not delete the old records, so we cannot remove the old
   records once we've migrated. They orphan harmlessly at the old
   hash, reachable only via `brain raw GET /api/query` with the old
   hash spelled out.
@@ -264,8 +263,8 @@ resolves.
 
 - **Field removal.** fold_db is append-only — old records carrying the
   removed field would orphan with no recovery path. Soft-deprecate
-  via a tag (the `__brain_deleted__` tombstone pattern from
-  `docs/phase-5-delete-spike.md`); set the deprecated field to a
+  via a tag (the `__brain_deleted__` tombstone pattern); set the
+  deprecated field to a
   sentinel value, then ignore it on read.
 - **Field type change.** Same root cause as removal — old records carry
   the old typed bytes; reinterpretation is a data migration. The

@@ -59,7 +59,7 @@ Operational measurements retain the 128-record pass and three 1,024-record passe
 Each body contains 4,096 bytes.
 The app creates each record with one commit, as `brain put` does.
 Update, delete, and title-only mutation samples each change one record.
-The checks verify exact membership, values, counts, body atoms, and restart recovery.
+The checks verify exact membership, values, counts, body values, and restart recovery.
 Creation, update, delete, and title-only samples use distinct operations.
 
 The workflow requires the exact definitions in the DEV Schema Service before it builds a daemon.

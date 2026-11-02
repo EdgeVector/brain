@@ -765,11 +765,10 @@ PATH-only mcp-entrypoint check):
     mismatch. Skipped when \`brain-mcp\` isn't on PATH. OFF by default
     so plain \`brain doctor\` never spawns the server.
 
-With --usage, skips the health checks and prints a team-adoption
-telemetry report: write count by userHash (8-char prefix only)
-over the last 7 days, broken down by record type. Also appends/
-updates today's per-user count in ~/.brain/usage.jsonl for trend
-plotting.
+With --usage, skips the health checks and prints an adoption
+telemetry report: write count over the last 7 days, broken down by
+record type. Also appends/updates today's count in
+~/.brain/usage.jsonl for trend plotting.
 
   --usage-window N   override the rolling window (default 7 days)
   --usage-path PATH  override the daily-summary file path

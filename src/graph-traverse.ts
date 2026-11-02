@@ -2,8 +2,8 @@
 // substrate written by `src/graph-edge.ts`.
 //
 // ACCESS-PATTERN CONTRACT: LastDB is Dynamo-style. An exact key is O(1).
-// A scan does not exist. One edge is stored once, in the edge-set atom.
-// Outbound reads that atom for each record type. Inbound reads the link page
+// A scan does not exist. One edge is stored once, in the edge-set record.
+// Outbound reads that record for each record type. Inbound reads the link page
 // `link#<slug>`. Each step of a walk is those keyed reads.
 //
 // The cost that IS unbounded is the walk itself: a graph with a hub node fans

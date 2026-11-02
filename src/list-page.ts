@@ -1492,7 +1492,7 @@ export async function readPageChain(
   const cards: ListCard[] = [];
   const seen = new Set<string>();
   let range = HEAD_RANGE;
-  // A bulk reader knows the hash. Fetch its page atoms together, then follow
+  // A bulk reader knows the hash. Fetch its page records together, then follow
   // only the linked chain. Staged overflow pages are never membership proof.
   // The one-page callers retain one exact read and do not fetch older pages.
   const pages = new Map<string, string>();

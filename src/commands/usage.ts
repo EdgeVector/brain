@@ -1,34 +1,20 @@
-// `brain doctor --usage` — team-adoption telemetry (G13).
+// `brain doctor --usage` — adoption telemetry (G13).
 //
-// Iterates every record across the registered schemas via
-// /api/query, derives a per-record userHash from the author public key,
-// and counts records created in the last N days (default 7) — grouped
-// by userHash and broken down by record type. Prints only the 8-char
-// prefix of each userHash so the report is shareable without leaking
-// identifiers.
+// Iterates every record across the registered schemas via /api/query and
+// counts records created in the last N days (default 7), broken down by
+// record type.
 //
-// Also persists today's per-user counts to ~/.brain/usage.jsonl as
-// one line per UTC date so we can plot adoption trends over time.
-// Re-running on the same UTC day replaces that day's line in-place.
+// Also persists today's count to ~/.brain/usage.jsonl as one line per UTC
+// date so we can plot adoption trends over time. Re-running on the same UTC
+// day replaces that day's line in-place.
 //
-// Per G0 readiness-gate definition-of-shipped: "2+ daily users with
-// userHash-distinguishable writes for 7 consecutive days" — this
-// command is what makes that condition measurable.
-//
-// A LastDB format 7 home stores one value per record and names no writer
-// (record model decision D7), so its query rows carry no author key. Those
-// rows are counted as unattributed and printed on their own line, so the
-// report does not read as "no records created" on such a home.
+// A LastDB record carries one metadata block and names no writer (record
+// model decision D7), so the report has no per-user split.
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import {
-  pubkeyToUserHash,
-  type NodeClient,
-  type QueryRow,
-  type Verbose,
-} from "../client.ts";
+import { type NodeClient, type QueryRow, type Verbose } from "../client.ts";
 import { brainDataDir, type Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import { fieldsFor, stringField } from "../record.ts";
@@ -43,25 +29,18 @@ export type UsageOptions = {
   usagePath?: string;
   print?: (line: string) => void;
   verbose?: Verbose;
-  // Suppress disk I/O — useful for unit tests that don't want a
-  // usage.jsonl file written into their tempdir.
+  // Suppress disk I/O so a caller can read the report without writing a
+  // usage.jsonl file.
   noPersist?: boolean;
-};
-
-export type UsagePerUser = {
-  userHashPrefix: string;
-  total: number;
-  today: number;
-  byType: Record<RecordType, number>;
 };
 
 export type UsageReport = {
   windowDays: number;
-  /** Writes attributed to a userHash (the sum over `users`). */
+  /** Records created in the window. */
   totalWrites: number;
-  users: UsagePerUser[];
-  /** Writes in the window whose row names no author key (a format 7 home). */
-  unattributedWrites: number;
+  /** Records created today (UTC). */
+  todayWrites: number;
+  byType: Record<RecordType, number>;
 };
 
 export async function runUsageReport(
@@ -76,9 +55,9 @@ export async function runUsageReport(
   const cutoff = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
   const todayStart = utcMidnight(now).getTime();
 
-  type Counts = { total: number; today: number; byType: Map<RecordType, number> };
-  const perUser = new Map<string, Counts>();
-  let unattributed = 0;
+  const byType = new Map<RecordType, number>();
+  let total = 0;
+  let today = 0;
 
   for (const entry of UNIQUE_SCHEMAS) {
     if (entry.types.length === 0) continue;
@@ -107,66 +86,35 @@ export async function runUsageReport(
       if (!createdAt) continue;
       const ts = Date.parse(createdAt);
       if (!Number.isFinite(ts) || ts < cutoff) continue;
-
-      const pubkey = row.author_pub_key;
-      if (typeof pubkey !== "string" || pubkey.length === 0) {
-        unattributed++;
-        verbose?.(`usage: row with no author_pub_key counted as unattributed (slug=${row.key.hash})`);
-        continue;
-      }
-      const uh = pubkeyToUserHash(pubkey);
-
-      let c = perUser.get(uh);
-      if (!c) {
-        c = { total: 0, today: 0, byType: new Map() };
-        perUser.set(uh, c);
-      }
-      c.total++;
-      if (ts >= todayStart) c.today++;
-      c.byType.set(type, (c.byType.get(type) ?? 0) + 1);
+      total++;
+      if (ts >= todayStart) today++;
+      byType.set(type, (byType.get(type) ?? 0) + 1);
     }
   }
 
-  const users: UsagePerUser[] = Array.from(perUser.entries())
-    .map(([uh, c]) => ({
-      userHashPrefix: uh.slice(0, 8),
-      total: c.total,
-      today: c.today,
-      byType: mapToRecord(c.byType),
-    }))
-    .sort((a, b) => b.total - a.total);
+  const report: UsageReport = {
+    windowDays,
+    totalWrites: total,
+    todayWrites: today,
+    byType: mapToRecord(byType),
+  };
 
-  const totalWrites = users.reduce((s, u) => s + u.total, 0);
-  const report: UsageReport = { windowDays, totalWrites, users, unattributedWrites: unattributed };
-
-  print(`brain usage (last ${windowDays} days, by userHash):`);
-  if (users.length === 0 && unattributed === 0) {
+  print(`brain usage (last ${windowDays} days):`);
+  if (total === 0) {
     print("  (no records created in window)");
   } else {
-    for (const u of users) {
-      const types = Object.entries(u.byType)
-        .sort((a, b) => b[1] - a[1])
-        .map(([t, n]) => `${t}(${n})`)
-        .join(" ");
-      print(
-        `  ${u.userHashPrefix}  ${u.total} writes  (${u.today} today)  types: ${types}`,
-      );
-    }
+    const types = Object.entries(report.byType)
+      .sort((a, b) => b[1] - a[1])
+      .map(([t, n]) => `${t}(${n})`)
+      .join(" ");
+    print(`  ${total} writes  (${today} today)  types: ${types}`);
   }
-  if (unattributed > 0) {
-    print(
-      `  unattributed: ${unattributed} write${unattributed === 1 ? "" : "s"} with no author key ` +
-        "(a format 7 home names no writer per record)",
-    );
-  }
-  print(
-    `total: ${totalWrites} write${totalWrites === 1 ? "" : "s"} across ${users.length} user${users.length === 1 ? "" : "s"}`,
-  );
+  print(`total: ${total} write${total === 1 ? "" : "s"}`);
 
   if (!opts.noPersist) {
     persistDailySummary({
       now,
-      users,
+      today,
       path: opts.usagePath ?? defaultUsagePath(),
       verbose,
     });
@@ -180,7 +128,6 @@ export async function runUsageReport(
 // plotted as a time series.
 export type DailySummaryLine = {
   date: string;
-  by_user: Record<string, number>;
   total: number;
 };
 
@@ -190,19 +137,12 @@ export function defaultUsagePath(): string {
 
 function persistDailySummary(args: {
   now: Date;
-  users: UsagePerUser[];
+  today: number;
   path: string;
   verbose: Verbose | undefined;
 }): void {
   const date = isoDate(args.now);
-  const by_user: Record<string, number> = {};
-  let total = 0;
-  for (const u of args.users) {
-    if (u.today === 0) continue;
-    by_user[u.userHashPrefix] = u.today;
-    total += u.today;
-  }
-  const line: DailySummaryLine = { date, by_user, total };
+  const line: DailySummaryLine = { date, total: args.today };
 
   mkdirSync(dirname(args.path), { recursive: true });
   const existing = existsSync(args.path) ? readFileSync(args.path, "utf8") : "";

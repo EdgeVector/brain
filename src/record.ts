@@ -576,7 +576,7 @@ export async function completeSnapshots(
 
 /**
  * Explicit admin/offline schema drain. Mini enumerates live storage keys via
- * `GET /api/list`; brain then point-gets each slug. No atom body is read by the
+ * `GET /api/list`; brain then point-gets each slug. No record value is read by the
  * membership walk and no request opts into the retired full-schema scan path.
  */
 export async function listRecordsAdminScan(

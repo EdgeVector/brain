@@ -1,4 +1,4 @@
-// `brain doctor` probe — the edge-set atom and the link page agree.
+// `brain doctor` probe — the edge-set record and the link page agree.
 //
 // There is no scan. This probe reads one page of each type and reports how
 // many sources it read. A green line means those sources agree. It does not

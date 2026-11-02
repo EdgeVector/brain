@@ -569,7 +569,7 @@ function buildConfig(parts: {
   // (app-isolation flip, fold#739). When set, later commands attest against the
   // same node without re-supplying BRAIN_FOLDDB_SOCKET or LASTDB_HOME. Unset
   // → omitted, and attestation falls back to the default resolution (checking
-  // BRAIN_FOLDDB_SOCKET env, then deriving from LASTDB_HOME/FOLDDB_HOME).
+  // BRAIN_FOLDDB_SOCKET env, then deriving from LASTDB_HOME or ~/.lastdb).
   if (parts.nodeSocketPath && parts.nodeSocketPath.length > 0) {
     config.nodeSocketPath = parts.nodeSocketPath;
   }

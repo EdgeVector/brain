@@ -38,10 +38,7 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
                 "socket": str(node.socket) if node else None, "config": str(destination / "config.json"),
                 "records": args.records, "samples": samples, "bodyBytes": args.body_bytes,
                 "seedProof": str(destination / "seed.json"),
-                "partialProof": str(destination / "partial.json"),
-                "lastdbSource": str(args.lastdb_source),
-                # A format 7 home stores one record per key and returns no atom ids.
-                "recordHome": bool(node and node.record_home())}
+                "lastdbSource": str(args.lastdb_source)}
     name = tag or phase
     settings_path, output = destination / f"{name}-settings.json", destination / f"{name}.json"
     save(settings_path, settings)
@@ -85,28 +82,10 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
 
 
 def finish_setup(node, output):
-    """Reclaim setup garbage once, outside the measured requests.
-
-    A format 4 to 6 home first drains its delete markers through the molecule drain. A format 7
-    home (one record per key) has no molecules; LastDB main removed that route (#938).
-    """
+    """Reclaim setup garbage once, outside the measured requests."""
     flushed, _, _ = node.call("/api/db/flush", {})
     if flushed.get("durable") is not True:
         raise RuntimeError("The app setup lacks a durable flush")
-    if not node.record_home():
-        until = time.monotonic() + 600
-        while True:
-            status = node.call("/api/db/molecule-drain", {})[0]["molecule_drain"]
-            report = status["report"]
-            if report["refused"] or report["last_error"]:
-                raise RuntimeError(f"App setup reclamation failed: {status}")
-            if (status["candidate_rows"] == 0 and not status["candidate_rows_capped"]
-                    and all(report[key] == 0 for key in ("pending", "parked", "waiting_records"))):
-                break
-            if time.monotonic() >= until:
-                raise RuntimeError(f"App setup reclamation did not finish: {status}")
-            time.sleep(0.5)
-        save(output / "setup-drain.json", status)
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
@@ -226,8 +205,8 @@ def summarize(args, runs):
     lines += ["", "Each read verifies exact generated membership and selected field values, including full bodies where requested.",
               "Bulk selection previews deletion without a write. Migration read measures the real app source read.",
               "The keyword fallback uses the real app with LastSeek absent. It does not claim LastSeek latency.",
-              "Operational runs verify the body across title edits (its atom id on a format 6 home, its value on a "
-              "format 7 home), deletion membership, exact counts, and restart recovery.",
+              "Operational runs verify the body value across title edits, deletion membership, exact counts, "
+              "and restart recovery.",
               "The after arm uses normal app initialization on the native daemon." if args.mode == "operations" else
               "Every read cell includes one restart call and five warm calls per paired repeat.",
               "This measures the app and daemon change. A same-layout LastDB benchmark isolates engine cost separately.",

@@ -319,23 +319,22 @@ FAIL: 1 issue
 
 A polluted result is informative, not a bug in brain — it tells you the homebrew daemon's native index is sharing slots with tombstoned embeddings and other schemas. The fix lives upstream in fold_db (G3d / G3e).
 
-### `--usage` (team-adoption telemetry)
+### `--usage` (adoption telemetry)
 
-`brain doctor --usage` skips the health checks and prints a write-count report by `userHash` over the last 7 days. fold_db stamps every atom with the writing user's public key; brain derives the 16-byte `userHash` from `sha256(pubkey)` and groups records by it. Only the 8-char prefix of each `userHash` is printed — that's enough to distinguish teammates on a shared daemon without leaking the full identifier.
+`brain doctor --usage` skips the health checks and prints a write-count report over the last 7 days, broken down by record type. A LastDB record names no writer, so the report has no per-user split.
 
 ```
-brain usage (last 7 days, by userHash):
-  dcf41c3a  127 writes  (45 today)  types: concept(80) task(30) design(10) preference(7)
-  9f2a1e07    3 writes  (0 today)   types: concept(3)
-total: 130 writes across 2 users
+brain usage (last 7 days):
+  130 writes  (45 today)  types: concept(83) task(30) design(10) preference(7)
+total: 130 writes
 ```
 
 The command also appends/updates a daily-summary line in `~/.brain/usage.jsonl`, one record per UTC date, so adoption can be plotted as a time series:
 
 ```jsonl
-{"date":"2026-05-22","by_user":{"dcf41c3a":18},"total":18}
-{"date":"2026-05-23","by_user":{"dcf41c3a":12,"9f2a1e07":1},"total":13}
-{"date":"2026-05-24","by_user":{"dcf41c3a":45,"9f2a1e07":0},"total":45}
+{"date":"2026-05-22","total":18}
+{"date":"2026-05-23","total":13}
+{"date":"2026-05-24","total":45}
 ```
 
 Re-running on the same day updates that date's line in-place (the report is a snapshot). Flags:
@@ -343,7 +342,7 @@ Re-running on the same day updates that date's line in-place (the report is a sn
   - `--usage-window N` — override the rolling window (default 7)
   - `--usage-path PATH` — override the daily-summary file
 
-This is the signal that backs the G0 definition-of-shipped: "2+ daily users with userHash-distinguishable writes for 7 consecutive days." Read writes are not counted — only new records (filtered by `created_at`) — because adoption is about people capturing knowledge, not querying it.
+Read writes are not counted — only new records (filtered by `created_at`) — because adoption is about people capturing knowledge, not querying it.
 
 ## Admin snapshot deliver
 
@@ -438,7 +437,7 @@ planned migration to the node's native CAS blob plane.
 
 ## Delete
 
-LastDB native `MutationType::Delete` converges tip absence on the persist lane. A later `brain get` misses the row. Restart does not resurrect it. Atom reclaim and cloud-bill shrink are a later janitor.
+LastDB native `MutationType::Delete` removes the record at its key. A later `brain get` misses the row. Restart does not resurrect it.
 
 `brain delete`:
 
@@ -448,8 +447,6 @@ LastDB native `MutationType::Delete` converges tip absence on the persist lane. 
 4. Verifies by reading the record back. Success is a miss or a row that still carries the tombstone tag. If the row is still visible without the tag, errors with `delete_not_applied`.
 
 Every brain read path (`get`, `list`, `status`, `link`, `search`) treats the slug as gone. The slug is reusable: `brain design new <same-slug>` (no `--force`) recreates it.
-
-The 2026-05-23 Phase 5 spike said Delete was a sync-log marker only. That is historical. Read [`docs/phase-5-delete-spike.md`](docs/phase-5-delete-spike.md) as the old probe, not as live product truth.
 
 ### Bulk delete (filter mode)
 
@@ -582,8 +579,8 @@ monorepo — the source of truth the CI regression guard compares against).
 | `brain delete --tag` (bulk) | filter-mode scan over a `list`-style selector | O(matches) | scales with the filtered set, not the whole brain |
 
 Headline fixes behind these numbers: keyed reads moved from O(field
-cardinality) to O(1) (fold #905), `list_atoms_by_schema` gained a secondary
-index (fold #1026), and the embedding sidecar gained an HNSW path for
+cardinality) to O(1) (fold #905), the per-schema record listing gained a
+secondary index (fold #1026), and the embedding sidecar gained an HNSW path for
 unscoped search (landed 2026-06-26) that's roughly 10x faster than the exact
 scan it replaced at 120K fragments. This table is a translation of those
 numbers into brain's call surface, not a re-derivation — see
@@ -643,13 +640,10 @@ Top errors you'll hit and the fix:
   You haven't initialised brain yet. Run `brain init`.
 
 - **`error: Node rejected POST /api/setup/bootstrap with 410 — already provisioned …`**  
-  The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where the node's `config/` carries over from a previous install. Recovery: (a) if you still have `~/.brain/config.json` from when this node was working, re-run `brain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.lastdb/config/` (on a current v0.15.1+ node; legacy 0.14.x nodes use `~/.folddb/config/`), restart, then re-run `brain init`. (The error hint itself prints the resolved path for your node.)
+  The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where the node's `config/` carries over from a previous install. Recovery: (a) if you still have `~/.brain/config.json` from when this node was working, re-run `brain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.lastdb/config/` (or `$LASTDB_HOME/config/`), restart, then re-run `brain init`. (The error hint itself prints the resolved path for your node.)
 
 - **`error: Semantic search is unavailable — the fold_db node failed to load its embedding model …`** (or, on older brain versions, the opaque `Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx`).  
   The fold_db_node loads its `model.onnx` lazily on the first `brain search` / `brain ask` call. After certain restarts (commonly `brew upgrade lastdb`) that cache is partially populated and the node 400s instead of fetching. **Workaround:** `lastdb daemon stop && lastdb daemon start` — the embedding cache repopulates on next search. If the failure persists, run `brain doctor --freshness` and capture the node log (the latest file under `~/Library/Logs/Homebrew/lastdb/`); the underlying cache-recovery bug is tracked upstream in `EdgeVector/fold` (fold/fold_db_node/). `brain doctor` (no flags) now runs a one-token search probe so this failure surfaces as a structured `[FAIL] embedding-runtime` line instead of an opaque error on first use.
-
-- **`?? ~/` showing up in `git status` inside this repo.**  
-  Don't get confused by it — that literal `~` directory is `fold_db` writing to a config path of `~/.folddb` without expanding the tilde, leaving a real `./~/` subtree in whatever cwd it ran from. The contents are safe to delete (`rm -rf ./~`). It's also gitignored (`/~/` in `.gitignore`) so it won't be staged.
 
 When in doubt, `brain doctor` will tell you exactly which check is failing and what to do.
 

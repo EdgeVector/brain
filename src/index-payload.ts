@@ -1,16 +1,16 @@
-// The one rule for an index row's record snapshot (atom contract P3): an index
+// The one rule for an index row's record snapshot (field value contract P3): an index
 // payload carries keys and summary fields, never a large field.
 //
 // Several indexes keep a JSON snapshot of the record beside their key:
 // RecordListEntry (`rle_payload`), LiveIndex and its siblings (`liv_payload`,
 // `clu_payload`, `prk_payload`, `eph_payload`), ChildTaskIndex (`ctd_payload`),
 // PapercutStatusIndex (`psi_payload`). Each used to copy the WHOLE record, body
-// included. A body can now reach the 256 KiB atom ceiling, and a body that big
+// included. A body can now reach the 256 KiB field value ceiling, and a body that big
 // made the index payload exceed the ceiling too: the index write failed and the
 // record write half-committed (measured 2026-10-12: a 57 KB body gave a 68 KB
-// RecordListEntry atom, refused with HTTP 413).
+// RecordListEntry value, refused with HTTP 413).
 //
-// The rule. The payload is the whole record when its atom is at most
+// The rule. The payload is the whole record when its value is at most
 // `INDEX_PAYLOAD_MAX_BYTES` (8 KiB), which is almost every record and changes
 // nothing for them. Otherwise, in this order, until it fits:
 //   1. the long text fields (`INDEX_LONG_TEXT_FIELDS`, the body) are cut to a
@@ -32,7 +32,7 @@
 
 import { TOMBSTONE_TAG, type BrainRecord } from "./record.ts";
 
-/** Largest index payload atom, in bytes as the node measures it (the JSON-quoted string). */
+/** Largest index payload value, in bytes as the node measures it (the JSON-quoted string). */
 export const INDEX_PAYLOAD_MAX_BYTES = 8 * 1024;
 /** Longest head of one long text field kept in a cut payload. */
 export const INDEX_TEXT_HEAD_BYTES = 2 * 1024;
@@ -57,8 +57,8 @@ const MINIMAL_TITLE_BYTES = 256;
 const MINIMAL_TAGS_BYTES = 2 * 1024;
 const MINIMAL_TAG_MAX_BYTES = 512;
 
-/** Bytes of `value` as one atom: the length of its JSON-quoted form. */
-export function atomBytes(value: string): number {
+/** Bytes of `value` as one field value: the length of its JSON-quoted form. */
+export function jsonValueBytes(value: string): number {
   return Buffer.byteLength(JSON.stringify(value));
 }
 
@@ -138,7 +138,7 @@ export function indexPayload(
 ): string {
   const truncatedKey = opts.truncatedKey ?? INDEX_TRUNCATED_KEY;
   const full = JSON.stringify(record);
-  if (atomBytes(full) <= INDEX_PAYLOAD_MAX_BYTES) return full;
+  if (jsonValueBytes(full) <= INDEX_PAYLOAD_MAX_BYTES) return full;
 
   const longFields = INDEX_LONG_TEXT_FIELDS.filter(
     (key) => typeof record[key] === "string",
@@ -156,7 +156,7 @@ export function indexPayload(
     if (cut.length === 0) return null;
     out[truncatedKey] = cut;
     const text = JSON.stringify(out);
-    return atomBytes(text) <= INDEX_PAYLOAD_MAX_BYTES ? text : null;
+    return jsonValueBytes(text) <= INDEX_PAYLOAD_MAX_BYTES ? text : null;
   };
 
   // 1. Cut the body, other fields whole.

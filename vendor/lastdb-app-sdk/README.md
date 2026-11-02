@@ -63,7 +63,7 @@ await fold.mutate('brain/Concept', {                          // capability auto
 });
 const { rows } = await fold.query('brain/Concept', { fields: ['id', 'title'] });
 for (const row of rows) {
-  console.log(row.key, row.fields, row.authorPubKey); // full envelope per row
+  console.log(row.key, row.fields, row.metadata); // full envelope per row
 }
 ```
 
@@ -134,7 +134,7 @@ read those for the full rationale.
 **"App isolation" is not a security wall.** A same-user process can reach the
 owner socket regardless, so the app socket's write-own rule is an
 **attribution + accident-prevention** boundary — it keeps two honest apps on the
-same node from clobbering each other's data (single-writer-per-molecule, so
+same node from clobbering each other's data (single writer per field key, so
 cross-app reads stay trustworthy), not an adversary defense. That is exactly why
 self-authored code just uses the owner socket: you already trust it.
 
@@ -289,9 +289,9 @@ remote or non-Unix clients. This mirrors the discovery order the Rust client
    callers when neither `LASTDB_SOCKET_PATH` nor `FOLDDB_SOCKET_PATH` is set.
    Prefer `LASTDB_SOCKET_PATH` for new scripts.
 4. **`<data_dir>/folddb.sock`** — the default the node binds, resolved the same
-   way the Rust client resolves it: `<folddb_home>/data/folddb.sock` where
-   `folddb_home` honors `LASTDB_HOME` → `FOLDDB_HOME` → an existing `~/.lastdb`
-   → an existing `~/.folddb` → `~/.lastdb`. Used only when the file exists.
+   way the Rust client resolves it: `<node_home>/data/folddb.sock` where
+   `node_home` is `LASTDB_HOME` when it is set, else `~/.lastdb`. Used only
+   when the file exists.
 5. **Loopback TCP at `baseUrl`** — the fallback when no socket file exists (a
    pre-data-plane node, or one whose socket bind failed).
 
@@ -397,7 +397,7 @@ a custom `capabilityStore`.
 ## Keys-only membership
 
 Use `list()` when an app needs the live members of a schema without loading
-field atoms. It calls `GET /api/list`; it does not delegate to an unfiltered
+record values. It calls `GET /api/list`; it does not delegate to an unfiltered
 `queryAll()` scan. The cursor is opaque and exclusive, so pass it back exactly
 as returned until `has_more` is false:
 
@@ -432,14 +432,13 @@ Each `QueryRow` carries:
 | `key` | the row's storage key rendered to a string (`"hash:range"` / `"hash"` / `"range"`, fold_db's `KeyValue::Display` rendering) — ambiguous when a range contains `:`, so prefer `keyValue` for addressing |
 | `keyValue` | the row's **structured** `{hash, range}` key when the node sent one (production `/api/query` does) — pass it back verbatim as `MutationOp.key` to update/delete this exact row; `null` when the node sent a pre-rendered string key (the dev-node mirror) |
 | `fields` | the field values, keyed by field name (the flattened convenience shape) |
-| `metadata` | per-field write metadata as the node stores it (atom/molecule ids, `writer_pubkey`, …), keyed by field name |
-| `authorPubKey` | the pubkey that authored the row (first non-empty `writer_pubkey`), or `null` |
+| `metadata` | the one metadata block of the record (`source_file_name` and the `metadata` map), or `null` when the record has none. A field has no metadata of its own |
 
 This is the exact shape Mini / production `lastdbd`'s `/api/query` builds
-(`{key, fields, metadata, author_pub_key}` per result key); the SDK surfaces
+(`{key, fields, metadata, has_conflicts}` per result key); the SDK surfaces
 those fields faithfully and invents none. A node that returns bare field-map
-rows is still accepted (the object becomes `fields`; `key`/`metadata`/
-`authorPubKey` come back empty/`null`).
+rows is still accepted (the object becomes `fields`; `key`/`metadata` come
+back empty/`null`).
 
 ## Pagination
 
@@ -481,8 +480,8 @@ for (const hit of hits) {
 }
 ```
 
-Each hit is a full `QueryRow` envelope (`key` + `fields` + `metadata` +
-`authorPubKey`, exactly as `query()` returns) plus three search-only fields:
+Each hit is a full `QueryRow` envelope (`key` + `fields` + `metadata`,
+exactly as `query()` returns) plus three search-only fields:
 
 | Field | Meaning |
 |---|---|
@@ -658,9 +657,9 @@ interface QueryRow {
   key: string                          // rendered key string (Display form; ambiguous with ':' ranges)
   keyValue: KeyValue | null            // structured row address — pass back as MutationOp.key
   fields: Record<string, JsonValue>    // the flattened field map
-  metadata: JsonValue                  // per-field write metadata (writer_pubkey, …)
-  authorPubKey: string | null          // who authored the row
+  metadata: RecordMetadata | null      // the one metadata block of the record
 }
+interface RecordMetadata { source_file_name: string | null; metadata?: Record<string, string> }
 
 interface SearchOptions {
   k?: number                           // top-N hits (node defaults + clamps)
@@ -746,7 +745,7 @@ Connect with `socketPath`, not `baseUrl`, for local work. So:
   required (the capability header may be accepted-but-ignored; the connecting
   pid's app identity is what's enforced). This is what `e2e/roundtrip.mjs`
   exercises — over the control socket, including the full query-row envelope
-  (`key` + `fields` + `metadata` + `authorPubKey`): local `/api/query` emits
+  (`key` + `fields` + `metadata`): local `/api/query` emits
   the same envelope production Mini does, so an app's query parsing is identical
   against either node. The e2e also drives the paginated read path
   (`limit`/`offset` + `page` metadata) and a `queryAll` drain.
