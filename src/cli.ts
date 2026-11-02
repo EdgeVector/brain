@@ -438,12 +438,12 @@ exists in multiple types (specify --type to disambiguate).
   which: `brain which [--json] [--check]
 
 Print the brain executable selected by this shell, the resolved source root,
-and whether the running install is under ~/.host-track. This is a local install
+and whether the running install is under ~/.local/share/lastdb-apps. This is a local install
 hygiene check only: it does not contact the LastDB node, read records, or mutate
 configuration.
 
   --json   emit a single structured object on stdout
-  --check  exit non-zero when brain is not host-track managed`,
+  --check  exit non-zero when brain is not registry managed`,
   status: `brain status <slug> [<new-status>] [--type T] [--json]
 
 Bare form prints current status. With a new-status, validates against the
@@ -2721,7 +2721,7 @@ async function runWhich(args: Argv): Promise<number> {
   } else {
     console.log(formatWhich(result));
   }
-  if (values.check && !result.hostTrack) {
+  if (values.check && !result.registryManaged) {
     console.error(result.issues.join("\n"));
     return 1;
   }

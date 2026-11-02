@@ -8,8 +8,8 @@ export type WhichResult = {
   realPath: string | null;
   sourceRoot: string;
   sourceRealPath: string;
-  hostTrackRoot: string;
-  hostTrack: boolean;
+  registryRoot: string;
+  registryManaged: boolean;
   stale: "unknown";
   issues: string[];
 };
@@ -17,7 +17,7 @@ export type WhichResult = {
 export type WhichOptions = {
   whichBin?: (name: string) => string | null | undefined;
   sourceRoot?: string;
-  hostTrackRoot?: string;
+  registryRoot?: string;
 };
 
 const DEFAULT_SOURCE_ROOT = resolve(import.meta.dir, "..", "..");
@@ -27,20 +27,20 @@ export function buildWhichResult(opts: WhichOptions = {}): WhichResult {
   const realCommandPath = commandPath ? safeRealpath(commandPath) : null;
   const sourceRoot = resolve(opts.sourceRoot ?? DEFAULT_SOURCE_ROOT);
   const sourceRealPath = safeRealpath(sourceRoot) ?? sourceRoot;
-  const hostTrackRoot = resolve(
-    opts.hostTrackRoot ?? process.env.HOST_TRACK_ROOT ?? `${homedir()}/.host-track`,
+  const registryRoot = resolve(
+    opts.registryRoot ?? process.env.LASTDB_APPS_ROOT ?? `${homedir()}/.local/share/lastdb-apps`,
   );
-  const hostTrackRealRoot = safeRealpath(hostTrackRoot) ?? hostTrackRoot;
+  const registryRealRoot = safeRealpath(registryRoot) ?? registryRoot;
 
-  const hostTrack =
-    isPathWithin(sourceRealPath, hostTrackRealRoot) ||
-    (realCommandPath !== null && isPathWithin(realCommandPath, hostTrackRealRoot));
+  const registryManaged =
+    isPathWithin(sourceRealPath, registryRealRoot) ||
+    (realCommandPath !== null && isPathWithin(realCommandPath, registryRealRoot));
   const issues: string[] = [];
   if (commandPath === null) {
     issues.push("brain is not on PATH");
   }
-  if (!hostTrack) {
-    issues.push(`brain is not running from ${hostTrackRoot}`);
+  if (!registryManaged) {
+    issues.push(`brain is not running from ${registryRoot}`);
   }
 
   return {
@@ -49,8 +49,8 @@ export function buildWhichResult(opts: WhichOptions = {}): WhichResult {
     realPath: realCommandPath,
     sourceRoot,
     sourceRealPath,
-    hostTrackRoot,
-    hostTrack,
+    registryRoot,
+    registryManaged,
     stale: "unknown",
     issues,
   };
@@ -62,8 +62,8 @@ export function formatWhich(result: WhichResult): string {
     `  path: ${result.path ?? "(not found)"}`,
     `  real_path: ${result.realPath ?? "(not found)"}`,
     `  source_root: ${result.sourceRealPath}`,
-    `  host_track_root: ${result.hostTrackRoot}`,
-    `  host_track: ${result.hostTrack ? "yes" : "no"}`,
+    `  registry_root: ${result.registryRoot}`,
+    `  registry_managed: ${result.registryManaged ? "yes" : "no"}`,
     "  stale: unknown",
   ].join("\n");
 }
