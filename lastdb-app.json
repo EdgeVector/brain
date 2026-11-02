@@ -4,7 +4,8 @@
   "source": "https://github.com/EdgeVector/brain.git",
   "metadata": {
     "display_name": "Brain",
-    "description": "Long-lived knowledge over LastDB: decisions, designs, references, and rationale."
+    "description": "Long-lived knowledge over LastDB: decisions, designs, references, and rationale.",
+    "homepage_url": "https://github.com/EdgeVector/brain"
   },
   "run": {
     "runtime": "bun",
