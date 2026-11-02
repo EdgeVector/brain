@@ -133,7 +133,7 @@ export async function runEmbeddingProbe(
         tag: "WARN",
         detail:
           "no semantic search plane answered — the node's in-process index is retired by design, so brain search will use local keyword fallback",
-        fix: "install LastSeek (`host-track refresh lastseek`, then `lastseek drain`) or the Search app to restore semantic recall",
+        fix: "install LastSeek (`lastdb app upgrade lastseek`, then `lastseek drain`) or the Search app to restore semantic recall",
       };
     }
     return {

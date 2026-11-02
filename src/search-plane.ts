@@ -9,7 +9,7 @@
  *   0. LastSeek (`lastseek query`) — the Rust successor, preferred when its
  *      binary and index are present
  *   1. LASTDB_SEARCH_SEMANTIC_MODULE — path to search package semantic.ts
- *   2. host-track search semantic.ts
+ *   2. registry-installed Search semantic.ts
  *   3. LASTDB_SEARCH_BIN / `search semantic-query --json` (or `search query`)
  *
  * LastSeek goes first rather than replacing the rest, so the cutover is a
@@ -54,8 +54,8 @@ export type SearchPlaneQueryOpts = {
 export function resolveSemanticModulePath(): string | null {
   const env = process.env.LASTDB_SEARCH_SEMANTIC_MODULE?.trim();
   if (env && existsSync(env)) return resolve(env);
-  const hostTrack = `${process.env.HOME ?? ""}/.host-track/apps/search/current/src/semantic.ts`;
-  if (hostTrack && existsSync(hostTrack)) return hostTrack;
+  const registry = `${process.env.LASTDB_APPS_ROOT ?? `${process.env.HOME ?? ""}/.local/share/lastdb-apps`}/search/current/source/src/semantic.ts`;
+  if (existsSync(registry)) return registry;
   return null;
 }
 
