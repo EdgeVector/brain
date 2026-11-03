@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""CI-only normal-app latency: the earlier app and this app, each on its own fresh home."""
+"""CI-only normal-app latency: the earlier app and this app, each on its own fresh home.
+
+Both arms run the same daemon: the latest lastdb nightly. The comparison measures the app change only.
+"""
 import argparse
 import json
 import math
@@ -96,12 +99,38 @@ def cloud_off(node, destination, phase):
     save(destination / f"cloud-off-{phase}.json", status)
 
 
+def nightly_node(Node):
+    """The lastdb helper Node, accepting a nightly build of its own source revision.
+
+    The helper requires a `bench-<revision>` build. A nightly reports `<core>-nightly.<date>.g<oid9>`,
+    so this check replaces that one and still binds the running daemon to the selected source.
+    """
+    class NightlyNode(Node):
+        def start(self):
+            try:
+                super().start()
+            except RuntimeError as error:
+                if ("differs from the selected revision" not in str(error)
+                        or self.process is None or self.process.poll() is not None):
+                    raise
+            version = json.loads((self.output / "version.json").read_text())
+            if "-nightly." not in json.dumps(version) or f".g{self.revision[:9]}" not in json.dumps(version):
+                raise RuntimeError("The actual daemon version is not the nightly of the selected revision")
+
+    return NightlyNode
+
+
+def observed_daemon(node, destination):
+    """The daemon identity this arm actually ran: version reply, API version, and home format."""
+    version = json.loads((destination / "version.json").read_text())
+    reply = version.get("data", version) if isinstance(version, dict) else {}
+    return {"version": reply, "api_version": reply.get("api_version"), "home_format": node.home_format()}
+
+
 def run_case(args, Node, label, repeat):
     destination = args.output / f"{repeat:02d}-{label}"
     destination.mkdir()
-    binary, revision = ((args.binary, args.revision) if label == "after"
-                        else (args.baseline_binary, args.baseline_revision))
-    node = Node(binary, revision, destination,
+    node = Node(args.binary, args.revision, destination,
                 temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={
                     "LASTDB_SELF_METRICS_TO_DB": "false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
@@ -110,6 +139,7 @@ def run_case(args, Node, label, repeat):
         node.start()
         cloud_off(node, destination, "start")
         app(args, node, destination, label, "setup")
+        result["daemon"] = observed_daemon(node, destination)
         if args.mode == "read":
             seeded = app(args, node, destination, label, "seed")
             result.update(input_sha256=seeded["input_sha256"], body_bytes=seeded["body_bytes"])
@@ -160,12 +190,17 @@ def summarize(args, runs):
     rows = []
     operations = OPERATIONS if args.mode == "read" else ("create", "update", "delete", "partial")
     states = ("restart", "warm") if args.mode == "read" else ("operations",)
-    # One daemon revision for both arms isolates the app change.
-    same_daemon = args.baseline_revision == args.revision
+    # Both arms run one daemon program, so its observed identity must match across every run.
+    observed = {json.dumps({name: run["daemon"][name] for name in ("api_version", "home_format")}, sort_keys=True)
+                for run in runs}
+    if len(observed) != 1:
+        raise RuntimeError("The arms observed different daemon API versions or home formats")
+    daemon = runs[0]["daemon"]
     lines = [f"## Brain {args.mode} comparison: {args.records:,} records", "",
              f"Before app: `{args.app_baseline_revision}`. After app: `{args.app_revision}`.",
-             f"Both arms use daemon `{args.revision}`. The comparison measures the app change only." if same_daemon else
-             f"Before daemon: `{args.baseline_revision}`. After daemon: `{args.revision}`.",
+             f"Both arms use the latest lastdb nightly `{args.lastdb_tag}` (source `{args.revision}`). "
+             "The comparison measures the app change only.",
+             f"Observed daemon: API `{daemon['api_version']}`, home format `{daemon['home_format']}`.",
              "Each app creates its own generated home on a fresh daemon. No home is converted in place.",
              "Canonical definitions remain shared. Record values belong to each schema.",
              f"Paired repeats: {args.repeats}. Each pair uses equal generated records and full body bytes.",
@@ -209,12 +244,12 @@ def summarize(args, runs):
               "and restart recovery.",
               "Both arms use normal app initialization." if args.mode == "operations" else
               "Every read cell includes one restart call and five warm calls per paired repeat.",
-              ("This measures the app change. " if same_daemon else "This measures the app and daemon change. ")
-              + "A same-layout LastDB benchmark isolates engine cost separately.",
+              "This measures the app change. LastDB's own benchmark CI compares daemons.",
               "Raw profiles, response sizes, memory samples, disk sizes, and source identities remain in CI artifacts.",
               "No primary data, primary copy, local benchmark, or test suite participates."]
     save(args.output / "comparison.json", {"records": args.records, "app_before": args.app_baseline_revision,
-         "app_after": args.app_revision, "daemon_before": args.baseline_revision, "daemon_after": args.revision,
+         "app_after": args.app_revision, "lastdb_tag": args.lastdb_tag, "lastdb_revision": args.revision,
+         "daemon_api_version": daemon["api_version"], "daemon_home_format": daemon["home_format"],
          "rows": rows, "runs": runs})
     summary = "\n".join(lines) + "\n"
     (args.output / "summary.md").write_text(summary)
@@ -225,9 +260,10 @@ def summarize(args, runs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("read", "operations"), required=True)
-    for name in ("binary", "baseline-binary", "lastdb-source", "baseline", "candidate", "output"):
+    # One daemon for both arms: the latest lastdb nightly, its source revision, and its release tag.
+    for name in ("binary", "lastdb-source", "baseline", "candidate", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("revision", "baseline-revision", "app-revision", "app-baseline-revision"):
+    for name in ("revision", "lastdb-tag", "app-revision", "app-baseline-revision"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--records", type=int, choices=(128, 1024, 1000), required=True)
     parser.add_argument("--body-bytes", type=int, default=0)
@@ -242,9 +278,11 @@ def main():
         parser.error("Reads require 1000 records, original full bodies, five warm calls, and three repeats")
     if args.mode == "operations" and (args.body_bytes != 4096 or (args.records, args.repeats) not in ((128, 1), (1024, 3))):
         parser.error("Operations require 128 records once or 1024 records three times, with 4096-byte bodies")
-    for value in (args.revision, args.baseline_revision, args.app_revision, args.app_baseline_revision):
+    for value in (args.revision, args.app_revision, args.app_baseline_revision):
         if not re.fullmatch(r"[0-9a-f]{40}", value):
             parser.error("Every source identity must be a full revision")
+    if not re.fullmatch(rf"nightly-[0-9]{{8}}-{args.revision[:9]}", args.lastdb_tag):
+        parser.error("The lastdb tag must be the nightly of the selected lastdb revision")
     for root, revision in ((args.baseline, args.app_baseline_revision), (args.candidate, args.app_revision),
                            (args.lastdb_source, args.revision)):
         observed = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
@@ -255,6 +293,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     sys.path.insert(0, str(args.lastdb_source.resolve() / "scripts/benchmarks"))
     from node import Node
+    Node = nightly_node(Node)
     # Appended after the Node import, so no disk_v2 module can shadow a benchmark module.
     sys.path.append(str(args.lastdb_source.resolve() / "scripts/disk_v2"))
     global cleanup
