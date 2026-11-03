@@ -89,7 +89,7 @@ worlds).
 fold_db identity-hashes a schema by its name + field set, and records pin to
 their schema hash at write time. Adding an `attachments` field to the existing
 schemas would mint 10 new hashes and require re-putting **every record in the
-brain** under the new hashes (`migrate --add-field`, the G15 playbook), with
+brain** under the new hashes, with
 the old copies orphaned forever in an append-only store. Dedicated internal
 schemas get the same user-visible feature with zero migration, zero risk to
 the live primary, and a natural CAS dedup boundary. The knowledge schemas are

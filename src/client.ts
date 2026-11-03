@@ -594,13 +594,10 @@ export function stripDoctorTip(message: string): string {
   return message;
 }
 
+// Read-only Schema Service client. Brain declares its schemas through the
+// node (`/api/apps/declare-schema`) and never writes to the catalog.
 export type SchemaServiceClient = {
   baseUrl: string;
-  registerSchema(req: AddSchemaRequest): Promise<{
-    canonicalHash: string;
-    status: number;
-    replacedSchema: string | null;
-  }>;
   listSchemas(): Promise<unknown>;
   getSchemaByHash(hash: string): Promise<RegisteredSchema | null>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
@@ -826,38 +823,10 @@ export type NodeClient = {
 export function newSchemaServiceClient(
   baseUrl: string,
   verbose: Verbose = noopVerbose,
-  canonicalVocabulary = false,
 ): SchemaServiceClient {
   const url = stripTrailingSlash(baseUrl);
   return {
     baseUrl: url,
-    async registerSchema(req) {
-      if (canonicalVocabulary) req = {...req, schema:canonicalSchema(req.schema)};
-      const path = "/v1/schemas";
-      const { res, readBody } = await callSchemaServiceRaw(url, path, "POST", req, verbose);
-      const body = await readBody();
-      if (res.status !== 200 && res.status !== 201) {
-        throw mapSchemaServiceError(res, body, path);
-      }
-      const schemaObj =
-        body && typeof body === "object"
-          ? ((body as Record<string, unknown>).schema as Record<string, unknown> | undefined)
-          : undefined;
-      const canonicalHash =
-        schemaObj && typeof schemaObj.name === "string" ? (schemaObj.name as string) : null;
-      if (!canonicalHash) {
-        throw new BrainError({
-          code: "schema_register_no_hash",
-          message: `Schema service did not return a canonical hash for ${req.schema.descriptive_name}.`,
-          hint: "Inspect the schema service response — brain expects `schema.name` to carry the identity hash.",
-        });
-      }
-      const replacedSchema =
-        body && typeof body === "object" && "replaced_schema" in body
-          ? ((body.replaced_schema as string | null | undefined) ?? null)
-          : null;
-      return { canonicalHash, status: res.status, replacedSchema };
-    },
     async listSchemas() {
       const { res, readBody } = await callSchemaServiceRaw(url, "/v1/schemas", "GET", undefined, verbose);
       const body = await readBody();
@@ -3207,46 +3176,9 @@ export function mapNodeError(status: number, body: unknown, path: string): Brain
   });
 }
 
-// Shared explanation + remedy text for the schema-service publish gate, used
-// from both `mapSchemaServiceError` (init's step 3 raw error) and
-// `runSchemaPublishGateProbe` (doctor's stand-alone diagnosis). Keeping a
-// single source so the two surfaces never drift.
-export const CERT_REQUIRED_HINT =
-  "brain's schemas under `brain/*` are namespaced — POSTing them to the " +
-  "schema service requires a DevCert held by a maintainer (per app_identity v3.1). " +
-  "A fresh consumer is expected to skip publishing entirely; init resolves the " +
-  "already-published canonical hashes from the node after the cert-free catalog " +
-  "load. You'll only see this error if the schemas have not yet been published " +
-  "to this schema service at all. Remedies, any one of: " +
-  "(a) ask a maintainer with a DevCert to run `brain init` once against this schema service so the canonical hashes are published; " +
-  "(b) point brain at a different schema service that already has brain/* published (e.g. the prod cloud Lambda — the default).";
-
 export function mapSchemaServiceError(res: Response, body: unknown, path: string): BrainError {
   const errCode = bodyError(body);
   const msg = bodyMessage(body);
-  const reason = bodyStringField(body, "reason");
-  // App-identity v3.1 publish gate. The schema service rejects an
-  // `owner_app_id`-tagged schema POST from a caller without a DevCert with
-  // `401 {"reason":"cert_required"}`. For brain — whose schemas under
-  // `brain/*` are pre-published org-wide — this is the canonical "fresh
-  // consumer following the documented path" failure: re-POSTing canonical
-  // hashes requires publish authority the consumer doesn't (and shouldn't) have.
-  // Surface a discriminated code + actionable remedy instead of a raw
-  // "HTTP 401" that gives the user nothing to act on.
-  if (
-    res.status === 401 &&
-    (reason === "cert_required" ||
-      /publish key required|cert_required/i.test(`${reason ?? ""} ${msg ?? ""} ${errCode ?? ""}`))
-  ) {
-    return new BrainError({
-      code: "schema_cert_required",
-      message:
-        `Schema service ${path} rejected publish with 401 cert_required — ` +
-        `registering brain's namespaced schemas requires a one-time DevCert publish ` +
-        `by a maintainer (this is expected for a fresh consumer) ${DOCTOR_TIP}.`,
-      hint: CERT_REQUIRED_HINT,
-    });
-  }
   return new BrainError({
     code: `schema_http_${res.status}`,
     message: `Schema service ${path} returned HTTP ${res.status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""} ${DOCTOR_TIP}.`,

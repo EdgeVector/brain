@@ -760,17 +760,6 @@ export async function runWriteRoundtripProbe(
   }
 }
 
-// Schema-service publish-gate probe used when there is no config yet (init
-// hasn't completed). Issues one POST /v1/schemas against the configured
-// schema service and translates the discriminated `cert_required` response
-// into a structured FAIL with the same remedy text the init error carries.
-// Other outcomes are squashed to a single WARN so the probe never overstates
-// confidence on a network-flaky run — the real publish path is `brain init`.
-//
-// `schemaClientFactory` (from opts) lets tests stub the schema service; in
-// production we use the default factory pointed at the URL from opts.nodeUrl
-// / opts.schemaServiceUrl or the init defaults when the user has no config.
-
 function readResultString(body: unknown): string | undefined {
   if (body && typeof body === "object" && "result" in body) {
     const v = (body as Record<string, unknown>).result;

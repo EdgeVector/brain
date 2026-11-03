@@ -54,7 +54,6 @@ import { putCmd, type PutResult } from "./commands/put.ts";
 import { appendCmd } from "./commands/append.ts";
 import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
 import { reindexCmd } from "./commands/reindex.ts";
-import { migrateCmd, type MigrateMode } from "./commands/migrate.ts";
 import { gateAdd, gateClear, gatesOpen, gateVerify } from "./commands/gate.ts";
 import {
   deliverAdminSnapshot,
@@ -119,9 +118,7 @@ export const USAGE_ERROR_CODES: ReadonlySet<string> = new Set([
   "invalid_usage_window",
   "doctor_mode_conflict",
   "doctor_flag_requires_usage",
-  "migrate_mode_conflict",
   "reindex_refused",
-  "migrate_flag_requires_add_field",
   // Bad invocation surfaced inside the command modules (put / new / raw):
   // missing or contradictory slug/type, a misapplied --design, an
   // unrecognised --type, empty stdin with nothing to write, malformed
@@ -195,7 +192,6 @@ export const COMMANDS = [
   "delete",
   "admin-snapshot",
   "reindex",
-  "migrate",
   "consolidate",
   "mcp",
   "hook",
@@ -257,7 +253,6 @@ ${RECORD_NEW_HELP_LINES}
   delete         delete a record (native LastDB Delete; also stamps a tombstone tag)
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        backfill named record keys into one list, keyword page, or type directory
-  migrate        (maintainer-only) evolve a schema by adding a field — publishes a new hash; consumers don't run this
   consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
   mcp            start an MCP server over stdio (${BRAIN_MCP_TOOL_NAMES.length} tools: ${BRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^brain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register brain with Claude Code + append instructions to CLAUDE.md
@@ -880,46 +875,6 @@ It prints wrote N and the cursor key. It does not walk the corpus.
   --graph-edges     refused. This command does not walk every record.
 
 Run with the global --verbose to print node calls.`,
-  migrate: `brain migrate --add-field <type> <field> <type-spec> [--default V] [--dry-run]
-brain migrate --status
-brain migrate --resume <manifest-id>
-
-MAINTAINER-ONLY. Evolving a schema publishes a NEW schema hash, which
-requires a maintainer DevCert for the schema service. Consumers don't
-run this: the canonical brain/* schemas are published centrally and
-\`brain init\` resolves them for you. The example below fails for a
-fresh consumer (401 cert_required) by design — run it only as a
-maintainer (DevCert), or against a local/dev schema service you control
-(\`brain init --schema-service-url <URL>\`).
-
-Evolve a brain schema by adding a field. fold_db is append-only and
-identity-hashes schemas by (descriptive_name, sorted fields), so
-adding a field necessarily produces a new schema hash. \`migrate\`
-registers the new schema, re-puts every record with the new field set
-to the configured default, and atomically swaps ~/.brain/config.json.
-See docs/g15-schema-evolution-playbook.md for the full mechanism +
-recovery recipes.
-
-Phase 6 types (concept | preference | reference | agent | project |
-spike) share one underlying schema; a migrate against any of them
-re-puts and re-hashes all six together.
-
-  --add-field   register + re-put. Args: <type> <field> <type-spec>.
-                <type-spec> is "String" or "Array:String".
-  --default V   default value for pre-existing records under the new
-                field. REQUIRED for String (no implicit empty default).
-                Optional for Array:String (defaults to []; pass a JSON
-                array literal to override).
-  --dry-run     preview the schema name/field + write the manifest as
-                "dry_run"; no schema registration, node load, record
-                writes, or config swap.
-  --status      tabular listing of every manifest under
-                ~/.brain/migrations/ (newest first).
-  --resume ID   resume a previously-interrupted migration. The
-                manifest id is in --status output.
-
-Example:
-  brain migrate --add-field concept urgency String --default "normal"`,
   consolidate: `brain consolidate --topic T [--prove] [--json]
 
 Collapse one topic cluster to one live canonical slug.
@@ -1269,14 +1224,6 @@ const REINDEX_OPTIONS = {
   "graph-edges": { type: "boolean", default: false },
   "max-records": { type: "string" },
 } as const;
-const MIGRATE_OPTIONS = {
-  "add-field": { type: "boolean", default: false },
-  status: { type: "boolean", default: false },
-  resume: { type: "string" },
-  default: { type: "string" },
-  "dry-run": { type: "boolean", default: false },
-} as const;
-
 const CONSOLIDATE_OPTIONS = {
   topic: { type: "string" },
   prove: { type: "boolean", default: false },
@@ -1336,7 +1283,6 @@ export const CLI_SPEC = {
   delete: DELETE_OPTIONS,
   "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
   reindex: REINDEX_OPTIONS,
-  migrate: MIGRATE_OPTIONS,
   consolidate: CONSOLIDATE_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
@@ -1992,8 +1938,6 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runAdminSnapshot(args, verboseFn);
     case "reindex":
       return runReindex(args, verboseFn);
-    case "migrate":
-      return runMigrate(args, verboseFn);
     case "consolidate":
       return runConsolidate(args, verboseFn);
     case "mcp":
@@ -4064,92 +4008,6 @@ async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
       }),
     );
   }
-  return 0;
-}
-
-async function runMigrate(args: Argv, verbose: Verbose): Promise<number> {
-  const { values, positionals } = parseCommandArgs(
-    {
-      args,
-      strict: true,
-      allowPositionals: true,
-      options: MIGRATE_OPTIONS,
-    },
-    "migrate",
-  );
-
-  // --status / --resume / --add-field pick three mutually exclusive modes,
-  // but the dispatch below is if/else if/else — when more than one is set
-  // the first branch silently wins and the others' args are dropped:
-  //   brain migrate --status --add-field concept urgency String
-  //     → ran --status, silently ignored the add-field args.
-  //   brain migrate --resume m-1234 --add-field concept urgency String
-  //     → ran --resume, silently ignored --add-field.
-  // Reject the conflict before readConfig so the user can fix the
-  // invocation instead of debugging a no-op migration. Same spirit as
-  // `ask --explain --no-llm` (PR #56).
-  const modes: string[] = [];
-  if (values.status) modes.push("--status");
-  if (values.resume) modes.push("--resume");
-  if (values["add-field"]) modes.push("--add-field");
-  if (modes.length > 1) {
-    throw new BrainError({
-      code: "migrate_mode_conflict",
-      message: `${modes.join(", ")} are mutually exclusive — pick one.`,
-    });
-  }
-
-  // `--default` and `--dry-run` only mean anything under `--add-field` (see
-  // COMMAND_HELP.migrate). With `--status` or `--resume` they were silently
-  // dropped — e.g. `brain migrate --status --dry-run` ran a normal status
-  // listing and discarded `--dry-run`. Reject the combo before readConfig
-  // so the user can fix the invocation. Same flavor as PR #93 and PR #56.
-  if (!values["add-field"]) {
-    const orphans: string[] = [];
-    if (values.default !== undefined) orphans.push("--default");
-    if (values["dry-run"]) orphans.push("--dry-run");
-    if (orphans.length > 0) {
-      throw new BrainError({
-        code: "migrate_flag_requires_add_field",
-        message: `${orphans.join(", ")} only ${orphans.length === 1 ? "applies" : "apply"} to --add-field.`,
-      });
-    }
-  }
-
-  const cfg = readConfig();
-  const mOpts: Parameters<typeof migrateCmd>[0] = {
-    cfg,
-    mode: { kind: "status" },
-    verbose,
-  };
-
-  if (values.status) {
-    mOpts.mode = { kind: "status" };
-  } else if (values.resume) {
-    mOpts.mode = { kind: "resume", manifestId: values.resume };
-  } else if (values["add-field"]) {
-    const type = parseRecordType(positionals[0]);
-    const fieldName = positionals[1];
-    const fieldSpec = positionals[2];
-    if (!type || !fieldName || !fieldSpec) {
-      console.error(COMMAND_HELP.migrate);
-      return USAGE_ERROR;
-    }
-    const mode: MigrateMode = {
-      kind: "add-field",
-      type,
-      fieldName,
-      fieldSpec,
-      ...(values.default !== undefined ? { defaultRaw: values.default } : {}),
-      ...(values["dry-run"] ? { dryRun: true } : {}),
-    };
-    mOpts.mode = mode;
-  } else {
-    console.error(COMMAND_HELP.migrate);
-    return USAGE_ERROR;
-  }
-
-  await migrateCmd(mOpts);
   return 0;
 }
 
