@@ -101,7 +101,7 @@ def run_case(args, Node, label, repeat):
     destination.mkdir()
     binary, revision = ((args.binary, args.revision) if label == "after"
                         else (args.baseline_binary, args.baseline_revision))
-    node = Node(binary, revision, destination, full_socket_name="folddb-full.sock",
+    node = Node(binary, revision, destination,
                 temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={
                     "LASTDB_SELF_METRICS_TO_DB": "false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
