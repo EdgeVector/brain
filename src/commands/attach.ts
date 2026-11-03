@@ -146,7 +146,7 @@ export type AttachmentsMigrateCmdResult = {
 };
 
 // `brain attachments migrate [slug]` — move v1 record-stored attachment
-// blobs into the node's file plane (encrypted B2 CAS + $lastdb_file pointer)
+// blobs into the node's record files (one file per BrainAttachmentFile record)
 // and delete the legacy stand-in records. Scoped to one record when a slug is
 // given, otherwise sweeps every attachment index. Idempotent.
 export async function attachmentsMigrateCmd(

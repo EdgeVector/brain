@@ -754,44 +754,41 @@ export const attachmentBlobSchema: AddSchemaRequest = {
 };
 
 // v2 attachment storage: one BrainAttachmentFile record per unique content
-// hash. The raw bytes do not live in this record; the node's file-blob plane
-// stores the encrypted CAS blob and returns a $lastdb_file pointer in `file`.
+// hash. The raw bytes are the record's file (LastDB API 23): `put-blob` stores
+// them with the record in one write, and `fetch-blob` reads them by schema and
+// key. No field names the file.
 export const attachmentFileSchema: AddSchemaRequest = {
   schema: {
     name: "BrainAttachmentFile",
     owner_app_id: OWNER_APP_ID,
     descriptive_name: "BrainAttachmentFile",
     purpose_statement:
-      "Content-addressed $lastdb_file pointer backing an fbrain attachment; bytes live in the encrypted B2 CAS file plane, never in this record",
+      "Content-addressed record backing an fbrain attachment; the bytes are the record's own LastDB file, never a field value",
     schema_type: "Hash",
     key: { hash_field: "content_hash" },
-    fields: ["content_hash", "size", "media_type", "file", "created_at"],
+    fields: ["content_hash", "size", "media_type", "created_at"],
     field_types: {
       content_hash: "String",
       size: "String",
       media_type: "String",
-      file: "Any",
       created_at: "String",
     },
     field_descriptions: {
       content_hash: "SHA-256 hex of the raw file bytes (CAS key)",
       size: "raw file byte length",
       media_type: "MIME type inferred at attach time",
-      file: "$lastdb_file pointer written by the node's file-blob plane; never indexed",
       created_at: "RFC 3339 timestamp",
     },
     field_classifications: {
       content_hash: ["no_index", "metadata"],
       size: ["no_index", "metadata"],
       media_type: ["no_index", "metadata"],
-      file: ["no_index", "metadata"],
       created_at: ["no_index", "metadata"],
     },
     field_data_classifications: {
       content_hash: GENERAL,
       size: GENERAL,
       media_type: GENERAL,
-      file: { sensitivity_level: 0, data_domain: "file-reference" },
       created_at: GENERAL,
     },
   },
@@ -799,18 +796,18 @@ export const attachmentFileSchema: AddSchemaRequest = {
 };
 
 // One immutable BrainBodyFile per spilled field and content hash. The full text
-// is a local file blob. Reads also accept the original per-field sidecar key.
-// `file` is type Any and holds the `$lastdb_file` pointer as the whole value.
-// A pointer inside a JSON string is not a reference. Knowledge schemas gain no
-// field: a new field would re-hash every record. The record keeps a head and a
-// marker line that names this sidecar.
+// is the record's own LastDB file (API 23), stored with the record by one
+// `put-blob` and read by `fetch-blob` with schema and key. Reads also accept
+// the original per-field sidecar key. Knowledge schemas gain no field: a new
+// field would re-hash every record. The record keeps a head and a marker line
+// that names this sidecar.
 export const bodyFileSchema: AddSchemaRequest = {
   schema: {
     name: "BrainBodyFile",
     owner_app_id: OWNER_APP_ID,
     descriptive_name: "BrainBodyFile",
     purpose_statement:
-      "Pointer to a local CAS file blob that holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
+      "Sidecar whose LastDB file holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
     schema_type: "Hash",
     key: { hash_field: "file_key" },
     fields: [
@@ -820,7 +817,6 @@ export const bodyFileSchema: AddSchemaRequest = {
       "record_field",
       "content_hash",
       "size",
-      "file",
       "created_at",
       "updated_at",
     ],
@@ -831,7 +827,6 @@ export const bodyFileSchema: AddSchemaRequest = {
       record_field: "String",
       content_hash: "String",
       size: "String",
-      file: "Any",
       created_at: "String",
       updated_at: "String",
     },
@@ -842,7 +837,6 @@ export const bodyFileSchema: AddSchemaRequest = {
       record_field: "which text field of the record was spilled (body, verified_by, fixed_by)",
       content_hash: "SHA-256 hex of the full UTF-8 text",
       size: "full text byte length",
-      file: "$lastdb_file pointer written by put-blob-local; the whole field value, never indexed",
       created_at: "BrainBodyFile time this sidecar was first stored",
       updated_at: "BrainBodyFile time this sidecar was last replaced",
     },
@@ -853,7 +847,6 @@ export const bodyFileSchema: AddSchemaRequest = {
       record_field: ["no_index", "metadata"],
       content_hash: ["no_index", "metadata"],
       size: ["no_index", "metadata"],
-      file: ["no_index", "metadata"],
       created_at: ["no_index", "metadata"],
       updated_at: ["no_index", "metadata"],
     },
@@ -864,7 +857,6 @@ export const bodyFileSchema: AddSchemaRequest = {
       record_field: GENERAL,
       content_hash: GENERAL,
       size: GENERAL,
-      file: { sensitivity_level: 0, data_domain: "file-reference" },
       created_at: GENERAL,
       updated_at: GENERAL,
     },
