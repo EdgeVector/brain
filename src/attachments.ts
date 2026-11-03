@@ -11,7 +11,7 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 //   - `BrainAttachmentFile` — one record per unique content hash (SHA-256 of
 //     the raw file). The bytes do NOT live in the record. Current Mini stores
 //     them through /api/db/put-blob-local; Brain writes the returned pointer as
-//     the whole Any field. Legacy nodes retain their cloud file route. Reads go
+//     the whole File field. Legacy nodes retain their cloud file route. Reads go
 //     through `POST /api/db/fetch-file-blob` with that pointer and are
 //     sha256-verified here before any byte is handed back.
 //   - `BrainAttachmentBlob` — LEGACY v1 stand-in (base64 bytes in a no_index

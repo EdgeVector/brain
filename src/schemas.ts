@@ -49,7 +49,7 @@
 // and the node resolves short names to the brain/* namespace at boot.
 export const OWNER_APP_ID = "brain";
 
-export type FieldType = "String" | "DateTime" | "Any" | { Array: "String" };
+export type FieldType = "String" | "DateTime" | "File" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
@@ -770,7 +770,7 @@ export const attachmentFileSchema: AddSchemaRequest = {
       content_hash: "String",
       size: "String",
       media_type: "String",
-      file: "Any",
+      file: "File",
       created_at: "String",
     },
     field_descriptions: {
@@ -800,7 +800,7 @@ export const attachmentFileSchema: AddSchemaRequest = {
 
 // One immutable BrainBodyFile per spilled field and content hash. The full text
 // is a local file blob. Reads also accept the original per-field sidecar key.
-// `file` is type Any and holds the `$lastdb_file` pointer as the whole value.
+// `file` is type File and holds the `$lastdb_file` pointer as the whole value.
 // A pointer inside a JSON string is not a reference. Knowledge schemas gain no
 // field: a new field would re-hash every record. The record keeps a head and a
 // marker line that names this sidecar.
@@ -831,7 +831,7 @@ export const bodyFileSchema: AddSchemaRequest = {
       record_field: "String",
       content_hash: "String",
       size: "String",
-      file: "Any",
+      file: "File",
       created_at: "String",
       updated_at: "String",
     },

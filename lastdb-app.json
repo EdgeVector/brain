@@ -1727,7 +1727,7 @@
         "file_content_sha256_hex": "String",
         "file_size_bytes_decimal_text": "String",
         "file_media_type": "String",
-        "native_file_reference": "Any",
+        "native_file_reference": "File",
         "file_record_created_at": "DateTime"
       },
       "field_descriptions": {
@@ -1816,7 +1816,7 @@
         "knowledge_text_source_local_field_name": "String",
         "file_content_sha256_hex": "String",
         "file_size_bytes_decimal_text": "String",
-        "native_file_reference": "Any",
+        "native_file_reference": "File",
         "knowledge_text_file_created_at": "DateTime",
         "knowledge_text_file_updated_at": "DateTime"
       },

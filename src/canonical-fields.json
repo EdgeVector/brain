@@ -185,7 +185,7 @@
     },
     "native_file_reference": {
       "description": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
-      "field_type": "Any",
+      "field_type": "File",
       "version": 1,
       "classification": {
         "sensitivity_level": 0,
