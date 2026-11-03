@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { canonicalSchema } from "../canonical-vocabulary.ts";
 // `brain doctor` — live health check for the local brain setup.
 //
@@ -11,7 +12,6 @@ import { canonicalSchema } from "../canonical-vocabulary.ts";
 
 import {
   defaultFolddbSocketPath,
-  discoverFullSurfaceSocket,
   BrainError,
   isNodeReachableButErroring,
   newNodeClient,
@@ -651,28 +651,14 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   return finalize(checks, print, opts.json);
 }
 
+// The node serves every route (data, owner, and control) on its one owner
+// socket, `<home>/data/folddb.sock`. Name that socket when it exists.
 function nodeReachabilityTransportDetail(nodeUrl: string, socketPath: string): string {
-  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  // A pre-collapse node exposes a distinct folddb-full.sock beside the control
-  // socket; name both.
-  if (fullSocketPath && fullSocketPath !== socketPath) {
-    return `unix:${socketPath} + unix:${fullSocketPath}`;
-  }
-  // fold #1246 collapsed the full-surface socket INTO the control socket, so a
-  // current node serves every route (data-plane AND owner) on the one socket.
-  if (fullSocketPath === socketPath) {
-    return `unix:${socketPath}`;
-  }
-  return nodeUrl;
+  return existsSync(socketPath) ? `unix:${socketPath}` : nodeUrl;
 }
 
 function doctorNodeConfigDetail(nodeUrl: string, socketPath: string): string {
-  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  if (fullSocketPath && fullSocketPath !== socketPath) {
-    return `node=unix:${socketPath} full=unix:${fullSocketPath}`;
-  }
-  if (fullSocketPath === socketPath) return `node=unix:${socketPath}`;
-  return `nodeUrl=${nodeUrl}`;
+  return existsSync(socketPath) ? `node=unix:${socketPath}` : `nodeUrl=${nodeUrl}`;
 }
 
 // client.ts appends "— run `brain doctor` for a full diagnosis" to every

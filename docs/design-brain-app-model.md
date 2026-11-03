@@ -39,12 +39,12 @@ offer high-risk third-party apps; brain does not depend on it.
 brain runs as the **node OWNER**, not as a sandboxed app:
 
 - No `folddb.toml` manifest and no `[code_signature]` anywhere in the brain repo.
-- It connects over the **owner control socket** (`BRAIN_FOLDDB_SOCKET` →
-  `folddb.sock` inside the data dir) and does **owner-session attestation** (the
+- It connects over the node's one **owner socket** (`BRAIN_FOLDDB_SOCKET` →
+  `<home>/data/folddb.sock`) for every node route and does **owner-session attestation** (the
   app-isolation flip, fold#739 — `src/client.ts:546`, `src/commands/init.ts:332`),
   plus a one-time `folddb consent grant brain`.
-- `init` calls **owner-only verbs**: `/api/schemas/load` and pairing-code mint
-  over the control socket.
+- `init` calls **owner-only verbs**: `/api/apps/declare-schema` and pairing-code
+  mint over the owner socket.
 
 Enforcement today is **consent + owner attestation, not the jail.**
 
@@ -134,9 +134,9 @@ Each phase below is filed as a follow-up fkanban card. Implementation spans both
    binary (the jail-free app surface) + signing wiring. The app surface must be a
    compiled binary, not `bun run src/cli.ts`.
 3. **Socket split.** `init` / consent stays an **OWNER** step run out-of-band on
-   the owner control socket; steady-state reads/writes move to the **app
+   the owner socket (`folddb.sock`); steady-state reads/writes move to the **app
    data-plane socket** (`FOLDDB_SOCKET_PATH`) as the scoped app principal. Audit
-   which verbs are owner-only — `init`'s `/api/schemas/load`, pairing-code mint,
+   which verbs are owner-only — `init`'s `/api/apps/declare-schema`, pairing-code mint,
    self-serving consent — vs app-scoped — the `brain_*` namespace CRUD, all
    allowed. (brain already encodes this split as the `app_in_sandbox` 403,
    `src/client.ts:782`.)

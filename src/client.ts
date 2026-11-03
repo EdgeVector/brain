@@ -17,13 +17,13 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 // `mapSdkDataError`). That covers consent, query/queryAll, mutation, and
 // app-scoped search. The remaining hand-rolled node surface is deliberately
 // Brain-specific owner/admin glue the SDK contract does not expose:
-// schemas/load, schema declaration/listing, bootstrap, auto-identity, health,
-// raw calls, and owner-session attestation.
+// schema declaration/listing, bootstrap, auto-identity, health, raw calls, and
+// owner-session attestation.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import {
   CapabilityDeniedError,
@@ -75,9 +75,9 @@ export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
 // X-App-Capability / X-Capability-Ts third-party-app axis above). brain runs
 // as the node owner; post app-isolation-flip (fold#739) the node's owner verbs
 // and owner-isolation bypass require an ATTESTED transport. brain mints a
-// one-time pairing code over the node's UDS control socket, exchanges it for a
-// session token over the full-surface UDS when available (TCP on older nodes),
-// and presents that token here on every request — the exact pairing the CLI's
+// one-time pairing code over the node's one owner socket, exchanges it for a
+// session token over that same socket, and presents that token here on every
+// request — the exact pairing the CLI's
 // `attest_owner_session` performs (fold_db_node `src/bin/folddb/commands/ui.rs`).
 // Must match the node's session header name.
 export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
@@ -88,11 +88,9 @@ export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
 // in-memory session token).
 export const TRANSPORT_NOT_ATTESTED = "transport_not_attested";
 
-// Filename of the node's Unix-domain data/control socket — must match
-// `fold_db_node::server::uds::SOCKET_FILE_NAME` ("folddb.sock"), the same
-// constant the CLI's attest path uses. The socket lives under the node home.
+// Filename of the node's one owner Unix-domain socket. Brain sends every node
+// route to `<home>/data/folddb.sock`; it never names or derives a second socket.
 const SOCKET_FILE_NAME = "folddb.sock";
-const FULL_SURFACE_SOCKET_FILE_NAME = "folddb-full.sock";
 
 // Resolve the running node's data home (the dir holding `port` and `data/`).
 // It matches the node's own resolver: `LASTDB_HOME` when it is set, else
@@ -132,26 +130,11 @@ export function defaultFolddbSocketPath(override?: string): string {
   return join(resolveNodeHome(), "data", SOCKET_FILE_NAME);
 }
 
-export function discoverFullSurfaceSocket(socketPath?: string): string | undefined {
-  if (socketPath === undefined || socketPath.length === 0) return undefined;
-  const fullSocketPath = join(dirname(socketPath), FULL_SURFACE_SOCKET_FILE_NAME);
-  if (existsSync(fullSocketPath)) return fullSocketPath;
-  // fold #1246 (2026-06-30) collapsed the separate `folddb-full.sock` owner
-  // surface INTO the canonical control socket: a current node serves the
-  // owner-attested verbs (`/api/session/browser-pair`, declare-schema, …) on
-  // `folddb.sock` itself, and no `folddb-full.sock` sibling is created. When
-  // that sibling is absent, fall back to the control socket so owner-session
-  // attestation completes against a collapsed node instead of silently
-  // degrading to unattested (which fails the owner verb). A pre-collapse node
-  // that still exposes the separate sibling is handled by the branch above.
-  return existsSync(socketPath) ? socketPath : undefined;
-}
-
-// Mint a one-time pairing code over the node's UDS control socket, then exchange
-// it for an owner-session token over `folddb-full.sock`. Returns the token, or
+// Mint a one-time pairing code over the node's owner socket, then exchange it
+// for an owner-session token over the same socket. Returns the token, or
 // `null` on ANY failure (no socket, mint refused, exchange non-2xx, parse
 // error) — null means "proceed unattested", exactly the CLI's behavior on a
-// default (non-isolation) build where nothing is gated and the control socket
+// default (non-isolation) build where nothing is gated and the owner socket
 // is absent.
 //
 // Mirrors `attest_owner_session` + `mint_pairing_code` in fold_db_node's
@@ -164,7 +147,7 @@ export async function attestOwnerSession(
   verbose: Verbose = noopVerbose,
 ): Promise<string | null> {
   if (!existsSync(socketPath)) {
-    verbose(`owner-session attestation skipped: no control socket at ${socketPath}`);
+    verbose(`owner-session attestation skipped: no owner socket at ${socketPath}`);
     return null;
   }
   // This handshake is the FIRST node I/O of every CLI invocation — it runs
@@ -214,16 +197,16 @@ export async function attestOwnerSession(
     }
   };
 
-  // Mint over the UDS control socket (a verb that exists ONLY on the
+  // Mint over the UDS owner socket (a verb that exists ONLY on the
   // owner-attested channel). Bun's fetch speaks HTTP over a Unix socket via the
   // `unix` option, keeping brain on its single global-fetch HTTP stack.
   let pairingCode: string;
   try {
-    // trace-egress: loopback (UDS control socket on the local machine; pairing
+    // trace-egress: loopback (UDS owner socket on the local machine; pairing
     // mint, never leaves the host)
     const body = await fetchJsonWithDeadline(
       "/control/browser-pairing-code",
-      { socketPath, kind: "data" },
+      { socketPath },
     );
     if (body === null) return null;
     const code = body.pairing_code;
@@ -238,22 +221,14 @@ export async function attestOwnerSession(
     verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
-  // Exchange the code over the full-surface UDS. A socket-only node always
-  // exposes `folddb-full.sock` beside the control socket; if it's absent there
-  // is no socket to exchange over (the retired loopback TCP listener is gone),
-  // so fail soft to `null` (proceed unattested) — the same degrade-cleanly
-  // contract as a missing control socket.
-  const fullSocketPath = discoverFullSurfaceSocket(socketPath);
-  if (!fullSocketPath) {
-    verbose(`owner-session exchange skipped: no full-surface socket beside ${socketPath}`);
-    return null;
-  }
+  // Exchange the code over the same owner socket. The node serves
+  // `/api/session/browser-pair` on `folddb.sock`.
   try {
-    // trace-egress: loopback (UDS full-surface socket on the local machine;
+    // trace-egress: loopback (UDS owner socket on the local machine;
     // pairing-code exchange, never leaves the host)
     const body = await fetchJsonWithDeadline(
       "/api/session/browser-pair",
-      { socketPath: fullSocketPath, kind: "full" },
+      { socketPath },
       { "Content-Type": "application/json" },
       JSON.stringify({ code: pairingCode }),
     );
@@ -729,17 +704,6 @@ export type NodeClient = {
   // via `folddb consent grant`.
   requestConsent(appId: string, scope: string): Promise<{ status: number; body: unknown }>;
   consentStatus(requestId: string): Promise<{ status: number; body: unknown }>;
-  // Load published schemas into the node's DB. Pass a list of schema
-  // identifiers (canonical identity hash or `descriptive_name`) to scope the
-  // load to just those (fold #877) — a fresh node then pulls only the handful
-  // it needs instead of the entire global catalog. Omit (or pass an empty
-  // list) to load every available schema, as before. Forward-compatible: a
-  // pre-#877 node ignores the scope body and full-loads.
-  loadSchemas(schemas?: readonly string[]): Promise<{
-    available_schemas_loaded: number;
-    schemas_loaded_to_db: number;
-    failed_schemas: string[];
-  }>;
   // POST /api/apps/declare-schema — ask Mini to resolve/register an app-owned
   // schema and return its Schema Service catalog identity
   // with the node. Newer local-first nodes persist an app-schema mapping and
@@ -910,7 +874,7 @@ export function newNodeClient(opts: {
   // The canonical app id the SDK client acts as on the consent + mutation
   // paths. Defaults to "brain" (the only app this CLI is).
   appId?: string;
-  // Path to the node's UDS control socket, used to mint the owner-session
+  // Path to the node's UDS owner socket, used to mint the owner-session
   // pairing code (see `attestOwnerSession`). Defaults to
   // `${LASTDB_HOME ?? ~/.lastdb}/data/folddb.sock` (overridable via the
   // `BRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
@@ -934,7 +898,7 @@ export function newNodeClient(opts: {
   // Owner-session attestation (app-isolation flip, fold#739). Attest ONCE per
   // client: the first node request that needs the token resolves a shared
   // promise; subsequent requests reuse the cached token. On a node whose
-  // control socket is absent this resolves to `null` and no `X-Folddb-Session`
+  // owner socket is absent this resolves to `null` and no `X-Folddb-Session`
   // header is ever attached — brain behaves exactly
   // as before. `invalidateSession()` clears the cache so a `transport_not_
   // attested` 403 (a restarted node dropped its in-memory session) triggers a
@@ -1450,13 +1414,7 @@ export function newNodeClient(opts: {
         if (err instanceof TransportError) {
           throw connectionError(url, "node", err, {
             socketPath,
-            routeSocket: localNodeRouteSocket(
-              "node",
-              "POST",
-              "/api/apps/request-consent",
-              url,
-              socketPath,
-            ),
+            routeSocket: localNodeRouteSocket("node", url, socketPath),
             socketCause: err,
           });
         }
@@ -1490,36 +1448,12 @@ export function newNodeClient(opts: {
         if (err instanceof TransportError) {
           throw connectionError(url, "node", err, {
             socketPath,
-            routeSocket: localNodeRouteSocket(
-              "node",
-              "GET",
-              "/api/apps/consent-status",
-              url,
-              socketPath,
-            ),
+            routeSocket: localNodeRouteSocket("node", url, socketPath),
             socketCause: err,
           });
         }
         throw err;
       }
-    },
-    async loadSchemas(schemas) {
-      // Scope the load to just the named schemas when a non-empty list is
-      // given (fold #877): each entry is a canonical identity hash or a
-      // `descriptive_name` (matching is lenient on whitespace/case). An empty
-      // list — or none at all — sends no body, so the node loads the full
-      // published catalog, exactly as before. This is forward-compatible: a
-      // pre-#877 node ignores the body and full-loads either way.
-      const scope = (schemas ?? []).filter((s) => typeof s === "string" && s.length > 0);
-      const reqBody = scope.length > 0 ? { schemas: scope } : undefined;
-      const body = await callJsonOk("/api/schemas/load", "POST", reqBody);
-      const b = body as Record<string, unknown>;
-      const failed = Array.isArray(b.failed_schemas) ? (b.failed_schemas as string[]) : [];
-      return {
-        available_schemas_loaded: numField(b, "available_schemas_loaded"),
-        schemas_loaded_to_db: numField(b, "schemas_loaded_to_db"),
-        failed_schemas: failed,
-      };
     },
     async declareAppSchema(appId, schema) {
       if (canonicalVocabulary) await requireCanonicalHome();
@@ -1892,11 +1826,6 @@ function findQueryRowByKey(rows: QueryRow[], keyHash: string): QueryRow | null {
   return null;
 }
 
-function numField(obj: Record<string, unknown>, key: string): number {
-  const v = obj[key];
-  return typeof v === "number" ? v : 0;
-}
-
 function bodyError(body: unknown): string | undefined {
   if (body && typeof body === "object" && "error" in body) {
     const e = (body as Record<string, unknown>).error;
@@ -1972,50 +1901,16 @@ type BoundedResponse = {
   readBody: ReadBody;
 };
 
-// The node's data Unix-domain socket serves a small data-plane allowlist: read
-// query, write mutation, schema listing, `/api/health`, the node-identity probe,
-// and the Search app semantic route. Current nodes also expose
-// `folddb-full.sock` beside it, and that socket serves the whole HTTP surface
-// (owner/control routes included). Route selection mirrors the node client's
-// socket_for(method, path): data-plane routes use `folddb.sock`; every other
-// loopback-node route uses `folddb-full.sock` when present, else the collapsed
-// control socket. Non-loopback node URLs never use the local socket.
-//
-// This MUST stay in lockstep with the node's data-socket route table. Adding a
-// path here without the node also serving it on the data socket would dial the
-// socket and get a 404; the inverse leaves a data route needlessly dependent on
-// the full socket path.
-const NODE_DATA_PLANE_ROUTES = {
-  GET: [
-    "/api/health",
-    "/api/list",
-    "/api/schemas",
-    "/api/system/auto-identity",
-    "/api/native-index/search",
-  ],
-  POST: ["/api/query", "/api/mutation", "/api/mutations/batch", "/api/app/search"],
-} as const;
-
-// Compare the request path WITHOUT its `?query`/`#fragment` against the
-// allowlist, mirroring the node router's `path_only`. Several data-plane
-// routes are GETs that carry a query string (`/api/native-index/search?q=...`,
-// `/api/schemas?include_system=true`); matching the full path-with-query
-// against the allowlist would never hit, so a GET-with-query route could never
-// select the socket and would always fall through to the retired TCP port.
+// The request path without its `?query`/`#fragment`, for slow-call labels.
 function pathOnly(path: string): string {
   const end = path.search(/[?#]/);
   return end === -1 ? path : path.slice(0, end);
 }
 
-function isNodeDataPlaneRoute(method: string, path: string): boolean {
-  const routes =
-    NODE_DATA_PLANE_ROUTES[method.toUpperCase() as keyof typeof NODE_DATA_PLANE_ROUTES];
-  return routes === undefined ? false : (routes as readonly string[]).includes(pathOnly(path));
-}
-
+// A local node has one owner socket, `<home>/data/folddb.sock`. Every node
+// route (data, owner, and control) goes to it.
 type NodeSocketSelection = {
   socketPath: string;
-  kind: "data" | "full";
 };
 
 type ConnectionErrorContext = {
@@ -2028,17 +1923,14 @@ type ConnectionErrorContext = {
 // A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
 // retired (fold `fold-retire-tcp-listener`), so there is NO TCP fallback. When
 // the node URL is loopback and a socket path is configured, this returns the
-// route's socket UNCONDITIONALLY (data-plane → the control socket; every other
-// node route → `folddb-full.sock` when a pre-collapse node exposes it, else the
-// control socket per fold #1246's collapse) EVEN WHEN the socket file is absent:
+// one owner socket for every route UNCONDITIONALLY, EVEN WHEN the socket file is
+// absent:
 // if the node is down the connect simply fails and the caller maps it to a clear
 // node-not-running diagnostic instead of silently dialing the retired `:9001`.
 // Returns null when the node isn't a local-socket target (remote node, schema
 // service, or no socket configured), leaving the caller on plain HTTP.
 export function localNodeRouteSocket(
   service: "node" | "schema",
-  method: string,
-  path: string,
   baseUrl: string,
   socketPath?: string,
 ): NodeSocketSelection | null {
@@ -2048,18 +1940,7 @@ export function localNodeRouteSocket(
     socketPath !== undefined &&
     socketPath.length > 0;
   if (!localNodeSocketOnly) return null;
-  if (isNodeDataPlaneRoute(method, path)) {
-    return { socketPath: socketPath as string, kind: "data" };
-  }
-  return {
-    // fold #1246 collapsed `folddb-full.sock` into the control socket, so
-    // `discoverFullSurfaceSocket` returns the separate sibling when a
-    // pre-collapse node exposes it, else the control socket itself. The
-    // `?? socketPath` keeps the unconditional socket-only contract (never dial
-    // TCP) even in the impossible undefined case.
-    socketPath: discoverFullSurfaceSocket(socketPath as string) ?? (socketPath as string),
-    kind: "full",
-  };
+  return { socketPath: socketPath as string };
 }
 
 type BoundedFetchFailureContext = ConnectionErrorContext;
@@ -2113,9 +1994,9 @@ async function boundedNodeFetch(opts: {
   const localRouteSocket =
     opts.routeSocket !== undefined
       ? opts.routeSocket
-      : localNodeRouteSocket(opts.service, opts.method, opts.path, opts.baseUrl, opts.socketPath);
+      : localNodeRouteSocket(opts.service, opts.baseUrl, opts.socketPath);
   const preflightTarget = localRouteSocket
-    ? `${opts.path} [${localRouteSocket.kind} socket selected]`
+    ? `${opts.path} [unix:${localRouteSocket.socketPath}]`
     : tcpUrl;
   opts.verbose?.(
     `→ ${tag} ${opts.method} ${preflightTarget}` +
@@ -2132,7 +2013,7 @@ async function boundedNodeFetch(opts: {
 
   const attempt = async (socket: NodeSocketSelection | null): Promise<Response> => {
     const url = socket ? `http://localhost${opts.path}` : tcpUrl;
-    const transport = socket ? `unix:${socket.socketPath} (${socket.kind})` : "tcp";
+    const transport = socket ? `unix:${socket.socketPath}` : "tcp";
     opts.verbose?.(
       `→ ${tag} ${opts.method} ${url} [${transport}]` +
         (opts.body !== undefined ? ` bodyBytes=${bodyBytes}` : ""),
@@ -2880,7 +2761,7 @@ function mapSdkDataError(
     if (reachable) return reachable;
     return connectionError(baseUrl, "node", err, {
       socketPath,
-      routeSocket: localNodeRouteSocket("node", method, path, baseUrl, socketPath),
+      routeSocket: localNodeRouteSocket("node", baseUrl, socketPath),
       socketCause: err,
     });
   }
@@ -2998,10 +2879,10 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
     },
   },
   // Owner-verb attestation 403 (app-isolation flip, fold#739). The node gates
-  // owner verbs — `/api/schemas/load`, owner-isolation bypass, etc. — behind an
+  // owner verbs — app schema declaration, owner-isolation bypass, etc. — behind an
   // attested transport and returns `403 {"error":"transport_not_attested"}` to
   // bare loopback TCP. brain attests by minting a pairing code over the node's
-  // UDS control socket (see `attestOwnerSession`); when it can't find that
+  // UDS owner socket (see `attestOwnerSession`); when it can't find that
   // socket it proceeds unattested and the verb 403s. The bite is the documented
   // CONTRIBUTOR path: README tells devs to run a from-source node via `./run.sh`
   // (a non-default data dir, so its socket is NOT at `~/.lastdb/data/folddb.sock`)
@@ -3019,8 +2900,8 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
       const socketPath = defaultFolddbSocketPath();
       const found = existsSync(socketPath);
       const where = found
-        ? `brain found a control socket at ${socketPath} but the node rejected the session it minted there`
-        : `brain found no control socket at ${socketPath}`;
+        ? `brain found an owner socket at ${socketPath} but the node rejected the session it minted there`
+        : `brain found no owner socket at ${socketPath}`;
       return {
         code: "transport_not_attested",
         message:
@@ -3030,7 +2911,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
           (found
             ? "The socket exists but attestation failed — the node may have restarted (its in-memory " +
               "session dropped) or it isn't the node serving your --node-url. "
-            : "brain attests by minting a pairing code over the node's UDS control socket, which lives at " +
+            : "brain attests by minting a pairing code over the node's UDS owner socket, which lives at " +
               "`<node-data-home>/data/folddb.sock`: `$LASTDB_HOME/data/folddb.sock` when `LASTDB_HOME` is " +
               "set, else `~/.lastdb/data/folddb.sock`. If your node uses a different home (a from-source " +
               "`./run.sh` node) brain won't find it. ") +
@@ -3038,7 +2919,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
           "(or `LASTDB_HOME=<node-home>`), then re-run. The socket is created " +
           "by the OS user that owns the node, so run brain as that user on the same machine.",
         agentHint:
-          `This node gates owner verbs behind an attested UDS control socket (fold#739). ${where}. ` +
+          `This node gates owner verbs behind an attested UDS owner socket (fold#739). ${where}. ` +
           "Set the BRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` " +
           "(default `~/.lastdb/data/folddb.sock`, or `$LASTDB_HOME/data/folddb.sock`) and " +
           "retry. brain must run as the OS user that owns the node.",

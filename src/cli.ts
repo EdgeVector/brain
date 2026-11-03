@@ -777,7 +777,7 @@ from stdin. Exits 0 on 2xx, 1 otherwise.
 
 Examples:
   brain raw GET /api/system/auto-identity
-  brain raw POST /api/schemas/load
+  brain raw GET /api/schemas
   brain raw GET /v1/schemas`,
   share: `brain share
 
