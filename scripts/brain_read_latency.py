@@ -36,8 +36,7 @@ def memory(pid):
 def app(args, node, destination, label, phase, samples=0, tag=None):
     settings = {"label": label, "baseline": str(args.baseline), "candidate": str(args.candidate),
                 "socket": str(node.socket) if node else None, "config": str(destination / "config.json"),
-                "records": args.records, "samples": samples, "bodyBytes": args.body_bytes,
-                "lastdbSource": str(args.lastdb_source)}
+                "records": args.records, "samples": samples, "bodyBytes": args.body_bytes}
     name = tag or phase
     settings_path, output = destination / f"{name}-settings.json", destination / f"{name}.json"
     save(settings_path, settings)
@@ -225,7 +224,7 @@ def summarize(args, runs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("catalog", "read", "operations"), required=True)
+    parser.add_argument("--mode", choices=("read", "operations"), required=True)
     for name in ("binary", "baseline-binary", "lastdb-source", "baseline", "candidate", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("revision", "baseline-revision", "app-revision", "app-baseline-revision"):
@@ -254,9 +253,6 @@ def main():
     args.baseline, args.candidate = args.baseline.resolve(), args.candidate.resolve()
     args.driver = args.candidate / "scripts/brain_latency.mjs"
     args.output.mkdir(parents=True, exist_ok=False)
-    if args.mode == "catalog":
-        app(args, None, args.output, "after", "catalog")
-        return
     sys.path.insert(0, str(args.lastdb_source.resolve() / "scripts/benchmarks"))
     from node import Node
     # Appended after the Node import, so no disk_v2 module can shadow a benchmark module.
