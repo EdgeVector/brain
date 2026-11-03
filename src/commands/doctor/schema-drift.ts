@@ -1,9 +1,8 @@
-import { BrainError, newSchemaServiceClient, stripDoctorTip, type RegisteredSchema, type SchemaServiceClient, type Verbose } from "../../client.ts";
+import { BrainError, type RegisteredSchema, type SchemaServiceClient } from "../../client.ts";
 import type { Config } from "../../config.ts";
 import { DEFAULT_SCHEMA_SERVICE_URL } from "../init.ts";
-import { listManifests, type MigrationManifest } from "../../migration.ts";
 import { RECORD_TYPES, UNIQUE_SCHEMAS, type AddSchemaRequest, type RecordType } from "../../schemas.ts";
-import type { CheckResult, DoctorOptions } from "../doctor.ts";
+import type { CheckResult } from "../doctor.ts";
 
 export async function checkSchemaDrift(
   schemaClient: SchemaServiceClient,
@@ -187,34 +186,6 @@ function sameFieldType(a: unknown, b: unknown): boolean {
   return false;
 }
 
-// If a completed `migrate` manifest covers this schema and its to_hash
-// matches the live config hash, the drift is documented and expected
-// (schemas.ts hasn't been hand-edited yet to reflect the migration).
-// Surface it as WARN with a fix pointer rather than failing the
-// doctor verdict.
-export function softenDriftIfMigrated(
-  drift: CheckResult,
-  schemaKey: string,
-  liveHash: string,
-  manifests: MigrationManifest[],
-): CheckResult {
-  if (drift.ok) return drift;
-  const matching = manifests.find(
-    (m) =>
-      m.scope.schema_key === schemaKey &&
-      m.status === "complete" &&
-      m.to_hash === liveHash,
-  );
-  if (!matching) return drift;
-  return {
-    ...drift,
-    ok: true,
-    tag: "WARN",
-    detail: `${drift.detail ?? "drift detected"} — explained by migration ${matching.id}`,
-    fix: `update src/schemas.ts to add "${matching.field_added}" to the ${schemaKey} schema so the next \`brain init\` keeps the new hash`,
-  };
-}
-
 // Canonical deployed schema service Lambdas. Mirrored against the prod
 // default in src/commands/init.ts and the dev URL in test/util.ts; kept
 // inline here so the fix-hint stays self-contained (no cross-command
@@ -243,14 +214,6 @@ export function schemaServiceFixHint(url: string): string {
   );
 }
 
-export function safeListManifests(): MigrationManifest[] {
-  try {
-    return listManifests();
-  } catch {
-    return [];
-  }
-}
-
 export function validateConfigShape(cfg: Config): string[] {
   const issues: string[] = [];
   for (const type of RECORD_TYPES as readonly RecordType[]) {
@@ -264,81 +227,4 @@ export function validateConfigShape(cfg: Config): string[] {
     }
   }
   return issues;
-}
-
-// One-token search probe: forces the node's lazy ONNX load so the
-// `embedding_model_unavailable` failure surfaces as a structured FAIL in
-// the doctor verdict rather than being hidden behind an `brain search`
-// call. We don't care about the hit list — only whether the call
-// completes. The probe is read-only and cheap, so it runs on every
-// `brain doctor` invocation (no --freshness gate).
-
-export async function runSchemaPublishGateProbe(
-  opts: DoctorOptions,
-  verbose: Verbose | undefined,
-): Promise<CheckResult | null> {
-  const url = DEFAULT_SCHEMA_SERVICE_URL;
-  const factory = opts.schemaClientFactory ?? newSchemaServiceClient;
-  const client = factory(url, verbose);
-  // Pick a brain-namespaced schema with a stable hash; any brain schema
-  // would trip the same cert_required gate, since the schema service checks
-  // for a DevCert before deciding the operation is idempotent.
-  const probe = UNIQUE_SCHEMAS.find((s) => s.key === "design") ?? UNIQUE_SCHEMAS[0];
-  if (!probe) return null;
-  try {
-    await client.registerSchema(probe.schema);
-    // EXPECTED on prod: brain's schemas are ALREADY published there (that's
-    // how `init` resolves their canonical hashes without a DevCert), so this
-    // re-register is idempotent and succeeds. Success means the publish gate
-    // isn't blocking onboarding — a calm PASS, not an alarm. Don't imply
-    // doctor "published" anything; the no-config `[FAIL] config`
-    // (→ "run `brain init`") line already drives doctor's red verdict.
-    verbose?.(`schema-publish-gate: brain/* already published (idempotent re-register) PASS`);
-    return {
-      name: "schema-publish-gate",
-      ok: true,
-      detail:
-        `schema service at ${url} already has brain/* published ` +
-        `(idempotent re-register succeeded) — the publish gate isn't blocking; ` +
-        `run \`brain init\` to finish onboarding`,
-    };
-  } catch (err) {
-    if (err instanceof BrainError && err.code === "schema_cert_required") {
-      // `cert_required` is the EXPECTED state for a fresh consumer, NOT a
-      // blocker. The schema service gates POST /v1/schemas behind a DevCert
-      // for the namespaced `brain/*` schemas — but `brain init` never needs
-      // to publish: it loads the cert-free catalog and resolves the
-      // already-published canonical hashes from the node (proven by the
-      // init.ts "cert_required POST → resolves all hashes, no throw" path).
-      // Reporting this as a FAIL with "init cannot complete" is a false
-      // dead-end that scares fresh adopters away before they've even run
-      // init. Surface it as a calm PASS; the no-config `[FAIL] config` line
-      // (→ "run `brain init`") already drives doctor's red verdict.
-      verbose?.(`schema-publish-gate: cert_required (expected consumer state) PASS`);
-      return {
-        name: "schema-publish-gate",
-        ok: true,
-        detail:
-          `schema service at ${url} gates brain/* publishing behind a DevCert ` +
-          `(cert_required) — expected for a consumer; \`brain init\` resolves the ` +
-          `already-published canonical hashes from the node, no DevCert needed`,
-      };
-    }
-    // Anything else (schema service unreachable, 5xx, unknown 401 body) —
-    // emit a WARN so the user sees we tried, without claiming we know what's
-    // wrong. The probe is a diagnostic, not a verdict.
-    verbose?.(
-      `schema-publish-gate: probe inconclusive — ${errMsg(err)}`,
-    );
-    return {
-      name: "schema-publish-gate",
-      ok: true,
-      tag: "WARN",
-      detail: `could not probe schema service at ${url}: ${stripDoctorTip(errMsg(err))}`,
-    };
-  }
-}
-
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

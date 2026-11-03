@@ -33,9 +33,11 @@
 // every pre-Phase-E `BrainKindNote` row into its per-kind canonical,
 // the legacy schema is no longer registered or read from.
 //
-// `POST /v1/schemas` accepts these bodies; the response's `schema.name`
-// IS THE CANONICAL HASH that every subsequent mutation/query MUST pin
-// to. The descriptive_name is for human-facing display only.
+// Brain declares these bodies through the node's
+// `POST /api/apps/declare-schema`; Brain never writes them to Schema
+// Service. The receipt's `canonical` names the schema that every
+// subsequent mutation/query MUST pin to. The descriptive_name is for
+// human-facing display only.
 
 // The app id that owns every brain schema. Under app_identity v3.1,
 // `owner_app_id` is part of the schema's identity: the schema_service resolver
@@ -423,8 +425,8 @@ export const ADMIN_SNAPSHOT_SCHEMA_KEY = "__admin_snapshot__";
 // `attachment get`). Two internal support schemas, NOT RecordTypes.
 // Attachments stay ADDITIVE by design: registering these schemas changes no
 // existing schema's identity hash and migrates no existing record — a
-// deliberate contrast to `migrate --add-field`, which re-puts every record
-// under a new hash. See docs/attachments.md.
+// deliberate contrast to a new field on an existing schema, which would
+// re-put every record under a new hash. See docs/attachments.md.
 export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
 export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";

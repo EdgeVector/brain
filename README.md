@@ -181,7 +181,6 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
 | `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). LastDB native Delete converges tip absence. The CLI also stamps a tombstone tag so older read paths hide the row (see [Delete](#delete)) |
 | `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges]` | Re-puts live records or rebuilds bounded secondary indexes, including typed graph edges (see [Recovery](#recovery)) |
-| `brain migrate --add-field <type> <field> <spec> [--default V] [--dry-run]` | Evolves a schema by adding a field: registers the new schema, re-puts every record with the default, atomically swaps `~/.brain/config.json`. Also `--status` (default; list manifests) and `--resume <id>` (continue an interrupted run). See [docs/g15-schema-evolution-playbook.md](docs/g15-schema-evolution-playbook.md) |
 | `brain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `brain_search`, `brain_ask`, `brain_get`, `brain_list`, `brain_backlinks`; write: `brain_put`, `brain_status`, `brain_append`, `brain_delete`, `brain_link` — so agents can read and mutate the brain in-process (see [MCP](#mcp)) |
 
 Run `brain help <command>` for per-command usage. `brain` remains an alias.
@@ -411,8 +410,8 @@ added_at}` entry to the record's `BrainAttachmentIndex`. Design properties:
 
 - **Additive by construction.** Attachments live in two dedicated internal
   schemas (the TagIndex pattern), so enabling them changes no existing schema's
-  identity hash and migrates zero existing records — deliberately NOT
-  `migrate --add-field`, which re-puts every record under a new hash.
+  identity hash and migrates zero existing records — deliberately NOT a new
+  field on an existing schema, which would re-put every record under a new hash.
 - **Content is never searchable.** The blob's `data` field is classified
   `no_index`/`binary` (the LastSecrets `no_index` policy); the node's mutation
   manager excludes such fields from BM25/vector indexes at write time, and the

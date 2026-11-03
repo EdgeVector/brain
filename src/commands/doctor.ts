@@ -47,10 +47,7 @@ import { runTagIndexProbe, TAG_INDEX_CHECK } from "./doctor/tag-index.ts";
 import {
   boundSchemaNames,
   checkSchemaDrift,
-  safeListManifests,
   schemaServiceFixHint,
-  softenDriftIfMigrated,
-  runSchemaPublishGateProbe,
   validateConfigShape,
 } from "./doctor/schema-drift.ts";
 import { runUsageReport, type UsageOptions } from "./usage.ts";
@@ -192,14 +189,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       detail: "no ~/.brain/config.json",
       fix: "run `brain init`",
     });
-    // Break the init↔doctor dead-end: if init's step 3 keeps failing with
-    // `401 cert_required`, the user has no config to load — pre-this-PR
-    // doctor stopped here and told them to re-run init, which would loop
-    // forever. Probe the schema-service publish gate independently so the
-    // real cause surfaces with an actionable remedy instead of bouncing
-    // them back to a command that can't succeed.
-    const probe = await runSchemaPublishGateProbe(opts, verbose);
-    if (probe) checks.push(probe);
     return finalize(checks, print, opts.json);
   }
   const nodeSocketPath = defaultFolddbSocketPath(cfg.nodeSocketPath);
@@ -433,18 +422,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   }
 
   // 6. schema drift — check each unique schema once. Iterates 8 entries:
-  // Design + Task + six per-kind Phase 6 schemas. Two flavors of drift are
-  // demoted to WARN instead of failing the verdict:
-  //   - extras-only: the schema service expanded brain's canonical against
-  //     an existing schema of the same descriptive_name (often a
-  //     Schema.org starter_seed) and the registered schema now carries
-  //     extra fields. `brain init` cannot shrink registered schemas —
-  //     handled inside checkSchemaDrift().
-  //   - migration-explained: a completed `brain migrate --add-field`
-  //     manifest's to_hash matches the live config hash, so the registered
-  //     schema's extra field is expected — softened here by
-  //     softenDriftIfMigrated().
-  const allManifests = safeListManifests();
+  // Design + Task + six per-kind Phase 6 schemas. Extras-only drift (the
+  // schema service expanded brain's canonical against an existing schema of
+  // the same descriptive_name, often a Schema.org starter_seed) is demoted to
+  // WARN inside checkSchemaDrift(): `brain init` cannot shrink it.
   if (cfgIssues.length === 0 && !nodeReachable) {
     // checkSchemaDrift only reads the cloud schema-SERVICE, so it would still
     // PASS with the node dead — but the `schema-drift[…]` label promises a
@@ -476,10 +457,9 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         hash,
         boundSchemaNames(cfg, hash),
       );
-      const softened = softenDriftIfMigrated(driftCheck, entry.key, hash, allManifests);
-      checks.push(softened);
+      checks.push(driftCheck);
       verbose?.(
-        `schema-drift[${label}]: ${tagOf(softened)} — ${softened.detail ?? ""}`,
+        `schema-drift[${label}]: ${tagOf(driftCheck)} — ${driftCheck.detail ?? ""}`,
       );
     }
   }
