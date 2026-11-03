@@ -2360,12 +2360,9 @@
       {
         "argv": [
           "./bin/registry-brain",
-          "get",
-          "sop-edgevector-portals",
-          "--field",
-          "title"
+          "--version"
         ],
-        "timeout_s": 60
+        "timeout_s": 30
       }
     ],
     "post_install": [],
