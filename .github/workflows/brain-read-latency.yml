@@ -16,23 +16,21 @@ concurrency:
   group: brain-native-latency-${{ github.ref }}
   cancel-in-progress: true
 env:
-  # Both daemons name the DEV environment. Neither asks Schema Service to declare a
-  # schema: since lastdb#1142 a node declares locally, so no definition check runs here.
+  # The daemon names the DEV environment and declares schemas locally (lastdb#1142),
+  # so no Schema Service definition check runs here.
   ENVIRONMENT: dev
   # Brain main at #498. It initializes the owned multi-key model like the candidate.
   APP_BEFORE: d629de7e2c9ed025f91bb8962d36c779afd4df7e
-  # LastDB main just before format 9 (#1139): format 8, declares locally (#1142), and
-  # still serves the file pointer routes that the earlier app uses.
-  DAEMON_BEFORE: d94afb7584ff7957fb69d1511ac4b8cd64b007da
-  # LastDB main at format 9 (#1139): one file per record, put-blob and fetch-blob by
-  # schema and key, API 23. The candidate app needs these routes.
-  DAEMON_AFTER: 972a9516d0843abaf856978f2094a5246538606c
+  # Both arms run the latest lastdb nightly, so the comparison is old app vs new app.
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.nightly.outputs.tag }}
+      oid: ${{ steps.nightly.outputs.oid }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -44,49 +42,57 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: node --check scripts/brain_latency.mjs
-      - name: Retain exact source revisions
+      - name: Fetch the latest lastdb nightly
+        id: nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          for label in brain-before daemon-before daemon-after; do
-            case "$label" in
-              brain-before) repository=brain; revision="$APP_BEFORE" ;;
-              daemon-before) repository=lastdb; revision="$DAEMON_BEFORE" ;;
-              daemon-after) repository=lastdb; revision="$DAEMON_AFTER" ;;
-            esac
-            directory="$RUNNER_TEMP/$label"
-            git init "$directory"
-            git -C "$directory" remote add origin "https://github.com/EdgeVector/$repository.git"
-            git -C "$directory" fetch --depth 1 origin "$revision"
-            git -C "$directory" checkout --detach FETCH_HEAD
-            test "$(git -C "$directory" rev-parse HEAD)" = "$revision"
+          tag="$(gh release list -R EdgeVector/lastdb --exclude-drafts --limit 30 \
+            --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName')"
+          test -n "$tag" && test "$tag" != null
+          dir="$RUNNER_TEMP/lastdb-nightly"
+          mkdir -p "$dir"
+          gh release download "$tag" -R EdgeVector/lastdb -D "$dir" \
+            -p 'lastdb-x86_64-unknown-linux-gnu.tar.gz' -p 'lastdb-x86_64-unknown-linux-gnu.manifest.json' -p SHA256SUMS.txt
+          (cd "$dir" && grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS.txt | sha256sum -c -)
+          tar -xzf "$dir/lastdb-x86_64-unknown-linux-gnu.tar.gz" -C "$dir"
+          for name in lastdb lastdbd; do
+            want="$(jq -r --arg n "$name" '.binaries[] | select(.name == $n) | .sha256' "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
+            test "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$want"
           done
-          cd "$RUNNER_TEMP/brain-before"
-          bun install --frozen-lockfile
-      - name: Build the comparison daemons once
+          oid="$(jq -r .source_git_oid "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
+          sum="$(grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' "$dir/SHA256SUMS.txt" | cut -d' ' -f1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "oid=$oid" >> "$GITHUB_OUTPUT"
+          echo "lastdbd=$dir/lastdbd" >> "$GITHUB_OUTPUT"
+          echo "lastdb=$dir/lastdb" >> "$GITHUB_OUTPUT"
+          printf '### LastDB under test\n\nNightly `%s` (source `%s`), Linux tarball sha256 `%s`.\n' "$tag" "$oid" "$sum" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the lastdb support code of the nightly source
         env:
-          CARGO_BUILD_JOBS: '3'
-          CARGO_TERM_COLOR: never
+          LASTDB_REVISION: ${{ steps.nightly.outputs.oid }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="$RUNNER_TEMP/lastdb-source"
+          git init "$directory"
+          git -C "$directory" remote add origin https://github.com/EdgeVector/lastdb.git
+          git -C "$directory" fetch --depth 1 origin "$LASTDB_REVISION"
+          git -C "$directory" checkout --detach FETCH_HEAD
+          test "$(git -C "$directory" rev-parse HEAD)" = "$LASTDB_REVISION"
+      - name: Stage the one daemon program for both arms
+        env:
+          LASTDBD: ${{ steps.nightly.outputs.lastdbd }}
+          TAG: ${{ steps.nightly.outputs.tag }}
+          LASTDB_REVISION: ${{ steps.nightly.outputs.oid }}
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/brain-binaries"
-          for label in before after; do
-            if [ "$label" = before ]; then revision="$DAEMON_BEFORE"; else revision="$DAEMON_AFTER"; fi
-            # One revision for both arms needs one build.
-            if [ "$label" = after ] && [ "$DAEMON_AFTER" = "$DAEMON_BEFORE" ]; then
-              cp "$RUNNER_TEMP/brain-binaries/before" "$RUNNER_TEMP/brain-binaries/after"
-              continue
-            fi
-            cd "$RUNNER_TEMP/daemon-$label"
-            FOLDDB_BUILD_VERSION_OVERRIDE="bench-$revision" \
-              CARGO_TARGET_DIR="$RUNNER_TEMP/brain-target-$label" \
-              cargo build --locked --profile dev-release -p lastdb_node --bin lastdbd
-            cp "$RUNNER_TEMP/brain-target-$label/dev-release/lastdbd" "$RUNNER_TEMP/brain-binaries/$label"
-            rm -rf "$RUNNER_TEMP/brain-target-$label"
-          done
+          cp "$LASTDBD" "$RUNNER_TEMP/brain-binaries/lastdbd"
           cd "$RUNNER_TEMP/brain-binaries"
-          sha256sum before after > SHA256SUMS
-          printf 'Before: %s\nAfter: %s\n' "$DAEMON_BEFORE" "$DAEMON_AFTER" > revisions.txt
+          sha256sum lastdbd > SHA256SUMS
+          printf 'Tag: %s\nSource: %s\n' "$TAG" "$LASTDB_REVISION" > revisions.txt
       - name: Retain the exact daemon programs
         id: binaries
         uses: actions/upload-artifact@v4
@@ -103,7 +109,7 @@ jobs:
           ARTIFACT_SHA256: ${{ steps.binaries.outputs.artifact-digest }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/binary-artifact.json"
-          python3 "$RUNNER_TEMP/daemon-after/scripts/benchmarks/artifact.py" \
+          python3 "$RUNNER_TEMP/lastdb-source/scripts/benchmarks/artifact.py" \
             --metadata "$RUNNER_TEMP/binary-artifact.json" --output "$RUNNER_TEMP/binary-artifact-receipt"
   measure:
     name: ${{ matrix.mode }}-latency-${{ matrix.records }}
@@ -127,11 +133,13 @@ jobs:
           bun-version: '1.3.10'
       - run: bun install --frozen-lockfile
       - name: Retain the source reader and daemon support code
+        env:
+          LASTDB_REVISION: ${{ needs.build.outputs.oid }}
         shell: bash
         run: |
           set -euo pipefail
-          for label in brain-before daemon-after; do
-            if [ "$label" = brain-before ]; then repository=brain; revision="$APP_BEFORE"; else repository=lastdb; revision="$DAEMON_AFTER"; fi
+          for label in brain-before lastdb-source; do
+            if [ "$label" = brain-before ]; then repository=brain; revision="$APP_BEFORE"; else repository=lastdb; revision="$LASTDB_REVISION"; fi
             directory="$RUNNER_TEMP/$label"
             git init "$directory"
             git -C "$directory" remote add origin "https://github.com/EdgeVector/$repository.git"
@@ -149,15 +157,17 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/brain-binaries"
           sha256sum --check SHA256SUMS
-          chmod +x before after
+          chmod +x lastdbd
       - name: Measure the actual app operations before and after
+        env:
+          LASTDB_TAG: ${{ needs.build.outputs.tag }}
+          LASTDB_REVISION: ${{ needs.build.outputs.oid }}
         run: |
           python3 scripts/brain_read_latency.py --mode '${{ matrix.mode }}' \
             --baseline "$RUNNER_TEMP/brain-before" --candidate "$GITHUB_WORKSPACE" \
             --app-baseline-revision "$APP_BEFORE" --app-revision "$APP_AFTER" \
-            --lastdb-source "$RUNNER_TEMP/daemon-after" \
-            --baseline-binary "$RUNNER_TEMP/brain-binaries/before" --binary "$RUNNER_TEMP/brain-binaries/after" \
-            --baseline-revision "$DAEMON_BEFORE" --revision "$DAEMON_AFTER" \
+            --lastdb-source "$RUNNER_TEMP/lastdb-source" --binary "$RUNNER_TEMP/brain-binaries/lastdbd" \
+            --revision "$LASTDB_REVISION" --lastdb-tag "$LASTDB_TAG" \
             --records '${{ matrix.records }}' --repeats '${{ matrix.repeats }}' --samples 5 \
             --body-bytes '${{ matrix.body_bytes }}' --output "$RUNNER_TEMP/brain-results"
       - name: Retain raw samples and source identities
@@ -178,7 +188,7 @@ jobs:
           ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/measurement-artifact.json"
-          python3 "$RUNNER_TEMP/daemon-after/scripts/benchmarks/artifact.py" \
+          python3 "$RUNNER_TEMP/lastdb-source/scripts/benchmarks/artifact.py" \
             --metadata "$RUNNER_TEMP/measurement-artifact.json" --output "$RUNNER_TEMP/measurement-artifact-receipt"
   benchmark-complete:
     if: ${{ always() }}
