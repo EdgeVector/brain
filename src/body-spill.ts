@@ -42,7 +42,6 @@ const FILE_FIELDS = [
   "record_field",
   "content_hash",
   "size",
-  "file",
   "created_at",
   "updated_at",
 ];
@@ -136,36 +135,16 @@ export function bodyFileKey(type: RecordType, slug: string, field: string, conte
 type SpillCfg = Pick<Config, "schemaHashes">;
 
 type SidecarRow = {
+  /** The key the row was read at: the versioned key or the original per-field key. */
+  key: string;
   contentHash: string;
   size: number;
   createdAt: string;
-  /** Null when the row exists but its `file` field is not a `$lastdb_file` pointer. */
-  pointer: Record<string, unknown> | null;
 };
 
 function stringOf(fields: Record<string, unknown>, key: string): string {
   const v = fields[key];
   return typeof v === "string" ? v : "";
-}
-
-function pointerOf(raw: unknown): Record<string, unknown> | null {
-  let pointer = raw;
-  if (typeof pointer === "string") {
-    try {
-      pointer = JSON.parse(pointer);
-    } catch {
-      return null;
-    }
-  }
-  if (
-    pointer === null ||
-    typeof pointer !== "object" ||
-    typeof (pointer as Record<string, unknown>).$lastdb_file !== "object" ||
-    (pointer as Record<string, unknown>).$lastdb_file === null
-  ) {
-    return null;
-  }
-  return pointer as Record<string, unknown>;
 }
 
 async function queryRowByKey(
@@ -192,10 +171,10 @@ function sidecarFromRow(row: QueryRow | null): SidecarRow | null {
   if (row === null) return null;
   const f = (row.fields ?? {}) as Record<string, unknown>;
   return {
+    key: row.key?.hash ?? stringOf(f, "file_key"),
     contentHash: stringOf(f, "content_hash"),
     size: Number(stringOf(f, "size")) || 0,
     createdAt: stringOf(f, "created_at"),
-    pointer: pointerOf(f.file),
   };
 }
 
@@ -262,63 +241,68 @@ function blobPlaneError(path: string, status: number, body: string): BrainError 
     return new BrainError({
       code: "body_spill_too_large",
       message: `Node ${path} refused the text as too large (413): ${excerpt}`,
-      hint: "A local blob is at most 16 MiB. Split the text across records.",
+      hint: "A record file is at most 16 MiB. Split the text across records.",
     });
   }
-  if (status === 404 || status === 405) {
+  if (status === 405) {
     return new BrainError({
       code: "body_spill_unavailable",
-      message: `Node ${path} answered ${status}: this node has no local blob route.`,
-      hint: "Long bodies need a LastDB Mini that serves POST /api/db/put-blob-local. Upgrade the node.",
+      message: `Node ${path} answered ${status}: this node keeps no record files.`,
+      hint: "Long bodies need a LastDB Mini that serves POST /api/db/put-blob (API 23). Upgrade the node.",
     });
   }
   return new BrainError({
     code: "body_spill_blob_error",
     message: `Node ${path} failed (${status}): ${excerpt}`,
-    hint: "Retry. If it persists, read the node log for the file-blob plane failure.",
+    hint: "Retry. If it persists, read the node log for the record file failure.",
   });
 }
 
-async function putBlobLocal(node: NodeClient, bytes: Uint8Array): Promise<Record<string, unknown>> {
-  const path = "/api/db/put-blob-local";
-  // No `name` and no `media_type`: identical bytes then give an identical pointer.
+function replyFile(json: unknown): Record<string, unknown> | undefined {
+  const root = (json ?? {}) as Record<string, unknown>;
+  const file = root.file ?? (root.data as Record<string, unknown> | undefined)?.file;
+  return file && typeof file === "object" ? (file as Record<string, unknown>) : undefined;
+}
+
+// One write: the sidecar fields and the full text as the sidecar's file.
+async function putSidecar(
+  node: NodeClient,
+  schemaHash: string,
+  key: string,
+  bytes: Uint8Array,
+  fields: Record<string, unknown>,
+): Promise<void> {
+  const path = "/api/db/put-blob";
   const res = await node.rawCall("POST", path, {
+    schema: schemaHash,
+    key: { hash: key },
     bytes_b64: Buffer.from(bytes).toString("base64"),
+    fields,
   });
   if (res.status !== 200) throw blobPlaneError(path, res.status, res.body);
-  const root = (res.json ?? {}) as Record<string, unknown>;
-  const fileBlob = (root.file_blob ?? (root.data as Record<string, unknown> | undefined)?.file_blob) as
-    | Record<string, unknown>
-    | undefined;
-  const pointer = pointerOf(fileBlob?.pointer);
-  if (pointer === null) {
+  const file = replyFile(res.json);
+  if (file?.sha256 !== fields.content_hash || file?.size_bytes !== bytes.length) {
     throw new BrainError({
       code: "body_spill_blob_error",
-      message: `Node ${path} returned no $lastdb_file pointer: ${res.body.slice(0, 300)}`,
-      hint: "The node and brain disagree on the put-blob-local response. Upgrade both.",
+      message: `Node ${path} stored a file that differs from the sent text: ${res.body.slice(0, 300)}`,
+      hint: "Retry. If it persists, read the node log for the record file failure.",
     });
   }
-  return pointer;
 }
 
-async function fetchBlob(node: NodeClient, pointer: Record<string, unknown>): Promise<Uint8Array> {
-  const path = "/api/db/fetch-file-blob";
-  const res = await node.rawCall("POST", path, { pointer });
+async function fetchBlob(node: NodeClient, schemaHash: string, key: string): Promise<Uint8Array> {
+  const path = "/api/db/fetch-blob";
+  const res = await node.rawCall("POST", path, { schema: schemaHash, key: { hash: key } });
   if (res.status === 404) {
     throw new BrainError({
       code: "body_spill_blob_missing",
-      message: "The long text blob is not on this node.",
-      hint:
-        "Brain keeps long text in this node's local blob plane. It does not sync to the cloud. " +
-        "Read the record on the node that wrote it.",
+      message: "The body file record has no file on this node.",
+      hint: "Write the record again with its full text (brain put --allow-shrink).",
     });
   }
   if (res.status !== 200) throw blobPlaneError(path, res.status, res.body);
-  const root = (res.json ?? {}) as Record<string, unknown>;
-  const fileBlob = (root.file_blob ?? (root.data as Record<string, unknown> | undefined)?.file_blob) as
-    | Record<string, unknown>
-    | undefined;
-  const b64 = typeof fileBlob?.bytes_b64 === "string" ? fileBlob.bytes_b64 : "";
+  const file = replyFile(res.json);
+  const b64 = typeof file?.bytes_b64 === "string" ? file.bytes_b64 : "";
   return new Uint8Array(Buffer.from(b64, "base64"));
 }
 
@@ -404,14 +388,7 @@ async function resolveSpilledField(
       hint: "The stored text reference does not match this record revision. Read the record again or restore its full text.",
     });
   }
-  if (sidecar.pointer === null) {
-    throw new BrainError({
-      code: "body_spill_pointer_invalid",
-      message: `${type} ${slug}: body file record ${key} does not carry a $lastdb_file pointer.`,
-      hint: "The sidecar record is corrupt. Write the record again with its full text to replace it (brain put --allow-shrink).",
-    });
-  }
-  const bytes = await fetchBlob(node, sidecar.pointer);
+  const bytes = await fetchBlob(node, schemaHash, sidecar.key);
   verifyBytes(bytes, marker.sha256, marker.bytes, `${type} ${slug} field ${field}`);
   return Buffer.from(bytes).toString("utf8");
 }
@@ -618,31 +595,24 @@ async function commitSidecar(opts: {
   }
   const key = bodyFileKey(type, slug, field, full.sha256);
   const existing = await readSidecar(node, schemaHash, key);
-  if (
-    existing !== null &&
-    existing.pointer !== null &&
-    existing.contentHash === full.sha256 &&
-    existing.size === full.buf.length
-  ) {
+  // put-blob writes the fields and the file in one write, so a sidecar with
+  // these fields has this file.
+  if (existing !== null && existing.contentHash === full.sha256 && existing.size === full.buf.length) {
     return { reused: true };
   }
-  // 1. blob, 2. verify it reads back, 3. sidecar. The record is written after.
-  const pointer = await putBlobLocal(node, full.buf);
-  verifyBytes(await fetchBlob(node, pointer), full.sha256, full.buf.length, `${type} ${slug} field ${field}`);
+  // 1. sidecar and its file in one write, 2. verify it reads back. The record is written after.
   const now = new Date().toISOString();
-  const fields = {
+  await putSidecar(node, schemaHash, key, full.buf, {
     file_key: key,
     record_type: type,
     record_slug: slug,
     record_field: field,
     content_hash: full.sha256,
     size: String(full.buf.length),
-    file: pointer,
     created_at: existing?.createdAt || now,
     updated_at: now,
-  };
-  if (existing !== null) await node.updateRecord({ schemaHash, fields, keyHash: key });
-  else await node.createRecord({ schemaHash, fields, keyHash: key });
+  });
+  verifyBytes(await fetchBlob(node, schemaHash, key), full.sha256, full.buf.length, `${type} ${slug} field ${field}`);
   return { reused: false };
 }
 
@@ -696,7 +666,7 @@ export async function sealRecordFields(opts: {
     await Promise.all(
       plan.pass.map(async ({ field, marker }) => {
         const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, field, marker.sha256);
-        if (sidecar === null || sidecar.pointer === null || sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
+        if (sidecar === null || sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
           throw new BrainError({
             code: "body_spill_sidecar_mismatch",
             message: `${type} ${slug}: field ${field} carries a marker with no matching body file record.`,

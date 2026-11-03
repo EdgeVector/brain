@@ -16,16 +16,17 @@ concurrency:
   group: brain-native-latency-${{ github.ref }}
   cancel-in-progress: true
 env:
-  # CI uses the DEV Schema Service. The definition check and both daemons read this
-  # one value, so they always name the same registry. Production needs publisher authority.
+  # Both daemons name the DEV environment. Neither asks Schema Service to declare a
+  # schema: since lastdb#1142 a node declares locally, so no definition check runs here.
   ENVIRONMENT: dev
   # Brain main at #498. It initializes the owned multi-key model like the candidate.
   APP_BEFORE: d629de7e2c9ed025f91bb8962d36c779afd4df7e
-  # LastDB main after record model 8c (#938, #941): every new home is format 7,
-  # one stored record per key with a 64 KiB record cap. API 15, after #803.
-  # Both arms use this one revision, so the comparison measures the app change.
-  DAEMON_BEFORE: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
-  DAEMON_AFTER: 0adf823cd8164b78245bbf6a4403ca0bb2c54760
+  # LastDB main just before format 9 (#1139): format 8, declares locally (#1142), and
+  # still serves the file pointer routes that the earlier app uses.
+  DAEMON_BEFORE: d94afb7584ff7957fb69d1511ac4b8cd64b007da
+  # LastDB main at format 9 (#1139): one file per record, put-blob and fetch-blob by
+  # schema and key, API 23. The candidate app needs these routes.
+  DAEMON_AFTER: 972a9516d0843abaf856978f2094a5246538606c
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
@@ -62,15 +63,6 @@ jobs:
           done
           cd "$RUNNER_TEMP/brain-before"
           bun install --frozen-lockfile
-      - name: Require registered definitions before the build
-        run: |
-          python3 scripts/brain_read_latency.py --mode catalog \
-            --baseline "$RUNNER_TEMP/brain-before" --candidate "$GITHUB_WORKSPACE" \
-            --app-baseline-revision "$APP_BEFORE" --app-revision "$APP_AFTER" \
-            --lastdb-source "$RUNNER_TEMP/daemon-after" \
-            --baseline-binary "$RUNNER_TEMP/brain-binaries/before" --binary "$RUNNER_TEMP/brain-binaries/after" \
-            --baseline-revision "$DAEMON_BEFORE" --revision "$DAEMON_AFTER" \
-            --records 1000 --output "$RUNNER_TEMP/brain-definitions"
       - name: Build the comparison daemons once
         env:
           CARGO_BUILD_JOBS: '3'
@@ -95,14 +87,6 @@ jobs:
           cd "$RUNNER_TEMP/brain-binaries"
           sha256sum before after > SHA256SUMS
           printf 'Before: %s\nAfter: %s\n' "$DAEMON_BEFORE" "$DAEMON_AFTER" > revisions.txt
-      - name: Retain definition results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: brain-definitions-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/brain-definitions/
-          if-no-files-found: error
-          retention-days: 14
       - name: Retain the exact daemon programs
         id: binaries
         uses: actions/upload-artifact@v4

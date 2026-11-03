@@ -183,15 +183,6 @@
         "data_domain": "general"
       }
     },
-    "native_file_reference": {
-      "description": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
-      "field_type": "Any",
-      "version": 1,
-      "classification": {
-        "sensitivity_level": 0,
-        "data_domain": "file-reference"
-      }
-    },
     "attachment_lookup_key": {
       "description": "the attachment-list key __attidx__ followed by the SHA-256 digest of the owning record type and slug",
       "field_type": "String",
@@ -615,7 +606,6 @@
       "content_hash": "file_content_sha256_hex",
       "size": "file_size_bytes_decimal_text",
       "media_type": "file_media_type",
-      "file": "native_file_reference",
       "created_at": "file_record_created_at"
     },
     "BrainAttachmentIndex": {
@@ -634,7 +624,6 @@
       "record_field": "knowledge_text_source_local_field_name",
       "content_hash": "file_content_sha256_hex",
       "size": "file_size_bytes_decimal_text",
-      "file": "native_file_reference",
       "created_at": "knowledge_text_file_created_at",
       "updated_at": "knowledge_text_file_updated_at"
     },

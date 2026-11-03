@@ -1130,7 +1130,7 @@
       "name": "Decision",
       "owner_app_id": "brain",
       "descriptive_name": "Decision",
-      "purpose_statement": "A call a human made \u2014 the choice, its rationale, and outcome \u2014 kept as an auditable trail",
+      "purpose_statement": "A call a human made — the choice, its rationale, and outcome — kept as an auditable trail",
       "schema_type": "Hash",
       "key": {
         "hash_field": "knowledge_record_slug"
@@ -1711,7 +1711,7 @@
       "name": "BrainAttachmentFile",
       "owner_app_id": "brain",
       "descriptive_name": "BrainAttachmentFile",
-      "purpose_statement": "Content-addressed $lastdb_file pointer backing an fbrain attachment; bytes live in the encrypted B2 CAS file plane, never in this record",
+      "purpose_statement": "Content-addressed record backing an fbrain attachment; the bytes are the record's own LastDB file, never a field value",
       "schema_type": "Hash",
       "key": {
         "hash_field": "file_content_sha256_hex"
@@ -1720,21 +1720,18 @@
         "file_content_sha256_hex",
         "file_size_bytes_decimal_text",
         "file_media_type",
-        "native_file_reference",
         "file_record_created_at"
       ],
       "field_types": {
         "file_content_sha256_hex": "String",
         "file_size_bytes_decimal_text": "String",
         "file_media_type": "String",
-        "native_file_reference": "Any",
         "file_record_created_at": "DateTime"
       },
       "field_descriptions": {
         "file_content_sha256_hex": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
         "file_size_bytes_decimal_text": "the base-10 text encoding of a file size in bytes",
         "file_media_type": "the MIME type of a file",
-        "native_file_reference": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
         "file_record_created_at": "the RFC 3339 instant when a file metadata record was first stored"
       },
       "field_classifications": {
@@ -1747,10 +1744,6 @@
           "metadata"
         ],
         "file_media_type": [
-          "no_index",
-          "metadata"
-        ],
-        "native_file_reference": [
           "no_index",
           "metadata"
         ],
@@ -1772,10 +1765,6 @@
           "sensitivity_level": 0,
           "data_domain": "media"
         },
-        "native_file_reference": {
-          "sensitivity_level": 0,
-          "data_domain": "file-reference"
-        },
         "file_record_created_at": {
           "sensitivity_level": 0,
           "data_domain": "general"
@@ -1785,7 +1774,6 @@
         "file_content_sha256_hex": 1,
         "file_size_bytes_decimal_text": 1,
         "file_media_type": 1,
-        "native_file_reference": 1,
         "file_record_created_at": 1
       }
     },
@@ -1793,7 +1781,7 @@
       "name": "BrainBodyFile",
       "owner_app_id": "brain",
       "descriptive_name": "BrainBodyFile",
-      "purpose_statement": "Pointer to a local CAS file blob that holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
+      "purpose_statement": "Sidecar whose LastDB file holds the full long text of one fbrain record field (body, papercut evidence); the record keeps only a bounded head and a marker line",
       "schema_type": "Hash",
       "key": {
         "hash_field": "knowledge_text_file_lookup_key"
@@ -1805,7 +1793,6 @@
         "knowledge_text_source_local_field_name",
         "file_content_sha256_hex",
         "file_size_bytes_decimal_text",
-        "native_file_reference",
         "knowledge_text_file_created_at",
         "knowledge_text_file_updated_at"
       ],
@@ -1816,7 +1803,6 @@
         "knowledge_text_source_local_field_name": "String",
         "file_content_sha256_hex": "String",
         "file_size_bytes_decimal_text": "String",
-        "native_file_reference": "Any",
         "knowledge_text_file_created_at": "DateTime",
         "knowledge_text_file_updated_at": "DateTime"
       },
@@ -1827,7 +1813,6 @@
         "knowledge_text_source_local_field_name": "the app-local name of the knowledge record field whose text is held in this file",
         "file_content_sha256_hex": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
         "file_size_bytes_decimal_text": "the base-10 text encoding of a file size in bytes",
-        "native_file_reference": "the complete native $lastdb_file pointer value in the existing LastDB file-reference wire format",
         "knowledge_text_file_created_at": "the RFC 3339 instant when a knowledge text file was first stored",
         "knowledge_text_file_updated_at": "the RFC 3339 instant when a knowledge text file was last replaced"
       },
@@ -1853,10 +1838,6 @@
           "metadata"
         ],
         "file_size_bytes_decimal_text": [
-          "no_index",
-          "metadata"
-        ],
-        "native_file_reference": [
           "no_index",
           "metadata"
         ],
@@ -1894,10 +1875,6 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         },
-        "native_file_reference": {
-          "sensitivity_level": 0,
-          "data_domain": "file-reference"
-        },
         "knowledge_text_file_created_at": {
           "sensitivity_level": 0,
           "data_domain": "general"
@@ -1914,7 +1891,6 @@
         "knowledge_text_source_local_field_name": 1,
         "file_content_sha256_hex": 1,
         "file_size_bytes_decimal_text": 1,
-        "native_file_reference": 1,
         "knowledge_text_file_created_at": 1,
         "knowledge_text_file_updated_at": 1
       }

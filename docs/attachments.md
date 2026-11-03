@@ -12,10 +12,11 @@ legacy `attachmentBlobSchema`)
 Brain records used to be text-only: PDFs, images, and other artifacts lived
 outside the brain with informal text-path "pointers". Attachments put the
 actual bytes in the brain — content-addressed, cloud-synced, and **excluded
-from every search index by construction**. Since v2 the bytes live in the
-node's **file-blob plane**: encrypted CAS blobs in B2 cloud file storage
-(`{scope}/cas/sha256/…`, metered as `file_reference_bytes`), with only a
-`$lastdb_file` pointer record in the DB.
+from every search index by construction**. Since v2 the bytes are the
+**record's own LastDB file** (LastDB API 23, design
+`design-lastdb-no-shared-file-blobs-20261102`): a record has at most one
+file, kept with the record and encrypted in the node's CAS run home, which
+the cloud backup sends to B2. No field value names a file.
 
 ## The internal schemas
 
@@ -46,27 +47,23 @@ Entry shape inside `attachments_json` (unchanged from v1):
 }
 ```
 
-### `BrainAttachmentFile` — one pointer record per unique content hash (v2)
+### `BrainAttachmentFile` — one record per unique content hash (v2)
 
 | Field | Type | Indexed? | Notes |
 |---|---|---|---|
 | `content_hash` | String | no | SHA-256 hex of raw bytes (hash key) |
 | `size` | String | no | raw byte length |
 | `media_type` | String | no | inferred from extension at attach time |
-| `file` | Any | no | `$lastdb_file` pointer written by the node's file-blob plane |
 | `created_at` | String | no | RFC 3339 |
 
-The raw bytes are NOT in this record. `putAttachmentBlob` POSTs
-`/api/db/file-blob` on the node's owner socket: the node seals the bytes with
-a per-blob DEK, uploads the ciphertext to B2 under `{scope}/cas/sha256/…`
-(metered as file bytes — `lastdb cloud status` reports them under `files`),
-persists the returned `$lastdb_file` pointer (blob_ref, file_hash,
-cipher_suite, dek, encrypted_size_bytes) into `file`, and seeds the local CAS
-cache so the attaching device round-trips without a download. Reads resolve
-the pointer with `POST /api/db/fetch-file-blob` (local cache first, then one
-explicit B2 GET) and are sha256-verified in `getAttachmentBlob` before any
-byte is handed back. Design contract:
-`fold/docs/designs/cloud-file-blobs-on-demand-sync.md`.
+The raw bytes are the record's file, not a field. `putAttachmentBlob` sends
+one `POST /api/db/put-blob {schema, key, bytes_b64, name, media_type, fields}`
+on the node's owner socket: the node writes the fields, the file marker
+(`{name, media_type, size_bytes, sha256}`) and the sealed file in one native
+write, and returns the marker. Reads use `POST /api/db/fetch-blob {schema,
+key}`; the node checks the bytes against the marker, and `getAttachmentBlob`
+sha256-verifies them again before any byte is handed back. Deleting the
+record deletes its file in the same write.
 
 ### `BrainAttachmentBlob` — LEGACY v1 stand-in
 
@@ -81,7 +78,7 @@ Moves v1 record-stored blobs into the file plane and deletes the legacy
 stand-in records. Scoped to one record when a slug is given, otherwise sweeps
 every attachment index. Per unique blob: read the legacy record,
 **sha256-verify before upload** (a corrupt legacy blob is a hard error, never
-laundered into the file plane), upload through `/api/db/file-blob`, then
+laundered into the file plane), upload through `/api/db/put-blob`, then
 delete the legacy record. Idempotent — blobs already in the file plane are
 skipped, and their legacy records are still cleaned up if present. Index
 entries do not change (the `blob_ref` is the same content hash in both

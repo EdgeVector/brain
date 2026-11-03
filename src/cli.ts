@@ -471,8 +471,8 @@ an absent one is a no-op success.
   attach: `brain attach <slug> <file> [--type T] [--name N] [--force] [--json]
 
 Attach a file to an existing record. Bytes are stored content-addressed
-(SHA-256) through the node's file-blob plane: an encrypted CAS blob in cloud
-file storage plus a \$lastdb_file pointer record — attachment CONTENT never
+(SHA-256) as the file of one LastDB record, stored with the record in one
+write and encrypted by the node — attachment CONTENT never
 enters search indexes; only the filename is searchable metadata. Re-attaching
 identical content is a no-op (deduplicated). Same name + different content
 errors unless --force.
@@ -488,7 +488,7 @@ brain attachments migrate [<slug>] [--type T] [--json]
 List a record's attachments (name, size, media type, blob ref, added_at).
 
 \`attachments migrate\` moves v1 record-stored attachment bytes into the
-node's file-blob plane (encrypted cloud CAS + \$lastdb_file pointer) and
+node's record files (one file per BrainAttachmentFile record) and
 deletes the legacy stand-in blob records. Scoped to one record when a slug is
 given, otherwise sweeps every attachment index. Idempotent.
 

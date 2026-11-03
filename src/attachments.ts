@@ -9,10 +9,9 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 //     (the TagIndex pattern). Carries the attachment entries as JSON plus a
 //     `filenames` array — the only word-indexed (searchable) surface.
 //   - `BrainAttachmentFile` — one record per unique content hash (SHA-256 of
-//     the raw file). The bytes do NOT live in the record. Current Mini stores
-//     them through /api/db/put-blob-local; Brain writes the returned pointer as
-//     the whole Any field. Legacy nodes retain their cloud file route. Reads go
-//     through `POST /api/db/fetch-file-blob` with that pointer and are
+//     the raw file). The bytes are the record's own LastDB file (API 23): one
+//     `POST /api/db/put-blob` stores the record and its file together, and
+//     `POST /api/db/fetch-blob` reads them by schema and key. Reads are
 //     sha256-verified here before any byte is handed back.
 //   - `BrainAttachmentBlob` — LEGACY v1 stand-in (base64 bytes in a no_index
 //     record field, riding cloud sync as DB bytes). Nothing writes it anymore;
@@ -60,8 +59,8 @@ const INDEX_FIELDS = [
 // Legacy v1 blob record projection (base64 `data` field).
 const BLOB_FIELDS = ["content_hash", "size", "media_type", "data", "created_at"];
 
-// v2 pointer record projection (`file` carries the $lastdb_file pointer).
-const FILE_FIELDS = ["content_hash", "size", "media_type", "file", "created_at"];
+// v2 file record projection. The bytes are the record's file, not a field.
+const FILE_FIELDS = ["content_hash", "size", "media_type", "created_at"];
 
 export type AttachmentEntry = {
   name: string;
@@ -316,63 +315,38 @@ function requireFileSchemaHash(cfg: Config): string {
   return schemaHash;
 }
 
-// Map file-route failures. Local write holds differ from legacy cloud setup.
+// Map file-route failures.
 function filePlaneError(path: string, status: number, body: string): BrainError {
   const excerpt = body.slice(0, 300);
-  if (status === 501) {
+  if (status === 404 || status === 405) {
     return new BrainError({
       code: "attachment_file_plane_unavailable",
-      message: `Node ${path} says cloud-sync support is not compiled into this daemon.`,
-      hint: "Attachments need a cloud-sync-capable lastdbd. Upgrade the node binary.",
+      message: `Node ${path} answered ${status}: this node keeps no record files.`,
+      hint: "Attachments need a LastDB Mini that serves POST /api/db/put-blob (API 23). Upgrade the node.",
     });
-  }
-  if (path === "/api/db/put-blob-local" && status === 409) {
-    return new BrainError({code:"attachment_local_file_write_paused",message:"LastDB paused local file writes.",hint:"Read the node status before the next attempt."});
   }
   if (status === 409) {
-    return new BrainError({
-      code: "attachment_file_plane_unavailable",
-      message: `Node ${path} says cloud sync is not configured on this node.`,
-      hint: "Attachment bytes upload through cloud sync. Configure/enable cloud sync, then retry.",
-    });
+    return new BrainError({code:"attachment_local_file_write_paused",message:"LastDB paused local file writes.",hint:"Read the node status before the next attempt."});
   }
   return new BrainError({
     code: "attachment_file_plane_error",
     message: `Node ${path} failed (${status}): ${excerpt}`,
-    hint: "Retry; if it persists, inspect the node logs for the file-blob plane failure.",
+    hint: "Retry; if it persists, inspect the node logs for the record file failure.",
   });
 }
 
-// Extract the `$lastdb_file` pointer from a BrainAttachmentFile row. Tolerates
-// a JSON-string round-trip of the field value but requires the pointer shape.
-function pointerFromFileRow(row: QueryRow, hash: string): Record<string, unknown> {
-  const fields = (row.fields ?? {}) as Record<string, unknown>;
-  let pointer: unknown = fields.file;
-  if (typeof pointer === "string") {
-    try {
-      pointer = JSON.parse(pointer);
-    } catch {
-      pointer = null;
-    }
-  }
-  if (
-    pointer === null ||
-    typeof pointer !== "object" ||
-    typeof (pointer as Record<string, unknown>).$lastdb_file !== "object"
-  ) {
-    throw new BrainError({
-      code: "attachment_pointer_invalid",
-      message: `Attachment file record sha256:${hash} does not carry a $lastdb_file pointer.`,
-      hint: "The pointer record is corrupt. Re-attach the file from the original source.",
-    });
-  }
-  return pointer as Record<string, unknown>;
+// The `file` object of a put-blob or fetch-blob reply. Accept a bare reply or a data envelope.
+function replyFile(json: unknown): Record<string, unknown> | undefined {
+  const root = (json ?? {}) as Record<string, unknown>;
+  const data = root.data as Record<string, unknown> | undefined;
+  const file = root.file ?? data?.file;
+  return file && typeof file === "object" ? (file as Record<string, unknown>) : undefined;
 }
 
-// Store file bytes through the node and persist the `$lastdb_file` pointer in a BrainAttachmentFile
-// record keyed by the content hash. Identical hash ⇒ identical bytes, so an
-// existing pointer record is left untouched (metadata-only attach); the probe
-// is a keyed point-read.
+// Store file bytes as the file of a BrainAttachmentFile record keyed by the
+// content hash, with its fields, in one put-blob write. Identical hash ⇒
+// identical bytes, so an existing record is left untouched (metadata-only
+// attach); the probe is a keyed point-read.
 export async function putAttachmentBlob(
   node: NodeClient,
   cfg: Config,
@@ -386,68 +360,31 @@ export async function putAttachmentBlob(
   if (existing !== null) {
     return { blobRef: `sha256:${hash}`, deduplicated: true };
   }
-  // Current Mini stores local bytes first; the caller writes the pointer.
-  const path = "/api/db/put-blob-local";
-  const stored = await node.rawCall("POST", path, {bytes_b64:Buffer.from(bytes).toString("base64")});
-  if (stored.status === 200) {
-    const root = (stored.json ?? {}) as Record<string,unknown>;
-    const data = root.data as Record<string,unknown> | undefined;
-    const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
-    const pointer = fileBlob?.pointer;
-    const marker = pointer && typeof pointer === "object"
-      ? (pointer as Record<string,unknown>).$lastdb_file : null;
-    if (!marker || typeof marker !== "object" || fileBlob?.file_hash !== hash
-      || typeof fileBlob.blob_ref !== "string" || !/^sha256:[a-f0-9]{64}$/.test(fileBlob.blob_ref)) {
-      throw new BrainError({code:"attachment_pointer_invalid",message:"Local file storage returned an invalid attachment pointer."});
-    }
-    await node.createRecord({schemaHash,keyHash:hash,fields:{
-      content_hash:hash,size:String(bytes.length),media_type:mediaType,file:pointer,created_at:nowIso(),
-    }});
-    return {blobRef:`sha256:${hash}`,deduplicated:false};
-  }
-  if (cfg.schemaFieldAliases?.[schemaHash] || ![404,405].includes(stored.status)) {
-    throw filePlaneError(path,stored.status,stored.body);
-  }
-  // Legacy nodes without local file storage retain their previous route.
-  const res = await node.rawCall("POST", "/api/db/file-blob", {
+  const path = "/api/db/put-blob";
+  const stored = await node.rawCall("POST", path, {
     schema: schemaHash,
-    field: "file",
-    key: { hash, range: null },
+    key: { hash },
     bytes_b64: Buffer.from(bytes).toString("base64"),
     ...(opts?.name !== undefined ? { name: opts.name } : {}),
     media_type: mediaType,
-    mutation_type: "Create",
-    // Seed the local CAS cache so `attachment get` on the attaching device
-    // round-trips without a B2 download.
-    cache_local_plaintext: true,
-    additional_fields: {
-      content_hash: hash,
-      size: String(bytes.length),
-      media_type: mediaType,
-      created_at: nowIso(),
-    },
+    fields: { content_hash: hash, size: String(bytes.length), media_type: mediaType, created_at: nowIso() },
   });
-  if (res.status !== 200) {
-    throw filePlaneError("/api/db/file-blob", res.status, res.body);
-  }
-  const fileBlob =
-    res.json && typeof res.json === "object"
-      ? ((res.json as Record<string, unknown>).file_blob as Record<string, unknown> | undefined)
-      : undefined;
-  if (!fileBlob || typeof fileBlob.blob_ref !== "string") {
+  if (stored.status !== 200) throw filePlaneError(path, stored.status, stored.body);
+  const file = replyFile(stored.json);
+  if (file?.sha256 !== hash || file?.size_bytes !== bytes.length) {
     throw new BrainError({
       code: "attachment_file_plane_error",
-      message: `Node /api/db/file-blob returned an incomplete response: ${res.body.slice(0, 300)}.`,
-      hint: "Upgrade the node or inspect the file-blob response shape.",
+      message: "The node stored an attachment file that differs from the sent bytes.",
+      hint: "Re-attach the file. If it persists, inspect the node logs.",
     });
   }
   return { blobRef: `sha256:${hash}`, deduplicated: false };
 }
 
 // Fetch + integrity-verify blob bytes for a `sha256:<hex>` ref. Prefers the
-// v2 file plane (pointer record → /api/db/fetch-file-blob), falls back to a
-// legacy v1 base64 blob record for unmigrated content. Hash mismatch or
-// missing blob is a hard error — never hand back unverified bytes.
+// v2 file record (fetch-blob by schema and key), falls back to a legacy v1
+// base64 blob record for unmigrated content. Hash mismatch or missing blob is
+// a hard error — never hand back unverified bytes.
 export async function getAttachmentBlob(
   node: NodeClient,
   cfg: Config,
@@ -459,22 +396,20 @@ export async function getAttachmentBlob(
   if (fileSchemaHash) {
     const row = await queryRowByKey(node, fileSchemaHash, FILE_FIELDS, hash);
     if (row !== null) {
-      const pointer = pointerFromFileRow(row, hash);
-      const res = await node.rawCall("POST", "/api/db/fetch-file-blob", { pointer });
+      const path = "/api/db/fetch-blob";
+      const res = await node.rawCall("POST", path, { schema: fileSchemaHash, key: { hash } });
       if (res.status === 404) {
         throw new BrainError({
           code: "attachment_blob_missing",
-          message: `Attachment blob sha256:${hash} was not found locally or in remote CAS.`,
-          hint: "The blob may not have synced yet; retry, or re-attach the file.",
+          message: `Attachment blob sha256:${hash} has a record but no file on this node.`,
+          hint: "Re-attach the file from the original source.",
         });
       }
       if (res.status !== 200) {
-        throw filePlaneError("/api/db/fetch-file-blob", res.status, res.body);
+        throw filePlaneError(path, res.status, res.body);
       }
-      const root = (res.json ?? {}) as Record<string,unknown>;
-      const data = root.data as Record<string,unknown> | undefined;
-      const fileBlob = (root.file_blob ?? data?.file_blob) as Record<string,unknown> | undefined;
-      const b64 = fileBlob && typeof fileBlob.bytes_b64 === "string" ? fileBlob.bytes_b64 : "";
+      const file = replyFile(res.json);
+      const b64 = file && typeof file.bytes_b64 === "string" ? file.bytes_b64 : "";
       const bytes = new Uint8Array(Buffer.from(b64, "base64"));
       const fields = (row.fields ?? {}) as Record<string, unknown>;
       return verifiedBlob(hash, bytes, stringOf(fields, "media_type"));
@@ -642,7 +577,7 @@ export type AttachmentMigrationReport = {
 // Move record-stored v1 attachment blobs into the file plane: for every blob
 // referenced by an attachment index (optionally scoped to one record), read
 // the legacy base64 record, sha256-verify it, upload through
-// `POST /api/db/file-blob` (creating the BrainAttachmentFile pointer record),
+// `POST /api/db/put-blob` (creating the BrainAttachmentFile record with its file),
 // and DELETE the legacy stand-in record so its bytes stop riding the DB
 // plane. Idempotent: blobs already in the file plane are skipped (their
 // legacy records are still deleted if present); re-running is safe.
@@ -711,7 +646,7 @@ export async function migrateAttachmentsToFilePlane(opts: {
     let legacyDeleted = false;
     if (legacyRow !== null && legacySchemaHash && action !== "missing") {
       // Fetch-back gate BEFORE the destructive step: prove the file plane can
-      // serve these exact bytes (getAttachmentBlob prefers the pointer record
+      // serve these exact bytes (getAttachmentBlob prefers the file record
       // and sha256-verifies) before the legacy copy goes away. Also covers a
       // prior run that crashed between upload and delete.
       await getAttachmentBlob(node, cfg, `sha256:${hash}`);

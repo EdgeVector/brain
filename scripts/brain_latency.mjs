@@ -36,47 +36,6 @@ const inputSha = createHash("sha256").update(JSON.stringify(corpus)).digest("hex
 const samples = [];
 let verification;
 
-// The registry is the one the comparison daemons use: `ENVIRONMENT` selects it from the
-// exact LastDB source's folddb_profile/environments.json, which the daemon also reads.
-function schemaService() {
-  const registry = JSON.parse(readFileSync(join(settings.lastdbSource, "folddb_profile", "environments.json"), "utf8"));
-  const service = registry.environments?.[process.env.ENVIRONMENT ?? ""]?.schema_service;
-  require(typeof service === "string" && service.startsWith("https://"),
-    "Set ENVIRONMENT to the Schema Service environment that the comparison daemons use");
-  return service;
-}
-
-async function catalog() {
-  const results = [];
-  const service = schemaService();
-  for (const root of [settings.baseline, settings.candidate]) {
-    const definitions = await load(root, "schemas");
-    const { canonicalSchema } = await load(root, "canonical-vocabulary");
-    for (let offset = 0; offset < definitions.UNIQUE_SCHEMAS.length; offset += 4) {
-      results.push(...await Promise.all(definitions.UNIQUE_SCHEMAS.slice(offset, offset + 4).map(async (entry) => {
-        const schema = canonicalSchema(entry.schema.schema);
-        // This public replay returns an existing definition. It grants no publisher authority.
-        const reply = await fetch(`${service}/v1/schemas`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ schema, mutation_mappers: {} }), signal: AbortSignal.timeout(60000),
-        });
-        const body = await reply.json(), stored = body.schema ?? body;
-        const exact = reply.status === 200 && ["owner_app_id", "schema_type", "field_types", "field_descriptions"]
-          .every((key) => stable(stored[key] ?? null) === stable(schema[key] ?? null))
-          // The service stores an absent key part as null; the app source omits it.
-          && (stored.key?.hash_field ?? null) === (schema.key?.hash_field ?? null)
-          && (stored.key?.range_field ?? null) === (schema.key?.range_field ?? null)
-          && stable([...(stored.fields ?? [])].sort()) === stable([...schema.fields].sort());
-        return { source: root, environment: process.env.ENVIRONMENT, schema: schema.descriptive_name, status: reply.status, exact_definition: exact };
-      })));
-    }
-  }
-  verification = { definitions: results };
-  writeFileSync(outputPath, JSON.stringify(verification, null, 2) + "\n");
-  require(results.every((entry) => entry.exact_definition),
-    `Publish or repair the exact Brain definitions in the ${process.env.ENVIRONMENT} Schema Service before this comparison`);
-}
-
 async function client(root, cfg) {
   const { newNodeClient } = await load(root, "client");
   return newNodeClient({ baseUrl: "http://127.0.0.1", userHash: cfg?.userHash ?? "", socketPath: settings.socket,
@@ -104,7 +63,6 @@ async function writeRecord(root, node, cfg, { type, previous = null, record }, p
 }
 
 async function run() {
-  if (phase === "catalog") return catalog();
   if (phase === "setup") {
     await setup();
     const cfg = JSON.parse(readFileSync(settings.config, "utf8")), node = await client(source, cfg);
@@ -321,7 +279,7 @@ globalThis.fetch = new Proxy(globalThis.fetch, {
 
 try {
   await run();
-  if (phase !== "catalog") writeFileSync(outputPath, JSON.stringify({ phase, source, label: settings.label, records: settings.records,
+  writeFileSync(outputPath, JSON.stringify({ phase, source, label: settings.label, records: settings.records,
     input_sha256: inputSha, body_bytes: corpus.reduce((total, item) => total + Buffer.byteLength(item.record.body), 0), samples, verification }, null, 2) + "\n");
 } catch (error) {
   writeFileSync(outputPath, JSON.stringify({ phase, source, label: settings.label, records: settings.records,
