@@ -130,7 +130,9 @@ def observed_daemon(node, destination):
 def run_case(args, Node, label, repeat):
     destination = args.output / f"{repeat:02d}-{label}"
     destination.mkdir()
-    node = Node(args.binary, args.revision, destination,
+    binary, revision = ((args.before_binary, args.before_revision) if label == "before"
+                        else (args.binary, args.revision))
+    node = Node(binary, revision, destination,
                 temporary_directory=Path(os.environ["RUNNER_TEMP"]).resolve(), environment={
                     "LASTDB_SELF_METRICS_TO_DB": "false",
                     "LASTDB_BYTE_BACKUP_V2_ENABLED": "false", "LASTDB_TTL_SWEEP": "0"})
@@ -190,16 +192,23 @@ def summarize(args, runs):
     rows = []
     operations = OPERATIONS if args.mode == "read" else ("create", "update", "delete", "partial")
     states = ("restart", "warm") if args.mode == "read" else ("operations",)
-    # Both arms run one daemon program, so its observed identity must match across every run.
-    observed = {json.dumps({name: run["daemon"][name] for name in ("api_version", "home_format")}, sort_keys=True)
-                for run in runs}
-    if len(observed) != 1:
-        raise RuntimeError("The arms observed different daemon API versions or home formats")
-    daemon = runs[0]["daemon"]
+    daemons = {}
+    for label in ("before", "after"):
+        observed = {(run["daemon"]["api_version"], run["daemon"]["home_format"])
+                    for run in runs if run["label"] == label}
+        if len(observed) != 1:
+            raise RuntimeError(f"The {label} arm observed inconsistent daemon formats or APIs")
+        api_version, home_format = observed.pop()
+        daemons[label] = {"api_version": api_version, "home_format": home_format}
+    if args.before_revision == args.revision and any(
+            daemons["before"][name] != daemons["after"][name] for name in ("api_version", "home_format")):
+        raise RuntimeError("The same daemon must expose the same format and API in both arms")
+    daemon = daemons["after"]
     lines = [f"## Brain {args.mode} comparison: {args.records:,} records", "",
              f"Before app: `{args.app_baseline_revision}`. After app: `{args.app_revision}`.",
-             f"Both arms use the latest lastdb nightly `{args.lastdb_tag}` (source `{args.revision}`). "
-             "The comparison measures the app change only.",
+             f"Before daemon: `{args.before_tag}` (`{args.before_revision}`). After daemon: `{args.lastdb_tag}` (`{args.revision}`).",
+             ("The comparison measures the app change only." if args.before_revision == args.revision else
+              "This comparison measures the app and daemon release transition together."),
              f"Observed daemon: API `{daemon['api_version']}`, home format `{daemon['home_format']}`.",
              "Each app creates its own generated home on a fresh daemon. No home is converted in place.",
              "Canonical definitions remain shared. Record values belong to each schema.",
@@ -244,12 +253,13 @@ def summarize(args, runs):
               "and restart recovery.",
               "Both arms use normal app initialization." if args.mode == "operations" else
               "Every read cell includes one restart call and five warm calls per paired repeat.",
-              "This measures the app change. LastDB's own benchmark CI compares daemons.",
+              "LastDB's own benchmark CI measures daemon changes separately.",
               "Raw profiles, response sizes, memory samples, disk sizes, and source identities remain in CI artifacts.",
               "No primary data, primary copy, local benchmark, or test suite participates."]
     save(args.output / "comparison.json", {"records": args.records, "app_before": args.app_baseline_revision,
          "app_after": args.app_revision, "lastdb_tag": args.lastdb_tag, "lastdb_revision": args.revision,
-         "daemon_api_version": daemon["api_version"], "daemon_home_format": daemon["home_format"],
+         "before_lastdb_tag": args.before_tag, "before_lastdb_revision": args.before_revision,
+         "daemons": daemons, "daemon_api_version": daemon["api_version"], "daemon_home_format": daemon["home_format"],
          "rows": rows, "runs": runs})
     summary = "\n".join(lines) + "\n"
     (args.output / "summary.md").write_text(summary)
@@ -260,10 +270,9 @@ def summarize(args, runs):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("read", "operations"), required=True)
-    # One daemon for both arms: the latest lastdb nightly, its source revision, and its release tag.
-    for name in ("binary", "lastdb-source", "baseline", "candidate", "output"):
+    for name in ("binary", "before-binary", "lastdb-source", "baseline", "candidate", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("revision", "lastdb-tag", "app-revision", "app-baseline-revision"):
+    for name in ("revision", "lastdb-tag", "before-revision", "before-tag", "app-revision", "app-baseline-revision"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--records", type=int, choices=(128, 1024, 1000), required=True)
     parser.add_argument("--body-bytes", type=int, default=0)
@@ -278,11 +287,12 @@ def main():
         parser.error("Reads require 1000 records, original full bodies, five warm calls, and three repeats")
     if args.mode == "operations" and (args.body_bytes != 4096 or (args.records, args.repeats) not in ((128, 1), (1024, 3))):
         parser.error("Operations require 128 records once or 1024 records three times, with 4096-byte bodies")
-    for value in (args.revision, args.app_revision, args.app_baseline_revision):
+    for value in (args.revision, args.before_revision, args.app_revision, args.app_baseline_revision):
         if not re.fullmatch(r"[0-9a-f]{40}", value):
             parser.error("Every source identity must be a full revision")
-    if not re.fullmatch(rf"nightly-[0-9]{{8}}-{args.revision[:9]}", args.lastdb_tag):
-        parser.error("The lastdb tag must be the nightly of the selected lastdb revision")
+    for tag, revision in ((args.before_tag, args.before_revision), (args.lastdb_tag, args.revision)):
+        if not re.fullmatch(rf"nightly-[0-9]{{8}}-{revision[:9]}", tag):
+            parser.error("Each lastdb tag must name the nightly of its selected revision")
     for root, revision in ((args.baseline, args.app_baseline_revision), (args.candidate, args.app_revision),
                            (args.lastdb_source, args.revision)):
         observed = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()

@@ -19,9 +19,8 @@ env:
   # The daemon names the DEV environment and declares schemas locally (lastdb#1142),
   # so no Schema Service definition check runs here.
   ENVIRONMENT: dev
-  # Brain main at #498. It initializes the owned multi-key model like the candidate.
-  APP_BEFORE: d629de7e2c9ed025f91bb8962d36c779afd4df7e
-  # Both arms run the latest lastdb nightly, so the comparison is old app vs new app.
+  APP_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+  # Use the same daemon unless the app comparison crosses the explicit-key API transition.
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
@@ -31,6 +30,8 @@ jobs:
     outputs:
       tag: ${{ steps.nightly.outputs.tag }}
       oid: ${{ steps.nightly.outputs.oid }}
+      before_tag: ${{ steps.nightly.outputs.before_tag }}
+      before_oid: ${{ steps.nightly.outputs.before_oid }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -52,23 +53,35 @@ jobs:
           tag="$(gh release list -R EdgeVector/lastdb --exclude-drafts --limit 30 \
             --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName')"
           test -n "$tag" && test "$tag" != null
-          dir="$RUNNER_TEMP/lastdb-nightly"
-          mkdir -p "$dir"
-          gh release download "$tag" -R EdgeVector/lastdb -D "$dir" \
-            -p 'lastdb-x86_64-unknown-linux-gnu.tar.gz' -p 'lastdb-x86_64-unknown-linux-gnu.manifest.json' -p SHA256SUMS.txt
-          (cd "$dir" && grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS.txt | sha256sum -c -)
-          tar -xzf "$dir/lastdb-x86_64-unknown-linux-gnu.tar.gz" -C "$dir"
-          for name in lastdb lastdbd; do
-            want="$(jq -r --arg n "$name" '.binaries[] | select(.name == $n) | .sha256' "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
-            test "$(sha256sum "$dir/$name" | cut -d' ' -f1)" = "$want"
+          git fetch --depth 1 origin "$APP_BEFORE"
+          before_api="$(git show "$APP_BEFORE:package.json" | jq -r '.lastdb.minApiVersion // 0')"
+          after_api="$(jq -r '.lastdb.minApiVersion // 0' package.json)"
+          before_tag="$tag"
+          if [ "$before_api" -lt 29 ] && [ "$after_api" -ge 29 ]; then
+            before_tag=nightly-20261104-4b76c7c90
+          fi
+          mkdir "$RUNNER_TEMP/brain-binaries"
+          for label in before after; do
+            selected="$tag"
+            if [ "$label" = before ]; then selected="$before_tag"; fi
+            dir="$RUNNER_TEMP/lastdb-$label"
+            mkdir "$dir"
+            gh release download "$selected" -R EdgeVector/lastdb -D "$dir" \
+              -p 'lastdb-x86_64-unknown-linux-gnu.tar.gz' -p 'lastdb-x86_64-unknown-linux-gnu.manifest.json' -p SHA256SUMS.txt
+            (cd "$dir" && grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' SHA256SUMS.txt | sha256sum -c -)
+            tar -xzf "$dir/lastdb-x86_64-unknown-linux-gnu.tar.gz" -C "$dir"
+            manifest="$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json"
+            want="$(jq -r '.binaries[] | select(.name == "lastdbd") | .sha256' "$manifest")"
+            test "$(sha256sum "$dir/lastdbd" | cut -d' ' -f1)" = "$want"
+            oid="$(jq -r .source_git_oid "$manifest")"
+            cp "$dir/lastdbd" "$RUNNER_TEMP/brain-binaries/$label"
+            prefix=""
+            if [ "$label" = before ]; then prefix=before_; fi
+            printf '%stag=%s\n%soid=%s\n' "$prefix" "$selected" "$prefix" "$oid" >> "$GITHUB_OUTPUT"
+            printf 'Daemon %s: %s at %s, SHA-256 %s\n' "$label" "$selected" "$oid" "$want" >> "$GITHUB_STEP_SUMMARY"
           done
-          oid="$(jq -r .source_git_oid "$dir/lastdb-x86_64-unknown-linux-gnu.manifest.json")"
-          sum="$(grep ' lastdb-x86_64-unknown-linux-gnu.tar.gz$' "$dir/SHA256SUMS.txt" | cut -d' ' -f1)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "oid=$oid" >> "$GITHUB_OUTPUT"
-          echo "lastdbd=$dir/lastdbd" >> "$GITHUB_OUTPUT"
-          echo "lastdb=$dir/lastdb" >> "$GITHUB_OUTPUT"
-          printf '### LastDB under test\n\nNightly `%s` (source `%s`), Linux tarball sha256 `%s`.\n' "$tag" "$oid" "$sum" >> "$GITHUB_STEP_SUMMARY"
+          cd "$RUNNER_TEMP/brain-binaries"
+          sha256sum before after > SHA256SUMS
       - name: Retain the lastdb support code of the nightly source
         env:
           LASTDB_REVISION: ${{ steps.nightly.outputs.oid }}
@@ -81,18 +94,6 @@ jobs:
           git -C "$directory" fetch --depth 1 origin "$LASTDB_REVISION"
           git -C "$directory" checkout --detach FETCH_HEAD
           test "$(git -C "$directory" rev-parse HEAD)" = "$LASTDB_REVISION"
-      - name: Stage the one daemon program for both arms
-        env:
-          LASTDBD: ${{ steps.nightly.outputs.lastdbd }}
-          TAG: ${{ steps.nightly.outputs.tag }}
-          LASTDB_REVISION: ${{ steps.nightly.outputs.oid }}
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/brain-binaries"
-          cp "$LASTDBD" "$RUNNER_TEMP/brain-binaries/lastdbd"
-          cd "$RUNNER_TEMP/brain-binaries"
-          sha256sum lastdbd > SHA256SUMS
-          printf 'Tag: %s\nSource: %s\n' "$TAG" "$LASTDB_REVISION" > revisions.txt
       - name: Retain the exact daemon programs
         id: binaries
         uses: actions/upload-artifact@v4
@@ -157,16 +158,19 @@ jobs:
         run: |
           cd "$RUNNER_TEMP/brain-binaries"
           sha256sum --check SHA256SUMS
-          chmod +x lastdbd
+          chmod +x before after
       - name: Measure the actual app operations before and after
         env:
           LASTDB_TAG: ${{ needs.build.outputs.tag }}
+          BEFORE_LASTDB_TAG: ${{ needs.build.outputs.before_tag }}
+          BEFORE_LASTDB_REVISION: ${{ needs.build.outputs.before_oid }}
           LASTDB_REVISION: ${{ needs.build.outputs.oid }}
         run: |
           python3 scripts/brain_read_latency.py --mode '${{ matrix.mode }}' \
             --baseline "$RUNNER_TEMP/brain-before" --candidate "$GITHUB_WORKSPACE" \
             --app-baseline-revision "$APP_BEFORE" --app-revision "$APP_AFTER" \
-            --lastdb-source "$RUNNER_TEMP/lastdb-source" --binary "$RUNNER_TEMP/brain-binaries/lastdbd" \
+            --lastdb-source "$RUNNER_TEMP/lastdb-source" --binary "$RUNNER_TEMP/brain-binaries/after" \
+            --before-binary "$RUNNER_TEMP/brain-binaries/before" --before-revision "$BEFORE_LASTDB_REVISION" --before-tag "$BEFORE_LASTDB_TAG" \
             --revision "$LASTDB_REVISION" --lastdb-tag "$LASTDB_TAG" \
             --records '${{ matrix.records }}' --repeats '${{ matrix.repeats }}' --samples 5 \
             --body-bytes '${{ matrix.body_bytes }}' --output "$RUNNER_TEMP/brain-results"
