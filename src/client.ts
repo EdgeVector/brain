@@ -18,8 +18,7 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 // `mapSdkDataError`). That covers consent, query/queryAll, mutation, and
 // app-scoped search. The remaining hand-rolled node surface is deliberately
 // Brain-specific owner/admin glue the SDK contract does not expose:
-// schema declaration/listing, bootstrap, auto-identity, health, raw calls, and
-// owner-session attestation.
+// schema declaration/listing, bootstrap, auto-identity, health, and raw calls.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -69,23 +68,6 @@ const noopVerbose: Verbose = () => {};
 export const APP_CAPABILITY_HEADER = "X-App-Capability";
 export const CAPABILITY_TS_HEADER = "X-Capability-Ts";
 
-// Owner-session attestation header (the OWNER-session axis, distinct from the
-// X-App-Capability / X-Capability-Ts third-party-app axis above). brain runs
-// as the node owner; post app-isolation-flip (fold#739) the node's owner verbs
-// and owner-isolation bypass require an ATTESTED transport. brain mints a
-// one-time pairing code over the node's one owner socket, exchanges it for a
-// session token over that same socket, and presents that token here on every
-// request — the exact pairing the CLI's
-// `attest_owner_session` performs (fold_db_node `src/bin/folddb/commands/ui.rs`).
-// Must match the node's session header name.
-export const FOLDDB_SESSION_HEADER = "X-Folddb-Session";
-
-// The node's body discriminator for "this transport is not attested" — fold's
-// owner-verb gate returns `403 {"error":"transport_not_attested"}`. brain
-// re-pairs once and retries when it sees this (a restarted node invalidates the
-// in-memory session token).
-export const TRANSPORT_NOT_ATTESTED = "transport_not_attested";
-
 // Filename of the node's one owner Unix-domain socket. Brain sends every node
 // route to `<home>/data/folddb.sock`; it never names or derives a second socket.
 const SOCKET_FILE_NAME = "folddb.sock";
@@ -94,11 +76,7 @@ const SOCKET_FILE_NAME = "folddb.sock";
 // It matches the node's own resolver: `LASTDB_HOME` when it is set, else
 // `~/.lastdb`.
 //
-// CRITICAL: every place that derives the node home (socket path + port
-// breadcrumb + init hint) MUST go through this one resolver so the owner-
-// attestation UDS socket and the node URL always derive from the SAME root —
-// a mismatch silently fails owner attestation with a misleading
-// `transport_not_attested` (the original dogfood bug).
+// Keep the socket path, port breadcrumb and setup hints on the same home.
 export function resolveNodeHome(): string {
   const lastdbEnv = process.env.LASTDB_HOME;
   if (lastdbEnv && lastdbEnv.length > 0) return lastdbEnv;
@@ -126,123 +104,6 @@ export function defaultFolddbSocketPath(override?: string): string {
   if (envOverride && envOverride.length > 0) return envOverride;
   if (override && override.length > 0) return override;
   return join(resolveNodeHome(), "data", SOCKET_FILE_NAME);
-}
-
-// Mint a one-time pairing code over the node's owner socket, then exchange it
-// for an owner-session token over the same socket. Returns the token, or
-// `null` on ANY failure (no socket, mint refused, exchange non-2xx, parse
-// error) — null means "proceed unattested", exactly the CLI's behavior on a
-// default (non-isolation) build where nothing is gated and the owner socket
-// is absent.
-//
-// Mirrors `attest_owner_session` + `mint_pairing_code` in fold_db_node's
-// `src/bin/folddb/commands/ui.rs`. We guard on `existsSync(socketPath)` BEFORE
-// issuing any fetch (just as the Rust path checks `socket.exists()` first) so
-// that on a socketless node — and in the unit suite, where no socket exists —
-// no HTTP request is made and the caller degrades cleanly.
-export async function attestOwnerSession(
-  socketPath: string,
-  verbose: Verbose = noopVerbose,
-): Promise<string | null> {
-  if (!existsSync(socketPath)) {
-    verbose(`owner-session attestation skipped: no owner socket at ${socketPath}`);
-    return null;
-  }
-  // This handshake is the FIRST node I/O of every CLI invocation — it runs
-  // BEFORE the read/write transports arm their own deadlines — so it carries
-  // its own. Each fetch (and its small body read) is bounded by
-  // `defaultTimeoutMs()` via the same abort deadline as callNodeRaw
-  // (L1137): one controller spans the whole request lifecycle so a stall in
-  // either the headers or the body read trips the same deadline. The
-  // genuinely-soft outcomes (refused, missing fields, connection error) still
-  // fail soft with `return null` so brain proceeds unattested exactly as
-  // before; only a TIMEOUT surfaces the canonical `service_timeout` error, so a
-  // contended/wedged node yields the bounded heavy-load/idempotent-retry hint
-  // instead of a silent unbounded hang.
-  const timeoutMs = defaultTimeoutMs();
-  // Fetch + parse JSON under a single deadline. Returns null when the response
-  // is non-OK (caller's soft path); throws the canonical service_timeout error
-  // when the request or body read stalls past the deadline.
-  const fetchJsonWithDeadline = async (
-    path: string,
-    routeSocket: NodeSocketSelection,
-    headers: Record<string, string> = {},
-    body?: string,
-  ): Promise<Record<string, unknown> | null> => {
-    try {
-      const res = await boundedNodeFetch({
-        baseUrl: "http://localhost",
-        path,
-        method: "POST",
-        headers,
-        body,
-        service: "node",
-        socketPath,
-        timeoutMs,
-        routeSocket,
-      });
-      if (res.status < 200 || res.status >= 300) {
-        verbose(`owner-session ${path} refused (HTTP ${res.status})`);
-        return null;
-      }
-      return JSON.parse(res.text) as Record<string, unknown>;
-    } catch (err) {
-      if (err instanceof BoundedFetchFailure && err.timeout) {
-        verbose(`owner-session ${path} timed out after ${timeoutMs}ms`);
-        throw timeoutError(path, "POST", "node", timeoutMs, err.cause);
-      }
-      throw err;
-    }
-  };
-
-  // Mint over the UDS owner socket (a verb that exists ONLY on the
-  // owner-attested channel). Bun's fetch speaks HTTP over a Unix socket via the
-  // `unix` option, keeping brain on its single global-fetch HTTP stack.
-  let pairingCode: string;
-  try {
-    // trace-egress: loopback (UDS owner socket on the local machine; pairing
-    // mint, never leaves the host)
-    const body = await fetchJsonWithDeadline(
-      "/control/browser-pairing-code",
-      { socketPath },
-    );
-    if (body === null) return null;
-    const code = body.pairing_code;
-    if (typeof code !== "string" || code.length === 0) {
-      verbose("owner-session mint response missing pairing_code");
-      return null;
-    }
-    pairingCode = code;
-  } catch (err) {
-    // service_timeout surfaces; only genuinely-soft failures degrade to null.
-    if (err instanceof BrainError && err.code === "service_timeout") throw err;
-    verbose(`owner-session mint failed: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
-  // Exchange the code over the same owner socket. The node serves
-  // `/api/session/browser-pair` on `folddb.sock`.
-  try {
-    // trace-egress: loopback (UDS owner socket on the local machine;
-    // pairing-code exchange, never leaves the host)
-    const body = await fetchJsonWithDeadline(
-      "/api/session/browser-pair",
-      { socketPath },
-      { "Content-Type": "application/json" },
-      JSON.stringify({ code: pairingCode }),
-    );
-    if (body === null) return null;
-    const token = body.session_token;
-    if (typeof token !== "string" || token.length === 0) {
-      verbose("owner-session exchange response missing session_token");
-      return null;
-    }
-    verbose("owner-session attested");
-    return token;
-  } catch (err) {
-    if (err instanceof BrainError && err.code === "service_timeout") throw err;
-    verbose(`owner-session exchange failed: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
 }
 
 export type NativeIndexHit = {
@@ -439,18 +300,12 @@ export function validateHomeBase(h: string): string {
 // slow node.
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-function defaultTimeoutMs(): number {
-  const raw = process.env.BRAIN_HTTP_TIMEOUT_MS;
-  const n = raw === undefined ? NaN : parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
-}
-
 // Per-KB and ceiling for the payload-scaled WRITE deadline. The node
 // chunk-embeds the *entire* body on write (~512-char chunks, batched), so a
 // write's cost is O(payload): a ~218KB record is ~425 chunk embeddings and
 // routinely blows past the flat 30s deadline, hard-failing `service_timeout`
 // for no reason other than that the record is big. (Reads stay on
-// `defaultTimeoutMs()` — they embed a single query vector and a 219KB read
+// the base deadline — they embed a single query vector and a 219KB read
 // round-trips in ~0.26s, so a fast deadline still surfaces a wedged node
 // quickly.) These scale the deadline up with body size so a large write
 // succeeds out of the box; the ceiling keeps a runaway from hanging forever.
@@ -875,12 +730,8 @@ export function newNodeClient(opts: {
   // The canonical app id the SDK client acts as on the consent + mutation
   // paths. Defaults to "brain" (the only app this CLI is).
   appId?: string;
-  // Path to the node's UDS owner socket, used to mint the owner-session
-  // pairing code (see `attestOwnerSession`). Defaults to
-  // `${LASTDB_HOME ?? ~/.lastdb}/data/folddb.sock` (overridable via the
-  // `BRAIN_FOLDDB_SOCKET` env or the config `nodeSocketPath` field). When the
-  // socket is absent (a non-isolation node) mint fails fast and brain proceeds
-  // unattested, exactly as today.
+  // Owner Unix socket for local requests. Defaults to the current LastDB home;
+  // BRAIN_FOLDDB_SOCKET and the configured nodeSocketPath can override it.
   socketPath?: string;
   // Skip the client↔node version gate. Only `brain doctor` sets this: doctor
   // is the tool that DESCRIBES an old node (its `node-api-version` check), so
@@ -896,49 +747,17 @@ export function newNodeClient(opts: {
   const appId = opts.appId ?? "brain";
   const socketPath = defaultFolddbSocketPath(opts.socketPath);
 
-  // Owner-session attestation (app-isolation flip, fold#739). Attest ONCE per
-  // client: the first node request that needs the token resolves a shared
-  // promise; subsequent requests reuse the cached token. On a node whose
-  // owner socket is absent this resolves to `null` and no `X-Folddb-Session`
-  // header is ever attached — brain behaves exactly
-  // as before. `invalidateSession()` clears the cache so a `transport_not_
-  // attested` 403 (a restarted node dropped its in-memory session) triggers a
-  // single re-pair on retry.
-  let sessionTokenPromise: Promise<string | null> | null = null;
-  const sessionToken = (): Promise<string | null> => {
-    if (sessionTokenPromise === null) {
-      sessionTokenPromise = attestOwnerSession(socketPath, verbose);
-    }
-    return sessionTokenPromise;
-  };
-  const invalidateSession = (): void => {
-    sessionTokenPromise = null;
-  };
-  // Build the X-Folddb-Session header for the next request, omitting it when
-  // unattested (token null). Resolved per request so a re-pair after a 403 is
-  // picked up without rebuilding the client.
-  const sessionHeader = async (): Promise<Record<string, string>> => {
-    const token = await sessionToken();
-    return token ? { [FOLDDB_SESSION_HEADER]: token } : {};
-  };
-
   // The SDK transport carries X-User-Hash on every request (the production
   // node's HTTP server is stateless — identity comes from the header; gap #1,
   // fold_dev_node #127). One transport is shared by every SDK client this
   // node client mints. It is a fetch-backed implementation of the SDK's
   // Transport seam rather than the SDK's node:http default, so brain keeps
   // exactly one HTTP stack: the same global `fetch` every other node call
-  // uses (and the same one the unit suite stubs to capture outgoing
-  // requests — the SDK's node:http transport would bypass that stub and leak
-  // test traffic onto real sockets).
+  // uses.
   //
-  // The session header is injected dynamically (a per-request supplier) so the
-  // owner-session token attaches to the SDK's consent/mutation calls too, and
-  // an invalidation-after-403 re-pair is reflected without rebuilding the
-  // transport.
   // The client↔node version gate (app-sdk "Version handshake"). Resolved ONCE
   // per client before the first data request on either wire path (the SDK
-  // transport below and `callJsonOnce`). With `MIN_LASTDB_API_VERSION` = 0 it
+  // transport below and `callJson`). With `MIN_LASTDB_API_VERSION` = 0 it
   // resolves without IO; with a positive floor it reads `GET /api/version`
   // and throws the SDK's NodeTooOldError — one line that names the fix — so
   // a brain newer than the node stops before its first write, not on a bare
@@ -960,7 +779,6 @@ export function newNodeClient(opts: {
   const sdkTransport = fieldAliasTransport(fetchTransport(
     url,
     { "X-User-Hash": userHash, "X-LastDB-Client": "brain" },
-    sessionHeader,
     socketPath,
     requireNodeApiVersion,
   ), fieldProfiles);
@@ -990,14 +808,14 @@ export function newNodeClient(opts: {
       sdkTransport.target,
     );
 
-  const callJsonOnce = async (
+  const callJson = async (
     path: string,
     method: "GET" | "POST",
     body?: unknown,
     extraHeaders?: Record<string, string>,
   ): Promise<{ status: number; body: unknown }> => {
     await requireNodeApiVersion(path);
-    const headers = { ...(extraHeaders ?? {}), ...(await sessionHeader()) };
+    const headers = extraHeaders ?? {};
     const { res, readBody } = await callNodeRaw(
       url,
       path,
@@ -1010,26 +828,6 @@ export function newNodeClient(opts: {
     );
     const parsed = decodeFieldReply(path, body, await readBody(), fieldProfiles);
     return { status: res.status, body: parsed };
-  };
-
-  const callJson = async (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ): Promise<{ status: number; body: unknown }> => {
-    const first = await callJsonOnce(path, method, body, extraHeaders);
-    // Re-pair once on a stale-session 403. A restarted node drops its in-memory
-    // session token, so a request that was attested moments ago now returns
-    // `403 {"error":"transport_not_attested"}`. Invalidate the cached token and
-    // retry exactly once; if we were unattested to begin with (no socket → null
-    // token), re-pair yields null again and the 403 surfaces unchanged.
-    if (first.status === 403 && bodyError(first.body) === TRANSPORT_NOT_ATTESTED) {
-      verbose(`← NODE ${method} ${path} 403 transport_not_attested — re-pairing once`);
-      invalidateSession();
-      return callJsonOnce(path, method, body, extraHeaders);
-    }
-    return first;
   };
 
   // Common 200-or-throw wrapper around `callJson`. Endpoints that branch on
@@ -1047,41 +845,6 @@ export function newNodeClient(opts: {
     const { status, body: parsed } = await callJson(path, method, body, extraHeaders);
     if (status !== 200) throw mapNodeError(status, parsed, path);
     return parsed;
-  };
-
-  const callJsonOkOnce = async (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ): Promise<unknown> => {
-    const { status, body: parsed } = await callJsonOnce(
-      path,
-      method,
-      body,
-      extraHeaders,
-    );
-    if (status !== 200) throw mapNodeError(status, parsed, path);
-    return parsed;
-  };
-
-  // Run an SDK-backed node call, re-pairing the owner session once if it 403s
-  // with `transport_not_attested`. Mirrors the raw-path retry in `callJson`:
-  // the SDK surfaces a stale-session 403 as a typed PermissionDenied/Unexpected
-  // error whose reason/body carries `transport_not_attested`. On match we
-  // invalidate the cached token (so the next `sessionHeader()` re-mints) and
-  // retry the thunk exactly once; everything else propagates untouched.
-  const withSessionRepair = async <T>(fn: () => Promise<T>): Promise<T> => {
-    try {
-      return await fn();
-    } catch (err) {
-      if (isTransportNotAttested(err)) {
-        verbose("SDK call 403 transport_not_attested — re-pairing once");
-        invalidateSession();
-        return fn();
-      }
-      throw err;
-    }
   };
 
   // App-identity v3.1: the mutation rides the SDK client, which attaches the
@@ -1179,11 +942,9 @@ export function newNodeClient(opts: {
     opts?: { allowFullScan?: boolean },
   ): Promise<SdkQueryResult> => {
     try {
-      return await withSessionRepair(() =>
-        sdkClient(null).query(schemaHash, filter, {
-          ...(opts?.allowFullScan === true ? { allowFullScan: true } : {}),
-        }),
-      );
+      return await sdkClient(null).query(schemaHash, filter, {
+        ...(opts?.allowFullScan === true ? { allowFullScan: true } : {}),
+      });
     } catch (err) {
       throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
     }
@@ -1432,9 +1193,7 @@ export function newNodeClient(opts: {
       // consent contract.
       verbose(`→ NODE POST /api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
       try {
-        const r = await withSessionRepair(() =>
-          sdkClient(null, consentAppId).requestConsent(parseScope(scope)),
-        );
+        const r = await sdkClient(null, consentAppId).requestConsent(parseScope(scope));
         verbose(`← NODE POST /api/apps/request-consent status=202`);
         return {
           status: 202,
@@ -1471,7 +1230,7 @@ export function newNodeClient(opts: {
       // body} shapes the node serves (200 granted / 202 pending / 403
       // denied|revoked / 408 expired / 404 unknown).
       try {
-        const blob = await withSessionRepair(() => sdkClient(null).pollConsentOnce(requestId));
+        const blob = await sdkClient(null).pollConsentOnce(requestId);
         if (blob === null) return { status: 202, body: { status: "pending" } };
         return { status: 200, body: { status: "granted", capability: blob } };
       } catch (err) {
@@ -1611,25 +1370,13 @@ export function newNodeClient(opts: {
         mutations,
         convergence: "async",
       };
-      // A durable write has ambiguous state after any error. Send it once and
-      // surface the first result; only the default queued path may repair an
-      // owner session and retry automatically.
-      const parsed =
-        options?.durability === "durable"
-          ? await callJsonOkOnce(
-              "/api/mutations/batch",
-              "POST",
-              requestBody,
-              extraHeaders,
-            )
-          : await withSessionRepair(() =>
-              callJsonOk(
-                "/api/mutations/batch",
-                "POST",
-                requestBody,
-                extraHeaders,
-              ),
-            );
+      // Send each mutation request once; ambiguous write outcomes surface to the caller.
+      const parsed = await callJsonOk(
+        "/api/mutations/batch",
+        "POST",
+        requestBody,
+        extraHeaders,
+      );
       verbose(`← NODE POST /api/mutations/batch status=200`);
       const body = (parsed ?? {}) as Record<string, unknown>;
       const mutationIds = Array.isArray(body.mutation_ids)
@@ -1728,10 +1475,10 @@ export function newNodeClient(opts: {
         const client = sdkClient(capability?.() ?? null);
         const targetResults =
           schemaTargets.length === 0
-            ? [await withSessionRepair(() => client.search(query, { k: 50 }))]
+            ? [await client.search(query, { k: 50 })]
             : await Promise.all(
                 schemaTargets.map((target) =>
-                  withSessionRepair(() => client.search(query, { k: 50, target })),
+                  client.search(query, { k: 50, target }),
                 ),
               );
         return sdkSearchHitsToNative(
@@ -1745,7 +1492,7 @@ export function newNodeClient(opts: {
       }
     },
     async rawCall(method, path, body) {
-      const { res, readBody } = await callNodeRaw(url, path, method, encodeFieldRequest(path, body, fieldProfiles), userHash, verbose, await sessionHeader(), socketPath);
+      const { res, readBody } = await callNodeRaw(url, path, method, encodeFieldRequest(path, body, fieldProfiles), userHash, verbose, undefined, socketPath);
       const text = await readBody({ asText: true });
       const original = parseJsonSafe(text);
       const json = decodeFieldReply(path, body, original, fieldProfiles);
@@ -2514,12 +2261,6 @@ function isVersionGateExempt(path: string): boolean {
 function fetchTransport(
   baseUrl: string,
   defaultHeaders: Record<string, string>,
-  // Optional per-request header supplier — used to inject the owner-session
-  // `X-Folddb-Session` token (resolved fresh each call so an
-  // invalidate-after-403 re-pair is reflected). Resolves to `{}` when
-  // unattested. Awaited per send so the SDK's consent/mutation calls carry the
-  // same owner-session attestation the raw node path does.
-  dynamicHeaders?: () => Promise<Record<string, string>>,
   socketPath?: string,
   // Awaited before every send except the version route itself: the
   // client↔node version gate (see `requireNodeApiVersion`).
@@ -2535,7 +2276,6 @@ function fetchTransport(
       if (gate) await gate(path);
       const headers: Record<string, string> = {
         ...defaultHeaders,
-        ...(dynamicHeaders ? await dynamicHeaders() : {}),
         ...(options.headers ?? {}),
       };
       const bodyStr =
@@ -2653,25 +2393,6 @@ function parseScope(scope: string): ConsentScope {
  * - `TransportError` → brain's `service_unreachable` with the start-the-node
  *   hint.
  */
-// True when an @lastdb/app-sdk error represents the node's
-// `transport_not_attested` 403 — the signal that this transport's owner session
-// is stale (a restarted node dropped its in-memory token). The node may carry
-// the discriminator in either `reason` (→ PermissionDeniedError) or `error` (→
-// UnexpectedResponseError body), so check both shapes. A match drives a single
-// re-pair + retry (see `withSessionRepair`); anything else is left untouched.
-function isTransportNotAttested(err: unknown): boolean {
-  if (err instanceof PermissionDeniedError && err.reason === TRANSPORT_NOT_ATTESTED) {
-    return true;
-  }
-  if (err instanceof UnexpectedResponseError && err.status === 403) {
-    return (
-      bodyError(err.body) === TRANSPORT_NOT_ATTESTED ||
-      bodyStringField(err.body, "reason") === TRANSPORT_NOT_ATTESTED
-    );
-  }
-  return false;
-}
-
 // The SDK's request timeout message: `request to <target><path> timed out
 // after <N>ms` (lastdb_app_sdk `src/transport.ts`, `req.on("timeout")`,
 // DEFAULT_REQUEST_TIMEOUT_MS = 30_000). The node ACCEPTED the connection and
@@ -2908,54 +2629,6 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
           "record_too_large: the stored record would exceed the format 7 record cap and the " +
           "node refused the write. Do not retry the same write. Shorten the record or create a " +
           "successor record `<slug>-<YYYYMMDD>` and link the two.",
-      };
-    },
-  },
-  // Owner-verb attestation 403 (app-isolation flip, fold#739). The node gates
-  // owner verbs — app schema declaration, owner-isolation bypass, etc. — behind an
-  // attested transport and returns `403 {"error":"transport_not_attested"}` to
-  // bare loopback TCP. brain attests by minting a pairing code over the node's
-  // UDS owner socket (see `attestOwnerSession`); when it can't find that
-  // socket it proceeds unattested and the verb 403s. The bite is the documented
-  // CONTRIBUTOR path: README tells devs to run a from-source node via `./run.sh`
-  // (a non-default data dir, so its socket is NOT at `~/.lastdb/data/folddb.sock`)
-  // and then `brain init --node-url …`. Without this rule that lands as an
-  // opaque `node_http_403` at init step 4/6 with zero guidance. Resolve the
-  // socket path the client would have used (env/HOME-derived; a config-supplied
-  // `nodeSocketPath` override isn't visible to this pure mapper) and tell the
-  // user whether it was even present, plus the one env var that fixes it.
-  // Placed first: `transport_not_attested` arrives in the `error` field, so
-  // `ctx.reason` is undefined and the capability-403 rule below won't catch it —
-  // but ordering it ahead keeps the precedence explicit.
-  {
-    match: (ctx) => ctx.status === 403 && ctx.errCode === TRANSPORT_NOT_ATTESTED,
-    build: (ctx) => {
-      const socketPath = defaultFolddbSocketPath();
-      const found = existsSync(socketPath);
-      const where = found
-        ? `brain found an owner socket at ${socketPath} but the node rejected the session it minted there`
-        : `brain found no owner socket at ${socketPath}`;
-      return {
-        code: "transport_not_attested",
-        message:
-          `Node rejected ${ctx.path}: this owner verb requires an attested transport ` +
-          `(app-isolation flip, fold#739) and bare loopback TCP can't drive it — ${where}.`,
-        hint:
-          (found
-            ? "The socket exists but attestation failed — the node may have restarted (its in-memory " +
-              "session dropped) or it isn't the node serving your --node-url. "
-            : "brain attests by minting a pairing code over the node's UDS owner socket, which lives at " +
-              "`<node-data-home>/data/folddb.sock`: `$LASTDB_HOME/data/folddb.sock` when `LASTDB_HOME` is " +
-              "set, else `~/.lastdb/data/folddb.sock`. If your node uses a different home (a from-source " +
-              "`./run.sh` node) brain won't find it. ") +
-          "Point brain at the right socket with `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
-          "(or `LASTDB_HOME=<node-home>`), then re-run. The socket is created " +
-          "by the OS user that owns the node, so run brain as that user on the same machine.",
-        agentHint:
-          `This node gates owner verbs behind an attested UDS owner socket (fold#739). ${where}. ` +
-          "Set the BRAIN_FOLDDB_SOCKET env to the node's `<data-home>/data/folddb.sock` " +
-          "(default `~/.lastdb/data/folddb.sock`, or `$LASTDB_HOME/data/folddb.sock`) and " +
-          "retry. brain must run as the OS user that owns the node.",
       };
     },
   },

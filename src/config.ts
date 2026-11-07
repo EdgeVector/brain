@@ -56,12 +56,11 @@ export type Config = {
   // for backward compat with v1 readers. Always kept in sync on write.
   designSchemaHash: string;
   taskSchemaHash: string;
-  // Optional override for the node's UDS control-socket path, used for
-  // owner-session attestation (the app-isolation flip, fold#739). Unset →
+  // Optional override for the node's Unix socket used for local requests. Unset →
   // `<node-home>/data/folddb.sock`, where `<node-home>` is `LASTDB_HOME` or
   // `~/.lastdb` — see `resolveNodeHome` in client.ts. Set this (or the
   // `BRAIN_FOLDDB_SOCKET` env) when pointing brain at a node whose data dir
-  // is elsewhere (an ephemeral test node). Omitted from disk when unset —
+  // is elsewhere. Omitted from disk when unset —
   // backward-compatible with every existing config.
   nodeSocketPath?: string;
   /**
@@ -259,7 +258,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     }
     config.schemaIdentities = { ...identities } as Record<string, string>;
   }
-  // Optional owner-session socket override — only carried when present and a
+  // Optional node socket override — only carried when present and a
   // non-empty string, so existing configs (which never wrote it) round-trip
   // unchanged.
   if (typeof r.nodeSocketPath === "string" && r.nodeSocketPath.length > 0) {
