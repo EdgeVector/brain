@@ -5,6 +5,7 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 import { createHash } from "node:crypto";
 
 import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
+import { fileOperation, readCompleteRecord } from "./complete-record.ts";
 import { writeConfig, type Config } from "./config.ts";
 import type { BrainRecord } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
@@ -273,11 +274,10 @@ async function putSidecar(
   fields: Record<string, unknown>,
 ): Promise<void> {
   const path = "/api/db/put-blob";
+  const current = await readCompleteRecord(node, schemaHash, key);
   const res = await node.rawCall("POST", path, {
-    schema: schemaHash,
-    key: { hash: key },
+    mutation: fileOperation(schemaHash, key, fields, current),
     bytes_b64: Buffer.from(bytes).toString("base64"),
-    fields,
   });
   if (res.status !== 200) throw blobPlaneError(path, res.status, res.body);
   const file = replyFile(res.json);
@@ -292,7 +292,9 @@ async function putSidecar(
 
 async function fetchBlob(node: NodeClient, schemaHash: string, key: string): Promise<Uint8Array> {
   const path = "/api/db/fetch-blob";
-  const res = await node.rawCall("POST", path, { schema: schemaHash, key: { hash: key } });
+  const record = await readCompleteRecord(node, schemaHash, key);
+  if (!record) throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
+  const res = await node.rawCall("POST", path, { schema: schemaHash, key: { hash: key }, expected_revision: record.revision });
   if (res.status === 404) {
     throw new BrainError({
       code: "body_spill_blob_missing",

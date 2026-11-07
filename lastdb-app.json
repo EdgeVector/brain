@@ -123,6 +123,21 @@
           ]
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
+        }
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_record_title": 1,
@@ -268,6 +283,26 @@
           ]
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_design": {
+            "kind": "hash_range",
+            "range_type": "String",
+            "allow_absent": true
+          }
+        }
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_record_title": 1,
@@ -388,6 +423,21 @@
               "format": "text"
             }
           ]
+        }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
         }
       },
       "field_versions": {
@@ -511,6 +561,21 @@
           ]
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
+        }
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_record_title": 1,
@@ -630,6 +695,21 @@
               "format": "text"
             }
           ]
+        }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
         }
       },
       "field_versions": {
@@ -753,6 +833,21 @@
           ]
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
+        }
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_record_title": 1,
@@ -872,6 +967,21 @@
               "format": "text"
             }
           ]
+        }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
         }
       },
       "field_versions": {
@@ -995,6 +1105,21 @@
           ]
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
+        }
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_record_title": 1,
@@ -1114,6 +1239,21 @@
               "format": "text"
             }
           ]
+        }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
         }
       },
       "field_versions": {
@@ -1265,6 +1405,21 @@
           ]
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {
+          "recent": {
+            "kind": "hash_range",
+            "range_type": "String"
+          },
+          "by_status": {
+            "kind": "hash_range",
+            "range_type": "String"
+          }
+        }
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_record_title": 1,
@@ -1355,6 +1510,12 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "tag_lookup_key": 1,
         "tag_label": 1,
@@ -1426,6 +1587,13 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "tag_membership_bucket_key": 1,
@@ -1506,6 +1674,12 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "knowledge_snapshot_id": 1,
@@ -1615,6 +1789,12 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "attachment_lookup_key": 1,
         "knowledge_record_type": 1,
@@ -1699,6 +1879,12 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "file_content_sha256_hex": 1,
         "file_size_bytes_decimal_text": 1,
@@ -1769,6 +1955,13 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "file_required": true,
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "file_content_sha256_hex": 1,
@@ -1884,6 +2077,13 @@
           "data_domain": "general"
         }
       },
+      "file_required": true,
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "knowledge_text_file_lookup_key": 1,
         "knowledge_record_type": 1,
@@ -1948,6 +2148,13 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "knowledge_list_scope_key": 1,
         "knowledge_list_page_key": 1,
@@ -2007,6 +2214,13 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "knowledge_list_locator_scope_key": 1,
         "knowledge_list_record_reference": 1,
@@ -2040,6 +2254,12 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "knowledge_list_record_page_id": 1
@@ -2098,6 +2318,13 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "knowledge_record_slug": 1,
         "knowledge_type_directory_marker": 1,
@@ -2144,6 +2371,12 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "knowledge_count_scope_key": 1,
@@ -2202,6 +2435,13 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "knowledge_edge_set_scope_key": 1,
@@ -2262,6 +2502,13 @@
           "data_domain": "general"
         }
       },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
+      },
       "field_versions": {
         "knowledge_token_set_scope_key": 1,
         "knowledge_token_set_head_marker": 1,
@@ -2320,6 +2567,13 @@
           "sensitivity_level": 0,
           "data_domain": "general"
         }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
       },
       "field_versions": {
         "knowledge_backfill_scope_key": 1,

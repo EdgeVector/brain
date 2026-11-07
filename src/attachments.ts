@@ -26,6 +26,7 @@ import { basename } from "node:path";
 import { createHash } from "node:crypto";
 
 import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
+import { fileOperation, readCompleteRecord } from "./complete-record.ts";
 import { writeConfig, type Config } from "./config.ts";
 import { nowIso } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
@@ -58,9 +59,6 @@ const INDEX_FIELDS = [
 
 // Legacy v1 blob record projection (base64 `data` field).
 const BLOB_FIELDS = ["content_hash", "size", "media_type", "data", "created_at"];
-
-// v2 file record projection. The bytes are the record's file, not a field.
-const FILE_FIELDS = ["content_hash", "size", "media_type", "created_at"];
 
 export type AttachmentEntry = {
   name: string;
@@ -362,12 +360,10 @@ export async function putAttachmentBlob(
   }
   const path = "/api/db/put-blob";
   const stored = await node.rawCall("POST", path, {
-    schema: schemaHash,
-    key: { hash },
+    mutation: fileOperation(schemaHash, hash, { content_hash: hash, size: String(bytes.length), media_type: mediaType, created_at: nowIso() }),
     bytes_b64: Buffer.from(bytes).toString("base64"),
     ...(opts?.name !== undefined ? { name: opts.name } : {}),
     media_type: mediaType,
-    fields: { content_hash: hash, size: String(bytes.length), media_type: mediaType, created_at: nowIso() },
   });
   if (stored.status !== 200) throw filePlaneError(path, stored.status, stored.body);
   const file = replyFile(stored.json);
@@ -394,10 +390,10 @@ export async function getAttachmentBlob(
 
   const fileSchemaHash = cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY];
   if (fileSchemaHash) {
-    const row = await queryRowByKey(node, fileSchemaHash, FILE_FIELDS, hash);
+    const row = await readCompleteRecord(node, fileSchemaHash, hash);
     if (row !== null) {
       const path = "/api/db/fetch-blob";
-      const res = await node.rawCall("POST", path, { schema: fileSchemaHash, key: { hash } });
+      const res = await node.rawCall("POST", path, { schema: fileSchemaHash, key: { hash }, expected_revision: row.revision });
       if (res.status === 404) {
         throw new BrainError({
           code: "attachment_blob_missing",
