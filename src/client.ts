@@ -1147,7 +1147,9 @@ export function newNodeClient(opts: {
       if (!schema) throw new BrainError({ code: "schema_unavailable", message: "Brain cannot resolve this record schema." });
       const current = preimages.get(coordinateId(op.schemaHash, op.keyHash, op.keyRange));
       if (!expectationMatches(op, current)) {
-        throw new BrainError({ code: "cas_conflict", message: "The record precondition did not hold." });
+        throw new BrainError({ code: "cas_conflict",
+          message: `The ${schema.name} ${op.mutationType} precondition did not hold (${current ? "record present" : "record absent"}, ${op.expected?.type ?? "no field guard"}${op.expected ? ` ${op.expected.field}` : ""}).`,
+        });
       }
       if (op.mutationType === "delete" && !current) return [];
       const request = recordOperation(op, schema, current, durable);

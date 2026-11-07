@@ -392,7 +392,6 @@ export async function commitResidentRemoval(opts: {
   cfg: Config;
   type: RecordType;
   slug: string;
-  tombstoneFields: Record<string, unknown>;
   side: ListSidePlan;
 }): Promise<ResidentCommitResult> {
   if (!opts.node.mutateBatch) {
@@ -417,13 +416,6 @@ export async function commitResidentRemoval(opts: {
   }, false, notes).concat(counts));
   const ops = [
     {
-      mutationType: "update" as const,
-      schemaHash,
-      keyHash: opts.slug,
-      fields: opts.tombstoneFields,
-      projection: "primary" as const,
-    },
-    {
       mutationType: "delete" as const,
       schemaHash,
       keyHash: opts.slug,
@@ -440,7 +432,8 @@ export async function commitResidentRemoval(opts: {
     });
   }
   try {
-    const primary = await opts.node.mutateBatch(ops);
+    const primary = await opts.node.mutateBatch(ops, { durability: "durable" });
+    if (primary.durability !== "durable") throw durableMiss(opts.type, opts.slug, primary.durability);
     return { ...primary, indexNotes: notes };
   } catch (err) {
     throw wrapCommitError(err, opts.type, opts.slug, ops);
