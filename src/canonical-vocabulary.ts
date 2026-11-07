@@ -38,7 +38,7 @@ export function canonicalSchema(schema: SchemaDefinition): SchemaDefinition {
     }])));
   }
   result.key = Object.fromEntries(Object.entries(schema.key ?? {}).filter(([,field]) => typeof field === "string").map(([role, field]) => [role, rename(field)]));
-  for (const property of ["field_classifications", "field_interest_categories", "ref_fields", "transform_fields"]) {
+  for (const property of ["field_classifications", "field_interest_categories", "transform_fields"]) {
     const map = result[property];
     if (map && typeof map === "object" && !Array.isArray(map)) {
       result[property] = Object.fromEntries(Object.entries(map).map(([name, value]) => [rename(name), value]));
