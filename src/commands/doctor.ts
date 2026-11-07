@@ -352,22 +352,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByNodeUnreachable("node-provisioned"));
   }
 
-  // 5. schemas loaded — verified via the READ path (GET /api/schemas), NOT by
-  // POSTing /api/schemas/load. Two reasons the old active-reload was wrong:
-  //   (a) A health check must not mutate. This file's own contract (see the
-  //       header + the `--write` gate) is that plain `brain doctor` never
-  //       writes; an unconditional /api/schemas/load violated that.
-  //   (b) Since the app-isolation flip (fold#739), /api/schemas/load is an
-  //       owner-attested verb. On a node whose owner-session attestation is
-  //       unavailable — a stale daemon with a wedged control socket, or brain
-  //       pointed at a node with no reachable local socket — the POST returns
-  //       `403 transport_not_attested` and the old check misdiagnosed a fully
-  //       healthy, fully-loaded node as "schemas not loaded — re-run init"
-  //       (re-running init can't fix a wedged socket). The read path needs
-  //       only X-User-Hash, so it answers the real question — "are brain's
-  //       record schemas present in the node's DB under the exact hashes we
-  //       write against?" — accurately regardless of attestation state.
-  //
+  // 5. Verify installed schemas through the read-only catalog. A diagnostic
+  // must not load or modify schemas, and must compare the addresses used by writes.
   // Match **write-path** hashes. Config `schemaHashes.*` is the catalog /
   // storage key used by mutates. On Mini, that appears as `name` on
   // GET /api/schemas. `identity_hash` is the node recompute and usually

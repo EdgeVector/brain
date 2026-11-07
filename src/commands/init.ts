@@ -191,8 +191,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   const nodeUrl = resolved.nodeUrl;
   const schemaServiceUrl = resolved.schemaServiceUrl;
-  // Resolve the socket path that will actually be used for owner-session
-  // attestation. This is what newNodeClient will use internally when
+  // Resolve the socket path for local requests. This is what newNodeClient uses when
   // connecting, so we persist it to the config so later commands use the same
   // socket without needing to re-supply BRAIN_FOLDDB_SOCKET or LASTDB_HOME.
   const nodeSocketPath = isLoopbackNodeUrl(nodeUrl)

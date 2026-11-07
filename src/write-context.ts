@@ -22,8 +22,7 @@ export type WriteNodeClientOptions = {
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
-  // Override the node's UDS control-socket path for owner-session attestation
-  // (app-isolation flip, fold#739). Forwarded verbatim to `newNodeClient`.
+  // Override the node's Unix socket for local requests. Forwarded to `newNodeClient`.
   // Unset → the default `${LASTDB_HOME ?? ~/.lastdb}/data/folddb.sock`.
   socketPath?: string;
   // Override the keychain store.
