@@ -1,7 +1,6 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
-import { alternateKeyWire } from "./alternate-key-wire.ts";
 import { coordinateId, expectationMatches, recordOperation, type RecordPreimage } from "./complete-record.ts";
-import { ownedSchemas } from "./multi-key.ts";
+import { explicitKeyDeclaration, ownedSchemas } from "./multi-key.ts";
 import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
 import { RECORD_BUDGET_BYTES, RECORD_CAP_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 export { QUERY_PAGE_SIZE };
@@ -1505,10 +1504,9 @@ export function newNodeClient(opts: {
       }
       const local = schema;
       if (canonicalVocabulary) schema = canonicalSchema(local);
-      if (schema.alternate_keys !== undefined) schema = { ...schema, alternate_keys: alternateKeyWire(schema.alternate_keys) };
       const body = await callJsonOk("/api/schemas/declare", "POST", {
         namespace: appId,
-        schema,
+        schema: explicitKeyDeclaration(schema),
       });
       const b = body as Record<string, unknown>;
       const canonical = typeof b.canonical === "string" ? b.canonical : "";

@@ -32,6 +32,13 @@ export function ownedSchemas() {
   });
 }
 
+// The legacy definitions above are app-local recipes for computing addresses.
+// The node receives only the explicit record-key shapes.
+export function explicitKeyDeclaration(schema: SchemaDefinition) {
+  const { key: _key, alternate_keys: _alternateKeys, ...definition } = schema;
+  return definition;
+}
+
 export type NamedRow = QueryRow & { matched_key: { hash: string; range: string } };
 export type NamedPage = { results: NamedRow[]; has_more: boolean; next_cursor?: unknown };
 
