@@ -47,6 +47,8 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
                    if not key.startswith(("LASTDB", "FOLD", "BRAIN", "LASTSEEK", "SENTRY", "OTEL"))
                    and key not in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY")}
     environment.update(LASTDB_ISOLATED_COPY="1", LASTDB_SUPPRESS_RECOVERY_PHRASE="1",
+                       BRAIN_APP_IDENTITY_ENFORCE="off" if label == "before" else "on",
+                       BRAIN_FORCE_FILE_KEYCHAIN="1",
                        BRAIN_CONFIG=str(destination / "config.json"),
                        BRAIN_FOLDDB_SOCKET=str(node.socket) if node else "",
                        LASTSEEK_BIN=str(destination / "absent-lastseek"),

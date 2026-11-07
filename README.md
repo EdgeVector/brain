@@ -4,131 +4,31 @@ A CLI named `brain` that uses fold_db as the storage engine for a personal brain
 
 ## Prerequisites
 
-You only need two things to **download and use** brain — Bun and a running
-`fold_db_node`. No Rust toolchain, no building from source.
-
-- **Bun** ≥ 1.3.10 — `bun --version`. brain ships as a Bun-runtime CLI, so Bun is the only thing you install to *run* it — `bun add -g github:EdgeVector/brain` puts the `brain` and `brain` bins on your PATH and runs them under Bun, in one command, straight from the public repo (no clone, no Rust, no compile). (A registry one-liner is the future steady-state once the package is published to npm; it's not required to install today. See Quick start step 1.)
-- **A running `fold_db_node`** — install the prebuilt daemon from the [`edgevector/lastdb` Homebrew tap](https://github.com/EdgeVector/homebrew-lastdb) (no Rust toolchain, no compile step):
-  ```bash
-  brew install edgevector/lastdb/lastdb   # taps + installs `lastdb` and `lastdb_server`
-  brew services start lastdb              # launchd: runs `lastdb_server --port 9001` with keep_alive
-  curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
-  ```
-  brain defaults to this daemon at `http://127.0.0.1:9001`. After a `brew upgrade lastdb`, run `brew services restart lastdb` so the new binary takes over the port. (Prefer a foreground daemon for a quick try? `lastdb daemon start` also works — `brew services` is just the keep-alive launchd path that survives crashes and reboots.)
-- **Network access to the schema service** — brain registers its schemas with the prod cloud Lambda at `https://axo709qs11.execute-api.us-east-1.amazonaws.com`. There is **no local schema_service to run**. (Iteration/CI uses the dev Lambda at `https://y0q3m6vk75.execute-api.us-west-2.amazonaws.com`.)
-
-> **Contributing to fold_db itself?** Instead of the Homebrew binary you can run a worktree-local node from source with `./run.sh` — that path *does* need a Rust toolchain and a multi-minute cold build the first time (cargo `target/` is shared once warmed). Point brain at the auto-slotted port with `brain init --node-url http://127.0.0.1:<slot>`; `brain init` prints a "compiling Rust — give it a few minutes" hint and retries while the node comes up. Override either endpoint with `--node-url` / `--schema-service-url` on `brain init`.
+Use LastDB API 29 or later and Bun 1.3.10 or later. Brain connects to the
+configured owner Unix socket. Check it with `lastdb status`. The default socket
+is `~/.lastdb/data/folddb.sock`. Set `LASTDB_HOME` or `BRAIN_FOLDDB_SOCKET`
+when selecting another node.
 
 ## Quick start
 
-From a clean machine to your first record in a few minutes (most of it is the
-one-time installs):
+Install Brain from the signed app registry, then initialize its schemas and config.
 
 ```bash
-# 0. install + start lastdb (one-time; prebuilt binary, no Rust)
-brew install edgevector/lastdb/lastdb
-brew services start lastdb            # launchd: serves :9001, restarts on crash
-curl -s http://127.0.0.1:9001/api/health   # verify; expect {"ok":true,...}
-
-# 1. install the brain CLI (one-time) — ONE command, straight from GitHub.
-#    No clone, no Rust, no compile; exposes the `brain` + `brain` bins.
-bun add -g github:EdgeVector/brain
-brain --version                       # verify it's on PATH
-
-# 2. bootstrap
-brain init                            # 6 steps; writes ~/.brain/config.json
-                                      # (auto-heals a stale local-schema config
-                                      #  to the new cloud-Lambda default)
+lastdb app install brain --accept-install
+brain --version
+brain init
 ```
 
-> **One command, no npm publish.** `bun add -g github:EdgeVector/brain` installs
-> the CLI directly from the already-public GitHub repo — no registry, no clone, no
-> `bun link`. `bunx github:EdgeVector/brain <cmd>` works too for a one-off run.
-> (A future registry install is the intended steady-state once the package is on
-> npm; tracking: Tom's `npm publish` follow-up. It's not required to install
-> today.)
->
-> **Contributing to brain itself?** Clone + `bun link` instead, so your edits run
-> live: `git clone https://github.com/EdgeVector/brain && cd brain && bun install
-> && bun link` puts the `brain` (+ compatibility `brain`) bins on your PATH,
-> pointed at your checkout. Everything below works the same whichever install
-> you used.
+Local initialization confirms access through the owner socket. Local writes
+and search use that connection. Existing callers may keep passing
+`brain init --grant-consent` or `--yes`.
 
-### One-time consent grant (handled by `init`)
+Remote nodes retain their capability protocol. Their owner approves access
+through the target node's supported approval flow. A cached capability can be
+reused by subsequent remote commands.
 
-brain is an **app** under fold_db's app-identity model: the node owner (you)
-approves brain acting on your data with a one-time consent grant. **`brain init`
-now does this inline as its final step**, so the happy path needs no second
-terminal. After registering schemas, `init` prints:
-
-```
-[6/6] establishing consent (one-time grant for brain's namespace)
-brain wants read/write access to its namespace on this node. Grant now? [Y/n]
-```
-
-Press `y` and `init` shells out to `lastdb consent grant brain --yes` for you
-(the `lastdb` CLI ships in the same Homebrew formula, so it's already on your
-PATH; older installs that only have the `folddb` compat shim still work), then
-waits until the capability is cached in your keychain. When `init`
-returns you have a ready-to-write capability — your first `brain put` /
-`design new` lands immediately. Re-running `init` is idempotent: it skips the
-prompt when a live capability already exists. (Running a local/dev node with
-`APP_IDENTITY_ENFORCE` off? Set `BRAIN_APP_IDENTITY_ENFORCE=off` to skip
-consent entirely; init still resolves the same namespaced `brain/*` schema
-hashes from the node, and writes land as NodeOwner with no capability headers.)
-
-**Scripted / CI / agent install (no TTY).** Pass `--grant-consent` and `init`
-runs the same handshake non-interactively — request-consent, shell out to
-`lastdb consent grant brain --yes`, poll until the capability is cached —
-so the very next `brain put` lands without a second terminal:
-
-```bash
-brew install edgevector/lastdb/lastdb
-brew services start lastdb
-bun add -g github:EdgeVector/brain              # one-command, registry-free install
-
-brain init --grant-consent </dev/null         # ready-to-write in one shot
-echo "hello scripted brain" | brain put my-first-note --type concept
-```
-
-> Once brain is published to npm, the install line above can also be written
-> `npm i -g brain`; the `bun add -g github:` form works today against the public
-> repo with no registry.
-
-> **No node up yet? Non-interactive `init` fails fast.** When `init` runs
-> without a TTY (the CI / agent / scripted path above) and the node is
-> unreachable, it prints the actionable node-down hint on the first probe and
-> exits non-zero within a few seconds — it does **not** sit through the long
-> retry budget, since an unattended caller can't start the daemon mid-wait.
-> (Interactive runs keep the full ~3-minute budget for the from-source
-> contributor watching a Rust cold build.) To override the schedule explicitly
-> — e.g. extend the wait in CI while an ephemeral node boots, or disable
-> retries entirely — set `BRAIN_INIT_RETRY_DELAYS_MS` to a comma-separated
-> list of inter-probe gaps in ms (`BRAIN_INIT_RETRY_DELAYS_MS=` empty = zero
-> retries, fail on the first probe).
-
-The flag is idempotent (no-op when a live capability already exists) and a
-friendly no-op under `BRAIN_APP_IDENTITY_ENFORCE=off` (no capability needed
-in that mode — writes land as NodeOwner).
-
-**Fallback — granting from a second terminal.** You'll only hit this if you
-declined `init`'s prompt, ran `init` non-interactively without
-`--grant-consent`, or your capability was later revoked. In those cases the
-next write stalls with:
-
-```
-First-run setup — run: `lastdb consent grant brain` in your terminal.
-Waiting for you to grant access to this node (polling every 2s)…
-```
-
-Re-run `brain init` and accept the grant, or approve it once in a second
-terminal:
-
-```bash
-lastdb consent grant brain           # review the request, then `y` (or pass --yes)
-```
-
-The waiting command then unblocks and the write lands.
+Brain prefers LastSeek for semantic search and reads the ranked records from
+LastDB. Use `lastseek status` and `lastseek doctor` to inspect that index.
 
 ```bash
 # 3. drive it
@@ -620,14 +520,16 @@ schema service with `--node-url` / `--schema-service-url` on `brain init`
 
 Top errors you'll hit and the fix:
 
-- **Your first write hangs at `First-run setup — run: \`lastdb consent grant brain\` … Waiting for you to grant access…`**  
-  Rare now that `brain init` grants consent inline — you'll only see this if you declined init's consent prompt, ran `init` non-interactively, or your capability was revoked. Easiest fix: re-run `brain init` (idempotent) and accept the grant. Otherwise leave the write waiting and, **in a second terminal**, run `lastdb consent grant brain` (review, then `y`; or `--yes` to skip the prompt). The original command unblocks and the capability is cached for all later writes. See [One-time consent grant](#one-time-consent-grant-handled-by-init). To opt out on a local/dev node, set `BRAIN_APP_IDENTITY_ENFORCE=off`.
+- **Remote writes require approval**
+  Ask the target node owner to approve access, then run `brain init`.
+  Local writes authenticate through the configured owner socket.
 
 - **First write is slow (~5s) the first time on a headless / SSH / locked-keychain box, then fast after**  
   brain stores its capability in the macOS login keychain (best protection against co-resident exfiltration). When there's no GUI to answer a keychain-authorization prompt (SSH, CI, an automation agent, or a never-unlocked login keychain), the `security` call can't complete — every keychain call is bounded by a short timeout (via the `@lastdb/app-sdk` capability store) and transparently falls back to a `0600` file under `~/.brain/capabilities/` instead of hanging (a pre-SDK `~/.brain/capabilities.json` entry is still read and migrated). You'll see a one-time ~5s pause on that first write; subsequent writes read the cached file and are fast. To skip the keychain entirely on such hosts, set `BRAIN_FORCE_FILE_KEYCHAIN=1`.
 
-- **`error: node not reachable at http://127.0.0.1:9001 — run \`brain doctor\` for a full diagnosis.`**  
-  The homebrew `fold_db_node` daemon isn't running. Check with `brew services list` (look for `lastdb` → `started`) and start it with `brew services start lastdb` (or `lastdb daemon start` if you prefer the foreground path). If you're contributing to fold itself and running a worktree-local `./run.sh --local`, point brain at the auto-slotted port with `brain init --node-url http://127.0.0.1:<slot>`.
+- **The local node socket is unreachable**
+  Run `lastdb status` and check the configured LastDB service.
+  Set `LASTDB_HOME` or `BRAIN_FOLDDB_SOCKET` to select the intended owner socket.
 
 - **`error: Node not set up — run \`brain doctor\` for a full diagnosis.`**  
   The node is running but not provisioned. Run `brain init`.
@@ -641,8 +543,9 @@ Top errors you'll hit and the fix:
 - **`error: Node rejected POST /api/setup/bootstrap with 410 — already provisioned …`**  
   The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where the node's `config/` carries over from a previous install. Recovery: (a) if you still have `~/.brain/config.json` from when this node was working, re-run `brain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.lastdb/config/` (or `$LASTDB_HOME/config/`), restart, then re-run `brain init`. (The error hint itself prints the resolved path for your node.)
 
-- **`error: Semantic search is unavailable — the fold_db node failed to load its embedding model …`** (or, on older brain versions, the opaque `Bad request: Schema error: Invalid data: Failed to init embedding model: Failed to retrieve model.onnx`).  
-  The fold_db_node loads its `model.onnx` lazily on the first `brain search` / `brain ask` call. After certain restarts (commonly `brew upgrade lastdb`) that cache is partially populated and the node 400s instead of fetching. **Workaround:** `lastdb daemon stop && lastdb daemon start` — the embedding cache repopulates on next search. If the failure persists, run `brain doctor --freshness` and capture the node log (the latest file under `~/Library/Logs/Homebrew/lastdb/`); the underlying cache-recovery bug is tracked upstream in `EdgeVector/fold` (fold/fold_db_node/). `brain doctor` (no flags) now runs a one-token search probe so this failure surfaces as a structured `[FAIL] embedding-runtime` line instead of an opaque error on first use.
+- **Semantic search is unavailable**
+  Run `lastseek status` and `lastseek doctor` to inspect the index and model.
+  Use `brain search "<query>" --verbose` to inspect the selected search path.
 
 When in doubt, `brain doctor` will tell you exactly which check is failing and what to do.
 

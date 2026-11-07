@@ -543,9 +543,9 @@ function timeoutError(
     code: "service_timeout",
     // No DOCTOR_TIP here. A timeout means BUSY, not down, and the standing
     // workspace rule is: do not run doctor/restart for a timeout — retry, and
-    // name the load with `lastdb ops`. The tip sent routines toward doctor on
+    // name the load with `lastdb admin ops`. The tip sent routines toward doctor on
     // every busy read (papercut-brain-busy-timeout-suggests-doctor-20260922).
-    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) — busy, not down: retry with backoff; \`lastdb ops\` names the load. Do not run doctor or restart for a timeout.`,
+    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) — busy, not down: retry with backoff; \`lastdb admin ops\` names the load. Do not run doctor or restart for a timeout.`,
     hint: timeoutHint(service),
     cause,
   });
@@ -701,7 +701,7 @@ export type NodeClient = {
   bootstrap(name: string): Promise<{ userHash: string }>;
   // App-identity consent handshake (app_identity v3.1). request-consent +
   // consent-status are the two app-driven steps; the owner grants out-of-band
-  // via `folddb consent grant`.
+  // through the target node owner.
   requestConsent(appId: string, scope: string): Promise<{ status: number; body: unknown }>;
   consentStatus(requestId: string): Promise<{ status: number; body: unknown }>;
   // POST /api/apps/declare-schema — ask Mini to resolve/register an app-owned
@@ -2293,12 +2293,11 @@ function socketFirstNodeHint(
     ? " (first run compiles Rust — give it a few minutes)"
     : "";
   const cliNote = opts.cliInstallPath
-    ? " If this is an intentional CLI/Homebrew node, start the foreground daemon with `lastdb daemon start` or repair its launchd service."
+    ? " Check `lastdb status` and the configured LastDB service."
     : "";
   return (
     `brain uses the local LastDB Unix socket at ${socketPath}; run \`brain doctor\` for a full diagnosis. ` +
-    "Start or reopen LastDB.app so that socket exists. " +
-    `Contributors running from source: \`cd fold/fold_db_node && ./run.sh --local\`${sourceNote}. ` +
+    `Check the configured LastDB service${sourceNote}. ` +
     "If your node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
     "or `LASTDB_HOME=<node-home>`." +
     cliNote
@@ -3042,13 +3041,9 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
         `Semantic search is unavailable — the fold_db node failed to load its embedding model ` +
         `(${ctx.messageBlob.trim()}) ${DOCTOR_TIP}.`,
       hint:
-        "Restart the node so it re-fetches the ONNX file from the embedding cache " +
-        "(homebrew: `lastdb daemon stop && lastdb daemon start`). " +
-        "If the failure persists, run `brain doctor --freshness` and capture " +
-        "the node log (the latest file under ~/Library/Logs/Homebrew/lastdb/).",
+        "Run `lastseek status` and `lastseek doctor` to inspect the semantic index and model.",
       agentHint:
-        "This is a node-side issue, not something this tool can fix — ask the " +
-        "operator to restart the fold_db node, then retry.",
+        "Ask the operator to inspect LastSeek with `lastseek status` and `lastseek doctor`.",
     }),
   },
 ];
