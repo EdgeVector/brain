@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { BrainError, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
 import { countAfterDelta, parseListCount } from "./count-state.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
@@ -1354,24 +1355,12 @@ function applyMembership(opts: {
   };
 
   const overflow = (head: MemPage, bound: number) => {
-    const avoid = new Set<string>([HEAD_RANGE, head.older]);
-    for (const page of opts.pages.values()) {
-      if (page.hash === head.hash) avoid.add(page.range);
-    }
     while (head.cards.length > bound) {
       const moved = head.cards[head.cards.length - 1];
       if (!moved) break;
       head.cards = head.cards.slice(0, -1);
       const previousOlder = head.older;
-      let id = "";
-      for (let n = 0; n < 8 && id.length === 0; n++) {
-        const candidate = `p${String(Math.floor(Math.random() * 100_000_000)).padStart(8, "0")}`;
-        if (!avoid.has(candidate)) id = candidate;
-      }
-      if (id.length === 0) {
-        id = `p${String(Date.now() % 100_000_000).padStart(8, "0")}`;
-      }
-      avoid.add(id);
+      const id = `p${randomUUID()}`;
       const page = opts.ensurePage(head.hash, id, false);
       page.cards = [moved];
       page.older = previousOlder;

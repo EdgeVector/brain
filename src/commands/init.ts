@@ -224,6 +224,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
   let userHash: string;
   let bootstrapped = false;
+  let recoveredIdentity = false;
   if (identity.provisioned) {
     userHash = identity.userHash;
     print(`[2/${STEPS}] node already provisioned (user_hash=${userHash.slice(0, 8)}…) — skipping bootstrap`);
@@ -250,6 +251,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
         hasUsableExistingConfig(existing)
       ) {
         userHash = existing.userHash;
+        recoveredIdentity = true;
         print(
           `        bootstrap refused (node + auto-identity disagree); reusing existing config userHash=${userHash.slice(0, 8)}… and continuing`,
         );
@@ -284,6 +286,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   writeConfig(config, configPath, priorConfig);
   const consent = await establishConsentInline({
     nodeUrl, userHash, print, verbose, socketPath: nodeSocketPath,
+    recoveredIdentity,
     nonInteractiveGrant: opts.grantConsent, ...opts.consent,
   });
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });

@@ -592,6 +592,7 @@ export type CapabilityProvider = () => string | null;
 // present for writes?" must accept either field.
 // `owner_app_id` is present on app-owned schemas (e.g. `"brain"`).
 export type LoadedSchema = {
+  schema_type?: string;
   fields?: string[];
   field_types?: Record<string,unknown>;
   descriptive_name?: string;
@@ -713,7 +714,7 @@ export type NodeClient = {
   // each carrying the authoritative `identity_hash` the node computed. Used
   // by `brain init` to RESOLVE an already-published `brain/*` schema's
   // canonical hash without a cert-gated re-POST (the fresh-consumer path).
-  listLoadedSchemas(): Promise<LoadedSchema[]>;
+  listLoadedSchemas(opts?: { full?: boolean }): Promise<LoadedSchema[]>;
   // `keyRange` addresses one row of a HashRange schema (RecordListEntry).
   // Omit it for Hash schemas — every product record schema is Hash-keyed.
   createRecord(opts: {
@@ -1538,8 +1539,8 @@ export function newNodeClient(opts: {
         decision: typeof b.decision === "string" ? b.decision : undefined,
       };
     },
-    async listLoadedSchemas() {
-      const body = await callJsonOk("/api/schemas", "GET");
+    async listLoadedSchemas(options) {
+      const body = await callJsonOk(options?.full ? "/api/schemas?include_full=1" : "/api/schemas", "GET");
       const arr =
         body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).schemas)
           ? ((body as Record<string, unknown>).schemas as unknown[])
@@ -1547,6 +1548,7 @@ export function newNodeClient(opts: {
       return arr
         .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
         .map((s) => ({
+          schema_type: typeof s.schema_type === "string" ? s.schema_type : undefined,
           descriptive_name:
             typeof s.descriptive_name === "string" ? s.descriptive_name : undefined,
           owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : undefined,

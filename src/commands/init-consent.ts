@@ -20,6 +20,7 @@ export type EstablishConsentOptions = {
   print?: (line: string) => void;
   verbose?: Verbose;
   socketPath?: string;
+  recoveredIdentity?: boolean;
   store?: CapabilityStore;
   transport?: ConsentTransport;
   isTty?: () => boolean;
@@ -48,7 +49,9 @@ export async function establishConsentInline(
   });
   if (isLoopbackNodeUrl(opts.nodeUrl)) {
     const identity = await node.autoIdentity();
-    if (!identity.provisioned || identity.userHash !== opts.userHash) {
+    if (!identity.provisioned && opts.recoveredIdentity) {
+      await node.listLoadedSchemas();
+    } else if (!identity.provisioned || identity.userHash !== opts.userHash) {
       throw new BrainError({
         code: "owner_identity_mismatch",
         message: "The configured owner socket did not confirm this Brain identity.",

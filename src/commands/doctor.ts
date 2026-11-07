@@ -19,6 +19,7 @@ import {
   nodeDownHint,
   nodeHttpErrorHint,
   stripDoctorTip,
+  type LoadedSchema,
   type NodeClient,
   type SchemaServiceClient,
   type Verbose,
@@ -179,6 +180,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 
   const checks: CheckResult[] = [];
   let schemasLoadedOk = false;
+  let loadedSchemas: LoadedSchema[] = [];
 
   // 1. config
   const cfg = tryReadConfig(opts.configPath);
@@ -198,7 +200,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       name: "config",
       ok: false,
       detail: cfgIssues.join("; "),
-      fix: "re-run `brain init` to refresh canonical hashes",
+      fix: "re-run `brain init` to refresh schema addresses and definition identities",
     });
   } else {
     checks.push({
@@ -375,7 +377,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // writable plane. Accept either field so doctor tracks write readiness.
   if (provisioned) {
     try {
-      const loaded = await nodeClient.listLoadedSchemas();
+      const loaded = await nodeClient.listLoadedSchemas({ full: true });
+      loadedSchemas = loaded;
       const loadedHashes = new Set<string>();
       for (const s of loaded) {
         if (typeof s.name === "string" && s.name.length > 0) loadedHashes.add(s.name);
@@ -427,19 +430,18 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // the same descriptive_name, often a Schema.org starter_seed) is demoted to
   // WARN inside checkSchemaDrift(): `brain init` cannot shrink it.
   if (cfgIssues.length === 0 && !nodeReachable) {
-    // checkSchemaDrift only reads the cloud schema-SERVICE, so it would still
-    // PASS with the node dead — but the `schema-drift[…]` label promises a
-    // comparison against the user's node, and one green line per schema next to a red
-    // `node-reachable` read as "my schemas are fine on my node," which was
-    // never checked. Collapse to a single honest SKIP when the node is down.
+    // Definition checks use the same installed catalog as the serving node.
     checks.push(
       skippedByNodeUnreachable("schema-drift", "can't compare against the node DB"),
     );
   } else if (cfgIssues.length === 0 && !provisioned) {
     checks.push(skippedByPrereqs("schema-drift", "node is not provisioned"));
+  } else if (cfgIssues.length === 0 && !schemasLoadedOk) {
+    checks.push(skippedByPrereqs("schema-drift", "installed schemas were not confirmed"));
   } else if (cfgIssues.length === 0) {
     for (const entry of DOCTOR_RECORD_SCHEMAS) {
-      const hash = cfg.schemaHashes[entry.key];
+      const runtime = cfg.schemaHashes[entry.key];
+      const hash = cfg.schemaIdentities?.[entry.key] ?? runtime;
       const label = entry.schema.schema.descriptive_name;
       if (!hash) {
         checks.push({
@@ -450,11 +452,30 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         });
         continue;
       }
-      const driftCheck = await checkSchemaDrift(
-        schemaClient,
+      const actual = loadedSchemas.find((schema) => schema.name === runtime || schema.identity_hash === hash);
+      if (actual && cfg.schemaIdentities?.[entry.key] && actual.identity_hash !== hash) {
+        checks.push({
+          name: `schema-drift[${label}]`,
+          ok: false,
+          detail: "installed definition differs from the pinned identity",
+          fix: "review the installed schema and run `brain init` to refresh the binding",
+        });
+        continue;
+      }
+      const registered = actual?.name && actual.descriptive_name && actual.schema_type &&
+        actual.fields && actual.field_types ? {
+          ...actual,
+          name: actual.name,
+          descriptive_name: actual.descriptive_name,
+          schema_type: actual.schema_type,
+          fields: actual.fields,
+          field_types: actual.field_types,
+        } : null;
+      const driftCheck = checkSchemaDrift(
         label,
-        cfg.schemaFieldAliases?.[hash] ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema,
+        cfg.schemaFieldAliases?.[runtime ?? ""] ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema,
         hash,
+        registered,
         boundSchemaNames(cfg, hash),
       );
       checks.push(driftCheck);

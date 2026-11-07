@@ -1,42 +1,28 @@
-import { BrainError, type RegisteredSchema, type SchemaServiceClient } from "../../client.ts";
+import { type RegisteredSchema } from "../../client.ts";
 import type { Config } from "../../config.ts";
 import { DEFAULT_SCHEMA_SERVICE_URL } from "../init.ts";
-import { RECORD_TYPES, UNIQUE_SCHEMAS, type AddSchemaRequest, type RecordType } from "../../schemas.ts";
+import { OWNER_APP_ID, RECORD_TYPES, UNIQUE_SCHEMAS, type AddSchemaRequest, type RecordType } from "../../schemas.ts";
 import type { CheckResult } from "../doctor.ts";
 
-export async function checkSchemaDrift(
-  schemaClient: SchemaServiceClient,
+export function checkSchemaDrift(
   type: string,
   request: AddSchemaRequest,
   hash: string,
+  registered: RegisteredSchema | null,
   canonicalNames: readonly string[] = [],
-): Promise<CheckResult> {
+): CheckResult {
   const name = `schema-drift[${type}]`;
-  let registered: RegisteredSchema | null;
-  try {
-    registered = await schemaClient.getSchemaByHash(hash);
-  } catch (err) {
-    if (err instanceof BrainError) {
-      return {
-        name,
-        ok: false,
-        detail: err.message,
-        fix: "re-run `brain init`",
-      };
-    }
-    throw err;
-  }
   if (!registered) {
     return {
       name,
       ok: false,
-      detail: `canonical hash ${hash} not found in schema service (deleted there?)`,
+      detail: `definition ${hash} was not found in the installed node catalog`,
       fix: "re-run `brain init`",
     };
   }
   // A canonical identity can serve several explicit local record-type names.
   // Only accept another name already bound to this exact hash in this config.
-  const expected = registered.name === hash && canonicalNames.includes(registered.descriptive_name)
+  const expected = canonicalNames.includes(registered.descriptive_name)
     ? {...request, schema:{...request.schema, descriptive_name:registered.descriptive_name}}
     : request;
   const classification = classifySchemaDrift(expected, registered);
@@ -88,7 +74,7 @@ export async function checkSchemaDrift(
 export function boundSchemaNames(cfg: Config, hash: string): string[] {
   if (!cfg.schemaFieldAliases?.[hash]) return [];
   return UNIQUE_SCHEMAS
-    .filter((entry) => cfg.schemaHashes[entry.key] === hash)
+    .filter((entry) => (cfg.schemaIdentities?.[entry.key] ?? cfg.schemaHashes[entry.key]) === hash)
     .map((entry) => entry.schema.schema.descriptive_name);
 }
 
@@ -222,8 +208,10 @@ export function validateConfigShape(cfg: Config): string[] {
       issues.push(`schemaHashes["${type}"] is missing`);
       continue;
     }
-    if (!/^[0-9a-f]{64}$/i.test(h)) {
-      issues.push(`schemaHashes["${type}"] "${h}" is not a 64-char hex string`);
+    const schema = UNIQUE_SCHEMAS.find((entry) => entry.key === type);
+    const runtimeName = schema ? `${OWNER_APP_ID}/${schema.schema.schema.name}` : "";
+    if (!/^[0-9a-f]{64}$/i.test(h) && h !== runtimeName) {
+      issues.push(`schemaHashes["${type}"] is neither a definition hash nor its owned schema name`);
     }
   }
   return issues;
