@@ -35,7 +35,7 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
   const result = {...value};
   const aliases = profile(value, profiles);
   if (aliases) {
-    for (const key of ["fields", "fields_and_values", "additional_fields"]) {
+    for (const key of ["fields", "fields_and_values", "additional_fields", "record"]) {
       const fields = value[key];
       if (Array.isArray(fields)) result[key] = fields.map((field) => typeof field === "string" ? rename(field, aliases, true) : field);
       else if (object(fields)) result[key] = renameObject(fields as ObjectValue, aliases, true);
@@ -44,6 +44,7 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
     const expected = object(value.expected);
     if (expected && typeof expected.field === "string") result.expected = {...expected, field:rename(expected.field, aliases, true)};
   }
+  if (object(value.mutation)) result.mutation = encodeItem(value.mutation, profiles);
   for (const key of ["queries", "mutations", "keys", "legs"]) {
     if (Array.isArray(value[key])) result[key] = (value[key] as unknown[]).map((item) => encodeItem(item, profiles));
   }
@@ -68,7 +69,29 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
   return result;
 }
 export function encodeFieldRequest(path: string, body: unknown, profiles: FieldAliasProfiles = {}): unknown {
-  return dataRoute.test(path) ? encodeItem(body, profiles) : body;
+  if (!dataRoute.test(path) && path !== "/api/db/put-blob") return body;
+  const encoded = encodeItem(body, profiles);
+  const value = object(encoded);
+  if (path === "/api/query" && value) delete value.fields;
+  if (path === "/api/queries/batch" && Array.isArray(value?.queries)) {
+    for (const item of value.queries) {
+      const query = object(item);
+      if (query) delete query.fields;
+    }
+  }
+  return encoded;
+}
+function projectQueryReply(reply: unknown, fields: unknown): unknown {
+  const value = object(reply);
+  if (!value || !Array.isArray(fields)) return reply;
+  if (Array.isArray(value.results)) {
+    return { ...value, results: value.results.map((item) => {
+      const row = object(item);
+      const values = object(row?.fields);
+      return values ? { ...row, fields: Object.fromEntries(Object.entries(values).filter(([name]) => fields.includes(name))) } : item;
+    }) };
+  }
+  return value.data ? { ...value, data: projectQueryReply(value.data, fields) } : value;
 }
 export function decodeFieldReply(path: string, request: unknown, reply: unknown, profiles: FieldAliasProfiles = {}): unknown {
   if (!dataRoute.test(path)) return reply;
@@ -77,16 +100,18 @@ export function decodeFieldReply(path: string, request: unknown, reply: unknown,
   if (input && Array.isArray(input.queries) && output && Array.isArray(output.results)) {
     return {...output, results:output.results.map((item, index) => {
       const query = object((input.queries as unknown[])[index]);
-      return decodeItem(item, profiles, query ? profile(query, profiles) : undefined);
+      const decoded = decodeItem(item, profiles, query ? profile(query, profiles) : undefined);
+      const response = object(decoded);
+      return response ? { ...response, response: projectQueryReply(response.response, query?.fields) } : decoded;
     })};
   }
-  return decodeItem(reply, profiles, input ? profile(input, profiles) : undefined);
+  const decoded = decodeItem(reply, profiles, input ? profile(input, profiles) : undefined);
+  return path === "/api/query" ? projectQueryReply(decoded, input?.fields) : decoded;
 }
 export function fieldAliasTransport(inner: Transport, profiles: FieldAliasProfiles = {}): Transport {
   return {
     target:inner.target,
     async send(method, path, options) {
-      if (!Object.keys(profiles).length) return inner.send(method, path, options);
       const body = options?.body;
       const result = await inner.send(method, path, {...options, body:encodeFieldRequest(path, body, profiles)});
       return {...result, body:decodeFieldReply(path, body, result.body, profiles)};

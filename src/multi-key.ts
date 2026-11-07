@@ -7,6 +7,7 @@ export const MULTI_KEY_MODEL = "multi-key-v1" as const;
 export function ownedSchemas() {
   return UNIQUE_SCHEMAS.map((entry) => {
     const schema = structuredClone(entry.schema.schema);
+    if (schema.name === "BrainBodyFile" || schema.name === "BrainAttachmentFile") schema.file_required = true;
     const ordered = (): NonNullable<SchemaDefinition["alternate_keys"]>[string] => ({
       hash_literal: "all", range_separator: "#", range_parts: [
         { field: "updated_at", format: "reverse_time_millis" }, { field: "slug" },
@@ -18,8 +19,24 @@ export function ownedSchemas() {
         ...ordered(), hash_literal: undefined, hash_field: "design_slug", missing: "omit", omit_empty_hash: true,
       };
     }
+    const rangeField = schema.key.range_field;
+    schema.record_keys = {
+      primary: schema.schema_type === "HashRange"
+        ? { kind: "hash_range", range_type: (rangeField && schema.field_types[rangeField]) || "String" }
+        : { kind: "hash" },
+      alternates: Object.fromEntries(Object.entries(schema.alternate_keys ?? {}).map(([name, key]) => [
+        name, { kind: "hash_range", range_type: "String", ...(key.missing === "omit" ? { allow_absent: true } : {}) },
+      ])),
+    };
     return { keys: schemaConfigKeys(entry), schema };
   });
+}
+
+// The legacy definitions above are app-local recipes for computing addresses.
+// The node receives only the explicit record-key shapes.
+export function explicitKeyDeclaration(schema: SchemaDefinition) {
+  const { key: _key, alternate_keys: _alternateKeys, ...definition } = schema;
+  return definition;
 }
 
 export type NamedRow = QueryRow & { matched_key: { hash: string; range: string } };

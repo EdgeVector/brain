@@ -1,5 +1,6 @@
 import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
-import { alternateKeyWire } from "./alternate-key-wire.ts";
+import { coordinateId, expectationMatches, recordOperation, type RecordPreimage } from "./complete-record.ts";
+import { explicitKeyDeclaration, ownedSchemas } from "./multi-key.ts";
 import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
 import { RECORD_BUDGET_BYTES, RECORD_CAP_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 export { QUERY_PAGE_SIZE };
@@ -27,7 +28,6 @@ import { isAbsolute, join } from "node:path";
 
 import {
   CapabilityDeniedError,
-  CasConflictError,
   LastDbClient,
   PermissionDeniedError,
   RequestRejectedError,
@@ -43,9 +43,7 @@ import {
   ConsentRequestNotFoundError,
   capabilityStoreKey,
   type CapabilityStore as SdkCapabilityStore,
-  type CasExpectation as SdkCasExpectation,
   type ConsentScope,
-  type JsonValue as SdkJsonValue,
   type KeyValue as SdkKeyValue,
   type QueryFilter as SdkQueryFilter,
   type QueryResult as SdkQueryResult,
@@ -629,6 +627,8 @@ export type BatchMutationOp = {
   keyHash: string;
   keyRange?: string;
   fields: Record<string, unknown>;
+  // A derived locator can be recreated from its deterministic key.
+  replaceIfPresent?: true;
   expected?:
     | { type: "absent"; field: string }
     | { type: "value"; field: string; value: string };
@@ -1092,40 +1092,84 @@ export function newNodeClient(opts: {
   // NodeOwner (or, under enforcement, 403s with `consent_required`). The
   // provider is resolved per write so a CapabilitySession re-acquire is
   // picked up without rebuilding the client.
+  const recordSchemas = new Map(ownedSchemas().flatMap(({ schema }) => [
+    [schema.name, schema] as const,
+    [`brain/${schema.name}`, schema] as const,
+  ]));
+
+  const writeHeaders = (): Record<string, string> => {
+    const blob = capability?.() ?? null;
+    return blob ? {
+      [APP_CAPABILITY_HEADER]: blob,
+      [CAPABILITY_TS_HEADER]: String(Math.floor(Date.now() / 1000)),
+    } : {};
+  };
+
+  const readPreimages = async (ops: BatchMutationOp[]) => {
+    const grouped = Map.groupBy(ops, (op) => op.schemaHash);
+    const queries = Array.from(grouped).flatMap(([schema, group]) =>
+      Array.from({ length: Math.ceil(group.length / 64) }, (_, index) => {
+        const keys = group.slice(index * 64, (index + 1) * 64);
+        return {
+          schema_name: schema, limit: keys.length,
+          filter: { HashRangeKeys: keys.map((op) => [op.keyHash, op.keyRange ?? ""]) },
+        };
+      }),
+    );
+    const selected = new Set(ops.map((op) => coordinateId(op.schemaHash, op.keyHash, op.keyRange)));
+    const found = new Map<string, RecordPreimage>();
+    for (let start = 0; start < queries.length; start += 64) {
+      const batch = queries.slice(start, start + 64);
+      const reply = await callJsonOk("/api/queries/batch", "POST", { queries: batch }) as {
+        results?: Array<{ status: number; response: { results?: RecordPreimage[]; has_more?: boolean } }>;
+      };
+      if (!Array.isArray(reply.results) || reply.results.length !== batch.length) {
+        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an incomplete preimage batch." });
+      }
+      for (const [index, item] of reply.results.entries()) {
+        if (item.status !== 200 || item.response.has_more !== false || !Array.isArray(item.response.results)) {
+          throw new BrainError({ code: "record_read_incomplete", message: "LastDB could not confirm a complete record preimage." });
+        }
+        for (const row of item.response.results) {
+          const id = coordinateId(batch[index]!.schema_name, row.key.hash, row.key.range);
+          if (!selected.has(id) || found.has(id) || !row.fields || !row.alternates || !/^[a-f0-9]{64}$/.test(row.revision)) {
+            throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected record preimage." });
+          }
+          found.set(id, row);
+        }
+      }
+    }
+    return found;
+  };
+
+  const completeOperations = async (ops: BatchMutationOp[], durable: boolean) => {
+    const preimages = await readPreimages(ops);
+    return ops.flatMap((op) => {
+      const schema = recordSchemas.get(op.schemaHash);
+      if (!schema) throw new BrainError({ code: "schema_unavailable", message: "Brain cannot resolve this record schema." });
+      const current = preimages.get(coordinateId(op.schemaHash, op.keyHash, op.keyRange));
+      if (!expectationMatches(op, current)) {
+        throw new BrainError({ code: "cas_conflict",
+          message: `The ${schema.name} ${op.mutationType} precondition did not hold (${current ? "record present" : "record absent"}, ${op.expected?.type ?? "no field guard"}${op.expected ? ` ${op.expected.field}` : ""}).`,
+        });
+      }
+      if (op.mutationType === "delete" && !current) return [];
+      const request = recordOperation(op, schema, current, durable);
+      assertWriteFitsRecordBudget({ ...op, fields: request.record });
+      return [request];
+    });
+  };
+
   const mutate = async (
     kind: "create" | "update" | "delete",
     schemaHash: string,
     fields: Record<string, unknown>,
     keyHash: string,
     keyRange?: string,
-    expected?: SdkCasExpectation,
+    expected?: BatchMutationOp["expected"],
   ): Promise<void> => {
-    assertWriteFitsRecordBudget({ mutationType: kind, schemaHash, keyHash, keyRange, fields });
-    const blob = capability?.() ?? null;
-    verbose(`→ NODE POST /api/mutation (sdk) schema=${schemaHash} type=${kind}`);
-    try {
-      await withSessionRepair(() =>
-        sdkClient(blob).mutate(schemaHash, {
-          mutationType: kind,
-          ...(expected !== undefined ? { expected } : {}),
-          fields: fields as Record<string, SdkJsonValue>,
-          // `range: null` is the Hash-schema key. A HashRange schema
-          // (RecordListEntry) addresses ONE row as (hash, range), which is what
-          // lets a put patch a single record instead of rewriting a whole type.
-          key: { hash: keyHash, range: keyRange ?? null },
-        }),
-      );
-      verbose(`← NODE POST /api/mutation status=200`);
-    } catch (err) {
-      if (err instanceof CasConflictError) {
-        throw new BrainError({
-          code: "cas_conflict",
-          message: `Node refused a guarded write on schema ${schemaHash.slice(0, 12)}…: the compare-and-set precondition did not hold.`,
-          cause: err,
-        });
-      }
-      throw mapSdkDataError(err, url, "POST", "/api/mutation", socketPath);
-    }
+    const [request] = await completeOperations([{ mutationType: kind, schemaHash, fields, keyHash, keyRange, expected }], false);
+    if (request) await callJsonOk("/api/mutation", "POST", request, writeHeaders());
   };
 
   const queryPageSdk = async (
@@ -1457,23 +1501,27 @@ export function newNodeClient(opts: {
     },
     async declareAppSchema(appId, schema) {
       if (canonicalVocabulary) await requireCanonicalHome();
+      if (!schema.record_keys) {
+        const current = recordSchemas.get(schema.name);
+        if (!current) throw new BrainError({ code: "schema_unavailable", message: "Brain cannot declare this record schema." });
+        schema = { ...schema, record_keys: current.record_keys, file_required: current.file_required };
+      }
       const local = schema;
       if (canonicalVocabulary) schema = canonicalSchema(local);
-      if (schema.alternate_keys !== undefined) schema = { ...schema, alternate_keys: alternateKeyWire(schema.alternate_keys) };
-      const body = await callJsonOk("/api/apps/declare-schema", "POST", {
-        app_id: appId,
-        schema,
+      const body = await callJsonOk("/api/schemas/declare", "POST", {
+        namespace: appId,
+        schema: explicitKeyDeclaration(schema),
       });
       const b = body as Record<string, unknown>;
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
-      const schemaName = typeof b.schema === "string" ? b.schema : "";
+      const schemaName = typeof b.schema_name === "string" ? b.schema_name : "";
       const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
       // An API 13+ node owns every declared schema (lastdb #803); the receipt names it exactly.
       if (!identityHash || !/^[a-f0-9]{64}$/.test(identityHash)
         || b.app_id !== appId || b.schema_name !== `${appId}/${local.name}`) {
         throw new BrainError({ code: "owned_schema_receipt_invalid", message: "The declaration did not confirm the exact owned app schema." });
       }
-      const resolution = typeof b.resolution === "string" ? b.resolution : "";
+      const resolution = typeof b.resolution === "string" ? b.resolution : "link";
       if (!canonical || !schemaName || !resolution) {
         throw new BrainError({
           code: "app_schema_declare_bad_response",
@@ -1535,7 +1583,7 @@ export function newNodeClient(opts: {
           fields,
           keyHash,
           keyRange,
-          expected as SdkCasExpectation,
+          expected,
         );
         return "applied";
       } catch (err) {
@@ -1546,35 +1594,19 @@ export function newNodeClient(opts: {
       }
     },
     async mutateBatch(ops, options) {
-      if (ops.length === 0) {
+      const mutations = ops.length ? await completeOperations(ops, options?.durability === "durable") : [];
+      if (mutations.length === 0) {
         return {
           mutationIds: [],
-          count: 0,
+          count: ops.length,
           backgroundTasksDrained: true,
           convergencePending: false,
         };
       }
-      // Check every op first: one refused record refuses the whole batch unsent.
-      for (const op of ops) assertWriteFitsRecordBudget(op);
-      const blob = capability?.() ?? null;
-      const extraHeaders: Record<string, string> = {};
-      if (blob) {
-        extraHeaders["X-App-Capability"] = blob;
-        extraHeaders["X-Capability-Ts"] = String(Math.floor(Date.now() / 1000));
-      }
+      const extraHeaders = writeHeaders();
       verbose(`→ NODE POST /api/mutations/batch count=${ops.length}`);
       const requestBody = {
-        mutations: ops.map((op) => ({
-          type: "mutation",
-          schema: op.schemaHash,
-          fields_and_values: op.fields,
-          key_value: { hash: op.keyHash, range: op.keyRange ?? null },
-          mutation_type: op.mutationType,
-          ...(op.expected ? { expected: op.expected } : {}),
-          ...(options?.durability === "durable"
-            ? { durability: "durable" as const }
-            : {}),
-        })),
+        mutations,
         convergence: "async",
       };
       // A durable write has ambiguous state after any error. Send it once and
@@ -3023,6 +3055,9 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
 
 export function mapNodeError(status: number, body: unknown, path: string): BrainError {
   const errCode = bodyError(body);
+  if (status === 409 && errCode === "cas_conflict") {
+    return new BrainError({ code: "cas_conflict", message: "The record revision changed before the write." });
+  }
   const msg = bodyMessage(body);
   const ctx: NodeErrorContext = {
     status,

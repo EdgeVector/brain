@@ -1,11 +1,6 @@
 // `brain delete <slug> [--type T]` — delete a record.
 //
-// One mutation call carries the product tombstone and the page changes.
-// The call updates the product fields to the tombstone tag, then deletes
-// the product key. The node applies that update first and the delete after
-// it, so a later get misses the row. The batch ack is success. A missing
-// batch client, a batch over the cap, or a failed batch fails the command
-// before any success line.
+// One durable mutation batch deletes the record and updates its related pages.
 
 import { BrainError, type NodeClient, type Verbose } from "../client.ts";
 import { readStoredPage } from "../backlink-index.ts";
@@ -16,7 +11,6 @@ import { HEAD_RANGE, planRecordListSide, readPageChain } from "../list-page.ts";
 import {
   buildRecordFields,
   normalizeSlug,
-  nowIso,
   NOT_FOUND_TYPED,
   resolveBySlug,
   TOMBSTONE_TAG,
@@ -42,19 +36,17 @@ export type DeleteOptions = {
   // Structured-output sink, mirroring the read commands' `onResult`: fires
   // once on the success path with the SAME resolved `type`/`slug` the printed
   // `deleted <type> <slug>` line uses, so the MCP `structuredContent` can't
-  // drift from the human text. `soft` stays `true` because the CLI still
-  // stamps a tombstone tag; native LastDB Delete also runs and get misses.
+  // drift from the human text.
   onResult?: (payload: DeleteResult) => void;
 };
 
 // The structured payload the MCP `brain_delete` tool returns in
 // `structuredContent` (mirrors the printed `deleted <type> <slug>` line).
-// `soft` is invariant `true` on the payload, not in the printed text.
 export type DeleteResult = {
   action: "deleted";
   type: RecordType;
   slug: string;
-  soft: true;
+  soft: false;
 };
 
 // The Task design key returns one bounded page. Do not list every task.
@@ -152,7 +144,6 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
     cfg: opts.cfg,
     type,
     slug,
-    tombstoneFields: buildTombstoneFields(type, slug, record.created_at, nowIso()),
     side: listSide,
   });
   const indexNote = formatIndexNotes(removed.indexNotes);
@@ -160,7 +151,7 @@ export async function deleteRecord(opts: DeleteOptions): Promise<void> {
   print(`deleted ${type} ${slug}${indexNote}`);
   // Emit the structured payload from the SAME resolved `type`/`slug` the
   // printed line uses (one source of truth — see the read commands).
-  opts.onResult?.({ action: "deleted", type, slug, soft: true });
+  opts.onResult?.({ action: "deleted", type, slug, soft: false });
 }
 
 // ── Filter-mode (bulk) delete ────────────────────────────────────────────
@@ -391,12 +382,6 @@ export async function deleteByFilter(
         cfg: opts.cfg,
         type: m.type,
         slug,
-        tombstoneFields: buildTombstoneFields(
-          m.type,
-          slug,
-          resolved.record.created_at,
-          nowIso(),
-        ),
         side: listSide,
       });
       const indexNote = formatIndexNotes(removed.indexNotes);
