@@ -627,6 +627,8 @@ export type BatchMutationOp = {
   keyHash: string;
   keyRange?: string;
   fields: Record<string, unknown>;
+  // A derived locator can be recreated from its deterministic key.
+  replaceIfPresent?: true;
   expected?:
     | { type: "absent"; field: string }
     | { type: "value"; field: string; value: string };

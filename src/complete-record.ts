@@ -41,7 +41,7 @@ export function fileOperation(schema: string, hash: string, fields: Fields, curr
 }
 
 export function expectationMatches(op: BatchMutationOp, current: RecordPreimage | undefined): boolean {
-  if (op.mutationType === "create" && current) return false;
+  if (op.mutationType === "create" && current && !op.replaceIfPresent) return false;
   if (op.mutationType === "update" && !current) return false;
   if (op.expected?.type === "absent") return current?.fields[op.expected.field] == null;
   if (op.expected?.type === "value") return current?.fields[op.expected.field] === op.expected.value;

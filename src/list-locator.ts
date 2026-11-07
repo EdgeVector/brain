@@ -79,6 +79,7 @@ export function locatorMutations(cfg: Config, loc: Locator): BatchMutationOp[] {
   if (!loc.deleted || loc.compact) {
     ops.push({ mutationType: loc.deleted ? "delete" : loc.compact ? "update" : "create",
       schemaHash: compact, keyHash: compactKey(key),
+      replaceIfPresent: true,
       fields: loc.deleted ? {} : { bcl_page: loc.pageId },
     });
   }
