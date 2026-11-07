@@ -5,7 +5,7 @@
 //   1. On startup, check the OS keychain for an existing capability for this
 //      app_id + node. If absent or invalid → request consent.
 //   2. POST /api/apps/request-consent {app_id:"brain", scope:"wildcard"} → request_id.
-//   3. Print: "First-run setup — run: `folddb consent grant brain` …".
+//   3. Print: "First-run setup — run: `the remote node approval flow` …".
 //   4. Poll GET /api/apps/consent-status/{request_id} every 2s.
 //   5. On 200 granted → store the base64 capability blob in the keychain.
 //   6. On 403 denied / 408 expired → surface; offer retry.
@@ -27,7 +27,7 @@
 // FLAGS (`capabilityDenialReaction`). What stays brain's own is the UX
 // orchestration: the consent handshake loop (prints, the inline-grant hook,
 // the non-TTY fast-fail), brain-worded `surface` messages (they name
-// `folddb consent grant brain`), and the BrainError code vocabulary.
+// `the remote node approval flow`), and the BrainError code vocabulary.
 
 import {
   capabilityDenialReaction,
@@ -136,7 +136,7 @@ type Reaction = {
  * (discard / re-acquire / retry-once) come from the SDK's
  * `capabilityDenialReaction` — the canonical port of this table — while the
  * `surface` strings stay brain's own: they name brain and the exact
- * remediation command (`folddb consent grant brain`) a user of THIS app
+ * remediation command (`the remote node approval flow`) a user of THIS app
  * should run, which a generic SDK message cannot.
  */
 export function reactionFor(
@@ -167,8 +167,7 @@ function brainSurfaceFor(
   switch (reason) {
     case "capability_revoked":
       return (
-        "brain's access to this node was revoked. Ask the node owner to re-grant: " +
-        "`lastdb consent grant brain`."
+        "Brain's remote access was revoked. Ask the target node owner to approve access again."
       );
     case "capability_out_of_scope":
       return (
@@ -232,7 +231,7 @@ export type ConsentTransport = {
  * Hook invoked once `request-consent` has returned 202, before polling
  * begins. The default prints the "First-run setup — run: …" instruction so a
  * second-terminal owner can grant. `brain init`'s inline-consent flow
- * overrides this to shell out to `folddb consent grant <app_id> --yes`
+ * overrides this to shell out to `the remote node approval flow`
  * directly, eliminating the two-terminal dance on the brew happy path.
  */
 export type OnConsentRequested = (ctx: {
@@ -258,7 +257,7 @@ export type AcquireOptions = {
   /**
    * Treat this process as interactive. Default: `process.stdin.isTTY`. The
    * manual-fallback branch (no `onConsentRequested`) needs a human in another
-   * terminal to run `folddb consent grant`; in a non-interactive shell — the
+   * terminal to run `the remote node approval flow`; in a non-interactive shell — the
    * agent/CI install path — the poll would wait the full consent TTL (~5 min)
    * for a grant that can never arrive. When this returns false in the manual
    * fallback, acquireCapability fast-fails with `consent_required_non_interactive`
@@ -282,15 +281,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
   const maxWaitMs = opts.maxWaitMs ?? 5 * 60 * 1000; // matches the node's 5-min consent TTL
   const isTty = opts.isTty ?? defaultIsTty;
 
-  // Manual-fallback fast-fail: with no `onConsentRequested`, this branch's
-  // only way to land a grant is "human runs `folddb consent grant` in another
-  // terminal" — meaningless in a non-interactive shell (agent / CI / piped
-  // stdin). Without this gate, the agent install path freezes for the full
-  // 5-min consent TTL on first write. Mirrors the same isTty pin
-  // `establishConsentInline` already uses to skip the prompt at init time.
-  // The `onConsentRequested` branch (inline `init --grant-consent` shelling
-  // out to `folddb consent grant <appId> --yes`) is unaffected — that path
-  // can complete the grant without a TTY and the poll is just confirming.
+  // Remote consent needs a human approval flow when no callback is supplied.
   if (opts.onConsentRequested === undefined && !isTty()) {
     throw new BrainError({
       code: "consent_required_non_interactive",
@@ -302,35 +293,11 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       message:
         `No write capability is cached for "${appId}" on this node, ` +
         `and brain can't request a grant non-interactively.`,
-      // CLI `hint` (human at a terminal) — UNCHANGED. Names the headless
-      // one-shot and the local/dogfood enforcement escape hatch, both correct
-      // for the human path and only shown when no `agentHint` is set.
-      hint:
-        `Run \`brain init --grant-consent\` once, then retry — it creates the consent request, grants it, and stores the capability in one headless step. ` +
-        `(A bare \`lastdb consent grant ${appId}\` only works once a pending request exists, i.e. an interactive write is already polling — it fails with "no pending consent request" on a fresh node.) ` +
-        `Set BRAIN_APP_IDENTITY_ENFORCE=off for local/dogfood stacks with enforcement disabled.`,
-      // Agent-voiced remediation (MCP) — names the OWNER action in agent terms,
-      // with no "shell" and no BRAIN_APP_IDENTITY_ENFORCE dogfood note the
-      // agent can't act on. This is the first hard wall an agent hits on a
-      // fresh owner's node (init headlessly skips the consent prompt).
-      agentHint:
-        `The node owner must grant brain consent before writes land. ` +
-        `Ask them to run \`brain init --grant-consent\` (or \`lastdb consent grant ${appId} --yes\`) in their terminal, then retry.`,
+      hint: "Ask the target node owner to approve remote Brain access, then run `brain init`.",
+      agentHint: "The target node owner must approve remote Brain access before this operation can continue.",
     });
   }
 
-  // Sibling-error audit (for the agent/MCP write surface): everything below
-  // this point is only reached when `onConsentRequested` is set (the inline
-  // `init --grant-consent` flow) or `isTty()` is true (a human at a terminal).
-  // The MCP write path supplies neither — `CapabilitySession.acquire` calls
-  // `acquireCapability` with no `onConsentRequested` and the default (non-TTY)
-  // `isTty`, so it ALWAYS fast-fails at the `consent_required_non_interactive`
-  // throw above and never reaches `app_not_registered`, the consent poll-loop
-  // denials/expiries, or the capability-integrity errors. Those are CLI-/inline-
-  // only, so their CLI `hint`s are the right voice and an `agentHint` would be
-  // unreachable on the agent channel. The single error an MCP agent can hit on
-  // a consent-pending write is the one above — which is why it's the one that
-  // carries `agentHint`.
   const req = await opts.transport.requestConsent(appId, scope);
   if (req.status === 404) {
     throw new BrainError({
@@ -338,9 +305,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       message:
         `Node rejected consent request: app "${appId}" is not registered with schema_service.`,
       hint:
-        "The app must be published before it can request consent " +
-        "(`folddb-dev app publish --id brain`). On a fresh node, run the app_identity " +
-        "migration runbook first.",
+        "Ask the target node owner to check the installed Brain app with `lastdb app status brain`.",
     });
   }
   if (req.status === 400) {
@@ -363,19 +328,13 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
     });
   }
 
-  // Step 3: tell the user what to do, then frame the polling line to match.
-  // The inline flow (used by `brain init --grant-consent`) has already shelled
-  // out to `folddb consent grant`, so the poll is just confirming the grant
-  // landed — printing "Waiting for you to grant access" there would contradict
-  // the "Granted access…" line the inline grant just printed. The manual
-  // fallback genuinely needs the human to act in another terminal, so it keeps
-  // the original wording.
+  // A caller may coordinate approval before the consent poll begins.
   const pollSeconds = Math.round(pollIntervalMs / 1000);
   if (opts.onConsentRequested) {
     await opts.onConsentRequested({ appId, requestId, print });
     print(`Confirming the grant landed (polling every ${pollSeconds}s)…`);
   } else {
-    print(`First-run setup — run: \`lastdb consent grant ${appId}\` in your terminal.`);
+    print(`Ask the target node owner to approve access for ${appId}.`);
     print(`Waiting for you to grant access to this node (polling every ${pollSeconds}s)…`);
   }
 
@@ -438,14 +397,14 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       throw new BrainError({
         code: "consent_denied",
         message: `The node owner denied brain's request for access.`,
-        hint: `Retry with another \`lastdb consent grant ${appId}\` once you're ready to allow it.`,
+        hint: "Ask the target node owner to approve access when ready.",
       });
     }
     if (res.status === 408) {
       throw new BrainError({
         code: "consent_expired",
         message: `The consent request expired before it was granted (5-minute window).`,
-        hint: `Re-run the brain command to start a fresh request, then \`lastdb consent grant ${appId}\`.`,
+        hint: "Re-run the Brain command and ask the target node owner to approve the new request.",
       });
     }
     if (res.status === 404) {
@@ -477,7 +436,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
       throw new BrainError({
         code: "consent_timeout",
         message: `Timed out after ${Math.round(maxWaitMs / 1000)}s waiting for consent to be granted.`,
-        hint: `Run \`lastdb consent grant ${appId}\` and retry the command.`,
+        hint: "Ask the target node owner to approve access, then retry.",
       });
     }
     await sleep(pollIntervalMs);

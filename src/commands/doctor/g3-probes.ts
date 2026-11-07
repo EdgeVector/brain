@@ -1,4 +1,4 @@
-import { BrainError, recordTypeForHash, stripDoctorTip, type NativeIndexHit, type NodeClient, type Verbose } from "../../client.ts";
+import { isLoopbackNodeUrl, BrainError, recordTypeForHash, stripDoctorTip, type NativeIndexHit, type NodeClient, type Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
 import { decodeCapabilityBlob, BRAIN_APP_ID, tokenIntegrityValid, type CapabilityStore } from "../../capability.ts";
 import { listRecords, nowIso, verifyRecordVisible, TOMBSTONE_TAG } from "../../record.ts";
@@ -92,7 +92,7 @@ export async function runEmbeddingProbe(
         detail: stripDoctorTip(err.message),
         fix:
           err.hint ??
-          "restart the node so it re-fetches the ONNX file (homebrew: `lastdb daemon stop && lastdb daemon start`)",
+          "run `lastseek status` and `lastseek doctor` to inspect the semantic index and model",
       };
     }
     // 503 / 404 from this route — the node is CORRECT and there is simply no
@@ -494,6 +494,25 @@ export async function runWriteReadyProbe(
   store: CapabilityStore,
   verbose: Verbose | undefined,
 ): Promise<CheckResult> {
+  if (isLoopbackNodeUrl(nodeUrl)) {
+    try {
+      const identity = await node.autoIdentity();
+      return {
+        name: "write-ready",
+        ok: identity.provisioned,
+        detail: identity.provisioned
+          ? "owner socket confirms access to the provisioned node"
+          : "the node needs initial setup",
+      };
+    } catch (error) {
+      return {
+        name: "write-ready",
+        ok: false,
+        detail: `owner socket access failed: ${stripDoctorTip(errMsg(error))}`,
+        fix: "check `lastdb status` and the configured owner socket",
+      };
+    }
+  }
   // Client-side enforcement OFF means brain won't attach capability headers,
   // and on a node ALSO running enforcement-off writes land as NodeOwner with
   // no consent step at all. We can't introspect the node's setting, so we
@@ -610,9 +629,7 @@ export async function runWriteReadyProbe(
       ok: false,
       detail: `node does not recognise app "${BRAIN_APP_ID}"${registrationDetail ? ` (${registrationDetail})` : ""}`,
       fix:
-        "the node's app registry has no brain entry — every write will fail with `app_not_registered`. " +
-        "Restart the daemon to warm the registry, or wait for the app_identity publish path to land if you're mid-migration " +
-        "(`folddb-dev app publish --id brain` on the dev side).",
+        "ask the target node owner to check `lastdb app status brain` and its signed registry installation.",
     };
   }
   if (!capabilityValid) {
@@ -621,9 +638,7 @@ export async function runWriteReadyProbe(
       ok: false,
       detail: capabilityDetail,
       fix:
-        "run `brain init --grant-consent` to grant consent and store a capability — it works whether or not you have an interactive terminal (bare `brain init` skips the consent prompt without a TTY, so it no-ops here and loops). " +
-        "It's idempotent, so it's safe interactively too (or run any write command — they all run the consent handshake on first use). " +
-        "On the daemon side the grant is confirmed with `lastdb consent grant brain`.",
+        "ask the target node owner to approve remote access, then run `brain init`.",
     };
   }
   return {

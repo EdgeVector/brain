@@ -28,6 +28,7 @@ import { BrainError, type CapabilityProvider, type Verbose } from "./client.ts";
 
 type CapabilitySessionOptions = {
   nodeUrl: string;
+  ownerSocket?: boolean;
   store: CapabilityStore;
   transport: ConsentTransport;
   appId?: string;
@@ -72,6 +73,7 @@ export class CapabilitySession {
    * no-op.
    */
   async ensureCapability(): Promise<void> {
+    if (this.opts.ownerSocket) return;
     if (this.blob !== null) return;
     const cached = await this.loadValidCached();
     if (cached !== null) {
@@ -130,6 +132,7 @@ export class CapabilitySession {
    * loop against a node that keeps rejecting.
    */
   async runWrite<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.opts.ownerSocket) return fn();
     await this.ensureCapability();
     let reacquired = false;
     let retried = false;
@@ -198,6 +201,7 @@ export class CapabilitySession {
    * Re-acquire and retry-once each happen AT MOST once.
    */
   async runSearch<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.opts.ownerSocket) return fn();
     await this.loadCachedIfPresent();
     let reacquired = false;
     let retried = false;

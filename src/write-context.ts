@@ -1,32 +1,10 @@
 import type { FieldAliasProfiles } from "./field-alias-transport.ts";
-// Capability-aware NodeClient factories for write commands AND for search.
-//
-// `newWriteNodeClient` returns a NodeClient that behaves exactly like
-// `newNodeClient` for reads, but transparently:
-//   1. acquires a capability (cached → JCS-validated reuse, else consent
-//      handshake) on the FIRST mutation, and
-//   2. attaches `X-App-Capability` + a fresh `X-Capability-Ts` to every
-//      mutation, applying the design's 403-reason contract (discard +
-//      re-acquire, retry-once, or surface) around each write.
-//
-// Write commands (design new / task new / put / link / delete / status update
-// / reindex / migrate) use this instead of `newNodeClient` and need no other
-// change — the capability lifecycle lives entirely here.
-//
-// `newSearchNodeClient` is the read counterpart for `/api/app/search`, which
-// LastDB 0.22.4 moved BEHIND capability enforcement (a header-less search now
-// gets `403 {reason:"capability_required"}` where older nodes bypassed reads).
-// It wraps `search` under the capability contract — best-effort replay of the
-// cached grant, then acquire+retry on a genuine rejection — so `brain ask` /
-// `brain search` and the MCP `brain_ask` / `brain_search` tools keep working
-// on an enforcing node. All OTHER reads (get / list / query / raw) still bypass
-// enforcement on the node, so they stay on the plain `newReadClientFromCfg`.
-//
-// Enforcement is per the node's APP_IDENTITY_ENFORCE flag; when off, the node
-// ignores the headers and both writes and searches land as NodeOwner — so
-// attaching them unconditionally is safe.
+// Local writes and search use the LastDB owner socket. Remote connections
+// reuse their capability cache and handle approval through the target node.
+// Callers share the same node/session interface for both transports.
 
 import {
+  isLoopbackNodeUrl,
   newNodeClient,
   type NodeClient,
   type Verbose,
@@ -107,7 +85,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
   // capability headers). The session is still constructed so `.session` stays
   // a valid handle, but its provider returns null so no headers attach and
   // runWrite never acquires.
-  if (!appIdentityEnforceEnabled()) {
+  if (isLoopbackNodeUrl(opts.baseUrl) || !appIdentityEnforceEnabled()) {
     const plainOpts: Parameters<typeof newNodeClient>[0] = {
       baseUrl: opts.baseUrl,
       userHash: opts.userHash,
@@ -178,7 +156,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
 export function newSearchNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
   const store = opts.store ?? defaultCapabilityStore();
 
-  if (!appIdentityEnforceEnabled()) {
+  if (isLoopbackNodeUrl(opts.baseUrl) || !appIdentityEnforceEnabled()) {
     const plainOpts: Parameters<typeof newNodeClient>[0] = {
       baseUrl: opts.baseUrl,
       userHash: opts.userHash,
@@ -223,6 +201,7 @@ function buildSessionOpts(
 ): ConstructorParameters<typeof CapabilitySession>[0] {
   const sessionOpts: ConstructorParameters<typeof CapabilitySession>[0] = {
     nodeUrl: opts.baseUrl,
+    ownerSocket: isLoopbackNodeUrl(opts.baseUrl),
     store,
     transport: {
       requestConsent: (appId, scope) => getBase().requestConsent(appId, scope),

@@ -676,24 +676,8 @@ const tagResultSchema = z.object({
 });
 
 // ── Cold-capability self-warm (opt-in) ───────────────────────────────────
-// The MCP server is launched with BRAIN_FORCE_FILE_KEYCHAIN=1, so it reads
-// its write capability from the file store (~/.brain/capabilities/), not the
-// OS keychain. `brain init --grant-consent` (the CLI default) warms only the
-// keychain, so the file store stays cold and every MCP write fast-fails with
-// `consent_required_non_interactive` ("No write capability is cached …"). The
-// validated manual fix is `BRAIN_FORCE_FILE_KEYCHAIN=1 brain init
-// --grant-consent`, which warms the SAME file store the server reads.
-//
-// This self-warm path runs that grant automatically on the first cold-cache
-// write — BUT ONLY when the operator opted in via BRAIN_MCP_AUTO_GRANT_CONSENT.
-// Security: auto-grant is no stronger than the owner running the grant by hand.
-// `establishConsentInline(nonInteractiveGrant:true)` reuses the exact same
-// machinery (`defaultRunFolddbGrant` shells out to `folddb consent grant
-// brain --yes`, then `acquireCapability` polls + stores), which still requires
-// an owner-local `folddb` on PATH and the node's master key to be available —
-// the grant fast-fails otherwise. We do NOT touch BRAIN_APP_IDENTITY_ENFORCE.
-// The grant lands in the store `defaultCapabilityStore()` selects, which honors
-// BRAIN_FORCE_FILE_KEYCHAIN — so it warms precisely the store the server reads.
+// Local writes use the owner socket. Remote access can reuse a cached grant
+// or report that the target node owner needs to approve access.
 
 export const MCP_AUTO_GRANT_ENV = "BRAIN_MCP_AUTO_GRANT_CONSENT";
 
@@ -714,24 +698,20 @@ function isColdCapabilityError(err: unknown): boolean {
   return err instanceof BrainError && err.code === "consent_required_non_interactive";
 }
 
-// Production auto-grant: drive the same non-interactive grant `brain init
-// --grant-consent` runs, against the configured node, writing into the store
-// `defaultCapabilityStore()` selects (honoring BRAIN_FORCE_FILE_KEYCHAIN). On
-// any failure (folddb not on PATH, master key unavailable, denial, timeout) it
-// returns false so the original cold-capability error surfaces unchanged —
-// auto-grant never masks a genuine failure with a misleading message.
+// Confirm owner access or reuse an existing remote grant for the MCP caller.
 async function defaultAutoGrant(cfg: Config): Promise<boolean> {
   try {
     const result = await establishConsentInline({
       nodeUrl: cfg.nodeUrl,
       userHash: cfg.userHash,
+      ...(cfg.nodeSocketPath ? { socketPath: cfg.nodeSocketPath } : {}),
       nonInteractiveGrant: true,
       // Swallow the inline grant's human-oriented progress lines — the MCP
       // channel surfaces only the tool result, and a failed grant falls
       // through to the original error below.
       print: () => {},
     });
-    return result.state === "granted_inline" || result.state === "already_granted";
+    return result.state === "owner_socket" || result.state === "granted_inline" || result.state === "already_granted";
   } catch {
     // A genuine grant failure (denial/expiry/transport) — let the caller
     // surface the original cold-capability error rather than this one.

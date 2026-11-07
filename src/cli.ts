@@ -285,23 +285,15 @@ function simpleNewHelp(type: RecordType): string {
 export const COMMAND_HELP: Record<Command, string> = {
   init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
-Probe the node, bootstrap if needed, register every schema, load them,
-persist ~/.brain/config.json with canonical hashes, then prompt once to
-grant brain consent against this node so the first write doesn't stall.
-Idempotent — re-running skips bootstrap and the consent prompt when a
-live capability is already on disk.
+Probe the node, declare Brain schemas, and save ~/.brain/config.json.
+Local access uses the configured LastDB owner socket.
 
-  --node-url             defaults to http://127.0.0.1 — local node via Unix socket (~/.lastdb/data/folddb.sock)
-  --schema-service-url   defaults to the prod cloud Lambda
-                         (https://axo709qs11.execute-api.us-east-1.amazonaws.com)
+  --node-url             defaults to http://127.0.0.1, selecting the local Unix socket
+  --schema-service-url   defaults to the production schema service
   --name                 bootstrap display name (default: brain)
-  --grant-consent, --yes complete the one-time consent grant non-interactively
-                         (no TTY needed). Use this in scripted / CI / agent
-                         installs: init shells out to lastdb consent grant
-                         and polls until the capability is cached. No-op when
-                         a live capability already exists, or under
-                         BRAIN_APP_IDENTITY_ENFORCE=off. Requires the folddb
-                         CLI on PATH (fast-fails with a clear message if not).`,
+  --grant-consent, --yes retained for existing callers. Local access is confirmed
+                         through the owner socket. Remote access requires approval
+                         from the target node owner.`,
   design: simpleNewHelp("design"),
   task: `brain task new <slug> [--title T] [--design D] [--tag T]... [--body STR] [--force] [--json]
 
@@ -716,10 +708,9 @@ Live health checks:
   - node reachable + provisioned
   - schemas loaded into the node
   - schema drift between schemas.ts and the registered Design/Task schemas
-  - write-ready: a valid CapabilityToken is cached for this node AND
-    the node's app registry knows brain (a consent dry-run returns 202
-    rather than 404). FAIL is reported as "write-blocked" with a
-    next-step hint — distinguishes a missing grant from a cold registry.
+  - write-ready: confirm local owner-socket access. Remote nodes check
+    the cached capability and app registration, with a next-step hint
+    when access requires approval.
   - mcp-entrypoint: the \`brain-mcp\` bin (the agent-integration path
     \`claude mcp add brain brain-mcp\`) resolves on PATH. WARN, never
     FAIL, when it's missing — MCP is optional and source checkouts use

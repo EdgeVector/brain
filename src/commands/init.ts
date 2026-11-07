@@ -7,7 +7,7 @@ import { syncOwnedModel } from "../owned-schema-init.ts";
 //   3. declare the owned schemas (owned-schema-init.ts); the node must be
 //      LastDB API 13 or later
 //   4. persist config
-//   5. inline app-identity consent grant when the config enforces it
+//   5. confirm owner-socket access or the remote capability
 //
 // Idempotent. A re-run verifies an existing multi-key config and keeps its
 // pins, and heals URLs that still point at the dead `:9101 / :9102`
@@ -32,7 +32,6 @@ import {
   type EstablishConsentResult,
 } from "./init-consent.ts";
 import { resolvePrintSink } from "../format.ts";
-import { appIdentityEnforceEnabled } from "../write-context.ts";
 
 export type InitOptions = {
   // Optional — when undefined, the resolver below picks either the existing
@@ -48,19 +47,13 @@ export type InitOptions = {
   // Retry controls:
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
-  /**
-   * Drive Step 6's consent grant non-interactively (no TTY required) —
-   * surfaced as `brain init --grant-consent`. Scripted / CI / agent
-   * installs use this to reach a ready-to-write state in one shot. No-op
-   * under BRAIN_APP_IDENTITY_ENFORCE=off (printed clearly) and idempotent
-   * when a live capability is already cached.
-   */
+  /** Preserve the existing init flag while confirming owner-socket access. */
   grantConsent?: boolean;
   // Inline consent controls (Step 6/6). When omitted, init
   // runs the real `establishConsentInline` against the configured node.
   consent?: Pick<
     EstablishConsentOptions,
-    "store" | "transport" | "ask" | "resolveFolddb" | "runFolddbGrant" | "isTty" | "pollIntervalMs" | "sleep" | "maxWaitMs"
+    "store" | "transport" | "isTty" | "pollIntervalMs" | "sleep" | "maxWaitMs"
   >;
 };
 
@@ -231,6 +224,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
   let userHash: string;
   let bootstrapped = false;
+  let recoveredIdentity = false;
   if (identity.provisioned) {
     userHash = identity.userHash;
     print(`[2/${STEPS}] node already provisioned (user_hash=${userHash.slice(0, 8)}…) — skipping bootstrap`);
@@ -257,6 +251,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
         hasUsableExistingConfig(existing)
       ) {
         userHash = existing.userHash;
+        recoveredIdentity = true;
         print(
           `        bootstrap refused (node + auto-identity disagree); reusing existing config userHash=${userHash.slice(0, 8)}… and continuing`,
         );
@@ -271,16 +266,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // definition identity; local mint and the schema_service publish fallback
   // are retired.
   //
-  // `BRAIN_APP_IDENTITY_ENFORCE=off` does NOT change the schema identity.
-  // Enforce-off only governs the WRITE side — no consent step, no capability
-  // headers, writes land as NodeOwner.
-  const enforceOn = appIdentityEnforceEnabled();
   print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} brain schemas`);
-  if (!enforceOn) {
-    print(
-      `        BRAIN_APP_IDENTITY_ENFORCE=off → namespaced brain/* schemas reused; consent + capability headers will be skipped (writes land as NodeOwner)`,
-    );
-  }
   // Existing configs retain their data identities. A fresh home may opt in.
   const loadedBefore = existing ? [] : await probeClient.listLoadedSchemas();
   const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
@@ -298,10 +284,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
   }, existing, canonicalVocabulary);
   writeConfig(config, configPath, priorConfig);
-  const consent = config.appIdentityEnforce === false
-    ? { state: "skipped", reason: "enforce_off" } as const
-    : await establishConsentInline({nodeUrl,userHash,print,verbose,socketPath:nodeSocketPath,
-      nonInteractiveGrant:opts.grantConsent,...opts.consent});
+  const consent = await establishConsentInline({
+    nodeUrl, userHash, print, verbose, socketPath: nodeSocketPath,
+    recoveredIdentity,
+    nonInteractiveGrant: opts.grantConsent, ...opts.consent,
+  });
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
   return { config, bootstrapped, consent };
 }
@@ -351,17 +338,11 @@ export function printNextSteps(
   print(`        → then \`brain doctor --mcp\` to confirm the agent surface boots and serves the brain_* tools. (Doing it by hand instead? \`claude mcp add brain brain-mcp\` then \`brain mcp instructions >> CLAUDE.md\`.)`);
   print(`  Data lives on the node at ${formatNodeTarget(ctx.nodeUrl)} (config: ${ctx.configPath}).`);
 
-  // When consent wasn't established (non-TTY scripted/CI run without
-  // --grant-consent), the first write will need a grant — point at the
-  // one-shot path so the operator isn't surprised mid-script.
+  // Remote approval is performed by the target node owner.
   if (ctx.consent.state === "skipped" && ctx.consent.reason === "non_tty") {
-    print(`  Note: running non-interactively — re-run \`brain init --grant-consent\` to authorize writes in one shot.`);
+    print("  Remote writes require approval from the target node owner before retrying.");
   }
-  if (ctx.consent.state === "skipped" && ctx.consent.reason === "no_folddb_bin") {
-    print(
-      `  Note: \`lastdb\` was not found, so \`--grant-consent\` could not authorize writes. Install the lastdb CLI, then re-run \`brain init --grant-consent\`.`,
-    );
-  }
+
 }
 
 type ProbeResult = Awaited<ReturnType<ReturnType<typeof newNodeClient>["autoIdentity"]>>;
