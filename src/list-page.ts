@@ -1588,6 +1588,7 @@ function mergeListCommits(
       ...last,
       mutationType: existed ? "update" : "create",
       fields: { blp_h: last.keyHash, blp_r: last.keyRange, blp_page: json },
+      expected: (heads[0] ?? last).expected,
     },
     note,
   };
@@ -1633,7 +1634,8 @@ function mergeKeywordCommits(
   if (cards.length === 0) {
     const existed = heads.some((head) => head.expected.type === "value" || head.mutationType === "delete");
     if (!existed) return { head: null, note };
-    return { head: { ...last, mutationType: "delete", fields: {} }, note };
+    // The first member read the page before this plan changed it.
+    return { head: { ...last, mutationType: "delete", fields: {}, expected: (heads[0] ?? last).expected }, note };
   }
   const json = JSON.stringify({ cards: sortKeyword(cards) });
   if (Buffer.byteLength(json) > PAGE_BYTE_CAP) return { head: null, note: note ?? "keyword page" };
@@ -1643,6 +1645,7 @@ function mergeKeywordCommits(
       ...last,
       mutationType: existed ? "update" : "create",
       fields: { blp_h: last.keyHash, blp_r: last.keyRange, blp_page: json },
+      expected: (heads[0] ?? last).expected,
     },
     note,
   };

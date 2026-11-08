@@ -56,6 +56,14 @@ export type PlannedMutation = {
   keyRange?: string;
   fields: Record<string, unknown>;
   projection: ProjectionKind;
+  /**
+   * The value this op's content was planned from. The commit checks it
+   * against the same read it sends from, so a write that landed between the
+   * plan and the commit refuses the batch instead of being overwritten.
+   */
+  expected?:
+    | { type: "absent"; field: string }
+    | { type: "value"; field: string; value: string };
 };
 
 export type ExactProjectionCounts = {
@@ -215,6 +223,9 @@ export async function buildResidentWritePlan(opts: {
       keyHash: opts.next.slug,
       fields: sealed.fields,
       projection: "primary",
+      expected: opts.previous
+        ? { type: "value", field: "updated_at", value: opts.previous.updated_at }
+        : { type: "absent", field: "updated_at" },
     });
   }
 
@@ -302,6 +313,28 @@ export async function buildResidentWritePlan(opts: {
     cfg: opts.cfg,
     listSideInput,
   };
+}
+
+/** A conflict refusal wrote nothing, so the whole read, plan and commit can run again. */
+export const RESIDENT_CONFLICT_ATTEMPTS = 4;
+
+/**
+ * Run one read-plan-commit attempt again when the node or the client refuses it
+ * with `cas_conflict`. The refusal means the batch was not committed, so a
+ * retry is safe. Any other error, or the last refusal, is thrown unchanged.
+ */
+export async function withConflictRetry<T>(attempt: () => Promise<T>): Promise<T> {
+  for (let n = 1; ; n += 1) {
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!(err instanceof BrainError) || err.code !== "cas_conflict" || n >= RESIDENT_CONFLICT_ATTEMPTS) {
+        throw err;
+      }
+      // Jitter spreads out writers that collided on the same shared page.
+      await new Promise((resolve) => setTimeout(resolve, 25 * n + Math.random() * 100));
+    }
+  }
 }
 
 export async function commitResidentWritePlan(opts: {
@@ -589,6 +622,7 @@ function headToOp(head: HeadCommit): PlannedMutation {
     keyRange: head.keyRange,
     fields: head.fields,
     projection: head.replay.kind === "keyword" ? "keyword" : "list-page",
+    expected: head.expected,
   };
 }
 
@@ -733,6 +767,9 @@ async function countMutations(
       keyHash: hash,
       fields: { bln_h: hash, bln_n: next },
       projection: "count",
+      expected: raw === null
+        ? { type: "absent", field: "bln_n" }
+        : { type: "value", field: "bln_n", value: raw },
     });
   }
   return ops;
