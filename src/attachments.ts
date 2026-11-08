@@ -6,21 +6,13 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 //
 //   - `BrainAttachmentIndex` — one internal record per (record_type,
 //     record_slug) that has attachments, keyed `__attidx__<sha256(type:slug)>`
-//     (the TagIndex pattern). Carries the attachment entries as JSON plus a
-//     `filenames` array — the only word-indexed (searchable) surface.
+//     Carries the attachment entries as JSON plus a `filenames` array — the
+//     only word-indexed (searchable) surface.
 //   - `BrainAttachmentFile` — one record per unique content hash (SHA-256 of
-//     the raw file). The bytes are the record's own LastDB file (API 23): one
+//     the raw file). The bytes are the record's own LastDB file: one
 //     `POST /api/db/put-blob` stores the record and its file together, and
 //     `POST /api/db/fetch-blob` reads them by schema and key. Reads are
 //     sha256-verified here before any byte is handed back.
-//   - `BrainAttachmentBlob` — LEGACY v1 stand-in (base64 bytes in a no_index
-//     record field, riding cloud sync as DB bytes). Nothing writes it anymore;
-//     `getAttachmentBlob` still falls back to it for unmigrated content and
-//     `migrateAttachmentsToFilePlane` moves v1 blobs into the file plane and
-//     deletes the stand-in records.
-//
-// The blob plane stays deliberately isolated in this module: CLI verbs, the
-// index schema, and the attachments_json entry shape are identical to v1.
 
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
@@ -31,7 +23,6 @@ import { writeConfig, type Config } from "./config.ts";
 import { nowIso } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 import {
-  ATTACHMENT_BLOB_SCHEMA_KEY,
   ATTACHMENT_FILE_SCHEMA_KEY,
   ATTACHMENT_INDEX_SCHEMA_KEY,
   attachmentFileSchema,
@@ -56,9 +47,6 @@ const INDEX_FIELDS = [
   "created_at",
   "updated_at",
 ];
-
-// Legacy v1 blob record projection (base64 `data` field).
-const BLOB_FIELDS = ["content_hash", "size", "media_type", "data", "created_at"];
 
 export type AttachmentEntry = {
   name: string;
@@ -117,12 +105,9 @@ export function mediaTypeFor(filename: string): string {
   return MEDIA_TYPES[ext] ?? "application/octet-stream";
 }
 
-// Lazy schema declare (the admin-snapshot pattern): installs that ran
-// `brain init` before attachments existed get the index + file schemas
-// minted on first use, without a re-init. Persists the canonical hashes to
-// config. The legacy v1 blob schema is intentionally NOT declared here — an
-// install only has legacy blob records if it already declared that schema
-// (its hash is then already in config), and fresh installs never write it.
+// Lazy schema declare: installs that ran `brain init` before attachments
+// existed get the index and file schemas minted on first use, without a
+// re-init. Persists the canonical hashes to config.
 export async function ensureAttachmentSchemas(
   node: NodeClient,
   cfg: Config,
@@ -377,10 +362,8 @@ export async function putAttachmentBlob(
   return { blobRef: `sha256:${hash}`, deduplicated: false };
 }
 
-// Fetch + integrity-verify blob bytes for a `sha256:<hex>` ref. Prefers the
-// v2 file record (fetch-blob by schema and key), falls back to a legacy v1
-// base64 blob record for unmigrated content. Hash mismatch or missing blob is
-// a hard error — never hand back unverified bytes.
+// Fetch and integrity-verify file bytes for a `sha256:<hex>` ref. Hash
+// mismatch or a missing file is a hard error.
 export async function getAttachmentBlob(
   node: NodeClient,
   cfg: Config,
@@ -408,16 +391,6 @@ export async function getAttachmentBlob(
       const b64 = file && typeof file.bytes_b64 === "string" ? file.bytes_b64 : "";
       const bytes = new Uint8Array(Buffer.from(b64, "base64"));
       const fields = (row.fields ?? {}) as Record<string, unknown>;
-      return verifiedBlob(hash, bytes, stringOf(fields, "media_type"));
-    }
-  }
-
-  const legacySchemaHash = cfg.schemaHashes[ATTACHMENT_BLOB_SCHEMA_KEY];
-  if (legacySchemaHash) {
-    const row = await queryRowByKey(node, legacySchemaHash, BLOB_FIELDS, hash);
-    if (row !== null) {
-      const fields = (row.fields ?? {}) as Record<string, unknown>;
-      const bytes = new Uint8Array(Buffer.from(stringOf(fields, "data"), "base64"));
       return verifiedBlob(hash, bytes, stringOf(fields, "media_type"));
     }
   }
@@ -553,103 +526,4 @@ export function findEntry(
   if (byName) return byName;
   const ref = nameOrRef.startsWith("sha256:") ? nameOrRef : `sha256:${nameOrRef}`;
   return entries.find((e) => e.blob_ref === ref) ?? null;
-}
-
-// ── v1 → v2 migration ──────────────────────────────────────────────────────
-
-export type AttachmentMigrationItem = {
-  blob_ref: string;
-  /** every attachment entry name that references this blob */
-  names: string[];
-  action: "migrated" | "already-file-plane" | "missing";
-  legacyDeleted: boolean;
-};
-
-export type AttachmentMigrationReport = {
-  indexes: number;
-  items: AttachmentMigrationItem[];
-};
-
-// Move record-stored v1 attachment blobs into the file plane: for every blob
-// referenced by an attachment index (optionally scoped to one record), read
-// the legacy base64 record, sha256-verify it, upload through
-// `POST /api/db/put-blob` (creating the BrainAttachmentFile record with its file),
-// and DELETE the legacy stand-in record so its bytes stop riding the DB
-// plane. Idempotent: blobs already in the file plane are skipped (their
-// legacy records are still deleted if present); re-running is safe.
-export async function migrateAttachmentsToFilePlane(opts: {
-  node: NodeClient;
-  cfg: Config;
-  type?: RecordType;
-  slug?: string;
-  verbose?: Verbose;
-}): Promise<AttachmentMigrationReport> {
-  const { node, cfg } = opts;
-  const fileSchemaHash = requireFileSchemaHash(cfg);
-  const legacySchemaHash = cfg.schemaHashes[ATTACHMENT_BLOB_SCHEMA_KEY];
-
-  let indexes: AttachmentIndexRecord[];
-  if (opts.type !== undefined && opts.slug !== undefined) {
-    const one = await readAttachmentIndex(node, cfg, opts.type, opts.slug);
-    indexes = one === null ? [] : [one];
-  } else {
-    const indexSchemaHash = cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY];
-    if (!indexSchemaHash) {
-      return { indexes: 0, items: [] };
-    }
-    const all = await node.queryAll({ schemaHash: indexSchemaHash, fields: INDEX_FIELDS });
-    indexes = all.results.map((row) => indexRowToRecord(row, row.key?.hash ?? ""));
-  }
-
-  // Unique blobs across every in-scope entry (CAS: one upload per hash).
-  const byHash = new Map<string, { names: string[]; media_type: string }>();
-  for (const index of indexes) {
-    for (const entry of index.entries) {
-      const hash = entry.blob_ref.slice("sha256:".length);
-      const seen = byHash.get(hash);
-      if (seen) {
-        if (!seen.names.includes(entry.name)) seen.names.push(entry.name);
-      } else {
-        byHash.set(hash, { names: [entry.name], media_type: entry.media_type });
-      }
-    }
-  }
-
-  const items: AttachmentMigrationItem[] = [];
-  for (const [hash, meta] of byHash) {
-    const inFilePlane =
-      (await queryRowByKey(node, fileSchemaHash, ["content_hash"], hash)) !== null;
-    let action: AttachmentMigrationItem["action"];
-    let legacyRow: QueryRow | null = null;
-    if (legacySchemaHash) {
-      legacyRow = await queryRowByKey(node, legacySchemaHash, BLOB_FIELDS, hash);
-    }
-    if (inFilePlane) {
-      action = "already-file-plane";
-    } else if (legacyRow === null) {
-      // Nothing to migrate from and nothing in the file plane — surface it
-      // rather than silently dropping the reference.
-      action = "missing";
-    } else {
-      const fields = (legacyRow.fields ?? {}) as Record<string, unknown>;
-      const bytes = new Uint8Array(Buffer.from(stringOf(fields, "data"), "base64"));
-      // Hard integrity gate BEFORE upload: never launder a corrupt legacy
-      // blob into the file plane.
-      verifiedBlob(hash, bytes, meta.media_type);
-      await putAttachmentBlob(node, cfg, bytes, meta.media_type, { name: meta.names[0]! });
-      action = "migrated";
-    }
-    let legacyDeleted = false;
-    if (legacyRow !== null && legacySchemaHash && action !== "missing") {
-      // Fetch-back gate BEFORE the destructive step: prove the file plane can
-      // serve these exact bytes (getAttachmentBlob prefers the file record
-      // and sha256-verifies) before the legacy copy goes away. Also covers a
-      // prior run that crashed between upload and delete.
-      await getAttachmentBlob(node, cfg, `sha256:${hash}`);
-      await node.deleteRecord({ schemaHash: legacySchemaHash, keyHash: hash });
-      legacyDeleted = true;
-    }
-    items.push({ blob_ref: `sha256:${hash}`, names: meta.names, action, legacyDeleted });
-  }
-  return { indexes: indexes.length, items };
 }

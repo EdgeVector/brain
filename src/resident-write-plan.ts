@@ -1,7 +1,6 @@
 // Build one Fold mutation batch for a Brain record write: primary row plus
 // every exact projection. Search stays out of the default plan.
 
-import { backlinkIndexTag, backlinkTargetSlugs } from "./backlink-index.ts";
 import {
   assertOpsFitFieldBudget,
   sealRecordFields,
@@ -37,10 +36,7 @@ export type ProjectionKind =
   | "primary"
   | "list"
   | "lifecycle"
-  | "tag"
-  | "backlink"
   | "graph"
-  | "child-task"
   | "list-page"
   | "list-locator"
   | "directory"
@@ -133,35 +129,6 @@ function countOps(ops: PlannedMutation[]): ExactProjectionCounts {
     else counts.deleted += 1;
   }
   return counts;
-}
-
-function planChildTaskOps(opts: {
-  cfg: Pick<Config, "schemaHashes">;
-  type: RecordType;
-  record: BrainRecord;
-  previous: BrainRecord | null;
-  upsertType: "create" | "update";
-}): PlannedMutation[] {
-  // List page records replaced this payload.
-  void opts;
-  return [];
-}
-
-// Tag and backlink membership. One small create per added member and one
-// delete per removed member of an indexed tag, in the same batch as the record.
-// Never a read-modify-write of a member list (see tag-index.ts).
-async function planTagMembershipOps(opts: {
-  node: NodeClient;
-  cfg: Config;
-  type: RecordType;
-  slug: string;
-  oldTags: readonly string[];
-  newTags: readonly string[];
-  projection: "tag" | "backlink";
-}): Promise<{ ops: PlannedMutation[]; noOp: number }> {
-  // List page records replaced this payload.
-  void opts;
-  return { ops: [], noOp: 0 };
 }
 
 export async function buildResidentWritePlan(opts: {
@@ -257,45 +224,6 @@ export async function buildResidentWritePlan(opts: {
     if (!indexNotes.includes(line)) indexNotes.push(line);
   }
   for (const op of side.ops) ops.push(op);
-
-  ops.push(
-    ...planChildTaskOps({
-      cfg: opts.cfg,
-      type: opts.type,
-      record: stored,
-      previous: opts.previous,
-      upsertType,
-    }),
-  );
-
-  const tags = await planTagMembershipOps({
-    node: opts.node,
-    cfg: opts.cfg,
-    type: opts.type,
-    slug: opts.next.slug,
-    oldTags: opts.previous?.tags ?? [],
-    newTags: opts.next.tags,
-    projection: "tag",
-  });
-  ops.push(...tags.ops);
-  noOp += tags.noOp;
-
-  const backlinks = await planTagMembershipOps({
-    node: opts.node,
-    cfg: opts.cfg,
-    type: opts.type,
-    slug: opts.next.slug,
-    oldTags: (opts.previous
-      ? backlinkTargetSlugs(opts.previous, opts.type)
-      : []
-    ).map((target) => backlinkIndexTag(target)),
-    newTags: backlinkTargetSlugs(opts.next, opts.type).map((target) =>
-      backlinkIndexTag(target),
-    ),
-    projection: "backlink",
-  });
-  ops.push(...backlinks.ops);
-  noOp += backlinks.noOp;
 
   const unique = dedupeOps(ops);
   const counts = countOps(unique);

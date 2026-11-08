@@ -983,7 +983,7 @@ export function newNodeClient(opts: {
         message:
           `queryAll on schema ${schemaHash.slice(0, 12)}… has no key filter and allowFullScan is not set — ` +
           `product paths must use HashKey/index; pass allowFullScan only for admin seed/offline bulk.`,
-        hint: "Use queryByKey / RecordListEntry / TagIndex, or allowFullScan: true for deliberate admin drains.",
+        hint: "Use a keyed query, or allowFullScan: true for deliberate admin drains.",
       });
     }
     // Bound native field work per IPC request. Complete membership still comes

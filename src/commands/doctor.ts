@@ -44,7 +44,6 @@ import {
   skippedByMcpUnresolved,
 } from "./doctor/mcp-boot.ts";
 import { runGraphEdgeLintProbe } from "./doctor/graph-lint.ts";
-import { runTagIndexProbe, TAG_INDEX_CHECK } from "./doctor/tag-index.ts";
 import {
   boundSchemaNames,
   checkSchemaDrift,
@@ -527,17 +526,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByNodeUnreachable("graph-edge-lint"));
   } else {
     checks.push(skippedByPrereqs("graph-edge-lint"));
-  }
-
-  // Tag and backlink membership: is the TagMembership schema registered, and is
-  // any legacy tag row newer than its copy stamp (an old binary wrote it)? A
-  // bounded sample over the keyed type-list index, never a scan.
-  if (provisioned && schemasLoadedOk) {
-    checks.push(await runTagIndexProbe(nodeClient, cfg, verbose));
-  } else if (!nodeReachable) {
-    checks.push(skippedByNodeUnreachable(TAG_INDEX_CHECK));
-  } else {
-    checks.push(skippedByPrereqs(TAG_INDEX_CHECK));
   }
 
   // Runtime probe — compare the running Bun against brain's documented

@@ -1,17 +1,7 @@
 // Stored list pages. One page is one HashRangeKey on blp_page.
-// backlinkIndexTag and backlinkTargetSlugs still name the old membership layout.
 
 import { BrainError, type NodeClient } from "./client.ts";
 import { HEAD_RANGE } from "./list-page.ts";
-import {
-  normalizeSlug,
-  parseGenericLinkTag,
-  wikiLinkSlugs,
-  type BrainRecord,
-} from "./record.ts";
-import { type RecordType } from "./schemas.ts";
-
-const BACKLINK_INDEX_TAG_PREFIX = "__brain_backlink__:";
 
 const PAGE_BYTE_CAP = 8 * 1024;
 const PAGE_LIMIT_CAP = 100;
@@ -105,29 +95,4 @@ export async function readStoredPage(
     older: typeof obj.older === "string" ? obj.older : "",
     bytes: Buffer.byteLength(raw),
   };
-}
-
-export function backlinkIndexTag(targetSlug: string): string {
-  return `${BACKLINK_INDEX_TAG_PREFIX}${normalizeSlug(targetSlug)}`;
-}
-
-export function backlinkTargetSlugs(
-  record: BrainRecord,
-  sourceType: RecordType,
-): string[] {
-  const targets = new Set<string>();
-  if (sourceType === "task" && record.design_slug && record.design_slug.length > 0) {
-    const designSlug = normalizeSlug(record.design_slug);
-    if (designSlug.length > 0) targets.add(designSlug);
-  }
-  for (const tag of record.tags) {
-    const parsed = parseGenericLinkTag(tag);
-    if (!parsed) continue;
-    const slug = normalizeSlug(parsed.to_slug);
-    if (slug.length > 0) targets.add(slug);
-  }
-  for (const slug of wikiLinkSlugs(record.body)) {
-    if (slug.length > 0) targets.add(slug);
-  }
-  return [...targets].sort();
 }

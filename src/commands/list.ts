@@ -14,11 +14,9 @@ import { HEAD_RANGE } from "../list-page.ts";
 import { namedRecordPage } from "../named-records.ts";
 import {
   completeKeyTags,
-  findBySlug,
   isSchemaNotFoundReadError,
   isTombstoned,
   listRecordKeys,
-  listRecords,
   missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
@@ -31,7 +29,6 @@ import {
   isRecordType,
   type RecordType,
 } from "../schemas.ts";
-import { resolveRecordsByTag } from "../tag-index.ts";
 
 // Default cap for an unfiltered `brain list`. Without it an
 // unfiltered list dumps every record in the index — 80+ already, and
@@ -98,8 +95,6 @@ export type ListPageResult = {
   truncated: boolean;
 };
 export type ListResult = ListPageResult | { count: number } | { miss: true };
-
-export type ListEntry = { type: RecordType; record: BrainRecord };
 
 const LIST_LIMIT_CAP = 100;
 const PAGE_ID = /^p\d{8}$/;
@@ -433,52 +428,6 @@ export type RecordSummary = {
   created_at?: string;
   updated_at: string;
 };
-
-export async function resolveListEntries(
-  node: NodeClient,
-  opts: Pick<
-    ListOptions,
-    "cfg" | "type" | "tag" | "printErr" | "onSkippedTypes"
-  >,
-): Promise<ListEntry[]> {
-  const { activeTypes: types } = resolveTypeFilter(
-    opts.type ? [opts.type] : undefined,
-    opts.cfg,
-    (skipped) => {
-      opts.onSkippedTypes?.(skipped);
-      opts.printErr?.(missingSchemaHashReadNote(skipped, "listing the rest"));
-    },
-  );
-  if (opts.tag) {
-    const indexed = await resolveRecordsByTag(node, opts.cfg, opts.tag, {
-      findBySlug: (type, hash, slug) =>
-        findBySlug(node, type, hash, slug, opts.cfg, { hydrate: false }),
-      schemaHashFor: (type) => schemaHashFor(type, opts.cfg),
-    });
-    if (indexed !== null) {
-      return indexed.filter((entry) => types.includes(entry.type));
-    }
-  }
-
-  const acc: ListEntry[] = [];
-  for (const t of types) {
-    let rs: BrainRecord[];
-    try {
-      // A display path: a stale list row with no record behind it is skipped
-      // (one warning), the other rows are listed.
-      rs = await listRecords(node, t, opts.cfg, { onMissing: "skip" });
-    } catch (err) {
-      if (isSchemaNotFoundReadError(err)) {
-        opts.onSkippedTypes?.([t]);
-        opts.printErr?.(missingSchemaHashReadNote([t], "listing the rest"));
-        continue;
-      }
-      throw err;
-    }
-    for (const r of rs) acc.push({ type: t, record: r });
-  }
-  return acc;
-}
 
 export function matchesListFilters(
   record: BrainRecord,

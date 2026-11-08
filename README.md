@@ -69,7 +69,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain status <slug> [<new>] [--type T]` | Reads or updates a record's status (per-type enum validation) |
 | `brain link <from-slug> <to-slug> [--from-type T] [--to-type T]` | Links records. Defaults to legacy Task → Design (`task.design_slug`); non-legacy pairs store a generic explicit link tag on the source |
 | `brain backlinks <slug> [--type T]` | Lists records linking to a slug through explicit edges or `[[slug]]` body references; reads the backlink secondary index instead of scanning every schema |
-| `brain attach <slug> <file> [--type T] [--name N] [--force]` | Attaches a file to a record. Bytes are stored content-addressed (SHA-256) in an internal blob record whose payload is classified `no_index`/`binary` — attachment **content never enters search indexes**; only the filename is searchable metadata. Identical content dedupes (see [Attachments](#attachments)) |
+| `brain attach <slug> <file> [--type T] [--name N] [--force]` | Attaches a file to a record. Bytes are the LastDB file of one `BrainAttachmentFile` record, keyed by SHA-256. Attachment content never enters search indexes; only the filename is searchable metadata. Identical content dedupes (see [Attachments](#attachments)) |
 | `brain attachments <slug> [--type T]` | Lists a record's attachments (name, size, media type, blob ref, added_at) |
 | `brain detach <slug> <name-or-ref> [--type T]` | Removes one attachment by filename or `sha256:<hex>` ref. The content-addressed blob remains (fold_db is append-only) |
 | `brain attachment get <slug> <name-or-ref> [-o PATH] [--force]` | Materializes an attachment's bytes to disk (or stdout with `-o -`), verifying the SHA-256 before writing — a hash mismatch is a hard error, never silent corruption |
@@ -79,7 +79,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
 | `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
 | `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). LastDB native Delete converges tip absence. The CLI also stamps a tombstone tag so older read paths hide the row (see [Delete](#delete)) |
-| `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges]` | Re-puts live records or rebuilds bounded secondary indexes, including typed graph edges (see [Recovery](#recovery)) |
+| `brain reindex --target <hash> --source-hash <type> --slug <slug>` | Repairs the named list-page keys. One call names one target, one source type, and at most 25 slugs (see [Recovery](#recovery)) |
 | `brain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `brain_search`, `brain_ask`, `brain_get`, `brain_list`, `brain_backlinks`; write: `brain_put`, `brain_status`, `brain_append`, `brain_delete`, `brain_link` — so agents can read and mutate the brain in-process (see [MCP](#mcp)) |
 
 Run `brain help <command>` for per-command usage.
@@ -289,25 +289,16 @@ Records can point at things three ways, in increasing order of weight:
 3. **Real attachments** — the file's bytes live in the brain, content-addressed
    and cloud-synced with the rest of the node's data.
 
-`brain attach <slug> <file>` stores the file under SHA-256 in an internal
-`BrainAttachmentBlob` record and appends a `{name, blob_ref, size, media_type,
-added_at}` entry to the record's `BrainAttachmentIndex`. Design properties:
+`brain attach <slug> <file>` stores the file as the LastDB file of one
+`BrainAttachmentFile` record, keyed by the SHA-256 of the bytes, and appends a
+`{name, blob_ref, size, media_type, added_at}` entry to the record's
+`BrainAttachmentIndex`.
 
-- **Additive by construction.** Attachments live in two dedicated internal
-  schemas (the TagIndex pattern), so enabling them changes no existing schema's
-  identity hash and migrates zero existing records — deliberately NOT a new
-  field on an existing schema, which would re-put every record under a new hash.
-- **Content is never searchable.** The blob's `data` field is classified
-  `no_index`/`binary` (the LastSecrets `no_index` policy); the node's mutation
-  manager excludes such fields from BM25/vector indexes at write time, and the
-  brain's own local BM25 corpus only ever reads knowledge-record titles/bodies.
-  The ONLY word-indexed attachment surface is the `filenames` field.
-- **Content-addressed.** Identical bytes are stored once no matter how many
-  records or names reference them; re-attaching the same file is a no-op.
-  `attachment get` re-verifies the SHA-256 before writing bytes to disk.
-- **Detach removes the reference, not the blob.** fold_db is append-only and
-  the same content may back other attachments.
-- 32 MiB per-file cap (the UDS transport caps request bodies at 64 MiB).
+- **Additive.** The attachment schemas are internal, so attach changes no knowledge schema.
+- **Content is never searchable.** The file bytes are not a field. The only word-indexed attachment surface is `filenames`.
+- **Content-addressed.** Identical bytes are stored once. Re-attaching the same file is a no-op. `attachment get` re-verifies the SHA-256 before writing bytes to disk.
+- **Detach removes the index entry.** The file record stays, because another record may name the same content.
+- 32 MiB per-file cap (the socket transport caps request bodies at 64 MiB).
 
 ```bash
 brain attach projects-edge-vector-labs-structure ./operating-agreement.pdf
@@ -316,8 +307,7 @@ brain attachment get projects-edge-vector-labs-structure operating-agreement.pdf
 brain detach projects-edge-vector-labs-structure operating-agreement.pdf
 ```
 
-See [docs/attachments.md](docs/attachments.md) for the storage model and the
-planned migration to the node's native CAS blob plane.
+See [docs/attachments.md](docs/attachments.md) for the storage model.
 
 ## Delete
 
@@ -352,28 +342,22 @@ brain delete --tag probe --type concept --status archived --yes
 
 ## Recovery
 
-If `brain search` starts returning stale or empty results — most often after a batch of `brain delete` calls, or when the homebrew daemon hosts non-brain schemas alongside brain — run:
+`brain reindex` repairs named list-page keys. It does not walk the corpus.
 
 ```bash
-brain reindex             # all record types
-brain reindex --type concept --dry-run   # preview what would be touched
-brain reindex --backlinks # rebuild the backlink secondary index
-brain reindex --graph-edges --max-records 100 # bounded typed-edge repair
+brain reindex --target all --source-hash concept --slug my-slug
+brain reindex --target tag#dogfood --source-hash concept --slug my-slug
 ```
 
-`brain reindex` walks every live (non-tombstoned) record and re-issues an `update` mutation. fold_db's mutation pipeline re-runs `index_record` synchronously, which refreshes the record's embedding entry in the native index. The fresh embeddings then survive the top-50 budget even when tombstoned-but-not-purged phantoms still sit in the index alongside them.
+One call names one target, one source type, and at most 25 slugs. It reads those product records by key and writes the page with a conditional write. The cursor advances after that write succeeds.
 
-`brain reindex --backlinks` is a secondary-index rebuild, not an embedding refresh. It scans the live corpus once and writes backlink membership rows so `brain get` / `brain backlinks` can answer `linked_from` from keyed index reads instead of walking every schema on each lookup. Re-run `brain init` first if your local config predates the internal index schema.
+What it does not do:
 
-`brain reindex --graph-edges` is deliberately bounded and reads Brain's keyed list index. Its output warns that the active enumeration-under-report defect can omit records, so the command repairs the observed slice without claiming complete corpus coverage.
+- It does not walk every record.
+- It does not purge embeddings left behind by `brain delete`.
+- It does not change tombstone semantics.
 
-What it does **not** do:
-
-- It does not purge phantom embeddings left behind by `brain delete`. The native index has no per-record purge API today; that fix is filed upstream as G3e against fold_db.
-- It does not change tombstone semantics — tombstoned records stay tombstoned and are reported as `skipped-tombstone`.
-- It does not change the search resolver's top-K logic.
-
-Per-record outcomes (`kept | reindexed | skipped-tombstone`) are printed with the global `--verbose` flag. Pollution-ratio measurement (before/after) is intentionally deferred to `brain doctor freshness` (G3a). For the full root-cause analysis and the chain of recommended follow-ups, see [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md).
+Run with the global `--verbose` flag to print the node calls. Pollution measurement stays on `brain doctor --freshness`. See [`docs/phase-7-search-latency-spike.md`](docs/phase-7-search-latency-spike.md).
 
 ## MCP
 

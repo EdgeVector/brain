@@ -772,10 +772,6 @@ export function assertOpsFitFieldBudget(
   ops: ReadonlyArray<{ projection: string; keyHash: string; fields: Record<string, unknown> }>,
 ): void {
   for (const op of ops) {
-    // Tag and backlink membership rows hold a growing list in one field. A
-    // separate change moves them to one row per member, so they are not
-    // guarded here: a guard would block a write that works today.
-    if (op.projection === "tag" || op.projection === "backlink") continue;
     for (const [name, value] of Object.entries(op.fields)) {
       const size = serializedBytes(value);
       if (size > FIELD_MAX_BYTES) {
