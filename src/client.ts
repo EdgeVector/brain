@@ -2726,7 +2726,11 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
 export function mapNodeError(status: number, body: unknown, path: string): BrainError {
   const errCode = bodyError(body);
   if (status === 409 && errCode === "cas_conflict") {
-    return new BrainError({ code: "cas_conflict", message: "The record revision changed before the write." });
+    // The node names the record that changed. Keep it in the message.
+    const schema = bodyStringField(body, "schema");
+    const key = bodyStringField(body, "key");
+    const where = schema && key ? ` (${schema} ${key})` : "";
+    return new BrainError({ code: "cas_conflict", message: `The record revision changed before the write${where}.` });
   }
   const msg = bodyMessage(body);
   const ctx: NodeErrorContext = {

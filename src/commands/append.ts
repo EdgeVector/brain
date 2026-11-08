@@ -27,6 +27,7 @@ import {
   buildResidentWritePlan,
   commitResidentWritePlan,
   recordFromPrimaryFields,
+  withConflictRetry,
 } from "../resident-write-plan.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
@@ -101,43 +102,48 @@ export async function appendCmd(opts: AppendOptions): Promise<void> {
   }
 
   const { node } = newWriteClientFromCfg(opts.cfg, opts.verbose);
-  const only = await resolveBySlug({
-    node,
-    cfg: opts.cfg,
-    slug,
-    type: opts.type,
-    recoveryVerb: "get",
-  });
+  // A conflict refusal wrote nothing. The retry reads the body that the
+  // other writer left, then appends to it again.
+  const { only, oldBody, newBody, hash, receipt } = await withConflictRetry(async () => {
+    const only = await resolveBySlug({
+      node,
+      cfg: opts.cfg,
+      slug,
+      type: opts.type,
+      recoveryVerb: "get",
+    });
 
-  const oldBody = only.record.body;
-  const newBody = appendBody(oldBody, opts.chunk, opts.raw === true);
+    const oldBody = only.record.body;
+    const newBody = appendBody(oldBody, opts.chunk, opts.raw === true);
 
-  const hash = schemaHashFor(only.type, opts.cfg);
-  const now = nowIso();
-  const fields = updateFieldsFrom(only.record, only.type, {
-    body: newBody,
-    updated_at: now,
-  });
-  // The read above returns the full text. The plan spills it again when the
-  // new body is long, and updates pages, the token set, and the edge set.
-  const desired = recordFromPrimaryFields(fields);
-  const plan = await buildResidentWritePlan({
-    node,
-    cfg: opts.cfg,
-    type: only.type,
-    schemaHash: hash,
-    previous: only.record,
-    next: desired,
-    primaryFields: fields,
-    now,
-    preserveStoredEdges: true,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-  });
-  const receipt = await commitResidentWritePlan({
-    node,
-    plan,
-    type: only.type,
-    slug,
+    const hash = schemaHashFor(only.type, opts.cfg);
+    const now = nowIso();
+    const fields = updateFieldsFrom(only.record, only.type, {
+      body: newBody,
+      updated_at: now,
+    });
+    // The read above returns the full text. The plan spills it again when the
+    // new body is long, and updates pages, the token set, and the edge set.
+    const desired = recordFromPrimaryFields(fields);
+    const plan = await buildResidentWritePlan({
+      node,
+      cfg: opts.cfg,
+      type: only.type,
+      schemaHash: hash,
+      previous: only.record,
+      next: desired,
+      primaryFields: fields,
+      now,
+      preserveStoredEdges: true,
+      ...(opts.verbose ? { verbose: opts.verbose } : {}),
+    });
+    const receipt = await commitResidentWritePlan({
+      node,
+      plan,
+      type: only.type,
+      slug,
+    });
+    return { only, oldBody, newBody, hash, receipt };
   });
   const indexNote = formatIndexNotes(receipt.indexNotes);
 
