@@ -596,10 +596,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
-  // Disclosure probes — always WARN, no detection. They surface the
-  // multi-machine + team-sharing limits called out in
-  // docs/g0-replacement-readiness-gate.md §6 so the gate stays honest
-  // about what brain does and doesn't do today.
+  // Disclosure probe — always WARN, no detection. Brain reads and writes
+  // the local node. This line says that, and it does not change the verdict.
   checks.push({
     name: "single-machine-slice",
     ok: true,
@@ -608,14 +606,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       "you're on this daemon; record set is local — multi-machine reads " +
       "require brain to drive fold_db's sync transport (deployed but not " +
       "yet wired up from brain; tracked as G16)",
-  });
-  checks.push({
-    name: "no-team-sync",
-    ok: true,
-    tag: "WARN",
-    detail:
-      "no team-sync transport — `brain share` is a placeholder until " +
-      "cloud sync is signed in and validated end-to-end",
   });
 
   // --write probe — real put → get → soft-delete round-trip under a

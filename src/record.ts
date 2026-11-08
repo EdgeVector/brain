@@ -1,7 +1,6 @@
 // Shared record helpers used by the design/task/put/get/list/status/link commands.
 
 import {
-  type IndexSnapshot,
   type SnapshotSummary,
 } from "./index-payload.ts";
 import type { NodeClient, QueryRow } from "./client.ts";
@@ -450,9 +449,8 @@ const PROGRESS_REPORT_INTERVAL_MS = 5_000;
  *   build, `admin-snapshot`). Such a row is a stale index row (a native LastDB
  *   delete leaves its list row behind), so it is left out, one warning per
  *   command names the count and the first slug, and the other rows are served.
- * - `"throw"`: for REBUILD and DESTRUCTIVE paths (`reindex --graph-edges`, the
- *   backlink rebuild, `consolidate`, anything that deletes or rewrites from what
- *   it read). They stop with `index_row_incomplete` and change nothing.
+ * - `"throw"`: for a path that deletes or rewrites from what it read.
+ *   It stops with `index_row_incomplete` and changes nothing.
  */
 export type OnMissing = "skip" | "throw";
 
@@ -528,50 +526,6 @@ export async function readFullRecords(
     });
   }
   return { records: complete, missing: pending };
-}
-
-/**
- * Whole records for index snapshots, in the order given.
- *
- * A snapshot that was not cut is its own record. A cut one (index-payload.ts)
- * is read from the product schema with ONE keyed read for all of them, retried
- * on an empty answer. If a product record still cannot be read, `onMissing`
- * decides (no default; see `OnMissing`): `"throw"` throws
- * `index_row_incomplete`, `"skip"` leaves the row out and warns once. It never
- * hands back the cut snapshot as a record. A record whose product row is
- * soft-deleted is omitted (it is not live).
- */
-export async function completeSnapshots(
-  node: NodeClient,
-  type: RecordType,
-  cfg: ListRecordsCfg,
-  snapshots: readonly IndexSnapshot[],
-  onMissing: OnMissing,
-  options?: ReadRetryOptions & { skipped?: string[] },
-): Promise<BrainRecord[]> {
-  const cutSlugs = snapshots.flatMap((s) => (s.cut ? [s.summary.slug] : []));
-  const { records, missing } = await readFullRecords(
-    node,
-    type,
-    cfg,
-    cutSlugs,
-    onMissing,
-    options,
-  );
-  if (missing.length > 0) {
-    options?.skipped?.push(...missing);
-    warnSkippedRows(type, missing);
-  }
-  const out: BrainRecord[] = [];
-  for (const snapshot of snapshots) {
-    if (!snapshot.cut) {
-      out.push(snapshot.record);
-      continue;
-    }
-    const record = records.get(snapshot.summary.slug);
-    if (record) out.push(record);
-  }
-  return out;
 }
 
 /**
@@ -675,11 +629,10 @@ export type RecordKey = {
   status: string;
   tags: string[];
   /**
-   * True when `tags` is only a BOUNDED subset of the record's tags: the list row
-   * is the keys-only form (index-payload.ts) that keeps at most 2 KiB of short
-   * tags (the tombstone tag is always kept). A tag filter or count over such a
-   * key would undercount, so it must complete the key first
-   * (`completeKeyTags`); `matchesListKeyFilters` refuses to filter on one.
+   * True when `tags` is only a bounded subset of the record's tags.
+   * A tag filter or count over such a key would undercount, so it must
+   * complete the key first (`completeKeyTags`); `matchesListKeyFilters`
+   * refuses to filter on one.
    */
   tagsCut?: boolean;
 };

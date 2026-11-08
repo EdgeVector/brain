@@ -62,9 +62,8 @@ and surfaces results in chat.
 
 Expected: Claude calls `brain_search` with `{query: "replacement
 direction", limit: 3}` and returns a text block with `slug · score ·
-type · title` lines. With the readiness-gate placeholder seeded in the
-brain (see `docs/g0-replacement-readiness-gate.md`), expect at least
-one hit referencing that page.
+type · title` lines. With a design record whose title contains those
+words, expect at least one hit.
 
 ### C.1b — `brain_ask` (hybrid recall)
 
@@ -80,12 +79,12 @@ rare tokens, acronyms, and exact-keyword matches.
 
 ### C.2 — `brain_get`
 
-> Use brain to get the record with slug `g0-replacement-readiness-gate`.
+> Use brain to get the record with slug `my-first-idea`.
 
-Expected: Claude calls `brain_get` with `{slug:
-"g0-replacement-readiness-gate"}` and prints the record (title, status,
-tags, body). If multiple types share the slug, the tool errors with
-"Specify type" — re-prompt with the right `type` argument.
+Expected: Claude calls `brain_get` with `{slug: "my-first-idea"}` and
+prints the record (title, status, tags, body). If multiple types share
+the slug, the tool errors with "Specify type" — re-prompt with the
+right `type` argument.
 
 ### C.3 — `brain_list`
 

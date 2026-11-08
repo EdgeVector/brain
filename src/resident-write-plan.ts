@@ -343,7 +343,7 @@ export async function commitResidentWritePlan(opts: {
   type: RecordType;
   slug: string;
   durable?: boolean;
-  /** Papercut file and close refuse a short or partial index. Do not send. */
+  /** Fail the commit when the plan notes an index partial. */
   failOnIndexPartial?: boolean;
 }): Promise<ResidentCommitResult> {
   return commitResidentWritePlans({
@@ -360,8 +360,6 @@ export async function commitResidentWritePlans(opts: {
   writes: readonly { plan: ResidentWritePlan; type: RecordType; slug: string }[];
   durable?: boolean;
   failOnIndexPartial?: boolean;
-  /** A papercut close with no twin is one write. Replay its keyword heads. */
-  replayKeywords?: boolean;
 }): Promise<ResidentCommitResult> {
   const first = opts.writes[0];
   if (!first) return { ...emptyBatchResult(), indexNotes: [] };
@@ -384,7 +382,6 @@ export async function commitResidentWritePlans(opts: {
     opts.writes,
     related,
     notes,
-    opts.replayKeywords === true,
   ).concat(counts));
   assertOpsFitFieldBudget(first.type, first.slug, ops);
   if (ops.length > WRITE_BATCH_MAX) {
@@ -555,7 +552,6 @@ function assembleWriteOps(
   writes: readonly { plan: ResidentWritePlan }[],
   related: boolean,
   notes: string[],
-  replayKeywords = false,
 ): PlannedMutation[] {
   const sides: SideAssembly[] = writes.map((write) => ({
     ops: write.plan.ops.filter((op) => op.projection !== "primary"),
@@ -564,12 +560,11 @@ function assembleWriteOps(
     tokenSet: write.plan.tokenSet,
   }));
   const primary = writes.flatMap((write) => write.plan.ops.filter((op) => op.projection === "primary"));
-  if (!related && !replayKeywords) {
+  if (!related) {
     return dedupeOps(primary.concat(sides.flatMap((side) => assembleSide(side, false, notes))));
   }
   // Group page heads across the related writes before dedupe. A per-write
-  // render plus last-wins dedupe drops the other write's card. A one-write
-  // close still replays keyword heads: the stored page can replace another card.
+  // render plus last-wins dedupe drops the other write's card.
   const sharedHeads = related
     ? headsToOps(sides.flatMap((side) => side.heads), true, notes)
     : sides.flatMap((side) => side.heads.map(headToOp));

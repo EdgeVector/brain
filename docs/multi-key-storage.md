@@ -27,18 +27,15 @@ The app requires a durable receipt before it reports a durable write.
 
 ## Existing app data
 
-CAUTION: Existing app data moves to this release only by the home copy (EdgeVector/last-stack#377). This release has no in-place conversion.
-
-The home copy reads the old home and writes a new home. The old home stays unchanged.
-The steps and the name mapping are in `docs/multi-key-schemas.md`.
-Normal initialization creates the new layout directly.
+Normal initialization creates the current layout directly.
+A config must set `storageModel` to `multi-key-v1`.
 Source changes do not authorize a change to the primary database or its archive.
 
 ## CI measurements
 
 The Brain read workflow compares exact app and daemon revisions.
 Each app uses normal initialization on its own generated home.
-Both arms use one LastDB revision at API 13 or later, so the comparison measures the app change.
+Both arms use one LastDB revision at API 29 or later, so the comparison measures the app change.
 No arm converts a home in place.
 
 Read measurements use 1,000 records, three paired repeats,
