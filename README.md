@@ -1,6 +1,6 @@
 # brain
 
-A CLI named `brain` that uses fold_db as the storage engine for a personal brain. Ten record types — **design**, **task**, **concept**, **preference**, **reference**, **agent**, **project**, **spike**, **sop**, **decision** — with semantic search, an `ask` answer command, an MCP agent surface, and a Phase 3 sharing probe. The old `brain` binary remains as a compatibility alias during the migration.
+A CLI named `brain` that uses LastDB as the storage engine for a personal brain. Ten record types — **design**, **task**, **concept**, **preference**, **reference**, **agent**, **project**, **spike**, **sop**, **decision** — with semantic search, an `ask` answer command, and an MCP agent surface.
 
 ## Prerequisites
 
@@ -74,16 +74,15 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain detach <slug> <name-or-ref> [--type T]` | Removes one attachment by filename or `sha256:<hex>` ref. The content-addressed blob remains (fold_db is append-only) |
 | `brain attachment get <slug> <name-or-ref> [-o PATH] [--force]` | Materializes an attachment's bytes to disk (or stdout with `-o -`), verifying the SHA-256 before writing — a hash mismatch is a hard error, never silent corruption |
 | `brain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
-| `brain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default** — the [2026-05-25 labeled eval](docs/g0-replacement-readiness-gate.md#8-status-snapshot--2026-06-06) showed LLM query expansion *reduced* relevance (P@5 0.59 vs 0.73), so it is opt-in via `--expand` (alias `--llm`). The default path is the eval winner, fastest, and needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
+| `brain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default.** LLM query expansion is opt-in via `--expand` (alias `--llm`). The default path needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
 | `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `brain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
-| `brain share` | Placeholder. Prints a pointer to the Phase 3 memo and exits 1 (see [Sharing](#sharing)) |
 | `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
 | `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). LastDB native Delete converges tip absence. The CLI also stamps a tombstone tag so older read paths hide the row (see [Delete](#delete)) |
 | `brain reindex [--type T] [--dry-run] [--tags] [--backlinks] [--graph-edges]` | Re-puts live records or rebuilds bounded secondary indexes, including typed graph edges (see [Recovery](#recovery)) |
 | `brain mcp` | Start a Model Context Protocol server over stdio. Exposes 10 tools to MCP clients (Claude Code, Codex, …) — read: `brain_search`, `brain_ask`, `brain_get`, `brain_list`, `brain_backlinks`; write: `brain_put`, `brain_status`, `brain_append`, `brain_delete`, `brain_link` — so agents can read and mutate the brain in-process (see [MCP](#mcp)) |
 
-Run `brain help <command>` for per-command usage. `brain` remains an alias.
+Run `brain help <command>` for per-command usage.
 
 ### Field projection
 
@@ -173,12 +172,11 @@ NOTE
 [PASS] schema-drift[Project]  — Project @ 7c5a90def142…
 [PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
 [WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require brain to drive fold_db's sync transport (deployed but not yet wired up from brain; tracked as G16)
-[WARN] no-team-sync  — no team-sync transport — `brain share` is a placeholder until cloud sync is signed in and validated end-to-end
 
 OK
 ```
 
-The two `[WARN]` lines at the bottom are **always emitted** — they're disclosure, not detection. They flag brain's current single-machine + no-team-sync slice per [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) §6 so a teammate dogfooding on a second machine sees the limitation instead of inferring a silent fork. WARN does not flip the exit code (same pattern as the pollution-probe WARN).
+The `[WARN]` line at the bottom is always emitted. It is disclosure, not detection. It says the record set is local to this daemon. WARN does not flip the exit code (same pattern as the pollution-probe WARN).
 
 **Red example** (drift detected after schemas.ts was edited but `brain init` wasn't re-run):
 
@@ -198,7 +196,6 @@ The two `[WARN]` lines at the bottom are **always emitted** — they're disclosu
 [PASS] schema-drift[Project]  — Project @ 7c5a90def142…
 [PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
 [WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require brain to drive fold_db's sync transport (deployed but not yet wired up from brain; tracked as G16)
-[WARN] no-team-sync  — no team-sync transport — `brain share` is a placeholder until cloud sync is signed in and validated end-to-end
 
 FAIL: 1 issue
 ```
@@ -280,18 +277,6 @@ prints the pending `delivery_id`. With `--approve`, Mini seals and sends a
 `delivery_slice`; evidence is non-secret (`delivery_id`, shared count,
 message type, schema hash). Mailbox poll + `openDelivery` stay on the admin
 SPA / consumer tooling (same as kanban).
-
-## Sharing
-
-Phase 3 was a sharing spike: stand up two local fold_db nodes, walk every `/api/sharing/*` endpoint, and either land a working `brain share` or land a memo explaining why a localhost-only test can't get there. **Outcome: memo.**
-
-In short: the sharing **metadata** (ShareRule, ShareInvite, ShareSubscription) is fully wireable on loopback — two nodes with distinct identities can hand-deliver an invite and persist a subscription end-to-end. But the **data** never actually moves between nodes on a `--local --local-schema` spike, because fold_db's cross-node transport is the cloud sync engine (S3-backed, mediated by an Auth Lambda + discovery service), and the spike intentionally didn't sign in to it. Without authenticated transport, the "B cannot read an unshared record" negative test is moot — B can't read **any** of A's records, shared or not.
-
-**This is a sign-in gap, not a missing-infra gap.** Both halves of the transport are built and deployed: fold_db's sync engine (`fold_db/crates/core/src/sync/engine.rs` — `local Sled → SyncEngine → Auth Lambda → S3`) and the exemem cloud stack (`exemem-infra/lambdas/` — auth, discovery, storage, etc., live in dev us-west-2 and prod us-east-1). The homebrew daemon at `:9001` reports `GET /api/sharing/exemem-status → {"connected": false}` because nobody has signed it in yet; the sync engine has somewhere to talk to as soon as a cloud session exists. See [`docs/cloud-signin-spike-plan.md`](docs/cloud-signin-spike-plan.md) for what it would take to light up the positive end-to-end test.
-
-`brain share` is currently a placeholder: it prints a pointer to the memo and exits non-zero. A real implementation drives `POST /api/sharing/rules` + `POST /api/sharing/invite` + `POST /api/sharing/accept`, gated on `exemem-status.connected == true`.
-
-Read [`docs/phase-3-sharing-memo.md`](docs/phase-3-sharing-memo.md) for the full evidence: every endpoint with its captured request/response JSON, what worked, what didn't, and exactly what a real two-device test would require.
 
 ## Attachments
 
@@ -588,19 +573,11 @@ Cost and safety, by construction:
 
 ## Project status
 
-brain is a working prototype, not yet a 1.0. CRUD across all record types, multi-type schemas, semantic/hybrid retrieval (`search` + `ask`), soft delete, `doctor`, and the MCP agent surface are all shipped and exercised end to end. The remaining work is the G0 replacement-readiness gate (a dogfood-shaped checklist) — see [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the ship criteria and outstanding items. Until that gate ships, treat published binaries and APIs as unstable.
-
-## Replacement direction
-
-brain is the planned replacement for [gbrain](https://github.com/garrytan/gbrain) at EdgeVector. The 2026-05-24 gap-consolidation review locked the replacement direction. **Status:** v0+ prototype, NOT shipped — readiness-gate criteria are defined, **10 of 10 items green or outstanding**. Only the dogfood-shaped items remain: #5 mirror-flip 7-day, #8 rollback rehearsal. The G5 `brain ask` ship (PR #23) closed the last code-shaped gap. See [`docs/g0-replacement-readiness-gate.md`](docs/g0-replacement-readiness-gate.md) for the workflow inventory, eval numbers, and the 2026-08-23 archive-review deadline.
-
-Gate item #6 (the "second-user dogfood") was **retired 2026-06-06** as false-premise: `userHash` is the node's provisioned identity, not a per-human identity, so two installs against one node always produce one hash. brain is single-user by design (one daemon, one team, one `userHash`); the "is brain usable by someone who isn't Tom?" question now flows through #5 (mirror-flip) and the future G16 cross-node visibility. See [`docs/decisions/g14-second-user-identity-model.md`](docs/decisions/g14-second-user-identity-model.md). Item number preserved for link integrity.
-
-Until the readiness gate ships, both gbrain and brain coexist; the `gbrain put` → brain mirror hook keeps writes flowing to both.
+Brain is the LastDB knowledge CLI. CRUD across all record types, multi-type schemas, semantic/hybrid retrieval (`search` + `ask`), soft delete, `doctor`, and the MCP agent surface are shipped.
 
 ## Out of scope for v0
 
-- Not E2E-encrypted (Phase 3 sharing probes the surface, doesn't build a product)
+- Not E2E-encrypted
 - Not running new fold_db core code
 - No git-to-brain sync
 - No compiled standalone binaries — brain runs as a Bun-runtime CLI (`bun add -g github:EdgeVector/brain` today; `npm i -g brain` / `bunx brain` once published to npm)

@@ -1,7 +1,7 @@
 # Tag and backlink membership layout
 
 Applies to brain from PR 466. Code: `src/tag-index.ts`, `src/backlink-index.ts`,
-`src/index-payload.ts`, `src/commands/doctor/tag-index.ts`.
+`src/commands/doctor/tag-index.ts`.
 
 ## Layout
 
@@ -103,53 +103,6 @@ reports a tag whose legacy row is newer than its copy stamp (check
 - Two devices that add different members of one tag write different rows.
   Nothing conflicts.
 - Nothing deletes or rewrites a legacy row.
-
-## Index payloads
-
-Index rows that keep a snapshot of the record (`RecordListEntry`, `LiveIndex`
-and its siblings, `ChildTaskIndex`) follow one rule
-(`src/index-payload.ts`). The payload is the whole record when its value is at
-most 8 KiB. Otherwise, until it fits: the body is cut to a head of at most 2 KiB
-(then smaller); every other text field above 2 KiB is cut to 2 KiB (then 512
-bytes); last, only the keys and summary fields (slug, status, timestamps, a
-short title, a bounded list of short tags). `idx_truncated` names the cut fields
-(`*` for keys only). The payload is always
-bounded. Short titles, ids and tags are never cut.
-
-A keys-only row keeps at most 2 KiB of short tags (the tombstone tag is always
-kept), so its key is marked `tagsCut`. A `--tag` filter or count over keys
-completes those keys first (`completeKeyTags`, one batched product read), and
-`matchesListKeyFilters` refuses to match a tag against a cut key, so a count never
-excludes such a record.
-
-A cut snapshot is not a record, and the types enforce it. A reader gets an
-`IndexSnapshot`: a whole record, or a `SnapshotSummary` that has no `body` and is
-not assignable to `BrainRecord`. To get the record, complete it with a keyed
-read of the product schema (`completeSnapshots`, `readFullRecords` in
-`record.ts`). That read retries an empty answer (a known flake) and then THROWS
-`index_row_incomplete` or skips; it never returns the head as if it were the
-record. What happens when a cut row's product record is missing is chosen by the
-caller, with no default (`onMissing`):
-
-- `"skip"` for READ and DISPLAY paths (`list`, `search`, `ask`, the BM25 build,
-  the child-task display lookup). The row is a stale index row (a native LastDB
-  delete leaves its list row behind). It is left out, ONE warning per command
-  names the count and the first slug, and every other row is served.
-- `"throw"` for REBUILD and DESTRUCTIVE paths (`reindex --graph-edges`, the
-  backlink rebuild, `consolidate`). They stop with `index_row_incomplete` and
-  change nothing.
-
-Callers that read no body ask for summaries (`listRecords(..., { summary: true
-})`). `admin-snapshot` only counts, so it reads summaries; a type it cannot read
-is recorded as `null` in `type_counts` and named in `unavailable_types`, never
-reported as 0.
-
-`brain consolidate` compares bodies and can delete a record. It uses the cluster
-snapshot only to name the members, and point-reads the body of every member from
-the product schema; if one cannot be read it stops and changes nothing.
-
-Existing oversize rows stay until the row is next written, or until the matching
-`reindex` command runs.
 
 ## TTL
 

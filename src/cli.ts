@@ -12,7 +12,6 @@ import { getBrainVersion } from "./version.ts";
 import { BrainError } from "./client.ts";
 import { reportSlowCall } from "./slow-call.ts";
 import { readConfig } from "./config.ts";
-import { primaryBrain, readFromPrimary } from "./primary-brain.ts";
 import { parseFieldProjection } from "./field-projection.ts";
 import { runInit } from "./commands/init.ts";
 import { recordNew } from "./commands/new.ts";
@@ -49,7 +48,6 @@ import { graphBoostEnabledByEnv } from "./retrieval/adjacency.ts";
 import { findCmd } from "./commands/find.ts";
 import { doctor } from "./commands/doctor.ts";
 import { rawCmd } from "./commands/raw.ts";
-import { shareCmd } from "./commands/share.ts";
 import { putCmd, type PutResult } from "./commands/put.ts";
 import { appendCmd } from "./commands/append.ts";
 import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
@@ -77,7 +75,6 @@ import {
   TYPES_WITHOUT_NEW_VERB,
   type RecordType,
 } from "./schemas.ts";
-import { consolidateCmd, PROVE_TOPIC } from "./commands/consolidate.ts";
 import {
   BRAIN_MCP_READ_TOOL_NAMES,
   BRAIN_MCP_TOOL_NAMES,
@@ -188,11 +185,9 @@ export const COMMANDS = [
   "gate",
   "doctor",
   "raw",
-  "share",
   "delete",
   "admin-snapshot",
   "reindex",
-  "consolidate",
   "mcp",
   "hook",
   "help",
@@ -220,7 +215,7 @@ const RECORD_NEW_HELP_LINES: string = RECORD_TYPES.filter(
   })
   .join("\n");
 
-export const TOP_HELP = `brain — CLI brain over fold_db
+export const TOP_HELP = `brain — CLI brain over LastDB
 
 Usage:
   brain <command> [options]
@@ -249,11 +244,9 @@ ${RECORD_NEW_HELP_LINES}
   gate           add, clear, or verify structured open-decisions gates
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
   raw            authenticated passthrough to node or schema service
-  share          (placeholder) — team sync is not wired up yet
   delete         delete a record (native LastDB Delete; also stamps a tombstone tag)
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        backfill named record keys into one list, keyword page, or type directory
-  consolidate    collapse one topic cluster to one live canonical (or --prove the live loop)
   mcp            start an MCP server over stdio (${BRAIN_MCP_TOOL_NAMES.length} tools: ${BRAIN_MCP_TOOL_NAMES.map((name) => name.replace(/^brain_/, "")).join("/")})
   mcp install    one-shot agent wiring: register brain with Claude Code + append instructions to CLAUDE.md
   mcp instructions  print the copy-paste CLAUDE.md block to wire brain into your agent (>> CLAUDE.md)
@@ -265,7 +258,7 @@ Global flags:
   --help, -h     print this help
   --version, -V  print the brain version and exit
 
-Run \`brain help <command>\` for per-command usage. The old \`brain\` binary remains an alias.`;
+Run \`brain help <command>\` for per-command usage.`;
 
 // Shared help shape for the record types that take the common
 // (--title/--tag/--body/--force) flag set. Task is the one type with an extra
@@ -770,15 +763,6 @@ Examples:
   brain raw GET /api/system/auto-identity
   brain raw GET /api/schemas
   brain raw GET /v1/schemas`,
-  share: `brain share
-
-Placeholder. Cross-node data flow requires fold_db's S3 + Auth-Lambda
-transport, and this daemon has not been signed in to it. The sharing
-METADATA primitives (ShareRule, ShareInvite, ShareSubscription) work
-end-to-end on loopback, but no records actually move between nodes until
-the daemon authenticates against the cloud and an end-to-end test passes.
-
-Prints a notice and exits 1.`,
   delete: `brain delete <slug> [--type T] [--force] [--json]
 brain delete --tag T [--type T] [--status S] [--yes] [--force] [--json]
 
@@ -866,20 +850,6 @@ It prints wrote N and the cursor key. It does not walk the corpus.
   --graph-edges     refused. This command does not walk every record.
 
 Run with the global --verbose to print node calls.`,
-  consolidate: `brain consolidate --topic T [--prove] [--json]
-
-Collapse one topic cluster to one live canonical slug.
-
-  --topic    cluster hash (required unless --prove, which defaults to lifecycle-ship-proof)
-  --prove    seed a dedicated topic, run consolidate + reap, assert, then clean up
-  --json     emit {ok, topic, canonical, parked, deleted, appended} on stdout
-
-Live membership is HashRange live:{type} / slug. Cluster membership is
-cluster:{topic} / slug. Unique facts append onto the canonical. Still-true
-losers park. Pure duplicates delete. Ephemeral rows expire by day hash.
-
-The --prove pass must exit 0 on the live node. It writes only
-lifecycle-ship-proof-* slugs and deletes them before returning.`,
   mcp: `brain mcp [install|instructions]
 
 brain mcp install [--yes] [--claude-md PATH]   (alias: brain mcp setup)
@@ -1215,11 +1185,6 @@ const REINDEX_OPTIONS = {
   "graph-edges": { type: "boolean", default: false },
   "max-records": { type: "string" },
 } as const;
-const CONSOLIDATE_OPTIONS = {
-  topic: { type: "string" },
-  prove: { type: "boolean", default: false },
-  json: { type: "boolean", default: false },
-} as const;
 const EMPTY_OPTIONS = {} as const;
 
 // `brain mcp install` (alias `setup`) flags. The other mcp subcommands
@@ -1270,11 +1235,9 @@ export const CLI_SPEC = {
   gate: GATE_OPTIONS,
   doctor: DOCTOR_OPTIONS,
   raw: EMPTY_OPTIONS,
-  share: EMPTY_OPTIONS,
   delete: DELETE_OPTIONS,
   "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
   reindex: REINDEX_OPTIONS,
-  consolidate: CONSOLIDATE_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
   help: EMPTY_OPTIONS,
@@ -1921,16 +1884,12 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runDoctor(args, verboseFn);
     case "raw":
       return runRaw(args, verboseFn);
-    case "share":
-      return runShare(args);
     case "delete":
       return runDelete(args, verboseFn);
     case "admin-snapshot":
       return runAdminSnapshot(args, verboseFn);
     case "reindex":
       return runReindex(args, verboseFn);
-    case "consolidate":
-      return runConsolidate(args, verboseFn);
     case "mcp":
       return runMcpCmd(args);
     case "hook":
@@ -2543,30 +2502,7 @@ async function runGet(args: Argv, verbose: Verbose): Promise<number> {
   if (bodyLimit !== undefined) getOpts.bodyLimit = bodyLimit;
   if (fields.length > 0) getOpts.fields = fields;
   if (values.json) getOpts.json = true;
-  try {
-    await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
-  } catch (err) {
-    // Split-brain period: a miss here may be a settled record that lives only
-    // in the primary brain (gbrain). Human output only; --json / --field keep
-    // their exact contract and still report the miss.
-    if (
-      err instanceof BrainError &&
-      err.code === "not_found" &&
-      !getOpts.json &&
-      (getOpts.fields === undefined || getOpts.fields.length === 0)
-    ) {
-      const hit = readFromPrimary(slug, getOpts.type);
-      if (hit) {
-        process.stderr.write(
-          `note: "${slug}" is not in the LastDB brain; served from the primary brain (${primaryBrain() ?? "gbrain"}) page ${hit.path}. ` +
-            "Writes (put/append) still go to the LastDB brain.\n",
-        );
-        process.stdout.write(hit.text.endsWith("\n") ? hit.text : `${hit.text}\n`);
-        return 0;
-      }
-    }
-    throw err;
-  }
+  await withTypeAsPositionalHint(slug, () => getRecord(getOpts));
   return 0;
 }
 
@@ -3431,20 +3367,6 @@ async function runDoctor(args: Argv, verbose: Verbose): Promise<number> {
   return doctor(parseDoctorOptions(args, verbose));
 }
 
-async function runShare(args: Argv): Promise<number> {
-  const { positionals } = parseCommandArgs(
-    { args, strict: true, allowPositionals: true, options: EMPTY_OPTIONS },
-    "share",
-  );
-  if (positionals.length > 0) {
-    throw new BrainError({
-      code: "extra_positional_args",
-      message: `share takes no positional arguments (got ${positionals.length}: ${positionals.join(", ")}).`,
-    });
-  }
-  return shareCmd();
-}
-
 async function runAdminSnapshot(args: Argv, verbose: Verbose): Promise<number> {
   const sub = args[0]?.startsWith("-") ? undefined : args[0];
   if (sub !== "publish" && sub !== "deliver") {
@@ -3961,45 +3883,6 @@ function requireGraphPositional(
     });
   }
   return positionals[0] as string;
-}
-
-async function runConsolidate(args: Argv, verbose: Verbose): Promise<number> {
-  const { values } = parseCommandArgs(
-    {
-      args,
-      strict: true,
-      allowPositionals: true,
-      options: CONSOLIDATE_OPTIONS,
-    },
-    "consolidate",
-  );
-  const prove = values.prove === true;
-  const topic = typeof values.topic === "string" ? values.topic : prove ? PROVE_TOPIC : "";
-  if (!topic) {
-    console.error(COMMAND_HELP.consolidate);
-    return USAGE_ERROR;
-  }
-  const cfg = readConfig();
-  const result = await consolidateCmd({
-    cfg,
-    topic,
-    prove,
-    json: values.json === true,
-    ...(verbose ? { verbose } : {}),
-  });
-  if (values.json) {
-    console.log(
-      JSON.stringify({
-        ok: true,
-        topic: result.topic,
-        canonical: result.canonical,
-        parked: result.parked,
-        deleted: result.deleted,
-        appended: result.appended,
-      }),
-    );
-  }
-  return 0;
 }
 
 async function runRaw(args: Argv, verbose: Verbose): Promise<number> {

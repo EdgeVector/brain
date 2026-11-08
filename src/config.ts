@@ -222,10 +222,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     if (typeof v !== "string" || v.length === 0) {
       throw new ConfigInvalidError(path, `schemaHashes["${k}"] is not a non-empty string`);
     }
-    // v3 → v4: drop the now-defunct legacy BrainKindNote entry. Records
-    // were migrated into per-kind canonicals by `brain consolidate`
-    // before this cleanup landed; keeping the key would route reads at
-    // an unregistered hash.
+    // Skip a retired schema key. It is not a current Brain hash.
     if (k === LEGACY_NOTE_SCHEMA_KEY_V3) continue;
     schemaHashes[k] = v;
   }
