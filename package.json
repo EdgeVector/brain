@@ -41,8 +41,7 @@
   ],
   "scripts": {
     "brain": "bun src/cli.ts",
-    "typecheck": "tsc --noEmit",
-    "build:mcp": "scripts/build-mcp-binary.sh"
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest",

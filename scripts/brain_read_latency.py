@@ -47,7 +47,6 @@ def app(args, node, destination, label, phase, samples=0, tag=None):
                    if not key.startswith(("LASTDB", "FOLD", "BRAIN", "LASTSEEK", "SENTRY", "OTEL"))
                    and key not in ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY")}
     environment.update(LASTDB_ISOLATED_COPY="1", LASTDB_SUPPRESS_RECOVERY_PHRASE="1",
-                       BRAIN_APP_IDENTITY_ENFORCE="off" if label == "before" else "on",
                        BRAIN_FORCE_FILE_KEYCHAIN="1",
                        BRAIN_CONFIG=str(destination / "config.json"),
                        BRAIN_FOLDDB_SOCKET=str(node.socket) if node else "",
@@ -209,8 +208,7 @@ def summarize(args, runs):
     lines = [f"## Brain {args.mode} comparison: {args.records:,} records", "",
              f"Before app: `{args.app_baseline_revision}`. After app: `{args.app_revision}`.",
              f"Before daemon: `{args.before_tag}` (`{args.before_revision}`). After daemon: `{args.lastdb_tag}` (`{args.revision}`).",
-             ("The comparison measures the app change only." if args.before_revision == args.revision else
-              "This comparison measures the app and daemon release transition together."),
+             "The comparison measures the app change only.",
              f"Observed daemon: API `{daemon['api_version']}`, home format `{daemon['home_format']}`.",
              "Each app creates its own generated home on a fresh daemon. No home is converted in place.",
              "Canonical definitions remain shared. Record values belong to each schema.",

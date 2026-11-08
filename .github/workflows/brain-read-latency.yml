@@ -20,7 +20,6 @@ env:
   # so no Schema Service definition check runs here.
   ENVIRONMENT: dev
   APP_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
-  # Use the same daemon unless the app comparison crosses the explicit-key API transition.
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}
   CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
@@ -53,13 +52,7 @@ jobs:
           tag="$(gh release list -R EdgeVector/lastdb --exclude-drafts --limit 30 \
             --json tagName,publishedAt --jq '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.publishedAt) | last | .tagName')"
           test -n "$tag" && test "$tag" != null
-          git fetch --depth 1 origin "$APP_BEFORE"
-          before_api="$(git show "$APP_BEFORE:package.json" | jq -r '.lastdb.minApiVersion // 0')"
-          after_api="$(jq -r '.lastdb.minApiVersion // 0' package.json)"
           before_tag="$tag"
-          if [ "$before_api" -lt 29 ] && [ "$after_api" -ge 29 ]; then
-            before_tag=nightly-20261104-4b76c7c90
-          fi
           mkdir "$RUNNER_TEMP/brain-binaries"
           for label in before after; do
             selected="$tag"
