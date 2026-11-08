@@ -1315,42 +1315,6 @@ export function schemaConfigKeys(entry: {
   return [...entry.types, ...(entry.extraKeys ?? [])];
 }
 
-// Resolve an already-published brain schema's canonical hash from the set
-// the node loaded out of the schema-service catalog (GET /api/schemas). The
-// match key is (descriptive_name, owner_app_id) — exactly the two signals the
-// schema service folds into a namespaced identity. This is the fresh-consumer
-// path: the `brain/*` record schemas are pre-published org-wide, so init reads
-// their canonical hashes here instead of re-POSTing (which needs a DevCert).
-export function resolveOwnedSchemaHash(
-  req: AddSchemaRequest,
-  loaded: ReadonlyArray<{
-    descriptive_name?: string;
-    owner_app_id?: string;
-    identity_hash?: string;
-    fields?: string[];
-    field_types?: Record<string,unknown>;
-  }>,
-  canonicalVocabulary = false,
-): string | null {
-  const expected = req.schema;
-  const wantName = req.schema.descriptive_name;
-  const wantOwner = req.schema.owner_app_id;
-  for (const s of loaded) {
-    if (
-      s.descriptive_name === wantName &&
-      s.owner_app_id === wantOwner &&
-      typeof s.identity_hash === "string" &&
-      s.identity_hash.length > 0 &&
-      (!canonicalVocabulary || (expected.fields.every((field) => s.fields?.includes(field) &&
-        JSON.stringify(s.field_types?.[field]) === JSON.stringify(expected.field_types[field])) &&
-        s.fields?.every((field) => expected.fields.includes(field))))
-    ) {
-      return s.identity_hash;
-    }
-  }
-  return null;
-}
-
 // Human-facing "what is this type for" one-liners, surfaced in the README
 // and the top-level CLI help so a brand-new dev can tell which record type
 // record types to reach for. SINGLE SHARED SOURCE — both surfaces read this

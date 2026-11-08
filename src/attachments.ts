@@ -131,7 +131,7 @@ export async function ensureAttachmentSchemas(
     (await node.declareAppSchema(OWNER_APP_ID, attachmentFileSchema.schema)).canonical;
   cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY] = declaredIndex;
   cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY] = declaredFile;
-  if (cfg.schemaFieldAliases) cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
+  cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
   if (opts.persist) {
     if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
     else writeConfig(cfg);

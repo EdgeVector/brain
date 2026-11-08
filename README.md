@@ -158,7 +158,7 @@ NOTE
 **Green example:**
 
 ```
-[PASS] config  — nodeUrl=http://127.0.0.1:9001 schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
+[PASS] config  — node=unix:<home>/data/folddb.sock schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
 [PASS] schema-service-reachable
 [PASS] node-reachable
 [PASS] node-provisioned  — user_hash=dd616fa8…
@@ -181,7 +181,7 @@ The `[WARN]` line at the bottom is always emitted. It is disclosure, not detecti
 **Red example** (drift detected after schemas.ts was edited but `brain init` wasn't re-run):
 
 ```
-[PASS] config  — nodeUrl=http://127.0.0.1:9001 schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
+[PASS] config  — node=unix:<home>/data/folddb.sock schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
 [PASS] schema-service-reachable
 [PASS] node-reachable
 [PASS] node-provisioned  — user_hash=dd616fa8…
@@ -467,7 +467,7 @@ methodology and the regression-guard CI job that keeps these numbers honest.
 ```
 brain CLI (TypeScript / Bun)
    │
-   ├──── HTTP (localhost) ─────────► fold_db_node (homebrew daemon, :9001)
+   ├──── Unix socket ──────────────► LastDB (`<home>/data/folddb.sock`)
    │                                  persistence, indexing, mutations
    │
    └──── HTTPS (cloud) ────────────► schema_service (AWS Lambda)
@@ -578,9 +578,6 @@ The map leaves values, record keys, cursors, and file references intact.
 A fresh home submits these definitions through normal schema declarations.
 The schema service checks names, definitions, types, and concept reuse for every caller.
 No special vocabulary key or operator approval path exists.
-An existing config without a field map keeps its current schema identities and declaration path.
-An explicit data migration must precede a change to those identities.
-This change does not perform that migration.
 
 Date fields use `DateTime` when the current wire value is an RFC 3339 instant.
 Decimal text and optional date text keep explicit text definitions.
@@ -588,5 +585,4 @@ This change does not infer value conversions from a field name.
 
 Current Mini stores attachment bytes through the local file command.
 A separate mapped mutation stores the complete native pointer in its `Any` field.
-This path needs no cloud account. Legacy configs use it on current Mini.
-Older nodes without this command keep their previous attachment command.
+This path needs no cloud account.

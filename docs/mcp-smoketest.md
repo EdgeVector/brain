@@ -158,7 +158,7 @@ panel (e.g. `query: "replacement"` for search), hit "Call Tool".
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `error: Config not found at ~/.brain/config.json` | `brain init` not run | Run `brain init` |
-| `error: node not reachable at http://127.0.0.1:9001` | homebrew `fold_db_node` daemon not running | Start the daemon; `brain doctor` |
+| node socket missing | LastDB is not running | Start LastDB; `brain doctor` |
 | Tools appear in the client but every call returns `isError: true` with a `schema collision` message | Config's schema hashes are stale | Re-run `brain init` |
 | Server starts but Claude Code reports "no tools" | Process crashed before connecting | Check Claude Code logs for the stderr line; usually `bun` not on PATH or `src/mcp/main.ts` wrong absolute path in the `claude mcp add` invocation |
 | `unknown command: mcp` from `brain mcp` | This branch not installed via `bun link`/`bun install` | Re-link from this checkout; `which brain` should resolve to the project's `src/cli.ts` |

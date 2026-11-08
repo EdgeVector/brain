@@ -745,8 +745,8 @@ record type. Also appends/updates today's count in
 Exits non-zero if any check fails or the pollution probe FAILs.`,
   raw: `brain raw <method> <path> [body]
 
-Authenticated passthrough. \`/api/\` paths go to the node (with
-X-User-Hash); \`/v1/\` paths go to the schema service. Body argument
+Authenticated passthrough. \`/api/\` paths go to the node over its
+Unix socket; \`/v1/\` paths go to the schema service. Body argument
 is treated as the literal request body; omit or pass \`-\` to read
 from stdin. Exits 0 on 2xx, 1 otherwise.
 
@@ -1949,9 +1949,8 @@ function parseInitArgs(args: Argv) {
 
 async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parseInitArgs(args);
-  // Defaults are resolved inside runInit so it can auto-heal a stale config
-  // (e.g. previously-baked `:9101 / :9102` URLs) without clobbering a user
-  // override the next time `brain init` runs without flags.
+  // runInit resolves the node URL and the schema-service URL from flags,
+  // the existing config, or the defaults.
   const initOpts: Parameters<typeof runInit>[0] = {
     bootstrapName: values.name,
     verbose,

@@ -2,7 +2,6 @@ import { profilesFor } from "./canonical-vocabulary.ts";
 import { BrainError, type NodeClient } from "./client.ts";
 import type { Config } from "./config.ts";
 import { MULTI_KEY_MODEL, ownedSchemas } from "./multi-key.ts";
-import { ownedHome } from "./runtime.ts";
 import { OWNER_APP_ID } from "./schemas.ts";
 
 /** One installed schema, as the node's schema directory reports it. */
@@ -21,18 +20,14 @@ type Metadata = {
 
 export async function syncOwnedModel(
   node: NodeClient,
-  base: Omit<Config, "storageModel">,
+  base: Omit<Config, "storageModel" | "schemaFieldAliases">,
   existing: Config | null,
-  canonicalVocabulary: boolean,
 ): Promise<Config> {
   const version = await node.rawCall("GET", "/api/version");
   const versionReply = version.json as {
     capabilities?: Record<string, boolean>;
-    api_version?: unknown;
   };
   const capabilities = versionReply?.capabilities;
-  const apiVersion =
-    typeof versionReply?.api_version === "number" ? versionReply.api_version : 0;
   if (
     version.status !== 200 ||
     !capabilities?.compound_alternate_keys_v1 ||
@@ -87,15 +82,6 @@ export async function syncOwnedModel(
       message:
         "Several installed schemas claim one app record type. Init leaves them unchanged.",
     });
-  // Brain needs LastDB API 13 or later: that node owns each declared schema's values.
-  if (!ownedHome(apiVersion)) {
-    throw new BrainError({
-      code: "home_copy_required",
-      message:
-        "This node is older than LastDB API 13. Brain needs a node that owns the values of each declared schema. Init leaves the home unchanged.",
-      hint: "Upgrade LastDB to API 13 or later. Move old Brain data to a new home with the home copy. See docs/multi-key-schemas.md.",
-    });
-  }
   if (
     existing &&
     [
@@ -169,21 +155,17 @@ export async function syncOwnedModel(
     storageModel: MULTI_KEY_MODEL,
     schemaHashes,
     schemaIdentities,
-    designSchemaHash: schemaHashes.design!,
-    taskSchemaHash: schemaHashes.task!,
     appIdentityEnforce: existing?.appIdentityEnforce ?? false,
-    schemaFieldAliases: canonicalVocabulary
-      ? Object.assign(
-          {},
-          existing?.schemaFieldAliases,
-          ...all.map((entry) =>
-            profilesFor(entry.schema, [
-              entry.identity,
-              entry.runtime,
-              OWNER_APP_ID + "/" + entry.schema.name,
-            ]),
-          ),
-        )
-      : existing?.schemaFieldAliases,
+    schemaFieldAliases: Object.assign(
+      {},
+      existing?.schemaFieldAliases,
+      ...all.map((entry) =>
+        profilesFor(entry.schema, [
+          entry.identity,
+          entry.runtime,
+          OWNER_APP_ID + "/" + entry.schema.name,
+        ]),
+      ),
+    ),
   };
 }

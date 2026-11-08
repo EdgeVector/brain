@@ -10,7 +10,7 @@ The app does not invent a stored hash field or reconstruct API keys.
 
 Each record kind uses recent and status keys. Task also uses a design key. Ranges contain the reverse UTC timestamp and the slug. Tags, links, graph edges, counts, and body files remain separate records that own their values. A list cursor belongs to one filter.
 
-A config without `storageModel: "multi-key-v1"` is refused with `home_copy_required`.
+A config must set `storageModel` to `multi-key-v1`. Any other value is `config_invalid`.
 
 Ten field descriptions and purpose statements in `src/schemas.ts` still name `fbrain`.
 They stay unchanged because the Schema Service identity hash includes them.

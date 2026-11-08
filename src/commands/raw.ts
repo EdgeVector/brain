@@ -1,6 +1,6 @@
 // `brain raw <method> <path> [body]` — authenticated passthrough to the
 // node or the schema service. Path prefix picks the service:
-//   /api/  → node (X-User-Hash auto-added)
+//   /api/  → node (Unix socket)
 //   /v1/   → schema service (no auth header)
 //
 // Body sources:
