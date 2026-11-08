@@ -5,12 +5,11 @@ import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
 import { RECORD_BUDGET_BYTES, RECORD_CAP_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 export { QUERY_PAGE_SIZE };
 import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
-// Typed HTTP wrappers for fold_db_node + schema_service.
+// Typed wrappers for the LastDB node and the schema service.
 //
-// Every node endpoint sends X-User-Hash (per Phase 0 spike: missing →
-// `401 MISSING_USER_CONTEXT`). All errors flow through `mapError` so
-// every Error Registry row maps to an actionable message in exactly
-// one place.
+// Node routes use the Unix socket. Schema-service routes use HTTPS.
+// All errors flow through `mapError` so every Error Registry row maps
+// to an actionable message in one place.
 //
 // As of the @lastdb/app-sdk port, the app data path rides the SDK's
 // `LastDbClient` — the same wire client every LastDB app uses — with the SDK's
@@ -20,7 +19,6 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 // Brain-specific owner/admin glue the SDK contract does not expose:
 // schema declaration/listing, bootstrap, auto-identity, health, and raw calls.
 
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -716,7 +714,6 @@ function stringProp(obj: Record<string, unknown>, key: string): string {
 }
 
 export function newNodeClient(opts: {
-  canonicalVocabulary?: boolean;
   schemaFieldAliases?: FieldAliasProfiles;
   baseUrl: string;
   userHash: string;
@@ -740,20 +737,16 @@ export function newNodeClient(opts: {
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
   const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
-  const canonicalVocabulary = opts.canonicalVocabulary ?? Boolean(opts.schemaFieldAliases);
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
   const capability = opts.capability;
   const appId = opts.appId ?? "brain";
   const socketPath = defaultFolddbSocketPath(opts.socketPath);
 
-  // The SDK transport carries X-User-Hash on every request (the production
-  // node's HTTP server is stateless — identity comes from the header; gap #1,
-  // fold_dev_node #127). One transport is shared by every SDK client this
-  // node client mints. It is a fetch-backed implementation of the SDK's
-  // Transport seam rather than the SDK's node:http default, so brain keeps
-  // exactly one HTTP stack: the same global `fetch` every other node call
-  // uses.
+  // One transport is shared by every SDK client this node client mints.
+  // It is a fetch-backed implementation of the SDK's Transport seam rather
+  // than the SDK's node:http default, so brain keeps exactly one HTTP stack:
+  // the same global `fetch` every other node call uses.
   //
   // The client↔node version gate (app-sdk "Version handshake"). Resolved ONCE
   // per client before the first data request on either wire path (the SDK
@@ -778,7 +771,7 @@ export function newNodeClient(opts: {
 
   const sdkTransport = fieldAliasTransport(fetchTransport(
     url,
-    { "X-User-Hash": userHash, "X-LastDB-Client": "brain" },
+    { "X-LastDB-Client": "brain" },
     socketPath,
     requireNodeApiVersion,
   ), fieldProfiles);
@@ -821,7 +814,6 @@ export function newNodeClient(opts: {
       path,
       method,
       encodeFieldRequest(path, body, fieldProfiles),
-      userHash,
       verbose,
       headers,
       socketPath,
@@ -1101,20 +1093,6 @@ export function newNodeClient(opts: {
     };
   };
 
-  let canonicalReadiness: Promise<void> | undefined;
-  const requireCanonicalHome = (): Promise<void> => canonicalReadiness ??= (async () => {
-    const raw = await callJsonOk("/api/schemas", "GET") as Record<string, unknown>;
-    const catalog = raw.data && typeof raw.data === "object" ? raw.data as Record<string,unknown> : raw;
-    if (!Array.isArray(catalog.schemas)) throw new BrainError({code:"schema_catalog_invalid",message:"Cannot confirm the local schema format before declaration."});
-    for (const item of catalog.schemas) {
-      if (!item || typeof item !== "object") continue;
-      const schema = item as Record<string,unknown>;
-      if (schema.owner_app_id === "brain" && Array.isArray(schema.fields) && schema.fields.some((field) => field === "slug" || field === "body" || field === "blp_h")) {
-        throw new BrainError({code:"canonical_migration_required",message:"This home uses legacy knowledge fields. An explicit data migration is required before new schema publication."});
-      }
-    }
-  })();
-
   return {
     baseUrl: url,
     userHash,
@@ -1218,7 +1196,7 @@ export function newNodeClient(opts: {
         if (err instanceof TransportError) {
           throw connectionError(url, "node", err, {
             socketPath,
-            routeSocket: localNodeRouteSocket("node", url, socketPath),
+            routeSocket: localNodeRouteSocket("node", socketPath),
             socketCause: err,
           });
         }
@@ -1252,7 +1230,7 @@ export function newNodeClient(opts: {
         if (err instanceof TransportError) {
           throw connectionError(url, "node", err, {
             socketPath,
-            routeSocket: localNodeRouteSocket("node", url, socketPath),
+            routeSocket: localNodeRouteSocket("node", socketPath),
             socketCause: err,
           });
         }
@@ -1260,14 +1238,13 @@ export function newNodeClient(opts: {
       }
     },
     async declareAppSchema(appId, schema) {
-      if (canonicalVocabulary) await requireCanonicalHome();
       if (!schema.record_keys) {
         const current = recordSchemas.get(schema.name);
         if (!current) throw new BrainError({ code: "schema_unavailable", message: "Brain cannot declare this record schema." });
         schema = { ...schema, record_keys: current.record_keys, file_required: current.file_required };
       }
       const local = schema;
-      if (canonicalVocabulary) schema = canonicalSchema(local);
+      schema = canonicalSchema(local);
       const body = await callJsonOk("/api/schemas/declare", "POST", {
         namespace: appId,
         schema: explicitKeyDeclaration(schema),
@@ -1276,7 +1253,6 @@ export function newNodeClient(opts: {
       const canonical = typeof b.canonical === "string" ? b.canonical : "";
       const schemaName = typeof b.schema_name === "string" ? b.schema_name : "";
       const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
-      // An API 13+ node owns every declared schema (lastdb #803); the receipt names it exactly.
       if (!identityHash || !/^[a-f0-9]{64}$/.test(identityHash)
         || b.app_id !== appId || b.schema_name !== `${appId}/${local.name}`) {
         throw new BrainError({ code: "owned_schema_receipt_invalid", message: "The declaration did not confirm the exact owned app schema." });
@@ -1289,7 +1265,7 @@ export function newNodeClient(opts: {
           hint: "Upgrade the node or inspect the app-schema declaration response.",
         });
       }
-      if (canonicalVocabulary) Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName, identityHash ?? ""]));
+      Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName, identityHash ?? ""]));
       return {
         app_id: typeof b.app_id === "string" ? b.app_id : appId,
         schema: schemaName,
@@ -1492,7 +1468,7 @@ export function newNodeClient(opts: {
       }
     },
     async rawCall(method, path, body) {
-      const { res, readBody } = await callNodeRaw(url, path, method, encodeFieldRequest(path, body, fieldProfiles), userHash, verbose, undefined, socketPath);
+      const { res, readBody } = await callNodeRaw(url, path, method, encodeFieldRequest(path, body, fieldProfiles), verbose, undefined, socketPath);
       const text = await readBody({ asText: true });
       const original = parseJsonSafe(text);
       const json = decodeFieldReply(path, body, original, fieldProfiles);
@@ -1632,7 +1608,6 @@ async function callNodeRaw(
   path: string,
   method: string,
   body: unknown,
-  userHash: string,
   verbose: Verbose,
   extraHeaders?: Record<string, string>,
   socketPath?: string,
@@ -1647,7 +1622,6 @@ async function callNodeRaw(
     // X-LastDB-Client is a best-effort ops label for Mini request telemetry
     // (not a security boundary).
     headers: {
-      "X-User-Hash": userHash,
       "X-LastDB-Client": "brain",
       ...(extraHeaders ?? {}),
     },
@@ -1701,27 +1675,15 @@ type ConnectionErrorContext = {
   phase?: "fetch" | "body";
 };
 
-// A LOCAL node speaks ONLY over its Unix socket — the loopback TCP listener is
-// retired (fold `fold-retire-tcp-listener`), so there is NO TCP fallback. When
-// the node URL is loopback and a socket path is configured, this returns the
-// one owner socket for every route UNCONDITIONALLY, EVEN WHEN the socket file is
-// absent:
-// if the node is down the connect simply fails and the caller maps it to a clear
-// node-not-running diagnostic instead of silently dialing the retired `:9001`.
-// Returns null when the node isn't a local-socket target (remote node, schema
-// service, or no socket configured), leaving the caller on plain HTTP.
+// Node routes use the owner socket whenever a path is set, including when the
+// socket file is absent. A down node fails the connect and the caller maps that
+// to a node-not-running error. Schema service stays on HTTPS.
 export function localNodeRouteSocket(
   service: "node" | "schema",
-  baseUrl: string,
   socketPath?: string,
 ): NodeSocketSelection | null {
-  const localNodeSocketOnly =
-    service === "node" &&
-    isLoopbackNodeUrl(baseUrl) &&
-    socketPath !== undefined &&
-    socketPath.length > 0;
-  if (!localNodeSocketOnly) return null;
-  return { socketPath: socketPath as string };
+  if (service !== "node" || !socketPath) return null;
+  return { socketPath };
 }
 
 type BoundedFetchFailureContext = ConnectionErrorContext;
@@ -1775,7 +1737,7 @@ async function boundedNodeFetch(opts: {
   const localRouteSocket =
     opts.routeSocket !== undefined
       ? opts.routeSocket
-      : localNodeRouteSocket(opts.service, opts.baseUrl, opts.socketPath);
+      : localNodeRouteSocket(opts.service, opts.socketPath);
   const preflightTarget = localRouteSocket
     ? `${opts.path} [unix:${localRouteSocket.socketPath}]`
     : tcpUrl;
@@ -1831,7 +1793,7 @@ async function boundedNodeFetch(opts: {
         throw socketErr;
       }
     } else {
-      // Schema service (HTTPS Lambda) and any non-loopback target: plain HTTP.
+      // Schema service, or a node call with no socket path: plain HTTP.
       res = await attempt(null);
     }
     try {
@@ -1853,9 +1815,9 @@ async function boundedNodeFetch(opts: {
 }
 
 // Shared inner fetch for both service clients. Differs only by the verbose
-// log tag (NODE vs SCHEMA), the service-specific headers passed in (the node
-// always sends X-User-Hash), and the connectionError service param. Same
-// shape and intent as the per-flag helpers in PRs #87/#88/#89/#97.
+// log tag (NODE vs SCHEMA), the service-specific headers passed in, and the
+// connectionError service param. Same shape and intent as the per-flag
+// helpers in PRs #87/#88/#89/#97.
 async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
@@ -1961,144 +1923,22 @@ export function isLoopbackNodeUrl(url: string): boolean {
   }
 }
 
-// True when the prebuilt `folddb` binary is on PATH (Homebrew install or
-// `BRAIN_FOLDDB_BIN` override). Mirrors the probe in init-consent.ts so
-// callers don't need to reach across modules. Injectable in `nodeDownHint`
-// for tests so the assertion doesn't depend on the host PATH.
-export function defaultIsFolddbBinaryInstalled(): boolean {
-  const override = process.env.BRAIN_FOLDDB_BIN;
-  if (override && override.length > 0) return true;
-  const probe = spawnSync("/bin/sh", ["-c", "command -v folddb"], { encoding: "utf8" });
-  return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
-}
-
-// Extract the TCP port from a node URL, defaulting to the http/https well-known
-// port when the URL omits it. Returns null for an unparseable URL. Used to scope
-// the wedged-vs-not-started probe to the TARGET port.
-export function nodePortOf(url: string): number | null {
-  try {
-    const u = new URL(url);
-    if (u.port) return Number(u.port);
-    if (u.protocol === "https:") return 443;
-    if (u.protocol === "http:") return 80;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-// True when SOMETHING is bound and LISTENING on the TARGET port of `url` on this
-// host. This is deliberately port-scoped: `nodeDownHint` only runs after a
-// transport failure to `url`, so "something is listening here but we still
-// couldn't talk to it" means a wedged/mid-boot node ON THAT PORT — whereas
-// "nothing is listening here" means the node simply isn't started. We must NOT
-// use a host-wide `pgrep`: a sibling node serving a DIFFERENT port would make an
-// unrelated down port look "wedged" and (wrongly) tell the dev to stop it.
-//
-// Uses `lsof -nP -iTCP:<port> -sTCP:LISTEN` (no name/DNS lookups, listeners
-// only). Injectable in `nodeDownHint` so tests don't depend on the host's live
-// socket table. A non-localhost URL can't be probed locally, so we report false
-// (treat a remote node as "not a local wedge").
-export function defaultIsTargetPortListening(url: string): boolean {
-  if (!isLoopbackNodeUrl(url)) return false;
-  const port = nodePortOf(url);
-  if (port == null || !Number.isFinite(port)) return false;
-  const probe = spawnSync("/bin/sh", ["-c", `lsof -nP -iTCP:${port} -sTCP:LISTEN`], {
-    encoding: "utf8",
-  });
-  return probe.status === 0 && (probe.stdout ?? "").trim().length > 0;
-}
-
-// True when a node URL is the default local CLI install marker. Used ONLY by
-// `nodeDownHint` for install guidance — brain reaches a loopback node over
-// its Unix socket and never dials TCP. Matches the current portless default
-// (`http://127.0.0.1` / `http://localhost`) and the historical retired
-// `:9001` marker so existing configs still get the right recovery text.
-// Custom loopback ports (9050, 9101, …) are NOT default-install — those are
-// contributor/ephemeral nodes and get from-source framing when no prebuilt
-// binary is on PATH.
-function isDefaultInstallNodeUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    const hostOk =
-      u.hostname === "127.0.0.1" ||
-      u.hostname === "localhost" ||
-      u.hostname === "::1" ||
-      u.hostname === "[::1]";
-    if (!hostOk) return false;
-    // Empty / default port (http → 80, but URL.port is "" when omitted) OR
-    // the historical Mini/full-node TCP marker.
-    return u.port === "" || u.port === "9001";
-  } catch {
-    return false;
-  }
-}
-
-function socketFirstNodeHint(
-  socketPath: string,
-  opts: { cliInstallPath?: boolean; sourceCompileNote?: boolean } = {},
-): string {
-  const sourceNote = opts.sourceCompileNote
-    ? " (first run compiles Rust — give it a few minutes)"
-    : "";
-  const cliNote = opts.cliInstallPath
-    ? " Check `lastdb status` and the configured LastDB service."
-    : "";
-  return (
-    `brain uses the local LastDB Unix socket at ${socketPath}; run \`brain doctor\` for a full diagnosis. ` +
-    `Check the configured LastDB service${sourceNote}. ` +
-    "If your node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
-    "or `LASTDB_HOME=<node-home>`." +
-    cliNote
-  );
-}
-
-// "Your node isn't reachable — start it" guidance. Three cases, all
-// socket-first:
-//   1. SOMETHING is bound and LISTENING on the TARGET port but the socket isn't
-//      answering — the node is wedged, mid-boot, or hung (it did NOT just "not
-//      start"). A restart of a wedged node just re-hangs, so point them at the
-//      socket, `brain doctor`, logs, and stop-before-start recovery. This
-//      branch wins first because a live-but-dead node is the most misdiagnosed
-//      failure. The probe is scoped to the TARGET port — a sibling node serving
-//      a DIFFERENT port must NOT make this down port look "wedged".
-//   2. Nothing on the target port, but the default install target OR a prebuilt
-//      `folddb` binary is on PATH — a downloaded/CLI user. Still lead with the
-//      socket and LastDB.app recovery; include a conditional CLI/Homebrew note.
-//   3. Nothing on the target port, not the default URL, and no prebuilt binary
-//      — a genuine fold contributor running from source against a custom port.
-export function nodeDownHint(
-  url: string,
-  isFolddbBinaryInstalled: () => boolean = defaultIsFolddbBinaryInstalled,
-  isTargetPortListening: (url: string) => boolean = defaultIsTargetPortListening,
-): string {
+export function nodeDownHint(): string {
   const socketPath = defaultFolddbSocketPath();
-  const cliInstallPath = isDefaultInstallNodeUrl(url) || isFolddbBinaryInstalled();
-  if (isTargetPortListening(url)) {
-    const cliNote = cliInstallPath
-      ? " If this is an intentional CLI/Homebrew node, stop that daemon before starting it again."
-      : "";
-    return (
-      `A node is bound to ${url} but isn't responding — it may still be starting up, or it may be wedged. ` +
-      `brain uses the local LastDB Unix socket at ${socketPath}; run \`brain doctor\` for a full diagnosis. ` +
-      "Check the node log; if it's wedged, stop it before restarting: stop the existing node process before starting it again. " +
-      "Desktop app: quit LastDB.app, then reopen it. " +
-      "Contributors running from source: stop the existing `lastdb_server`/`folddb_server` process, then `cd fold/fold_db_node && ./run.sh --local`." +
-      cliNote
-    );
-  }
-  if (cliInstallPath) {
-    return socketFirstNodeHint(socketPath, { cliInstallPath: true });
-  }
-  return socketFirstNodeHint(socketPath, { sourceCompileNote: true });
+  return (
+    `brain uses the local LastDB Unix socket at ${socketPath}. ` +
+    "Run `brain doctor` for a full diagnosis. " +
+    "Check `lastdb status` and the configured LastDB service. " +
+    "If the node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+    "or `LASTDB_HOME=<node-home>`."
+  );
 }
 
 function socketMissingHint(socketPath: string): string {
   return (
-    `Start or reopen LastDB.app so it creates the Unix socket at ${socketPath}. ` +
-    "Run `brain doctor` for a full diagnosis. Contributors running from source: " +
-    "`cd fold/fold_db_node && ./run.sh --local`. " +
-    "If your node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
+    `Start or reopen LastDB so it creates the Unix socket at ${socketPath}. ` +
+    "Run `brain doctor` for a full diagnosis. " +
+    "If the node uses a different home, set `BRAIN_FOLDDB_SOCKET=/abs/path/to/folddb.sock` " +
     "or `LASTDB_HOME=<node-home>`."
   );
 }
@@ -2212,9 +2052,7 @@ function connectionError(
       cause: { socket: ctx.socketCause, fallback: cause },
     });
   }
-  // Any LOCAL (loopback) node is socket-only — no TCP fallback — so an absent
-  // socket means the node isn't running, whatever the loopback port.
-  if (service === "node" && ctx.socketPath && isLoopbackNodeUrl(baseUrl) && !existsSync(ctx.socketPath)) {
+  if (service === "node" && ctx.socketPath && !existsSync(ctx.socketPath)) {
     return new BrainError({
       code: "service_unreachable",
       message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,
@@ -2226,7 +2064,7 @@ function connectionError(
   return new BrainError({
     code: "service_unreachable",
     message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
-    hint: service === "node" ? nodeDownHint(baseUrl) : schemaDownHint(baseUrl),
+    hint: service === "node" ? nodeDownHint() : schemaDownHint(baseUrl),
     cause,
   });
 }
@@ -2401,10 +2239,9 @@ const SDK_TIMEOUT_RE = /\btimed out after (\d+)\s*ms\b/;
 
 // The SDK's non-JSON-body message: `non-JSON response (<status>) from
 // <target><path>: <first 200 chars>`. The node answered with headers AND a
-// body — it is unambiguously up. Only the status is captured: `target` is the
-// base URL (`http://127.0.0.1:9001`), so it contains colons of its own and
-// cannot be split out of the tail reliably — the full SDK message is carried
-// through as the detail instead.
+// body — it is unambiguously up. Only the status is captured: the target
+// contains colons of its own and cannot be split out of the tail reliably.
+// The full SDK message is carried through as the detail instead.
 const SDK_NON_JSON_RE = /^non-JSON response \((\d+)\)/;
 
 /**
@@ -2515,7 +2352,7 @@ function mapSdkDataError(
     if (reachable) return reachable;
     return connectionError(baseUrl, "node", err, {
       socketPath,
-      routeSocket: localNodeRouteSocket("node", baseUrl, socketPath),
+      routeSocket: localNodeRouteSocket("node", socketPath),
       socketCause: err,
     });
   }
@@ -2664,7 +2501,7 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
         ctx.msg?.includes("Authentication") === true),
     build: (ctx) => ({
       code: "missing_user_context",
-      message: `Node rejected ${ctx.path}: missing X-User-Hash ${DOCTOR_TIP}.`,
+      message: `Node rejected ${ctx.path}: missing user context ${DOCTOR_TIP}.`,
       hint: "Re-run `brain init` so the config's userHash is regenerated.",
     }),
   },

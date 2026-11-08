@@ -1,24 +1,9 @@
 import { writeConfigFile } from "./config-file.ts";
 import { parseFieldAliases, type FieldAliasProfiles } from "./field-alias-transport.ts";
 // Persistent CLI config — `~/.brain/config.json` by default.
-// Holds the canonical schema hashes (NOT the descriptive_names), per the
-// Phase 0 spike finding.
-//
-// v2 (Phase 6): `schemaHashes` map carries one canonical hash per record
-// type. `designSchemaHash` and `taskSchemaHash` are mirrored on disk for
-// backward compat with v1 readers. v1 configs are migrated in-memory on
-// read; the next `brain init` persists v2 to disk.
-//
-// v3 (Phase D): same shape as v2; the version bump signals that the
-// default schema-service URL moved from the local `:9102` to the cloud
-// Lambda. `runInit` auto-heals v1/v2 configs with the dead local default
-// URLs on the next `brain init` (preserving any user override).
-//
-// v4 (this commit): legacy BrainKindNote cleanup. The legacy schema and
-// its `__legacy_note__` schemaHashes entry are gone. Any v3 config that
-// still carries that entry is auto-healed on read by stripping the entry
-// — the cleanup is purely shape, not data (consolidation already moved
-// every legacy row into the per-kind canonicals).
+// Holds the schema hashes, not the descriptive names.
+// configVersion is 4. storageModel is multi-key-v1.
+// Unknown keys are ignored.
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -33,16 +18,7 @@ import { brainHomeBase } from "./client.ts";
 
 export const CONFIG_VERSION = 4;
 
-// Legacy BrainKindNote schema-key (pre-v4). Defined here, not in
-// schemas.ts, so the config migration can detect + strip it without
-// keeping the legacy schema definition alive. Any v3 config that carried
-// this key in `schemaHashes` is auto-healed on read (the entry is
-// dropped). Records were already moved to per-kind schemas by the
-// consolidation migration (PR #63) before this cleanup landed.
-const LEGACY_NOTE_SCHEMA_KEY_V3 = "__legacy_note__";
-
 export type Config = {
-  // A config without this key belongs to a retired Brain storage model.
   storageModel: "multi-key-v1";
   configVersion: number;
   nodeUrl: string;
@@ -51,11 +27,7 @@ export type Config = {
   schemaHashes: Record<string, string>;
   /** Definition identities are separate from runtime addresses. */
   schemaIdentities?: Record<string, string>;
-  schemaFieldAliases?: FieldAliasProfiles;
-  // Mirror of schemaHashes.design / schemaHashes.task — present on disk
-  // for backward compat with v1 readers. Always kept in sync on write.
-  designSchemaHash: string;
-  taskSchemaHash: string;
+  schemaFieldAliases: FieldAliasProfiles;
   // Optional override for the node's Unix socket used for local requests. Unset →
   // `<node-home>/data/folddb.sock`, where `<node-home>` is `LASTDB_HOME` or
   // `~/.lastdb` — see `resolveNodeHome` in client.ts. Set this (or the
@@ -148,19 +120,7 @@ export function configBytes(config: Config): string {
       ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
         .map(([key, item]) => [key, ordered(item)]))
       : value;
-  return JSON.stringify(ordered(syncMirrors(config)), null, 2) + "\n";
-}
-
-// Keep designSchemaHash/taskSchemaHash mirrored against schemaHashes
-// so v1 readers continue to see the legacy fields populated.
-function syncMirrors(config: Config): Config {
-  return {
-    ...config,
-    designSchemaHash:
-      config.schemaHashes.design ?? config.designSchemaHash ?? "",
-    taskSchemaHash:
-      config.schemaHashes.task ?? config.taskSchemaHash ?? "",
-  };
+  return JSON.stringify(ordered(config), null, 2) + "\n";
 }
 
 function assertConfigShape(path: string, raw: unknown): Config {
@@ -168,7 +128,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     throw new ConfigInvalidError(path, "not an object");
   }
   const r = raw as Record<string, unknown>;
-  if (r.storageModel !== undefined && r.storageModel !== "multi-key-v1") {
+  if (r.storageModel !== "multi-key-v1") {
     throw new ConfigInvalidError(path, "unsupported storageModel");
   }
 
@@ -182,32 +142,11 @@ function assertConfigShape(path: string, raw: unknown): Config {
   }
 
   const version = r.configVersion;
-  if (version !== 1 && version !== 2 && version !== 3 && version !== CONFIG_VERSION) {
+  if (version !== CONFIG_VERSION) {
     throw new ConfigInvalidError(
       path,
       `configVersion ${String(version)} != ${CONFIG_VERSION}`,
     );
-  }
-
-  // The two legacy mirror fields must be present on every supported
-  // version. For v1 they additionally seed schemaHashes; for v2+ they
-  // exist as a redundant on-disk mirror that v1 readers still consult.
-  // The URL auto-heal (v2→v3) lives in runInit so user overrides
-  // survive; the v3→v4 legacy-key strip happens in the schemaHashes
-  // loop below.
-  for (const key of ["designSchemaHash", "taskSchemaHash"] as const) {
-    if (typeof r[key] !== "string" || (r[key] as string).length === 0) {
-      throw new ConfigInvalidError(path, `field "${key}" not a non-empty string`);
-    }
-  }
-
-  // v1 → current: synthesize schemaHashes from the legacy mirror fields
-  // so the shared validation + return below runs unmodified for v1.
-  if (version === 1) {
-    r.schemaHashes = {
-      design: r.designSchemaHash as string,
-      task: r.taskSchemaHash as string,
-    };
   }
 
   if (!("schemaHashes" in r)) {
@@ -222,19 +161,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     if (typeof v !== "string" || v.length === 0) {
       throw new ConfigInvalidError(path, `schemaHashes["${k}"] is not a non-empty string`);
     }
-    // Skip a retired schema key. It is not a current Brain hash.
-    if (k === LEGACY_NOTE_SCHEMA_KEY_V3) continue;
     schemaHashes[k] = v;
-  }
-
-  // Only the owned multi-key model is readable. The stable code tells the
-  // operator to move the data with the home copy; nothing rewrites the file.
-  if (r.storageModel === undefined) {
-    throw new BrainError({
-      code: "home_copy_required",
-      message: `Config at ${path} uses a retired Brain storage model. This release does not read it.`,
-      hint: "Move Brain data to a new home with the home copy. See docs/multi-key-schemas.md.",
-    });
   }
 
   const config: Config = {
@@ -244,8 +171,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     schemaServiceUrl: r.schemaServiceUrl as string,
     userHash: r.userHash as string,
     schemaHashes,
-    designSchemaHash: r.designSchemaHash as string,
-    taskSchemaHash: r.taskSchemaHash as string,
+    schemaFieldAliases: readFieldAliases(path, r.schemaFieldAliases),
   };
   const identities = r.schemaIdentities;
   if (identities !== undefined) {
@@ -264,7 +190,22 @@ function assertConfigShape(path: string, raw: unknown): Config {
   if (typeof r.appIdentityEnforce === "boolean") {
     config.appIdentityEnforce = r.appIdentityEnforce;
   }
-  const aliases = parseFieldAliases(r.schemaFieldAliases);
-  if (aliases) config.schemaFieldAliases = aliases;
   return config;
+}
+
+function readFieldAliases(path: string, raw: unknown): FieldAliasProfiles {
+  if (raw === undefined) {
+    throw new ConfigInvalidError(path, `missing field "schemaFieldAliases"`);
+  }
+  try {
+    const aliases = parseFieldAliases(raw);
+    if (!aliases) {
+      throw new ConfigInvalidError(path, `missing field "schemaFieldAliases"`);
+    }
+    return aliases;
+  } catch (err) {
+    if (err instanceof ConfigInvalidError) throw err;
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new ConfigInvalidError(path, msg);
+  }
 }

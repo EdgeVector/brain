@@ -265,9 +265,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   try {
     const identity = await nodeClient.autoIdentity();
     nodeReachable = true;
-    // Surface the connected node's folddb version on the node-reachable line —
-    // a developer can then spot a stale node (e.g. a 0.13.0 brew node bind-
-    // fighting the desktop app on :9001) without reaching for `curl`. This is
+    // Surface the connected node's LastDB version on the node-reachable line
+    // so a developer can spot a stale node. This is
     // best-effort and STRICTLY informational: a health-probe failure (older
     // node with no /api/health, transient hiccup) must NOT flip node-reachable
     // to FAIL — auto-identity already answered that the node is up — so we keep
@@ -332,15 +331,13 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   } catch (err) {
     // Distinguish a node that is genuinely DOWN (transport failure → "start
     // it") from one that is UP but returned an HTTP error (4xx/5xx → don't say
-    // "start it"; the node answered, its own message is the real fix). The old
-    // code lumped both into nodeDownHint, so a reachable node that 500s on
-    // identity decryption was told to `brew services start folddb` even though
-    // schema-service + every schema-drift check (same node) passed. (29ced)
+    // "start it"; the node answered, its own message is the real fix). A
+    // reachable node that returns an HTTP error is not told to start LastDB.
     checks.push({
       name: "node-reachable",
       ok: false,
       detail: doctorReachabilityDetail(err, "node", cfg.nodeUrl),
-      fix: isNodeReachableButErroring(err) ? nodeHttpErrorHint(err) : nodeDownHint(cfg.nodeUrl),
+      fix: isNodeReachableButErroring(err) ? nodeHttpErrorHint(err) : nodeDownHint(),
     });
     verbose?.(`node-reachable: FAIL`);
     // The node never answered, so node-provisioned can't be determined. Emit
@@ -356,10 +353,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   // Match **write-path** hashes. Config `schemaHashes.*` is the catalog /
   // storage key used by mutates. On Mini, that appears as `name` on
   // GET /api/schemas. `identity_hash` is the node recompute and usually
-  // equals `name`; when they diverge (keyed schema dual-hash residual before
-  // fold#1352 is live on the primary, e.g. Papercut name=5ffb961d…
-  // identity_hash=6ca32e27…), only checking identity_hash false-FAILS a fully
-  // writable plane. Accept either field so doctor tracks write readiness.
+  // equals `name`. When they diverge, only checking identity_hash false-FAILS
+  // a fully writable plane. Accept either field so doctor tracks write readiness.
   if (provisioned) {
     try {
       const loaded = await nodeClient.listLoadedSchemas({ full: true });
@@ -458,7 +453,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
         } : null;
       const driftCheck = checkSchemaDrift(
         label,
-        cfg.schemaFieldAliases?.[runtime ?? ""] ? {...entry.schema,schema:canonicalSchema(entry.schema.schema)} : entry.schema,
+        {...entry.schema, schema: canonicalSchema(entry.schema.schema)},
         hash,
         registered,
         boundSchemaNames(cfg, hash),

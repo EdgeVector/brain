@@ -4,20 +4,16 @@ import { syncOwnedModel } from "../owned-schema-init.ts";
 //
 //   1. probe /api/system/auto-identity
 //   2. POST /api/setup/bootstrap if the node is not provisioned
-//   3. declare the owned schemas (owned-schema-init.ts); the node must be
-//      LastDB API 13 or later
+//   3. declare the owned schemas (owned-schema-init.ts)
 //   4. persist config
 //   5. confirm owner-socket access or the remote capability
 //
-// Idempotent. A re-run verifies an existing multi-key config and keeps its
-// pins, and heals URLs that still point at the dead `:9101 / :9102`
-// local-schema setup. Config load refuses a config in a retired storage
-// model with `home_copy_required`, so init never rewrites one.
+// Idempotent. A re-run verifies an existing multi-key config and keeps its pins.
 
 import { existsSync, readFileSync } from "node:fs";
 
-import { newNodeClient, BrainError, nodeDownHint, defaultIsFolddbBinaryInstalled, defaultIsTargetPortListening, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
-import { OWNER_APP_ID, UNIQUE_SCHEMAS } from "../schemas.ts";
+import { newNodeClient, BrainError, nodeDownHint, defaultFolddbSocketPath, isLoopbackNodeUrl, type Verbose } from "../client.ts";
+import { UNIQUE_SCHEMAS } from "../schemas.ts";
 import {
   CONFIG_VERSION,
   ConfigInvalidError,
@@ -34,10 +30,7 @@ import {
 import { resolvePrintSink } from "../format.ts";
 
 export type InitOptions = {
-  // Optional — when undefined, the resolver below picks either the existing
-  // config's URL (if it isn't a dead local-schema default) or the new
-  // default. This lets `brain init` (no flags) auto-heal a stale config
-  // without clobbering a user-supplied override.
+  // Optional. When unset, the resolver uses the existing config URL or the default.
   nodeUrl?: string;
   schemaServiceUrl?: string;
   configPath?: string;
@@ -57,30 +50,12 @@ export type InitOptions = {
   >;
 };
 
-// Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback *marker*
-// (hostname only) so clients select socket transport via isLoopbackNodeUrl —
-// it is NOT a TCP endpoint. The retired :9001 control plane must never appear
-// in new configs or user-facing first-run copy. Schema service is the prod
+// Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback marker
+// (hostname only). It is not a TCP endpoint. Schema service is the prod
 // cloud Lambda; the dev Lambda is separate from production.
 export const DEFAULT_NODE_URL = "http://127.0.0.1";
 export const DEFAULT_SCHEMA_SERVICE_URL =
   "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
-
-// Auto-heal triggers: any existing config carrying one of these URLs is
-// treated as "still pointing at the dead pre-cloud local-schema setup".
-// User overrides (any other URL, including a custom localhost port) are
-// preserved verbatim.
-const STALE_NODE_URLS: ReadonlySet<string> = new Set([
-  "http://127.0.0.1:9101",
-  "http://localhost:9101",
-  // Retired Mini/full-node TCP control plane — heal to socket-only marker.
-  "http://127.0.0.1:9001",
-  "http://localhost:9001",
-]);
-const STALE_SCHEMA_URLS: ReadonlySet<string> = new Set([
-  "http://127.0.0.1:9102",
-  "http://localhost:9102",
-]);
 
 // Default cold-build retry schedule. Two competing cases share one budget:
 //   - The COMMON new-dev miss: the node just isn't running yet. init prints
@@ -183,20 +158,11 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
 
   const resolved = resolveUrls(opts, existing);
-  if (resolved.healed.length > 0) {
-    print(
-      `brain: auto-upgraded config to v${CONFIG_VERSION} with new schema-service URL` +
-        ` (replaced ${resolved.healed.join(", ")})`,
-    );
-  }
   const nodeUrl = resolved.nodeUrl;
   const schemaServiceUrl = resolved.schemaServiceUrl;
-  // Resolve the socket path for local requests. This is what newNodeClient uses when
-  // connecting, so we persist it to the config so later commands use the same
-  // socket without needing to re-supply BRAIN_FOLDDB_SOCKET or LASTDB_HOME.
-  const nodeSocketPath = isLoopbackNodeUrl(nodeUrl)
-    ? defaultFolddbSocketPath(existing?.nodeSocketPath)
-    : undefined;
+  // Resolve the socket path for node requests. Persist it so later commands
+  // use the same socket without re-supplying BRAIN_FOLDDB_SOCKET or LASTDB_HOME.
+  const nodeSocketPath = defaultFolddbSocketPath(existing?.nodeSocketPath);
   // Always echo which node we're targeting and where the URL came from — a dev
   // re-running `init` to confirm "which node am I actually pointed at?" needs
   // the answer on every run.
@@ -240,8 +206,8 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
       // "already provisioned". If our local config has a usable userHash
       // from a previous successful init against this node, treat the
       // config as authoritative and continue — the downstream
-      // schemas-load step exercises X-User-Hash and will surface
-      // `missing_user_context` if the saved userHash is genuinely wrong.
+      // The schemas-load step surfaces `missing_user_context` if the saved
+      // userHash is genuinely wrong.
       // No usable config ⇒ rethrow the BrainError so the user sees the
       // node's actual message (e.g. "POST /api/auth/restore …").
       if (
@@ -266,22 +232,17 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // are retired.
   //
   print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} brain schemas`);
-  // Existing configs retain their data identities. A fresh home may opt in.
-  const loadedBefore = existing ? [] : await probeClient.listLoadedSchemas();
-  const canonicalVocabulary = existing ? Boolean(existing.schemaFieldAliases)
-    : !loadedBefore.some((schema) => schema.owner_app_id === OWNER_APP_ID &&
-      schema.fields?.some((field) => ["slug", "body", "blp_h"].includes(field)));
-  const nodeClient = newNodeClient({ 
-    canonicalVocabulary, schemaFieldAliases:existing?.schemaFieldAliases,
-    baseUrl: nodeUrl, 
-    userHash, 
+  const nodeClient = newNodeClient({
+    schemaFieldAliases: existing?.schemaFieldAliases,
+    baseUrl: nodeUrl,
+    userHash,
     verbose: verbose ?? (() => {}),
     socketPath: nodeSocketPath,
   });
   const config = await syncOwnedModel(nodeClient, {
     configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
-    designSchemaHash: "", taskSchemaHash: "", ...(nodeSocketPath ? { nodeSocketPath } : {}),
-  }, existing, canonicalVocabulary);
+    nodeSocketPath,
+  }, existing);
   writeConfig(config, configPath, priorConfig);
   const consent = await establishConsentInline({
     nodeUrl, userHash, print, verbose, socketPath: nodeSocketPath,
@@ -350,11 +311,6 @@ type ProbeOpts = {
   nodeUrl: string;
   retryDelaysMs?: number[];
   sleep?: (ms: number) => Promise<void>;
-  // Injectable probes forwarded to `nodeDownHint` so the printed guidance is
-  // deterministic in tests (otherwise it would read the host's live PATH /
-  // socket table). Default to the real probes in production.
-  isFolddbBinaryInstalled?: () => boolean;
-  isTargetPortListening?: (url: string) => boolean;
   // Treat the current process as a TTY (default: process.stdin.isTTY). Gates
   // the down-node retry budget: interactive runs keep the long compile-wait,
   // non-interactive (CI/agent/scripted) runs fail fast. Injectable so the
@@ -382,11 +338,7 @@ export async function probeWithRetry(
     if (delays.length === 0) throw err;
     const sleep = opts.sleep ?? defaultSleep;
     print(
-      `        node not reachable at ${opts.nodeUrl}. ${nodeDownHint(
-        opts.nodeUrl,
-        opts.isFolddbBinaryInstalled ?? defaultIsFolddbBinaryInstalled,
-        opts.isTargetPortListening ?? defaultIsTargetPortListening,
-      )}`,
+      `        node not reachable at ${opts.nodeUrl}. ${nodeDownHint()}`,
     );
     for (let i = 0; i < delays.length; i++) {
       const delay = delays[i] ?? 0;
@@ -412,46 +364,16 @@ export async function probeWithRetry(
 type ResolvedUrls = {
   nodeUrl: string;
   schemaServiceUrl: string;
-  // Human-readable descriptors of what we replaced, for the heal notice.
-  // Empty when no heal happened (fresh init, or existing URLs are already
-  // current / are user overrides).
-  healed: string[];
 };
 
 export function resolveUrls(
   opts: Pick<InitOptions, "nodeUrl" | "schemaServiceUrl">,
   existing: Config | null,
 ): ResolvedUrls {
-  const healed: string[] = [];
-
-  // When no explicit --node-url is given and there's no existing config URL to
-  // reuse, default to the loopback marker. brain reaches a local node ONLY
-  // over its Unix socket; the URL is not dialed as TCP.
-  let nodeUrl: string;
-  if (opts.nodeUrl) {
-    nodeUrl = opts.nodeUrl;
-  } else if (!existing) {
-    nodeUrl = DEFAULT_NODE_URL;
-  } else if (STALE_NODE_URLS.has(existing.nodeUrl)) {
-    nodeUrl = DEFAULT_NODE_URL;
-    healed.push(`nodeUrl ${existing.nodeUrl} → ${DEFAULT_NODE_URL}`);
-  } else {
-    nodeUrl = existing.nodeUrl;
-  }
-
-  let schemaServiceUrl: string;
-  if (opts.schemaServiceUrl) {
-    schemaServiceUrl = opts.schemaServiceUrl;
-  } else if (!existing) {
-    schemaServiceUrl = DEFAULT_SCHEMA_SERVICE_URL;
-  } else if (STALE_SCHEMA_URLS.has(existing.schemaServiceUrl)) {
-    schemaServiceUrl = DEFAULT_SCHEMA_SERVICE_URL;
-    healed.push(`schemaServiceUrl ${existing.schemaServiceUrl} → ${DEFAULT_SCHEMA_SERVICE_URL}`);
-  } else {
-    schemaServiceUrl = existing.schemaServiceUrl;
-  }
-
-  return { nodeUrl, schemaServiceUrl, healed };
+  const nodeUrl = opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
+  const schemaServiceUrl =
+    opts.schemaServiceUrl ?? existing?.schemaServiceUrl ?? DEFAULT_SCHEMA_SERVICE_URL;
+  return { nodeUrl, schemaServiceUrl };
 }
 
 function isUnreachable(err: unknown): boolean {

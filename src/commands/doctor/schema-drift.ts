@@ -72,7 +72,6 @@ export function checkSchemaDrift(
 }
 
 export function boundSchemaNames(cfg: Config, hash: string): string[] {
-  if (!cfg.schemaFieldAliases?.[hash]) return [];
   return UNIQUE_SCHEMAS
     .filter((entry) => (cfg.schemaIdentities?.[entry.key] ?? cfg.schemaHashes[entry.key]) === hash)
     .map((entry) => entry.schema.schema.descriptive_name);

@@ -87,12 +87,3 @@ export function bunVersionMeetsMinimum(
 ): boolean {
   return compareVersions(found, min) >= 0;
 }
-
-// LastDB API 13 (lastdb #803) is the first node that owns the values of every
-// schema it declares. The node, not the app, decides ownership, so Brain init
-// refuses an older node.
-export const OWNED_HOME_API_VERSION = 13;
-
-/** Whether a node at this API version owns the values of every schema. */
-export const ownedHome = (apiVersion: number): boolean =>
-  apiVersion >= OWNED_HOME_API_VERSION;
