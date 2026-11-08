@@ -23,7 +23,6 @@ import {
   attachCmd,
   attachmentGetCmd,
   attachmentsCmd,
-  attachmentsMigrateCmd,
   detachCmd,
 } from "./commands/attach.ts";
 import { linkCmd } from "./commands/link.ts";
@@ -463,18 +462,11 @@ errors unless --force.
   --force   replace an existing attachment with the same name
   --json    emit \`{ok, slug, type, entry, deduplicated, replaced}\` on stdout`,
   attachments: `brain attachments <slug> [--type T] [--json]
-brain attachments migrate [<slug>] [--type T] [--json]
 
 List a record's attachments (name, size, media type, blob ref, added_at).
 
-\`attachments migrate\` moves v1 record-stored attachment bytes into the
-node's record files (one file per BrainAttachmentFile record) and
-deletes the legacy stand-in blob records. Scoped to one record when a slug is
-given, otherwise sweeps every attachment index. Idempotent.
-
   --type    ${RECORD_TYPE_LIST}
-  --json    emit \`{ok, slug, type, attachments}\` (list) or \`{ok, report}\`
-            (migrate) on stdout`,
+  --json    emit \`{ok, slug, type, attachments}\` on stdout`,
   detach: `brain detach <slug> <name-or-ref> [--type T] [--json]
 
 Remove one attachment by filename or sha256:<hex> blob ref. The
@@ -519,9 +511,8 @@ so dangling wiki-link intent remains queryable.
   --json    emit \`{slug, type?, linked_from:[...]}\` on stdout.`,
   graph: `brain graph <neighbors|path|query> [...] [--json]
 
-Bounded traversal over the typed edge substrate written by \`put\`/\`append\`
-and rebuilt by \`brain reindex --graph-edges\`. Every walk is keyed reads
-only — one range read per node per direction, never a scan.
+Bounded traversal over the typed edge substrate written by \`put\`/\`append\`.
+Every walk is keyed reads only — one range read per node per direction, never a scan.
 
   brain graph neighbors <slug> [--direction out|in|both] [--edge-type T]...
       One hop. Default direction \`both\`, so an isolated record and an
@@ -842,12 +833,6 @@ It prints wrote N and the cursor key. It does not walk the corpus.
                     child#, symptom, symptom#, keyword, kw#, or directory are valid.
   --source-hash     one record type. all is refused.
   --slug            repeat up to 25. A call with no slug is refused.
-  --tags            the old payload write stopped. No scan.
-  --backlinks       the old payload write stopped. No scan.
-  --child-task-index the old payload write stopped. No scan.
-  --bm25            refused.
-  --list-index      refused. This command does not walk every record.
-  --graph-edges     refused. This command does not walk every record.
 
 Run with the global --verbose to print node calls.`,
   mcp: `brain mcp [install|instructions]
@@ -1172,18 +1157,9 @@ const GRAPH_OPTIONS = {
   json: { type: "boolean", default: false },
 } as const;
 const REINDEX_OPTIONS = {
-  type: { type: "string" },
   target: { type: "string" },
   "source-hash": { type: "string" },
   slug: { type: "string", multiple: true },
-  "dry-run": { type: "boolean", default: false },
-  tags: { type: "boolean", default: false },
-  backlinks: { type: "boolean", default: false },
-  bm25: { type: "boolean", default: false },
-  "list-index": { type: "boolean", default: false },
-  "child-task-index": { type: "boolean", default: false },
-  "graph-edges": { type: "boolean", default: false },
-  "max-records": { type: "string" },
 } as const;
 const EMPTY_OPTIONS = {} as const;
 
@@ -2757,31 +2733,6 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     },
     "attachments",
   );
-  // `brain attachments migrate [slug]` — v1→v2 storage migration subcommand.
-  // "migrate" is a reserved word here; a record cannot shadow it because
-  // record slugs are resolved only in the list form.
-  if (positionals[0] === "migrate") {
-    if (positionals.length > 2) {
-      throw new BrainError({
-        code: "extra_positional_args",
-        message: `attachments migrate takes at most one slug (got ${positionals.length - 1}).`,
-        hint: "Run `brain attachments migrate [<slug>]`.",
-      });
-    }
-    const cfg = readConfig();
-    const type = parseRecordType(values.type);
-    const mOpts: Parameters<typeof attachmentsMigrateCmd>[0] = { cfg, verbose };
-    const migrateSlug = positionals[1];
-    if (migrateSlug !== undefined) mOpts.slug = migrateSlug;
-    if (type) mOpts.type = type;
-    if (values.json) {
-      mOpts.print = (line: string) => console.error(line);
-      mOpts.onResult = (payload) =>
-        console.log(JSON.stringify({ ok: true, report: payload.report }));
-    }
-    await attachmentsMigrateCmd(mOpts);
-    return 0;
-  }
   const slug = positionals[0];
   if (!slug) {
     console.error(COMMAND_HELP.attachments);
@@ -2791,7 +2742,7 @@ async function runAttachments(args: Argv, verbose: Verbose): Promise<number> {
     throw new BrainError({
       code: "extra_positional_args",
       message: `attachments takes exactly one slug (got ${positionals.length}).`,
-      hint: "Run `brain attachments <slug>` (or `brain attachments migrate [<slug>]`).",
+      hint: "Run `brain attachments <slug>`.",
     });
   }
   const cfg = readConfig();
@@ -3714,27 +3665,8 @@ async function runReindex(args: Argv, verbose: Verbose): Promise<number> {
     },
     "reindex",
   );
-  const type = parseRecordType(values.type);
   const cfg = readConfig();
   const rOpts: Parameters<typeof reindexCmd>[0] = { cfg, verbose };
-  if (type) rOpts.type = type;
-  if (values["dry-run"]) rOpts.dryRun = true;
-  if (values.tags) rOpts.tags = true;
-  if (values.backlinks) rOpts.backlinks = true;
-  if (values.bm25) rOpts.bm25 = true;
-  if (values["list-index"]) rOpts.listIndex = true;
-  if (values["child-task-index"]) rOpts.childTaskIndex = true;
-  if (values["graph-edges"]) rOpts.graphEdges = true;
-  if (typeof values["max-records"] === "string") {
-    const max = Number.parseInt(values["max-records"], 10);
-    if (!Number.isInteger(max) || max < 1) {
-      throw new BrainError({
-        code: "invalid_limit",
-        message: `--max-records must be a positive integer, got ${JSON.stringify(values["max-records"])}.`,
-      });
-    }
-    rOpts.graphMaxRecords = max;
-  }
   if (typeof values.target === "string") rOpts.target = values.target;
   if (typeof values["source-hash"] === "string") rOpts.sourceHash = values["source-hash"];
   if (values.slug !== undefined) {

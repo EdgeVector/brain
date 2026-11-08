@@ -299,13 +299,12 @@ export async function runFreshnessProbe(
   }
 
   // Genuine failure. Distinguish the two real causes so the fix line points
-  // somewhere useful instead of blanket-recommending `brain reindex` (which
-  // re-puts embeddings and does nothing for score variance or a node whose
-  // writes aren't surfacing at all).
+  // somewhere useful. A corpus walk is not a repair for score variance or
+  // for a node whose writes are not surfacing.
   const notSurfacing = avgScore === null || passed === 0;
   const fix = notSurfacing
     ? "fresh writes are not surfacing in search at all — this points at the node, not the index. Check the node log and confirm the embedding runtime is up (the native-index search must be returning our just-written record); restart the node with embeddings enabled if needed."
-    : `fresh writes are surfacing but retrieval quality is systematically low (avg score < ${minScore} and/or only a weak minority of trials cleared the floor). Check the node's embedding model/runtime; if the live index has drifted, \`brain reindex\` re-puts every live record so its embedding is current (it does NOT de-duplicate the index or reduce pollution).`;
+    : `fresh writes are surfacing but retrieval quality is systematically low (avg score < ${minScore} and/or only a weak minority of trials cleared the floor). Check the node's embedding model and runtime.`;
   return {
     name: "freshness-probe",
     ok: false,
@@ -436,17 +435,12 @@ export async function runPollutionProbe(
     `query "${query}" → ${total} hits: ` +
     `live ${live}, stale ${stale} (${pct(stalePct)}), orphan ${orphan} (${pct(orphanPct)}) ` +
     `— pollution ${pct(combinedPct)}`;
-  // Pollution = stale/superseded embeddings that fold_db's append-only index
-  // does NOT purge on soft-delete or re-put. No brain-layer action can lower
-  // it today (the purge is upstream G3d/G3e work), and `reindex` makes it
-  // WORSE — each re-put appends a fresh embedding while the prior one persists
-  // as stale. So a high ratio must surface as a WARN (visible, counted) and
-  // must NOT fail the verdict or recommend `reindex`. See the honest hint.
+  // Pollution = stale embeddings the index does not purge on soft-delete.
+  // No brain command lowers it. A high ratio is a WARN, not a verdict failure.
   const pollutionHint =
-    "stale/superseded embeddings — fold_db's append-only index does not purge them on soft-delete or re-put. " +
-    "No brain command can lower this: `brain reindex` refreshes live embeddings but does NOT reduce pollution " +
-    "(each re-put appends a new embedding and the prior one persists as stale). The index purge is tracked upstream. " +
-    "User-facing search/ask is unaffected: they skip stale hits at query time; this is raw-index bloat, not wrong results.";
+    "stale embeddings stay in the index after a soft-delete. " +
+    "No brain command lowers this. The index purge is upstream. " +
+    "Search and ask skip stale hits at query time. This is index size, not a wrong result.";
   if (combinedPct > failThreshold) {
     return {
       name: "pollution-probe",

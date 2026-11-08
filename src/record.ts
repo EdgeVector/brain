@@ -85,18 +85,6 @@ export function parseGenericLinkTag(
   return { to_type: rawType, to_slug: toSlug };
 }
 
-export function wikiLinkSlugs(body: string): string[] {
-  const found = new Set<string>();
-  const re = /\[\[([^\]\n]+)\]\]/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(body)) !== null) {
-    const raw = match[1] ?? "";
-    const slug = normalizeSlug(raw.split(/[|#]/, 1)[0] ?? "");
-    if (slug.length > 0) found.add(slug);
-  }
-  return Array.from(found);
-}
-
 // Tombstone sentinel. `brain delete` still stamps this tag so older read
 // paths hide the row. Native LastDB Delete also converges tip absence.
 export const TOMBSTONE_TAG = "__brain_deleted__";
@@ -471,8 +459,8 @@ function warnSkippedRows(type: RecordType, slugs: readonly string[]): void {
   skippedRowsWarned = true;
   process.stderr.write(
     `warning: ${slugs.length} ${type} list row(s) have no record behind them and were skipped ` +
-      `(first: ${slugs[0]}). They are stale index rows; \`brain reindex --list-index --type ${type}\` ` +
-      "(admin) removes them. Other rows are unaffected.\n",
+      `(first: ${slugs[0]}). They are stale index rows. ` +
+      "Other rows are unaffected.\n",
   );
 }
 
@@ -521,8 +509,7 @@ export async function readFullRecords(
         `(${pending.slice(0, 5).join(", ")}${pending.length > 5 ? ", ..." : ""}), ` +
         "so nothing was returned: an index snapshot keeps only a head of a long body and a head is not the record.",
       hint:
-        "Retry: an empty read is usually a flake. If it persists the index row has no record behind it: " +
-        `run \`brain reindex --list-index --type ${type}\` (admin).`,
+        "Retry: an empty read is usually a flake. If it persists, the index row has no record behind it.",
     });
   }
   return { records: complete, missing: pending };
@@ -1414,7 +1401,6 @@ export interface ResolveBySlugOpts {
     | "delete"
     | "attach"
     | "attachments"
-    | "attachments migrate"
     | "detach"
     | "attachment get";
   // Read-only callers can opt into deterministic ambiguity resolution while

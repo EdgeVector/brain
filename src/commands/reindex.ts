@@ -2,7 +2,6 @@
 // Page heads commit conditionally. The command does not walk the corpus.
 
 import { BrainError, type BatchMutationOp, type NodeClient, type Verbose } from "../client.ts";
-import { pageBackfill } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
 import { parseListCount, serializeListCount } from "../count-state.ts";
@@ -252,15 +251,6 @@ async function finishCountedBackfill(opts: {
 
 export type ReindexOptions = {
   cfg: Config;
-  type?: RecordType;
-  dryRun?: boolean;
-  tags?: boolean;
-  backlinks?: boolean;
-  bm25?: boolean;
-  listIndex?: boolean;
-  childTaskIndex?: boolean;
-  graphEdges?: boolean;
-  graphMaxRecords?: number;
   target?: string;
   sourceHash?: string;
   slugs?: string[];
@@ -344,21 +334,6 @@ function parseTarget(raw: string): NamedBackfillTarget {
 
 export async function reindexCmd(opts: ReindexOptions): Promise<ReindexResult> {
   const { print } = resolvePrintSinks(opts);
-
-  if (opts.tags || opts.backlinks || opts.childTaskIndex) {
-    const backfill = opts.tags
-      ? pageBackfill("tag#<tag>", "<type>")
-      : opts.backlinks
-        ? pageBackfill("link#<slug>", "<type>")
-        : pageBackfill("child#<designSlug>", "task");
-    print(`The old payload write stopped. ${backfill}`);
-    return { wrote: 0 };
-  }
-
-  if (opts.bm25) refuse("reindex refuses --bm25.");
-  if (opts.listIndex || opts.graphEdges || opts.dryRun) {
-    refuse("reindex refuses the walk that writes every record again.");
-  }
 
   const rawSlugs = opts.slugs ?? [];
   if (!opts.target || !opts.sourceHash || rawSlugs.length === 0) {

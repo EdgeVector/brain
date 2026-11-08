@@ -1,11 +1,9 @@
 # File attachments — storage model
 
-**Date:** 2026-07-16 (v1, record-stored bytes) · 2026-07-17 (v2, file-blob plane)
 **Commands:** `brain attach` / `brain attachments` / `brain detach` /
-`brain attachment get` / `brain attachments migrate`
-**Code:** `src/attachments.ts` (model), `src/commands/attach.ts` (CLI),
-`src/schemas.ts` (`attachmentIndexSchema`, `attachmentFileSchema`,
-legacy `attachmentBlobSchema`)
+`brain attachment get`
+**Code:** `src/attachments.ts`, `src/commands/attach.ts`,
+`src/schemas.ts` (`attachmentIndexSchema`, `attachmentFileSchema`)
 
 ## What this is
 
@@ -20,7 +18,7 @@ the cloud backup sends to B2. No field value names a file.
 
 ## The internal schemas
 
-All are internal support schemas like `TagIndex` — registered by
+These are internal support schemas, registered by
 `brain init` (or declared lazily on first `attach`), never surfaced by
 `get`/`list`/`search`, and NOT record types.
 
@@ -65,25 +63,6 @@ key}`; the node checks the bytes against the marker, and `getAttachmentBlob`
 sha256-verifies them again before any byte is handed back. Deleting the
 record deletes its file in the same write.
 
-### `BrainAttachmentBlob` — LEGACY v1 stand-in
-
-v1 stored base64 bytes in a `no_index`/`binary` record field (`data`),
-riding cloud sync as **database** bytes. Nothing writes this schema anymore;
-`getAttachmentBlob` still falls back to it for unmigrated content, and it
-stays registered so migration can read it.
-
-## Migration: `brain attachments migrate [<slug>]`
-
-Moves v1 record-stored blobs into the file plane and deletes the legacy
-stand-in records. Scoped to one record when a slug is given, otherwise sweeps
-every attachment index. Per unique blob: read the legacy record,
-**sha256-verify before upload** (a corrupt legacy blob is a hard error, never
-laundered into the file plane), upload through `/api/db/put-blob`, then
-delete the legacy record. Idempotent — blobs already in the file plane are
-skipped, and their legacy records are still cleaned up if present. Index
-entries do not change (the `blob_ref` is the same content hash in both
-worlds).
-
 ## Why NOT a field on the 10 knowledge schemas
 
 fold_db identity-hashes a schema by its name + field set, and records pin to
@@ -122,25 +101,10 @@ Searchable on purpose: the filename (via `filenames`, classified `word`), so
   remain (append-only store; other records may reference the same content).
 - `attachment get` → fetches via the pointer, re-hashes, and hard-fails on
   mismatch (`attachment_integrity_error`) — corrupt bytes are never written
-  silently. Unmigrated v1 blobs are still readable (legacy fallback).
+  silently.
 - Node without cloud-sync support (501) or without cloud sync configured
   (409) → clear `attachment_file_plane_unavailable` error; attachments
   require the file plane.
 - Per-file cap: 32 MiB raw (UDS transport caps bodies at 64 MiB; base64 is
   4/3 + JSON overhead).
 - Zero-byte files are rejected.
-
-## Validation
-
-Unit: `test/unit/attachments.test.ts` (file-plane round-trip byte-identity,
-CAS dedup, force-replace, detach, integrity failure, CAS-miss 404 mapping,
-legacy fallback, migration incl. idempotency/scoping/corruption, size caps,
-classification assertions).
-
-E2E (run against the live primary): attach/migrate two real PDFs on a record,
-`attachments` lists both, `attachment get` round-trips byte-identical
-(`shasum -a 256` equal), `lastdb cloud status` shows the bytes under
-**files** (`file_reference_bytes > 0`), the B2 bucket holds
-`{scope}/cas/sha256/…` objects, and a `brain search`/`ask` for distinctive
-strings of the PDF body returns no attachment payloads while a filename
-search still finds the carrying record.

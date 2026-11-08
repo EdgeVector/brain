@@ -416,8 +416,7 @@ export const GRAPH_LINT_DEFAULT_MAX_SLUGS = 100;
  * This deliberately takes its source set from the caller rather than
  * discovering one: there is no scan to enumerate "every record with edges",
  * and inventing one here would smuggle a corpus walk into a health check. The
- * doctor probe seeds it from the keyed type-list index; `reindex` seeds it
- * from the slice it just rebuilt.
+ * doctor probe seeds it from the keyed type-list index.
  */
 export async function lintGraphEdges(
   node: NodeClient,
