@@ -15,8 +15,7 @@ import subprocess
 import sys
 import time
 
-# The LastDB source's scripts/disk_v2/cleanup.py, imported in main() once the source path is known.
-cleanup = None
+import cleanup
 
 OPERATIONS = ("get", "first_page", "all_summaries", "all_records", "snapshot_counts",
               "bulk_selection", "migration_read", "search_fallback")
@@ -92,10 +91,17 @@ def finish_setup(node, output):
 
 
 def cloud_off(node, destination, phase):
-    status = node.call("/api/sync/byte-backup-v2", {"action": "status"})[0]
-    if any(status.get(name) is not False for name in ("enabled", "automatic_backup_enabled", "running")):
+    """The generated node keeps cloud sync off and has no saved connection.
+
+    The nightly daemon no longer serves `/api/sync/byte-backup-v2`. The same fact is
+    `cloud_sync` on `GET /api/status`: disconnected, accepting no captures, and idle.
+    """
+    status = node.call("/api/status")[0]["status"]["cloud_sync"]
+    if (status.get("connected") is not False or status.get("captures_accepted") is not False
+            or status.get("payment_hold") is not False or status.get("last_error") is not None
+            or status.get("databases") != {}):
         raise RuntimeError("The generated node did not confirm that cloud sync stays OFF")
-    if status.get("manual_connection") is not None:
+    if "environment" not in status or status["environment"] is not None:
         raise RuntimeError("The generated node has a cloud connection")
     save(destination / f"cloud-off-{phase}.json", status)
 
@@ -304,10 +310,6 @@ def main():
     sys.path.insert(0, str(args.lastdb_source.resolve() / "scripts/benchmarks"))
     from node import Node
     Node = nightly_node(Node)
-    # Appended after the Node import, so no disk_v2 module can shadow a benchmark module.
-    sys.path.append(str(args.lastdb_source.resolve() / "scripts/disk_v2"))
-    global cleanup
-    import cleanup
 
     runs, failures = [], {}
     for repeat in range(1, args.repeats + 1):
