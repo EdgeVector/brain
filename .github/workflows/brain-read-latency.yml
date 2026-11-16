@@ -5,6 +5,7 @@ on:
       - 'src/**'
       - 'scripts/brain_latency.mjs'
       - 'scripts/brain_read_latency.py'
+      - 'scripts/cleanup.py'
       - '.github/workflows/brain-read-latency.yml'
   push:
     branches: [main]

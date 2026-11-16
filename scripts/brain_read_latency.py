@@ -15,8 +15,7 @@ import subprocess
 import sys
 import time
 
-# The LastDB source's scripts/disk_v2/cleanup.py, imported in main() once the source path is known.
-cleanup = None
+import cleanup
 
 OPERATIONS = ("get", "first_page", "all_summaries", "all_records", "snapshot_counts",
               "bulk_selection", "migration_read", "search_fallback")
@@ -304,10 +303,6 @@ def main():
     sys.path.insert(0, str(args.lastdb_source.resolve() / "scripts/benchmarks"))
     from node import Node
     Node = nightly_node(Node)
-    # Appended after the Node import, so no disk_v2 module can shadow a benchmark module.
-    sys.path.append(str(args.lastdb_source.resolve() / "scripts/disk_v2"))
-    global cleanup
-    import cleanup
 
     runs, failures = [], {}
     for repeat in range(1, args.repeats + 1):
