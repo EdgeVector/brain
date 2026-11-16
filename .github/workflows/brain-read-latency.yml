@@ -103,9 +103,8 @@ jobs:
           ARTIFACT_URL: ${{ steps.binaries.outputs.artifact-url }}
           ARTIFACT_SHA256: ${{ steps.binaries.outputs.artifact-digest }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/binary-artifact.json"
           python3 "$RUNNER_TEMP/lastdb-source/scripts/benchmarks/artifact.py" \
-            --metadata "$RUNNER_TEMP/binary-artifact.json" --output "$RUNNER_TEMP/binary-artifact-receipt"
+            --output "$RUNNER_TEMP/binary-artifact-receipt"
   measure:
     name: ${{ matrix.mode }}-latency-${{ matrix.records }}
     needs: [build]
@@ -185,9 +184,8 @@ jobs:
           ARTIFACT_URL: ${{ steps.measurements.outputs.artifact-url }}
           ARTIFACT_SHA256: ${{ steps.measurements.outputs.artifact-digest }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/measurement-artifact.json"
           python3 "$RUNNER_TEMP/lastdb-source/scripts/benchmarks/artifact.py" \
-            --metadata "$RUNNER_TEMP/measurement-artifact.json" --output "$RUNNER_TEMP/measurement-artifact-receipt"
+            --output "$RUNNER_TEMP/measurement-artifact-receipt"
   benchmark-complete:
     if: ${{ always() }}
     needs: [build, measure]
