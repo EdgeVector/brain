@@ -91,10 +91,17 @@ def finish_setup(node, output):
 
 
 def cloud_off(node, destination, phase):
-    status = node.call("/api/sync/byte-backup-v2", {"action": "status"})[0]
-    if any(status.get(name) is not False for name in ("enabled", "automatic_backup_enabled", "running")):
+    """The generated node keeps cloud sync off and has no saved connection.
+
+    The nightly daemon no longer serves `/api/sync/byte-backup-v2`. The same fact is
+    `cloud_sync` on `GET /api/status`: disconnected, accepting no captures, and idle.
+    """
+    status = node.call("/api/status")[0]["status"]["cloud_sync"]
+    if (status.get("connected") is not False or status.get("captures_accepted") is not False
+            or status.get("payment_hold") is not False or status.get("last_error") is not None
+            or status.get("databases") != {}):
         raise RuntimeError("The generated node did not confirm that cloud sync stays OFF")
-    if status.get("manual_connection") is not None:
+    if "environment" not in status or status["environment"] is not None:
         raise RuntimeError("The generated node has a cloud connection")
     save(destination / f"cloud-off-{phase}.json", status)
 
