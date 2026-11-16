@@ -42,17 +42,3 @@ jobs:
         run: |
           echo "check=${{ needs.check.result }}"
           test "${{ needs.check.result }}" = "success"
-
-  registry-commit:
-    name: Registry commit identity
-    needs: [ci-required]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: python3 scripts/registry-commit.py
