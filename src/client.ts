@@ -1,6 +1,6 @@
-import { canonicalSchema, profilesFor } from "./canonical-vocabulary.ts";
-import { coordinateId, expectationMatches, recordOperation, type RecordPreimage } from "./complete-record.ts";
-import { explicitKeyDeclaration, ownedSchemas } from "./multi-key.ts";
+import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
+import { coordinateId, expectationMatches, toAppMutation, type RecordPreimage } from "./complete-record.ts";
+import { ownedSchemas } from "./multi-key.ts";
 import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
 import { RECORD_BUDGET_BYTES, RECORD_CAP_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 export { QUERY_PAGE_SIZE };
@@ -11,41 +11,27 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 // All errors flow through `mapError` so every Error Registry row maps
 // to an actionable message in one place.
 //
-// As of the @lastdb/app-sdk port, the app data path rides the SDK's
-// `LastDbClient` — the same wire client every LastDB app uses — with the SDK's
-// typed errors translated back into brain's BrainError registry (see
-// `mapSdkDataError`). That covers consent, query/queryAll, mutation, and
-// app-scoped search. The remaining hand-rolled node surface is deliberately
-// Brain-specific owner/admin glue the SDK contract does not expose:
-// schema declaration/listing, bootstrap, auto-identity, health, and raw calls.
+// Record reads and writes go through the LastDB app API (`POST /v1/read` and
+// `POST /v1/write`). The restricted app socket serves only those routes.
+// Search still posts `/api/app/search` for a developer running on the owner
+// socket. Schema declaration, identity, version, and consent are not called.
 
 import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import {
-  CapabilityDeniedError,
+  AppApiError,
   LastDbClient,
+  NodeTooOldError,
   PermissionDeniedError,
   RequestRejectedError,
   TransportError,
   UnexpectedResponseError,
-  UnknownAppError,
-  AppInSandboxError,
-  InvalidScopeError,
-  NodeTooOldError,
-  ConsentDeniedError,
-  CapabilityRevokedError,
-  ConsentExpiredError,
-  ConsentRequestNotFoundError,
-  capabilityStoreKey,
-  type CapabilityStore as SdkCapabilityStore,
-  type ConsentScope,
-  type KeyValue as SdkKeyValue,
-  type QueryFilter as SdkQueryFilter,
-  type QueryResult as SdkQueryResult,
-  type QueryRow as SdkQueryRow,
-  type SearchHit as SdkSearchHit,
+  type AppApiMutation,
+  type AppApiRead,
+  type AppApiReadResult,
+  type AppApiRecord,
   type NodeVersion as SdkNodeVersion,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
@@ -53,7 +39,6 @@ import {
 import type { Config } from "./config.ts";
 import type { AddSchemaRequest, RecordType } from "./schemas.ts";
 import { beginFetch, endFetch } from "./slow-call.ts";
-import { BRAIN_APP_LABEL, MIN_LASTDB_API_VERSION } from "./runtime.ts";
 
 export type Verbose = (msg: string) => void;
 
@@ -95,9 +80,11 @@ export function onboardingResetConfigDir(): string {
 // explicit override (config field / BRAIN_FOLDDB_SOCKET env) wins for
 // ephemeral / non-default nodes.
 export function defaultFolddbSocketPath(override?: string): string {
-  // Precedence: the BRAIN_FOLDDB_SOCKET env wins (the ad-hoc override),
-  // then an explicit config-supplied path, then the default
-  // `<resolveNodeHome()>/data/folddb.sock`.
+  // The restricted launcher sets LASTDB_SOCKET_PATH to the app socket.
+  // A developer override (BRAIN_FOLDDB_SOCKET, then config) still wins
+  // after that. The owner socket is the fallback when neither is set.
+  const appSocket = process.env.LASTDB_SOCKET_PATH;
+  if (appSocket && appSocket.length > 0) return appSocket;
   const envOverride = process.env.BRAIN_FOLDDB_SOCKET;
   if (envOverride && envOverride.length > 0) return envOverride;
   if (override && override.length > 0) return override;
@@ -152,6 +139,13 @@ export type RawResponse = {
 export type QueryRow = {
   fields: Record<string, unknown>;
   key: { hash: string | null; range: string | null };
+  revision?: string;
+  file?: {
+    name: string | null;
+    media_type: string | null;
+    size: number;
+    path?: string | null;
+  } | null;
 };
 
 export type QueryResponse = {
@@ -486,6 +480,8 @@ export type BatchMutationOp = {
   expected?:
     | { type: "absent"; field: string }
     | { type: "value"; field: string; value: string };
+  // A file that already exists on disk. LastDB stores the path, not the bytes.
+  file?: { path: string; name?: string; media_type?: string };
 };
 
 /**
@@ -619,7 +615,26 @@ export type NodeClient = {
     schemaHash: string;
     fields: string[];
     keyHash: string;
+    file?: boolean;
   }): Promise<QueryRow | null>;
+  // One page of an alternate-key range. Rows are complete records so the
+  // caller can recompute the alternate address before it projects fields.
+  readVia?(opts: {
+    schemaHash: string;
+    via: string;
+    range: { hash: string; prefix?: string; start?: string; end?: string };
+    limit?: number;
+    cursor?: string;
+    keysOnly?: boolean;
+  }): Promise<{ rows: QueryRow[]; keys: SchemaRecordKey[]; nextCursor: string | null }>;
+  writeRecordFile?(opts: {
+    schemaHash: string;
+    keyHash: string;
+    fields: Record<string, unknown>;
+    path: string;
+    name?: string;
+    mediaType?: string;
+  }): Promise<void>;
   // One keyed read for the keys the caller names. Optional so hand-built
   // mocks keep compiling; callers fall back to queryByKey when it is absent.
   queryByKeys?(opts: {
@@ -718,202 +733,142 @@ export function newNodeClient(opts: {
   baseUrl: string;
   userHash: string;
   verbose?: Verbose;
-  // When set, every MUTATION (create/update/delete) attaches the returned
-  // base64 capability blob as `X-App-Capability` plus a fresh `X-Capability-Ts`.
-  // Reads are NOT gated (design: reads bypass capability enforcement), so the
-  // provider is only consulted on the mutation path. Returning null sends no
-  // capability headers (NodeOwner fallback / enforcement off).
+  // Kept so existing callers still typecheck. The app API does not use a
+  // capability blob; the launcher session authorizes the app.
   capability?: CapabilityProvider;
-  // The canonical app id the SDK client acts as on the consent + mutation
-  // paths. Defaults to "brain" (the only app this CLI is).
+  // The canonical app id the SDK client acts as. Defaults to "brain".
   appId?: string;
-  // Owner Unix socket for local requests. Defaults to the current LastDB home;
-  // BRAIN_FOLDDB_SOCKET and the configured nodeSocketPath can override it.
+  // Unix socket. LASTDB_SOCKET_PATH wins, then BRAIN_FOLDDB_SOCKET, then this.
   socketPath?: string;
-  // Skip the client↔node version gate. Only `brain doctor` sets this: doctor
-  // is the tool that DESCRIBES an old node (its `node-api-version` check), so
-  // it must be allowed to look at one. Every other command keeps the gate.
+  // Kept so existing callers still typecheck. Brain does not call /api/version.
   skipApiVersionGate?: boolean;
 }): NodeClient {
   const url = stripTrailingSlash(opts.baseUrl);
-  const fieldProfiles: FieldAliasProfiles = {...opts.schemaFieldAliases};
+  const fieldProfiles: FieldAliasProfiles = {
+    ...canonicalProfilesForHashes({}),
+    ...opts.schemaFieldAliases,
+  };
   const verbose = opts.verbose ?? noopVerbose;
   const userHash = opts.userHash;
-  const capability = opts.capability;
   const appId = opts.appId ?? "brain";
   const socketPath = defaultFolddbSocketPath(opts.socketPath);
-
-  // One transport is shared by every SDK client this node client mints.
-  // It is a fetch-backed implementation of the SDK's Transport seam rather
-  // than the SDK's node:http default, so brain keeps exactly one HTTP stack:
-  // the same global `fetch` every other node call uses.
-  //
-  // The client↔node version gate (app-sdk "Version handshake"). Resolved ONCE
-  // per client before the first data request on either wire path (the SDK
-  // transport below and `callJson`). With `MIN_LASTDB_API_VERSION` = 0 it
-  // resolves without IO; with a positive floor it reads `GET /api/version`
-  // and throws the SDK's NodeTooOldError — one line that names the fix — so
-  // a brain newer than the node stops before its first write, not on a bare
-  // 400 after it. The version route itself is exempt from the gate (it IS
-  // the gate), as is `/health`, so `brain doctor` can still describe an old
-  // node instead of refusing to look at it.
-  let apiVersionGate: Promise<void> | null = null;
-  const requireNodeApiVersion = (path: string): Promise<void> => {
-    if (isVersionGateExempt(path)) return Promise.resolve();
-    if (apiVersionGate === null) {
-      apiVersionGate =
-        MIN_LASTDB_API_VERSION > 0 && !opts.skipApiVersionGate
-          ? gateOnNodeApiVersion(sdkClient(null))
-          : Promise.resolve();
-    }
-    return apiVersionGate;
-  };
+  void opts.capability;
+  void opts.skipApiVersionGate;
 
   const sdkTransport = fieldAliasTransport(fetchTransport(
     url,
     { "X-LastDB-Client": "brain" },
     socketPath,
-    requireNodeApiVersion,
   ), fieldProfiles);
-
-  // SDK clients constructed here never use the SDK's capability store —
-  // brain's CapabilitySession owns acquisition/storage (via keychain.ts) and
-  // hands the current blob in per call. A no-op store keeps the SDK from ever
-  // touching a real keychain on this path.
-  const sdkStore: SdkCapabilityStore = {
-    async store() {},
-    async load() {
-      return null;
-    },
-    async remove() {},
-  };
-
-  // A fresh, cheap SDK client per call: construction is pure object wiring
-  // (no IO), and per-call construction is how the per-write capability blob
-  // (re-acquired mid-session by CapabilitySession) stays current.
-  const sdkClient = (blob: string | null, forAppId: string = appId): LastDbClient =>
-    new LastDbClient(
-      forAppId,
-      sdkTransport,
-      sdkStore,
-      blob,
-      safeStoreKey(forAppId, sdkTransport.target),
-      sdkTransport.target,
-    );
-
-  const callJson = async (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ): Promise<{ status: number; body: unknown }> => {
-    await requireNodeApiVersion(path);
-    const headers = extraHeaders ?? {};
-    const { res, readBody } = await callNodeRaw(
-      url,
-      path,
-      method,
-      encodeFieldRequest(path, body, fieldProfiles),
-      verbose,
-      headers,
-      socketPath,
-    );
-    const parsed = decodeFieldReply(path, body, await readBody(), fieldProfiles);
-    return { status: res.status, body: parsed };
-  };
-
-  // Common 200-or-throw wrapper around `callJson`. Endpoints that branch on
-  // specific non-200 statuses (autoIdentity 503, bootstrap 410) and `rawCall`
-  // stay on `callJson` directly; `search` also stays on `callJson` so its
-  // error tag can intentionally strip the query string from the path. The
-  // consent endpoints (requestConsent / consentStatus) and mutations ride the
-  // SDK client above instead.
-  const callJsonOk = async (
-    path: string,
-    method: "GET" | "POST",
-    body?: unknown,
-    extraHeaders?: Record<string, string>,
-  ): Promise<unknown> => {
-    const { status, body: parsed } = await callJson(path, method, body, extraHeaders);
-    if (status !== 200) throw mapNodeError(status, parsed, path);
-    return parsed;
-  };
-
-  // App-identity v3.1: the mutation rides the SDK client, which attaches the
-  // verbatim base64 capability blob plus a fresh unix-epoch-seconds timestamp
-  // (`X-App-Capability` + `X-Capability-Ts`) on every call. The timestamp is
-  // recomputed per call so a token cached for hours still lands inside the
-  // node's ±60s replay window. No capability provider, or a provider
-  // returning null, sends neither header — the node treats the caller as
-  // NodeOwner (or, under enforcement, 403s with `consent_required`). The
-  // provider is resolved per write so a CapabilitySession re-acquire is
-  // picked up without rebuilding the client.
+  const sdk = new LastDbClient(appId, sdkTransport);
   const recordSchemas = new Map(ownedSchemas().flatMap(({ schema }) => [
     [schema.name, schema] as const,
     [`brain/${schema.name}`, schema] as const,
   ]));
 
-  const writeHeaders = (): Record<string, string> => {
-    const blob = capability?.() ?? null;
-    return blob ? {
-      [APP_CAPABILITY_HEADER]: blob,
-      [CAPABILITY_TS_HEADER]: String(Math.floor(Date.now() / 1000)),
-    } : {};
+  const openSchema = (schemaHash: string) => {
+    const wire = wireSchemaName(schemaHash);
+    return { wire, schema: recordSchemas.get(wire) ?? recordSchemas.get(schemaHash) };
+  };
+
+  const requireSchema = (schemaHash: string) => {
+    const opened = openSchema(schemaHash);
+    if (!opened.schema) {
+      throw new BrainError({
+        code: "schema_unavailable",
+        message: `Brain cannot resolve schema ${opened.wire}.`,
+      });
+    }
+    return { wire: opened.wire, schema: opened.schema };
+  };
+
+  const sdkRead = async (reads: AppApiRead[]): Promise<AppApiReadResult[]> => {
+    if (reads.length === 0) return [];
+    const out: AppApiReadResult[] = [];
+    for (let start = 0; start < reads.length; start += APP_READ_BATCH) {
+      const chunk = reads.slice(start, start + APP_READ_BATCH);
+      let results: AppApiReadResult[];
+      try {
+        results = await sdk.read(chunk);
+      } catch (err) {
+        throw mapSdkDataError(err, url, "POST", "/v1/read", socketPath);
+      }
+      if (results.length !== chunk.length) {
+        throw new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned an incomplete read.",
+        });
+      }
+      out.push(...results);
+    }
+    return out;
+  };
+
+  const writeMutations = async (mutations: AppApiMutation[]) => {
+    if (mutations.length === 0) return { written: 0, revisions: [] as string[] };
+    try {
+      verbose(`→ NODE POST /v1/write count=${mutations.length}`);
+      const written = await sdk.write(mutations);
+      verbose(`← NODE POST /v1/write written=${written.written}`);
+      return written;
+    } catch (err) {
+      throw mapSdkDataError(err, url, "POST", "/v1/write", socketPath);
+    }
   };
 
   const readPreimages = async (ops: BatchMutationOp[]) => {
-    const grouped = Map.groupBy(ops, (op) => op.schemaHash);
-    const queries = Array.from(grouped).flatMap(([schema, group]) =>
-      Array.from({ length: Math.ceil(group.length / 64) }, (_, index) => {
-        const keys = group.slice(index * 64, (index + 1) * 64);
-        return {
-          schema_name: schema, limit: keys.length,
-          filter: { HashRangeKeys: keys.map((op) => [op.keyHash, op.keyRange ?? ""]) },
-        };
-      }),
-    );
-    const selected = new Set(ops.map((op) => coordinateId(op.schemaHash, op.keyHash, op.keyRange)));
     const found = new Map<string, RecordPreimage>();
-    for (let start = 0; start < queries.length; start += 64) {
-      const batch = queries.slice(start, start + 64);
-      const reply = await callJsonOk("/api/queries/batch", "POST", { queries: batch }) as {
-        results?: Array<{ status: number; response: { results?: RecordPreimage[]; has_more?: boolean } }>;
-      };
-      if (!Array.isArray(reply.results) || reply.results.length !== batch.length) {
-        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an incomplete preimage batch." });
+    const reads = ops.map((op) => {
+      const { wire } = requireSchema(op.schemaHash);
+      return pointRead(wire, op.keyHash, op.keyRange ? op.keyRange : null);
+    });
+    const results = await sdkRead(reads);
+    for (let index = 0; index < ops.length; index++) {
+      const op = ops[index]!;
+      const { wire } = requireSchema(op.schemaHash);
+      const row = onePoint(results[index]!, []);
+      if (!row) continue;
+      const range = op.keyRange ? op.keyRange : null;
+      if (row.key.hash !== op.keyHash || (row.key.range ?? null) !== range || !row.revision) {
+        throw new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned an unexpected record preimage.",
+        });
       }
-      for (const [index, item] of reply.results.entries()) {
-        if (item.status !== 200 || item.response.has_more !== false || !Array.isArray(item.response.results)) {
-          throw new BrainError({ code: "record_read_incomplete", message: "LastDB could not confirm a complete record preimage." });
-        }
-        for (const row of item.response.results) {
-          const id = coordinateId(batch[index]!.schema_name, row.key.hash, row.key.range);
-          if (!selected.has(id) || found.has(id) || !row.fields || !row.alternates || !/^[a-f0-9]{64}$/.test(row.revision)) {
-            throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected record preimage." });
-          }
-          found.set(id, row);
-        }
-      }
+      found.set(coordinateId(wire, op.keyHash, range), {
+        key: { hash: row.key.hash, range: row.key.range },
+        fields: row.fields,
+        alternates: {},
+        revision: row.revision,
+        metadata: null,
+      });
     }
     return found;
   };
 
-  const completeOperations = async (ops: BatchMutationOp[], durable: boolean) => {
+  const completeOperations = async (ops: BatchMutationOp[]): Promise<AppApiMutation[]> => {
     const preimages = await readPreimages(ops);
-    return ops.flatMap((op) => {
-      const schema = recordSchemas.get(op.schemaHash);
-      if (!schema) throw new BrainError({ code: "schema_unavailable", message: "Brain cannot resolve this record schema." });
-      const current = preimages.get(coordinateId(op.schemaHash, op.keyHash, op.keyRange));
+    const mutations: AppApiMutation[] = [];
+    for (const op of ops) {
+      const { wire, schema } = requireSchema(op.schemaHash);
+      const current = preimages.get(coordinateId(wire, op.keyHash, op.keyRange));
       if (!expectationMatches(op, current)) {
-        throw new BrainError({ code: "cas_conflict",
-          message: `The ${schema.name} ${op.mutationType} precondition did not hold (${current ? "record present" : "record absent"}, ${op.expected?.type ?? "no field guard"}${op.expected ? ` ${op.expected.field}` : ""}).`,
+        throw new BrainError({
+          code: "cas_conflict",
+          message:
+            `The ${schema.name} ${op.mutationType} precondition did not hold ` +
+            `(${current ? "record present" : "record absent"}, ${op.expected?.type ?? "no field guard"}` +
+            `${op.expected ? ` ${op.expected.field}` : ""}).`,
         });
       }
-      if (op.mutationType === "delete" && !current) return [];
-      const request = recordOperation(op, schema, current, durable);
-      assertWriteFitsRecordBudget({ ...op, fields: request.record });
-      return [request];
-    });
+      const mutation = toAppMutation(op, wire, schema, current);
+      if (!mutation) continue;
+      if (mutation.op !== "delete") {
+        assertWriteFitsRecordBudget({ ...op, fields: mutation.record as Record<string, unknown> });
+      }
+      mutations.push(mutation);
+    }
+    return mutations;
   };
 
   const mutate = async (
@@ -924,27 +879,65 @@ export function newNodeClient(opts: {
     keyRange?: string,
     expected?: BatchMutationOp["expected"],
   ): Promise<void> => {
-    const [request] = await completeOperations([{ mutationType: kind, schemaHash, fields, keyHash, keyRange, expected }], false);
-    if (request) await callJsonOk("/api/mutation", "POST", request, writeHeaders());
+    const mutations = await completeOperations([{
+      mutationType: kind, schemaHash, fields, keyHash, keyRange, expected,
+    }]);
+    await writeMutations(mutations);
   };
 
-  const queryPageSdk = async (
-    schemaHash: string,
-    filter: SdkQueryFilter,
-    opts?: { allowFullScan?: boolean },
-  ): Promise<SdkQueryResult> => {
-    try {
-      return await sdkClient(null).query(schemaHash, filter, {
-        ...(opts?.allowFullScan === true ? { allowFullScan: true } : {}),
-      });
-    } catch (err) {
-      throw mapSdkDataError(err, url, "POST", "/api/query", socketPath);
+  const drainRange = async (read: AppApiRead, fields: string[]): Promise<QueryResponse> => {
+    const rows: QueryRow[] = [];
+    const seen = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    const pageSize = queryPageSize(fields.length);
+    let complete = false;
+    for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
+      const request: AppApiRead = cursor
+        ? { ...read, limit: pageSize, cursor }
+        : { ...read, limit: pageSize };
+      const [result] = await sdkRead([request]);
+      if (!result) {
+        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an incomplete read." });
+      }
+      const consumed = takeRecords(result, fields);
+      let added = 0;
+      for (const row of consumed.rows) {
+        const id = recordDedupKey(row);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        rows.push(row);
+        added++;
+      }
+      const next = consumed.nextCursor;
+      if (!next) {
+        complete = true;
+        break;
+      }
+      if (seenCursors.has(next) || (added === 0 && consumed.rows.length === 0)) {
+        throw new BrainError({
+          code: "query_pagination_stalled",
+          message: "LastDB repeated a read cursor.",
+        });
+      }
+      seenCursors.add(next);
+      cursor = next;
     }
+    if (!complete) {
+      throw new BrainError({
+        code: "query_pagination_incomplete",
+        message: `The query exceeded ${QUERY_PAGE_LIMIT} pages.`,
+      });
+    }
+    return {
+      ok: true,
+      results: rows,
+      total_count: rows.length,
+      returned_count: rows.length,
+      has_more: false,
+    };
   };
 
-  // Unfiltered corpus drains (list / BM25 warm) are admin bulk: Mini hard-refuses
-  // product full-schema scans unless X-LastDB-Allow-Full-Scan is set. Point reads
-  // stay on queryByKey (no header).
   const queryAllGuarded = async ({
     schemaHash,
     fields,
@@ -956,343 +949,74 @@ export function newNodeClient(opts: {
     allowFullScan?: boolean;
     filter?: { HashKey?: string; [k: string]: unknown };
   }): Promise<QueryResponse> => {
-    // Keyed filters never need the admin full-scan header.
-    // HashRangePrefix / Range / Keys are is_key_restricted on Mini (LastGit
-    // already allows them). Do not add scan-class RangePrefix / HashRange.
-    const keyed =
-      filter !== undefined &&
-      typeof filter === "object" &&
-      filter !== null &&
-      ("HashKey" in filter ||
-        "HashKeys" in filter ||
-        "HashRangeKey" in filter ||
-        "HashRangeKeys" in filter ||
-        "HashRangePrefix" in filter ||
-        "HashRangeRange" in filter);
-    if (!keyed && allowFullScan !== true) {
-      throw new BrainError({
-        code: "full_scan_not_allowed",
-        message:
-          `queryAll on schema ${schemaHash.slice(0, 12)}… has no key filter and allowFullScan is not set — ` +
-          `product paths must use HashKey/index; pass allowFullScan only for admin seed/offline bulk.`,
-        hint: "Use a keyed query, or allowFullScan: true for deliberate admin drains.",
-      });
-    }
-    // Bound native field work per IPC request. Complete membership still comes
-    // from the full cursor drain, never from a single page or a raw row count.
-    const pageSize = queryPageSize(fields.length);
-    // Keep the complete server cursor, deduplicate keys, reject stalled cursors,
-    // and refuse an incomplete drain. A nullable total count does not replace has_more.
-    const allResults: QueryRow[] = [];
-    const seenKeys = new Set<string>();
-    let offset = 0;
-    let cursor: SdkKeyValue | undefined;
-    const seenCursors = new Set<string>();
-    let complete = false;
-    let lastTotalCount: number | null = null;
-    for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-      const pageResult = await queryPageSdk(
-        schemaHash,
-        {
-          fields,
-          limit: pageSize,
-          ...(cursor ? { cursor } : { offset }),
-          ...(filter ? { filter: filter as SdkQueryFilter["filter"] } : {}),
-        },
-        keyed ? undefined : { allowFullScan: true },
-      );
-      const pageResults = fromSdkRows(pageResult.rows);
-      // SDK 0.3+: `totalCount` is optional — the node may report pagination
-      // state and decline the exact count. Keep the last count it did give.
-      if (pageResult.page !== null && pageResult.page.totalCount !== undefined) {
-        lastTotalCount = pageResult.page.totalCount;
-      }
-      let newOnPage = 0;
-      for (const row of pageResults) {
-        const k = recordDedupKey(row);
-        if (seenKeys.has(k)) continue;
-        seenKeys.add(k);
-        allResults.push(row);
-        newOnPage++;
-      }
-      // Stop on explicit `has_more: false`. Absent page envelope used to mean
-      // "done" even when the page was full (the requested page size) — that silently
-      // stopped at the MAX_QUERY_LIMIT=1000 cliff when a node returned
-      // page:null (measured on primary for large type partitions). Treat a
-      // full page with no envelope as "maybe more" and keep paging; a short
-      // or empty follow-up page ends the loop via the empty/newOnPage guards.
-      const hasMore = pageResult.page?.hasMore === true;
-      const fullPageMaybeMore =
-        pageResult.page === null && pageResults.length >= pageSize;
-      if (!hasMore && !fullPageMaybeMore) { complete = true; break; }
-      // A format 7 page that a run of deleted records ended early can hold no
-      // new row; its cursor still moves past the keys it examined.
-      const nextCursor = pageResult.page?.nextCursor;
-      const cursorMoved = !!nextCursor && !seenCursors.has(JSON.stringify(nextCursor));
-      if (newOnPage === 0 && !cursorMoved) {
+    const { wire, schema } = openSchema(schemaHash);
+    const kind = filter ? namedFilter(filter) : null;
+    if (!kind) {
+      if (allowFullScan !== true || !hasRecent(schema)) {
         throw new BrainError({
-          code: "query_pagination_stalled",
-          message:
-            `Node /api/query returned page ${page + 1} at offset=${offset} ` +
-            `with only previously-seen record keys but reported has_more=true ` +
-            `(total_count=${lastTotalCount ?? "?"}) — the node is counting ` +
-            `deleted/tombstoned record keys in total_count but omitting them from ` +
-            `the materialized page, so has_more never clears and pagination cannot ` +
-            `progress ${DOCTOR_TIP}.`,
-          hint:
-            "Walk the offsets with limit=1 and look for a repeated record, which is the " +
-            "alias-key defect in brain " +
-            "`papercut-lastdb-full-scan-key-list-contains-alias-keys-so-offsets-repeat-and-total-count-over-reports`. " +
-            "This affects only the record type you deleted from; other types still work.",
+          code: "full_scan_not_allowed",
+          message: allowFullScan === true
+            ? `Schema ${wire} has no recent alternate, so Brain cannot list every record.`
+            : `queryAll on schema ${wire} has no key filter and allowFullScan is not set. ` +
+              "Product paths must name a key. Pass allowFullScan only for an admin drain.",
+          hint: "Use a keyed query, or allowFullScan: true for a deliberate admin drain of a product schema.",
         });
       }
-      // Defensive: a node that returns has_more=true with an empty
-      // results array would spin without progress. The stalled-page
-      // guard above already covers this (0 new keys), but keep an
-      // explicit break for clarity and so the throw above can only
-      // ever fire on a real overlap.
-      if (pageResults.length === 0 && !cursorMoved) break;
-      if (nextCursor) {
-        const token = JSON.stringify(nextCursor);
-        if (seenCursors.has(token)) throw new BrainError({ code: "query_pagination_stalled", message: "The node repeated a query cursor." });
-        seenCursors.add(token);
-        cursor = nextCursor;
-      } else if (cursor) {
-        throw new BrainError({ code: "query_pagination_incomplete", message: "The node omitted the next cursor during a keyed continuation." });
+      return drainRange(rangeRead(wire, { hash: "all" }, "recent"), fields);
+    }
+    const plan = planFilter(wire, schema, filter as Record<string, unknown>);
+    if (plan.mode === "points") {
+      const results = await sdkRead(plan.reads);
+      const rows: QueryRow[] = [];
+      for (const result of results) {
+        const row = onePoint(result, fields);
+        if (row) rows.push(row);
       }
-      offset += pageResults.length;
+      return {
+        ok: true,
+        results: rows,
+        total_count: rows.length,
+        returned_count: rows.length,
+        has_more: false,
+      };
     }
-    if (!complete) throw new BrainError({ code: "query_pagination_incomplete", message: `The query exceeded ${QUERY_PAGE_LIMIT} pages.` });
-    if (lastTotalCount !== null && allResults.length < lastTotalCount) {
-      throw new BrainError({
-        code: "query_pagination_incomplete",
-        message:
-          `Node /api/query finished with has_more=false but only ${allResults.length} ` +
-          `unique records were collected across pages — the node's reported total_count ` +
-          `was ${lastTotalCount}. This means total_count includes record keys the node ` +
-          `never returned in any page: either deleted/tombstoned keys counted in the ` +
-          `total, or rows silently dropped by unstable offset pagination on a schema ` +
-          `larger than page size (${pageSize}) ${DOCTOR_TIP}.`,
-        hint:
-          "Do NOT assume this is an outdated node — the tombstone-aware count fix " +
-          "(fold #995) has a deployed successor, and checking for it by commit " +
-          "ancestry gives a false negative because it was squash-merged. A gap this " +
-          "size can mean the scan's key list holds alias keys that resolve to the " +
-          "same record — walk the offsets " +
-          "with limit=1 and look for a repeat. Brain: " +
-          "`papercut-lastdb-full-scan-key-list-contains-alias-keys-so-offsets-repeat-and-total-count-over-reports`. " +
-          "If the gap matches records you recently deleted, only that record type is " +
-          "affected; other types still work.",
-      });
-    }
-    return {
-      ok: true,
-      results: allResults,
-      total_count: lastTotalCount ?? allResults.length,
-      returned_count: allResults.length,
-    };
+    return drainRange(plan.read, fields);
   };
+
+  const finishedBatch = (ops: BatchMutationOp[], revisions: string[]): BatchMutationResult => ({
+    mutationIds: revisions,
+    count: ops.length,
+    backgroundTasksDrained: true,
+    convergencePending: false,
+    durability: "durable",
+  });
 
   return {
     baseUrl: url,
     userHash,
-    async autoIdentity() {
-      const { status, body } = await callJson("/api/system/auto-identity", "GET");
-      if (status === 200) {
-        const uh = body && typeof body === "object" ? (body as Record<string, unknown>).user_hash : undefined;
-        return {
-          provisioned: true,
-          userHash: typeof uh === "string" ? uh : userHash,
-        };
-      }
-      if (status === 503) {
-        return {
-          provisioned: false,
-          reason: bodyError(body) ?? "node_not_provisioned",
-        };
-      }
-      throw mapNodeError(status, body, "/api/system/auto-identity");
+    autoIdentity() {
+      return appRouteUnavailable("/api/system/auto-identity");
     },
-    async health() {
-      // GET /api/health → `{ ok, uptime_s, version }`. The node reports its
-      // release string here (`brain doctor` surfaces it on node-reachable).
-      // `version` (and `uptime_s`) are read defensively: an older node may omit
-      // either, so each is only carried through when it's the expected type.
-      const { status, body } = await callJson("/api/health", "GET");
-      if (status !== 200) throw mapNodeError(status, body, "/api/health");
-      const b = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-      const result: HealthResult = { ok: b.ok === true };
-      if (typeof b.uptime_s === "number") result.uptime_s = b.uptime_s;
-      if (typeof b.version === "string" && b.version.length > 0) result.version = b.version;
-      return result;
+    health() {
+      return appRouteUnavailable("/api/health");
     },
     nodeVersion() {
-      return sdkClient(null).version();
+      return appRouteUnavailable("/api/version");
     },
-    async bootstrap(name) {
-      const { status, body } = await callJson("/api/setup/bootstrap", "POST", { name });
-      if (status === 200) {
-        const uh = body && typeof body === "object" ? (body as Record<string, unknown>).user_hash : undefined;
-        if (typeof uh !== "string" || uh.length === 0) {
-          throw new BrainError({
-            code: "bootstrap_no_user_hash",
-            message: "Bootstrap succeeded but the node did not return a user_hash.",
-            hint: "Inspect the response from POST /api/setup/bootstrap.",
-          });
-        }
-        return { userHash: uh };
-      }
-      if (status === 410) {
-        // The node and auto-identity disagree: auto-identity says
-        // "not provisioned", bootstrap says "already provisioned". Surface
-        // the node's own message field (typically a pointer to
-        // POST /api/auth/restore) — the caller (init.ts) decides whether
-        // to recover from an existing ~/.brain/config.json or rethrow.
-        const nodeMsg = bodyMessage(body);
-        throw new BrainError({
-          code: "onboarding_already_complete",
-          message:
-            `Node rejected POST /api/setup/bootstrap with 410 — already provisioned` +
-            (nodeMsg ? `: ${nodeMsg}` : ".") +
-            ` (auto-identity simultaneously reports the node as not provisioned — a contradictory state from the daemon).`,
-          hint:
-            "Recovery: (a) if ~/.brain/config.json from this node still exists, re-run `brain init` so it reuses the saved userHash; " +
-            "(b) follow the node's own instruction above (typically `POST /api/auth/restore` with the recovery phrase); " +
-            "(c) to start fresh, stop the daemon and clear its onboarding state " +
-            `(homebrew default: \`rm -rf ${onboardingResetConfigDir()}\`), then re-run \`brain init\`.`,
-        });
-      }
-      throw mapNodeError(status, body, "/api/setup/bootstrap");
+    bootstrap() {
+      return appRouteUnavailable("/api/setup/bootstrap");
     },
-    async requestConsent(consentAppId, scope) {
-      // Rides the SDK client's consent flow, translated back to the raw
-      // {status, body} contract the capability layer (and `brain doctor`'s
-      // write-ready probe) branches on — 202 / 404 / 403 / 400 per the
-      // consent contract.
-      verbose(`→ NODE POST /api/apps/request-consent (sdk) app=${consentAppId} scope=${scope}`);
-      try {
-        const r = await sdkClient(null, consentAppId).requestConsent(parseScope(scope));
-        verbose(`← NODE POST /api/apps/request-consent status=202`);
-        return {
-          status: 202,
-          body: { request_id: r.requestId, expires_at: r.expiresAt },
-        };
-      } catch (err) {
-        if (err instanceof UnknownAppError) {
-          return { status: 404, body: { error: err.message, app_id: consentAppId } };
-        }
-        if (err instanceof AppInSandboxError) {
-          return {
-            status: 403,
-            body: { reason: "app_in_sandbox", app_id: consentAppId, error: err.message },
-          };
-        }
-        if (err instanceof InvalidScopeError) {
-          return { status: 400, body: { error: err.message } };
-        }
-        if (err instanceof UnexpectedResponseError) {
-          return { status: err.status, body: err.body };
-        }
-        if (err instanceof TransportError) {
-          throw connectionError(url, "node", err, {
-            socketPath,
-            routeSocket: localNodeRouteSocket("node", socketPath),
-            socketCause: err,
-          });
-        }
-        throw err;
-      }
+    requestConsent() {
+      return appRouteUnavailable("/api/apps/request-consent");
     },
-    async consentStatus(requestId) {
-      // One SDK consent-status poll, translated back to the raw {status,
-      // body} shapes the node serves (200 granted / 202 pending / 403
-      // denied|revoked / 408 expired / 404 unknown).
-      try {
-        const blob = await sdkClient(null).pollConsentOnce(requestId);
-        if (blob === null) return { status: 202, body: { status: "pending" } };
-        return { status: 200, body: { status: "granted", capability: blob } };
-      } catch (err) {
-        if (err instanceof CapabilityRevokedError) {
-          return { status: 403, body: { status: "revoked" } };
-        }
-        if (err instanceof ConsentDeniedError) {
-          return { status: 403, body: { status: "denied" } };
-        }
-        if (err instanceof ConsentExpiredError) {
-          return { status: 408, body: { status: "expired" } };
-        }
-        if (err instanceof ConsentRequestNotFoundError) {
-          return { status: 404, body: { status: "unknown" } };
-        }
-        if (err instanceof UnexpectedResponseError) {
-          return { status: err.status, body: err.body };
-        }
-        if (err instanceof TransportError) {
-          throw connectionError(url, "node", err, {
-            socketPath,
-            routeSocket: localNodeRouteSocket("node", socketPath),
-            socketCause: err,
-          });
-        }
-        throw err;
-      }
+    consentStatus() {
+      return appRouteUnavailable("/api/apps/consent-status");
     },
-    async declareAppSchema(appId, schema) {
-      if (!schema.record_keys) {
-        const current = recordSchemas.get(schema.name);
-        if (!current) throw new BrainError({ code: "schema_unavailable", message: "Brain cannot declare this record schema." });
-        schema = { ...schema, record_keys: current.record_keys, file_required: current.file_required };
-      }
-      const local = schema;
-      schema = canonicalSchema(local);
-      const body = await callJsonOk("/api/schemas/declare", "POST", {
-        namespace: appId,
-        schema: explicitKeyDeclaration(schema),
-      });
-      const b = body as Record<string, unknown>;
-      const canonical = typeof b.canonical === "string" ? b.canonical : "";
-      const schemaName = typeof b.schema_name === "string" ? b.schema_name : "";
-      const identityHash = typeof b.identity_hash === "string" ? b.identity_hash : undefined;
-      if (!identityHash || !/^[a-f0-9]{64}$/.test(identityHash)
-        || b.app_id !== appId || b.schema_name !== `${appId}/${local.name}`) {
-        throw new BrainError({ code: "owned_schema_receipt_invalid", message: "The declaration did not confirm the exact owned app schema." });
-      }
-      const resolution = typeof b.resolution === "string" ? b.resolution : "link";
-      if (!canonical || !schemaName || !resolution) {
-        throw new BrainError({
-          code: "app_schema_declare_bad_response",
-          message: `Node /api/apps/declare-schema returned an incomplete response: ${JSON.stringify(body).slice(0, 300)}.`,
-          hint: "Upgrade the node or inspect the app-schema declaration response.",
-        });
-      }
-      Object.assign(fieldProfiles, profilesFor(local, [canonical, schemaName, identityHash ?? ""]));
-      return {
-        app_id: typeof b.app_id === "string" ? b.app_id : appId,
-        schema: schemaName,
-        canonical, identityHash,
-        resolution,
-        decision: typeof b.decision === "string" ? b.decision : undefined,
-      };
+    declareAppSchema() {
+      return appRouteUnavailable("/api/schemas/declare");
     },
-    async listLoadedSchemas(options) {
-      const body = await callJsonOk(options?.full ? "/api/schemas?include_full=1" : "/api/schemas", "GET");
-      const arr =
-        body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).schemas)
-          ? ((body as Record<string, unknown>).schemas as unknown[])
-          : [];
-      return arr
-        .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
-        .map((s) => ({
-          schema_type: typeof s.schema_type === "string" ? s.schema_type : undefined,
-          descriptive_name:
-            typeof s.descriptive_name === "string" ? s.descriptive_name : undefined,
-          owner_app_id: typeof s.owner_app_id === "string" ? s.owner_app_id : undefined,
-          // Catalog / write-path key. Prefer this when identity_hash drifts.
-          name: typeof s.name === "string" ? s.name : undefined,
-          identity_hash: typeof s.identity_hash === "string" ? s.identity_hash : undefined,
-          fields:Array.isArray(s.fields) ? s.fields.filter((field): field is string => typeof field === "string") : [],
-          field_types:s.field_types && typeof s.field_types === "object" ? s.field_types as Record<string,unknown> : {},
-        }));
+    listLoadedSchemas() {
+      return appRouteUnavailable("/api/schemas");
     },
     async createRecord({ schemaHash, fields, keyHash, keyRange }) {
       await mutate("create", schemaHash, fields, keyHash, keyRange);
@@ -1301,185 +1025,427 @@ export function newNodeClient(opts: {
       await mutate("update", schemaHash, fields, keyHash, keyRange);
     },
     async deleteRecord({ schemaHash, keyHash, keyRange }) {
-      // Empty fields_and_values is the minimal body. A `{slug: keyHash}` body
-      // would also rewrite the slug field with itself.
       await mutate("delete", schemaHash, {}, keyHash, keyRange);
     },
-    async mutateIfExpected({
-      mutationType,
-      schemaHash,
-      fields,
-      keyHash,
-      keyRange,
-      expected,
-    }) {
+    async mutateIfExpected({ mutationType, schemaHash, fields, keyHash, keyRange, expected }) {
       try {
-        await mutate(
-          mutationType,
-          schemaHash,
-          fields,
-          keyHash,
-          keyRange,
-          expected,
-        );
+        await mutate(mutationType, schemaHash, fields, keyHash, keyRange, expected);
         return "applied";
       } catch (err) {
-        if (err instanceof BrainError && err.code === "cas_conflict") {
-          return "conflict";
-        }
+        if (err instanceof BrainError && err.code === "cas_conflict") return "conflict";
         throw err;
       }
     },
-    async mutateBatch(ops, options) {
-      const mutations = ops.length ? await completeOperations(ops, options?.durability === "durable") : [];
-      if (mutations.length === 0) {
-        return {
-          mutationIds: [],
-          count: ops.length,
-          backgroundTasksDrained: true,
-          convergencePending: false,
-        };
-      }
-      const extraHeaders = writeHeaders();
-      verbose(`→ NODE POST /api/mutations/batch count=${ops.length}`);
-      const requestBody = {
-        mutations,
-        convergence: "async",
-      };
-      // Send each mutation request once; ambiguous write outcomes surface to the caller.
-      const parsed = await callJsonOk(
-        "/api/mutations/batch",
-        "POST",
-        requestBody,
-        extraHeaders,
-      );
-      verbose(`← NODE POST /api/mutations/batch status=200`);
-      const body = (parsed ?? {}) as Record<string, unknown>;
-      const mutationIds = Array.isArray(body.mutation_ids)
-        ? body.mutation_ids.filter((id): id is string => typeof id === "string")
-        : [];
-      const durability =
-        body.durability === "queued" || body.durability === "durable"
-          ? body.durability
-          : undefined;
-      return {
-        mutationIds,
-        count: typeof body.count === "number" ? body.count : ops.length,
-        backgroundTasksDrained: body.background_tasks_drained === true,
-        convergencePending: body.convergence_pending !== false,
-        ...(durability ? { durability } : {}),
-      };
+    async mutateBatch(ops, _options) {
+      void _options;
+      const mutations = ops.length ? await completeOperations(ops) : [];
+      if (mutations.length === 0) return finishedBatch(ops, []);
+      const written = await writeMutations(mutations);
+      return finishedBatch(ops, written.revisions);
     },
     async queryAll({ schemaHash, fields, allowFullScan, filter }) {
       return queryAllGuarded({ schemaHash, fields, allowFullScan, filter });
     },
-    async queryByKey({ schemaHash, fields, keyHash }) {
-      // Pure HashKey point-read — never fall back to a full schema drain.
-      // Mini refuses unfiltered product scans; a missing row is null, not a scan.
-      const page = await queryPageSdk(schemaHash, {
-        fields,
-        filter: { HashKey: keyHash },
-        limit: QUERY_PAGE_SIZE,
-        offset: 0,
-      });
-      const results = fromSdkRows(page.rows);
-      return findQueryRowByKey(results, keyHash);
+    async queryByKey({ schemaHash, fields, keyHash, file }) {
+      const { wire } = openSchema(schemaHash);
+      const [result] = await sdkRead([pointRead(wire, keyHash, null, file === true)]);
+      if (!result) {
+        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an incomplete read." });
+      }
+      return onePoint(result, fields);
     },
     async queryByKeys({ schemaHash, fields, keys }) {
       if (keys.length === 0) return [];
+      const { wire } = openSchema(schemaHash);
+      const reads = keys.map((key) => pointRead(wire, key.hash, key.range ? key.range : null));
+      const results = await sdkRead(reads);
       const rows: QueryRow[] = [];
-      // Bound native field work as well as simultaneous requests. A 1000-key
-      // batch can exceed the node budget before its first row returns.
-      const batchSize = 100, concurrency = 4;
-      for (let offset = 0; offset < keys.length; offset += batchSize * concurrency) {
-        const batches: Array<Array<{ hash: string; range?: string }>> = [];
-        for (let part = offset; part < Math.min(keys.length, offset + batchSize * concurrency); part += batchSize) batches.push(keys.slice(part, part + batchSize));
-        const pages = await Promise.all(batches.map(slice => queryAllGuarded({
-          schemaHash, fields, filter: { HashRangeKeys: slice.map(key => [key.hash, key.range ?? ""]) },
-        })));
-        for (const page of pages) rows.push(...page.results);
+      for (const result of results) {
+        const row = onePoint(result, fields);
+        if (row) rows.push(row);
       }
       return rows;
     },
     async listRecordKeys(schemaHash, listOpts = {}) {
-      const params = new URLSearchParams({ schema: schemaHash });
-      if (listOpts.limit !== undefined) params.set("limit", String(listOpts.limit));
-      if (listOpts.cursor !== undefined) params.set("cursor", listOpts.cursor);
-      const path = `/api/list?${params.toString()}`;
-      const body = await callJsonOk(path, "GET");
-      const envelope = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
-      const list =
-        envelope.list && typeof envelope.list === "object"
-          ? (envelope.list as Record<string, unknown>)
-          : null;
-      if (list === null || !Array.isArray(list.keys) || typeof list.has_more !== "boolean") {
+      const { wire, schema } = openSchema(schemaHash);
+      if (!hasRecent(schema)) {
         throw new BrainError({
-          code: "list_keys_bad_response",
-          message: `Node GET /api/list returned an invalid keys page for schema ${schemaHash.slice(0, 12)}….`,
-          hint: "Inspect the node response; brain expects list.keys[] and list.has_more from a Mini version with the keys-only list route.",
+          code: "membership_via_recent_required",
+          message: `Schema ${wire} has no recent alternate, so Brain cannot list its keys.`,
         });
       }
-      const keys: SchemaRecordKey[] = list.keys.map((raw, index) => {
-        const key = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+      const read: AppApiRead = {
+        schema: wire,
+        via: "recent",
+        range: { hash: "all" },
+        keys_only: true,
+        limit: listOpts.limit ?? QUERY_PAGE_SIZE,
+        ...(listOpts.cursor ? { cursor: listOpts.cursor } : {}),
+      };
+      const [result] = await sdkRead([read]);
+      if (!result) {
+        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an incomplete key page." });
+      }
+      const problem = appReadError(result);
+      if (problem) {
+        if (problem.code === "not_found") return { keys: [], nextCursor: null, hasMore: false };
+        throw new BrainError({ code: problem.code || "record_read_failed", message: problem.message });
+      }
+      if (!("keys" in result)) {
+        throw new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned records for a keys-only read.",
+        });
+      }
+      const keys: SchemaRecordKey[] = result.keys.map((key, index) => {
         if (typeof key.hash !== "string" || key.hash.length === 0) {
           throw new BrainError({
-            code: "list_keys_bad_response",
-            message: `Node GET /api/list returned an invalid key at index ${index} for schema ${schemaHash.slice(0, 12)}….`,
-            hint: "Inspect the node response; every listed brain record must have a non-empty hash key.",
+            code: "record_read_incomplete",
+            message: `LastDB returned an invalid key at index ${index} for schema ${wire}.`,
           });
         }
         return {
           hash: key.hash,
-          ...(typeof key.range === "string" && key.range.length > 0
-            ? { range: key.range }
-            : {}),
+          ...(typeof key.range === "string" && key.range.length > 0 ? { range: key.range } : {}),
         };
       });
-      const nextCursor = typeof list.next_cursor === "string" ? list.next_cursor : null;
-      if (list.has_more && nextCursor === null) {
-        throw new BrainError({
-          code: "list_keys_bad_response",
-          message: `Node GET /api/list reported has_more=true without a next_cursor for schema ${schemaHash.slice(0, 12)}….`,
-          hint: "Inspect the node response; a truncated keys page must carry the cursor for the next page.",
-        });
+      const nextCursor = textCursor(result.next_cursor);
+      return { keys, nextCursor, hasMore: nextCursor !== null };
+    },
+    async readVia({ schemaHash, via, range, limit, cursor, keysOnly }) {
+      const { wire } = openSchema(schemaHash);
+      const read: AppApiRead = {
+        schema: wire,
+        via,
+        range: rangeSpec(range.hash, range),
+        ...(limit !== undefined ? { limit } : {}),
+        ...(cursor ? { cursor } : {}),
+        ...(keysOnly ? { keys_only: true } : {}),
+      };
+      const [result] = await sdkRead([read]);
+      if (!result) {
+        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an incomplete read." });
       }
-      return { keys, nextCursor, hasMore: list.has_more };
+      if (keysOnly) {
+        const problem = appReadError(result);
+        if (problem) {
+          if (problem.code === "not_found") return { rows: [], keys: [], nextCursor: null };
+          throw new BrainError({ code: problem.code || "record_read_failed", message: problem.message });
+        }
+        if (!("keys" in result)) {
+          throw new BrainError({
+            code: "record_read_incomplete",
+            message: "LastDB returned records for a keys-only read.",
+          });
+        }
+        const keys: SchemaRecordKey[] = result.keys.flatMap((key) =>
+          typeof key.hash === "string" && key.hash.length > 0
+            ? [{ hash: key.hash, ...(key.range ? { range: key.range } : {}) }]
+            : []);
+        return { rows: [], keys, nextCursor: textCursor(result.next_cursor) };
+      }
+      const page = takeRecords(result, []);
+      return { rows: page.rows, keys: [], nextCursor: page.nextCursor };
+    },
+    async writeRecordFile({ schemaHash, keyHash, fields, path, name, mediaType }) {
+      const mutations = await completeOperations([{
+        mutationType: "create",
+        replaceIfPresent: true,
+        schemaHash,
+        keyHash,
+        fields,
+        file: {
+          path,
+          ...(name !== undefined ? { name } : {}),
+          ...(mediaType !== undefined ? { media_type: mediaType } : {}),
+        },
+      }]);
+      await writeMutations(mutations);
     },
     async search(query, searchOpts) {
       const schemaTargets = uniqueStrings(searchOpts?.schemas ?? []);
-      try {
-        const client = sdkClient(capability?.() ?? null);
-        const targetResults =
-          schemaTargets.length === 0
-            ? [await client.search(query, { k: 50 })]
-            : await Promise.all(
-                schemaTargets.map((target) =>
-                  client.search(query, { k: 50, target }),
-                ),
-              );
-        return sdkSearchHitsToNative(
-          targetResults.flatMap((result) => result.hits),
-          searchOpts,
-          query,
-          schemaTargets,
-        );
-      } catch (err) {
-        throw mapSdkDataError(err, url, "POST", "/api/app/search", socketPath);
-      }
+      const bodies = schemaTargets.length === 0
+        ? [{ query, k: 50 }]
+        : schemaTargets.map((target) => ({ query, k: 50, target }));
+      const hits: LocalSearchHit[] = [];
+      for (const body of bodies) hits.push(...await postSearch(sdkTransport, url, socketPath, body));
+      return sdkSearchHitsToNative(hits, searchOpts, query, schemaTargets);
     },
     async rawCall(method, path, body) {
-      const { res, readBody } = await callNodeRaw(url, path, method, encodeFieldRequest(path, body, fieldProfiles), verbose, undefined, socketPath);
+      const { res, readBody } = await callNodeRaw(
+        url, path, method, encodeFieldRequest(path, body, fieldProfiles), verbose, undefined, socketPath,
+      );
       const text = await readBody({ asText: true });
       const original = parseJsonSafe(text);
       const json = decodeFieldReply(path, body, original, fieldProfiles);
       return { status: res.status, headers: res.headers, body: json === original ? text : JSON.stringify(json), json };
-
     },
   };
 }
 
+const APP_READ_BATCH = 64;
+
+function wireSchemaName(schemaHash: string): string {
+  const name = schemaHash.trim();
+  if (name.length === 0 || /^[a-f0-9]{64}$/.test(name)) {
+    throw new BrainError({
+      code: "schema_name_required",
+      message:
+        "Brain needs the exact schema name (brain/<Name>). " +
+        "A saved hash pin cannot be used on the app API. Re-run `brain init`.",
+      hint: "Run `brain init` so config stores brain/<Name> for each schema.",
+    });
+  }
+  return name.startsWith("brain/") ? name : `brain/${name}`;
+}
+
+function appRouteUnavailable(path: string): never {
+  throw new BrainError({
+    code: "app_api_route_unavailable",
+    message: `Brain does not call ${path}. A restricted app uses POST /v1/read and POST /v1/write.`,
+  });
+}
+
+function hasRecent(schema: { alternate_keys?: object } | undefined): boolean {
+  return !!schema?.alternate_keys && Object.hasOwn(schema.alternate_keys, "recent");
+}
+
+function textCursor(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function appReadError(result: AppApiReadResult): { code: string; message: string } | null {
+  if ("error" in result) {
+    return {
+      code: result.error.code,
+      message: result.error.message || "LastDB refused the read.",
+    };
+  }
+  return null;
+}
+
+function projectRecord(fields: Record<string, unknown>, requested: readonly string[]): Record<string, unknown> {
+  if (requested.length === 0) return fields;
+  const out: Record<string, unknown> = {};
+  for (const name of requested) {
+    if (Object.hasOwn(fields, name)) out[name] = fields[name];
+  }
+  return out;
+}
+
+function rowFromRecord(record: AppApiRecord, requested: readonly string[]): QueryRow {
+  return {
+    fields: projectRecord(record.record as Record<string, unknown>, requested),
+    key: { hash: record.key.hash, range: record.key.range },
+    revision: record.revision,
+    file: record.file,
+  };
+}
+
+function takeRecords(result: AppApiReadResult, fields: readonly string[]): { rows: QueryRow[]; nextCursor: string | null } {
+  const problem = appReadError(result);
+  if (problem) {
+    if (problem.code === "not_found") return { rows: [], nextCursor: null };
+    throw new BrainError({ code: problem.code || "record_read_failed", message: problem.message });
+  }
+  if (!("records" in result)) {
+    throw new BrainError({
+      code: "record_read_incomplete",
+      message: "LastDB returned keys for a record read.",
+    });
+  }
+  return {
+    rows: result.records.map((record) => rowFromRecord(record, fields)),
+    nextCursor: textCursor(result.next_cursor),
+  };
+}
+
+function onePoint(result: AppApiReadResult, fields: readonly string[]): QueryRow | null {
+  const page = takeRecords(result, fields);
+  if (page.rows.length > 1) {
+    throw new BrainError({
+      code: "record_read_incomplete",
+      message: "LastDB returned more than one record for a key.",
+    });
+  }
+  return page.rows[0] ?? null;
+}
+
+function pointRead(schema: string, hash: string, range: string | null, file = false): AppApiRead {
+  return {
+    schema,
+    key: { hash, range },
+    limit: 2,
+    ...(file ? { file: true } : {}),
+  };
+}
+
+function rangeSpec(
+  hash: string,
+  extra?: { prefix?: string; start?: string; end?: string },
+): { hash: string; prefix?: string; start?: string; end?: string } {
+  const range: { hash: string; prefix?: string; start?: string; end?: string } = { hash };
+  if (extra?.prefix) range.prefix = extra.prefix;
+  if (extra?.start) range.start = extra.start;
+  if (extra?.end) range.end = extra.end;
+  return range;
+}
+
+function rangeRead(
+  schema: string,
+  range: { hash: string; prefix?: string; start?: string; end?: string },
+  via?: string,
+): AppApiRead {
+  return { schema, range, ...(via ? { via } : {}) };
+}
+
+function namedFilter(filter: object): string | null {
+  const value = filter as Record<string, unknown>;
+  for (const name of ["HashKey", "HashKeys", "HashRangeKey", "HashRangeKeys", "HashRangePrefix", "HashRangeRange"]) {
+    if (value[name] !== undefined) return name;
+  }
+  return null;
+}
+
+function invalidQuery(message: string): never {
+  throw new BrainError({ code: "invalid_query", message });
+}
+
+function planFilter(
+  wire: string,
+  schema: { schema_type?: string } | undefined,
+  filter: Record<string, unknown>,
+): { mode: "points"; reads: AppApiRead[] } | { mode: "range"; read: AppApiRead } {
+  const kind = namedFilter(filter);
+  if (kind === "HashKey") {
+    const hash = filter.HashKey;
+    if (typeof hash !== "string" || hash.length === 0) invalidQuery("HashKey needs a non-empty hash.");
+    const via = typeof filter.via === "string" && filter.via.length > 0 ? filter.via : undefined;
+    if (via || schema?.schema_type === "HashRange") {
+      return { mode: "range", read: rangeRead(wire, { hash }, via) };
+    }
+    return { mode: "points", reads: [pointRead(wire, hash, null)] };
+  }
+  if (kind === "HashKeys") {
+    const listed = filter.HashKeys;
+    if (!Array.isArray(listed)) invalidQuery("HashKeys needs a list of hashes.");
+    const hashes: string[] = [];
+    for (const hash of listed) {
+      if (typeof hash !== "string" || hash.length === 0) invalidQuery("HashKeys needs a list of hashes.");
+      hashes.push(hash);
+    }
+    return { mode: "points", reads: hashes.map((hash) => pointRead(wire, hash, null)) };
+  }
+  if (kind === "HashRangeKey") {
+    const key = asKey(filter.HashRangeKey);
+    if (key === null) invalidQuery("HashRangeKey needs a hash and a range.");
+    return { mode: "points", reads: [pointRead(wire, key.hash, key.range)] };
+  }
+  if (kind === "HashRangeKeys") {
+    const items = filter.HashRangeKeys;
+    if (!Array.isArray(items)) invalidQuery("HashRangeKeys needs a list of keys.");
+    const reads: AppApiRead[] = [];
+    for (const item of items) {
+      const key = asKey(item);
+      if (key === null) invalidQuery("HashRangeKeys needs pairs of hash and range.");
+      reads.push(pointRead(wire, key.hash, key.range));
+    }
+    return { mode: "points", reads };
+  }
+  if (kind === "HashRangePrefix" || kind === "HashRangeRange") {
+    const raw = filter[kind];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) invalidQuery(`${kind} needs a hash.`);
+    const body = raw as Record<string, unknown>;
+    const hash = body.hash;
+    if (typeof hash !== "string" || hash.length === 0) invalidQuery(`${kind} needs a hash.`);
+    const prefix = kind === "HashRangePrefix" && typeof body.prefix === "string" ? body.prefix : undefined;
+    const start = kind === "HashRangeRange" && typeof body.start === "string" ? body.start : undefined;
+    const end = kind === "HashRangeRange" && typeof body.end === "string" ? body.end : undefined;
+    return { mode: "range", read: rangeRead(wire, rangeSpec(hash, { prefix, start, end })) };
+  }
+  return invalidQuery("The query filter is not a key or a range.");
+}
+
+function asKey(value: unknown): { hash: string; range: string | null } | null {
+  if (Array.isArray(value)) {
+    const hash = value[0];
+    const range = value[1];
+    if (typeof hash !== "string" || hash.length === 0) return null;
+    if (range === undefined || range === null || range === "") return { hash, range: null };
+    if (typeof range !== "string") return null;
+    return { hash, range };
+  }
+  if (!value || typeof value !== "object") return null;
+  const body = value as Record<string, unknown>;
+  if (typeof body.hash !== "string" || body.hash.length === 0) return null;
+  if (body.range === undefined || body.range === null || body.range === "") return { hash: body.hash, range: null };
+  if (typeof body.range !== "string") return null;
+  return { hash: body.hash, range: body.range };
+}
+
+type LocalSearchHit = {
+  score: number | null;
+  schemaName: string;
+  schemaDisplayName: string | null;
+  fields: Record<string, unknown>;
+  keyValue: { hash: string | null; range: string | null } | null;
+  key: string;
+};
+
+function parseSearchHits(body: unknown): LocalSearchHit[] {
+  const root = body && typeof body === "object" ? body as Record<string, unknown> : {};
+  const list = Array.isArray(root.results) ? root.results : Array.isArray(root.hits) ? root.hits : [];
+  return list.flatMap((raw): LocalSearchHit[] => {
+    if (!raw || typeof raw !== "object") return [];
+    const obj = raw as Record<string, unknown>;
+    const fields = obj.fields && typeof obj.fields === "object" && !Array.isArray(obj.fields)
+      ? obj.fields as Record<string, unknown>
+      : {};
+    const keyValueRaw = obj.key_value ?? obj.keyValue;
+    let keyValue: LocalSearchHit["keyValue"] = null;
+    const keyObject = keyValueRaw && typeof keyValueRaw === "object"
+      ? keyValueRaw as Record<string, unknown>
+      : obj.key && typeof obj.key === "object"
+        ? obj.key as Record<string, unknown>
+        : null;
+    if (keyObject) {
+      keyValue = {
+        hash: typeof keyObject.hash === "string" ? keyObject.hash : null,
+        range: typeof keyObject.range === "string" ? keyObject.range : null,
+      };
+    }
+    return [{
+      score: typeof obj.score === "number" ? obj.score : null,
+      schemaName: typeof obj.schema_name === "string"
+        ? obj.schema_name
+        : typeof obj.schemaName === "string" ? obj.schemaName : "",
+      schemaDisplayName: typeof obj.schema_display_name === "string"
+        ? obj.schema_display_name
+        : typeof obj.schemaDisplayName === "string" ? obj.schemaDisplayName : null,
+      fields,
+      keyValue,
+      key: typeof obj.key === "string" ? obj.key : "",
+    }];
+  });
+}
+
+async function postSearch(
+  transport: SdkTransport,
+  baseUrl: string,
+  socketPath: string,
+  body: unknown,
+): Promise<LocalSearchHit[]> {
+  let response: { status: number; body: unknown };
+  try {
+    response = await transport.send("POST", "/api/app/search", { body });
+  } catch (err) {
+    throw mapSdkDataError(err, baseUrl, "POST", "/api/app/search", socketPath);
+  }
+  if (response.status !== 200) throw mapNodeError(response.status, response.body, "/api/app/search");
+  return parseSearchHits(response.body);
+}
 function sdkSearchHitsToNative(
-  hits: SdkSearchHit[],
+  hits: LocalSearchHit[],
   searchOpts: SearchOptions | undefined,
   query: string,
   schemaTargets: string[],
@@ -1509,22 +1475,15 @@ function sdkSearchHitsToNative(
   });
 }
 
-function searchHitText(hit: SdkSearchHit): string {
+function searchHitText(hit: LocalSearchHit): string {
   const title = typeof hit.fields.title === "string" ? hit.fields.title : "";
   const body = typeof hit.fields.body === "string" ? hit.fields.body : "";
   const value = [title, body].filter((s) => s.length > 0).join("\n").trim();
   return value.length > 0 ? value : JSON.stringify(hit.fields);
 }
 
-function fromSdkRows(rows: readonly SdkQueryRow[]): QueryRow[] {
-  return rows.map((row) => ({
-    fields: row.fields as Record<string, unknown>,
-    key: sdkKeyToBrainKey(row.keyValue, row.key),
-  }));
-}
-
 function sdkKeyToBrainKey(
-  keyValue: SdkKeyValue | null,
+  keyValue: { hash: string | null; range: string | null } | null,
   renderedKey: string,
 ): { hash: string | null; range: string | null } {
   if (keyValue !== null) {
@@ -1572,29 +1531,26 @@ function recordDedupKey(row: QueryRow): string {
   return `h:${key.hash ?? ""}|r:${key.range ?? ""}`;
 }
 
-function findQueryRowByKey(rows: QueryRow[], keyHash: string): QueryRow | null {
-  for (const row of rows) {
-    if (row.key?.hash === keyHash) return row;
-  }
-  for (const row of rows) {
-    const f = (row.fields ?? {}) as Record<string, unknown>;
-    if (f.slug === keyHash) return row;
-  }
-  return null;
-}
-
 function bodyError(body: unknown): string | undefined {
   if (body && typeof body === "object" && "error" in body) {
     const e = (body as Record<string, unknown>).error;
     if (typeof e === "string") return e;
+    if (e && typeof e === "object" && "code" in e) {
+      const code = (e as Record<string, unknown>).code;
+      if (typeof code === "string") return code;
+    }
   }
   return undefined;
 }
 
 function bodyMessage(body: unknown): string | undefined {
-  if (body && typeof body === "object" && "message" in body) {
-    const m = (body as Record<string, unknown>).message;
-    if (typeof m === "string") return m;
+  if (body && typeof body === "object") {
+    const record = body as Record<string, unknown>;
+    if (typeof record.message === "string") return record.message;
+    if (record.error && typeof record.error === "object") {
+      const message = (record.error as Record<string, unknown>).message;
+      if (typeof message === "string") return message;
+    }
   }
   return undefined;
 }
@@ -2081,28 +2037,10 @@ function connectionError(
  * outgoing requests), and (b) a non-JSON body degrades to `body: null`
  * instead of a hard transport error, matching brain's tolerant `parseBody`.
  */
-// Resolve the version gate: the SDK's NodeTooOldError propagates to the
-// caller (it is the one line that names the fix), so this only narrows the
-// resolved type. An async function, not a promise chain, so the
-// floating-promise guard sees the rejection path.
-async function gateOnNodeApiVersion(sdk: LastDbClient): Promise<void> {
-  await sdk.requireApiVersion(MIN_LASTDB_API_VERSION, BRAIN_APP_LABEL);
-}
-
-// Paths the version gate never waits on: the handshake itself and the
-// liveness probe, so describing an old node (`brain doctor`) still works.
-function isVersionGateExempt(path: string): boolean {
-  const bare = path.split("?")[0] ?? path;
-  return bare === "/api/version" || bare === "/health" || bare === "/api/health";
-}
-
 function fetchTransport(
   baseUrl: string,
   defaultHeaders: Record<string, string>,
   socketPath?: string,
-  // Awaited before every send except the version route itself: the
-  // client↔node version gate (see `requireNodeApiVersion`).
-  gate?: (path: string) => Promise<void>,
 ): SdkTransport {
   return {
     target: baseUrl,
@@ -2111,7 +2049,6 @@ function fetchTransport(
       path: string,
       options: { headers?: Record<string, string>; body?: unknown } = {},
     ) {
-      if (gate) await gate(path);
       const headers: Record<string, string> = {
         ...defaultHeaders,
         ...(options.headers ?? {}),
@@ -2189,31 +2126,6 @@ function fetchTransport(
   };
 }
 
-// `capabilityStoreKey` validates the app-id shape; brain's SDK clients never
-// persist through the SDK store (no-op store), so an out-of-shape app id must
-// not turn into a client-side throw where the node used to answer. Fall back
-// to the raw app id as the (unused) key.
-function safeStoreKey(appId: string, target: string): string {
-  try {
-    return capabilityStoreKey(appId, target);
-  } catch {
-    return appId;
-  }
-}
-
-// brain's consent layer carries scope as the node's wire string; the SDK
-// takes the structured ConsentScope and serializes it back to the same
-// string. Only "wildcard" is used today; "explicit:a,b" maps onto the SDK's
-// explicit form. Anything else is forwarded as a single explicit entry so the
-// node stays the authority on rejecting it.
-function parseScope(scope: string): ConsentScope {
-  if (scope === "wildcard") return "wildcard";
-  if (scope.startsWith("explicit:")) {
-    return { explicit: scope.slice("explicit:".length).split(",") };
-  }
-  return { explicit: [scope] };
-}
-
 /**
  * Translate an @lastdb/app-sdk typed error back into brain's BrainError
  * registry. The SDK discriminates exactly what `mapNodeError`'s dispatch
@@ -2221,9 +2133,8 @@ function parseScope(scope: string): ConsentScope {
  * the node sent and funnels through `mapNodeError` — keeping the registry the
  * single source of error wording:
  *
- * - `CapabilityDeniedError` carries the node's verbatim discriminated reason
- *   + detail (the eight-reason capability-403 contract, SDK gap #4) — rebuilt
- *   as `{status: 403, reason, ...detail}`.
+ * - `AppApiError` carries the app API status and `error.code`. A 409
+ *   `conflict` becomes `cas_conflict`.
  * - `UnexpectedResponseError` carries the raw {status, body} — lossless.
  * - `RequestRejectedError` (400) carries the node's `kind` + `error` text.
  * - `PermissionDeniedError` (403 without a reason) carries the node's
@@ -2309,6 +2220,9 @@ function mapSdkDataError(
   // message is already the one line an operator needs (who needs what, what
   // the node reports, the brew command); wrapping it as "HTTP 400" would bury
   // the fact that the NODE is the side that moved.
+  if (err instanceof AppApiError) {
+    return mapNodeError(err.status, { error: { code: err.code, message: err.message } }, path);
+  }
   if (err instanceof NodeTooOldError) {
     return new BrainError({
       code: "node_too_old",
@@ -2317,16 +2231,6 @@ function mapSdkDataError(
         "The LastDB node is older than this brain. Ask the owner to upgrade LastDB; do not rewrite the request.",
       cause: err,
     });
-  }
-  // NB: CapabilityDeniedError subclasses PermissionDeniedError — order matters.
-  if (err instanceof CapabilityDeniedError) {
-    const body: Record<string, unknown> = { status: 403, reason: err.reason };
-    if (err.detail.schema !== undefined) body.schema = err.detail.schema;
-    if (err.detail.capabilityId !== undefined) body.capability_id = err.detail.capabilityId;
-    if (err.detail.timestampSkewSecs !== undefined) {
-      body.timestamp_skew_secs = err.detail.timestampSkewSecs;
-    }
-    return mapNodeError(403, body, path);
   }
   if (err instanceof PermissionDeniedError) {
     return mapNodeError(403, { kind: "permission_denied", error: err.reason }, path);
@@ -2562,12 +2466,17 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
 
 export function mapNodeError(status: number, body: unknown, path: string): BrainError {
   const errCode = bodyError(body);
-  if (status === 409 && errCode === "cas_conflict") {
-    // The node names the record that changed. Keep it in the message.
+  if (status === 409 && (errCode === "cas_conflict" || errCode === "conflict")) {
+    // The node names the record that changed. Keep that text in the message.
     const schema = bodyStringField(body, "schema");
     const key = bodyStringField(body, "key");
     const where = schema && key ? ` (${schema} ${key})` : "";
-    return new BrainError({ code: "cas_conflict", message: `The record revision changed before the write${where}.` });
+    const detail = bodyMessage(body);
+    const extra = detail && !where ? `: ${detail}` : "";
+    return new BrainError({
+      code: "cas_conflict",
+      message: `The record revision changed before the write${where}${extra}.`,
+    });
   }
   const msg = bodyMessage(body);
   const ctx: NodeErrorContext = {

@@ -4,7 +4,7 @@
 import type { Transport } from "@lastdb/app-sdk";
 export type FieldAliasProfiles = Record<string, Record<string, string>>;
 type ObjectValue = Record<string, unknown>;
-const dataRoute = /^\/api\/(query|queries|mutation|mutations|records|conflicts|app\/search|db\/file-blob|sharing\/deliver)(\/|$)/;
+const dataRoute = /^\/(?:api\/(?:query|queries|mutation|mutations|records|conflicts|app\/search|db\/file-blob|sharing\/deliver)|v1\/(?:read|write))(?:\/|$)/;
 function object(value: unknown): ObjectValue | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : null;
 }
@@ -45,7 +45,7 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
     if (expected && typeof expected.field === "string") result.expected = {...expected, field:rename(expected.field, aliases, true)};
   }
   if (object(value.mutation)) result.mutation = encodeItem(value.mutation, profiles);
-  for (const key of ["queries", "mutations", "keys", "legs"]) {
+  for (const key of ["queries", "mutations", "reads", "keys", "legs"]) {
     if (Array.isArray(value[key])) result[key] = (value[key] as unknown[]).map((item) => encodeItem(item, profiles));
   }
   return result;
@@ -58,7 +58,7 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
   const result = {...value};
   if (aliases) {
     const inverse = Object.fromEntries(Object.entries(aliases).map(([local, canonical]) => [canonical, local]));
-    for (const key of ["fields", "metadata"]) {
+    for (const key of ["fields", "metadata", "record"]) {
       const fields = object(value[key]);
       if (fields) result[key] = renameObject(fields, inverse, false);
     }
@@ -97,6 +97,12 @@ export function decodeFieldReply(path: string, request: unknown, reply: unknown,
   if (!dataRoute.test(path)) return reply;
   const input = object(request);
   const output = object(reply);
+  if (input && Array.isArray(input.reads) && output && Array.isArray(output.results)) {
+    return { ...output, results: output.results.map((item, index) => {
+      const read = object((input.reads as unknown[])[index]);
+      return decodeItem(item, profiles, read ? profile(read, profiles) : undefined);
+    }) };
+  }
   if (input && Array.isArray(input.queries) && output && Array.isArray(output.results)) {
     return {...output, results:output.results.map((item, index) => {
       const query = object((input.queries as unknown[])[index]);

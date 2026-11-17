@@ -1,10 +1,10 @@
-import { isLoopbackNodeUrl, BrainError, recordTypeForHash, stripDoctorTip, type NativeIndexHit, type NodeClient, type Verbose } from "../../client.ts";
+import { BrainError, recordTypeForHash, stripDoctorTip, type NativeIndexHit, type NodeClient, type Verbose } from "../../client.ts";
 import type { Config } from "../../config.ts";
-import { decodeCapabilityBlob, BRAIN_APP_ID, tokenIntegrityValid, type CapabilityStore } from "../../capability.ts";
+import type { CapabilityStore } from "../../capability.ts";
 import { listRecords, nowIso, verifyRecordVisible, TOMBSTONE_TAG } from "../../record.ts";
 import type { RecordType } from "../../schemas.ts";
 import { MIN_BUN_VERSION, bunVersionMeetsMinimum } from "../../runtime.ts";
-import { appIdentityEnforceEnabled, newWriteNodeClient, type WriteNodeClientOptions } from "../../write-context.ts";
+import { newWriteNodeClient, type WriteNodeClientOptions } from "../../write-context.ts";
 import { buildTombstoneFields } from "../delete.ts";
 import { querySearchPlane } from "../../search-plane.ts";
 import type { CheckResult, DoctorOptions } from "../doctor.ts";
@@ -473,173 +473,35 @@ function pct(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
 }
 
-// Write-readiness probe — asks the two questions any mutation needs to
-// answer "yes" to:
-//   (a) is a valid CapabilityToken cached locally for this node? (load it,
-//       run the same JCS integrity check the write path uses before replay).
-//   (b) does the node's app registry know about brain? (GET
-//       /api/apps/consent-request/brain and read the discriminated result).
-// Read-only: plain doctor never creates a pending consent request.
-// Fails closed: any indeterminate state (consent endpoint 5xx / throws,
-// keychain unreadable) surfaces as WARN, never silently PASS.
+// Write-readiness is a keyed read. Writes use the app session. Brain does
+// not request consent and does not read a capability store.
 export async function runWriteReadyProbe(
   node: NodeClient,
   nodeUrl: string,
   store: CapabilityStore,
   verbose: Verbose | undefined,
 ): Promise<CheckResult> {
-  if (isLoopbackNodeUrl(nodeUrl)) {
-    try {
-      const identity = await node.autoIdentity();
-      return {
-        name: "write-ready",
-        ok: identity.provisioned,
-        detail: identity.provisioned
-          ? "owner socket confirms access to the provisioned node"
-          : "the node needs initial setup",
-      };
-    } catch (error) {
-      return {
-        name: "write-ready",
-        ok: false,
-        detail: `owner socket access failed: ${stripDoctorTip(errMsg(error))}`,
-        fix: "check `lastdb status` and the configured owner socket",
-      };
-    }
-  }
-  // Client-side enforcement OFF means brain won't attach capability headers,
-  // and on a node ALSO running enforcement-off writes land as NodeOwner with
-  // no consent step at all. We can't introspect the node's setting, so we
-  // declare the limitation: WARN so the doctor verdict stays green for the
-  // dogfood case but the user sees the half-configured state.
-  if (!appIdentityEnforceEnabled()) {
-    verbose?.(`write-ready: enforcement off — emitting WARN`);
-    return {
-      name: "write-ready",
-      ok: true,
-      tag: "WARN",
-      detail:
-        "client app-identity enforcement is OFF (BRAIN_APP_IDENTITY_ENFORCE) — " +
-        "no capability check performed; writes will succeed only if the node also has enforcement off",
-    };
-  }
-
-  // (a) Local capability check — load from the store + JCS-integrity-validate.
-  // Mirrors the gate in CapabilitySession.loadValidCached() so this probe
-  // never reports PASS for a cached token the write path would discard.
-  let capabilityValid = false;
-  let capabilityDetail = "no capability stored for this node";
+  void store;
+  void nodeUrl;
   try {
-    const cached = await store.load(nodeUrl);
-    if (cached === null) {
-      capabilityDetail = "no capability stored for this node";
-    } else {
-      const token = decodeCapabilityBlob(cached.blob);
-      if (token === null) {
-        capabilityDetail = "stored capability blob did not decode";
-      } else if (token.app_id !== BRAIN_APP_ID) {
-        capabilityDetail = `stored capability is for app_id "${token.app_id}", not "${BRAIN_APP_ID}"`;
-      } else if (!(await tokenIntegrityValid(token))) {
-        capabilityDetail = "stored capability failed JCS integrity check (tampered or stale)";
-      } else {
-        capabilityValid = true;
-      }
+    if (!node.queryByKey) {
+      throw new BrainError({ code: "keyed_read_required", message: "The write-ready probe needs a keyed read." });
     }
-  } catch (err) {
-    // The store path itself failed (keychain locked, file unreadable, …)
-    // — we can't tell if writes would work or not, so WARN.
-    verbose?.(
-      `write-ready: capability store load threw — ${errMsg(err)}`,
-    );
+    await node.queryByKey({ schemaHash: "brain/Design", fields: ["slug"], keyHash: "__brain_doctor__" });
+    verbose?.("write-ready: app session authorizes writes");
     return {
       name: "write-ready",
       ok: true,
-      tag: "WARN",
-      detail: `could not read capability store: ${errMsg(err)}`,
-      fix: "check OS keychain access and ~/.brain/capabilities.json, then re-run `brain doctor`",
+      detail: "Writes use the app session. Brain does not request consent.",
     };
-  }
-  verbose?.(`write-ready: capability=${capabilityValid ? "valid" : `absent (${capabilityDetail})`}`);
-
-  // (b) Node app-registration check — GET consent-request and read the
-  // discriminated result. `not_registered` is the cold-registry failure;
-  // pending/expired/no_pending/already_granted all prove the app is known.
-  let registered: boolean;
-  let registrationDetail = "";
-  try {
-    const res = await node.rawCall(
-      "GET",
-      `/api/apps/consent-request/${encodeURIComponent(BRAIN_APP_ID)}`,
-    );
-    if (res.status !== 200) {
-      verbose?.(`write-ready: consent-request returned HTTP ${res.status} — emitting WARN`);
-      return {
-        name: "write-ready",
-        ok: true,
-        tag: "WARN",
-        detail: `consent-request lookup returned HTTP ${res.status}; cannot determine write-readiness`,
-        fix: "inspect the node log; once /api/apps/consent-request/brain responds cleanly, re-run `brain doctor`",
-      };
-    }
-    const result = readResultString(res.json);
-    if (result === "not_registered") {
-      registered = false;
-      registrationDetail = "node returned not_registered from /api/apps/consent-request/brain";
-    } else if (
-      result === "pending" ||
-      result === "expired" ||
-      result === "no_pending" ||
-      result === "already_granted"
-    ) {
-      registered = true;
-    } else {
-      verbose?.(`write-ready: consent-request returned result=${result ?? "?"} — emitting WARN`);
-      return {
-        name: "write-ready",
-        ok: true,
-        tag: "WARN",
-        detail: `consent-request lookup returned an unrecognized result; cannot determine write-readiness`,
-        fix: "inspect the node log; once /api/apps/consent-request/brain returns a known result, re-run `brain doctor`",
-      };
-    }
-  } catch (err) {
-    verbose?.(
-      `write-ready: consent-request lookup threw — ${errMsg(err)}`,
-    );
+  } catch (error) {
     return {
       name: "write-ready",
-      ok: true,
-      tag: "WARN",
-      detail: `consent-request lookup threw: ${stripDoctorTip(errMsg(err))}`,
-      fix: "inspect the node log; the consent-request endpoint is rejecting brain's probe",
-    };
-  }
-
-  // Verdict — registration is the more actionable failure (capability is
-  // moot without it), so it sorts first.
-  if (!registered) {
-    return {
-      name: "write-blocked",
       ok: false,
-      detail: `node does not recognise app "${BRAIN_APP_ID}"${registrationDetail ? ` (${registrationDetail})` : ""}`,
-      fix:
-        "ask the target node owner to check `lastdb app status brain` and its signed registry installation.",
+      detail: stripDoctorTip(errMsg(error)),
+      fix: "Confirm the app socket and run `brain init` so schema pins are brain/<Name>.",
     };
   }
-  if (!capabilityValid) {
-    return {
-      name: "write-blocked",
-      ok: false,
-      detail: capabilityDetail,
-      fix:
-        "ask the target node owner to approve remote access, then run `brain init`.",
-    };
-  }
-  return {
-    name: "write-ready",
-    ok: true,
-    detail: "capability cached + JCS-valid for this node; app registry lookup is read-only and recognizes brain",
-  };
 }
 
 // MCP-entrypoint probe — resolve the `brain-mcp` bin on PATH so a new dev
@@ -767,14 +629,6 @@ export async function runWriteRoundtripProbe(
       }
     }
   }
-}
-
-function readResultString(body: unknown): string | undefined {
-  if (body && typeof body === "object" && "result" in body) {
-    const v = (body as Record<string, unknown>).result;
-    if (typeof v === "string" && v.length > 0) return v;
-  }
-  return undefined;
 }
 
 function errMsg(err: unknown): string {

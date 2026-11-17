@@ -69,7 +69,7 @@ export async function attachCmd(
     ...(opts.type !== undefined ? { type: opts.type } : {}),
     recoveryVerb: "attach",
   });
-  await ensureAttachmentSchemas(node, opts.cfg, { persist: true });
+  ensureAttachmentSchemas(opts.cfg, { persist: true });
   const result = await attachToRecord({
     node,
     cfg: opts.cfg,

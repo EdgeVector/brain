@@ -1,14 +1,7 @@
 import { syncOwnedModel } from "../owned-schema-init.ts";
-// `brain init` — bootstrap a node (if needed), declare every brain-owned
-// multi-key schema, persist the schema pins to ~/.brain/config.json.
-//
-//   1. probe /api/system/auto-identity
-//   2. POST /api/setup/bootstrap if the node is not provisioned
-//   3. declare the owned schemas (owned-schema-init.ts)
-//   4. persist config
-//   5. confirm owner-socket access or the remote capability
-//
-// Idempotent. A re-run verifies an existing multi-key config and keeps its pins.
+// `brain init` writes a local config that pins every owned schema to its
+// exact name (`brain/<Name>`). The installer places the schemas. Init does
+// not probe identity, bootstrap a node, declare schemas, or request consent.
 
 import { existsSync, readFileSync } from "node:fs";
 
@@ -124,12 +117,10 @@ export type InitResult = {
   consent: EstablishConsentResult;
 };
 
-const STEPS = 6;
+const STEPS = 3;
 
 export async function runInit(opts: InitOptions): Promise<InitResult> {
   const print = resolvePrintSink(opts);
-  const verbose = opts.verbose;
-  const bootstrapName = opts.bootstrapName ?? "brain";
   const configPath = opts.configPath ?? defaultConfigPath();
   const priorConfig = existsSync(configPath) ? readFileSync(configPath, "utf8") : null;
 
@@ -176,81 +167,20 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   }
   print(`[1/${STEPS}] targeting node at ${formatNodeTarget(nodeUrl)} (${nodeUrlSource})`);
 
-  // Step 0/6: probe identity (with cold-build retry).
-  print(`[1/${STEPS}] probing node identity`);
-  const probeUserHash = existing?.userHash ?? "init-probe";
-  const probeClient = newNodeClient({ 
-    baseUrl: nodeUrl, 
-    userHash: probeUserHash, 
-    verbose: verbose ?? (() => {}),
-    socketPath: nodeSocketPath,
-  });
-  const identity = await probeWithRetry(probeClient, { nodeUrl, sleep: opts.sleep, retryDelaysMs: opts.retryDelaysMs }, print);
-
-  let userHash: string;
-  let bootstrapped = false;
-  let recoveredIdentity = false;
-  if (identity.provisioned) {
-    userHash = identity.userHash;
-    print(`[2/${STEPS}] node already provisioned (user_hash=${userHash.slice(0, 8)}…) — skipping bootstrap`);
-  } else {
-    print(`[2/${STEPS}] node not provisioned (${identity.reason}); running bootstrap`);
-    try {
-      const result = await probeClient.bootstrap(bootstrapName);
-      userHash = result.userHash;
-      bootstrapped = true;
-      print(`        bootstrap ok (user_hash=${userHash.slice(0, 8)}…)`);
-    } catch (err) {
-      // Option C: the daemon is in the contradictory state where
-      // auto-identity says "not provisioned" but bootstrap returns 410
-      // "already provisioned". If our local config has a usable userHash
-      // from a previous successful init against this node, treat the
-      // config as authoritative and continue — the downstream
-      // The schemas-load step surfaces `missing_user_context` if the saved
-      // userHash is genuinely wrong.
-      // No usable config ⇒ rethrow the BrainError so the user sees the
-      // node's actual message (e.g. "POST /api/auth/restore …").
-      if (
-        err instanceof BrainError &&
-        err.code === "onboarding_already_complete" &&
-        hasUsableExistingConfig(existing)
-      ) {
-        userHash = existing.userHash;
-        recoveredIdentity = true;
-        print(
-          `        bootstrap refused (node + auto-identity disagree); reusing existing config userHash=${userHash.slice(0, 8)}… and continuing`,
-        );
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  // Step 3/6: declare every brain-owned schema on the node
-  // (owned-schema-init.ts). The node returns each runtime address and its
-  // definition identity; local mint and the schema_service publish fallback
-  // are retired.
-  //
-  print(`[3/${STEPS}] preparing ${UNIQUE_SCHEMAS.length} brain schemas`);
-  const nodeClient = newNodeClient({
-    schemaFieldAliases: existing?.schemaFieldAliases,
-    baseUrl: nodeUrl,
-    userHash,
-    verbose: verbose ?? (() => {}),
-    socketPath: nodeSocketPath,
-  });
-  const config = await syncOwnedModel(nodeClient, {
+  const userHash = existing?.userHash && existing.userHash.length > 0 ? existing.userHash : "local";
+  print(`[2/${STEPS}] pinning ${UNIQUE_SCHEMAS.length} brain schemas to exact names`);
+  const config = syncOwnedModel({
     configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
     nodeSocketPath,
   }, existing);
+  print(`[3/${STEPS}] writing config at ${configPath}`);
   writeConfig(config, configPath, priorConfig);
   const consent = await establishConsentInline({
-    nodeUrl, userHash, print, verbose, socketPath: nodeSocketPath,
-    recoveredIdentity,
+    nodeUrl, userHash, print, verbose: opts.verbose, socketPath: nodeSocketPath,
     nonInteractiveGrant: opts.grantConsent, ...opts.consent,
   });
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
-  return { config, bootstrapped, consent };
+  return { config, bootstrapped: false, consent };
 }
 
 export function formatNodeTarget(nodeUrl: string): string {

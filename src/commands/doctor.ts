@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { canonicalSchema } from "../canonical-vocabulary.ts";
 // `brain doctor` — live health check for the local brain setup.
 //
 // Contract:
@@ -15,11 +14,9 @@ import {
   BrainError,
   isNodeReachableButErroring,
   newNodeClient,
-  newSchemaServiceClient,
   nodeDownHint,
   nodeHttpErrorHint,
   stripDoctorTip,
-  type LoadedSchema,
   type NodeClient,
   type SchemaServiceClient,
   type Verbose,
@@ -45,16 +42,12 @@ import {
 } from "./doctor/mcp-boot.ts";
 import { runGraphEdgeLintProbe } from "./doctor/graph-lint.ts";
 import {
-  boundSchemaNames,
-  checkSchemaDrift,
-  schemaServiceFixHint,
   validateConfigShape,
 } from "./doctor/schema-drift.ts";
 import { runUsageReport, type UsageOptions } from "./usage.ts";
 import { type CapabilityStore } from "../capability.ts";
 import { defaultCapabilityStore } from "../keychain.ts";
 import { UNIQUE_SCHEMAS } from "../schemas.ts";
-import { MIN_LASTDB_API_VERSION } from "../runtime.ts";
 import type { WriteNodeClient, WriteNodeClientOptions } from "../write-context.ts";
 
 export {
@@ -179,7 +172,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
 
   const checks: CheckResult[] = [];
   let schemasLoadedOk = false;
-  let loadedSchemas: LoadedSchema[] = [];
 
   // 1. config
   const cfg = tryReadConfig(opts.configPath);
@@ -210,10 +202,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   }
   verbose?.(`config: ${cfgIssues.length === 0 ? "ok" : `bad — ${cfgIssues.join("; ")}`}`);
 
-  const schemaClient = (opts.schemaClientFactory ?? newSchemaServiceClient)(
-    cfg.schemaServiceUrl,
-    verbose,
-  );
   const nodeClient = (opts.nodeClientFactory ?? newNodeClient)({
     baseUrl: cfg.nodeUrl,
     userHash: cfg.userHash,
@@ -244,225 +232,94 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     }
   }
 
-  // 2. schema service reachable
-  try {
-    await schemaClient.listSchemas();
-    checks.push({ name: "schema-service-reachable", ok: true });
-    verbose?.(`schema-service-reachable: ok`);
-  } catch (err) {
-    checks.push({
-      name: "schema-service-reachable",
-      ok: false,
-      detail: doctorReachabilityDetail(err, "schema service", cfg.schemaServiceUrl),
-      fix: schemaServiceFixHint(cfg.schemaServiceUrl),
-    });
-    verbose?.(`schema-service-reachable: FAIL`);
-  }
+  checks.push({
+    name: "schema-service-reachable",
+    ok: true,
+    tag: "SKIP",
+    detail: "Brain does not contact the schema service.",
+  });
 
-  // 3 + 4. node reachable + provisioned
+  // Reachability is one keyed read. Identity, health, and version routes are
+  // not on the app socket.
   let provisioned = false;
   let nodeReachable = false;
+  const designPin = cfg.schemaHashes.design;
+  const probeSchema = designPin && !/^[a-f0-9]{64}$/.test(designPin) ? designPin : "brain/Design";
   try {
-    const identity = await nodeClient.autoIdentity();
+    if (!nodeClient.queryByKey) {
+      throw new BrainError({ code: "keyed_read_required", message: "The doctor probe needs a keyed read." });
+    }
+    await nodeClient.queryByKey({ schemaHash: probeSchema, fields: ["slug"], keyHash: "__brain_doctor__" });
     nodeReachable = true;
-    // Surface the connected node's LastDB version on the node-reachable line
-    // so a developer can spot a stale node. This is
-    // best-effort and STRICTLY informational: a health-probe failure (older
-    // node with no /api/health, transient hiccup) must NOT flip node-reachable
-    // to FAIL — auto-identity already answered that the node is up — so we keep
-    // PASS and just omit the version, falling back to the node URL alone.
-    const nodeTransport = nodeReachabilityTransportDetail(cfg.nodeUrl, nodeSocketPath);
-    let nodeReachableDetail = nodeTransport;
-    try {
-      const health = await nodeClient.health();
-      if (health.version) nodeReachableDetail = `lastdb ${health.version} @ ${nodeTransport}`;
-      verbose?.(`node health: version=${health.version ?? "—"}`);
-    } catch (err) {
-      verbose?.(`node health probe failed (non-fatal): ${errMsg(err)}`);
-    }
-    checks.push({ name: "node-reachable", ok: true, detail: nodeReachableDetail });
+    provisioned = true;
+    checks.push({
+      name: "node-reachable",
+      ok: true,
+      detail: nodeReachabilityTransportDetail(cfg.nodeUrl, nodeSocketPath),
+    });
+    checks.push({
+      name: "node-api-version",
+      ok: true,
+      tag: "SKIP",
+      detail: "Brain does not call GET /api/version.",
+    });
+    checks.push({
+      name: "node-provisioned",
+      ok: true,
+      detail: "The app session authorizes Brain. Identity is not probed.",
+    });
     verbose?.(`node-reachable: ok`);
-    // The client↔node version handshake (`GET /api/version`). PASS when the
-    // node's api_version meets brain's declared floor (package.json
-    // `lastdb.minApiVersion`); a node that predates the route reports 0 and
-    // still PASSES while the floor is 0. This is the one line that explains
-    // a `400 unknown_key` before anyone sees one.
-    if (nodeClient.nodeVersion) {
-      try {
-        const nv = await nodeClient.nodeVersion();
-        const build = nv.build ? ` build ${nv.build}` : "";
-        const reported = nv.handshake ? `api_version ${nv.apiVersion}${build}` : "no /api/version (node predates the handshake)";
-        if (nv.apiVersion >= MIN_LASTDB_API_VERSION) {
-          checks.push({
-            name: "node-api-version",
-            ok: true,
-            detail: `${reported}; brain needs >= ${MIN_LASTDB_API_VERSION}`,
-          });
-        } else {
-          checks.push({
-            name: "node-api-version",
-            ok: false,
-            detail: `${reported}; brain needs >= ${MIN_LASTDB_API_VERSION}`,
-            fix: "brew upgrade lastdb && brew services restart lastdb",
-          });
-        }
-        verbose?.(`node-api-version: ${reported}`);
-      } catch (err) {
-        verbose?.(`node version probe failed (non-fatal): ${errMsg(err)}`);
-      }
-    }
-    if (identity.provisioned) {
-      provisioned = true;
-      checks.push({
-        name: "node-provisioned",
-        ok: true,
-        detail: `user_hash=${identity.userHash.slice(0, 8)}…`,
-      });
-      verbose?.(`node-provisioned: ok`);
-    } else {
-      checks.push({
-        name: "node-provisioned",
-        ok: false,
-        detail: identity.reason,
-        fix: "run `brain init` to bootstrap",
-      });
-      verbose?.(`node-provisioned: FAIL — ${identity.reason}`);
-    }
   } catch (err) {
-    // Distinguish a node that is genuinely DOWN (transport failure → "start
-    // it") from one that is UP but returned an HTTP error (4xx/5xx → don't say
-    // "start it"; the node answered, its own message is the real fix). A
-    // reachable node that returns an HTTP error is not told to start LastDB.
+    const nameRequired = err instanceof BrainError && err.code === "schema_name_required" ? err.message : null;
     checks.push({
       name: "node-reachable",
       ok: false,
-      detail: doctorReachabilityDetail(err, "node", cfg.nodeUrl),
-      fix: isNodeReachableButErroring(err) ? nodeHttpErrorHint(err) : nodeDownHint(),
+      detail: nameRequired ?? doctorReachabilityDetail(err, "node", cfg.nodeUrl),
+      fix: nameRequired !== null ? "run `brain init`" : isNodeReachableButErroring(err) ? nodeHttpErrorHint(err) : nodeDownHint(),
     });
-    verbose?.(`node-reachable: FAIL`);
-    // The node never answered, so node-provisioned can't be determined. Emit
-    // an explicit SKIP (neutral, like WARN) rather than letting it silently
-    // vanish — the schemas-loaded / schema-drift / embedding-runtime /
-    // write-ready checks below SKIP for the same reason at their own gates,
-    // so the check list keeps the same shape whether the node is up or down.
+    checks.push({
+      name: "node-api-version",
+      ok: true,
+      tag: "SKIP",
+      detail: "Brain does not call GET /api/version.",
+    });
     checks.push(skippedByNodeUnreachable("node-provisioned"));
+    verbose?.(`node-reachable: FAIL`);
   }
 
-  // 5. Verify installed schemas through the read-only catalog. A diagnostic
-  // must not load or modify schemas, and must compare the addresses used by writes.
-  // Match **write-path** hashes. Config `schemaHashes.*` is the catalog /
-  // storage key used by mutates. On Mini, that appears as `name` on
-  // GET /api/schemas. `identity_hash` is the node recompute and usually
-  // equals `name`. When they diverge, only checking identity_hash false-FAILS
-  // a fully writable plane. Accept either field so doctor tracks write readiness.
-  if (provisioned) {
-    try {
-      const loaded = await nodeClient.listLoadedSchemas({ full: true });
-      loadedSchemas = loaded;
-      const loadedHashes = new Set<string>();
-      for (const s of loaded) {
-        if (typeof s.name === "string" && s.name.length > 0) loadedHashes.add(s.name);
-        if (typeof s.identity_hash === "string" && s.identity_hash.length > 0) {
-          loadedHashes.add(s.identity_hash);
-        }
-      }
-      const missing = DOCTOR_RECORD_SCHEMAS.filter((entry) => {
-        const hash = cfg.schemaHashes[entry.key];
-        return !hash || !loadedHashes.has(hash);
-      }).map((entry) => entry.schema.schema.descriptive_name);
-      if (missing.length === 0) {
-        schemasLoadedOk = true;
-        checks.push({
-          name: "schemas-loaded",
-          ok: true,
-          detail: `${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length} brain record schemas present in the node DB`,
-        });
-        verbose?.(`schemas-loaded: ok (${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length})`);
-      } else {
-        checks.push({
-          name: "schemas-loaded",
-          ok: false,
-          detail: `not loaded into the node: ${missing.join(", ")}`,
-          fix: "re-run `brain init` (it loads brain's schemas into the node)",
-        });
-        verbose?.(`schemas-loaded: FAIL — ${missing.join(", ")}`);
-      }
-    } catch (err) {
+  // Local pin check. A 64-hex pin cannot be used on the app API.
+  if (cfgIssues.length === 0) {
+    const wrong = DOCTOR_RECORD_SCHEMAS.filter((entry) => {
+      const expected = `brain/${entry.schema.schema.name}`;
+      return cfg.schemaHashes[entry.key] !== expected;
+    }).map((entry) => entry.schema.schema.descriptive_name);
+    if (wrong.length === 0) {
+      schemasLoadedOk = true;
+      checks.push({
+        name: "schemas-loaded",
+        ok: true,
+        detail: `${DOCTOR_RECORD_SCHEMAS.length}/${DOCTOR_RECORD_SCHEMAS.length} record schemas pinned to brain/<Name>`,
+      });
+    } else {
       checks.push({
         name: "schemas-loaded",
         ok: false,
-        detail: errMsg(err),
+        detail: `re-run brain init to replace pins: ${wrong.join(", ")}`,
         fix: "re-run `brain init`",
       });
-      verbose?.(`schemas-loaded: FAIL`);
     }
-  } else if (!nodeReachable) {
-    // Node is down — reading the node DB to confirm brain's schemas are
-    // loaded is impossible. SKIP rather than drop the check.
-    checks.push(skippedByNodeUnreachable("schemas-loaded", "can't read the node DB"));
   } else {
-    checks.push(skippedByPrereqs("schemas-loaded", "node is not provisioned"));
+    checks.push(skippedByPrereqs("schemas-loaded", "config is invalid"));
   }
 
-  // 6. schema drift — check each unique schema once. Iterates 8 entries:
-  // Design + Task + six per-kind Phase 6 schemas. Extras-only drift (the
-  // schema service expanded brain's canonical against an existing schema of
-  // the same descriptive_name, often a Schema.org starter_seed) is demoted to
-  // WARN inside checkSchemaDrift(): `brain init` cannot shrink it.
-  if (cfgIssues.length === 0 && !nodeReachable) {
-    // Definition checks use the same installed catalog as the serving node.
-    checks.push(
-      skippedByNodeUnreachable("schema-drift", "can't compare against the node DB"),
-    );
-  } else if (cfgIssues.length === 0 && !provisioned) {
-    checks.push(skippedByPrereqs("schema-drift", "node is not provisioned"));
-  } else if (cfgIssues.length === 0 && !schemasLoadedOk) {
-    checks.push(skippedByPrereqs("schema-drift", "installed schemas were not confirmed"));
-  } else if (cfgIssues.length === 0) {
-    for (const entry of DOCTOR_RECORD_SCHEMAS) {
-      const runtime = cfg.schemaHashes[entry.key];
-      const hash = cfg.schemaIdentities?.[entry.key] ?? runtime;
-      const label = entry.schema.schema.descriptive_name;
-      if (!hash) {
-        checks.push({
-          name: `schema-drift[${label}]`,
-          ok: false,
-          detail: `no canonical hash for "${entry.key}" in config.schemaHashes`,
-          fix: "re-run `brain init`",
-        });
-        continue;
-      }
-      const actual = loadedSchemas.find((schema) => schema.name === runtime || schema.identity_hash === hash);
-      if (actual && cfg.schemaIdentities?.[entry.key] && actual.identity_hash !== hash) {
-        checks.push({
-          name: `schema-drift[${label}]`,
-          ok: false,
-          detail: "installed definition differs from the pinned identity",
-          fix: "review the installed schema and run `brain init` to refresh the binding",
-        });
-        continue;
-      }
-      const registered = actual?.name && actual.descriptive_name && actual.schema_type &&
-        actual.fields && actual.field_types ? {
-          ...actual,
-          name: actual.name,
-          descriptive_name: actual.descriptive_name,
-          schema_type: actual.schema_type,
-          fields: actual.fields,
-          field_types: actual.field_types,
-        } : null;
-      const driftCheck = checkSchemaDrift(
-        label,
-        {...entry.schema, schema: canonicalSchema(entry.schema.schema)},
-        hash,
-        registered,
-        boundSchemaNames(cfg, hash),
-      );
-      checks.push(driftCheck);
-      verbose?.(
-        `schema-drift[${label}]: ${tagOf(driftCheck)} — ${driftCheck.detail ?? ""}`,
-      );
-    }
+  for (const entry of DOCTOR_RECORD_SCHEMAS) {
+    const label = entry.schema.schema.descriptive_name;
+    checks.push({
+      name: `schema-drift[${label}]`,
+      ok: true,
+      tag: "SKIP",
+      detail: "Brain does not read schemas at run time.",
+    });
   }
 
   // Embedding-runtime probe — issue one trivial Search app query so the node

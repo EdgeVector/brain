@@ -46,6 +46,9 @@ export type Config = {
 };
 
 export function brainDataDir(): string {
+  // A restricted app may write only inside the folder the launcher names.
+  const appData = process.env.LASTDB_APP_DATA;
+  if (appData && appData.length > 0) return appData;
   return join(brainHomeBase(), ".brain");
 }
 

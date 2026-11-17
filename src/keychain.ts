@@ -1,98 +1,25 @@
-// File-backed capability store (0600) for app-side capability storage.
-//
-// Storage is @lastdb/app-sdk's `FileCapabilityStore`: a 0600 file store under
-// `~/.brain/capabilities/`, keyed `capabilityStoreKey(appId, nodeUrl)` =
-// `brain@<sha256(nodeUrl)[:16]>` with a `boundNode` envelope, so a capability
-// minted by one node is never replayed against another (the SDK's wrong-node
-// guard). This module adapts that store to brain's `CapabilityStore`
-// interface (StoredCapability keyed by node URL) and keeps brain's on-disk
-// identity: the file fallback lives under the brain data dir (BRAIN_CAPABILITY_DIR
-// honored), at `capabilities/<key>.cap`.
+// Capability tokens are not used on the LastDB app API. The default store
+// keeps nothing on disk, so a restricted app does not write a keychain file.
 
 import { createHash } from "node:crypto";
-import {
-  capabilityStoreKey,
-  decodeCapabilityBlob,
-  FileCapabilityStore,
-  type CapabilityStore as SdkCapabilityStore,
-} from "@lastdb/app-sdk";
 
 import type { CapabilityStore, StoredCapability } from "./capability.ts";
 import { brainDataDir } from "./config.ts";
 
-/** Directory holding the file store (and the existing config). */
+/** Directory that used to hold the file store. */
 export function brainDir(): string {
   const override = process.env.BRAIN_CAPABILITY_DIR;
   if (override && override.length > 0) return override;
   return brainDataDir();
 }
 
-// ---------------------------------------------------------------------------
-// Public store
-// ---------------------------------------------------------------------------
-
-// The default app id used when load/clear are called without a
-// StoredCapability in hand (they only carry a nodeUrl). brain is the only
-// app today.
 function defaultAppId(): string {
   return "brain";
 }
 
-// Rebuild brain's StoredCapability view from an SDK-stored blob. A blob that
-// no longer decodes is still surfaced (with empty derived fields) so the
-// session's own decode + integrity check decides to discard it — the same
-// "corrupt cache is discarded downstream" behavior as before.
-function storedFromBlob(appId: string, nodeUrl: string, blob: string): StoredCapability {
-  const token = decodeCapabilityBlob(blob);
-  return {
-    appId,
-    nodeUrl,
-    nodePubkey: token?.node_pubkey ?? "",
-    capabilityId: token?.capability_id ?? "",
-    blob,
-  };
-}
-
 /**
- * Adapt an SDK capability store to brain's CapabilityStore interface.
- * Exported for tests (inject any SDK store); production callers use
- * {@link defaultCapabilityStore}.
- */
-export function sdkBackedCapabilityStore(
-  sdkStore: SdkCapabilityStore,
-  appId: string = defaultAppId(),
-): CapabilityStore {
-  return {
-    async load(nodeUrl: string): Promise<StoredCapability | null> {
-      const key = capabilityStoreKey(appId, nodeUrl);
-      const blob = await sdkStore.load(key, { expectedNode: nodeUrl });
-      if (blob !== null) return storedFromBlob(appId, nodeUrl, blob);
-      return null;
-    },
-    async save(cap: StoredCapability): Promise<void> {
-      await sdkStore.store(
-        capabilityStoreKey(cap.appId, cap.nodeUrl),
-        cap.blob,
-        cap.nodeUrl,
-      );
-    },
-    async clear(nodeUrl: string): Promise<void> {
-      await sdkStore.remove(capabilityStoreKey(appId, nodeUrl));
-    },
-  };
-}
-
-/**
- * Build the default capability store: the SDK's 0600 file store under
- * brain's data directory, adapted to brain's interface.
- */
-export function defaultCapabilityStore(): CapabilityStore {
-  return sdkBackedCapabilityStore(new FileCapabilityStore(brainDir()));
-}
-
-/**
- * A pure in-memory store — used by unit tests and as an explicit fallback when
- * a caller wants no persistence. Mirrors the CapabilityStore contract exactly.
+ * A pure in-memory store. The app API session replaces capability tokens,
+ * so Brain does not persist them.
  */
 export function inMemoryCapabilityStore(): CapabilityStore {
   const keyFor = (appId: string, nodeUrl: string): string =>
@@ -109,4 +36,9 @@ export function inMemoryCapabilityStore(): CapabilityStore {
       map.delete(keyFor(defaultAppId(), nodeUrl));
     },
   };
+}
+
+/** The store the data path uses. It does not write outside the process. */
+export function defaultCapabilityStore(): CapabilityStore {
+  return inMemoryCapabilityStore();
 }

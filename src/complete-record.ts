@@ -1,3 +1,5 @@
+import type { AppApiMutation } from "@lastdb/app-sdk";
+
 import type { BatchMutationOp, NodeClient } from "./client.ts";
 import type { SchemaDefinition } from "./schemas.ts";
 
@@ -16,19 +18,19 @@ export function coordinateId(schema: string, hash: string, range?: string | null
 }
 
 export async function readCompleteRecord(node: NodeClient, schema: string, hash: string): Promise<RecordPreimage | null> {
-  const result = await node.rawCall("POST", "/api/query", {
-    schema_name: schema, filter: { HashKey: hash }, limit: 2,
-  });
-  const reply = result.json as { results?: RecordPreimage[]; has_more?: boolean };
-  if (result.status !== 200 || reply?.has_more !== false || !Array.isArray(reply.results) || reply.results.length > 1) {
-    throw new Error("LastDB did not confirm the complete record read.");
-  }
-  const row = reply.results[0];
+  if (!node.queryByKey) throw new Error("LastDB did not confirm the complete record read.");
+  const row = await node.queryByKey({ schemaHash: schema, fields: [], keyHash: hash, file: true });
   if (!row) return null;
-  if (row.key.hash !== hash || row.key.range !== null || !row.fields || !row.alternates || !/^[a-f0-9]{64}$/.test(row.revision)) {
+  if (row.key.hash !== hash || row.key.range !== null || !row.revision) {
     throw new Error("LastDB returned an invalid complete record.");
   }
-  return row;
+  return {
+    key: { hash: row.key.hash, range: row.key.range },
+    fields: row.fields,
+    alternates: {},
+    revision: row.revision,
+    metadata: null,
+  };
 }
 
 export function fileOperation(schema: string, hash: string, fields: Fields, current?: RecordPreimage | null) {
@@ -48,7 +50,7 @@ export function expectationMatches(op: BatchMutationOp, current: RecordPreimage 
   return true;
 }
 
-function alternateAddresses(schema: SchemaDefinition, fields: Fields): RecordPreimage["alternates"] {
+export function alternateAddresses(schema: SchemaDefinition, fields: Fields): RecordPreimage["alternates"] {
   return Object.fromEntries(Object.entries(schema.alternate_keys ?? {}).map(([name, spec]) => {
     const hash = spec.hash_literal ?? fields[spec.hash_field ?? ""];
     const parts = (spec.range_parts ?? []).map((part) => fields[part.field]);
@@ -73,6 +75,51 @@ function alternateAddresses(schema: SchemaDefinition, fields: Fields): RecordPre
     if (!range) throw new Error(`The ${name} alternate key is missing its range.`);
     return [name, { hash, range }];
   }));
+}
+
+export function toAppMutation(
+  op: BatchMutationOp,
+  schemaName: string,
+  schema: SchemaDefinition,
+  current: RecordPreimage | undefined,
+): AppApiMutation | null {
+  const deleting = op.mutationType === "delete";
+  if (deleting && !current) return null;
+  const key = { hash: op.keyHash, range: op.keyRange ? op.keyRange : null };
+  if (deleting) {
+    if (!current?.revision) throw new Error("LastDB delete needs the record revision.");
+    return { op: "delete", schema: schemaName, key, revision: current.revision };
+  }
+  const fields = { ...current?.fields, ...op.fields } as AppApiMutation extends { record: infer R } ? R : never;
+  const alternates = alternateAddresses(schema, fields);
+  const link = op.file
+    ? {
+        path: op.file.path,
+        ...(op.file.name !== undefined ? { name: op.file.name } : {}),
+        ...(op.file.media_type !== undefined ? { media_type: op.file.media_type } : {}),
+      }
+    : undefined;
+  const record = fields;
+  if (current) {
+    if (!current.revision) throw new Error("LastDB replace needs the record revision.");
+    return {
+      op: "replace",
+      schema: schemaName,
+      key,
+      revision: current.revision,
+      record,
+      alternates,
+      ...(link ? { file: link } : {}),
+    };
+  }
+  return {
+    op: "create",
+    schema: schemaName,
+    key,
+    record,
+    alternates,
+    ...(link ? { file: link } : {}),
+  };
 }
 
 export function recordOperation(

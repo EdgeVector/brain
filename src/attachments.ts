@@ -9,27 +9,31 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 //     Carries the attachment entries as JSON plus a `filenames` array — the
 //     only word-indexed (searchable) surface.
 //   - `BrainAttachmentFile` — one record per unique content hash (SHA-256 of
-//     the raw file). The bytes are the record's own LastDB file: one
-//     `POST /api/db/put-blob` stores the record and its file together, and
-//     `POST /api/db/fetch-blob` reads them by schema and key. Reads are
-//     sha256-verified here before any byte is handed back.
+//     the raw file). The bytes stay in the app data directory. The record
+//     stores the path. Reads open that path and sha256-verify the bytes.
 
+import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { createHash } from "node:crypto";
 
+import { writeStoredFile } from "./app-files.ts";
 import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
-import { fileOperation, readCompleteRecord } from "./complete-record.ts";
 import { writeConfig, type Config } from "./config.ts";
 import { nowIso } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 import {
   ATTACHMENT_FILE_SCHEMA_KEY,
   ATTACHMENT_INDEX_SCHEMA_KEY,
-  attachmentFileSchema,
-  attachmentIndexSchema,
-  OWNER_APP_ID,
   type RecordType,
 } from "./schemas.ts";
+
+const ATTACHMENT_INDEX_NAME = "brain/BrainAttachmentIndex";
+const ATTACHMENT_FILE_NAME = "brain/BrainAttachmentFile";
+
+function exactSchemaName(pin: string | undefined, fallback: string): string {
+  if (pin && !/^[a-f0-9]{64}$/.test(pin)) return pin.startsWith("brain/") ? pin : `brain/${pin}`;
+  return fallback;
+}
 
 export const ATTACHMENT_INDEX_SLUG_PREFIX = "__attidx__";
 
@@ -105,38 +109,24 @@ export function mediaTypeFor(filename: string): string {
   return MEDIA_TYPES[ext] ?? "application/octet-stream";
 }
 
-// Lazy schema declare: installs that ran `brain init` before attachments
-// existed get the index and file schemas minted on first use, without a
-// re-init. Persists the canonical hashes to config.
-export async function ensureAttachmentSchemas(
-  node: NodeClient,
+// Pin the attachment schemas to their exact names. The installer places them.
+export function ensureAttachmentSchemas(
   cfg: Config,
   opts: { persist: boolean; configPath?: string },
-): Promise<{ indexHash: string; fileHash: string }> {
-  const haveIndex = cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY];
-  const haveFile = cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY];
-  if (haveIndex && haveFile) return { indexHash: haveIndex, fileHash: haveFile };
-  if (!node.declareAppSchema) {
-    throw new BrainError({
-      code: "attachment_schema_unavailable",
-      message: "This node cannot declare the brain attachment schemas.",
-      hint: "Run `brain init` against a current Mini node, then retry.",
-    });
+): { indexHash: string; fileHash: string } {
+  const changed =
+    cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY] !== ATTACHMENT_INDEX_NAME ||
+    cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY] !== ATTACHMENT_FILE_NAME;
+  cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY] = ATTACHMENT_INDEX_NAME;
+  cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY] = ATTACHMENT_FILE_NAME;
+  if (changed) {
+    cfg.schemaFieldAliases = { ...cfg.schemaFieldAliases, ...canonicalProfilesForHashes(cfg.schemaHashes) };
+    if (opts.persist) {
+      if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
+      else writeConfig(cfg);
+    }
   }
-  const declaredIndex =
-    haveIndex ??
-    (await node.declareAppSchema(OWNER_APP_ID, attachmentIndexSchema.schema)).canonical;
-  const declaredFile =
-    haveFile ??
-    (await node.declareAppSchema(OWNER_APP_ID, attachmentFileSchema.schema)).canonical;
-  cfg.schemaHashes[ATTACHMENT_INDEX_SCHEMA_KEY] = declaredIndex;
-  cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY] = declaredFile;
-  cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
-  if (opts.persist) {
-    if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
-    else writeConfig(cfg);
-  }
-  return { indexHash: declaredIndex, fileHash: declaredFile };
+  return { indexHash: ATTACHMENT_INDEX_NAME, fileHash: ATTACHMENT_FILE_NAME };
 }
 
 function stringOf(fields: Record<string, unknown>, key: string): string {
@@ -287,49 +277,13 @@ type BlobRecord = {
 };
 
 function requireFileSchemaHash(cfg: Config): string {
-  const schemaHash = cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY];
-  if (!schemaHash) {
-    throw new BrainError({
-      code: "attachment_schema_unavailable",
-      message: "Attachment file schema hash missing from config.",
-      hint: "Run `brain init` (or any `brain attach`), then retry.",
-    });
-  }
-  return schemaHash;
+  return exactSchemaName(cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY], ATTACHMENT_FILE_NAME);
 }
 
-// Map file-route failures.
-function filePlaneError(path: string, status: number, body: string): BrainError {
-  const excerpt = body.slice(0, 300);
-  if (status === 404 || status === 405) {
-    return new BrainError({
-      code: "attachment_file_plane_unavailable",
-      message: `Node ${path} answered ${status}: this node keeps no record files.`,
-      hint: "Attachments need a LastDB Mini that serves POST /api/db/put-blob (API 23). Upgrade the node.",
-    });
-  }
-  if (status === 409) {
-    return new BrainError({code:"attachment_local_file_write_paused",message:"LastDB paused local file writes.",hint:"Read the node status before the next attempt."});
-  }
-  return new BrainError({
-    code: "attachment_file_plane_error",
-    message: `Node ${path} failed (${status}): ${excerpt}`,
-    hint: "Retry; if it persists, inspect the node logs for the record file failure.",
-  });
-}
-
-// The `file` object of a put-blob or fetch-blob reply. Accept a bare reply or a data envelope.
-function replyFile(json: unknown): Record<string, unknown> | undefined {
-  const root = (json ?? {}) as Record<string, unknown>;
-  const data = root.data as Record<string, unknown> | undefined;
-  const file = root.file ?? data?.file;
-  return file && typeof file === "object" ? (file as Record<string, unknown>) : undefined;
-}
-
-// Store file bytes as the file of a BrainAttachmentFile record keyed by the
-// content hash, with its fields, in one put-blob write. Identical hash ⇒
-// identical bytes, so an existing record is left untouched (metadata-only
-// attach); the probe is a keyed point-read.
+// Store file bytes under the app data directory and link that path from a
+// BrainAttachmentFile record keyed by the content hash. Identical hash means
+// identical bytes, so an existing record is left untouched. The probe is a
+// keyed point-read. The file stays on disk after the write.
 export async function putAttachmentBlob(
   node: NodeClient,
   cfg: Config,
@@ -343,22 +297,21 @@ export async function putAttachmentBlob(
   if (existing !== null) {
     return { blobRef: `sha256:${hash}`, deduplicated: true };
   }
-  const path = "/api/db/put-blob";
-  const stored = await node.rawCall("POST", path, {
-    mutation: fileOperation(schemaHash, hash, { content_hash: hash, size: String(bytes.length), media_type: mediaType, created_at: nowIso() }),
-    bytes_b64: Buffer.from(bytes).toString("base64"),
-    ...(opts?.name !== undefined ? { name: opts.name } : {}),
-    media_type: mediaType,
-  });
-  if (stored.status !== 200) throw filePlaneError(path, stored.status, stored.body);
-  const file = replyFile(stored.json);
-  if (file?.sha256 !== hash || file?.size_bytes !== bytes.length) {
+  if (!node.writeRecordFile) {
     throw new BrainError({
-      code: "attachment_file_plane_error",
-      message: "The node stored an attachment file that differs from the sent bytes.",
-      hint: "Re-attach the file. If it persists, inspect the node logs.",
+      code: "app_api_route_unavailable",
+      message: "Brain cannot store an attachment without the app write route.",
     });
   }
+  const path = writeStoredFile(hash, bytes);
+  await node.writeRecordFile({
+    schemaHash,
+    keyHash: hash,
+    fields: { content_hash: hash, size: String(bytes.length), media_type: mediaType, created_at: nowIso() },
+    path,
+    ...(opts?.name !== undefined ? { name: opts.name } : {}),
+    mediaType,
+  });
   return { blobRef: `sha256:${hash}`, deduplicated: false };
 }
 
@@ -371,28 +324,23 @@ export async function getAttachmentBlob(
 ): Promise<BlobRecord> {
   const hash = blobRef.startsWith("sha256:") ? blobRef.slice("sha256:".length) : blobRef;
 
-  const fileSchemaHash = cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY];
-  if (fileSchemaHash) {
-    const row = await readCompleteRecord(node, fileSchemaHash, hash);
-    if (row !== null) {
-      const path = "/api/db/fetch-blob";
-      const res = await node.rawCall("POST", path, { schema: fileSchemaHash, key: { hash }, expected_revision: row.revision });
-      if (res.status === 404) {
-        throw new BrainError({
-          code: "attachment_blob_missing",
-          message: `Attachment blob sha256:${hash} has a record but no file on this node.`,
-          hint: "Re-attach the file from the original source.",
-        });
-      }
-      if (res.status !== 200) {
-        throw filePlaneError(path, res.status, res.body);
-      }
-      const file = replyFile(res.json);
-      const b64 = file && typeof file.bytes_b64 === "string" ? file.bytes_b64 : "";
-      const bytes = new Uint8Array(Buffer.from(b64, "base64"));
-      const fields = (row.fields ?? {}) as Record<string, unknown>;
-      return verifiedBlob(hash, bytes, stringOf(fields, "media_type"));
+  const fileSchemaHash = exactSchemaName(cfg.schemaHashes[ATTACHMENT_FILE_SCHEMA_KEY], ATTACHMENT_FILE_NAME);
+  if (!node.queryByKey) {
+    throw new BrainError({ code: "keyed_read_required", message: "The attachment read needs a keyed client." });
+  }
+  const row = await node.queryByKey({ schemaHash: fileSchemaHash, fields: [], keyHash: hash, file: true });
+  if (row !== null) {
+    const path = row.file?.path;
+    if (!path) {
+      throw new BrainError({
+        code: "attachment_blob_missing",
+        message: `Attachment blob sha256:${hash} has no path. Brain cannot read file bytes stored inside LastDB.`,
+        hint: "Re-attach the file from the original source.",
+      });
     }
+    const bytes = new Uint8Array(readFileSync(path));
+    const fields = (row.fields ?? {}) as Record<string, unknown>;
+    return verifiedBlob(hash, bytes, stringOf(fields, "media_type"));
   }
 
   throw new BrainError({

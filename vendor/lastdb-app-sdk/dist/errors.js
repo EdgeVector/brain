@@ -1,41 +1,19 @@
 /**
  * Typed error taxonomy for the LastDB app SDK.
  *
- * Every class here maps 1:1 to a discriminated response the node actually
- * returns — there is no catch-all "request failed". The mapping is verified
- * against the on-`main` handlers:
- *
- * - Consent flow (`fold_db_node/src/server/routes/apps.rs`):
- *   - `request-consent`  → `404 {error, app_id}` (unknown app),
- *                          `403 {reason: "app_in_sandbox", app_id, error}`,
- *                          `400 {error}` (invalid scope).
- *   - `consent-status`   → `202 {status: "pending"}`,
- *                          `200 {status: "granted", capability}`,
- *                          `403 {status: "denied"}` / `403 {status: "revoked"}`,
- *                          `408 {status: "expired"}`,
- *                          `404 {status: "unknown"}`.
- * - Data path (`fold_db_node::dev_mode` `app_endpoints.rs`, production
- *   `fold_db_node` operation layer): `403 {kind: "permission_denied",
- *   error: "<discriminated reason>"}` where the reason text distinguishes
- *   namespace-denied / unverified-identity / write-denied / revoked, and
- *   `400 {kind, error}` for a request-shape / schema-state rejection.
- * - Capability verifier (app_identity v3.1,
- *   `fold_db/crates/core/src/access/capability_denial.rs`): a failed
- *   per-write capability check returns `403 {status: 403, reason: "<one of
- *   the eight discriminated reasons>", ...detail}` — see
- *   {@link CapabilityDeniedError}.
+ * Every class maps to a discriminated response the node returns — there is no
+ * catch-all "request failed".
  */
 /** Base class for every error this SDK raises. */
-export class FoldDbError extends Error {
+export class LastDbError extends Error {
     constructor(message) {
         super(message);
         this.name = new.target.name;
-        // Restore prototype chain for instanceof across the transpile target.
         Object.setPrototypeOf(this, new.target.prototype);
     }
 }
-/** A network/transport failure (socket error, connection refused, DNS, etc.). */
-export class TransportError extends FoldDbError {
+/** A network/transport failure (socket error, connection refused, timeout, etc.). */
+export class TransportError extends LastDbError {
     kind;
     status;
     constructor(message, kind = 'connect', options = {}) {
@@ -44,11 +22,8 @@ export class TransportError extends FoldDbError {
         this.status = options.status;
     }
 }
-/**
- * The node answered with an HTTP status the SDK has no specific class for.
- * Carries the status and the parsed body so the caller can still react.
- */
-export class UnexpectedResponseError extends FoldDbError {
+/** The node answered with an HTTP status the SDK has no specific class for. */
+export class UnexpectedResponseError extends LastDbError {
     status;
     body;
     constructor(message, status, body) {
@@ -57,13 +32,18 @@ export class UnexpectedResponseError extends FoldDbError {
         this.body = body;
     }
 }
-/**
- * The node's paginated `/api/query` response stopped making forward progress
- * or could not produce the unique row count it advertised. This is an SDK-side
- * guard around the known-unstable offset pagination path; callers should retry
- * later or narrow the query instead of trusting a partial drain.
- */
-export class QueryPaginationError extends FoldDbError {
+/** Retry the same body with this UUID when the Share upload outcome is uncertain. */
+export class ShareSubmissionUncertainError extends LastDbError {
+    mutationId;
+    cause;
+    constructor(mutationId, cause) {
+        super('Share submission outcome is unavailable. Retry with the same mutation ID and body.');
+        this.mutationId = mutationId;
+        this.cause = cause;
+    }
+}
+/** The node's paginated `/api/query` stopped making progress or mismatched `total_count`. */
+export class QueryPaginationError extends LastDbError {
     reason;
     detail;
     constructor(reason, detail) {
@@ -78,116 +58,9 @@ function queryPaginationMessage(reason, detail) {
             'no new record keys on the next page');
     }
     return (`queryAll collected ${detail.collectedCount} unique rows` +
-        (detail.totalCount === undefined
-            ? ''
-            : ` but the node reported total_count=${detail.totalCount}`));
+        (detail.totalCount === undefined ? '' : ` but the node reported total_count=${detail.totalCount}`));
 }
-/**
- * `queryAll()` was called with no `filter.filter` (a full unfiltered schema
- * drain — a "scan" in LastDB's DynamoDB-style access model) and without the
- * explicit `{ allowFullScan: true }` opt-in. Scans are deprecated for product
- * apps (`brain design-lastdb-scan-deprecation-path`): they are the dominant
- * cause of node load under `lastdb ops`. Use a point read (`filter: {
- * HashKey: id }`) or a partition read (HashRange) instead, or pass
- * `allowFullScan: true` when a full drain is genuinely required (admin/offline
- * tooling, migrations).
- */
-export class FullScanNotAllowedError extends FoldDbError {
-    schemaName;
-    constructor(schemaName) {
-        super(`queryAll('${schemaName}') has no filter and allowFullScan is not set — ` +
-            'unfiltered scans are deprecated for product apps. Pass a HashKey/HashRange ' +
-            'filter, or opts.allowFullScan: true to run the full drain anyway.');
-        this.schemaName = schemaName;
-    }
-}
-// ---------------------------------------------------------------------------
-// Consent flow
-// ---------------------------------------------------------------------------
-/**
- * `request-consent` → `404`. The app id is not in the canonical app registry
- * the node knows about (publish the app to schema_service first).
- */
-export class UnknownAppError extends FoldDbError {
-    appId;
-    constructor(appId) {
-        super(`app '${appId}' is not registered with the node's schema service`);
-        this.appId = appId;
-    }
-}
-/**
- * `request-consent` → `403 {reason: "app_in_sandbox"}`. The app is registered
- * as `sandbox` tier; only the owner-developer (whose dev pubkey matches the
- * app's `owner_dev_pubkey`) may install it. Promote the app to `live` to lift
- * the gate.
- */
-export class AppInSandboxError extends FoldDbError {
-    appId;
-    constructor(appId) {
-        super(`app '${appId}' is in sandbox tier; only the owner-developer can install it`);
-        this.appId = appId;
-    }
-}
-/** `request-consent` → `400`. The requested scope string was malformed. */
-export class InvalidScopeError extends FoldDbError {
-}
-/**
- * The owner denied the consent request (`consent-status` → `403 {status:
- * "denied"}`). Terminal: do not auto-re-prompt.
- */
-export class ConsentDeniedError extends FoldDbError {
-    requestId;
-    constructor(requestId) {
-        super(`consent request '${requestId}' was denied by the node owner`);
-        this.requestId = requestId;
-    }
-}
-/**
- * The granted capability was revoked (`consent-status` → `403 {status:
- * "revoked"}`). Per the design's app-side caching table: discard the cached
- * token and surface "access revoked" — do NOT auto-re-prompt.
- */
-export class CapabilityRevokedError extends FoldDbError {
-    requestId;
-    constructor(requestId) {
-        super(`the capability for request '${requestId}' was revoked`);
-        this.requestId = requestId;
-    }
-}
-/**
- * The consent request passed its 5-minute window (`consent-status` → `408
- * {status: "expired"}`). The app must call `requestConsent` again.
- */
-export class ConsentExpiredError extends FoldDbError {
-    requestId;
-    constructor(requestId) {
-        super(`consent request '${requestId}' expired before it was granted`);
-        this.requestId = requestId;
-    }
-}
-/** `consent-status` → `404 {status: "unknown"}`. No request with that id. */
-export class ConsentRequestNotFoundError extends FoldDbError {
-    requestId;
-    constructor(requestId) {
-        super(`no consent request found for id '${requestId}'`);
-        this.requestId = requestId;
-    }
-}
-/**
- * `awaitConsent` gave up before the owner acted on a still-pending request.
- * Distinct from {@link ConsentExpiredError}: the node's record may still be
- * `pending`; this is the SDK's own client-side timeout.
- */
-export class ConsentTimeoutError extends FoldDbError {
-    requestId;
-    timeoutMs;
-    constructor(requestId, timeoutMs) {
-        super(`gave up waiting for consent on '${requestId}' after ${timeoutMs}ms (still pending)`);
-        this.requestId = requestId;
-        this.timeoutMs = timeoutMs;
-    }
-}
-export class PermissionDeniedError extends FoldDbError {
+export class PermissionDeniedError extends LastDbError {
     reason;
     category;
     constructor(reason, category) {
@@ -196,12 +69,7 @@ export class PermissionDeniedError extends FoldDbError {
         this.category = category ?? classifyPermissionReason(reason);
     }
 }
-/**
- * Best-effort classification of the node's discriminated permission-denied
- * reason string into a {@link PermissionCategory}. The reason text is the
- * stable contract (see `uds_isolation_test.rs` assertions); we match on its
- * documented substrings.
- */
+/** Classify the node's `403` permission-denied reason into a {@link PermissionCategory}. */
 export function classifyPermissionReason(reason) {
     const r = reason.toLowerCase();
     if (r.includes('is not granted') && r.includes('isolated namespace')) {
@@ -210,192 +78,37 @@ export function classifyPermissionReason(reason) {
     if (r.includes('code-signature-verified app identity')) {
         return 'unverified_identity';
     }
-    if (r.includes('write denied by namespace isolation')) {
+    if (r.includes('write denied by namespace isolation') ||
+        r.includes('this share is read-only') ||
+        r.includes('permits local read sessions only') ||
+        r.includes('unavailable on a received database')) {
         return 'write_denied';
+    }
+    if (r.includes('database session refused')) {
+        return 'session_denied';
     }
     return 'unknown';
 }
-// ---------------------------------------------------------------------------
-// Discriminated capability 403 contract (app_identity v3.1, gap #4)
-// ---------------------------------------------------------------------------
-/**
- * The eight discriminated `reason` values a node's capability verifier can
- * return on a `403` (`app_identity.md#discriminated-403-reasons`, rendered by
- * `fold_db/crates/core/src/access/capability_denial.rs::CapabilityDenial` as
- * `{status: 403, reason: "<reason>", ...detail}`).
- */
-export const CAPABILITY_DENIAL_REASONS = [
-    /** `capability_id` is on the node's local revocation list. */
-    'capability_revoked',
-    /** The capability's `expires_at` is in the past. */
-    'capability_expired',
-    /** The capability's `app_id` is not in the node's cached app registry. */
-    'capability_unknown',
-    /** The capability's scope / granted ops do not cover this schema. */
-    'capability_out_of_scope',
-    /** `X-Capability-Ts` is outside the ±60s replay window (or absent). */
-    'capability_replay',
-    /** The envelope signature / payload hash did not verify on the node. */
-    'capability_bad_sig',
-    /** The capability's `node_pubkey` is not this node's key. */
-    'capability_for_wrong_node',
-    /** No capability was presented for a write that required one. */
-    'consent_required',
-];
-/** Type guard: is `s` one of the eight discriminated capability-403 reasons? */
-export function isCapabilityDenialReason(s) {
-    return CAPABILITY_DENIAL_REASONS.includes(s);
-}
-/**
- * A data-path `403` whose body carries a discriminated `reason` field — the
- * capability-verifier contract (`{status: 403, reason: "capability_…", …}`).
- *
- * Subclasses {@link PermissionDeniedError} so existing `instanceof
- * PermissionDeniedError` handling keeps working; its `category` is always
- * `'capability_denied'`. `reason` is the node's verbatim discriminator —
- * one of {@link CAPABILITY_DENIAL_REASONS} for the per-write verifier, or
- * another reason-tagged 403 the node emits on the data path (e.g.
- * `/api/app/search`'s `capability_required` for a header-less call). Use
- * {@link isCapabilityDenialReason} to narrow, and
- * {@link capabilityDenialReaction} for the design's contract reaction.
- */
-export class CapabilityDeniedError extends PermissionDeniedError {
-    detail;
-    constructor(reason, detail = {}) {
-        super(reason, 'capability_denied');
-        this.detail = detail;
-    }
-    /** `reason` narrowed to the eight-reason contract, or `null`. */
-    get denialReason() {
-        return isCapabilityDenialReason(this.reason) ? this.reason : null;
-    }
-}
-/**
- * The design's contract reaction for each discriminated capability-403
- * reason. Pure data — the SDK does not act on it automatically; an app (or a
- * session layer above the client) applies it. `detail` refines the surfaced
- * message where the node provided one.
- */
-export function capabilityDenialReaction(reason, detail = {}) {
-    switch (reason) {
-        case 'capability_revoked':
-            // Discard, but DO NOT auto-re-prompt — the owner revoked deliberately.
-            return {
-                reason,
-                discardToken: true,
-                reacquire: false,
-                retryOnce: false,
-                surface: 'this app’s access to the node was revoked by the owner; ' +
-                    'ask them to re-grant consent',
-            };
-        case 'capability_expired':
-        case 'capability_unknown':
-        case 'consent_required':
-            // Expired / stale-client-state / nothing presented: discard + silently
-            // re-acquire via the consent handshake.
-            return { reason, discardToken: true, reacquire: true, retryOnce: false };
-        case 'capability_for_wrong_node':
-            // The connection moved nodes — discard + re-acquire against this node.
-            return { reason, discardToken: true, reacquire: true, retryOnce: false };
-        case 'capability_out_of_scope':
-            // Declared scope and attempted operation disagree — a developer bug;
-            // re-prompting would not fix it.
-            return {
-                reason,
-                discardToken: false,
-                reacquire: false,
-                retryOnce: false,
-                surface: `the granted capability does not cover ${detail.schema ?? 'this schema'} — ` +
-                    'the declared consent scope and the attempted operation disagree',
-            };
-        case 'capability_replay':
-            // Clock skew — retry once; the retry attaches a fresh X-Capability-Ts.
-            return {
-                reason,
-                discardToken: false,
-                reacquire: false,
-                retryOnce: true,
-                surface: 'the capability timestamp was rejected as a replay' +
-                    (detail.timestampSkewSecs !== undefined
-                        ? ` (skew ${detail.timestampSkewSecs}s)`
-                        : '') +
-                    '; check this machine’s clock',
-            };
-        case 'capability_bad_sig':
-            // The stored token is malformed — discard and surface; replaying it
-            // can only 403 again.
-            return {
-                reason,
-                discardToken: true,
-                reacquire: false,
-                retryOnce: false,
-                surface: 'the capability signature failed verification on the node — the ' +
-                    'stored token is malformed',
-            };
-    }
-}
-/**
- * A capability blob failed client-side verification (gap #4) at a point where
- * the SDK must not adopt it: the consent-grant path under
- * `ConnectOptions.verifyCapability`. `problem` discriminates: `malformed`
- * (not base64 JSON in the CapabilityToken shape), `audience_mismatch` (the
- * token is bound to a different `app_id`), or `integrity_mismatch`
- * (`envelope.payload_hash != sha256(JCS(token-minus-envelope))`).
- */
-export class CapabilityVerificationError extends FoldDbError {
-    problem;
-    appId;
-    tokenAppId;
-    constructor(problem, appId, tokenAppId) {
-        super(problem === 'audience_mismatch'
-            ? `capability is bound to app '${tokenAppId ?? '?'}', not '${appId}'`
-            : problem === 'integrity_mismatch'
-                ? `capability for app '${appId}' failed the JCS integrity check ` +
-                    '(envelope.payload_hash != sha256(JCS(token-minus-envelope)))'
-                : `capability for app '${appId}' did not decode as a CapabilityToken`);
-        this.problem = problem;
-        this.appId = appId;
-        this.tokenAppId = tokenAppId;
-    }
-}
-/**
- * The node rejected a data-path request before capability evaluation because
- * the caller's authenticated session/API credential is no longer valid
- * (`401`, commonly `{code:"AUTH_FAILED", error:"Session token expired"}`).
- *
- * Apps should catch this separately from capability-denied errors and start
- * their re-authentication flow instead of treating it as an unexpected crash.
- */
-export class AuthenticationRequiredError extends FoldDbError {
+/** Credential failure (`401`). */
+export class AuthenticationRequiredError extends LastDbError {
     reason;
     body;
-    constructor(reason, message, 
-    /** The raw parsed 401 response body, verbatim (`null` when none). */
-    body = null) {
+    constructor(reason, message, body = null) {
         super(message);
         this.reason = reason;
         this.body = body;
     }
 }
-/**
- * The node rejected the request shape or schema state (`400 {kind:
- * "query_failed" | "mutation_rejected" | "invalid_request" | ...}`). Carries
- * the node's `kind` discriminator and message, plus the raw parsed response
- * `body` — production 400s are not uniform (`{kind, error}` from the dev
- * mirror, `{error}` / `{message}` / richer envelopes from production
- * handlers), and dropping everything but `kind` + one text field lost the
- * node's detail (e.g. its `message` field). The body is surfaced verbatim,
- * the same way the 403 {@link CapabilityDeniedError} surfaces its `detail`.
- */
-export class RequestRejectedError extends FoldDbError {
+/** Request shape, target lookup, conflict, or payload-size rejection (`400`/`404`/`409`/`413`). */
+export class RequestRejectedError extends LastDbError {
     kind;
     body;
-    constructor(kind, message, 
-    /** The raw parsed 400 response body, verbatim (`null` when none). */
-    body = null) {
+    status;
+    constructor(kind, message, body = null, status = 400) {
         super(message);
         this.kind = kind;
         this.body = body;
+        this.status = status;
     }
 }
 /** The one line an operator needs. Same shape from every app. */
@@ -412,84 +125,110 @@ export function nodeTooOldMessage(detail) {
     return (`${who} needs LastDB api_version >= ${detail.required ?? '?'}; ` +
         `this node reports ${reported}${build}. ${remedy}`);
 }
-/**
- * The node is older than this client needs. Subclasses
- * {@link RequestRejectedError} (kind `unknown_key` or
- * `api_version_below_required`) so an app that already catches request
- * rejections keeps working, and can branch on `instanceof NodeTooOldError`
- * to print {@link NodeTooOldError.message} and exit instead of retrying.
- */
+/** The node is older than this client needs. Subclasses {@link RequestRejectedError}. */
 export class NodeTooOldError extends RequestRejectedError {
     detail;
     constructor(detail, body = null) {
-        super(detail.reason, nodeTooOldMessage(detail), body);
+        super(detail.reason, nodeTooOldMessage(detail), body, 400);
         this.detail = detail;
     }
 }
-/**
- * A compare-and-set (CAS) precondition on a {@link import('./types.js').MutationOp}
- * (its `expected` field) did not hold: the node rejected the write with
- * `409 {error:"cas_conflict", schema?, field?, key?, expected?, actual?, message?}`.
- *
- * The row changed since the caller's expected precondition (or was already
- * present when `{type:"absent"}` was required), so the write was NOT applied.
- * The typed fields (`schema` / `field` / `key` / `expected` / `actual`) let an
- * app re-read the current value and retry without re-parsing free text or
- * re-serializing a generic error body. The verbatim parsed 409 `body` is also
- * carried for anything the node added beyond the modeled fields.
- *
- * A CAS conflict is a normal, expected outcome of contended writes — it is a
- * distinct class (NOT a {@link RequestRejectedError} or an
- * {@link UnexpectedResponseError}) precisely so an app can branch on it and
- * retry rather than treat it as a hard failure.
- */
-export class CasConflictError extends FoldDbError {
+/** A compare-and-set (CAS) precondition did not hold (`409 {error:"cas_conflict"}`). */
+export class CasConflictError extends LastDbError {
     body;
-    /** The schema the conflicting write targeted, or `null`. */
     schema;
-    /** The field the CAS precondition was checked against, or `null`. */
-    field;
-    /** The row key (rendered) the write targeted, or `null`. */
     key;
-    /** The value the write EXPECTED the field to hold, or `null`. */
     expected;
-    /** The field's ACTUAL current value the node observed, or `null`. */
     actual;
-    constructor(detail = {}, 
-    /** The raw parsed 409 response body, verbatim (`null` when none). */
-    body = null) {
+    constructor(detail = {}, body = null) {
         super(detail.message ?? casConflictMessage(detail));
         this.body = body;
         this.schema = detail.schema ?? null;
-        this.field = detail.field ?? null;
         this.key = detail.key ?? null;
         this.expected = detail.expected ?? null;
         this.actual = detail.actual ?? null;
     }
 }
-/** Compose a default message from the modeled CAS-conflict detail. */
 function casConflictMessage(detail) {
-    const where = detail.field !== undefined
-        ? ` on field '${detail.field}'` +
-            (detail.schema !== undefined ? ` of schema '${detail.schema}'` : '')
-        : detail.schema !== undefined
-            ? ` on schema '${detail.schema}'`
-            : '';
+    const where = detail.schema !== undefined ? ` on schema '${detail.schema}'` : '';
     const values = detail.expected !== undefined || detail.actual !== undefined
-        ? ` (expected ${JSON.stringify(detail.expected ?? null)}, ` +
-            `actual ${JSON.stringify(detail.actual ?? null)})`
+        ? ` (expected ${JSON.stringify(detail.expected ?? null)}, actual ${JSON.stringify(detail.actual ?? null)})`
         : '';
     return `CAS conflict${where}: the row changed since the expected precondition${values}`;
 }
-// ---------------------------------------------------------------------------
-// Capability storage
-// ---------------------------------------------------------------------------
-/** No capability is stored under the requested app id (`loadCapability`). */
-export class CapabilityNotFoundError extends FoldDbError {
-    appId;
-    constructor(appId) {
-        super(`no stored capability for app '${appId}'`);
-        this.appId = appId;
+/** Whether a value is a non-array JSON object. */
+export function isObject(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+function authenticationRequiredReason(body) {
+    const text = `${body.code ?? ''} ${body.error ?? ''} ${body.message ?? ''}`.toLowerCase();
+    if ((text.includes('session') || text.includes('token')) && text.includes('expired')) {
+        return 'session_expired';
     }
+    return 'auth_failed';
+}
+function casConflictDetailOf(body) {
+    const detail = {};
+    if (!isObject(body))
+        return detail;
+    if (typeof body['schema'] === 'string')
+        detail.schema = body['schema'];
+    if (typeof body['key'] === 'string')
+        detail.key = body['key'];
+    if (typeof body['expected'] === 'string')
+        detail.expected = body['expected'];
+    if (typeof body['actual'] === 'string' || body['actual'] === null) {
+        detail.actual = body['actual'];
+    }
+    if (typeof body['message'] === 'string')
+        detail.message = body['message'];
+    return detail;
+}
+function extractErrorMessage(body, fallback) {
+    if (typeof body === 'string' && body.trim().length > 0)
+        return body.trim();
+    if (isObject(body)) {
+        for (const field of ['message', 'reason', 'error']) {
+            const candidate = body[field];
+            if (typeof candidate === 'string' && candidate.length > 0)
+                return candidate;
+        }
+    }
+    return fallback;
+}
+/** Map a non-200 data-plane response into the SDK's typed error hierarchy. */
+export function mapDataError(verb, status, body, appId) {
+    const b = (isObject(body) ? body : {});
+    if (status === 401) {
+        return new AuthenticationRequiredError(authenticationRequiredReason(b), extractErrorMessage(body, `${verb} requires authentication`), body ?? null);
+    }
+    if (status === 409 && b.error === 'cas_conflict') {
+        return new CasConflictError(casConflictDetailOf(body), body ?? null);
+    }
+    if (status === 403) {
+        return new PermissionDeniedError(extractErrorMessage(body, `${verb} permission denied`));
+    }
+    if (status === 400) {
+        if (b.kind === 'unknown_key') {
+            return new NodeTooOldError({ reason: 'unknown_key', reported: null, build: null, app: appId }, body ?? null);
+        }
+        const hasDetail = typeof b.message === 'string' || typeof b.reason === 'string';
+        const kind = typeof b.kind === 'string'
+            ? b.kind
+            : hasDetail && typeof b.error === 'string'
+                ? b.error
+                : 'invalid_request';
+        return new RequestRejectedError(kind, extractErrorMessage(body, `${verb} rejected`), body ?? null, 400);
+    }
+    if (status === 404) {
+        return new RequestRejectedError('not_found', extractErrorMessage(body, `${verb} target not found`), body ?? null, 404);
+    }
+    if (status === 409) {
+        return new RequestRejectedError(typeof b.error === 'string' ? b.error : 'conflict', extractErrorMessage(body, `${verb} conflict`), body ?? null, 409);
+    }
+    if (status === 413) {
+        return new RequestRejectedError(typeof b.error === 'string' ? b.error : 'payload_too_large', extractErrorMessage(body, `${verb} payload too large`), body ?? null, 413);
+    }
+    return new UnexpectedResponseError(extractErrorMessage(body, `${verb} returned ${status}`), status, body);
 }
 //# sourceMappingURL=errors.js.map

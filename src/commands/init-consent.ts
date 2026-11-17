@@ -1,16 +1,7 @@
-// Local Mini authorizes the owner through its Unix socket. Remote nodes
-// retain their capability protocol and require approval on that node.
-import {
-  acquireCapability,
-  BRAIN_APP_ID,
-  hasValidCachedCapability,
-  type CapabilityStore,
-  type ConsentTransport,
-} from "../capability.ts";
-import { BrainError, isLoopbackNodeUrl, newNodeClient, type Verbose } from "../client.ts";
+// The launcher session authorizes a restricted app. Brain does not request consent.
+import type { CapabilityStore, ConsentTransport } from "../capability.ts";
+import type { Verbose } from "../client.ts";
 import { resolvePrintSink } from "../format.ts";
-import { defaultCapabilityStore } from "../keychain.ts";
-import { appIdentityEnforceEnabled } from "../write-context.ts";
 
 export type EstablishConsentOptions = {
   nodeUrl: string;
@@ -41,45 +32,6 @@ export async function establishConsentInline(
   opts: EstablishConsentOptions,
 ): Promise<EstablishConsentResult> {
   const print = resolvePrintSink(opts);
-  const node = newNodeClient({
-    baseUrl: opts.nodeUrl,
-    userHash: opts.userHash,
-    ...(opts.verbose ? { verbose: opts.verbose } : {}),
-    ...(opts.socketPath ? { socketPath: opts.socketPath } : {}),
-  });
-  if (isLoopbackNodeUrl(opts.nodeUrl)) {
-    const identity = await node.autoIdentity();
-    if (!identity.provisioned && opts.recoveredIdentity) {
-      await node.listLoadedSchemas();
-    } else if (!identity.provisioned || identity.userHash !== opts.userHash) {
-      throw new BrainError({
-        code: "owner_identity_mismatch",
-        message: "The configured owner socket did not confirm this Brain identity.",
-      });
-    }
-    print("        owner socket confirmed access");
-    return { state: "owner_socket" };
-  }
-  if (!appIdentityEnforceEnabled()) {
-    return { state: "skipped", reason: "enforce_off" };
-  }
-  const appId = opts.appId ?? BRAIN_APP_ID;
-  const store = opts.store ?? defaultCapabilityStore();
-  if (await hasValidCachedCapability(store, opts.nodeUrl, appId)) {
-    return { state: "already_granted" };
-  }
-  if (!(opts.isTty ?? (() => Boolean(process.stdin.isTTY)))()) {
-    print("        remote access requires approval from the target node owner");
-    return { state: "skipped", reason: "non_tty" };
-  }
-  await acquireCapability({
-    ...opts,
-    appId,
-    store,
-    transport: opts.transport ?? {
-      requestConsent: (app, scope) => node.requestConsent(app, scope),
-      consentStatus: (request) => node.consentStatus(request),
-    },
-  });
-  return { state: "granted_inline" };
+  print("        the launcher session authorizes the app");
+  return { state: "owner_socket" };
 }

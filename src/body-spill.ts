@@ -3,19 +3,20 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 // Seal runs in `buildResidentWritePlan` and in `writeRecordFields` (append, tag, link, gate).
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
+import { writeStoredFile } from "./app-files.ts";
 import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
-import { fileOperation, readCompleteRecord } from "./complete-record.ts";
 import { writeConfig, type Config } from "./config.ts";
 import type { BrainRecord } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 import {
   BODY_FILE_SCHEMA_KEY,
-  OWNER_APP_ID,
   RECORDS,
-  bodyFileSchema,
   type RecordType,
 } from "./schemas.ts";
+
+const BODY_FILE_NAME = "brain/BrainBodyFile";
 
 /** Spill a field when its serialized size is above this. Matches the contract (32 KiB). */
 export const SPILL_THRESHOLD_BYTES = 32 * 1024;
@@ -207,65 +208,22 @@ async function readMarkerSidecar(
   return current ?? previous;
 }
 
-// Lazy schema declare, the same pattern as `ensureAttachmentSchemas`: an
-// install that ran `brain init` before body spill existed gets the schema
-// minted on first use. Persists the canonical hash to config.
-export async function ensureBodyFileSchema(
-  node: NodeClient,
+// Pin the body-file schema to its exact name. The installer places it.
+export function ensureBodyFileSchema(
   cfg: Config,
   opts: { persist: boolean; configPath?: string } = { persist: true },
-): Promise<string> {
-  const have = cfg.schemaHashes[BODY_FILE_SCHEMA_KEY];
-  if (have) return have;
-  if (!node.declareAppSchema) {
-    throw new BrainError({
-      code: "body_spill_schema_unavailable",
-      message: "This node cannot declare the brain body-file schema.",
-      hint: "Run `brain init` against a current Mini node, then retry.",
-    });
-  }
-  const declared = await node.declareAppSchema(OWNER_APP_ID, bodyFileSchema.schema);
-  cfg.schemaHashes[BODY_FILE_SCHEMA_KEY] = declared.canonical;
-  cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
+): string {
+  if (cfg.schemaHashes[BODY_FILE_SCHEMA_KEY] === BODY_FILE_NAME) return BODY_FILE_NAME;
+  cfg.schemaHashes[BODY_FILE_SCHEMA_KEY] = BODY_FILE_NAME;
+  cfg.schemaFieldAliases = { ...cfg.schemaFieldAliases, ...canonicalProfilesForHashes(cfg.schemaHashes) };
   if (opts.persist) {
     if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
     else writeConfig(cfg);
   }
-  return declared.canonical;
+  return BODY_FILE_NAME;
 }
 
-// ── blob plane ──────────────────────────────────────────────────────────────
-
-function blobPlaneError(path: string, status: number, body: string): BrainError {
-  const excerpt = body.slice(0, 300);
-  if (status === 413) {
-    return new BrainError({
-      code: "body_spill_too_large",
-      message: `Node ${path} refused the text as too large (413): ${excerpt}`,
-      hint: "A record file is at most 16 MiB. Split the text across records.",
-    });
-  }
-  if (status === 405) {
-    return new BrainError({
-      code: "body_spill_unavailable",
-      message: `Node ${path} answered ${status}: this node keeps no record files.`,
-      hint: "Long bodies need a LastDB Mini that serves POST /api/db/put-blob (API 23). Upgrade the node.",
-    });
-  }
-  return new BrainError({
-    code: "body_spill_blob_error",
-    message: `Node ${path} failed (${status}): ${excerpt}`,
-    hint: "Retry. If it persists, read the node log for the record file failure.",
-  });
-}
-
-function replyFile(json: unknown): Record<string, unknown> | undefined {
-  const root = (json ?? {}) as Record<string, unknown>;
-  const file = root.file ?? (root.data as Record<string, unknown> | undefined)?.file;
-  return file && typeof file === "object" ? (file as Record<string, unknown>) : undefined;
-}
-
-// One write: the sidecar fields and the full text as the sidecar's file.
+// One write: the sidecar fields plus a path to the text already on disk.
 async function putSidecar(
   node: NodeClient,
   schemaHash: string,
@@ -273,39 +231,31 @@ async function putSidecar(
   bytes: Uint8Array,
   fields: Record<string, unknown>,
 ): Promise<void> {
-  const path = "/api/db/put-blob";
-  const current = await readCompleteRecord(node, schemaHash, key);
-  const res = await node.rawCall("POST", path, {
-    mutation: fileOperation(schemaHash, key, fields, current),
-    bytes_b64: Buffer.from(bytes).toString("base64"),
-  });
-  if (res.status !== 200) throw blobPlaneError(path, res.status, res.body);
-  const file = replyFile(res.json);
-  if (file?.sha256 !== fields.content_hash || file?.size_bytes !== bytes.length) {
+  if (!node.writeRecordFile) {
     throw new BrainError({
-      code: "body_spill_blob_error",
-      message: `Node ${path} stored a file that differs from the sent text: ${res.body.slice(0, 300)}`,
-      hint: "Retry. If it persists, read the node log for the record file failure.",
+      code: "app_api_route_unavailable",
+      message: "Brain cannot store a body file without the app write route.",
     });
   }
+  const path = writeStoredFile(key, bytes);
+  await node.writeRecordFile({ schemaHash, keyHash: key, fields, path, name: key });
 }
 
 async function fetchBlob(node: NodeClient, schemaHash: string, key: string): Promise<Uint8Array> {
-  const path = "/api/db/fetch-blob";
-  const record = await readCompleteRecord(node, schemaHash, key);
-  if (!record) throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
-  const res = await node.rawCall("POST", path, { schema: schemaHash, key: { hash: key }, expected_revision: record.revision });
-  if (res.status === 404) {
+  if (!node.queryByKey) {
+    throw new BrainError({ code: "keyed_read_required", message: "The body file read needs a keyed client." });
+  }
+  const row = await node.queryByKey({ schemaHash, fields: [], keyHash: key, file: true });
+  if (!row) throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
+  const path = row.file?.path;
+  if (!path) {
     throw new BrainError({
       code: "body_spill_blob_missing",
-      message: "The body file record has no file on this node.",
+      message: "The body file has no path. Brain cannot read file bytes stored inside LastDB.",
       hint: "Write the record again with its full text (brain put --allow-shrink).",
     });
   }
-  if (res.status !== 200) throw blobPlaneError(path, res.status, res.body);
-  const file = replyFile(res.json);
-  const b64 = typeof file?.bytes_b64 === "string" ? file.bytes_b64 : "";
-  return new Uint8Array(Buffer.from(b64, "base64"));
+  return new Uint8Array(readFileSync(path));
 }
 
 function verifyBytes(bytes: Uint8Array, sha256: string, size: number, what: string): void {
@@ -326,35 +276,12 @@ export const STORED_FORM = Symbol("brain.storedForm");
 
 type HydratedRecord = BrainRecord & { [STORED_FORM]?: Record<string, string> };
 
-// The sidecar schema hash. A caller that holds the config passes it (no extra
-// call). A caller that does not (a read helper called without `cfg`) falls
-// back to ONE `GET /api/schemas` per node client, looked up only when a marker
-// is actually met, so a record with no spilled text pays nothing.
-const nodeBodyFileHash = new WeakMap<NodeClient, Promise<string | null>>();
-
-async function bodyFileSchemaHash(node: NodeClient, cfg: SpillCfg | null): Promise<string> {
-  const fromCfg = cfg?.schemaHashes[BODY_FILE_SCHEMA_KEY];
-  if (fromCfg) return fromCfg;
-  let lookup = nodeBodyFileHash.get(node);
-  if (lookup === undefined) {
-    lookup = node.listLoadedSchemas().then((loaded) => {
-      const hit = loaded.find(
-        (s) => s.descriptive_name === bodyFileSchema.schema.descriptive_name && s.owner_app_id === OWNER_APP_ID,
-      );
-      return hit?.name ?? hit?.identity_hash ?? null;
-    });
-    nodeBodyFileHash.set(node, lookup);
+function bodyFileSchemaHash(cfg: SpillCfg | null): string {
+  const pin = cfg?.schemaHashes[BODY_FILE_SCHEMA_KEY];
+  if (typeof pin === "string" && pin.length > 0 && !/^[a-f0-9]{64}$/.test(pin)) {
+    return pin.startsWith("brain/") ? pin : `brain/${pin}`;
   }
-  const hash = await lookup;
-  if (!hash) {
-    nodeBodyFileHash.delete(node);
-    throw new BrainError({
-      code: "body_spill_schema_missing",
-      message: "This record keeps its long text in a body file, but the node has no BrainBodyFile schema loaded.",
-      hint: "Run `brain init` so the BrainBodyFile schema registers, then retry.",
-    });
-  }
-  return hash;
+  return BODY_FILE_NAME;
 }
 
 export type HydrateOptions = {
@@ -370,7 +297,7 @@ async function resolveSpilledField(
   field: string,
   marker: SpillMarker,
 ): Promise<string> {
-  const schemaHash = await bodyFileSchemaHash(node, cfg);
+  const schemaHash = bodyFileSchemaHash(cfg);
   const key = bodyFileKey(type, slug, marker.field || field, marker.sha256);
   const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, marker.field || field, marker.sha256);
   if (sidecar === null) {
@@ -649,7 +576,7 @@ export async function sealRecordFields(opts: {
   const spilled: SpilledField[] = [];
 
   if (plan.spill.length > 0 || plan.pass.length > 0) {
-    const schemaHash = await ensureBodyFileSchema(node, cfg, { persist: true });
+    const schemaHash = ensureBodyFileSchema(cfg, { persist: true });
     const results = await Promise.all(
       plan.spill.map(async (s) => {
         const { reused } = await commitSidecar({ node, schemaHash, type, slug, field: s.field, full: s.full });

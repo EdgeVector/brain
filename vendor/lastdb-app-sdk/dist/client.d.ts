@@ -1,279 +1,115 @@
 /**
- * The LastDB runtime app client.
+ * The LastDB runtime app client facade.
  *
- * Wraps the node's production `/api/*` dialect: connect → request-consent →
- * poll → query/mutation-with-capability. Every method maps the node's
- * discriminated responses to the typed errors in `errors.ts` — no catch-all.
- *
- * Surface verified against `origin/main`:
- * - consent flow handlers: `fold_db_node/src/server/routes/apps.rs`
- * - data path handlers: `fold_db_node::dev_mode` `app_endpoints.rs` (the dev mirror of
- *   production `fold_db_node`'s control-socket route table)
- * - capability header: `fold_db_node/src/handlers/caller.rs`
- *   (`X-App-Capability` = base64 JSON CapabilityToken, `X-Capability-Ts` =
- *   unix epoch seconds)
+ * Wraps the node's Unix-socket data plane and delegates handshake, schema,
+ * keyed read, mutation, blob, and database-session operations to focused
+ * domain modules. `read`, `write`, and `changes` call the app API (`/v1`).
  */
-import { type CapabilityStore } from './capabilityStore.js';
+import { type AppApiChangesOptions, type AppApiChangesResult, type AppApiMutation, type AppApiRead, type AppApiReadResult, type AppApiWriteResult } from './appApi.js';
+import { type DeleteBlobOptions, type FetchBlobOptions, type FetchedBlob, type PutBlobRequest, type PutBlobResult } from './blobOps.js';
+import { type CreateDatabaseRequest, type DatabaseSpec, type ListedDatabase } from './databases.js';
+import { type AutoIdentityResult, type DeclareSchemaRequest, type DeclareSchemaResult, type LoadedSchema, type SchemaDescriptor } from './schemaOps.js';
 import { type Transport } from './transport.js';
-import type { ConnectOptions, ConsentScope, AutoIdentityResult, ChangesOptions, ChangesResult, ListOptions, ListResult, LoadedSchema, NodeVersion, MutationOp, MutationResult, QueryAllOptions, QueryFilter, QueryResult, RequestConsentResult, SchemaDescriptor, SchemaResolver, SearchOptions, SearchResult } from './types.js';
-/** Options for {@link LastDbClient.awaitConsent}. */
-export interface AwaitConsentOptions {
-    /** Hard client-side ceiling. Throws {@link ConsentTimeoutError} past it. */
-    timeoutMs?: number;
-    /** Poll interval (default 2000ms, per the design). */
-    pollIntervalMs?: number;
+import type * as Types from './types.js';
+/** Connect to a LastDB node over its Unix-domain socket and verify protocol compatibility. */
+export declare function connect<DatabaseId extends string | undefined = undefined>(options: Types.ConnectOptions<DatabaseId>): Promise<LastDbClient<DatabaseId>>;
+/** Behavior switches for {@link LastDbClient} (set via `ConnectOptions` or `ownerClient`). */
+export interface LastDbClientOptions<DatabaseId extends string | undefined = undefined> {
+    databaseId?: DatabaseId;
+    databaseSession?: string;
 }
-/**
- * Connect to a LastDB node. Provide exactly one of `baseUrl` (HTTP) or
- * `socketPath` (Unix-domain socket) — the transport is chosen by which is
- * present. Attempts to auto-load a stored capability for `appId` unless one
- * is supplied inline.
- *
- * **Socket-first discovery.** When you pass `baseUrl` (the local-node case),
- * the SDK PREFERS the node's Unix-domain data-plane socket and falls back to
- * the `baseUrl` TCP listener only when no socket file is present. This follows
- * the discovery order the Rust client uses, with the brand-forward
- * `LASTDB_SOCKET_PATH` preferred ahead of the Rust client's
- * `FOLDDB_SOCKET_PATH` (`LASTDB_SOCKET_PATH` → `FOLDDB_SOCKET_PATH` legacy
- * alias → `FOLDDB_SOCK` legacy alias → `<data_dir>/folddb.sock` → TCP),
- * making the
- * socket the normal app path while keeping TCP working mid-migration. Opt out
- * with `connect({ baseUrl, discoverSocket: false })` to force the TCP listener
- * (e.g. against a remote/non-local node, or a browser-style HTTP path). An
- * explicit `socketPath` always uses that socket verbatim with no discovery.
- */
-export declare function connect(options: ConnectOptions): Promise<LastDbClient>;
-/** Behavior switches for {@link LastDbClient} (set via {@link ConnectOptions}). */
-export interface LastDbClientOptions {
-    /** See `ConnectOptions.verifyCapability`. Default `false`. */
-    verifyCapability?: boolean;
-    /** See `ConnectOptions.schemaResolver`. Default pass-through. */
-    schemaResolver?: SchemaResolver;
-    /**
-     * Canonical DB locator this client targets (also sent as `X-LastDB-Db`).
-     * Defaults to personal when omitted.
-     */
-    dbLocator?: string;
-}
-/** A connected LastDB app client. Construct via {@link connect}. */
-export declare class LastDbClient {
+/** A connected LastDB app client. Construct via {@link connect} or `ownerClient`. */
+export declare class LastDbClient<DatabaseId extends string | undefined = undefined> {
     readonly appId: string;
-    private readonly transport;
-    private readonly store;
-    private capability;
-    /** The node-scoped capability-store key: `capabilityStoreKey(appId, node)`. */
-    private readonly storeKey;
-    /** The canonical node target this client is bound to (transport `target`). */
-    private readonly nodeTarget;
-    private readonly verifyCapability;
-    private readonly schemaResolver;
-    /** Canonical multi-DB locator forwarded on every data-path request. */
-    readonly dbLocator: string;
-    constructor(appId: string, transport: Transport, store: CapabilityStore, capability: string | null, 
-    /** The node-scoped capability-store key: `capabilityStoreKey(appId, node)`. */
-    storeKey: string, 
-    /** The canonical node target this client is bound to (transport `target`). */
-    nodeTarget: string, options?: LastDbClientOptions);
+    private readonly baseTransport;
+    readonly databaseId: DatabaseId;
+    private readonly context;
+    constructor(appId: string, baseTransport: Transport, options?: LastDbClientOptions<DatabaseId>);
     /** Where this client is pointed (for diagnostics). */
     get target(): string;
-    /** Whether a capability is currently loaded. */
-    get hasCapability(): boolean;
-    /**
-     * `GET /api/version` — the client↔node compatibility handshake. Reads no
-     * node state and needs no capability. A node that predates the route (404)
-     * yields `{ apiVersion: 0, handshake: false }` rather than an error, so a
-     * caller can still print what it learned.
-     */
-    version(): Promise<NodeVersion>;
-    /**
-     * Refuse to proceed against a node whose `api_version` is below `required`.
-     * Throws {@link NodeTooOldError}, whose message is the one line an operator
-     * needs (`… Run: brew upgrade lastdb …`). Returns the node's version on
-     * success so a caller can log it. `connect({ requireApiVersion })` calls
-     * this for you.
-     */
-    requireApiVersion(required: number, appLabel?: string): Promise<NodeVersion>;
-    /**
-     * `POST /api/apps/request-consent`. Returns a `requestId` to poll with
-     * {@link awaitConsent}. The owner grants via `folddb consent grant <appId>`.
-     */
-    requestConsent(scope?: ConsentScope): Promise<RequestConsentResult>;
-    /**
-     * Poll `GET /api/apps/consent-status/{requestId}` until the owner grants the
-     * request, then store and return the base64 capability. Throws the matching
-     * typed error on denied / revoked / expired, and {@link ConsentTimeoutError}
-     * if the request is still pending when `timeoutMs` elapses.
-     */
-    awaitConsent(requestId: string, options?: AwaitConsentOptions): Promise<string>;
-    /**
-     * One `consent-status` poll. Returns the base64 capability on `granted`,
-     * `null` while still `pending`, and throws the typed terminal error
-     * otherwise. Exposed for callers that want to drive their own poll loop.
-     */
-    pollConsentOnce(requestId: string): Promise<string | null>;
-    /**
-     * Persist `capability` for this app **on this node** and use it on
-     * subsequent calls. The entry is keyed by (appId, node) and records the
-     * bound node, so it is never loaded for a different node.
-     */
-    storeCapability(capability: string): Promise<void>;
-    /**
-     * Load this app's stored capability **for this node** into the client.
-     * Returns it, or `null` if none is stored (including the wrong-node case:
-     * a capability bound to a different node is treated as absent). Called
-     * automatically by `connect`.
-     */
-    loadCapability(): Promise<string | null>;
-    /**
-     * `GET /api/list` — return one page of live record keys without hydrating
-     * record values. Use this for membership, then point-read the keys whose
-     * fields you need. A page is not a census: follow `next_cursor` while
-     * `has_more` is true.
-     */
-    list(schemaName: string, opts?: ListOptions): Promise<ListResult>;
-    /**
-     * `POST /api/query`. Reads fields from `schemaName` (a schema or a view).
-     * Auto-attaches the capability headers when one is loaded.
-     *
-     * Pagination: production `fold_db_node` ALWAYS pages — with no `limit` it
-     * still caps the response at its default page size (100,
-     * `DEFAULT_QUERY_LIMIT`), so a >100-row schema is silently truncated;
-     * check `result.page?.hasMore` or use {@link queryAll} to drain it.
-     * `filter.limit`/`filter.offset` are forwarded verbatim as the request's
-     * top-level pagination fields, and only when set. Both the production node
-     * and the dev node (`fold_db_node::dev_mode`) honor them with production-parity
-     * semantics (default 100, clamp 1000, `total_count`/`has_more` metadata).
-     */
-    query(schemaName: string, filter?: QueryFilter, opts?: {
-        allowFullScan?: boolean;
-    }): Promise<QueryResult>;
-    /**
-     * Drain a query past the node's page cap: issues `query()` repeatedly with
-     * `limit`/`offset` until the node reports no more rows, and returns every
-     * unique row as one {@link QueryResult}.
-     *
-     * Termination is two-signal: the node's own `page.hasMore` when it reports
-     * pagination metadata (production), else a short page
-     * (`rows.length < pageSize`). `opts.maxRows` (default 100k) is the safety
-     * ceiling — when hit, the result's `page.hasMore` is `true` so the
-     * truncation stays visible.
-     *
-     * Production offset pagination has historically been unstable, so `queryAll`
-     * dedupes by row key across pages and throws {@link QueryPaginationError}
-     * when a follow-up page makes no unique progress or when a completed drain
-     * cannot match the node's `totalCount`.
-     */
-    queryAll(schemaName: string, filter?: Omit<QueryFilter, 'limit' | 'offset' | 'cursor'>, opts?: QueryAllOptions): Promise<QueryResult>;
-    /**
-     * `POST /api/mutation`. Writes one row into `schemaName`. Auto-attaches the
-     * capability headers when one is loaded.
-     */
-    mutate(schemaName: string, op: MutationOp): Promise<MutationResult>;
-    /**
-     * Read durable changed-row metadata since an opaque cursor. The node owns
-     * scope: a verified app sees only its authorized schemas, and `target` can
-     * only narrow that set. Rows are hints; point-read product state after wake.
-     */
-    changes(opts?: ChangesOptions): Promise<ChangesResult>;
-    /**
-     * `POST /api/app/search` — the **node-authoritative scoped search**
-     * (`folddb_app_api.md` operation 5). Embeds `query`, ranks it over the
-     * node's native index, and returns the top-k hits **only from schemas the
-     * app has been granted** (its access-scope set `S(A)`).
-     *
-     * Scope is decided by the NODE, not the app. The node derives `S(A)` from the
-     * capability's verified `app_id` against its own grant ledger; the app never
-     * names its scope and **cannot widen it**. The single optional `opts.target`
-     * is *intersected* with `S(A)` (never unioned) — a target outside scope just
-     * yields no hits from it, with a normal `200`. There is deliberately no way
-     * for the app to pass a schema allowlist.
-     *
-     * Auto-attaches the capability headers (`X-App-Capability` + `X-Capability-Ts`)
-     * the same way `query`/`mutate` do. The node REJECTS a header-less call with
-     * `403 {reason: "capability_required"}` (mapped to {@link PermissionDeniedError})
-     * rather than handing back the owner's whole-index search.
-     *
-     * Each hit is a full {@link QueryRow} envelope (`key`, `fields`, `metadata`)
-     * plus the relevance `score` and the `schemaName` /
-     * `schemaDisplayName` the hit came from.
-     */
-    search(query: string, opts?: SearchOptions): Promise<SearchResult>;
-    /**
-     * `GET /api/system/auto-identity`. Resolves the local owner identity a
-     * host-context app uses for `X-User-Hash`. A not-yet-provisioned node returns
-     * `{ provisioned: false }` for the node's canonical 503, so callers can pivot
-     * to bootstrap without treating it as a transport failure.
-     */
+    /** `GET /api/version` — client↔node compatibility handshake. */
+    version(): Promise<Types.NodeVersion>;
+    /** Refuse to proceed against a node whose `api_version` is below `required`. */
+    requireApiVersion(required: number, appLabel?: string): Promise<Types.NodeVersion>;
+    /** `GET /api/system/auto-identity` — resolve the local owner identity. */
     autoIdentity(): Promise<AutoIdentityResult>;
+    /** `GET /api/list` — return one page of live primary or alternate keys. */
+    list(schemaName: string, opts?: Types.ListOptions): Promise<Types.ListResult>;
+    /** Point lookup of a single record by primary `HashKey` or `HashRangeKey`. */
+    get(schemaName: string, key: Types.RecordKeyInput): Promise<Types.QueryRow | null>;
+    /** `POST /api/query` — keyed point, multi-get, or range read under one hash. */
+    query(schemaName: string, filter?: Types.QueryFilter): Promise<Types.QueryResult>;
+    /** `POST /api/queries/batch` — read up to 64 keyed queries per request. */
+    queryBatch(items: readonly Types.QueryBatchItem[]): Promise<Types.QueryBatchOutcome[]>;
+    /** Auto-paginate a keyed query across pages until `hasMore` is false or `maxRows` is reached. */
+    queryAll(schemaName: string, filter?: Omit<Types.QueryFilter, 'limit' | 'offset' | 'cursor'>, opts?: Types.QueryAllOptions): Promise<Types.QueryResult>;
+    /** `POST /api/mutation` — write one complete conditional record into `schemaName`. */
+    mutate(schemaName: string, op: Types.MutationOp, options?: DatabaseId extends string ? Types.MutationOptions : never): Promise<Types.MutationResult | (DatabaseId extends string ? Types.ShareSubmissionResult : never)>;
+    /** `POST /api/mutations/batch` — commit an atomic batch of conditional record mutations. */
+    mutateBatch(items: readonly Types.MutationBatchItem[], options?: Types.MutationBatchOptions): Promise<Types.MutationBatchResult>;
+    /** Read the outcome of one submission made by this receiving LastDB node. */
+    getShareSubmissionStatus(mutationId: string): Promise<Types.ShareSubmissionStatus>;
     /**
-     * `GET /api/schemas`. Lists schemas loaded in the owner node and normalizes
-     * the fields host-context apps use to resolve their own canonical schema hash
-     * without hand-parsing raw route JSON.
+     * `POST /v1/read` — one result per read, in order.
+     * A per-item error is returned, not thrown. Does not use this client's `/api` database path.
      */
+    read(reads: readonly AppApiRead[]): Promise<AppApiReadResult[]>;
+    /** `POST /v1/write` — commit a list of conditional mutations after the write is on disk. */
+    write(mutations: readonly AppApiMutation[]): Promise<AppApiWriteResult>;
+    /** `POST /v1/x/changes` — changed record keys after a saved position. */
+    changes(options?: AppApiChangesOptions): Promise<AppApiChangesResult>;
+    /** `POST /api/db/put-blob` — attach or replace a record's blob, inline, or local-path file. */
+    putBlob(schemaName: string, request: PutBlobRequest): Promise<PutBlobResult>;
+    /** `POST /api/db/fetch-blob` — read a record's blob or inline file bytes. */
+    fetchBlob(schemaName: string, key: Types.RecordKeyInput, options?: FetchBlobOptions): Promise<FetchedBlob>;
+    /** `POST /api/db/delete-blob` — clear a record's blob or inline file via complete replacement. */
+    deleteBlob(schemaName: string, op: Types.ReplaceMutationOp, options?: DeleteBlobOptions): Promise<Types.MutationResult>;
+    /** Remember the 64-hex `definition_id` returned by `declareSchema` for `schemaName`. */
+    rememberDefinition(schemaName: string, definitionId: string): void;
+    /** `POST /api/schemas/declare` — declare an app-owned schema. */
+    declareSchema(request: DeclareSchemaRequest): Promise<DeclareSchemaResult>;
+    /** `GET /api/schemas` — list schemas loaded on the selected database. */
     listSchemas(): Promise<LoadedSchema[]>;
-    /**
-     * Resolve an app-owned schema descriptor to the loaded canonical schema entry.
-     * Matching uses `owner_app_id` + `descriptive_name`, and when `fields` is
-     * supplied requires the exact same field set regardless of order.
-     */
+    /** `GET /api/schema/<name>` — fetch a single loaded schema entry, or `null` on `404`. */
+    getSchema(schemaName: string): Promise<LoadedSchema | null>;
+    /** Resolve an app-owned schema descriptor against `listSchemas()`. */
     resolveSchema(descriptor: SchemaDescriptor): Promise<LoadedSchema | null>;
-    /** Capability headers, present only when a capability is loaded. */
-    private capabilityHeaders;
-    /**
-     * Resolve an app schema name to the node-facing schema + field maps (the
-     * data-path schema mapping used by `query`/`mutate`). Distinct from the
-     * public {@link resolveSchema} owner-host helper, which resolves a
-     * {@link SchemaDescriptor} to a {@link LoadedSchema}; they were merged from
-     * two concurrent PRs that both chose the name `resolveSchema`, so the private
-     * data-path one is named `resolveDataPathSchema` to avoid the collision.
-     */
-    private resolveDataPathSchema;
-    /** Map a non-200 data-path response to a typed error. */
-    private mapDataError;
-    /** Extract an `error` string from a node error body, with a fallback. */
-    private errorText;
+    /** `GET /api/databases` — list personal, owned, and received shared databases. */
+    listDatabases(): Promise<ListedDatabase[]>;
+    /** `POST /api/databases` — create an owned database on this node. */
+    createDatabase(request: CreateDatabaseRequest): Promise<ListedDatabase>;
+    /** `POST /api/databases/spec` — bind or clear an owned database's spec. */
+    bindDatabaseSpec(databaseId: string, spec: DatabaseSpec | null): Promise<ListedDatabase>;
+    /** `POST /api/databases/session` — issue a short-lived session restricted to `databaseId`. */
+    issueDatabaseSession(databaseId: string, intent: Types.DatabaseSessionIntent): Promise<Types.DatabaseSession>;
+    /** Issue a short-lived database session and return a scoped client bound to it. */
+    openDatabaseSession(databaseId: string, intent: Types.DatabaseSessionIntent): Promise<{
+        session: Types.DatabaseSession;
+        client: LastDbClient<string>;
+    }>;
+    /** Return a client bound to `databaseId` (and optional `databaseSession`) without mutating `this`. */
+    select(databaseId: string, options?: Types.SelectDatabaseOptions): LastDbClient<string>;
 }
-/** Parse a successful keys-only `GET /api/list` response. */
-export declare function parseListResponse(body: unknown): ListResult;
-/**
- * Parse a `200` `/api/query` body into a {@link QueryResult}, surfacing the
- * full per-row envelope (gap #3).
- *
- * The node returns its rows under `results` (production `fold_db_node`) or
- * `rows` (the `fold_db_node::dev_mode` mirror); both carry per-key objects shaped
- * `{ key, fields, metadata, has_conflicts }`. Each row is normalized to a
- * {@link QueryRow}. A bare field-map row (a node that pre-dates the envelope)
- * is still accepted: its `key`/`metadata` come back empty/null
- * and the whole object is its `fields` — so the SDK never throws away an
- * envelope the node sends, nor invents one it doesn't.
- */
-export declare function parseQueryResponse(body: unknown): QueryResult;
-/** Parse a successful `POST /api/app/changes` cursor page. */
-export declare function parseChangesResponse(body: unknown): ChangesResult;
-/**
- * Parse a `200` `/api/app/search` body into a {@link SearchResult}.
- *
- * The node wraps the hits in its standard envelope: `{ ok, results: [...],
- * user_hash }` (the `ApiResponse<IndexSearchResponse>` shape). Each element of
- * `results` is a full `/api/query` row envelope (`key`, `fields`, `metadata`)
- * with three search-only fields the node adds per hit:
- * `schema_name`, `schema_display_name`, and `score`. Hits arrive in the node's
- * relevance order and are surfaced verbatim — the SDK preserves it.
- *
- * The row part is parsed by the SAME {@link parseQueryRow} used for `query()`,
- * so the envelope handling (enveloped vs bare row, null author) is identical.
- */
-export declare function parseSearchResponse(body: unknown): SearchResult;
-/** Parse `GET /api/system/auto-identity` success JSON. */
-/**
- * Parse a `GET /api/version` 200 body. Tolerant of a node that omits a
- * field: a missing `api_version` reads as `0`, the same as a 404, because a
- * handshake that cannot state its version has not stated compatibility.
- */
-export declare function parseNodeVersion(body: unknown): NodeVersion;
-export declare function parseAutoIdentityResponse(body: unknown): AutoIdentityResult;
-/** Parse `GET /api/schemas` JSON into normalized loaded-schema entries. */
-export declare function parseSchemaListResponse(body: unknown): LoadedSchema[];
-/** Resolve a schema descriptor against an already-fetched schema list. */
-export declare function resolveLoadedSchema(schemas: readonly LoadedSchema[], descriptor: SchemaDescriptor): LoadedSchema | null;
+/** Options for {@link ownerClient}. */
+export interface OwnerClientOptions<DatabaseId extends string | undefined = undefined> {
+    /** Canonical app id this client acts as. */
+    appId: string;
+    /** Database ID or local alias. Omit for the personal default. */
+    databaseId?: DatabaseId;
+    /**
+     * Short-lived owner-approved database session token (`X-LastDB-Database-Session`).
+     * Requires `databaseId`. Keep session tokens out of logs.
+     */
+    databaseSession?: string;
+    /** Best-effort client label (`X-LastDB-Client`). Defaults to `appId`. */
+    clientId?: string;
+    /** Control-socket path. The file must exist. */
+    socketPath: string;
+    /** Headers attached to every request this client sends (per-call headers win). */
+    defaultHeaders?: Record<string, string>;
+    /** Per-request transport timeout in milliseconds (defaults to 30_000). */
+    timeoutMs?: number;
+}
+/** Build a {@link LastDbClient} synchronously against an existing Unix-domain socket. */
+export declare function ownerClient<DatabaseId extends string | undefined = undefined>(options: OwnerClientOptions<DatabaseId>): LastDbClient<DatabaseId>;
 //# sourceMappingURL=client.d.ts.map
