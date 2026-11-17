@@ -77,68 +77,24 @@ export function appIdentityEnforceEnabled(): boolean {
   return true;
 }
 
-export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
+function plainNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
   const store = opts.store ?? defaultCapabilityStore();
-
-  // Enforcement off → behave exactly like a plain node client (no consent, no
-  // capability headers). The session is still constructed so `.session` stays
-  // a valid handle, but its provider returns null so no headers attach and
-  // runWrite never acquires.
-  if (isLoopbackNodeUrl(opts.baseUrl) || !appIdentityEnforceEnabled()) {
-    const plainOpts: Parameters<typeof newNodeClient>[0] = {
-      baseUrl: opts.baseUrl,
-      userHash: opts.userHash,
-    };
-    if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
-    if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
-    plainOpts.schemaFieldAliases = opts.schemaFieldAliases;
-    const plain = newNodeClient(plainOpts);
-    const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
-    return { node: plain, session: idleSession };
-  }
-
-  // The base client carries the capability provider; the session owns the
-  // current blob and the provider returns it. Reads on `base` ignore it.
-  const session: CapabilitySession = new CapabilitySession(buildSessionOpts(opts, store, () => base));
-  const baseOpts: Parameters<typeof newNodeClient>[0] = {
+  const plainOpts: Parameters<typeof newNodeClient>[0] = {
     baseUrl: opts.baseUrl,
     userHash: opts.userHash,
-    capability: session.provider(),
+    schemaFieldAliases: opts.schemaFieldAliases,
   };
-  if (opts.verbose !== undefined) baseOpts.verbose = opts.verbose;
-  if (opts.socketPath !== undefined) baseOpts.socketPath = opts.socketPath;
-  baseOpts.schemaFieldAliases = opts.schemaFieldAliases;
-  const base = newNodeClient(baseOpts);
+  if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
+  if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
+  const plain = newNodeClient(plainOpts);
+  // The session stays so callers keep a handle. The data path does not
+  // acquire consent: the app session on the restricted socket authorizes writes.
+  const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
+  return { node: plain, session: idleSession };
+}
 
-  // Wrap the three mutation methods so each runs under the capability
-  // contract. Everything else delegates straight through.
-  const node: NodeClient = {
-    ...base,
-    async createRecord(args) {
-      await session.runWrite(() => base.createRecord(args));
-    },
-    async updateRecord(args) {
-      await session.runWrite(() => base.updateRecord(args));
-    },
-    async deleteRecord(args) {
-      await session.runWrite(() => base.deleteRecord(args));
-    },
-    async mutateBatch(args, options) {
-      const send = () => {
-        if (!base.mutateBatch) {
-          throw new Error("node client is missing mutateBatch");
-        }
-        return base.mutateBatch(args, options);
-      };
-      if (options?.durability === "durable") {
-        await session.ensureCapability();
-        return send();
-      }
-      return session.runWrite(send);
-    },
-  };
-
-  return { node, session };
+export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
+  return plainNodeClient(opts);
 }
 
 /**
@@ -153,40 +109,7 @@ export function newWriteNodeClient(opts: WriteNodeClientOptions): WriteNodeClien
  * client with no capability headers, exactly like the write factory.
  */
 export function newSearchNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
-  const store = opts.store ?? defaultCapabilityStore();
-
-  if (isLoopbackNodeUrl(opts.baseUrl) || !appIdentityEnforceEnabled()) {
-    const plainOpts: Parameters<typeof newNodeClient>[0] = {
-      baseUrl: opts.baseUrl,
-      userHash: opts.userHash,
-    };
-    if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
-    if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
-    plainOpts.schemaFieldAliases = opts.schemaFieldAliases;
-    const plain = newNodeClient(plainOpts);
-    const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
-    return { node: plain, session: idleSession };
-  }
-
-  const session: CapabilitySession = new CapabilitySession(buildSessionOpts(opts, store, () => base));
-  const baseOpts: Parameters<typeof newNodeClient>[0] = {
-    baseUrl: opts.baseUrl,
-    userHash: opts.userHash,
-    capability: session.provider(),
-  };
-  if (opts.verbose !== undefined) baseOpts.verbose = opts.verbose;
-  if (opts.socketPath !== undefined) baseOpts.socketPath = opts.socketPath;
-  baseOpts.schemaFieldAliases = opts.schemaFieldAliases;
-  const base = newNodeClient(baseOpts);
-
-  const node: NodeClient = {
-    ...base,
-    async search(query, searchOpts) {
-      return session.runSearch(() => base.search(query, searchOpts));
-    },
-  };
-
-  return { node, session };
+  return plainNodeClient(opts);
 }
 
 // CapabilitySession needs a ConsentTransport, which is built from the base

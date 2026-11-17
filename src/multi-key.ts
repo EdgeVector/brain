@@ -1,4 +1,5 @@
 // Named keys belong to one record schema. Relationship records keep their own values.
+import { alternateAddresses } from "./complete-record.ts";
 import { BrainError, type NodeClient, type QueryRow } from "./client.ts";
 import { RECORD_TYPES, UNIQUE_SCHEMAS, schemaConfigKeys, type RecordType, type SchemaDefinition } from "./schemas.ts";
 
@@ -42,22 +43,87 @@ export function explicitKeyDeclaration(schema: SchemaDefinition) {
 export type NamedRow = QueryRow & { matched_key: { hash: string; range: string } };
 export type NamedPage = { results: NamedRow[]; has_more: boolean; next_cursor?: unknown };
 
+function pageRange(filter: unknown): { hash: string; prefix?: string; start?: string; end?: string } {
+  if (!filter || typeof filter !== "object") {
+    throw new BrainError({ code: "multi_key_read_failed", message: "The named-key filter is not an object." });
+  }
+  const body = filter as Record<string, unknown>;
+  if (typeof body.HashKey === "string" && body.HashKey.length > 0) return { hash: body.HashKey };
+  const ranged = body.HashRangeRange;
+  if (ranged && typeof ranged === "object") {
+    const range = ranged as Record<string, unknown>;
+    if (typeof range.hash !== "string" || range.hash.length === 0) {
+      throw new BrainError({ code: "multi_key_read_failed", message: "The named-key range needs a hash." });
+    }
+    const out: { hash: string; start?: string; end?: string } = { hash: range.hash };
+    if (typeof range.start === "string" && range.start.length > 0) out.start = range.start;
+    if (typeof range.end === "string" && range.end.length > 0) out.end = range.end;
+    return out;
+  }
+  const prefixed = body.HashRangePrefix;
+  if (prefixed && typeof prefixed === "object") {
+    const range = prefixed as Record<string, unknown>;
+    if (typeof range.hash !== "string" || range.hash.length === 0 || typeof range.prefix !== "string") {
+      throw new BrainError({ code: "multi_key_read_failed", message: "The named-key prefix needs a hash and a prefix." });
+    }
+    return { hash: range.hash, ...(range.prefix.length > 0 ? { prefix: range.prefix } : {}) };
+  }
+  throw new BrainError({ code: "multi_key_read_failed", message: "The named-key filter is not a hash or a range." });
+}
+
+function ownedDefinition(schema: string): SchemaDefinition | undefined {
+  const suffix = schema.startsWith("brain/") ? schema.slice("brain/".length) : schema;
+  return ownedSchemas().find((entry) => entry.schema.name === suffix)?.schema;
+}
+
+function projectFields(fields: Record<string, unknown>, names: readonly string[]): Record<string, unknown> {
+  if (names.length === 0) return fields;
+  const out: Record<string, unknown> = {};
+  for (const name of names) if (Object.hasOwn(fields, name)) out[name] = fields[name];
+  return out;
+}
+
 export async function keyPage(
   node: NodeClient, schema: string, name: string,
   filter: unknown, fields: readonly string[], limit = 1000, cursor?: unknown,
 ): Promise<NamedPage> {
-  const response = await node.rawCall("POST", "/api/query", {
-    schema_name: schema, key_name: name, filter, fields: [...fields], limit, response_format: "values",
-    ...(cursor ? { cursor } : {}),
-  });
-  const root = response.json as { data?: unknown };
-  const page = (root?.data ?? root) as NamedPage;
-  if (response.status !== 200 || !Array.isArray(page?.results) || typeof page.has_more !== "boolean"
-      || page.results.some((row) => !row.key?.hash || !row.matched_key?.hash || typeof row.matched_key.range !== "string")) {
-    throw new BrainError({ code: "multi_key_read_failed", message: `The ${schema}/${name} read did not return a valid named-key page.` });
+  if (!node.readVia) {
+    throw new BrainError({ code: "multi_key_read_failed", message: "The client cannot read an alternate key." });
   }
-  if (page.has_more && !page.next_cursor) throw new BrainError({ code: "multi_key_cursor_missing", message: "The named-key page has no continuation." });
-  return page;
+  const range = pageRange(filter);
+  const cursorText = typeof cursor === "string" && cursor.length > 0 ? cursor : undefined;
+  const page = await node.readVia({
+    schemaHash: schema,
+    via: name,
+    range,
+    limit,
+    ...(cursorText ? { cursor: cursorText } : {}),
+  });
+  const definition = ownedDefinition(schema);
+  const results: NamedRow[] = [];
+  for (const row of page.rows) {
+    if (!row.key?.hash) {
+      throw new BrainError({
+        code: "multi_key_read_failed",
+        message: `The ${schema}/${name} read did not return a valid named-key page.`,
+      });
+    }
+    let matched: { hash: string; range: string };
+    try {
+      const address = definition ? alternateAddresses(definition, row.fields)[name] : null;
+      if (!address || typeof address.hash !== "string" || typeof address.range !== "string") {
+        matched = { hash: range.hash, range: String(row.key.hash ?? "") };
+      } else {
+        matched = { hash: address.hash, range: address.range };
+      }
+    } catch {
+      matched = { hash: range.hash, range: String(row.key.hash ?? "") };
+    }
+    results.push({ ...row, fields: projectFields(row.fields, fields), matched_key: matched });
+  }
+  const next = page.nextCursor;
+  if (next === null) return { results, has_more: false };
+  return { results, has_more: true, next_cursor: next };
 }
 
 export async function keyRows(

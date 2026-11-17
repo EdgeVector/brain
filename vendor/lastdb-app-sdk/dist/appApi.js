@@ -1,0 +1,274 @@
+/**
+ * App API: `POST /v1/read`, `POST /v1/write`, and `POST /v1/x/changes`.
+ * A non-200 reply throws {@link AppApiError}. A failed read in a list is a result.
+ */
+import { LastDbError, UnexpectedResponseError } from './errors.js';
+import { isObject } from './responseParsers.js';
+const READ_PATH = '/v1/read';
+const WRITE_PATH = '/v1/write';
+const CHANGES_PATH = '/v1/x/changes';
+/** A non-200 app API reply. `code` is the body's `error.code`. `message` is `Error.message`. */
+export class AppApiError extends LastDbError {
+    status;
+    code;
+    constructor(status, code, message) {
+        super(message);
+        this.status = status;
+        this.code = code;
+    }
+}
+function invalid(message, body) {
+    return new UnexpectedResponseError(message, 200, body);
+}
+function appApiFailure(status, body) {
+    const envelope = isObject(body) ? body['error'] : undefined;
+    const code = isObject(envelope) && typeof envelope['code'] === 'string' ? envelope['code'] : '';
+    const message = isObject(envelope) && typeof envelope['message'] === 'string'
+        ? envelope['message']
+        : `app API request returned status ${status}`;
+    return new AppApiError(status, code, message);
+}
+async function postAppApi(ctx, path, body) {
+    const session = process.env.LASTDB_APP_SESSION; // set by the launcher for a restricted app
+    const opts = session ? { body, headers: { 'X-LastDB-App-Session': session } } : { body };
+    const res = await ctx.transport.send('POST', path, opts);
+    if (res.status !== 200)
+        throw appApiFailure(res.status, res.body);
+    return res.body;
+}
+function keyBody(key) {
+    return { hash: key.hash, range: key.range };
+}
+function rangeBody(range) {
+    const body = { hash: range.hash };
+    if (range.prefix !== undefined)
+        body.prefix = range.prefix;
+    if (range.start !== undefined)
+        body.start = range.start;
+    if (range.end !== undefined)
+        body.end = range.end;
+    return body;
+}
+function readItemBody(item) {
+    const body = { schema: item.schema };
+    if (item.database !== undefined)
+        body.database = item.database;
+    if (item.via !== undefined)
+        body.via = item.via;
+    if (item.limit !== undefined)
+        body.limit = item.limit;
+    if (item.cursor !== undefined)
+        body.cursor = item.cursor;
+    if (item.keys_only !== undefined)
+        body.keys_only = item.keys_only;
+    if (item.file !== undefined)
+        body.file = item.file;
+    if (item.key !== undefined)
+        body.key = keyBody(item.key);
+    if (item.range !== undefined)
+        body.range = rangeBody(item.range);
+    return body;
+}
+function fileLinkBody(link) {
+    const body = { path: link.path };
+    if (link.name !== undefined)
+        body.name = link.name;
+    if (link.media_type !== undefined)
+        body.media_type = link.media_type;
+    return body;
+}
+function alternatesBody(alternates) {
+    const body = {};
+    for (const [name, key] of Object.entries(alternates)) {
+        body[name] = key === null ? null : keyBody(key);
+    }
+    return body;
+}
+function mutationBody(mutation) {
+    const body = {
+        schema: mutation.schema,
+        op: mutation.op,
+        key: keyBody(mutation.key),
+    };
+    if (mutation.database !== undefined)
+        body.database = mutation.database;
+    if (mutation.op === 'delete') {
+        body.revision = mutation.revision;
+        return body;
+    }
+    body.record = mutation.record;
+    if (mutation.alternates !== undefined)
+        body.alternates = alternatesBody(mutation.alternates);
+    if (mutation.file !== undefined)
+        body.file = fileLinkBody(mutation.file);
+    if (mutation.op === 'replace')
+        body.revision = mutation.revision;
+    return body;
+}
+function changesBody(options) {
+    const body = {};
+    if (options.after !== undefined)
+        body.after = options.after;
+    if (options.limit !== undefined)
+        body.limit = options.limit;
+    if (options.schemas !== undefined)
+        body.schemas = options.schemas;
+    if (options.database !== undefined)
+        body.database = options.database;
+    return body;
+}
+function parseKey(value, body) {
+    if (!isObject(value))
+        throw invalid('app API returned an invalid key', body);
+    const hash = value['hash'];
+    const range = value['range'];
+    if ((hash !== undefined && hash !== null && typeof hash !== 'string') ||
+        (range !== undefined && range !== null && typeof range !== 'string')) {
+        throw invalid('app API returned an invalid key', body);
+    }
+    return {
+        hash: typeof hash === 'string' ? hash : null,
+        range: typeof range === 'string' ? range : null,
+    };
+}
+function parseCursor(value, body) {
+    if (value === null)
+        return null;
+    if (typeof value === 'string')
+        return value;
+    throw invalid('app API returned an invalid cursor', body);
+}
+function optionalText(value, body) {
+    if (value === undefined || value === null)
+        return null;
+    if (typeof value === 'string')
+        return value;
+    throw invalid('app API returned an invalid file', body);
+}
+function parseFile(value, body) {
+    if (value === undefined)
+        throw invalid('app API returned a record with no file', body);
+    if (value === null)
+        return null;
+    if (!isObject(value) || typeof value['size'] !== 'number' || !Number.isFinite(value['size'])) {
+        throw invalid('app API returned an invalid file', body);
+    }
+    const path = value['path'];
+    if (path !== undefined && path !== null && typeof path !== 'string') {
+        throw invalid('app API returned an invalid file', body);
+    }
+    const file = {
+        name: optionalText(value['name'], body),
+        media_type: optionalText(value['media_type'], body),
+        size: value['size'],
+    };
+    if (path !== undefined)
+        file.path = typeof path === 'string' ? path : null;
+    return file;
+}
+function parseRecord(value, body) {
+    if (!isObject(value) || typeof value['revision'] !== 'string' || value['revision'].length === 0) {
+        throw invalid('app API returned an invalid record', body);
+    }
+    if (!isObject(value['record']))
+        throw invalid('app API returned an invalid record', body);
+    return {
+        key: parseKey(value['key'], body),
+        revision: value['revision'],
+        record: value['record'],
+        file: parseFile(value['file'], body),
+    };
+}
+function parseReadResult(value, body) {
+    if (!isObject(value))
+        throw invalid('app API returned an invalid read result', body);
+    if ('error' in value) {
+        const error = value['error'];
+        if (!isObject(error) || typeof error['code'] !== 'string' || typeof error['message'] !== 'string') {
+            throw invalid('app API returned an invalid read error', body);
+        }
+        return { error: { code: error['code'], message: error['message'] } };
+    }
+    if (!('next_cursor' in value))
+        throw invalid('app API returned a read result with no cursor', body);
+    const nextCursor = parseCursor(value['next_cursor'], body);
+    if ('records' in value && !('keys' in value)) {
+        if (!Array.isArray(value['records']))
+            throw invalid('app API returned invalid records', body);
+        return { records: value['records'].map((row) => parseRecord(row, body)), next_cursor: nextCursor };
+    }
+    if ('keys' in value && !('records' in value)) {
+        if (!Array.isArray(value['keys']))
+            throw invalid('app API returned invalid keys', body);
+        return { keys: value['keys'].map((key) => parseKey(key, body)), next_cursor: nextCursor };
+    }
+    throw invalid('app API returned a read result with no records or keys', body);
+}
+function parseReadResults(body, expected) {
+    if (!isObject(body) || !Array.isArray(body['results']) || body['results'].length !== expected) {
+        throw invalid(`app read returned a malformed reply (expected ${expected} results)`, body);
+    }
+    return body['results'].map((item) => parseReadResult(item, body));
+}
+function parseWriteResult(body, expected) {
+    if (!isObject(body) || !Array.isArray(body['revisions'])) {
+        throw invalid('app API write returned an invalid receipt', body);
+    }
+    const revisions = [];
+    for (const revision of body['revisions']) {
+        if (typeof revision !== 'string' || revision.length === 0) {
+            throw invalid('app API write returned an invalid revision', body);
+        }
+        revisions.push(revision);
+    }
+    if (body['written'] !== expected || revisions.length !== expected) {
+        throw invalid('app API write returned an invalid written count', body);
+    }
+    return { written: expected, revisions };
+}
+function parseCount(value, label, body) {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+        throw invalid(`app API changes returned an invalid ${label}`, body);
+    }
+    return value;
+}
+function parseChange(value, body) {
+    if (!isObject(value) || typeof value['schema'] !== 'string' || typeof value['deleted'] !== 'boolean') {
+        throw invalid('app API changes returned an invalid entry', body);
+    }
+    return {
+        seq: parseCount(value['seq'], 'seq', body),
+        schema: value['schema'],
+        key: parseKey(value['key'], body),
+        deleted: value['deleted'],
+    };
+}
+function parseChanges(body) {
+    if (!isObject(body) ||
+        typeof body['id'] !== 'string' ||
+        body['id'].length === 0 ||
+        typeof body['gap'] !== 'boolean' ||
+        !Array.isArray(body['changes'])) {
+        throw invalid('app API changes returned an invalid page', body);
+    }
+    return {
+        id: body['id'],
+        head: parseCount(body['head'], 'head', body),
+        through: parseCount(body['through'], 'through', body),
+        gap: body['gap'],
+        changes: body['changes'].map((entry) => parseChange(entry, body)),
+    };
+}
+export async function executeAppRead(ctx, reads) {
+    const body = await postAppApi(ctx, READ_PATH, { reads: reads.map(readItemBody) });
+    return parseReadResults(body, reads.length);
+}
+export async function executeAppWrite(ctx, mutations) {
+    const body = await postAppApi(ctx, WRITE_PATH, { mutations: mutations.map(mutationBody) });
+    return parseWriteResult(body, mutations.length);
+}
+export async function executeAppChanges(ctx, options) {
+    const body = await postAppApi(ctx, CHANGES_PATH, changesBody(options));
+    return parseChanges(body);
+}
+//# sourceMappingURL=appApi.js.map

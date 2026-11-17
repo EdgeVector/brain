@@ -17,11 +17,11 @@ import { parseListCount } from "../count-state.ts";
 import {
   ADMIN_SNAPSHOT_SCHEMA_KEY,
   BRAIN_LIST_COUNT_SCHEMA_KEY,
-  OWNER_APP_ID,
   RECORD_TYPES,
-  adminSnapshotSchema,
   type RecordType,
 } from "../schemas.ts";
+
+const ADMIN_SNAPSHOT_NAME = "brain/BrainAdminSnapshot";
 
 export const ADMIN_SNAPSHOT_SLUG = "admin-brain-snapshot";
 export const ADMIN_SNAPSHOT_SCHEMA_VERSION = "1";
@@ -140,7 +140,7 @@ export async function publishAdminSnapshot(
   const node = opts.node ?? newReadClientFromCfg(opts.cfg, opts.verbose);
   const slug = opts.slug ?? ADMIN_SNAPSHOT_SLUG;
   const now = opts.now ?? new Date();
-  const schemaHash = await ensureAdminSnapshotSchema(node, opts.cfg, {
+  const schemaHash = ensureAdminSnapshotSchema(opts.cfg, {
     persist: !opts.dryRun,
   });
   const snapshot = await buildBrainAdminSnapshot(node, opts.cfg, { slug, now });
@@ -373,73 +373,34 @@ export function parseOpenDecisionLine(
 }
 
 export function newLastDbDeliveryClient(node: NodeClient): LastDbDeliveryClient {
+  void node;
+  const unavailable = (path: string): never => {
+    throw new BrainError({
+      code: "app_api_route_unavailable",
+      message: `Brain does not call ${path}. A restricted app uses POST /v1/read and POST /v1/write.`,
+    });
+  };
   return {
     async stageDelivery(request) {
-      const res = await node.rawCall("POST", "/api/sharing/deliver", request);
-      if (res.status < 200 || res.status >= 300) {
-        throw new BrainError({
-          code: "delivery_stage_failed",
-          message: `LastDB deliver stage returned ${res.status}: ${messageFor(res.json ?? res.body)}`,
-          hint: "Confirm Mini is signed in to Exemem and the recipient keys match the admin kanban-consumer bundle.",
-        });
-      }
-      const data = dataObject(res.json);
-      const delivery = dataObject(data.delivery);
-      const preview = dataObject(delivery.preview);
-      const deliveryId = objectString(delivery, "delivery_id");
-      if (!deliveryId) {
-        throw new BrainError({
-          code: "delivery_stage_bad_response",
-          message: "LastDB deliver stage returned no delivery_id.",
-        });
-      }
-      return {
-        deliveryId,
-        recordCount: objectNumber(preview, "record_count"),
-        fields: objectStringArray(preview, "fields"),
-        note: objectString(data, "note"),
-      };
+      void request;
+      return unavailable("/api/sharing/deliver");
     },
     async approveDelivery(deliveryId) {
-      const res = await node.rawCall(
-        "POST",
-        `/api/sharing/deliveries/${encodeURIComponent(deliveryId)}/approve`,
-      );
-      if (res.status < 200 || res.status >= 300) {
-        throw new BrainError({
-          code: "delivery_approve_failed",
-          message: `LastDB deliver approve returned ${res.status}: ${messageFor(res.json ?? res.body)}`,
-        });
-      }
-      const data = dataObject(res.json);
-      return {
-        deliveryId: objectString(data, "delivery_id") || deliveryId,
-        shared: objectNumber(data, "shared"),
-        messageType: objectString(data, "message_type"),
-      };
+      void deliveryId;
+      return unavailable("/api/sharing/deliveries/approve");
     },
   };
 }
 
-async function ensureAdminSnapshotSchema(
-  node: NodeClient,
+function ensureAdminSnapshotSchema(
   cfg: Config,
   opts: { persist: boolean },
-): Promise<string> {
-  const existing = cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY];
-  if (existing) return existing;
-  if (!node.declareAppSchema) {
-    throw new BrainError({
-      code: "admin_snapshot_schema_unavailable",
-      message: "This node cannot declare the brain admin snapshot schema.",
-      hint: "Run `brain init` against a current Mini node, then retry `brain admin-snapshot publish`.",
-    });
-  }
-  const declared = await node.declareAppSchema(OWNER_APP_ID, adminSnapshotSchema.schema);
-  cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY] = declared.canonical;
-  cfg.schemaFieldAliases = {...cfg.schemaFieldAliases,...canonicalProfilesForHashes(cfg.schemaHashes)};
+): string {
+  if (cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY] === ADMIN_SNAPSHOT_NAME) return ADMIN_SNAPSHOT_NAME;
+  cfg.schemaHashes[ADMIN_SNAPSHOT_SCHEMA_KEY] = ADMIN_SNAPSHOT_NAME;
+  cfg.schemaFieldAliases = { ...cfg.schemaFieldAliases, ...canonicalProfilesForHashes(cfg.schemaHashes) };
   if (opts.persist) writeConfig(cfg);
-  return declared.canonical;
+  return ADMIN_SNAPSHOT_NAME;
 }
 
 async function upsertSnapshotRecord(
@@ -581,40 +542,4 @@ function summarizeTypeCounts(counts: Record<RecordType, number | null>): string 
 function positiveInt(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isInteger(value) || value < 1) return fallback;
   return value;
-}
-
-function objectString(value: unknown, key: string): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
-  const raw = (value as Record<string, unknown>)[key];
-  return typeof raw === "string" ? raw : "";
-}
-
-function objectNumber(value: unknown, key: string): number {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
-  const raw = (value as Record<string, unknown>)[key];
-  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-}
-
-function objectStringArray(value: unknown, key: string): string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-  const raw = (value as Record<string, unknown>)[key];
-  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
-}
-
-function dataObject(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const obj = value as Record<string, unknown>;
-  const nested = obj.data;
-  return nested && typeof nested === "object" && !Array.isArray(nested)
-    ? (nested as Record<string, unknown>)
-    : obj;
-}
-
-function messageFor(body: unknown): string {
-  if (typeof body === "string") return body.slice(0, 300);
-  return (
-    objectString(body, "message") ||
-    objectString(body, "error") ||
-    (body ? JSON.stringify(body).slice(0, 300) : "")
-  );
 }

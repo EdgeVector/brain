@@ -30,23 +30,83 @@
 // `the remote node approval flow`), and the BrainError code vocabulary.
 
 import {
-  capabilityDenialReaction,
-  decodeCapabilityBlob,
-  isCapabilityDenialReason,
-  tokenIntegrityValid,
-  verifyCapabilityBlob,
-  type CapabilityDenialReason,
-  type CapabilityToken,
-  type SignatureEnvelope,
-} from "@lastdb/app-sdk";
-
-import {
   APP_CAPABILITY_HEADER,
   CAPABILITY_TS_HEADER,
   BrainError,
   bodyStringField,
   type Verbose,
 } from "./client.ts";
+
+// The app API does not use capability tokens. These stubs keep the consent
+// modules compiling. The data path does not call them.
+export type CapabilityDenialReason =
+  | "capability_revoked"
+  | "capability_out_of_scope"
+  | "capability_replay"
+  | "capability_bad_sig"
+  | "capability_expired"
+  | "capability_required"
+  | "consent_required"
+  | "unknown_capability";
+
+const CAPABILITY_DENIALS = new Set<string>([
+  "capability_revoked",
+  "capability_out_of_scope",
+  "capability_replay",
+  "capability_bad_sig",
+  "capability_expired",
+  "capability_required",
+  "consent_required",
+  "unknown_capability",
+]);
+
+export function isCapabilityDenialReason(value: string): value is CapabilityDenialReason {
+  return CAPABILITY_DENIALS.has(value);
+}
+
+export type CapabilityToken = {
+  app_id: string;
+  node_pubkey: string;
+  capability_id: string;
+};
+
+export type SignatureEnvelope = { payload: string; signature: string };
+
+export type CapabilityVerification =
+  | { ok: true; token: CapabilityToken }
+  | { ok: false; problem: "malformed" | "audience_mismatch" | "integrity"; tokenAppId?: string };
+
+export function decodeCapabilityBlob(blob: string): CapabilityToken | null {
+  void blob;
+  return null;
+}
+
+export function tokenIntegrityValid(token: CapabilityToken): boolean {
+  void token;
+  return false;
+}
+
+export function verifyCapabilityBlob(blob: string, appId: string): CapabilityVerification {
+  void blob;
+  void appId;
+  return { ok: false, problem: "malformed" };
+}
+
+export function capabilityDenialReaction(
+  reason: CapabilityDenialReason,
+  detail: { schema?: string; capabilityId?: string; timestampSkewSecs?: number } = {},
+): {
+  discardToken: boolean;
+  reacquire: boolean;
+  retryOnce: boolean;
+} {
+  void detail;
+  if (reason === "capability_replay") return { discardToken: false, reacquire: false, retryOnce: true };
+  if (reason === "capability_out_of_scope" || reason === "capability_bad_sig") {
+    return { discardToken: true, reacquire: false, retryOnce: false };
+  }
+  return { discardToken: true, reacquire: true, retryOnce: false };
+}
 
 export const BRAIN_APP_ID = "brain";
 
@@ -64,9 +124,6 @@ export const MAX_CONSECUTIVE_UNEXPECTED_CONSENT_STATUS = 3;
 // their single import surface. NB `tokenIntegrityValid` is synchronous in the
 // SDK (node:crypto) where brain's old implementation was async; existing
 // `await tokenIntegrityValid(...)` call sites are unaffected.
-export { decodeCapabilityBlob, tokenIntegrityValid, verifyCapabilityBlob };
-export type { CapabilityToken, SignatureEnvelope };
-
 /**
  * What brain persists per (app_id, node). The base64 blob is the source of
  * truth replayed in `X-App-Capability`; `nodePubkey` is cached separately so

@@ -1,21 +1,13 @@
 /**
- * HTTP transport over either a TCP base URL or a Unix-domain socket.
+ * HTTP/1.1 JSON and binary transport over the node's Unix-domain socket.
  *
- * Both transports speak the same HTTP/1.1 dialect the node serves on its TCP
- * listener and its control socket (`fold_db_node::dev_mode` binds both; production
- * `fold_db_node` serves the control-socket route table over its UDS). Node's
- * built-in `http` client handles UDS natively via the `socketPath` request
- * option, so one implementation covers both — the only difference is whether
- * we pass `host`/`port` or `socketPath`.
+ * `lastdbd` serves its route table (`lastdb_uds::uds_router::route`) on
+ * `folddb.sock`. Node's built-in `http` client reaches that socket through
+ * the `socketPath` request option.
  */
 /**
- * The per-request correlation-ID header the node's request-ops telemetry
- * reads (sanitized to ≤96 chars server-side and rendered as `req=<id>` in
- * `lastdb ops` "Slowest recent"). The transport mints a fresh UUID per
- * request when neither the per-call headers nor the transport's
- * `defaultHeaders` already carry one — per-request by design: a static
- * default header would stamp every call with the same ID and defeat
- * correlation. A caller-supplied value (either seam) is never clobbered.
+ * Per-request correlation-ID header read by the node's request-ops telemetry.
+ * Minted fresh per request unless supplied per-call or via `defaultHeaders`.
  */
 export declare const REQUEST_ID_HEADER = "x-lastdb-request-id";
 /** A parsed HTTP response: status + the parsed JSON body (or `null`). */
@@ -23,77 +15,49 @@ export interface RawResponse {
     status: number;
     body: unknown;
 }
-/**
- * The transport contract the client depends on. Tests inject a mock
- * implementation to exercise the error taxonomy without a live node.
- */
+/** A binary HTTP response from routes that stream `application/octet-stream`. */
+export interface BinaryResponse {
+    status: number;
+    /** Lowercase response headers. */
+    headers: Record<string, string>;
+    /** Raw response bytes on 2xx replies; empty on non-2xx replies. */
+    bytes: Uint8Array;
+    /** Parsed JSON or plain-text error body on non-2xx replies; `null` on 2xx. */
+    errorBody: unknown;
+}
+export interface TransportSendOptions {
+    headers?: Record<string, string>;
+    body?: unknown;
+    /** Override this transport's timeout for one request. */
+    timeoutMs?: number;
+}
+/** The transport contract the client depends on. */
 export interface Transport {
     /** A short description of where this transport points (for diagnostics). */
     readonly target: string;
-    /** Perform one request and return the parsed response. */
-    send(method: 'GET' | 'POST', path: string, options?: {
-        headers?: Record<string, string>;
-        body?: unknown;
-        /** Override this transport's timeout for one request. */
-        timeoutMs?: number;
-        /** Raise, but never shorten, the effective timeout for one request. */
-        minimumTimeoutMs?: number;
-    }): Promise<RawResponse>;
+    /** True when `send` accepts raw `Uint8Array` / `ArrayBuffer` bodies directly. */
+    readonly supportsBinaryBody?: boolean;
+    /** Perform one request and return the parsed JSON response. */
+    send(method: 'GET' | 'POST', path: string, options?: TransportSendOptions): Promise<RawResponse>;
+    /** Perform one request expecting a binary `application/octet-stream` 2xx body. */
+    sendBinary?(method: 'GET' | 'POST', path: string, options?: TransportSendOptions): Promise<BinaryResponse>;
 }
-/** Per-transport behavior shared by TCP and Unix-domain-socket HTTP. */
+/** Per-request options for the Unix-domain socket transport. */
 export interface TransportOptions {
-    /**
-     * Per-request timeout in milliseconds. Defaults to 30s so a wedged node
-     * cannot leave app data-plane calls pending forever.
-     */
+    /** Per-request timeout in milliseconds (defaults to 30_000). */
     timeoutMs?: number;
 }
-/**
- * Build a {@link Transport} for a TCP base URL (e.g.
- * `http://127.0.0.1:9101`). Throws on a non-http(s) URL. `defaultHeaders` are
- * attached to every request this transport sends (under a per-call header of
- * the same name, which wins) — used to carry a node-required identity header
- * such as `X-User-Hash` that the production `fold_db_node` reads to resolve the
- * caller (its HTTP server is stateless: identity comes from the header).
- */
-export declare function httpTransport(baseUrl: string, defaultHeaders?: Record<string, string>, options?: TransportOptions): Transport;
-/**
- * Build a {@link Transport} that speaks HTTP over a Unix-domain socket. See
- * {@link httpTransport} for the `defaultHeaders` contract.
- */
+/** Build a {@link Transport} that speaks HTTP over a Unix-domain socket. */
 export declare function udsTransport(socketPath: string, defaultHeaders?: Record<string, string>, options?: TransportOptions): Transport;
 /**
- * Discover which transport an app should use against a local node. Mirrors the
- * Rust `FoldDbHttpClient` discovery (CLI + MCP) so a TypeScript app and the
- * Rust client agree on where the socket lives, and additionally accepts the
- * brand-forward `LASTDB_SOCKET_PATH` override ahead of the Rust client's
- * `FOLDDB_SOCKET_PATH` (both resolve to the same socket when only one is set).
- *
- * Order (highest priority first):
- * 1. `LASTDB_SOCKET_PATH` — canonical explicit socket-path override
- *    (brand-forward; SDK-preferred).
- * 2. `FOLDDB_SOCKET_PATH` — legacy socket-path alias (the current Rust client's
- *    canonical override), still honored.
- * 3. `FOLDDB_SOCK` — deprecated socket-path alias, still honored.
- * 4. `<data_dir>/folddb.sock` — the default the node binds, resolved via
- *    {@link resolveSocketPath} (`LASTDB_HOME`, else `~/.lastdb`).
- * 5. Loopback TCP at `fallbackBaseUrl` — the fallback when no socket exists.
- *
- * A socket path is only chosen when the file actually EXISTS, so a node that
- * binds no socket (a pre-data-plane node, or one whose bind failed)
- * transparently falls back to TCP. `defaultHeaders` are attached to whichever
- * transport is built (see {@link httpTransport}); a UDS caller does not need
- * the `X-User-Hash` identity header — the socket carries kernel peer
- * credentials — but passing it is harmless.
- *
- * On a non-Unix platform there is no UDS transport, so this always returns the
- * TCP transport (matching the Rust `#[cfg(not(unix))]` discovery).
+ * Open the discovered data-plane socket (`LASTDB_SOCKET_PATH`, then
+ * `FOLDDB_SOCKET_PATH`, then `<LASTDB_HOME or ~/.lastdb>/data/folddb.sock`).
  */
-export declare function discoverTransport(options: {
-    fallbackBaseUrl: string;
+export declare function openDiscoveredSocket(options: {
     defaultHeaders?: Record<string, string>;
     timeoutMs?: number;
-    /** Override the environment read for discovery (defaults to `process.env`). */
     env?: NodeJS.ProcessEnv;
 }): Transport;
+/** Wrap an existing {@link Transport} with additional default headers (per-call headers still win). */
+export declare function withDefaultHeaders(transport: Transport, extraHeaders: Record<string, string>): Transport;
 //# sourceMappingURL=transport.d.ts.map

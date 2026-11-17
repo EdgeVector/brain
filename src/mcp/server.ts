@@ -1838,10 +1838,13 @@ export async function probeNodeStatus(cfg: Config): Promise<NodeStatusPayload> {
     nodeUrl: cfg.nodeUrl,
   };
   try {
-    const identity = await node.autoIdentity();
+    if (!node.queryByKey) {
+      throw new BrainError({ code: "keyed_read_required", message: "The status probe needs a keyed read." });
+    }
+    await node.queryByKey({ schemaHash: "brain/Design", fields: ["slug"], keyHash: "__brain_status__" });
     payload.reachable = true;
-    payload.provisioned = identity.provisioned;
-    if (!identity.provisioned) payload.detail = identity.reason;
+    payload.provisioned = true;
+    payload.detail = "The app session authorizes Brain.";
   } catch (err) {
     payload.reachable = false;
     payload.detail =
@@ -1850,16 +1853,6 @@ export async function probeNodeStatus(cfg: Config): Promise<NodeStatusPayload> {
         : err instanceof Error
           ? err.message
           : String(err);
-    return payload;
-  }
-  // Health is informational — a failure here doesn't flip `reachable` (the
-  // auto-identity probe already answered that); we just skip version/uptime.
-  try {
-    const health = await node.health();
-    if (health.version !== undefined) payload.version = health.version;
-    if (health.uptime_s !== undefined) payload.uptimeSeconds = health.uptime_s;
-  } catch {
-    // best-effort; leave version/uptime unset.
   }
   return payload;
 }
