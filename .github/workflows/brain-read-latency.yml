@@ -45,7 +45,7 @@ jobs:
       - run: node --check scripts/brain_latency.mjs
       - name: Fetch and verify the latest lastdb nightly
         id: lastdb
-        uses: EdgeVector/.github/lastdb-node@9722fe3984fb1956d785cfab478b067744f19c2c
+        uses: EdgeVector/.github/lastdb-node@9e14e0a569c77c7e7229ff9b6e00664c597ccabe
         with:
           start: "false"
       - name: Name the one daemon for both arms
