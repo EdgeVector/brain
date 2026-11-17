@@ -7,7 +7,7 @@
  */
 import { existsSync } from 'node:fs';
 import { LASTDB_SDK_API_VERSION } from './apiVersion.generated.js';
-import { executeAppChanges, executeAppRead, executeAppWrite, } from './appApi.js';
+import { executeAppChanges, executeAppRead, executeAppWrite } from './appApi.js';
 import { executeDeleteBlob, executeFetchBlob, executePutBlob, } from './blobOps.js';
 import { bindNodeDatabaseSpec, createNodeDatabase, databaseScope, issueNodeDatabaseSession, listNodeDatabases, validateDatabaseSelector, } from './databases.js';
 import { RequestRejectedError, TransportError } from './errors.js';

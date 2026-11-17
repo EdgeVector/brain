@@ -1,4 +1,4 @@
-import type { AppApiMutation } from "@lastdb/app-sdk";
+import type { WriteItem } from "@lastdb/app-sdk";
 
 import type { BatchMutationOp, NodeClient } from "./client.ts";
 import type { SchemaDefinition } from "./schemas.ts";
@@ -82,7 +82,7 @@ export function toAppMutation(
   schemaName: string,
   schema: SchemaDefinition,
   current: RecordPreimage | undefined,
-): AppApiMutation | null {
+): WriteItem | null {
   const deleting = op.mutationType === "delete";
   if (deleting && !current) return null;
   const key = { hash: op.keyHash, range: op.keyRange ? op.keyRange : null };
@@ -90,7 +90,7 @@ export function toAppMutation(
     if (!current?.revision) throw new Error("LastDB delete needs the record revision.");
     return { op: "delete", schema: schemaName, key, revision: current.revision };
   }
-  const fields = { ...current?.fields, ...op.fields } as AppApiMutation extends { record: infer R } ? R : never;
+  const fields = { ...current?.fields, ...op.fields } as WriteItem extends { record: infer R } ? R : never;
   const alternates = alternateAddresses(schema, fields);
   const link = op.file
     ? {

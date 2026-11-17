@@ -1,7 +1,7 @@
 // `brain index` names Brain's record schemas to LastSeek.
 // Without `--wait` it returns as soon as LastSeek accepts the request.
 
-import { BrainError, defaultFolddbSocketPath } from "../client.ts";
+import { BrainError } from "../client.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSinks } from "../format.ts";
 import { LASTSEEK_NOT_INSTALLED_LINE, requestLastSeekIndex } from "../lastseek-index.ts";
@@ -16,7 +16,6 @@ export async function indexSearchCmd(opts: {
   const { print } = resolvePrintSinks(opts);
   const indexed = requestLastSeekIndex({
     cfg: opts.cfg,
-    socketPath: defaultFolddbSocketPath(opts.cfg.nodeSocketPath),
     wait: opts.wait === true,
   });
   if (indexed.kind === "ok") {

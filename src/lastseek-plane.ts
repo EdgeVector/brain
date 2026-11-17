@@ -146,12 +146,24 @@ type LastSeekSpawn = {
   error?: NodeJS.ErrnoException;
 };
 
+/** Environment for a LastSeek command.
+ *
+ * LastSeek is another app. Its own launcher sets LASTDB_APP and
+ * LASTDB_SOCKET_PATH. Brain does not hand over its own.
+ */
+export function lastSeekChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env };
+  delete next.LASTDB_APP;
+  delete next.LASTDB_SOCKET_PATH;
+  return next;
+}
+
 function spawnLastSeek(args: string[], env: NodeJS.ProcessEnv, label: string): LastSeekSpawn {
   const timeoutMs = lastSeekTimeoutMs();
   const started = beginSubprocess();
   const result = spawnSync(lastSeekBin(), args, {
     encoding: "utf8",
-    env,
+    env: lastSeekChildEnv(env),
     timeout: timeoutMs > 0 ? timeoutMs : undefined,
   });
   endSubprocess(started, label);

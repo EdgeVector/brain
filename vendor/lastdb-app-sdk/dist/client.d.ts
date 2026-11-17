@@ -5,7 +5,7 @@
  * keyed read, mutation, blob, and database-session operations to focused
  * domain modules. `read`, `write`, and `changes` call the app API (`/v1`).
  */
-import { type AppApiChangesOptions, type AppApiChangesResult, type AppApiMutation, type AppApiRead, type AppApiReadResult, type AppApiWriteResult } from './appApi.js';
+import type { ChangesReply, ChangesRequest, ReadItem, ReadResult, WriteItem, WriteResult } from './appApi.generated.js';
 import { type DeleteBlobOptions, type FetchBlobOptions, type FetchedBlob, type PutBlobRequest, type PutBlobResult } from './blobOps.js';
 import { type CreateDatabaseRequest, type DatabaseSpec, type ListedDatabase } from './databases.js';
 import { type AutoIdentityResult, type DeclareSchemaRequest, type DeclareSchemaResult, type LoadedSchema, type SchemaDescriptor } from './schemaOps.js';
@@ -53,11 +53,11 @@ export declare class LastDbClient<DatabaseId extends string | undefined = undefi
      * `POST /v1/read` — one result per read, in order.
      * A per-item error is returned, not thrown. Does not use this client's `/api` database path.
      */
-    read(reads: readonly AppApiRead[]): Promise<AppApiReadResult[]>;
+    read(reads: readonly ReadItem[]): Promise<ReadResult[]>;
     /** `POST /v1/write` — commit a list of conditional mutations after the write is on disk. */
-    write(mutations: readonly AppApiMutation[]): Promise<AppApiWriteResult>;
+    write(mutations: readonly WriteItem[]): Promise<WriteResult>;
     /** `POST /v1/x/changes` — changed record keys after a saved position. */
-    changes(options?: AppApiChangesOptions): Promise<AppApiChangesResult>;
+    changes(options?: ChangesRequest): Promise<ChangesReply>;
     /** `POST /api/db/put-blob` — attach or replace a record's blob, inline, or local-path file. */
     putBlob(schemaName: string, request: PutBlobRequest): Promise<PutBlobResult>;
     /** `POST /api/db/fetch-blob` — read a record's blob or inline file bytes. */

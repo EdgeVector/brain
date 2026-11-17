@@ -28,10 +28,11 @@ import {
   RequestRejectedError,
   TransportError,
   UnexpectedResponseError,
-  type AppApiMutation,
-  type AppApiRead,
-  type AppApiReadResult,
-  type AppApiRecord,
+  type Range,
+  type ReadItem,
+  type ReadResult,
+  type Record as SdkRecord,
+  type WriteItem,
   type NodeVersion as SdkNodeVersion,
   type Transport as SdkTransport,
 } from "@lastdb/app-sdk";
@@ -734,7 +735,7 @@ export function newNodeClient(opts: {
   userHash: string;
   verbose?: Verbose;
   // Kept so existing callers still typecheck. The app API does not use a
-  // capability blob; the launcher session authorizes the app.
+  // capability blob. The launcher sets LASTDB_APP to the app id.
   capability?: CapabilityProvider;
   // The canonical app id the SDK client acts as. Defaults to "brain".
   appId?: string;
@@ -782,12 +783,12 @@ export function newNodeClient(opts: {
     return { wire: opened.wire, schema: opened.schema };
   };
 
-  const sdkRead = async (reads: AppApiRead[]): Promise<AppApiReadResult[]> => {
+  const sdkRead = async (reads: ReadItem[]): Promise<ReadResult[]> => {
     if (reads.length === 0) return [];
-    const out: AppApiReadResult[] = [];
+    const out: ReadResult[] = [];
     for (let start = 0; start < reads.length; start += APP_READ_BATCH) {
       const chunk = reads.slice(start, start + APP_READ_BATCH);
-      let results: AppApiReadResult[];
+      let results: ReadResult[];
       try {
         results = await sdk.read(chunk);
       } catch (err) {
@@ -804,7 +805,7 @@ export function newNodeClient(opts: {
     return out;
   };
 
-  const writeMutations = async (mutations: AppApiMutation[]) => {
+  const writeMutations = async (mutations: WriteItem[]) => {
     if (mutations.length === 0) return { written: 0, revisions: [] as string[] };
     try {
       verbose(`→ NODE POST /v1/write count=${mutations.length}`);
@@ -846,9 +847,9 @@ export function newNodeClient(opts: {
     return found;
   };
 
-  const completeOperations = async (ops: BatchMutationOp[]): Promise<AppApiMutation[]> => {
+  const completeOperations = async (ops: BatchMutationOp[]): Promise<WriteItem[]> => {
     const preimages = await readPreimages(ops);
-    const mutations: AppApiMutation[] = [];
+    const mutations: WriteItem[] = [];
     for (const op of ops) {
       const { wire, schema } = requireSchema(op.schemaHash);
       const current = preimages.get(coordinateId(wire, op.keyHash, op.keyRange));
@@ -885,7 +886,7 @@ export function newNodeClient(opts: {
     await writeMutations(mutations);
   };
 
-  const drainRange = async (read: AppApiRead, fields: string[]): Promise<QueryResponse> => {
+  const drainRange = async (read: ReadItem, fields: string[]): Promise<QueryResponse> => {
     const rows: QueryRow[] = [];
     const seen = new Set<string>();
     const seenCursors = new Set<string>();
@@ -893,7 +894,7 @@ export function newNodeClient(opts: {
     const pageSize = queryPageSize(fields.length);
     let complete = false;
     for (let page = 0; page < QUERY_PAGE_LIMIT; page++) {
-      const request: AppApiRead = cursor
+      const request: ReadItem = cursor
         ? { ...read, limit: pageSize, cursor }
         : { ...read, limit: pageSize };
       const [result] = await sdkRead([request]);
@@ -1074,7 +1075,7 @@ export function newNodeClient(opts: {
           message: `Schema ${wire} has no recent alternate, so Brain cannot list its keys.`,
         });
       }
-      const read: AppApiRead = {
+      const read: ReadItem = {
         schema: wire,
         via: "recent",
         range: { hash: "all" },
@@ -1114,7 +1115,7 @@ export function newNodeClient(opts: {
     },
     async readVia({ schemaHash, via, range, limit, cursor, keysOnly }) {
       const { wire } = openSchema(schemaHash);
-      const read: AppApiRead = {
+      const read: ReadItem = {
         schema: wire,
         via,
         range: rangeSpec(range.hash, range),
@@ -1214,7 +1215,7 @@ function textCursor(value: string | null | undefined): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function appReadError(result: AppApiReadResult): { code: string; message: string } | null {
+function appReadError(result: ReadResult): { code: string; message: string } | null {
   if ("error" in result) {
     return {
       code: result.error.code,
@@ -1233,7 +1234,7 @@ function projectRecord(fields: Record<string, unknown>, requested: readonly stri
   return out;
 }
 
-function rowFromRecord(record: AppApiRecord, requested: readonly string[]): QueryRow {
+function rowFromRecord(record: SdkRecord, requested: readonly string[]): QueryRow {
   return {
     fields: projectRecord(record.record as Record<string, unknown>, requested),
     key: { hash: record.key.hash, range: record.key.range },
@@ -1242,7 +1243,7 @@ function rowFromRecord(record: AppApiRecord, requested: readonly string[]): Quer
   };
 }
 
-function takeRecords(result: AppApiReadResult, fields: readonly string[]): { rows: QueryRow[]; nextCursor: string | null } {
+function takeRecords(result: ReadResult, fields: readonly string[]): { rows: QueryRow[]; nextCursor: string | null } {
   const problem = appReadError(result);
   if (problem) {
     if (problem.code === "not_found") return { rows: [], nextCursor: null };
@@ -1260,7 +1261,7 @@ function takeRecords(result: AppApiReadResult, fields: readonly string[]): { row
   };
 }
 
-function onePoint(result: AppApiReadResult, fields: readonly string[]): QueryRow | null {
+function onePoint(result: ReadResult, fields: readonly string[]): QueryRow | null {
   const page = takeRecords(result, fields);
   if (page.rows.length > 1) {
     throw new BrainError({
@@ -1271,7 +1272,7 @@ function onePoint(result: AppApiReadResult, fields: readonly string[]): QueryRow
   return page.rows[0] ?? null;
 }
 
-function pointRead(schema: string, hash: string, range: string | null, file = false): AppApiRead {
+function pointRead(schema: string, hash: string, range: string | null, file = false): ReadItem {
   return {
     schema,
     key: { hash, range },
@@ -1283,24 +1284,21 @@ function pointRead(schema: string, hash: string, range: string | null, file = fa
 function rangeSpec(
   hash: string,
   extra?: { prefix?: string; start?: string; end?: string },
-): { hash: string; prefix?: string; start?: string; end?: string } {
-  const range: { hash: string; prefix?: string; start?: string; end?: string } = { hash };
-  if (extra?.prefix) range.prefix = extra.prefix;
-  if (extra?.start) range.start = extra.start;
-  if (extra?.end) range.end = extra.end;
-  // POST /v1/read accepts hash alone, hash plus prefix, or start and end
-  // together. An open lower bound is an empty start, not an end by itself.
-  if (range.end !== undefined && range.start === undefined && range.prefix === undefined) {
-    range.start = "";
+): Range {
+  // A range is hash alone, hash plus prefix, or hash plus start and end.
+  // Prefix and bounds are different forms. An open bound is an empty string.
+  if (typeof extra?.prefix === "string" && extra.prefix.length > 0) {
+    return { hash, prefix: extra.prefix };
   }
-  return range;
+  const start = typeof extra?.start === "string" ? extra.start : undefined;
+  const end = typeof extra?.end === "string" ? extra.end : undefined;
+  if ((start !== undefined && start.length > 0) || (end !== undefined && end.length > 0)) {
+    return { hash, start: start && start.length > 0 ? start : "", end: end && end.length > 0 ? end : "" };
+  }
+  return { hash };
 }
 
-function rangeRead(
-  schema: string,
-  range: { hash: string; prefix?: string; start?: string; end?: string },
-  via?: string,
-): AppApiRead {
+function rangeRead(schema: string, range: Range, via?: string): ReadItem {
   return { schema, range, ...(via ? { via } : {}) };
 }
 
@@ -1320,7 +1318,7 @@ function planFilter(
   wire: string,
   schema: { schema_type?: string } | undefined,
   filter: Record<string, unknown>,
-): { mode: "points"; reads: AppApiRead[] } | { mode: "range"; read: AppApiRead } {
+): { mode: "points"; reads: ReadItem[] } | { mode: "range"; read: ReadItem } {
   const kind = namedFilter(filter);
   if (kind === "HashKey") {
     const hash = filter.HashKey;
@@ -1349,7 +1347,7 @@ function planFilter(
   if (kind === "HashRangeKeys") {
     const items = filter.HashRangeKeys;
     if (!Array.isArray(items)) invalidQuery("HashRangeKeys needs a list of keys.");
-    const reads: AppApiRead[] = [];
+    const reads: ReadItem[] = [];
     for (const item of items) {
       const key = asKey(item);
       if (key === null) invalidQuery("HashRangeKeys needs pairs of hash and range.");

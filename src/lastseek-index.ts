@@ -10,7 +10,7 @@
 import { spawnSync } from "node:child_process";
 
 import { BrainError } from "./client.ts";
-import { lastSeekBin, lastSeekTimeoutMs } from "./lastseek-plane.ts";
+import { lastSeekBin, lastSeekChildEnv, lastSeekTimeoutMs } from "./lastseek-plane.ts";
 import {
   BRAIN_INDEX_COMMAND,
   LASTSEEK_APP_NAME,
@@ -52,17 +52,6 @@ function requireSchemaNames(cfg: SchemaConfig): string[] {
   return schemas;
 }
 
-function indexEnv(socketPath: string | undefined): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  // The detached build inherits this environment. LastSeek reads LastDB
-  // through LASTDB_SOCKET_PATH and LASTDB_APP_SESSION. Brain's resolved
-  // socket is that path when the launcher did not already set one.
-  if (socketPath && socketPath.length > 0 && !env.LASTDB_SOCKET_PATH) {
-    env.LASTDB_SOCKET_PATH = socketPath;
-  }
-  return env;
-}
-
 function parseIndexStdout(stdout: string): { state: string; json: string } | null {
   const json = stdout.trim();
   if (json.length === 0) return null;
@@ -81,7 +70,6 @@ function parseIndexStdout(stdout: string): { state: string; json: string } | nul
  */
 export function requestLastSeekIndex(opts: {
   cfg: SchemaConfig;
-  socketPath?: string;
   wait?: boolean;
 }): LastSeekIndexResult {
   const schemas = requireSchemaNames(opts.cfg);
@@ -95,7 +83,7 @@ export function requestLastSeekIndex(opts: {
   const started = beginSubprocess();
   const result = spawnSync(lastSeekBin(), args, {
     encoding: "utf8",
-    env: indexEnv(opts.socketPath),
+    env: lastSeekChildEnv(),
     timeout: timeoutMs > 0 ? timeoutMs : undefined,
     stdio: ["ignore", "pipe", opts.wait ? "inherit" : "pipe"],
   });
