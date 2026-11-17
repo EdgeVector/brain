@@ -53,6 +53,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { BRAIN_INDEX_COMMAND } from "./lastseek-schemas.ts";
 import { beginSubprocess, endSubprocess, subprocessMsSoFar } from "./slow-call.ts";
 
 /** Per-spawn deadline. 100x the measured cold-query cost. */
@@ -163,7 +164,10 @@ export function queryLastSeek(opts: LastSeekQueryOpts): LastSeekHit[] | null {
   if (r.status !== 0) {
     const stderr = (r.stderr ?? "").trim();
     if (/unknown schema/i.test(stderr)) {
-      throw new LastSeekUnknownSchemaError(stderr);
+      // Name the command. Do not rebuild here: a rebuild reads every record.
+      throw new LastSeekUnknownSchemaError(
+        `${stderr}\nRun \`${BRAIN_INDEX_COMMAND}\` to register Brain's schemas with LastSeek.`,
+      );
     }
     // A deadline miss is reported on stderr, not swallowed into `verbose`.
     // `spawnSync` signals a timeout as ETIMEDOUT (Bun/Node set `error` and

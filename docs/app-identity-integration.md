@@ -20,6 +20,8 @@ that request through the target node's supported administration flow.
 | `src/capability-session.ts` | Reuse and refresh remote capabilities, and propagate owner-socket failures. |
 | `src/client.ts` | Send the current record protocol through the selected transport. |
 | `src/lastseek-plane.ts` | Query LastSeek for ranked keys. Brain then reads the records from LastDB. |
+| `src/lastseek-schemas.ts` | The `brain/<Type>` schema names Brain passes to `lastseek query --schema`. |
+| `src/lastseek-index.ts` | Register that list and build the Brain index. `brain index` always rebuilds. `brain init` rebuilds only when LastSeek is installed and the index is missing or does not cover the list. |
 
 Use `lastdb status` for node health and `lastdb admin ops` for request load.
-Use `lastseek status` and `lastseek doctor` for the semantic index.
+Use `brain index` to build the semantic index. Use `lastseek status --home <brain index directory>` to inspect it.

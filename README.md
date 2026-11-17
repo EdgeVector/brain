@@ -28,7 +28,15 @@ through the target node's supported approval flow. A cached capability can be
 reused by subsequent remote commands.
 
 Brain prefers LastSeek for semantic search and reads the ranked records from
-LastDB. Use `lastseek status` and `lastseek doctor` to inspect that index.
+LastDB. LastSeek does not keep its own schema list. `brain init` registers
+every record schema Brain can pass to `lastseek query --schema` and builds
+the index when LastSeek is installed and that index is missing or does not
+cover the list. `brain index` does the same registration on demand. The index directory is `$LASTSEEK_HOME` when that is set. Otherwise it is
+`$LASTDB_APP_DATA/brain-index` when the launcher sets app data, and
+`~/.lastseek/brain-index` when it does not. The rebuild reads every record and can take minutes.
+If LastSeek is not installed, init says so in one line and search uses
+keyword heads. Inspect the index with
+`lastseek status --home <that directory>`.
 
 ```bash
 # 3. drive it
@@ -60,7 +68,7 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 
 | Command | What it does |
 |---|---|
-| `brain init` | Bootstraps the node + registers schemas + writes `~/.brain/config.json` with canonical hashes |
+| `brain init` | Bootstraps the node, registers schemas, and writes `~/.brain/config.json`. When LastSeek is installed and the Brain index is missing or incomplete, also builds that index |
 | `brain <TYPE> new <slug> [--title T] [--tag T]… [--body STR] [--force]` | Creates a record of type `design`, `task`, `concept`, `preference`, `reference`, `agent`, `project`, `spike`, `sop`, or `decision`. Status defaults to the type's first enum value |
 | `brain task new <slug> [--design D] …` | Extra: `--design <slug>` links the new task to a parent design (rejects a dangling slug) |
 | `brain put <slug> [--type T]` | Upserts a record from stdin (YAML frontmatter aware). One of frontmatter `type:` or `--type` is required — there is NO silent default. `--type` overrides absent frontmatter and errors on disagreement. Re-puts update in place — no `--force`, no 409 |
@@ -73,7 +81,8 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain attachments <slug> [--type T]` | Lists a record's attachments (name, size, media type, blob ref, added_at) |
 | `brain detach <slug> <name-or-ref> [--type T]` | Removes one attachment by filename or `sha256:<hex>` ref. The content-addressed blob remains (fold_db is append-only) |
 | `brain attachment get <slug> <name-or-ref> [-o PATH] [--force]` | Materializes an attachment's bytes to disk (or stdout with `-o -`), verifying the SHA-256 before writing — a hash mismatch is a hard error, never silent corruption |
-| `brain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote |
+| `brain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote. Does not build the LastSeek index; run `brain index` for that |
+| `brain index` | Registers every record schema `brain search` can name (`brain/<Type>`) with LastSeek and builds the index in LastSeek's Brain index directory. Prints LastSeek's JSON result. Can take minutes |
 | `brain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default.** LLM query expansion is opt-in via `--expand` (alias `--llm`). The default path needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
 | `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `brain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
 | `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
@@ -513,7 +522,12 @@ Top errors you'll hit and the fix:
   The daemon is in a contradictory state — `/api/system/auto-identity` says "not provisioned" but `/api/setup/bootstrap` says "already provisioned". This typically happens on a second-user dogfood machine where the node's `config/` carries over from a previous install. Recovery: (a) if you still have `~/.brain/config.json` from when this node was working, re-run `brain init` — it reuses the saved `userHash` and continues; (b) follow the node's own message (POST `/api/auth/restore` with the recovery phrase, if you have one); (c) for a clean slate, stop the daemon, `rm -rf ~/.lastdb/config/` (or `$LASTDB_HOME/config/`), restart, then re-run `brain init`. (The error hint itself prints the resolved path for your node.)
 
 - **Semantic search is unavailable**
-  Run `lastseek status` and `lastseek doctor` to inspect the index and model.
+  Run `brain index` to register Brain's schemas and build the LastSeek index.
+  If LastSeek is not installed, install it and run `brain index` again.
+  Until that index exists, search uses keyword heads. An unknown-schema
+  error from search names the same command; search does not start the rebuild.
+  Inspect the index with `lastseek status --home ~/.lastseek/brain-index`
+  (or `--home "$LASTSEEK_HOME"` when that variable is set).
   Use `brain search "<query>" --verbose` to inspect the selected search path.
 
 When in doubt, `brain doctor` will tell you exactly which check is failing and what to do.

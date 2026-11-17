@@ -11,7 +11,9 @@
 // So leave out exactly the types that hold no record. They have nothing to
 // find, and the scope loses nothing. Every other type stays in, so a type that
 // holds records LastSeek never received still fails loudly (see
-// lastseek-plane.ts: an unknown schema is never swallowed).
+// lastseek-plane.ts: an unknown schema is never swallowed). The full pin
+// list, before this drop, is `lastSeekSchemaNames` in lastseek-schemas.ts.
+// `brain index` registers that list. A query never rebuilds the index.
 //
 // One batched count read decides most types. A count above zero keeps the type
 // (the count over-reports: soft-deleted records keep their entry, and those

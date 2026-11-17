@@ -1,3 +1,4 @@
+import { registerLastSeekSchemas } from "../lastseek-index.ts";
 import { syncOwnedModel } from "../owned-schema-init.ts";
 // `brain init` writes a local config that pins every owned schema to its
 // exact name (`brain/<Name>`). The installer places the schemas. Init does
@@ -179,6 +180,19 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     nodeUrl, userHash, print, verbose: opts.verbose, socketPath: nodeSocketPath,
     nonInteractiveGrant: opts.grantConsent, ...opts.consent,
   });
+  // A missing LastSeek is one line. A rebuild runs only when the Brain index
+  // is absent or does not cover the record-type list. Search does not do this.
+  try {
+    await registerLastSeekSchemas({
+      cfg: config,
+      socketPath: nodeSocketPath,
+      print,
+      when: "if-needed",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    print(`LastSeek index was not built (${message}). Run \`brain index\` to retry.`);
+  }
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
   return { config, bootstrapped: false, consent };
 }
