@@ -1288,6 +1288,11 @@ function rangeSpec(
   if (extra?.prefix) range.prefix = extra.prefix;
   if (extra?.start) range.start = extra.start;
   if (extra?.end) range.end = extra.end;
+  // POST /v1/read accepts hash alone, hash plus prefix, or start and end
+  // together. An open lower bound is an empty start, not an end by itself.
+  if (range.end !== undefined && range.start === undefined && range.prefix === undefined) {
+    range.start = "";
+  }
   return range;
 }
 
