@@ -239,7 +239,7 @@ ${RECORD_NEW_HELP_LINES}
   backlinks      list records linking to a slug
   graph          bounded traversal over typed graph edges (neighbors | path | query)
   search         semantic search over indexed records
-  index          register Brain's schemas with LastSeek and build the search index
+  index          name Brain's schemas to LastSeek (returns at once; --wait stays for the build)
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
   find           retrieval by an array of match probes (each --match is fused via RRF; no embedding in brain)
   gates          list structured open human gates from the canonical open-decisions record
@@ -830,22 +830,22 @@ BRAIN_ADMIN_MESSAGING_PUBLIC_KEY, BRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 BRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
-  index: `brain index
+  index: `brain index [--wait]
 
-Register every record schema Brain can pass to \`lastseek query --schema\`
-and build LastSeek's Brain index. LastSeek embeds every field of each named
-schema and reads every record, so this can take minutes. Search does not
-start this rebuild. This is not \`brain reindex\` (that backfills named keys).
+Name every record schema Brain passes to \`lastseek search --schema\` and
+start LastSeek's index for the brain app. Runs
+\`lastseek index --app brain --schema <each brain/<Name>>\`.
+Returns as soon as LastSeek accepts the request and prints LastSeek's
+JSON on stdout. It does not wait for the build. Search does not start
+a build. This is not \`brain reindex\` (that backfills named keys).
 
-The index directory is the one LastSeek uses for a brain/ query:
-\`$LASTSEEK_HOME\` when that is set, otherwise \`brain-index\` beside LastSeek's
-default home (\`~/.lastseek/brain-index\`, or \`$LASTDB_APP_DATA/brain-index\`
-when the launcher sets app data). The LastDB socket is the one Brain is
-configured to use. The binary is \`$LASTSEEK_BIN\` or \`lastseek\`.
+  --wait    run the build in the foreground and exit non-zero if it fails
 
-Prints LastSeek's JSON result on stdout. Progress goes to stderr.
+LastSeek owns the index directory. Brain does not name it. Inspect the
+index with \`lastseek status --app brain\`. The binary is \`$LASTSEEK_BIN\`
+or \`lastseek\`. \`LASTSEEK_DISABLE=1\` skips LastSeek during search.
 If LastSeek is not installed, this command exits non-zero. \`brain init\`
-instead says so in one line and continues.
+says so in one line and continues.
 `,
   reindex: `brain reindex --target <hash> --source-hash <type> --slug <slug> [--slug <slug> ...]
 
@@ -1181,6 +1181,9 @@ const GRAPH_OPTIONS = {
   "edge-type": { type: "string", multiple: true },
   json: { type: "boolean", default: false },
 } as const;
+const INDEX_OPTIONS = {
+  wait: { type: "boolean", default: false },
+} as const;
 const REINDEX_OPTIONS = {
   target: { type: "string" },
   "source-hash": { type: "string" },
@@ -1238,7 +1241,7 @@ export const CLI_SPEC = {
   raw: EMPTY_OPTIONS,
   delete: DELETE_OPTIONS,
   "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
-  index: EMPTY_OPTIONS,
+  index: INDEX_OPTIONS,
   reindex: REINDEX_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
@@ -3683,17 +3686,17 @@ async function runHookCmd(args: Argv): Promise<number> {
 }
 
 async function runIndex(args: Argv): Promise<number> {
-  parseCommandArgs(
+  const { values } = parseCommandArgs(
     {
       args,
       strict: true,
       allowPositionals: false,
-      options: EMPTY_OPTIONS,
+      options: INDEX_OPTIONS,
     },
     "index",
   );
   const cfg = readConfig();
-  await indexSearchCmd({ cfg });
+  await indexSearchCmd({ cfg, wait: values.wait === true });
   return 0;
 }
 

@@ -1,4 +1,8 @@
-import { registerLastSeekSchemas } from "../lastseek-index.ts";
+import {
+  LASTSEEK_NOT_INSTALLED_LINE,
+  requestLastSeekIndex,
+} from "../lastseek-index.ts";
+import { BRAIN_INDEX_COMMAND } from "../lastseek-schemas.ts";
 import { syncOwnedModel } from "../owned-schema-init.ts";
 // `brain init` writes a local config that pins every owned schema to its
 // exact name (`brain/<Name>`). The installer places the schemas. Init does
@@ -180,18 +184,21 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     nodeUrl, userHash, print, verbose: opts.verbose, socketPath: nodeSocketPath,
     nonInteractiveGrant: opts.grantConsent, ...opts.consent,
   });
-  // A missing LastSeek is one line. A rebuild runs only when the Brain index
-  // is absent or does not cover the record-type list. Search does not do this.
+  // Start the index and return. LastSeek builds in the background. A missing
+  // binary is one line. Any other LastSeek failure is one line that names
+  // `brain index`. Init does not wait for the build.
   try {
-    await registerLastSeekSchemas({
-      cfg: config,
-      socketPath: nodeSocketPath,
-      print,
-      when: "if-needed",
-    });
+    const indexed = requestLastSeekIndex({ cfg: config, socketPath: nodeSocketPath });
+    if (indexed.kind === "missing") {
+      print(LASTSEEK_NOT_INSTALLED_LINE);
+    } else if (indexed.kind === "error") {
+      print(`LastSeek index did not start (${indexed.detail}). Run \`${BRAIN_INDEX_COMMAND}\` to retry.`);
+    } else {
+      print(`LastSeek index: ${indexed.state}.`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    print(`LastSeek index was not built (${message}). Run \`brain index\` to retry.`);
+    print(`LastSeek index did not start (${message}). Run \`${BRAIN_INDEX_COMMAND}\` to retry.`);
   }
   printNextSteps(print, { nodeUrl, configPath, consent, reinitialized: existing !== null });
   return { config, bootstrapped: false, consent };

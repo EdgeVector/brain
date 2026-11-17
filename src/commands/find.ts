@@ -37,9 +37,9 @@ import {
   missingSchemaHashReadNote,
   resolveTypeFilter,
   schemaHashFor,
+  uniqueSchemaHashes,
   type BrainRecord,
 } from "../record.ts";
-import { lastSeekScope } from "../lastseek-scope.ts";
 import type { RecordType } from "../schemas.ts";
 import { dedupeHits } from "../retrieval/dedupe.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
@@ -101,9 +101,9 @@ export async function findCmd(opts: FindOptions): Promise<FindResult> {
   });
 
   const node = newSearchClientFromCfg(opts.cfg, opts.verbose).node;
-  const brainSchemas = await lastSeekScope(node, opts.cfg, activeTypes, opts.verbose);
-  // Every walked type is empty: nothing to find, and an unscoped probe would
-  // rank other apps' rows.
+  // Same strings `brain index` passed to `lastseek index --schema`.
+  const brainSchemas = uniqueSchemaHashes(opts.cfg, activeTypes);
+  // No pins: an unscoped probe would rank other apps' rows.
   const nothingToFind = activeTypes.length > 0 && brainSchemas.length === 0;
 
   const rankers: RankerInput[] = [];

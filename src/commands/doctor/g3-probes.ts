@@ -6,6 +6,7 @@ import type { RecordType } from "../../schemas.ts";
 import { MIN_BUN_VERSION, bunVersionMeetsMinimum } from "../../runtime.ts";
 import { newWriteNodeClient, type WriteNodeClientOptions } from "../../write-context.ts";
 import { buildTombstoneFields } from "../delete.ts";
+import { lastSeekAppStatus } from "../../lastseek-plane.ts";
 import { querySearchPlane } from "../../search-plane.ts";
 import type { CheckResult, DoctorOptions } from "../doctor.ts";
 
@@ -61,6 +62,23 @@ export async function runEmbeddingProbe(
       };
     }
     verbose?.("embedding-runtime: no search plane available");
+    const index = lastSeekAppStatus();
+    if (index && index.state !== "ready") {
+      const building = index.state === "building" || index.state === "rebuild_required";
+      const why = index.error ? `: ${index.error}` : "";
+      verbose?.(`embedding-runtime: lastseek status --app brain state=${index.state}`);
+      return {
+        name: "embedding-runtime",
+        ok: true,
+        tag: "WARN",
+        detail: building
+          ? `LastSeek index is still building (lastseek status --app brain: ${index.state})`
+          : `LastSeek index is ${index.state} (lastseek status --app brain)${why}`,
+        fix: building
+          ? "wait for the build to finish, or run `brain index --wait`"
+          : "run `brain index` to name Brain's schemas to LastSeek",
+      };
+    }
   } catch (err) {
     // An unresolvable schema means the plane is UP and strict — a live plane
     // rejecting a bad scope term, which is not this check's business. Anything
@@ -70,7 +88,7 @@ export async function runEmbeddingProbe(
       name: "embedding-runtime",
       ok: false,
       detail: `search plane errored on a probe query: ${stripDoctorTip(errMsg(err))}`,
-      fix: "run `lastseek status` (or `search status`) and check the plane's own report",
+      fix: "run `lastseek status --app brain` and check the index state",
     };
   }
 
@@ -92,7 +110,7 @@ export async function runEmbeddingProbe(
         detail: stripDoctorTip(err.message),
         fix:
           err.hint ??
-          "run `lastseek status` and `lastseek doctor` to inspect the semantic index and model",
+          "run `lastseek status --app brain` to inspect the semantic index",
       };
     }
     // 503 / 404 from this route — the node is CORRECT and there is simply no
@@ -133,7 +151,7 @@ export async function runEmbeddingProbe(
         tag: "WARN",
         detail:
           "no semantic search plane answered — the node's in-process index is retired by design, so brain search will use local keyword fallback",
-        fix: "install LastSeek (`lastdb app upgrade lastseek`), then run `brain index` to register Brain's schemas",
+        fix: "install LastSeek (`lastdb app upgrade lastseek`), then run `brain index`. Inspect it with `lastseek status --app brain`",
       };
     }
     return {

@@ -1,194 +1,35 @@
-// Register Brain's record schemas with LastSeek and build the Brain index.
+// Name Brain's record schemas to LastSeek.
 //
-// LastSeek keeps no schema list of its own. `lastseek rebuild --schema` is
-// how an app names the schemas to embed. Query routing, with no `--home` and
-// no inbox, uses this directory:
-//
-// - `$LASTSEEK_HOME` when it is set. LastSeek then skips the sibling index
-//   and serves the query from that home.
-// - otherwise `brain-index` beside the default home: `$LASTDB_APP_DATA/brain-index`
-//   when the launcher sets app data, else `~/.lastseek/brain-index`.
-//
-// Coverage is the published online checkpoint, which is what LastSeek's
-// `covers` check reads. `lastseek status` reports `needs_rebuild` but not the
-// schema names, so it cannot answer "does this index cover the list".
+// `lastseek index --app brain --schema <each name>` returns as soon as
+// LastSeek has accepted the schema set. It starts a build only when the
+// published index does not already cover that set, and the build runs
+// detached unless `--wait` is passed. Brain does not read LastSeek's
+// directory, checkpoint, or state file. What Brain needs to know comes
+// back as the one JSON object on stdout, or from `lastseek status --app brain`.
 
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { BrainError } from "./client.ts";
-import { lastSeekBin } from "./lastseek-plane.ts";
-import { BRAIN_INDEX_COMMAND, lastSeekSchemaNames } from "./lastseek-schemas.ts";
+import { lastSeekBin, lastSeekTimeoutMs } from "./lastseek-plane.ts";
+import {
+  BRAIN_INDEX_COMMAND,
+  LASTSEEK_APP_NAME,
+  lastSeekSchemaNames,
+} from "./lastseek-schemas.ts";
+import { beginSubprocess, endSubprocess } from "./slow-call.ts";
 
-const VERSION_TIMEOUT_MS = 10_000;
-/** LastSeek stops a rebuild at 30 minutes. Stop a wedged child after that. */
-const REBUILD_TIMEOUT_MS = 35 * 60 * 1000;
-const NOT_INSTALLED_LINE =
+export const LASTSEEK_NOT_INSTALLED_LINE =
   "LastSeek is not installed; search uses keyword heads until it is.";
 
 type SchemaConfig = { schemaHashes: Record<string, string> };
 
-export function lastSeekBrainIndexDir(): string {
-  const override = process.env.LASTSEEK_HOME;
-  if (override && override.length > 0) return override;
-  const appData = process.env.LASTDB_APP_DATA;
-  if (appData && appData.length > 0) return join(appData, "brain-index");
-  const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : ".";
-  return join(home, ".lastseek", "brain-index");
-}
+export type LastSeekIndexResult =
+  | { kind: "ok"; state: string; json: string }
+  | { kind: "missing" }
+  | { kind: "error"; detail: string };
 
-type InstallProbe = { kind: "ready" } | { kind: "missing" } | { kind: "unusable"; detail: string };
-
-function probeLastSeek(): InstallProbe {
-  const bin = lastSeekBin();
-  const result = spawnSync(bin, ["--version"], {
-    encoding: "utf8",
-    timeout: VERSION_TIMEOUT_MS,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const error = result.error as NodeJS.ErrnoException | undefined;
-  if (error?.code === "ENOENT") return { kind: "missing" };
-  if (result.status === 0) return { kind: "ready" };
-  const detail = (result.stderr ?? "").trim() || error?.message || `exit ${result.status ?? "unknown"}`;
-  return { kind: "unusable", detail };
-}
-
-/** Schema names in the published checkpoint. Absent when there is no online index. */
-export function publishedIndexSchemas(dir: string): string[] | null {
-  let slot: string;
-  try {
-    slot = readFileSync(join(dir, ".lastseek-online", "active"), "utf8").trim();
-  } catch {
-    return null;
-  }
-  if (slot !== "a" && slot !== "b") return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(join(dir, ".lastseek-online", slot, "checkpoint.json"), "utf8"));
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const projections = (parsed as { projections?: unknown }).projections;
-  if (!projections || typeof projections !== "object" || Array.isArray(projections)) return null;
-  return Object.keys(projections as Record<string, unknown>);
-}
-
-export function indexCovers(dir: string, schemas: readonly string[]): boolean {
-  if (!existsSync(dir) || schemas.length === 0) return false;
-  const published = publishedIndexSchemas(dir);
-  if (!published) return false;
-  const known = new Set(published);
-  return schemas.every((schema) => known.has(schema));
-}
-
-type RebuildResult = {
-  stdout: string;
-  parsed: unknown;
-};
-
-function summarize(parsed: unknown, home: string, schemaCount: number): string {
-  const body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
-  const schemas = Array.isArray(body.schemas) ? body.schemas.length : schemaCount;
-  const rows = typeof body.committed_rows === "number" ? `, ${body.committed_rows} rows` : "";
-  return `LastSeek index ready: ${schemas} schemas${rows} in ${home}.`;
-}
-
-function runRebuild(
-  bin: string,
-  args: string[],
-  onProgress: (line: string) => void,
-): Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean; spawnError?: NodeJS.ErrnoException }> {
-  return new Promise((resolve) => {
-    const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    let pending = "";
-    let timedOut = false;
-    let settled = false;
-    const finish = (result: {
-      status: number | null;
-      stdout: string;
-      stderr: string;
-      timedOut: boolean;
-      spawnError?: NodeJS.ErrnoException;
-    }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-    }, REBUILD_TIMEOUT_MS);
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-      pending += chunk;
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      for (const line of lines) {
-        if (line.startsWith("lastseek rebuild:")) onProgress(line);
-      }
-    });
-    child.on("error", (error: NodeJS.ErrnoException) => {
-      finish({ status: null, stdout, stderr: stderr || error.message, timedOut, spawnError: error });
-    });
-    child.on("close", (status) => {
-      if (pending.startsWith("lastseek rebuild:")) onProgress(pending);
-      finish({ status, stdout, stderr, timedOut });
-    });
-  });
-}
-
-async function rebuild(opts: {
-  schemas: readonly string[];
-  home: string;
-  socketPath: string;
-  onProgress: (line: string) => void;
-}): Promise<RebuildResult> {
-  const bin = lastSeekBin();
-  const args = ["rebuild", "--home", opts.home, "--lastdb-socket", opts.socketPath];
-  for (const schema of opts.schemas) args.push("--schema", schema);
-  const result = await runRebuild(bin, args, opts.onProgress);
-  if (result.spawnError?.code === "ENOENT") {
-    throw new BrainError({
-      code: "lastseek_missing",
-      message: NOT_INSTALLED_LINE,
-      hint: `Install LastSeek, then run \`${BRAIN_INDEX_COMMAND}\`.`,
-    });
-  }
-  if (result.timedOut) {
-    throw new BrainError({
-      code: "lastseek_index_failed",
-      message: "lastseek rebuild exceeded 35 minutes and was stopped.",
-      hint: `Run \`${BRAIN_INDEX_COMMAND}\` when the node is up.`,
-    });
-  }
-  if (result.status !== 0) {
-    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status ?? "unknown"}`;
-    throw new BrainError({
-      code: "lastseek_index_failed",
-      message: detail,
-      hint: `Run \`${BRAIN_INDEX_COMMAND}\` to retry. LastSeek reads every record of each named schema.`,
-    });
-  }
-  const text = result.stdout.trim();
-  try {
-    return { stdout: text, parsed: JSON.parse(text) as unknown };
-  } catch (error) {
-    throw new BrainError({
-      code: "lastseek_index_failed",
-      message: "lastseek rebuild exited 0 but did not print a JSON result.",
-      hint: text.slice(0, 500) || (error instanceof Error ? error.message : "empty stdout"),
-    });
-  }
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
 function requireSchemaNames(cfg: SchemaConfig): string[] {
@@ -211,57 +52,73 @@ function requireSchemaNames(cfg: SchemaConfig): string[] {
   return schemas;
 }
 
+function indexEnv(socketPath: string | undefined): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  // The detached build inherits this environment. LastSeek reads LastDB
+  // through LASTDB_SOCKET_PATH and LASTDB_APP_SESSION. Brain's resolved
+  // socket is that path when the launcher did not already set one.
+  if (socketPath && socketPath.length > 0 && !env.LASTDB_SOCKET_PATH) {
+    env.LASTDB_SOCKET_PATH = socketPath;
+  }
+  return env;
+}
+
+function parseIndexStdout(stdout: string): { state: string; json: string } | null {
+  const json = stdout.trim();
+  if (json.length === 0) return null;
+  try {
+    const body = JSON.parse(json) as { ok?: unknown; state?: unknown };
+    if (body.ok !== true || typeof body.state !== "string" || body.state.length === 0) return null;
+    return { state: body.state, json };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Build the Brain index. `if-needed` is the init path: a missing LastSeek is
- * one line and a return; an index that already covers the list is left alone.
- * `always` is `brain index`: it rebuilds and prints LastSeek's JSON result.
+ * Run `lastseek index --app brain`. Without `wait`, LastSeek returns as soon
+ * as it has recorded the request. With `wait`, the build stays in this process.
  */
-export async function registerLastSeekSchemas(opts: {
+export function requestLastSeekIndex(opts: {
   cfg: SchemaConfig;
-  socketPath: string;
-  print: (line: string) => void;
-  printErr?: (line: string) => void;
-  when: "always" | "if-needed";
-}): Promise<void> {
-  const report = opts.printErr ?? opts.print;
-  const probe = probeLastSeek();
-  if (probe.kind === "missing") {
-    if (opts.when === "if-needed") {
-      opts.print(NOT_INSTALLED_LINE);
-      return;
-    }
-    throw new BrainError({
-      code: "lastseek_missing",
-      message: NOT_INSTALLED_LINE,
-      hint: `Install LastSeek, then run \`${BRAIN_INDEX_COMMAND}\`.`,
-    });
-  }
-  if (probe.kind === "unusable") {
-    const line = `LastSeek did not answer \`lastseek --version\` (${probe.detail}).`;
-    if (opts.when === "if-needed") {
-      opts.print(`${line} Search uses keyword heads until it runs.`);
-      return;
-    }
-    throw new BrainError({
-      code: "lastseek_missing",
-      message: line,
-      hint: `Fix LastSeek, then run \`${BRAIN_INDEX_COMMAND}\`.`,
-    });
-  }
-
+  socketPath?: string;
+  wait?: boolean;
+}): LastSeekIndexResult {
   const schemas = requireSchemaNames(opts.cfg);
-  const home = lastSeekBrainIndexDir();
-  if (opts.when === "if-needed" && indexCovers(home, schemas)) return;
+  const args = ["index", "--app", LASTSEEK_APP_NAME];
+  for (const schema of schemas) args.push("--schema", schema);
+  if (opts.wait) args.push("--wait");
 
-  report(
-    `Registering ${schemas.length} schemas with LastSeek in ${home}. This can take minutes.`,
-  );
-  const result = await rebuild({
-    schemas,
-    home,
-    socketPath: opts.socketPath,
-    onProgress: report,
+  // The search deadline bounds the non-waiting call, which returns at once.
+  // `--wait` stays until LastSeek exits; that build is not a search.
+  const timeoutMs = opts.wait ? 0 : lastSeekTimeoutMs();
+  const started = beginSubprocess();
+  const result = spawnSync(lastSeekBin(), args, {
+    encoding: "utf8",
+    env: indexEnv(opts.socketPath),
+    timeout: timeoutMs > 0 ? timeoutMs : undefined,
+    stdio: ["ignore", "pipe", opts.wait ? "inherit" : "pipe"],
   });
-  report(summarize(result.parsed, home, schemas.length));
-  if (opts.when === "always") opts.print(result.stdout);
+  endSubprocess(started, opts.wait ? "lastseek index --wait" : "lastseek index");
+
+  const error = result.error as NodeJS.ErrnoException | undefined;
+  if (error?.code === "ENOENT") return { kind: "missing" };
+
+  const timedOut = error?.code === "ETIMEDOUT" || (result.status === null && result.signal !== null);
+  if (result.status === 0 && !timedOut) {
+    const parsed = parseIndexStdout(result.stdout ?? "");
+    if (parsed) return { kind: "ok", state: parsed.state, json: parsed.json };
+    return {
+      kind: "error",
+      detail: "lastseek index exited 0 but did not print a JSON state",
+    };
+  }
+
+  const stderr = typeof result.stderr === "string" ? result.stderr : "";
+  const stdout = result.stdout ?? "";
+  const detail =
+    timedOut && timeoutMs > 0
+      ? `lastseek index exceeded its ${(timeoutMs / 1000).toFixed(1)}s deadline`
+      : oneLine(stderr || stdout || error?.message || `exit ${result.status ?? "unknown"}`);
+  return { kind: "error", detail: detail || `exit ${result.status ?? "unknown"}` };
 }

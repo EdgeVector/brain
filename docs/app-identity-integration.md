@@ -19,9 +19,9 @@ that request through the target node's supported administration flow.
 | `src/write-context.ts` | Select owner-socket access for local writes and search, or capability handling for remote nodes. |
 | `src/capability-session.ts` | Reuse and refresh remote capabilities, and propagate owner-socket failures. |
 | `src/client.ts` | Send the current record protocol through the selected transport. |
-| `src/lastseek-plane.ts` | Query LastSeek for ranked keys. Brain then reads the records from LastDB. |
-| `src/lastseek-schemas.ts` | The `brain/<Type>` schema names Brain passes to `lastseek query --schema`. |
-| `src/lastseek-index.ts` | Register that list and build the Brain index. `brain index` always rebuilds. `brain init` rebuilds only when LastSeek is installed and the index is missing or does not cover the list. |
+| `src/lastseek-plane.ts` | Run `lastseek search --app brain` for ranked keys. Brain then reads the records from LastDB. Exit 3 (`index_not_ready`) uses the keyword fallback. |
+| `src/lastseek-schemas.ts` | The `brain/<Type>` schema names Brain passes to `lastseek index --schema` and `lastseek search --schema`. |
+| `src/lastseek-index.ts` | Run `lastseek index --app brain` for that list. `brain init` does not wait. `brain index` prints LastSeek's JSON. `brain index --wait` stays for the build. |
 
 Use `lastdb status` for node health and `lastdb admin ops` for request load.
-Use `brain index` to build the semantic index. Use `lastseek status --home <brain index directory>` to inspect it.
+Use `brain index` to name the schemas. Use `lastseek status --app brain` to inspect the index. Brain does not read LastSeek's files.

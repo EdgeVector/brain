@@ -6,7 +6,7 @@
  * failures.
  *
  * Resolution order:
- *   0. LastSeek (`lastseek query`) — the Rust successor, preferred when its
+ *   0. LastSeek (`lastseek search --app brain`) — preferred when its
  *      binary and index are present
  *   1. LASTDB_SEARCH_SEMANTIC_MODULE — path to search package semantic.ts
  *   2. registry-installed Search semantic.ts
@@ -16,9 +16,8 @@
  * property of what is installed rather than a flag day. `LASTSEEK_DISABLE=1`
  * pins the incumbent.
  *
- * The scope hashes brain passes (`uniqueSchemaHashes`) are the registry names
- * LastSeek's Schema Service table resolves directly — `reference` is
- * `5c691083…` in both — so this tier needs no translation.
+ * The scope names brain passes (`uniqueSchemaHashes`) are the `brain/<Name>`
+ * pins `brain index` registers. Search passes those same strings.
  */
 
 import { existsSync } from "node:fs";
