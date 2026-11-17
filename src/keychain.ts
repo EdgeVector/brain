@@ -18,7 +18,7 @@ function defaultAppId(): string {
 }
 
 /**
- * A pure in-memory store. The app API session replaces capability tokens,
+ * A pure in-memory store. The app id replaces capability tokens,
  * so Brain does not persist them.
  */
 export function inMemoryCapabilityStore(): CapabilityStore {

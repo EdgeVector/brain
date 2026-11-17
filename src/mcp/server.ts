@@ -1844,7 +1844,7 @@ export async function probeNodeStatus(cfg: Config): Promise<NodeStatusPayload> {
     await node.queryByKey({ schemaHash: "brain/Design", fields: ["slug"], keyHash: "__brain_status__" });
     payload.reachable = true;
     payload.provisioned = true;
-    payload.detail = "The app session authorizes Brain.";
+    payload.detail = "The app id authorizes Brain.";
   } catch (err) {
     payload.reachable = false;
     payload.detail =

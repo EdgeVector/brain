@@ -1,51 +1,45 @@
 /**
  * App API: `POST /v1/read`, `POST /v1/write`, and `POST /v1/x/changes`.
  * A non-200 reply throws {@link AppApiError}. A failed read in a list is a result.
+ * Request and reply types live in `appApi.generated.ts`.
  */
-import { LastDbError, UnexpectedResponseError } from './errors.js';
+import { appApiFailure } from './appApiError.js';
+import { APP_API_ERROR_CODES, APP_API_ERROR_REASONS, } from './appApi.generated.js';
+import { UnexpectedResponseError } from './errors.js';
 import { isObject } from './responseParsers.js';
+export { AppApiError } from './appApiError.js';
 const READ_PATH = '/v1/read';
 const WRITE_PATH = '/v1/write';
 const CHANGES_PATH = '/v1/x/changes';
-/** A non-200 app API reply. `code` is the body's `error.code`. `message` is `Error.message`. */
-export class AppApiError extends LastDbError {
-    status;
-    code;
-    constructor(status, code, message) {
-        super(message);
-        this.status = status;
-        this.code = code;
-    }
-}
 function invalid(message, body) {
     return new UnexpectedResponseError(message, 200, body);
 }
-function appApiFailure(status, body) {
-    const envelope = isObject(body) ? body['error'] : undefined;
-    const code = isObject(envelope) && typeof envelope['code'] === 'string' ? envelope['code'] : '';
-    const message = isObject(envelope) && typeof envelope['message'] === 'string'
-        ? envelope['message']
-        : `app API request returned status ${status}`;
-    return new AppApiError(status, code, message);
+function listed(value, options) {
+    return options.includes(value);
 }
 async function postAppApi(ctx, path, body) {
-    const session = process.env.LASTDB_APP_SESSION; // set by the launcher for a restricted app
-    const opts = session ? { body, headers: { 'X-LastDB-App-Session': session } } : { body };
+    const app = process.env.LASTDB_APP; // the app id, set by the launcher
+    const opts = app ? { body, headers: { 'X-LastDB-App': app } } : { body };
     const res = await ctx.transport.send('POST', path, opts);
     if (res.status !== 200)
         throw appApiFailure(res.status, res.body);
     return res.body;
 }
 function keyBody(key) {
-    return { hash: key.hash, range: key.range };
+    const body = {};
+    if (key.hash !== undefined)
+        body.hash = key.hash;
+    if (key.range !== undefined)
+        body.range = key.range;
+    return body;
 }
 function rangeBody(range) {
     const body = { hash: range.hash };
-    if (range.prefix !== undefined)
+    if (typeof range.prefix === 'string')
         body.prefix = range.prefix;
-    if (range.start !== undefined)
+    if (typeof range.start === 'string')
         body.start = range.start;
-    if (range.end !== undefined)
+    if (typeof range.end === 'string')
         body.end = range.end;
     return body;
 }
@@ -79,8 +73,8 @@ function fileLinkBody(link) {
 }
 function alternatesBody(alternates) {
     const body = {};
-    for (const [name, key] of Object.entries(alternates)) {
-        body[name] = key === null ? null : keyBody(key);
+    for (const [name, value] of Object.entries(alternates)) {
+        body[name] = value === null ? null : keyBody(value);
     }
     return body;
 }
@@ -94,6 +88,8 @@ function mutationBody(mutation) {
         body.database = mutation.database;
     if (mutation.op === 'delete') {
         body.revision = mutation.revision;
+        if (mutation.alternates !== undefined)
+            body.alternates = mutation.alternates;
         return body;
     }
     body.record = mutation.record;
@@ -118,18 +114,16 @@ function changesBody(options) {
     return body;
 }
 function parseKey(value, body) {
-    if (!isObject(value))
-        throw invalid('app API returned an invalid key', body);
-    const hash = value['hash'];
-    const range = value['range'];
-    if ((hash !== undefined && hash !== null && typeof hash !== 'string') ||
-        (range !== undefined && range !== null && typeof range !== 'string')) {
+    if (!isObject(value) || !('hash' in value) || !('range' in value)) {
         throw invalid('app API returned an invalid key', body);
     }
-    return {
-        hash: typeof hash === 'string' ? hash : null,
-        range: typeof range === 'string' ? range : null,
-    };
+    const hash = value['hash'];
+    const range = value['range'];
+    if ((hash !== null && typeof hash !== 'string') ||
+        (range !== null && typeof range !== 'string')) {
+        throw invalid('app API returned an invalid key', body);
+    }
+    return { hash, range };
 }
 function parseCursor(value, body) {
     if (value === null)
@@ -138,8 +132,8 @@ function parseCursor(value, body) {
         return value;
     throw invalid('app API returned an invalid cursor', body);
 }
-function optionalText(value, body) {
-    if (value === undefined || value === null)
+function textOrNull(value, body) {
+    if (value === null)
         return null;
     if (typeof value === 'string')
         return value;
@@ -150,20 +144,33 @@ function parseFile(value, body) {
         throw invalid('app API returned a record with no file', body);
     if (value === null)
         return null;
-    if (!isObject(value) || typeof value['size'] !== 'number' || !Number.isFinite(value['size'])) {
+    if (!isObject(value) ||
+        !('name' in value) ||
+        !('media_type' in value) ||
+        !('size' in value) ||
+        !('local' in value)) {
         throw invalid('app API returned an invalid file', body);
     }
-    const path = value['path'];
-    if (path !== undefined && path !== null && typeof path !== 'string') {
+    const size = value['size'];
+    const local = value['local'];
+    if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0) {
+        throw invalid('app API returned an invalid file', body);
+    }
+    if (local !== null && typeof local !== 'string') {
         throw invalid('app API returned an invalid file', body);
     }
     const file = {
-        name: optionalText(value['name'], body),
-        media_type: optionalText(value['media_type'], body),
-        size: value['size'],
+        name: textOrNull(value['name'], body),
+        media_type: textOrNull(value['media_type'], body),
+        size,
+        local: typeof local === 'string' ? local : null,
     };
-    if (path !== undefined)
-        file.path = typeof path === 'string' ? path : null;
+    if ('path' in value) {
+        const path = value['path'];
+        if (path !== null && typeof path !== 'string')
+            throw invalid('app API returned an invalid file', body);
+        file.path = path === null ? null : path;
+    }
     return file;
 }
 function parseRecord(value, body) {
@@ -179,15 +186,37 @@ function parseRecord(value, body) {
         file: parseFile(value['file'], body),
     };
 }
+function parseItemError(value, body) {
+    const code = value['code'];
+    const message = value['message'];
+    if (typeof code !== 'string' || !listed(code, APP_API_ERROR_CODES) || typeof message !== 'string') {
+        throw invalid('app API returned an invalid read error', body);
+    }
+    const error = { code: code, message };
+    if ('index' in value) {
+        const index = value['index'];
+        if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) {
+            throw invalid('app API returned an invalid read error', body);
+        }
+        error.index = index;
+    }
+    if ('reason' in value) {
+        const reason = value['reason'];
+        if (typeof reason !== 'string' || !listed(reason, APP_API_ERROR_REASONS)) {
+            throw invalid('app API returned an invalid read error', body);
+        }
+        error.reason = reason;
+    }
+    return error;
+}
 function parseReadResult(value, body) {
     if (!isObject(value))
         throw invalid('app API returned an invalid read result', body);
     if ('error' in value) {
         const error = value['error'];
-        if (!isObject(error) || typeof error['code'] !== 'string' || typeof error['message'] !== 'string') {
+        if (!isObject(error))
             throw invalid('app API returned an invalid read error', body);
-        }
-        return { error: { code: error['code'], message: error['message'] } };
+        return { error: parseItemError(error, body) };
     }
     if (!('next_cursor' in value))
         throw invalid('app API returned a read result with no cursor', body);

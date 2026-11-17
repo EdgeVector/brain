@@ -266,7 +266,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push({
       name: "node-provisioned",
       ok: true,
-      detail: "The app session authorizes Brain. Identity is not probed.",
+      detail: "The app id authorizes Brain. Identity is not probed.",
     });
     verbose?.(`node-reachable: ok`);
   } catch (err) {

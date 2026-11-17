@@ -491,7 +491,7 @@ function pct(n: number): string {
   return `${(n * 100).toFixed(0)}%`;
 }
 
-// Write-readiness is a keyed read. Writes use the app session. Brain does
+// Write-readiness is a keyed read. Writes use the app id. Brain does
 // not request consent and does not read a capability store.
 export async function runWriteReadyProbe(
   node: NodeClient,
@@ -506,11 +506,11 @@ export async function runWriteReadyProbe(
       throw new BrainError({ code: "keyed_read_required", message: "The write-ready probe needs a keyed read." });
     }
     await node.queryByKey({ schemaHash: "brain/Design", fields: ["slug"], keyHash: "__brain_doctor__" });
-    verbose?.("write-ready: app session authorizes writes");
+    verbose?.("write-ready: the app id authorizes writes");
     return {
       name: "write-ready",
       ok: true,
-      detail: "Writes use the app session. Brain does not request consent.",
+      detail: "Writes use the app id. Brain does not request consent.",
     };
   } catch (error) {
     return {

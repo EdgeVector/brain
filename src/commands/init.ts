@@ -188,7 +188,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   // binary is one line. Any other LastSeek failure is one line that names
   // `brain index`. Init does not wait for the build.
   try {
-    const indexed = requestLastSeekIndex({ cfg: config, socketPath: nodeSocketPath });
+    const indexed = requestLastSeekIndex({ cfg: config });
     if (indexed.kind === "missing") {
       print(LASTSEEK_NOT_INSTALLED_LINE);
     } else if (indexed.kind === "error") {

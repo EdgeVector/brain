@@ -1,4 +1,4 @@
-// The launcher session authorizes a restricted app. Brain does not request consent.
+// The launcher registers the app id. Brain does not request consent.
 import type { CapabilityStore, ConsentTransport } from "../capability.ts";
 import type { Verbose } from "../client.ts";
 import { resolvePrintSink } from "../format.ts";
@@ -32,6 +32,6 @@ export async function establishConsentInline(
   opts: EstablishConsentOptions,
 ): Promise<EstablishConsentResult> {
   const print = resolvePrintSink(opts);
-  print("        the launcher session authorizes the app");
+  print("        the launcher registers the app");
   return { state: "owner_socket" };
 }

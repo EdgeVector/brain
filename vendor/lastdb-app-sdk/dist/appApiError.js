@@ -1,0 +1,41 @@
+/**
+ * Typed error for a non-200 app API reply.
+ * Callers that read only `code` and `message` stay valid.
+ */
+import { APP_API_ERROR_REASONS } from './appApi.generated.js';
+import { LastDbError, UnexpectedResponseError } from './errors.js';
+import { isObject } from './responseParsers.js';
+function knownReason(value) {
+    return APP_API_ERROR_REASONS.includes(value);
+}
+export class AppApiError extends LastDbError {
+    status;
+    code;
+    /** Zero-based position when the refusal concerns one item in the list. */
+    index;
+    /** `exists`, `absent`, or `revision` when a write condition failed. */
+    reason;
+    constructor(status, code, message, index, reason) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.index = index;
+        this.reason = reason;
+    }
+}
+/** Build {@link AppApiError} from a non-200 app API body. */
+export function appApiFailure(status, body) {
+    const error = isObject(body) ? body['error'] : undefined;
+    const text = (name) => isObject(error) && typeof error[name] === 'string' ? error[name] : undefined;
+    const rawIndex = isObject(error) ? error['index'] : undefined;
+    const index = typeof rawIndex === 'number' && Number.isInteger(rawIndex) && rawIndex >= 0
+        ? rawIndex
+        : undefined;
+    const message = text('message') ?? `app API request returned status ${status}`;
+    const reason = text('reason');
+    if (reason !== undefined && !knownReason(reason)) {
+        throw new UnexpectedResponseError('app API returned an unknown error reason', status, body);
+    }
+    return new AppApiError(status, text('code') ?? '', message, index, reason);
+}
+//# sourceMappingURL=appApiError.js.map

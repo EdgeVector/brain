@@ -87,8 +87,8 @@ function plainNodeClient(opts: WriteNodeClientOptions): WriteNodeClient {
   if (opts.verbose !== undefined) plainOpts.verbose = opts.verbose;
   if (opts.socketPath !== undefined) plainOpts.socketPath = opts.socketPath;
   const plain = newNodeClient(plainOpts);
-  // The session stays so callers keep a handle. The data path does not
-  // acquire consent: the app session on the restricted socket authorizes writes.
+  // The capability handle stays so callers keep it. The data path does not
+  // acquire consent: the app id on the app socket authorizes writes.
   const idleSession = new CapabilitySession(buildSessionOpts(opts, store, () => plain));
   return { node: plain, session: idleSession };
 }
