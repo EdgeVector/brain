@@ -50,6 +50,7 @@ import { rawCmd } from "./commands/raw.ts";
 import { putCmd, type PutResult } from "./commands/put.ts";
 import { appendCmd } from "./commands/append.ts";
 import { deleteByFilter, deleteRecord } from "./commands/delete.ts";
+import { indexSearchCmd } from "./commands/index-search.ts";
 import { reindexCmd } from "./commands/reindex.ts";
 import { gateAdd, gateClear, gatesOpen, gateVerify } from "./commands/gate.ts";
 import {
@@ -186,6 +187,7 @@ export const COMMANDS = [
   "raw",
   "delete",
   "admin-snapshot",
+  "index",
   "reindex",
   "mcp",
   "hook",
@@ -237,6 +239,7 @@ ${RECORD_NEW_HELP_LINES}
   backlinks      list records linking to a slug
   graph          bounded traversal over typed graph edges (neighbors | path | query)
   search         semantic search over indexed records
+  index          name Brain's schemas to LastSeek (returns at once; --wait stays for the build)
   ask            hybrid retrieval (BM25 + vector + RRF; --expand adds LLM expansion)
   find           retrieval by an array of match probes (each --match is fused via RRF; no embedding in brain)
   gates          list structured open human gates from the canonical open-decisions record
@@ -279,6 +282,10 @@ export const COMMAND_HELP: Record<Command, string> = {
 
 Probe the node, declare Brain schemas, and save ~/.brain/config.json.
 Local access uses the configured LastDB owner socket.
+When LastSeek is installed, init registers Brain's record schemas and builds
+the Brain search index if that index is missing or does not cover them.
+If LastSeek is not installed, init says so and continues. Search then uses
+keyword heads. Run \`brain index\` to register or rebuild later.
 
   --node-url             defaults to http://127.0.0.1, selecting the local Unix socket
   --schema-service-url   defaults to the production schema service
@@ -536,7 +543,8 @@ Every walk is keyed reads only — one range read per node per direction, never 
   --json          emit the structured result on stdout.`,
   search: `brain search <query> [-n N | --limit N] [--exact] [--min-score F] [--type T]... [--json]
 
-Semantic search across indexed records. Dedupes fragment hits per record
+Semantic search across indexed records. Build or refresh the LastSeek index
+with \`brain index\`. Search does not rebuild it. Dedupes fragment hits per record
 and skips stale hits (records deleted since indexing). Prints
 \`slug · score · type · title\` per match, with a short matching body snippet
 indented under each row — so the answer is visible without a follow-up
@@ -822,6 +830,23 @@ BRAIN_ADMIN_MESSAGING_PUBLIC_KEY, BRAIN_ADMIN_MESSAGING_PSEUDONYM, and
 BRAIN_ADMIN_RECIPIENT_NAME (or the ROUTINES_ADMIN_* aliases used by routines
 deliver-status). Reuses the existing kanban-consumer identity — no second
 consumer enroll is required.`,
+  index: `brain index [--wait]
+
+Name every record schema Brain passes to \`lastseek search --schema\` and
+start LastSeek's index for the brain app. Runs
+\`lastseek index --app brain --schema <each brain/<Name>>\`.
+Returns as soon as LastSeek accepts the request and prints LastSeek's
+JSON on stdout. It does not wait for the build. Search does not start
+a build. This is not \`brain reindex\` (that backfills named keys).
+
+  --wait    run the build in the foreground and exit non-zero if it fails
+
+LastSeek owns the index directory. Brain does not name it. Inspect the
+index with \`lastseek status --app brain\`. The binary is \`$LASTSEEK_BIN\`
+or \`lastseek\`. \`LASTSEEK_DISABLE=1\` skips LastSeek during search.
+If LastSeek is not installed, this command exits non-zero. \`brain init\`
+says so in one line and continues.
+`,
   reindex: `brain reindex --target <hash> --source-hash <type> --slug <slug> [--slug <slug> ...]
 
 One call names one target, one source type, and at most 25 slugs.
@@ -1156,6 +1181,9 @@ const GRAPH_OPTIONS = {
   "edge-type": { type: "string", multiple: true },
   json: { type: "boolean", default: false },
 } as const;
+const INDEX_OPTIONS = {
+  wait: { type: "boolean", default: false },
+} as const;
 const REINDEX_OPTIONS = {
   target: { type: "string" },
   "source-hash": { type: "string" },
@@ -1213,6 +1241,7 @@ export const CLI_SPEC = {
   raw: EMPTY_OPTIONS,
   delete: DELETE_OPTIONS,
   "admin-snapshot": ADMIN_SNAPSHOT_OPTIONS,
+  index: INDEX_OPTIONS,
   reindex: REINDEX_OPTIONS,
   mcp: MCP_OPTIONS,
   hook: EMPTY_OPTIONS,
@@ -1864,6 +1893,8 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
       return runDelete(args, verboseFn);
     case "admin-snapshot":
       return runAdminSnapshot(args, verboseFn);
+    case "index":
+      return runIndex(args);
     case "reindex":
       return runReindex(args, verboseFn);
     case "mcp":
@@ -3652,6 +3683,21 @@ async function runHookCmd(args: Argv): Promise<number> {
     "./commands/session-start-hook.ts"
   );
   return runSessionStartHook({ cfg, input: await readStdin() });
+}
+
+async function runIndex(args: Argv): Promise<number> {
+  const { values } = parseCommandArgs(
+    {
+      args,
+      strict: true,
+      allowPositionals: false,
+      options: INDEX_OPTIONS,
+    },
+    "index",
+  );
+  const cfg = readConfig();
+  await indexSearchCmd({ cfg, wait: values.wait === true });
+  return 0;
 }
 
 async function runReindex(args: Argv, verbose: Verbose): Promise<number> {

@@ -2462,9 +2462,9 @@ const NODE_ERROR_RULES: NodeErrorRule[] = [
         `Semantic search is unavailable — the fold_db node failed to load its embedding model ` +
         `(${ctx.messageBlob.trim()}) ${DOCTOR_TIP}.`,
       hint:
-        "Run `lastseek status` and `lastseek doctor` to inspect the semantic index and model.",
+        "Run `lastseek status --app brain` to inspect the semantic index.",
       agentHint:
-        "Ask the operator to inspect LastSeek with `lastseek status` and `lastseek doctor`.",
+        "Ask the operator to inspect LastSeek with `lastseek status --app brain`.",
     }),
   },
 ];

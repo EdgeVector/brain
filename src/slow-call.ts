@@ -17,7 +17,7 @@
 //   after     — last response fully read until the process reports (output
 //               rendering, stdout flush, exit path)
 //   subprocess— time inside a helper process this CLI spawned and blocked on
-//               (today: `lastseek query`). CARVED OUT of the segment it fell
+//               (today: `lastseek search`). CARVED OUT of the segment it fell
 //               in, not added alongside it, so the four segments still sum to
 //               the total. Before this existed a 30 s `lastseek` reported as
 //               `pre-send 30.7s` and read as brain's own boot — the CLI held
