@@ -90,6 +90,41 @@ def finish_setup(node, output):
     save(output / "setup-cleanup.json", cleanup.request_and_wait(node))
 
 
+def place_app_schemas(node, source):
+    """Place lastdb-app.json on the owner socket the way the installer does.
+
+    The lastdb CLI has no command that only places schemas from a source folder.
+    `lastdb app install` installs a signed catalog release. The installer posts
+    each manifest entry once, and does not read the node first:
+
+        POST /api/apps/declare-schema
+        {"app_id": <app id>, "schema": <entry with retention removed>}
+
+    Retention, when the entry has it, is a sibling of schema. The node names
+    the schema `<app id>/<name>`. The same definition already in place succeeds.
+    """
+    manifest = json.loads((Path(source) / "lastdb-app.json").read_text())
+    app_id = manifest.get("app_id")
+    schemas = manifest.get("schemas")
+    if not isinstance(app_id, str) or not app_id or "/" in app_id:
+        raise RuntimeError("lastdb-app.json app_id must be a non-empty name without '/'")
+    if not isinstance(schemas, list):
+        raise RuntimeError("manifest schemas must be a list of schema declarations")
+    for entry in schemas:
+        if not isinstance(entry, dict):
+            raise RuntimeError("schema declaration is not an object")
+        schema = dict(entry)
+        name = schema.get("name") or "<unnamed>"
+        retention = schema.pop("retention", None)
+        body = {"app_id": app_id, "schema": schema}
+        if retention is not None:
+            body["retention"] = retention
+        try:
+            node.call("/api/apps/declare-schema", body)
+        except RuntimeError as error:
+            raise RuntimeError(f"schema '{name}' was refused: {error}") from error
+
+
 def cloud_off(node, destination, phase):
     """The generated node keeps cloud sync off and has no saved connection.
 
@@ -147,6 +182,8 @@ def run_case(args, Node, label, repeat):
     try:
         node.start()
         cloud_off(node, destination, "start")
+        # The installer places schemas before the app starts. Init no longer does.
+        place_app_schemas(node, args.baseline if label == "before" else args.candidate)
         app(args, node, destination, label, "setup")
         result["daemon"] = observed_daemon(node, destination)
         if args.mode == "read":
