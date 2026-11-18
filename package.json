@@ -1,6 +1,6 @@
 {
   "name": "brain",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "brain \u2014 a CLI brain over LastDB (design, task, concept, preference, reference, agent, project, spike, sop, decision) with semantic search and an MCP agent surface",
   "license": "MIT",
   "type": "module",

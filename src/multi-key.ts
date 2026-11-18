@@ -1,6 +1,6 @@
 // Named keys belong to one record schema. Relationship records keep their own values.
 import { alternateAddresses } from "./complete-record.ts";
-import { BrainError, type NodeClient, type QueryRow } from "./client.ts";
+import { BrainError, type BatchRangeRead, type NodeClient, type QueryRow } from "./client.ts";
 import { RECORD_TYPES, UNIQUE_SCHEMAS, schemaConfigKeys, type RecordType, type SchemaDefinition } from "./schemas.ts";
 
 export const MULTI_KEY_MODEL = "multi-key-v1" as const;
@@ -83,25 +83,30 @@ function projectFields(fields: Record<string, unknown>, names: readonly string[]
   return out;
 }
 
-export async function keyPage(
-  node: NodeClient, schema: string, name: string,
-  filter: unknown, fields: readonly string[], limit = 1000, cursor?: unknown,
-): Promise<NamedPage> {
-  if (!node.readVia) {
-    throw new BrainError({ code: "multi_key_read_failed", message: "The client cannot read an alternate key." });
-  }
-  const range = pageRange(filter);
-  const cursorText = typeof cursor === "string" && cursor.length > 0 ? cursor : undefined;
-  const page = await node.readVia({
-    schemaHash: schema,
-    via: name,
-    range,
-    limit,
-    ...(cursorText ? { cursor: cursorText } : {}),
-  });
+export type KeyPageRequest = {
+  schema: string;
+  name: string;
+  filter: unknown;
+  fields: readonly string[];
+  limit?: number;
+  cursor?: unknown;
+};
+
+function cursorText(cursor: unknown): string | undefined {
+  return typeof cursor === "string" && cursor.length > 0 ? cursor : undefined;
+}
+
+function namedPageFromRows(
+  schema: string,
+  name: string,
+  range: { hash: string },
+  fields: readonly string[],
+  rows: QueryRow[],
+  nextCursor: string | null,
+): NamedPage {
   const definition = ownedDefinition(schema);
   const results: NamedRow[] = [];
-  for (const row of page.rows) {
+  for (const row of rows) {
     if (!row.key?.hash) {
       throw new BrainError({
         code: "multi_key_read_failed",
@@ -121,9 +126,83 @@ export async function keyPage(
     }
     results.push({ ...row, fields: projectFields(row.fields, fields), matched_key: matched });
   }
-  const next = page.nextCursor;
-  if (next === null) return { results, has_more: false };
-  return { results, has_more: true, next_cursor: next };
+  if (nextCursor === null) return { results, has_more: false };
+  return { results, has_more: true, next_cursor: nextCursor };
+}
+
+async function keyPageVia(
+  node: NodeClient, schema: string, name: string,
+  filter: unknown, fields: readonly string[], limit = 1000, cursor?: unknown,
+): Promise<NamedPage> {
+  if (!node.readVia) {
+    throw new BrainError({ code: "multi_key_read_failed", message: "The client cannot read an alternate key." });
+  }
+  const range = pageRange(filter);
+  const cursorValue = cursorText(cursor);
+  const page = await node.readVia({
+    schemaHash: schema,
+    via: name,
+    range,
+    limit,
+    ...(cursorValue ? { cursor: cursorValue } : {}),
+  });
+  return namedPageFromRows(schema, name, range, fields, page.rows, page.nextCursor);
+}
+
+/** One `/v1/read` for every named-key page. A longer list is chunked at 64. */
+export async function keyPages(
+  node: NodeClient,
+  requests: readonly KeyPageRequest[],
+): Promise<NamedPage[]> {
+  if (requests.length === 0) return [];
+  if (!node.readBatch) {
+    const out: NamedPage[] = [];
+    for (const req of requests) {
+      out.push(await keyPageVia(node, req.schema, req.name, req.filter, req.fields, req.limit ?? 1000, req.cursor));
+    }
+    return out;
+  }
+  const ranges: BatchRangeRead[] = [];
+  const parsed: Array<{ hash: string }> = [];
+  for (const req of requests) {
+    const range = pageRange(req.filter);
+    const cursor = cursorText(req.cursor);
+    ranges.push({
+      kind: "range",
+      schemaHash: req.schema,
+      via: req.name,
+      range,
+      // The alternate address is computed from the full record. Projection
+      // happens in namedPageFromRows, after that address exists.
+      fields: [],
+      limit: req.limit ?? 1000,
+      ...(cursor ? { cursor } : {}),
+    });
+    parsed.push(range);
+  }
+  const hits = await node.readBatch(ranges);
+  return hits.map((hit, index) => {
+    const req = requests[index]!;
+    if (hit.kind !== "range") {
+      throw new BrainError({
+        code: "record_read_incomplete",
+        message: "LastDB returned an unexpected named-key read.",
+      });
+    }
+    if (hit.error) throw hit.error;
+    return namedPageFromRows(req.schema, req.name, parsed[index]!, req.fields, hit.rows, hit.nextCursor);
+  });
+}
+
+export async function keyPage(
+  node: NodeClient, schema: string, name: string,
+  filter: unknown, fields: readonly string[], limit = 1000, cursor?: unknown,
+): Promise<NamedPage> {
+  if (node.readBatch) {
+    const [page] = await keyPages(node, [{ schema, name, filter, fields, limit, cursor }]);
+    return page!;
+  }
+  return keyPageVia(node, schema, name, filter, fields, limit, cursor);
 }
 
 export async function keyRows(

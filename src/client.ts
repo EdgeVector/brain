@@ -157,7 +157,7 @@ export type QueryResponse = {
   has_more?: boolean;
 };
 
-/** One live record identity returned by Mini's keys-only `GET /api/list`. */
+/** One live record identity from a keys-only read. */
 export type SchemaRecordKey = {
   hash: string;
   range?: string;
@@ -528,6 +528,51 @@ export type BatchMutationOptions = {
   durability?: "durable";
 };
 
+/** One point inside a batched POST /v1/read. `range` null reads a hash key. */
+export type BatchPointRead = {
+  kind: "point";
+  schemaHash: string;
+  fields: readonly string[];
+  hash: string;
+  range?: string | null;
+  file?: boolean;
+};
+
+/** One range or alternate-key page inside a batched POST /v1/read. */
+export type BatchRangeRead = {
+  kind: "range";
+  schemaHash: string;
+  fields: readonly string[];
+  via?: string;
+  range: { hash: string; prefix?: string; start?: string; end?: string };
+  limit?: number;
+  cursor?: string;
+};
+
+export type BatchRead = BatchPointRead | BatchRangeRead;
+
+export type BatchPointHit = {
+  kind: "point";
+  row: QueryRow | null;
+  error: BrainError | null;
+};
+
+export type BatchRangeHit = {
+  kind: "range";
+  rows: QueryRow[];
+  nextCursor: string | null;
+  error: BrainError | null;
+};
+
+export type BatchReadHit = BatchPointHit | BatchRangeHit;
+
+/** Keys that share a schema and a field list. `readPointGroups` keeps this grouping. */
+export type PointReadGroup = {
+  schemaHash: string;
+  fields: readonly string[];
+  keys: ReadonlyArray<{ hash: string; range?: string | null }>;
+};
+
 export type NodeClient = {
   baseUrl: string;
   userHash: string;
@@ -643,9 +688,14 @@ export type NodeClient = {
     fields: string[];
     keys: Array<{ hash: string; range?: string }>;
   }): Promise<QueryRow[]>;
-  // Admin/offline membership primitive: GET /api/list returns storage keys
-  // only, never record values. Optional so legacy hand-built test doubles do not
-  // all need to grow the newly-shipped Mini route at once.
+  // One POST /v1/read for many independent items. Results line up with
+  // `items`. At most 64 items go on one request; a longer list is sent as
+  // successive requests. A missing record is an empty row, not an error.
+  // Any other item error is returned on that item so the caller can apply
+  // the same policy a single read used. A failure of the request itself throws.
+  readBatch?(items: readonly BatchRead[]): Promise<BatchReadHit[]>;
+  // Admin/offline membership primitive: a keys-only read returns storage keys
+  // only, never record values. Optional so hand-built clients stay small.
   listRecordKeys?(
     schemaHash: string,
     opts?: { limit?: number; cursor?: string },
@@ -1067,6 +1117,12 @@ export function newNodeClient(opts: {
       }
       return rows;
     },
+    async readBatch(items) {
+      if (items.length === 0) return [];
+      const reads = items.map((item) => batchReadItem(openSchema(item.schemaHash).wire, item));
+      const results = await sdkRead(reads);
+      return results.map((result, index) => interpretBatchRead(result, items[index]!));
+    },
     async listRecordKeys(schemaHash, listOpts = {}) {
       const { wire, schema } = openSchema(schemaHash);
       if (!hasRecent(schema)) {
@@ -1186,6 +1242,100 @@ export function newNodeClient(opts: {
 
 const APP_READ_BATCH = 64;
 
+/**
+ * Read every group's keys in one `/v1/read` list (successive chunks of 64).
+ * Each group's rows are the hits only, in key order, the same as `queryByKeys`.
+ * An empty schema or an empty key list contributes no request. An item error
+ * throws, matching a single `queryByKeys` call.
+ */
+export async function readPointGroups(
+  node: NodeClient,
+  groups: readonly PointReadGroup[],
+): Promise<QueryRow[][]> {
+  const out = groups.map(() => [] as QueryRow[]);
+  const flat: BatchPointRead[] = [];
+  const where: number[] = [];
+  groups.forEach((group, groupIndex) => {
+    if (!group.schemaHash || group.keys.length === 0) return;
+    for (const key of group.keys) {
+      flat.push({
+        kind: "point",
+        schemaHash: group.schemaHash,
+        fields: group.fields,
+        hash: key.hash,
+        range: key.range && key.range.length > 0 ? key.range : null,
+      });
+      where.push(groupIndex);
+    }
+  });
+  if (flat.length === 0) return out;
+  const hits = node.readBatch
+    ? await node.readBatch(flat)
+    : await readPointsOneByOne(node, flat);
+  hits.forEach((hit, index) => {
+    if (hit.kind !== "point") {
+      throw new BrainError({
+        code: "record_read_incomplete",
+        message: "LastDB returned an unexpected read.",
+      });
+    }
+    if (hit.error) throw hit.error;
+    if (hit.row) out[where[index]!]!.push(hit.row);
+  });
+  return out;
+}
+
+async function readPointsOneByOne(
+  node: NodeClient,
+  items: readonly BatchPointRead[],
+): Promise<BatchPointHit[]> {
+  const out: BatchPointHit[] = [];
+  for (const item of items) {
+    try {
+      const fields = [...item.fields];
+      const range = item.range && item.range.length > 0 ? item.range : undefined;
+      let row: QueryRow | null = null;
+      if (node.queryByKeys) {
+        const rows = await node.queryByKeys({
+          schemaHash: item.schemaHash,
+          fields,
+          keys: [{ hash: item.hash, ...(range ? { range } : {}) }],
+        });
+        row = rows[0] ?? null;
+      } else if (node.queryByKey && range === undefined) {
+        row = await node.queryByKey({
+          schemaHash: item.schemaHash,
+          fields,
+          keyHash: item.hash,
+          ...(item.file ? { file: true } : {}),
+        });
+      } else {
+        const res = await node.queryAll({
+          schemaHash: item.schemaHash,
+          fields,
+          filter: range
+            ? { HashRangeKey: { hash: item.hash, range } }
+            : { HashKey: item.hash },
+        });
+        row = res.results[0] ?? null;
+      }
+      out.push({ kind: "point", row, error: null });
+    } catch (err) {
+      out.push({
+        kind: "point",
+        row: null,
+        error: err instanceof BrainError
+          ? err
+          : new BrainError({
+              code: "record_read_failed",
+              message: err instanceof Error ? err.message : String(err),
+            }),
+      });
+    }
+  }
+  return out;
+}
+
 function wireSchemaName(schemaHash: string): string {
   const name = schemaHash.trim();
   if (name.length === 0 || /^[a-f0-9]{64}$/.test(name)) {
@@ -1270,6 +1420,38 @@ function onePoint(result: ReadResult, fields: readonly string[]): QueryRow | nul
     });
   }
   return page.rows[0] ?? null;
+}
+
+function batchReadItem(wire: string, item: BatchRead): ReadItem {
+  if (item.kind === "point") {
+    const range = item.range && item.range.length > 0 ? item.range : null;
+    return pointRead(wire, item.hash, range, item.file === true);
+  }
+  const cursor = item.cursor && item.cursor.length > 0 ? item.cursor : undefined;
+  return {
+    schema: wire,
+    range: rangeSpec(item.range.hash, item.range),
+    ...(item.via && item.via.length > 0 ? { via: item.via } : {}),
+    ...(item.limit !== undefined ? { limit: item.limit } : {}),
+    ...(cursor ? { cursor } : {}),
+  };
+}
+
+function interpretBatchRead(result: ReadResult, item: BatchRead): BatchReadHit {
+  try {
+    if (item.kind === "point") {
+      return { kind: "point", row: onePoint(result, item.fields), error: null };
+    }
+    const page = takeRecords(result, item.fields);
+    return { kind: "range", rows: page.rows, nextCursor: page.nextCursor, error: null };
+  } catch (err) {
+    if (err instanceof BrainError) {
+      return item.kind === "point"
+        ? { kind: "point", row: null, error: err }
+        : { kind: "range", rows: [], nextCursor: null, error: err };
+    }
+    throw err;
+  }
 }
 
 function pointRead(schema: string, hash: string, range: string | null, file = false): ReadItem {
@@ -2095,33 +2277,6 @@ function fetchTransport(
           parsed = JSON.parse(res.text);
         } catch {
           parsed = null;
-        }
-      }
-      if (
-        method === "POST" &&
-        path === "/api/query" &&
-        parsed &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed) &&
-        options.body &&
-        typeof options.body === "object" &&
-        !Array.isArray(options.body)
-      ) {
-        const responseBody = parsed as Record<string, unknown>;
-        const requestBody = options.body as Record<string, unknown>;
-        if (responseBody.limit === undefined && typeof requestBody.limit === "number") {
-          responseBody.limit = requestBody.limit;
-        }
-        if (responseBody.offset === undefined && typeof requestBody.offset === "number") {
-          responseBody.offset = requestBody.offset;
-        }
-        if (responseBody.returned_count === undefined) {
-          const rows = Array.isArray(responseBody.results)
-            ? responseBody.results
-            : Array.isArray(responseBody.rows)
-              ? responseBody.rows
-              : null;
-          if (rows !== null) responseBody.returned_count = rows.length;
         }
       }
       return { status: res.status, body: parsed };

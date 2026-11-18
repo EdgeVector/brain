@@ -22,7 +22,7 @@ import {
   type GraphEdge,
   type GraphEdgeType,
 } from "./graph-edge.ts";
-import { findBySlug, normalizeSlug } from "./record.ts";
+import { normalizeSlug, probeSlugs } from "./record.ts";
 import { RECORD_TYPES, type RecordType } from "./schemas.ts";
 
 /** Which way to walk an edge. `both` treats the graph as undirected. */
@@ -539,22 +539,20 @@ function defaultRecordExists(
   // on a half-initialised config — a confident wrong answer, and the loudest
   // possible one. Unknown is not absent.
   if (types.length === 0) return async () => true;
+  const readable = types.filter((type) => {
+    const hash = (cfg.schemaHashes as Record<string, string | undefined>)[type];
+    return typeof hash === "string" && hash.length > 0;
+  });
   return async (slug: string) => {
-    const hits = await Promise.all(
-      types.map(async (type) => {
-        const hash = (cfg.schemaHashes as Record<string, string | undefined>)[type];
-        if (!hash) return false;
-        try {
-          return (await findBySlug(node, type, hash, slug)) !== null;
-        } catch {
-          // A read failure is not evidence of absence. Treating it as such
-          // would report a live record as dangling on a transient node blip,
-          // which is exactly the false alarm a health check must not raise.
-          return true;
-        }
-      }),
-    );
-    return hits.some(Boolean);
+    if (readable.length === 0) return false;
+    // An item error is not absence: the old per-type catch returned true.
+    // A failure of the shared request is the same answer, with no second pass.
+    try {
+      const probed = await probeSlugs(node, cfg, readable.map((type) => ({ type, slug })));
+      return probed.some((probe) => probe.status !== "miss");
+    } catch {
+      return true;
+    }
   };
 }
 

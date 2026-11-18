@@ -467,8 +467,8 @@ function warnSkippedRows(type: RecordType, slugs: readonly string[]): void {
 /**
  * Whole, live records for `slugs`, read from the PRODUCT schema (never from an
  * index snapshot), with ONE keyed read. A slug the read does not return is
- * retried (bounded, with backoff: an empty read is a known flake of
- * `/api/query`). If any is still missing, `onMissing: "throw"` THROWS
+ * retried (bounded, with backoff: an empty read is a known flake). If any is
+ * still missing, `onMissing: "throw"` THROWS
  * `index_row_incomplete` (a caller about to compare, rebuild or delete on these
  * bodies must not proceed on a partial answer) and `"skip"` returns them in
  * `missing`. A record whose product row is soft-deleted maps to null (it is not
@@ -516,8 +516,8 @@ export async function readFullRecords(
 }
 
 /**
- * Explicit admin/offline schema drain. Mini enumerates live storage keys via
- * `GET /api/list`; brain then point-gets each slug. No record value is read by the
+ * Explicit admin/offline schema drain. A keys-only read lists live storage
+ * keys; brain then point-gets each slug. No record value is read by the
  * membership walk and no request opts into the retired full-schema scan path.
  */
 export async function listRecordsAdminScan(
@@ -536,7 +536,7 @@ export async function listRecordsAdminScan(
     throw new BrainError({
       code: "admin_list_not_supported",
       message: "This node client does not support the keys-only admin list path.",
-      hint: "Use the production NodeClient against a Mini version that serves GET /api/list.",
+      hint: "Use the production NodeClient against a Mini version that serves a keys-only read.",
     });
   }
   const rows: QueryRow[] = [];
@@ -580,8 +580,8 @@ export async function listRecordsAdminScan(
     if (page.nextCursor === null || seenCursors.has(page.nextCursor)) {
       throw new BrainError({
         code: "list_keys_pagination_stalled",
-        message: `Node GET /api/list did not advance its cursor while listing ${type} records.`,
-        hint: "Retry after checking the node's keys-only list route; brain will not return a silently incomplete admin drain.",
+        message: `The keys-only read did not advance its cursor while listing ${type} records.`,
+        hint: "Retry after checking the node's keys-only read; brain will not return a silently incomplete admin drain.",
       });
     }
     seenCursors.add(page.nextCursor);
@@ -590,7 +590,7 @@ export async function listRecordsAdminScan(
   if (!complete) {
     throw new BrainError({
       code: "list_keys_pagination_limit",
-      message: `Node GET /api/list exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
+      message: `The keys-only read exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
       hint: "Retry with a healthy node; brain will not return a silently truncated admin drain.",
     });
   }
@@ -654,7 +654,7 @@ export async function completeKeyTags(
   return out;
 }
 
-// The minimal `/api/query` projection that still answers "did the corpus
+// The minimal keyed projection that still answers "did the corpus
 // change?". `ask` runs this BEFORE deciding whether to do a full body fetch:
 // on a warm cache hit the body fetch is skipped entirely, turning the corpus
 // load from O(all records, full bodies) into O(this cheap listing). We pull
@@ -686,8 +686,7 @@ export async function listRecordKeys(
 }
 
 // Page size for the no-match probe/hint paths (`hasAnyLiveRecord`,
-// `listLiveSlugsPage`). Matches the node's own `/api/query` default page
-// (DEFAULT_QUERY_LIMIT=100 in fold_db_node) — small enough that a probe on a
+// `listLiveSlugsPage`). A page of 100 is small enough that a probe on a
 // populated brain stays a single cheap round trip, large enough that a page
 // made entirely of tombstones is vanishingly unlikely to hide a live record.
 export const NO_MATCH_PROBE_PAGE_LIMIT = 100;
@@ -723,22 +722,83 @@ export async function listLiveSlugsPage(
   return slugs;
 }
 
-// One body-free sample per distinct record schema, read in parallel. A sample
-// with no live slug is not a complete membership count. Read errors propagate.
+/**
+ * One body-free page per schema hash, in one `/v1/read`. A missing record is
+ * an empty page. Any other item error is returned on that hash. A failure of
+ * the request itself throws: the per-schema HTTP isolation of the old fan-out
+ * is gone, because the schemas share one request.
+ */
+export async function sampleLiveSlugPages(
+  node: NodeClient,
+  schemaHashes: readonly string[],
+  limit: number = NO_MATCH_PROBE_PAGE_LIMIT,
+): Promise<Array<{ slugs: string[] } | { error: unknown }>> {
+  if (schemaHashes.length === 0) return [];
+  if (!node.readBatch) {
+    const out: Array<{ slugs: string[] } | { error: unknown }> = [];
+    for (const schemaHash of schemaHashes) {
+      try {
+        out.push({ slugs: await listLiveSlugsPage(node, schemaHash, limit) });
+      } catch (err) {
+        out.push({ error: err });
+      }
+    }
+    return out;
+  }
+  const hits = await node.readBatch(schemaHashes.map((schemaHash) => ({
+    kind: "range" as const,
+    schemaHash,
+    via: "recent",
+    range: { hash: "all" },
+    fields: LIVE_SLUG_PAGE_FIELDS,
+    limit,
+  })));
+  return hits.map((hit, index) => {
+    const schemaHash = schemaHashes[index]!;
+    if (hit.kind !== "range") {
+      return {
+        error: new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned an unexpected read.",
+        }),
+      };
+    }
+    if (hit.error) return { error: hit.error };
+    const slugs: string[] = [];
+    for (const row of hit.rows) {
+      if (!row.key?.hash) {
+        return {
+          error: new BrainError({
+            code: "multi_key_read_failed",
+            message: `The ${schemaHash}/recent read did not return a valid named-key page.`,
+          }),
+        };
+      }
+      const f = (row.fields ?? {}) as Record<string, unknown>;
+      if (arrayStringField(f, "tags").includes(TOMBSTONE_TAG)) continue;
+      slugs.push(stringField(f, "slug"));
+    }
+    return { slugs };
+  });
+}
+
+// One body-free sample per distinct record schema. A sample with no live slug
+// is not a complete membership count. A schema-not-found error on one hash is
+// an empty sample. Any other item error fails the call, as one probe's throw
+// failed the old parallel read.
 export async function hasAnyLiveRecord(
   node: NodeClient,
   cfg: { schemaHashes: Record<string, string> },
 ): Promise<boolean> {
-  const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
-  const pages = await Promise.all(hashes.map(async (schemaHash) => {
-    try {
-      return await listLiveSlugsPage(node, schemaHash, NO_MATCH_PROBE_PAGE_LIMIT);
-    } catch (err) {
-      if (isSchemaNotFoundReadError(err)) return [];
-      throw err;
-    }
-  }));
-  return pages.some((slugs) => slugs.length > 0);
+  const pages = await sampleLiveSlugPages(
+    node,
+    uniqueSchemaHashes(cfg, RECORD_TYPES),
+    NO_MATCH_PROBE_PAGE_LIMIT,
+  );
+  for (const page of pages) {
+    if ("error" in page && !isSchemaNotFoundReadError(page.error)) throw page.error;
+  }
+  return pages.some((page) => "slugs" in page && page.slugs.length > 0);
 }
 
 // A single-record read returns the full text. `cfg` only saves a schema-hash
@@ -797,6 +857,154 @@ export async function findBySlugRaw(
     if (again === null) return null;
     return hydrateRecord(node, cfg ?? null, type, rowToRecord(again, type));
   }
+}
+
+export type SlugProbe =
+  | { status: "hit"; type: RecordType; record: BrainRecord }
+  | { status: "miss" }
+  | { status: "error"; error: unknown };
+
+function probeSchema(
+  type: RecordType,
+  cfg: ListRecordsCfg,
+): { hash: string } | { error: unknown } {
+  try {
+    const hash = schemaHashFor(type, cfg);
+    if (/^[a-f0-9]{64}$/.test(hash.trim())) {
+      return {
+        error: new BrainError({
+          code: "schema_name_required",
+          message:
+            "Brain needs the exact schema name (brain/<Name>). " +
+            "A saved hash pin cannot be used on the app API. Re-run `brain init`.",
+          hint: "Run `brain init` so config stores brain/<Name> for each schema.",
+        }),
+      };
+    }
+    return { hash };
+  } catch (err) {
+    return { error: err };
+  }
+}
+
+async function hydrateProbed(
+  node: NodeClient,
+  cfg: ListRecordsCfg | null,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+  record: BrainRecord,
+): Promise<BrainRecord | null> {
+  try {
+    return await hydrateRecord(node, cfg, type, record);
+  } catch (err) {
+    if (!(err instanceof BrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
+    const readAgain = async (): Promise<QueryRow | null> => {
+      if (node.readBatch) {
+        const [hit] = await node.readBatch([{
+          kind: "point",
+          schemaHash,
+          fields: fieldsFor(type),
+          hash: slug,
+        }]);
+        if (!hit || hit.kind !== "point") {
+          throw new BrainError({
+            code: "record_read_incomplete",
+            message: "LastDB returned an unexpected read.",
+          });
+        }
+        if (hit.error) throw hit.error;
+        return hit.row;
+      }
+      return node.queryByKey
+        ? node.queryByKey({ schemaHash, fields: fieldsFor(type), keyHash: slug })
+        : null;
+    };
+    const again = await readAgain();
+    if (again === null) return null;
+    return hydrateRecord(node, cfg, type, rowToRecord(again, type));
+  }
+}
+
+/**
+ * One point per probe, in one `/v1/read`, results in probe order.
+ * `not_found` is a miss. Any other item error is `error` on that probe, which
+ * is what a single `findBySlug` threw for that type. Tombstones are misses,
+ * and only after hydration, matching `findBySlug`. A failure of the request
+ * itself throws.
+ */
+export async function probeSlugs(
+  node: NodeClient,
+  cfg: ListRecordsCfg | null,
+  probes: readonly { type: RecordType; slug: string }[],
+  opts?: { hydrate?: boolean },
+): Promise<SlugProbe[]> {
+  if (probes.length === 0) return [];
+  const hydrate = opts?.hydrate !== false;
+  const hashes = cfg ?? { schemaHashes: {} };
+  if (!node.readBatch) {
+    const out: SlugProbe[] = [];
+    for (const probe of probes) {
+      try {
+        const hash = schemaHashFor(probe.type, hashes);
+        const record = await findBySlug(
+          node, probe.type, hash, probe.slug, cfg ?? undefined,
+          hydrate ? undefined : { hydrate: false },
+        );
+        out.push(record === null ? { status: "miss" } : { status: "hit", type: probe.type, record });
+      } catch (err) {
+        out.push({ status: "error", error: err });
+      }
+    }
+    return out;
+  }
+  const out: SlugProbe[] = new Array(probes.length);
+  const pending: Array<{ index: number; hash: string }> = [];
+  probes.forEach((probe, index) => {
+    const opened = probeSchema(probe.type, hashes);
+    if ("error" in opened) out[index] = { status: "error", error: opened.error };
+    else pending.push({ index, hash: opened.hash });
+  });
+  if (pending.length === 0) return out;
+  const hits = await node.readBatch(pending.map(({ index, hash }) => ({
+    kind: "point" as const,
+    schemaHash: hash,
+    fields: fieldsFor(probes[index]!.type),
+    hash: probes[index]!.slug,
+  })));
+  for (let i = 0; i < pending.length; i += 1) {
+    const place = pending[i]!;
+    const probe = probes[place.index]!;
+    const hit = hits[i];
+    try {
+      if (!hit || hit.kind !== "point") {
+        throw new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned an unexpected read.",
+        });
+      }
+      if (hit.error) throw hit.error;
+      if (!hit.row) {
+        out[place.index] = { status: "miss" };
+        continue;
+      }
+      let record = rowToRecord(hit.row, probe.type);
+      if (hydrate) {
+        const hydrated = await hydrateProbed(node, cfg, probe.type, place.hash, probe.slug, record);
+        if (hydrated === null) {
+          out[place.index] = { status: "miss" };
+          continue;
+        }
+        record = hydrated;
+      }
+      out[place.index] = isTombstoned(record)
+        ? { status: "miss" }
+        : { status: "hit", type: probe.type, record };
+    } catch (err) {
+      out[place.index] = { status: "error", error: err };
+    }
+  }
+  return out;
 }
 
 /**
@@ -874,7 +1082,7 @@ export async function findBySlugsRaw(
 }
 
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
-// case). The same /api/query intermittently returns 0 results on a daemon
+// case). A keyed read intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:
 // `brain put` lands and `brain search` returns the row, but `brain get`
 // flakes ~1/5 of the time. scripts/parity-smoketest.sh rides this out by
@@ -896,7 +1104,7 @@ export const READ_RETRY_BACKOFF_MS = 250;
 // 2026-06-05).
 //
 // Cap = 2 keeps a single retry for the documented saturated-daemon empty-
-// result flake (the row exists but `/api/query` returns []) while making the
+// result flake (the row exists but the keyed read returns []) while making the
 // fresh-node case cost ~1 extra query (~250 ms) instead of ~1100 ms.
 // Verify-after-write callers that *expect* the row to exist still go through
 // `withReadRetry` with the full budget — they are not affected.
@@ -965,7 +1173,7 @@ export async function withReadRetry<T>(
 // Verify-after-write helper. Used by `brain put` after `createRecord` /
 // `updateRecord` resolves: read the row back with the FULL withReadRetry
 // budget (5×250 ms) before reporting "created"/"updated" to the caller. The
-// underlying fold_db `/api/mutation` is not read-your-writes consistent —
+// The record write is not read-your-writes consistent —
 // the write returns before the row is queryable — so a tight put→get loop
 // (especially the MCP-agent path, where get fires in the same warm process
 // with no bun cold-start to mask the visibility window) saw the just-
@@ -998,7 +1206,7 @@ export async function verifyRecordVisible(
 
 // Vector-index visibility check for the WRITE confirmation path (MCP
 // `brain_put` only — see mcp/server.ts). `verifyRecordVisible` above proves
-// the row is queryable via /api/query (the record-list / BM25 surface that
+// the row is visible to a keyed read (the record-list / BM25 surface that
 // `ask` and `list` read), but it says NOTHING about the NATIVE (vector) index
 // that `brain_search` and `ask`'s vector leg read: fold_db indexes the
 // embedding asynchronously AFTER the mutation returns, so a tight
@@ -1286,19 +1494,15 @@ export async function findCrossTypeSlugCollisions(
   slug: string,
 ): Promise<RecordType[]> {
   const others = RECORD_TYPES.filter((t) => t !== selfType);
-  const hits = await Promise.all(
-    others.map(async (t): Promise<RecordType | null> => {
-      try {
-        const hash = schemaHashFor(t, cfg);
-        const existing = await findBySlug(node, t, hash, slug);
-        return existing ? t : null;
-      } catch {
-        // Best-effort: a probe error/timeout on one type just skips that type.
-        return null;
-      }
-    }),
-  );
-  return hits.filter((t): t is RecordType => t !== null);
+  // A probe error used to be swallowed per type. An item error still is.
+  // A failure of the shared request is also "no collision": the note must
+  // not block the create, and this does not retry the types one by one.
+  try {
+    const probed = await probeSlugs(node, cfg, others.map((type) => ({ type, slug })));
+    return probed.flatMap((probe) => (probe.status === "hit" ? [probe.type] : []));
+  } catch {
+    return [];
+  }
 }
 
 // Render the cross-type collision note for the create verbs. Returns null when
@@ -1335,7 +1539,7 @@ export type ResolvedRecord = {
   record: BrainRecord;
   // Non-empty only when an UNTYPED lookup matched more than one schema and
   // `ambiguousTypePrecedence` picked this one. The other matches are already
-  // paid for — `resolveBySlug` point-reads every type in parallel — so dropping
+  // paid for — `resolveBySlug` reads every candidate type in one list — so dropping
   // them on the floor threw away an answer the caller had already bought.
   //
   // Measured 2026-09-01 on the primary: 55 `papercut-*` slugs exist as BOTH a
@@ -1594,21 +1798,16 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   }
   const sweepTypes = missedHint === null ? types : types.filter((t) => t !== missedHint);
 
-  // Per-type retry, run in parallel. The previous shape wrapped one
-  // outer withReadRetry around a sequential sweep that returned the
-  // FIRST attempt with any hit — but the `/api/query` top-100 page
-  // flake nulls a real row out of one schema's slice on the same
-  // attempt another schema catches its row. With the outer-retry
-  // shape, an untyped lookup of an ambiguous slug then surfaced as a
-  // single match: `brain get` / `status` / `delete` would silently
-  // operate on the one type that caught it and skip the sibling.
-  // Giving each type its own retry budget lets the flaked type
-  // recover within its own loop, so ambiguity is detected before the
-  // helper returns.
-  const perType = await Promise.all(sweepTypes.map(probeType));
-  const matches: ResolvedRecord[] = perType.filter(
-    (m): m is ResolvedRecord => m !== null,
+  // One read item per candidate type, in sweep order. An item error fails
+  // the lookup at the first such type. `not_found` stays a miss, which is
+  // what one `findBySlug` returned for that type.
+  const probed = await probeSlugs(
+    opts.node,
+    opts.cfg,
+    sweepTypes.map((type) => ({ type, slug: opts.slug })),
+    { hydrate: readOpts?.hydrate !== false },
   );
+  const matches = matchesFromProbes(probed, opts.filter);
 
   if (matches.length === 0) {
     if (opts.normalizedSlugFallback === true) {
@@ -1700,23 +1899,32 @@ async function findNormalizedSlugMatches(
   const candidateSlugs = normalizedSlugLookupVariants(opts.slug);
   if (candidateSlugs.length === 0) return [];
 
+  const probes: Array<{ type: RecordType; slug: string }> = [];
+  for (const type of types) {
+    for (const candidateSlug of candidateSlugs) probes.push({ type, slug: candidateSlug });
+  }
+  const probed = await probeSlugs(opts.node, opts.cfg, probes, { hydrate: readOpts?.hydrate !== false });
   const seen = new Set<string>();
   const matches: ResolvedRecord[] = [];
-  for (const t of types) {
-    const hash = schemaHashFor(t, opts.cfg);
-    for (const candidateSlug of candidateSlugs) {
-      const row = opts.raw === true
-        ? await findBySlugRaw(opts.node, t, hash, candidateSlug, opts.cfg, readOpts)
-        : await findBySlug(opts.node, t, hash, candidateSlug, opts.cfg, readOpts);
-      if (row === null) continue;
-      if (opts.raw && isTombstoned(row)) continue;
-      if (opts.filter && !opts.filter(row, t)) continue;
+  for (const match of matchesFromProbes(probed, opts.filter)) {
+    const key = `${match.type}:${match.record.slug}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    matches.push(match);
+  }
+  return matches;
+}
 
-      const key = `${t}:${row.slug}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      matches.push({ type: t, record: row });
-    }
+function matchesFromProbes(
+  probed: readonly SlugProbe[],
+  filter: ((record: BrainRecord, type: RecordType) => boolean) | undefined,
+): ResolvedRecord[] {
+  const matches: ResolvedRecord[] = [];
+  for (const probe of probed) {
+    if (probe.status === "error") throw probe.error;
+    if (probe.status !== "hit") continue;
+    if (filter && !filter(probe.record, probe.type)) continue;
+    matches.push({ type: probe.type, record: probe.record });
   }
   return matches;
 }

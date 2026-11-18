@@ -4,7 +4,7 @@
 import type { Transport } from "@lastdb/app-sdk";
 export type FieldAliasProfiles = Record<string, Record<string, string>>;
 type ObjectValue = Record<string, unknown>;
-const dataRoute = /^\/(?:api\/(?:query|queries|mutation|mutations|records|conflicts|app\/search|db\/file-blob|sharing\/deliver)|v1\/(?:read|write))(?:\/|$)/;
+const dataRoute = /^\/(?:api\/app\/search|v1\/(?:read|write))(?:\/|$)/;
 function object(value: unknown): ObjectValue | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : null;
 }
@@ -45,7 +45,7 @@ function encodeItem(input: unknown, profiles: FieldAliasProfiles): unknown {
     if (expected && typeof expected.field === "string") result.expected = {...expected, field:rename(expected.field, aliases, true)};
   }
   if (object(value.mutation)) result.mutation = encodeItem(value.mutation, profiles);
-  for (const key of ["queries", "mutations", "reads", "keys", "legs"]) {
+  for (const key of ["mutations", "reads", "keys", "legs"]) {
     if (Array.isArray(value[key])) result[key] = (value[key] as unknown[]).map((item) => encodeItem(item, profiles));
   }
   return result;
@@ -69,29 +69,8 @@ function decodeItem(input: unknown, profiles: FieldAliasProfiles, fallback?: Rec
   return result;
 }
 export function encodeFieldRequest(path: string, body: unknown, profiles: FieldAliasProfiles = {}): unknown {
-  if (!dataRoute.test(path) && path !== "/api/db/put-blob") return body;
-  const encoded = encodeItem(body, profiles);
-  const value = object(encoded);
-  if (path === "/api/query" && value) delete value.fields;
-  if (path === "/api/queries/batch" && Array.isArray(value?.queries)) {
-    for (const item of value.queries) {
-      const query = object(item);
-      if (query) delete query.fields;
-    }
-  }
-  return encoded;
-}
-function projectQueryReply(reply: unknown, fields: unknown): unknown {
-  const value = object(reply);
-  if (!value || !Array.isArray(fields)) return reply;
-  if (Array.isArray(value.results)) {
-    return { ...value, results: value.results.map((item) => {
-      const row = object(item);
-      const values = object(row?.fields);
-      return values ? { ...row, fields: Object.fromEntries(Object.entries(values).filter(([name]) => fields.includes(name))) } : item;
-    }) };
-  }
-  return value.data ? { ...value, data: projectQueryReply(value.data, fields) } : value;
+  if (!dataRoute.test(path)) return body;
+  return encodeItem(body, profiles);
 }
 export function decodeFieldReply(path: string, request: unknown, reply: unknown, profiles: FieldAliasProfiles = {}): unknown {
   if (!dataRoute.test(path)) return reply;
@@ -103,16 +82,7 @@ export function decodeFieldReply(path: string, request: unknown, reply: unknown,
       return decodeItem(item, profiles, read ? profile(read, profiles) : undefined);
     }) };
   }
-  if (input && Array.isArray(input.queries) && output && Array.isArray(output.results)) {
-    return {...output, results:output.results.map((item, index) => {
-      const query = object((input.queries as unknown[])[index]);
-      const decoded = decodeItem(item, profiles, query ? profile(query, profiles) : undefined);
-      const response = object(decoded);
-      return response ? { ...response, response: projectQueryReply(response.response, query?.fields) } : decoded;
-    })};
-  }
-  const decoded = decodeItem(reply, profiles, input ? profile(input, profiles) : undefined);
-  return path === "/api/query" ? projectQueryReply(decoded, input?.fields) : decoded;
+  return decodeItem(reply, profiles, input ? profile(input, profiles) : undefined);
 }
 export function fieldAliasTransport(inner: Transport, profiles: FieldAliasProfiles = {}): Transport {
   return {
