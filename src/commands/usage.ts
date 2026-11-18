@@ -1,6 +1,6 @@
 // `brain doctor --usage` — adoption telemetry (G13).
 //
-// Iterates every record across the registered schemas via /api/query and
+// Iterates every record across the registered schemas with a keyed read and
 // counts records created in the last N days (default 7), broken down by
 // record type.
 //

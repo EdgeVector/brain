@@ -761,9 +761,8 @@ export const attachmentBlobSchema: AddSchemaRequest = {
 };
 
 // v2 attachment storage: one BrainAttachmentFile record per unique content
-// hash. The raw bytes are the record's file (LastDB API 23): `put-blob` stores
-// them with the record in one write, and `fetch-blob` reads them by schema and
-// key. No field names the file.
+// hash. The raw bytes are the record's LastDB file. A create or replace names
+// that file by path, and a read reports the file marker. No field names the file.
 export const attachmentFileSchema: AddSchemaRequest = {
   schema: {
     name: "BrainAttachmentFile",
@@ -803,11 +802,11 @@ export const attachmentFileSchema: AddSchemaRequest = {
 };
 
 // One immutable BrainBodyFile per spilled field and content hash. The full text
-// is the record's own LastDB file (API 23), stored with the record by one
-// `put-blob` and read by `fetch-blob` with schema and key. Reads also accept
-// the original per-field sidecar key. Knowledge schemas gain no field: a new
-// field would re-hash every record. The record keeps a head and a marker line
-// that names this sidecar.
+// is the record's own LastDB file, stored with the record by one create or
+// replace and read back by schema and key. Reads also accept the original
+// per-field sidecar key. Knowledge schemas gain no field: a new field would
+// re-hash every record. The record keeps a head and a marker line that names
+// this sidecar.
 export const bodyFileSchema: AddSchemaRequest = {
   schema: {
     name: "BrainBodyFile",

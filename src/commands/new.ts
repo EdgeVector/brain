@@ -4,7 +4,7 @@
 // `task new` existed as ergonomic verbs; later types were reachable only via `brain put
 // --type <t>` even though their schemas were fully registered. This shared
 // implementation closes that gap without duplicating the slug-exists guard,
-// the /api/query top-100 read-flake hedge, or the parent-design dangling-ref
+// the keyed-read retry, or the parent-design dangling-ref
 // check across six near-identical copies.
 //
 // Only `task` has a per-type extra (`--design <slug>`); the others share the

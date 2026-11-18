@@ -157,7 +157,7 @@ export type QueryResponse = {
   has_more?: boolean;
 };
 
-/** One live record identity returned by Mini's keys-only `GET /api/list`. */
+/** One live record identity from a keys-only read. */
 export type SchemaRecordKey = {
   hash: string;
   range?: string;
@@ -694,9 +694,8 @@ export type NodeClient = {
   // Any other item error is returned on that item so the caller can apply
   // the same policy a single read used. A failure of the request itself throws.
   readBatch?(items: readonly BatchRead[]): Promise<BatchReadHit[]>;
-  // Admin/offline membership primitive: GET /api/list returns storage keys
-  // only, never record values. Optional so legacy hand-built test doubles do not
-  // all need to grow the newly-shipped Mini route at once.
+  // Admin/offline membership primitive: a keys-only read returns storage keys
+  // only, never record values. Optional so hand-built clients stay small.
   listRecordKeys?(
     schemaHash: string,
     opts?: { limit?: number; cursor?: string },
@@ -2278,33 +2277,6 @@ function fetchTransport(
           parsed = JSON.parse(res.text);
         } catch {
           parsed = null;
-        }
-      }
-      if (
-        method === "POST" &&
-        path === "/api/query" &&
-        parsed &&
-        typeof parsed === "object" &&
-        !Array.isArray(parsed) &&
-        options.body &&
-        typeof options.body === "object" &&
-        !Array.isArray(options.body)
-      ) {
-        const responseBody = parsed as Record<string, unknown>;
-        const requestBody = options.body as Record<string, unknown>;
-        if (responseBody.limit === undefined && typeof requestBody.limit === "number") {
-          responseBody.limit = requestBody.limit;
-        }
-        if (responseBody.offset === undefined && typeof requestBody.offset === "number") {
-          responseBody.offset = requestBody.offset;
-        }
-        if (responseBody.returned_count === undefined) {
-          const rows = Array.isArray(responseBody.results)
-            ? responseBody.results
-            : Array.isArray(responseBody.rows)
-              ? responseBody.rows
-              : null;
-          if (rows !== null) responseBody.returned_count = rows.length;
         }
       }
       return { status: res.status, body: parsed };

@@ -226,25 +226,28 @@ function checkRecords(items, expected, selectedFields, allowed) {
 
 async function primaryRows(node, cfg, numbers) {
   const rows = new Map();
-  for (let offset = 0; offset < numbers.length; offset += 100) {
-    const keys = numbers.slice(offset, offset + 100);
-    // One batch read by key returns the records for the title-only operation proof.
-    const queries = types.map((type) => ({ schema_name: cfg.schemaHashes[type], fields,
-      filter: { HashRangeKeys: keys.filter((number) => input(number).type === type).map((number) => [`read-${number}`, ""]) }, limit: 100 }));
-    const response = await node.rawCall("POST", "/api/queries/batch", { queries });
-    const result = response.json?.data ?? response.json;
-    require(response.status === 200 && result?.count === queries.length && result.results?.length === queries.length,
+  const reads = numbers.map((number) => {
+    const item = input(number);
+    return { schema: cfg.schemaHashes[item.type], key: { hash: item.record.slug, range: null } };
+  });
+  // One /v1/read list, at most 64 keys. A missing key is an empty page.
+  // The stored record is compared under `fields`, the same names as before.
+  for (let offset = 0; offset < reads.length; offset += 64) {
+    const chunk = reads.slice(offset, offset + 64);
+    const response = await node.rawCall("POST", "/v1/read", { reads: chunk });
+    const result = response.json;
+    require(response.status === 200 && Array.isArray(result?.results) && result.results.length === chunk.length,
       "The primary batch reply is incomplete");
-    const pages = result.results.map((entry) => {
-      const page = entry.response?.data ?? entry.response;
-      require(entry.status === 200 && page?.ok !== false && page?.has_more === false && Array.isArray(page?.results),
+    for (const page of result.results) {
+      require(page && page.error == null && page.next_cursor == null
+        && Array.isArray(page.records) && page.records.length <= 1,
         "The primary batch contains an incomplete page");
-      return page.results;
-    });
-    for (const row of pages.flat()) {
-      const slug = row.fields.slug;
-      require(!rows.has(slug) && row.key.hash === slug, "The primary read repeats or changes an identity");
-      rows.set(slug, row);
+      const stored = page.records[0];
+      if (!stored) continue;
+      const slug = stored.record?.slug;
+      require(typeof slug === "string" && !rows.has(slug) && stored.key?.hash === slug,
+        "The primary read repeats or changes an identity");
+      rows.set(slug, { fields: stored.record, key: stored.key });
     }
   }
   return rows;

@@ -687,7 +687,7 @@ async function commitSidecar(opts: {
   }
   const key = bodyFileKey(type, slug, field, full.sha256);
   const existing = await readSidecar(node, schemaHash, key);
-  // put-blob writes the fields and the file in one write, so a sidecar with
+  // The write stores the fields and the file together, so a sidecar with
   // these fields has this file.
   if (existing !== null && existing.contentHash === full.sha256 && existing.size === full.buf.length) {
     return { reused: true };

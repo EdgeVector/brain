@@ -467,8 +467,8 @@ function warnSkippedRows(type: RecordType, slugs: readonly string[]): void {
 /**
  * Whole, live records for `slugs`, read from the PRODUCT schema (never from an
  * index snapshot), with ONE keyed read. A slug the read does not return is
- * retried (bounded, with backoff: an empty read is a known flake of
- * `/api/query`). If any is still missing, `onMissing: "throw"` THROWS
+ * retried (bounded, with backoff: an empty read is a known flake). If any is
+ * still missing, `onMissing: "throw"` THROWS
  * `index_row_incomplete` (a caller about to compare, rebuild or delete on these
  * bodies must not proceed on a partial answer) and `"skip"` returns them in
  * `missing`. A record whose product row is soft-deleted maps to null (it is not
@@ -516,8 +516,8 @@ export async function readFullRecords(
 }
 
 /**
- * Explicit admin/offline schema drain. Mini enumerates live storage keys via
- * `GET /api/list`; brain then point-gets each slug. No record value is read by the
+ * Explicit admin/offline schema drain. A keys-only read lists live storage
+ * keys; brain then point-gets each slug. No record value is read by the
  * membership walk and no request opts into the retired full-schema scan path.
  */
 export async function listRecordsAdminScan(
@@ -536,7 +536,7 @@ export async function listRecordsAdminScan(
     throw new BrainError({
       code: "admin_list_not_supported",
       message: "This node client does not support the keys-only admin list path.",
-      hint: "Use the production NodeClient against a Mini version that serves GET /api/list.",
+      hint: "Use the production NodeClient against a Mini version that serves a keys-only read.",
     });
   }
   const rows: QueryRow[] = [];
@@ -580,8 +580,8 @@ export async function listRecordsAdminScan(
     if (page.nextCursor === null || seenCursors.has(page.nextCursor)) {
       throw new BrainError({
         code: "list_keys_pagination_stalled",
-        message: `Node GET /api/list did not advance its cursor while listing ${type} records.`,
-        hint: "Retry after checking the node's keys-only list route; brain will not return a silently incomplete admin drain.",
+        message: `The keys-only read did not advance its cursor while listing ${type} records.`,
+        hint: "Retry after checking the node's keys-only read; brain will not return a silently incomplete admin drain.",
       });
     }
     seenCursors.add(page.nextCursor);
@@ -590,7 +590,7 @@ export async function listRecordsAdminScan(
   if (!complete) {
     throw new BrainError({
       code: "list_keys_pagination_limit",
-      message: `Node GET /api/list exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
+      message: `The keys-only read exceeded ${QUERY_PAGE_LIMIT} pages while listing ${type} records.`,
       hint: "Retry with a healthy node; brain will not return a silently truncated admin drain.",
     });
   }
@@ -654,7 +654,7 @@ export async function completeKeyTags(
   return out;
 }
 
-// The minimal `/api/query` projection that still answers "did the corpus
+// The minimal keyed projection that still answers "did the corpus
 // change?". `ask` runs this BEFORE deciding whether to do a full body fetch:
 // on a warm cache hit the body fetch is skipped entirely, turning the corpus
 // load from O(all records, full bodies) into O(this cheap listing). We pull
@@ -686,8 +686,7 @@ export async function listRecordKeys(
 }
 
 // Page size for the no-match probe/hint paths (`hasAnyLiveRecord`,
-// `listLiveSlugsPage`). Matches the node's own `/api/query` default page
-// (DEFAULT_QUERY_LIMIT=100 in fold_db_node) — small enough that a probe on a
+// `listLiveSlugsPage`). A page of 100 is small enough that a probe on a
 // populated brain stays a single cheap round trip, large enough that a page
 // made entirely of tombstones is vanishingly unlikely to hide a live record.
 export const NO_MATCH_PROBE_PAGE_LIMIT = 100;
@@ -1083,7 +1082,7 @@ export async function findBySlugsRaw(
 }
 
 // Read-flake retry — docs/phase-7-search-latency-spike.md (H2 polluted-daemon
-// case). The same /api/query intermittently returns 0 results on a daemon
+// case). A keyed read intermittently returns 0 results on a daemon
 // whose top-50 budget is saturated by phantom embeddings + orphan schemas:
 // `brain put` lands and `brain search` returns the row, but `brain get`
 // flakes ~1/5 of the time. scripts/parity-smoketest.sh rides this out by
@@ -1105,7 +1104,7 @@ export const READ_RETRY_BACKOFF_MS = 250;
 // 2026-06-05).
 //
 // Cap = 2 keeps a single retry for the documented saturated-daemon empty-
-// result flake (the row exists but `/api/query` returns []) while making the
+// result flake (the row exists but the keyed read returns []) while making the
 // fresh-node case cost ~1 extra query (~250 ms) instead of ~1100 ms.
 // Verify-after-write callers that *expect* the row to exist still go through
 // `withReadRetry` with the full budget — they are not affected.
@@ -1174,7 +1173,7 @@ export async function withReadRetry<T>(
 // Verify-after-write helper. Used by `brain put` after `createRecord` /
 // `updateRecord` resolves: read the row back with the FULL withReadRetry
 // budget (5×250 ms) before reporting "created"/"updated" to the caller. The
-// underlying fold_db `/api/mutation` is not read-your-writes consistent —
+// The record write is not read-your-writes consistent —
 // the write returns before the row is queryable — so a tight put→get loop
 // (especially the MCP-agent path, where get fires in the same warm process
 // with no bun cold-start to mask the visibility window) saw the just-
@@ -1207,7 +1206,7 @@ export async function verifyRecordVisible(
 
 // Vector-index visibility check for the WRITE confirmation path (MCP
 // `brain_put` only — see mcp/server.ts). `verifyRecordVisible` above proves
-// the row is queryable via /api/query (the record-list / BM25 surface that
+// the row is visible to a keyed read (the record-list / BM25 surface that
 // `ask` and `list` read), but it says NOTHING about the NATIVE (vector) index
 // that `brain_search` and `ask`'s vector leg read: fold_db indexes the
 // embedding asynchronously AFTER the mutation returns, so a tight
