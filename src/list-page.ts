@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { BrainError, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
+import { BrainError, readPointGroups, type BatchMutationOp, type NodeClient, type QueryRow } from "./client.ts";
 import { countAfterDelta, parseListCount } from "./count-state.ts";
 import { edgeRange, extractGraphEdges, type GraphEdge } from "./graph-edge.ts";
 import { utf8Head } from "./index-payload.ts";
@@ -7,7 +7,7 @@ import { parseSpillMarker } from "./body-spill.ts";
 import { TOMBSTONE_TAG, isTombstoned, normalizeSlug, parseGenericLinkTag, type BrainRecord } from "./record.ts";
 import { tokenize } from "./tokenize.ts";
 import { namedCards } from "./named-records.ts";
-import { locatorMutations, locatorSchema, readLocators } from "./list-locator.ts";
+import { locatorMutations, locatorReadGroups, locatorSchema, mergeLocatorRows, readLocators } from "./list-locator.ts";
 import {
   BRAIN_EDGE_SET_SCHEMA_KEY,
   BRAIN_LIST_PAGE_SCHEMA_KEY,
@@ -605,35 +605,38 @@ export async function planRecordListSide(opts: {
     }
     const queriedHeads = new Set<string>();
     for (const slot of headKeys.values()) queriedHeads.add(slot.hash);
-    const [locRows, headRows, edgeRows, tokenRows, dirRows] = await Promise.all([
-      readLocators(
-        opts.node,
-        opts.cfg,
-        locatorKeys.map((key) => ({ hash: key.hash, range: key.range })),
-      ),
-      readExact(
-        opts.node,
-        pageSchema,
-        ["blp_h", "blp_r", "blp_page"],
-        [...headKeys.values()].map((slot) => ({ hash: slot.hash, range: HEAD_RANGE })),
-      ),
-      edgeSchema.length > 0
-        ? readExact(opts.node, edgeSchema, ["bes_h", "bes_r", "bes_ids"], [
-            { hash: `es#${opts.type}#${slug}`, range: HEAD_RANGE },
-            { hash: `es#${opts.type}#${slug}`, range: FRONTMATTER_RANGE },
-          ])
-        : Promise.resolve([]),
-      tokenSchema.length > 0
-        ? readExact(opts.node, tokenSchema, ["bts_h", "bts_r", "bts_tokens"], [
-            { hash: `ts#${opts.type}#${slug}`, range: HEAD_RANGE },
-          ])
-        : Promise.resolve([]),
-      dirSchema.length > 0 && opts.next !== null
-        ? readExact(opts.node, dirSchema, ["btd_h", "btd_r", "btd_types"], [
-            { hash: slug, range: DIRECTORY_RANGE },
-          ])
-        : Promise.resolve([]),
+    const locatorPairs = locatorKeys.map((key) => ({ hash: key.hash, range: key.range }));
+    const [compactGroup, legacyGroup] = locatorReadGroups(opts.cfg, locatorPairs);
+    // readExact kept 43 head keys and dropped the rest. An unread head must
+    // not look empty, so the cap stays on this group.
+    const headKeyList = [...headKeys.values()]
+      .slice(0, READ_KEY_CAP)
+      .map((slot) => ({ hash: slot.hash, range: HEAD_RANGE }));
+    const edgeKeyList = edgeSchema.length > 0
+      ? [
+          { hash: `es#${opts.type}#${slug}`, range: HEAD_RANGE },
+          { hash: `es#${opts.type}#${slug}`, range: FRONTMATTER_RANGE },
+        ]
+      : [];
+    const tokenKeyList = tokenSchema.length > 0
+      ? [{ hash: `ts#${opts.type}#${slug}`, range: HEAD_RANGE }]
+      : [];
+    const dirKeyList = dirSchema.length > 0 && opts.next !== null
+      ? [{ hash: slug, range: DIRECTORY_RANGE }]
+      : [];
+    const loaded = await readPointGroups(opts.node, [
+      compactGroup,
+      legacyGroup,
+      { schemaHash: pageSchema, fields: ["blp_h", "blp_r", "blp_page"], keys: headKeyList },
+      { schemaHash: edgeSchema, fields: ["bes_h", "bes_r", "bes_ids"], keys: edgeKeyList },
+      { schemaHash: tokenSchema, fields: ["bts_h", "bts_r", "bts_tokens"], keys: tokenKeyList },
+      { schemaHash: dirSchema, fields: ["btd_h", "btd_r", "btd_types"], keys: dirKeyList },
     ]);
+    const locRows = mergeLocatorRows(locatorPairs, loaded[0] ?? [], loaded[1] ?? []);
+    const headRows = loaded[2] ?? [];
+    const edgeRows = loaded[3] ?? [];
+    const tokenRows = loaded[4] ?? [];
+    const dirRows = loaded[5] ?? [];
 
     for (const row of locRows) {
       const listHash = rowHash(row).startsWith("loc#")

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { writeStoredFile } from "./app-files.ts";
-import { BrainError, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
+import { BrainError, type BatchPointRead, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
 import { writeConfig, type Config } from "./config.ts";
 import type { BrainRecord } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
@@ -328,7 +328,7 @@ async function resolveSpilledField(
  * the stored form under `STORED_FORM`, so the write plan can tell "unchanged"
  * from "legacy text that still needs a spill".
  */
-export async function hydrateRecord(
+async function hydrateRecordOne(
   node: NodeClient,
   cfg: SpillCfg | null,
   type: RecordType,
@@ -356,6 +356,169 @@ export async function hydrateRecord(
   });
   Object.defineProperty(out, STORED_FORM, { value: stored, enumerable: false });
   return out;
+}
+
+type PendingSpill = {
+  itemIndex: number;
+  field: string;
+  marker: SpillMarker;
+  stored: string;
+  versioned: string;
+  legacy: string;
+};
+
+/**
+ * Hydrate many records. Sidecar keys share one `/v1/read`. The chosen file
+ * keys share a second. The first failure in input order is the error. A
+ * record with no marker is the same object, and no read is sent for it.
+ */
+export async function hydrateRecords(
+  node: NodeClient,
+  cfg: SpillCfg | null,
+  items: readonly { type: RecordType; record: BrainRecord; opts?: HydrateOptions }[],
+): Promise<BrainRecord[]> {
+  const pending: PendingSpill[] = [];
+  items.forEach((item, itemIndex) => {
+    const only = item.opts?.fields;
+    for (const field of spillFieldsFor(item.type)) {
+      if (only !== undefined && !only.includes(field)) continue;
+      const value = item.record[field];
+      if (typeof value !== "string") continue;
+      const marker = parseSpillMarker(value);
+      if (marker === null) continue;
+      const name = marker.field || field;
+      pending.push({
+        itemIndex,
+        field,
+        marker,
+        stored: value,
+        versioned: bodyFileKey(item.type, item.record.slug, name, marker.sha256),
+        legacy: bodyFileKey(item.type, item.record.slug, name),
+      });
+    }
+  });
+  if (pending.length === 0) return items.map((item) => item.record);
+  const readBatch = node.readBatch;
+  if (!readBatch) {
+    const out: BrainRecord[] = [];
+    for (const item of items) out.push(await hydrateRecordOne(node, cfg, item.type, item.record, item.opts));
+    return out;
+  }
+  const schemaHash = bodyFileSchemaHash(cfg);
+  const sidecarReads: BatchPointRead[] = [];
+  for (const item of pending) {
+    sidecarReads.push(
+      { kind: "point", schemaHash, fields: FILE_FIELDS, hash: item.versioned },
+      { kind: "point", schemaHash, fields: FILE_FIELDS, hash: item.legacy },
+    );
+  }
+  const sidecarHits = await readBatch(sidecarReads);
+  const sidecarRows = new Map<string, QueryRow>();
+  for (let index = 0; index < sidecarHits.length; index += 1) {
+    const hit = sidecarHits[index]!;
+    if (hit.kind !== "point") {
+      throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected read." });
+    }
+    if (hit.error) throw hit.error;
+    if (hit.row) sidecarRows.set(sidecarReads[index]!.hash, hit.row);
+  }
+  const chosen: Array<{ pendingIndex: number; key: string }> = [];
+  for (let index = 0; index < pending.length; index += 1) {
+    const item = pending[index]!;
+    const source = items[item.itemIndex]!;
+    const sidecar = sidecarFromRow(sidecarRows.get(item.versioned) ?? sidecarRows.get(item.legacy) ?? null);
+    if (sidecar === null) {
+      throw new BrainError({
+        code: "body_spill_sidecar_missing",
+        message: `${source.type} ${source.record.slug}: field ${item.field} points at a body file record that does not exist (${item.versioned}).`,
+        hint: "The record may have synced before its sidecar. Retry; if it stays, write the record again with its full text.",
+      });
+    }
+    if (sidecar.contentHash !== item.marker.sha256 || sidecar.size !== item.marker.bytes) {
+      throw new BrainError({
+        code: "body_spill_sidecar_mismatch",
+        message:
+          `${source.type} ${source.record.slug}: field ${item.field} names text ${item.marker.sha256.slice(0, 12)}, ` +
+          `but the body file record holds ${sidecar.contentHash.slice(0, 12)}.`,
+        hint: "The stored text reference does not match this record revision. Read the record again or restore its full text.",
+      });
+    }
+    chosen.push({ pendingIndex: index, key: sidecar.key });
+  }
+  const uniqueKeys = [...new Set(chosen.map((item) => item.key))];
+  const fileHits = await readBatch(uniqueKeys.map((hash) => ({
+    kind: "point" as const,
+    schemaHash,
+    fields: [],
+    hash,
+    file: true,
+  })));
+  const files = new Map<string, Uint8Array>();
+  for (let index = 0; index < fileHits.length; index += 1) {
+    const hit = fileHits[index]!;
+    const hash = uniqueKeys[index]!;
+    if (hit.kind !== "point") {
+      throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected read." });
+    }
+    if (hit.error) throw hit.error;
+    if (!hit.row) {
+      throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
+    }
+    const path = hit.row.file?.path;
+    if (!path) {
+      throw new BrainError({
+        code: "body_spill_blob_missing",
+        message: "The body file has no path. Brain cannot read file bytes stored inside LastDB.",
+        hint: "Write the record again with its full text (brain put --allow-shrink).",
+      });
+    }
+    files.set(hash, new Uint8Array(readFileSync(path)));
+  }
+  const texts: string[] = [];
+  for (const item of chosen) {
+    const pendingItem = pending[item.pendingIndex]!;
+    const source = items[pendingItem.itemIndex]!;
+    const bytes = files.get(item.key);
+    if (!bytes) {
+      throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
+    }
+    verifyBytes(
+      bytes,
+      pendingItem.marker.sha256,
+      pendingItem.marker.bytes,
+      `${source.type} ${source.record.slug} field ${pendingItem.field}`,
+    );
+    texts.push(Buffer.from(bytes).toString("utf8"));
+  }
+  const copies = new Map<number, HydratedRecord>();
+  const storedForms = new Map<number, Record<string, string>>();
+  chosen.forEach((item, index) => {
+    const pendingItem = pending[item.pendingIndex]!;
+    let copy = copies.get(pendingItem.itemIndex);
+    if (!copy) {
+      copy = { ...items[pendingItem.itemIndex]!.record };
+      copies.set(pendingItem.itemIndex, copy);
+    }
+    copy[pendingItem.field] = texts[index]!;
+    const stored = storedForms.get(pendingItem.itemIndex) ?? {};
+    stored[pendingItem.field] = pendingItem.stored;
+    storedForms.set(pendingItem.itemIndex, stored);
+  });
+  for (const [index, stored] of storedForms) {
+    Object.defineProperty(copies.get(index)!, STORED_FORM, { value: stored, enumerable: false });
+  }
+  return items.map((item, index) => copies.get(index) ?? item.record);
+}
+
+export async function hydrateRecord(
+  node: NodeClient,
+  cfg: SpillCfg | null,
+  type: RecordType,
+  record: BrainRecord,
+  opts?: HydrateOptions,
+): Promise<BrainRecord> {
+  const [out] = await hydrateRecords(node, cfg, [{ type, record, ...(opts ? { opts } : {}) }]);
+  return out!;
 }
 
 /** The fields of `record` as the node stores them: spilled fields in marker form. */

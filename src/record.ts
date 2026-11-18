@@ -723,22 +723,83 @@ export async function listLiveSlugsPage(
   return slugs;
 }
 
-// One body-free sample per distinct record schema, read in parallel. A sample
-// with no live slug is not a complete membership count. Read errors propagate.
+/**
+ * One body-free page per schema hash, in one `/v1/read`. A missing record is
+ * an empty page. Any other item error is returned on that hash. A failure of
+ * the request itself throws: the per-schema HTTP isolation of the old fan-out
+ * is gone, because the schemas share one request.
+ */
+export async function sampleLiveSlugPages(
+  node: NodeClient,
+  schemaHashes: readonly string[],
+  limit: number = NO_MATCH_PROBE_PAGE_LIMIT,
+): Promise<Array<{ slugs: string[] } | { error: unknown }>> {
+  if (schemaHashes.length === 0) return [];
+  if (!node.readBatch) {
+    const out: Array<{ slugs: string[] } | { error: unknown }> = [];
+    for (const schemaHash of schemaHashes) {
+      try {
+        out.push({ slugs: await listLiveSlugsPage(node, schemaHash, limit) });
+      } catch (err) {
+        out.push({ error: err });
+      }
+    }
+    return out;
+  }
+  const hits = await node.readBatch(schemaHashes.map((schemaHash) => ({
+    kind: "range" as const,
+    schemaHash,
+    via: "recent",
+    range: { hash: "all" },
+    fields: LIVE_SLUG_PAGE_FIELDS,
+    limit,
+  })));
+  return hits.map((hit, index) => {
+    const schemaHash = schemaHashes[index]!;
+    if (hit.kind !== "range") {
+      return {
+        error: new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned an unexpected read.",
+        }),
+      };
+    }
+    if (hit.error) return { error: hit.error };
+    const slugs: string[] = [];
+    for (const row of hit.rows) {
+      if (!row.key?.hash) {
+        return {
+          error: new BrainError({
+            code: "multi_key_read_failed",
+            message: `The ${schemaHash}/recent read did not return a valid named-key page.`,
+          }),
+        };
+      }
+      const f = (row.fields ?? {}) as Record<string, unknown>;
+      if (arrayStringField(f, "tags").includes(TOMBSTONE_TAG)) continue;
+      slugs.push(stringField(f, "slug"));
+    }
+    return { slugs };
+  });
+}
+
+// One body-free sample per distinct record schema. A sample with no live slug
+// is not a complete membership count. A schema-not-found error on one hash is
+// an empty sample. Any other item error fails the call, as one probe's throw
+// failed the old parallel read.
 export async function hasAnyLiveRecord(
   node: NodeClient,
   cfg: { schemaHashes: Record<string, string> },
 ): Promise<boolean> {
-  const hashes = uniqueSchemaHashes(cfg, RECORD_TYPES);
-  const pages = await Promise.all(hashes.map(async (schemaHash) => {
-    try {
-      return await listLiveSlugsPage(node, schemaHash, NO_MATCH_PROBE_PAGE_LIMIT);
-    } catch (err) {
-      if (isSchemaNotFoundReadError(err)) return [];
-      throw err;
-    }
-  }));
-  return pages.some((slugs) => slugs.length > 0);
+  const pages = await sampleLiveSlugPages(
+    node,
+    uniqueSchemaHashes(cfg, RECORD_TYPES),
+    NO_MATCH_PROBE_PAGE_LIMIT,
+  );
+  for (const page of pages) {
+    if ("error" in page && !isSchemaNotFoundReadError(page.error)) throw page.error;
+  }
+  return pages.some((page) => "slugs" in page && page.slugs.length > 0);
 }
 
 // A single-record read returns the full text. `cfg` only saves a schema-hash
@@ -797,6 +858,154 @@ export async function findBySlugRaw(
     if (again === null) return null;
     return hydrateRecord(node, cfg ?? null, type, rowToRecord(again, type));
   }
+}
+
+export type SlugProbe =
+  | { status: "hit"; type: RecordType; record: BrainRecord }
+  | { status: "miss" }
+  | { status: "error"; error: unknown };
+
+function probeSchema(
+  type: RecordType,
+  cfg: ListRecordsCfg,
+): { hash: string } | { error: unknown } {
+  try {
+    const hash = schemaHashFor(type, cfg);
+    if (/^[a-f0-9]{64}$/.test(hash.trim())) {
+      return {
+        error: new BrainError({
+          code: "schema_name_required",
+          message:
+            "Brain needs the exact schema name (brain/<Name>). " +
+            "A saved hash pin cannot be used on the app API. Re-run `brain init`.",
+          hint: "Run `brain init` so config stores brain/<Name> for each schema.",
+        }),
+      };
+    }
+    return { hash };
+  } catch (err) {
+    return { error: err };
+  }
+}
+
+async function hydrateProbed(
+  node: NodeClient,
+  cfg: ListRecordsCfg | null,
+  type: RecordType,
+  schemaHash: string,
+  slug: string,
+  record: BrainRecord,
+): Promise<BrainRecord | null> {
+  try {
+    return await hydrateRecord(node, cfg, type, record);
+  } catch (err) {
+    if (!(err instanceof BrainError) || err.code !== "body_spill_sidecar_mismatch") throw err;
+    const readAgain = async (): Promise<QueryRow | null> => {
+      if (node.readBatch) {
+        const [hit] = await node.readBatch([{
+          kind: "point",
+          schemaHash,
+          fields: fieldsFor(type),
+          hash: slug,
+        }]);
+        if (!hit || hit.kind !== "point") {
+          throw new BrainError({
+            code: "record_read_incomplete",
+            message: "LastDB returned an unexpected read.",
+          });
+        }
+        if (hit.error) throw hit.error;
+        return hit.row;
+      }
+      return node.queryByKey
+        ? node.queryByKey({ schemaHash, fields: fieldsFor(type), keyHash: slug })
+        : null;
+    };
+    const again = await readAgain();
+    if (again === null) return null;
+    return hydrateRecord(node, cfg, type, rowToRecord(again, type));
+  }
+}
+
+/**
+ * One point per probe, in one `/v1/read`, results in probe order.
+ * `not_found` is a miss. Any other item error is `error` on that probe, which
+ * is what a single `findBySlug` threw for that type. Tombstones are misses,
+ * and only after hydration, matching `findBySlug`. A failure of the request
+ * itself throws.
+ */
+export async function probeSlugs(
+  node: NodeClient,
+  cfg: ListRecordsCfg | null,
+  probes: readonly { type: RecordType; slug: string }[],
+  opts?: { hydrate?: boolean },
+): Promise<SlugProbe[]> {
+  if (probes.length === 0) return [];
+  const hydrate = opts?.hydrate !== false;
+  const hashes = cfg ?? { schemaHashes: {} };
+  if (!node.readBatch) {
+    const out: SlugProbe[] = [];
+    for (const probe of probes) {
+      try {
+        const hash = schemaHashFor(probe.type, hashes);
+        const record = await findBySlug(
+          node, probe.type, hash, probe.slug, cfg ?? undefined,
+          hydrate ? undefined : { hydrate: false },
+        );
+        out.push(record === null ? { status: "miss" } : { status: "hit", type: probe.type, record });
+      } catch (err) {
+        out.push({ status: "error", error: err });
+      }
+    }
+    return out;
+  }
+  const out: SlugProbe[] = new Array(probes.length);
+  const pending: Array<{ index: number; hash: string }> = [];
+  probes.forEach((probe, index) => {
+    const opened = probeSchema(probe.type, hashes);
+    if ("error" in opened) out[index] = { status: "error", error: opened.error };
+    else pending.push({ index, hash: opened.hash });
+  });
+  if (pending.length === 0) return out;
+  const hits = await node.readBatch(pending.map(({ index, hash }) => ({
+    kind: "point" as const,
+    schemaHash: hash,
+    fields: fieldsFor(probes[index]!.type),
+    hash: probes[index]!.slug,
+  })));
+  for (let i = 0; i < pending.length; i += 1) {
+    const place = pending[i]!;
+    const probe = probes[place.index]!;
+    const hit = hits[i];
+    try {
+      if (!hit || hit.kind !== "point") {
+        throw new BrainError({
+          code: "record_read_incomplete",
+          message: "LastDB returned an unexpected read.",
+        });
+      }
+      if (hit.error) throw hit.error;
+      if (!hit.row) {
+        out[place.index] = { status: "miss" };
+        continue;
+      }
+      let record = rowToRecord(hit.row, probe.type);
+      if (hydrate) {
+        const hydrated = await hydrateProbed(node, cfg, probe.type, place.hash, probe.slug, record);
+        if (hydrated === null) {
+          out[place.index] = { status: "miss" };
+          continue;
+        }
+        record = hydrated;
+      }
+      out[place.index] = isTombstoned(record)
+        ? { status: "miss" }
+        : { status: "hit", type: probe.type, record };
+    } catch (err) {
+      out[place.index] = { status: "error", error: err };
+    }
+  }
+  return out;
 }
 
 /**
@@ -1286,19 +1495,15 @@ export async function findCrossTypeSlugCollisions(
   slug: string,
 ): Promise<RecordType[]> {
   const others = RECORD_TYPES.filter((t) => t !== selfType);
-  const hits = await Promise.all(
-    others.map(async (t): Promise<RecordType | null> => {
-      try {
-        const hash = schemaHashFor(t, cfg);
-        const existing = await findBySlug(node, t, hash, slug);
-        return existing ? t : null;
-      } catch {
-        // Best-effort: a probe error/timeout on one type just skips that type.
-        return null;
-      }
-    }),
-  );
-  return hits.filter((t): t is RecordType => t !== null);
+  // A probe error used to be swallowed per type. An item error still is.
+  // A failure of the shared request is also "no collision": the note must
+  // not block the create, and this does not retry the types one by one.
+  try {
+    const probed = await probeSlugs(node, cfg, others.map((type) => ({ type, slug })));
+    return probed.flatMap((probe) => (probe.status === "hit" ? [probe.type] : []));
+  } catch {
+    return [];
+  }
 }
 
 // Render the cross-type collision note for the create verbs. Returns null when
@@ -1335,7 +1540,7 @@ export type ResolvedRecord = {
   record: BrainRecord;
   // Non-empty only when an UNTYPED lookup matched more than one schema and
   // `ambiguousTypePrecedence` picked this one. The other matches are already
-  // paid for — `resolveBySlug` point-reads every type in parallel — so dropping
+  // paid for — `resolveBySlug` reads every candidate type in one list — so dropping
   // them on the floor threw away an answer the caller had already bought.
   //
   // Measured 2026-09-01 on the primary: 55 `papercut-*` slugs exist as BOTH a
@@ -1594,21 +1799,16 @@ export async function resolveBySlug(opts: ResolveBySlugOpts): Promise<ResolvedRe
   }
   const sweepTypes = missedHint === null ? types : types.filter((t) => t !== missedHint);
 
-  // Per-type retry, run in parallel. The previous shape wrapped one
-  // outer withReadRetry around a sequential sweep that returned the
-  // FIRST attempt with any hit — but the `/api/query` top-100 page
-  // flake nulls a real row out of one schema's slice on the same
-  // attempt another schema catches its row. With the outer-retry
-  // shape, an untyped lookup of an ambiguous slug then surfaced as a
-  // single match: `brain get` / `status` / `delete` would silently
-  // operate on the one type that caught it and skip the sibling.
-  // Giving each type its own retry budget lets the flaked type
-  // recover within its own loop, so ambiguity is detected before the
-  // helper returns.
-  const perType = await Promise.all(sweepTypes.map(probeType));
-  const matches: ResolvedRecord[] = perType.filter(
-    (m): m is ResolvedRecord => m !== null,
+  // One read item per candidate type, in sweep order. An item error fails
+  // the lookup at the first such type. `not_found` stays a miss, which is
+  // what one `findBySlug` returned for that type.
+  const probed = await probeSlugs(
+    opts.node,
+    opts.cfg,
+    sweepTypes.map((type) => ({ type, slug: opts.slug })),
+    { hydrate: readOpts?.hydrate !== false },
   );
+  const matches = matchesFromProbes(probed, opts.filter);
 
   if (matches.length === 0) {
     if (opts.normalizedSlugFallback === true) {
@@ -1700,23 +1900,32 @@ async function findNormalizedSlugMatches(
   const candidateSlugs = normalizedSlugLookupVariants(opts.slug);
   if (candidateSlugs.length === 0) return [];
 
+  const probes: Array<{ type: RecordType; slug: string }> = [];
+  for (const type of types) {
+    for (const candidateSlug of candidateSlugs) probes.push({ type, slug: candidateSlug });
+  }
+  const probed = await probeSlugs(opts.node, opts.cfg, probes, { hydrate: readOpts?.hydrate !== false });
   const seen = new Set<string>();
   const matches: ResolvedRecord[] = [];
-  for (const t of types) {
-    const hash = schemaHashFor(t, opts.cfg);
-    for (const candidateSlug of candidateSlugs) {
-      const row = opts.raw === true
-        ? await findBySlugRaw(opts.node, t, hash, candidateSlug, opts.cfg, readOpts)
-        : await findBySlug(opts.node, t, hash, candidateSlug, opts.cfg, readOpts);
-      if (row === null) continue;
-      if (opts.raw && isTombstoned(row)) continue;
-      if (opts.filter && !opts.filter(row, t)) continue;
+  for (const match of matchesFromProbes(probed, opts.filter)) {
+    const key = `${match.type}:${match.record.slug}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    matches.push(match);
+  }
+  return matches;
+}
 
-      const key = `${t}:${row.slug}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      matches.push({ type: t, record: row });
-    }
+function matchesFromProbes(
+  probed: readonly SlugProbe[],
+  filter: ((record: BrainRecord, type: RecordType) => boolean) | undefined,
+): ResolvedRecord[] {
+  const matches: ResolvedRecord[] = [];
+  for (const probe of probed) {
+    if (probe.status === "error") throw probe.error;
+    if (probe.status !== "hit") continue;
+    if (filter && !filter(probe.record, probe.type)) continue;
+    matches.push({ type: probe.type, record: probe.record });
   }
   return matches;
 }

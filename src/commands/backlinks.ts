@@ -9,8 +9,8 @@ import {
   type StoredCard,
   type StoredPage,
 } from "../backlink-index.ts";
-import { newReadClientFromCfg, type Verbose } from "../client.ts";
-import { hydrateRecord, parseSpillMarker } from "../body-spill.ts";
+import { newReadClientFromCfg, readPointGroups, type Verbose } from "../client.ts";
+import { hydrateRecords, parseSpillMarker } from "../body-spill.ts";
 import type { Config } from "../config.ts";
 import { resolvePrintSink } from "../format.ts";
 import { extractGraphEdges } from "../graph-edge.ts";
@@ -165,25 +165,29 @@ async function readLinkSources(
   }
   const out = new Map<string, LinkSource>();
   if (!node.queryByKeys) return { sources: out, partial: cards.length > 0 };
-  await Promise.all([...byType].map(async ([type, slugs]) => {
-    let schemaHash: string;
+  const groups: Array<{ type: RecordType; schemaHash: string; slugs: string[] }> = [];
+  for (const [type, slugs] of byType) {
     try {
-      schemaHash = schemaHashFor(type, cfg);
+      groups.push({ type, schemaHash: schemaHashFor(type, cfg), slugs });
     } catch {
-      return;
+      // A type with no schema hash contributed nothing, as the per-type catch did.
     }
-    const rows = await node.queryByKeys!({
-      schemaHash,
-      fields: [
-        "status", "tags",
-        ...(type === "task" ? ["design_slug"] : []),
-        ...(targetType !== undefined ? ["body"] : []),
-      ],
-      keys: slugs.map((hash) => ({ hash, range: "" })),
-    });
-    await Promise.all(rows.map(async (row) => {
+  }
+  const loaded = await readPointGroups(node, groups.map((group) => ({
+    schemaHash: group.schemaHash,
+    fields: [
+      "status", "tags",
+      ...(group.type === "task" ? ["design_slug"] : []),
+      ...(targetType !== undefined ? ["body"] : []),
+    ],
+    keys: group.slugs.map((hash) => ({ hash, range: "" })),
+  })));
+  const tails: Array<{ type: RecordType; hash: string; source: LinkSource; fields: Record<string, unknown> }> = [];
+  loaded.forEach((rows, index) => {
+    const type = groups[index]!.type;
+    for (const row of rows) {
       const hash = row.key?.hash;
-      if (!hash) return;
+      if (!hash) continue;
       const source: LinkSource = {
         status: stringField(row.fields, "status"),
         tags: arrayStringField(row.fields, "tags"),
@@ -193,17 +197,24 @@ async function readLinkSources(
         const rawBody = stringField(row.fields, "body");
         const marker = parseSpillMarker(rawBody);
         source.body = marker ? marker.head : rawBody;
-        // A typed mismatch can still be a body link in the stored tail.
         if (marker && !hasExplicitLink(source, type, target, targetType) &&
             !bodyLinksTo(hash, source.body, target)) {
-          const full = await hydrateRecord(node, cfg, type,
-            recordFromPrimaryFields({ ...row.fields, slug: hash }), { fields: ["body"] });
-          source.body = full.body;
+          tails.push({ type, hash, source, fields: { ...row.fields, slug: hash } });
         }
       }
       out.set(`${type}\0${hash}`, source);
-    }));
-  }));
+    }
+  });
+  if (tails.length > 0) {
+    const full = await hydrateRecords(node, cfg, tails.map((tail) => ({
+      type: tail.type,
+      record: recordFromPrimaryFields(tail.fields),
+      opts: { fields: ["body"] },
+    })));
+    tails.forEach((tail, index) => {
+      tail.source.body = full[index]!.body;
+    });
+  }
   const partial = targetType !== undefined
     ? await markFrontmatterLinks(node, cfg, cards, out, target, targetType)
     : false;

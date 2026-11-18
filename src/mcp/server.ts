@@ -45,7 +45,7 @@ import {
 } from "../schemas.ts";
 import { establishConsentInline } from "../commands/init-consent.ts";
 import {
-  listLiveSlugsPage,
+  sampleLiveSlugPages,
   schemaHashFor,
 } from "../record.ts";
 export { BRAIN_MCP_TOOL_NAMES } from "./tools.ts";
@@ -2411,21 +2411,35 @@ async function nearestSlugCandidates(
 ): Promise<Array<{ slug: string; type: RecordJson["type"] }>> {
   const node = newReadClientFromCfg(cfg);
   const types = type ? [type] : RECORD_TYPES;
-  const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
-  await Promise.all(types.map(async (t) => {
+  const planned: Array<{ type: RecordJson["type"]; hash: string }> = [];
+  for (const t of types) {
     try {
-      const slugs = await listLiveSlugsPage(node, schemaHashFor(t, cfg));
-      for (const candidateSlug of slugs) {
-        candidates.push({
-          slug: candidateSlug,
-          type: t,
-          score: slugFuzzyScore(slug, candidateSlug),
-        });
-      }
+      const hash = schemaHashFor(t, cfg);
+      if (/^[a-f0-9]{64}$/.test(hash.trim())) continue;
+      planned.push({ type: t, hash });
     } catch {
-      // Best-effort error hint only; preserve the original not_found error.
+      // A missing schema hash skipped that type. The not_found error stays.
     }
-  }));
+  }
+  let pages: Awaited<ReturnType<typeof sampleLiveSlugPages>>;
+  try {
+    pages = await sampleLiveSlugPages(node, planned.map((item) => item.hash));
+  } catch {
+    // The shared request failed. Do not replay it once per type.
+    return [];
+  }
+  const candidates: Array<{ slug: string; type: RecordJson["type"]; score: number }> = [];
+  pages.forEach((page, index) => {
+    if ("error" in page) return;
+    const t = planned[index]!.type;
+    for (const candidateSlug of page.slugs) {
+      candidates.push({
+        slug: candidateSlug,
+        type: t,
+        score: slugFuzzyScore(slug, candidateSlug),
+      });
+    }
+  });
   return candidates
     .sort((a, b) => a.score - b.score || a.slug.localeCompare(b.slug) || a.type.localeCompare(b.type))
     .slice(0, 3)

@@ -2,7 +2,7 @@
 //
 // One durable mutation batch deletes the record and updates its related pages.
 
-import { BrainError, type NodeClient, type Verbose } from "../client.ts";
+import { BrainError, readPointGroups, type NodeClient, type Verbose } from "../client.ts";
 import { readStoredPage } from "../backlink-index.ts";
 import { newWriteClientFromCfg } from "../write-context.ts";
 import type { Config } from "../config.ts";
@@ -19,7 +19,7 @@ import {
 } from "../record.ts";
 import { BRAIN_LIST_PAGE_SCHEMA_KEY, RECORD_TYPES, isRecordType, type RecordType } from "../schemas.ts";
 import { commitResidentRemoval } from "../resident-write-plan.ts";
-import { namedRecordPage } from "../named-records.ts";
+import { namedChainsForHashes, namedRecordPage } from "../named-records.ts";
 import { formatIndexNotes } from "../write-confirmation.ts";
 
 export type DeleteOptions = {
@@ -232,7 +232,14 @@ async function resolveFilterMatches(
     const head = await readStoredPage(node, opts.cfg.schemaHashes[BRAIN_LIST_PAGE_SCHEMA_KEY] ?? "", hashes[0]!, HEAD_RANGE);
     if (head.kind !== "page") return { matches: [], partial: true };
   }
-  const chains = await Promise.all(hashes.map(hash => readPageChain(node, opts.cfg, hash)));
+  const named = await namedChainsForHashes(node, opts.cfg, hashes);
+  const chains = [];
+  for (let index = 0; index < hashes.length; index += 1) {
+    const cards = named[index];
+    chains.push(cards === null || cards === undefined
+      ? await readPageChain(node, opts.cfg, hashes[index]!)
+      : cards);
+  }
   if (chains.some(chain => chain === null)) return { matches: [], partial: true };
   const byType = new Map<RecordType, Set<string>>();
   for (const [index, chain] of chains.entries()) for (const card of chain ?? []) {
@@ -244,17 +251,21 @@ async function resolveFilterMatches(
   if (!node.queryByKeys) throw new BrainError({ code: "keyed_read_required", message: "Bulk selection requires batch reads." });
   // Read only selection fields. Recheck the current record's status and tags;
   // a stale summary cannot authorize a delete, and bodies are unnecessary.
-  const batches = await Promise.all([...byType].map(async ([type, slugs]) => {
-    const rows = await node.queryByKeys!({ schemaHash: schemaHashFor(type, opts.cfg),
-      fields: ["slug", "title", "status", "tags", "created_at"], keys: [...slugs].map(hash => ({ hash })) });
+  const typeGroups = [...byType];
+  const rowGroups = await readPointGroups(node, typeGroups.map(([type, slugs]) => ({
+    schemaHash: schemaHashFor(type, opts.cfg),
+    fields: ["slug", "title", "status", "tags", "created_at"],
+    keys: [...slugs].map((hash) => ({ hash })),
+  })));
+  const matches = rowGroups.flatMap((rows, index) => {
+    const type = typeGroups[index]![0];
     return rows.flatMap(row => {
       const record = row.fields;
       const tags = arrayStringField(record, "tags");
       if (tags.includes(TOMBSTONE_TAG) || (opts.tag && !tags.includes(opts.tag)) || (opts.status && record.status !== opts.status)) return [];
       return [{ type, slug: String(record.slug), title: String(record.title ?? ""), created_at: String(record.created_at ?? "") }];
     });
-  }));
-  const matches = batches.flat();
+  });
   sortFilterMatches(matches);
   return { matches, partial: false };
 }

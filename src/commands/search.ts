@@ -1,6 +1,7 @@
 // `brain search <query>` — LastSeek rank, then a keyword-head sample on a miss.
 
 import {
+  readPointGroups,
   recordTypeForHash,
   type NodeClient,
   type Verbose,
@@ -8,7 +9,7 @@ import {
 import { newSearchClientFromCfg } from "../write-context.ts";
 import { queryLastSeek } from "../lastseek-plane.ts";
 import type { Config } from "../config.ts";
-import { hydrateRecord, parseSpillMarker } from "../body-spill.ts";
+import { hydrateRecords, parseSpillMarker } from "../body-spill.ts";
 import {
   capitalize,
   formatTable,
@@ -22,7 +23,7 @@ import {
   TOMBSTONE_TAG,
   uniqueSchemaHashes,
 } from "../record.ts";
-import { RANKER_PAGE, READ_KEY_CAP, rankKeywordQuery } from "../list-page.ts";
+import { RANKER_PAGE, rankKeywordQuery } from "../list-page.ts";
 import { buildSnippet } from "../retrieval/snippet.ts";
 import { isRecordType, type RecordType } from "../schemas.ts";
 
@@ -116,50 +117,61 @@ async function readBodyHeads(
     group.push(hit.slug);
     byType.set(hit.type, group);
   }
-  await Promise.all(
-    [...byType].map(async ([type, slugs]) => {
-      const schemaHash = cfg.schemaHashes[type];
-      if (!schemaHash) return;
-      verbose?.(`HashRangeKeys body keys=${slugs.length} field=body,title`);
-      const chunks: string[][] = [];
-      for (let i = 0; i < slugs.length; i += READ_KEY_CAP) {
-        chunks.push(slugs.slice(i, i + READ_KEY_CAP));
+  const groups: Array<{ type: RecordType; slugs: string[] }> = [];
+  for (const [type, slugs] of byType) {
+    if (!cfg.schemaHashes[type]) continue;
+    verbose?.(`HashRangeKeys body keys=${slugs.length} field=body,title`);
+    groups.push({ type, slugs });
+  }
+  const loaded = await readPointGroups(node, groups.map((group) => ({
+    schemaHash: cfg.schemaHashes[group.type]!,
+    fields: ["body", "title", "tags"],
+    keys: group.slugs.map((slug) => ({ hash: slug })),
+  })));
+  const tails: Array<{ type: RecordType; slug: string; title: string; rawBody: string }> = [];
+  loaded.forEach((rows, index) => {
+    const type = groups[index]!.type;
+    for (const row of rows) {
+      const slug = row.key?.hash ?? "";
+      const fields = row.fields as Record<string, unknown> | undefined;
+      const rawBody = fields?.body;
+      if (slug.length === 0 || typeof rawBody !== "string") continue;
+      if (Array.isArray(fields?.tags) && fields.tags.includes(TOMBSTONE_TAG)) continue;
+      const marker = parseSpillMarker(rawBody);
+      const head: BodyHead = {
+        title: typeof fields?.title === "string" ? fields.title : "",
+        body: marker ? marker.head : rawBody,
+      };
+      if (exactQuery !== undefined && marker && !matchesExact(head, exactQuery)) {
+        tails.push({ type, slug, title: head.title, rawBody });
+        continue;
       }
-      const rows = (await Promise.all(chunks.map((chunk) => node.queryByKeys!({
-        schemaHash,
-        fields: ["body", "title", "tags"],
-        keys: chunk.map((slug) => ({ hash: slug })),
-      })))).flat();
-      await Promise.all(rows.map(async (row) => {
-        const slug = row.key?.hash ?? "";
-        const fields = row.fields as Record<string, unknown> | undefined;
-        const rawBody = fields?.body;
-        if (slug.length === 0 || typeof rawBody !== "string") return;
-        if (Array.isArray(fields?.tags) && fields.tags.includes(TOMBSTONE_TAG)) return;
-        const marker = parseSpillMarker(rawBody);
-        const head: BodyHead = {
-          title: typeof fields?.title === "string" ? fields.title : "",
-          body: marker ? marker.head : rawBody,
-        };
-        // A phrase absent from the head can still occur in the stored tail.
-        if (exactQuery !== undefined && marker && !matchesExact(head, exactQuery)) {
-          const full = await hydrateRecord(node, cfg, type, {
-            slug,
-            title: head.title,
-            body: rawBody,
-            status: "",
-            tags: [],
-            created_at: "",
-            updated_at: "",
-          }, { fields: ["body"] });
-          head.body = full.body;
-        }
-        if (exactQuery === undefined || matchesExact(head, exactQuery)) {
-          out.set(`${type}::${slug}`, head);
-        }
-      }));
-    }),
-  );
+      if (exactQuery === undefined || matchesExact(head, exactQuery)) {
+        out.set(`${type}::${slug}`, head);
+      }
+    }
+  });
+  if (tails.length > 0) {
+    const full = await hydrateRecords(node, cfg, tails.map((tail) => ({
+      type: tail.type,
+      record: {
+        slug: tail.slug,
+        title: tail.title,
+        body: tail.rawBody,
+        status: "",
+        tags: [],
+        created_at: "",
+        updated_at: "",
+      },
+      opts: { fields: ["body"] },
+    })));
+    tails.forEach((tail, index) => {
+      const head = { title: tail.title, body: full[index]!.body };
+      if (exactQuery === undefined || matchesExact(head, exactQuery)) {
+        out.set(`${tail.type}::${tail.slug}`, head);
+      }
+    });
+  }
   return out;
 }
 
