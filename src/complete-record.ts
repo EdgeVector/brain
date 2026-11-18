@@ -10,7 +10,6 @@ export type RecordPreimage = {
   fields: Fields;
   alternates: Record<string, RecordCoordinate | null>;
   revision: string;
-  metadata: Fields | null;
 };
 
 export function coordinateId(schema: string, hash: string, range?: string | null): string {
@@ -29,7 +28,6 @@ export async function readCompleteRecord(node: NodeClient, schema: string, hash:
     fields: row.fields,
     alternates: {},
     revision: row.revision,
-    metadata: null,
   };
 }
 
@@ -128,7 +126,6 @@ export function recordOperation(
 ) {
   const deleting = op.mutationType === "delete";
   const fields = deleting ? {} : { ...current?.fields, ...op.fields };
-  const metadata = deleting ? null : current?.metadata;
   return {
     type: "mutation",
     schema: op.schemaHash,
@@ -137,9 +134,6 @@ export function recordOperation(
     alternates: deleting ? current?.alternates : alternateAddresses(schema, fields),
     mutation_type: deleting ? "delete" : current ? "replace" : "create",
     expected: current ? { type: "revision", revision: current.revision } : { type: "absent" },
-    source_file_name: metadata?.source_file_name ?? null,
-    metadata: metadata?.metadata ?? null,
-    file: metadata?.file ?? null,
     ...(durable ? { durability: "durable" } : {}),
   };
 }

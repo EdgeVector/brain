@@ -37,8 +37,7 @@ const FRAME_BYTES =
 /**
  * Upper-bound size of the format 7 stored value for a record that holds
  * `fields`. A field whose value is `undefined` is not sent, so it is not
- * counted. Record metadata (source file name, metadata map) is not counted:
- * brain never writes it.
+ * counted. Brain does not send record metadata, so the budget counts fields only.
  */
 export function recordBytes(fields: Record<string, unknown>): number {
   let total = FRAME_BYTES;

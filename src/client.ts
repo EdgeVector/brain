@@ -891,7 +891,6 @@ export function newNodeClient(opts: {
         fields: row.fields,
         alternates: {},
         revision: row.revision,
-        metadata: null,
       });
     }
     return found;

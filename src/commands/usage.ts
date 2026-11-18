@@ -8,8 +8,8 @@
 // date so we can plot adoption trends over time. Re-running on the same UTC
 // day replaces that day's line in-place.
 //
-// A LastDB record carries one metadata block and names no writer (record
-// model decision D7), so the report has no per-user split.
+// The report counts records by created_at. It does not read created_by or
+// updated_by, so it has no per-user split.
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
