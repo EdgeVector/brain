@@ -573,9 +573,17 @@ async function commitChunks(opts: {
   }
   const key = bodyFileKey(type, slug, field, full.sha256);
   const what = `${type} ${slug} field ${field}`;
-  const existing = (await readChunkTexts(node, cfg, [key])).get(key);
-  if (existing !== undefined && existing.contentHash === full.sha256 && existing.size === full.buf.length) {
-    verifyBytes(existing.bytes, full.sha256, full.buf.length, what);
+  // Reuse only a complete set whose joined text has this hash. A set left
+  // incomplete by a failed earlier write (a prefix, or a gap) is written
+  // again in full; every part is a replace, so the retry completes it.
+  const existing = await readChunkTexts(node, cfg, [key]).then(
+    (texts) => texts.get(key),
+    (error: unknown) => {
+      if (error instanceof BrainError && error.code === "body_spill_chunk_missing") return undefined;
+      throw error;
+    },
+  );
+  if (existing !== undefined && existing.bytes.length === full.buf.length && sha256Hex(existing.bytes) === full.sha256) {
     return { reused: true };
   }
   // 1. the chunks, 2. read them back. The record that names them is written after.
