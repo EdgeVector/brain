@@ -436,7 +436,9 @@ export const ATTACHMENT_INDEX_SCHEMA_KEY = "__attachmentindex__";
 export const ATTACHMENT_BLOB_SCHEMA_KEY = "__attachmentblob__";
 export const ATTACHMENT_FILE_SCHEMA_KEY = "__attachmentfile__";
 // One sidecar per (record type, slug, field). The pointer is the whole `file` value.
+// Read only: new long text goes to BrainBodyChunk records.
 export const BODY_FILE_SCHEMA_KEY = "__bodyfile__";
+export const BODY_CHUNK_SCHEMA_KEY = "__bodychunk__";
 export const tagIndexSchema: AddSchemaRequest = {
   schema: {
     name: "TagIndex",
@@ -801,12 +803,10 @@ export const attachmentFileSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
-// One immutable BrainBodyFile per spilled field and content hash. The full text
-// is the record's own LastDB file, stored with the record by one create or
-// replace and read back by schema and key. Reads also accept the original
-// per-field sidecar key. Knowledge schemas gain no field: a new field would
-// re-hash every record. The record keeps a head and a marker line that names
-// this sidecar.
+// RETIRED (2026-11-25): long text now lives in BrainBodyChunk records. Brain
+// no longer writes or reads this schema. It stays declared only so the
+// one-time move can delete the old records, which named a plain-text file
+// outside the LastDB home. Remove it once no record of it is left.
 export const bodyFileSchema: AddSchemaRequest = {
   schema: {
     name: "BrainBodyFile",
@@ -870,6 +870,55 @@ export const bodyFileSchema: AddSchemaRequest = {
   mutation_mappers: {},
 };
 
+// The full long text of one spilled field, held as records inside LastDB so
+// the store encrypts it and a snapshot uploads it as it is. One partition per
+// body file key (the same key a BrainBodyFile used); the range is the chunk
+// position, zero padded, so a range read returns the chunks in order. Every
+// chunk carries the hash and length of the whole text, so no separate sidecar
+// is needed. Keys are versioned by content hash, so chunks are never rewritten
+// with other text.
+export const BODY_CHUNK_FIELDS = ["file_key", "chunk_index", "chunk_text", "content_hash", "size"] as const;
+export const bodyChunkSchema: AddSchemaRequest = {
+  schema: {
+    name: "BrainBodyChunk",
+    owner_app_id: OWNER_APP_ID,
+    descriptive_name: "BrainBodyChunk",
+    purpose_statement:
+      "One part of the full long text of one fbrain record field (body); the parts under one body file key, in position order, join to the full text, and the record keeps only a bounded head and a marker line",
+    schema_type: "HashRange",
+    key: { hash_field: "file_key", range_field: "chunk_index" },
+    fields: [...BODY_CHUNK_FIELDS],
+    field_types: {
+      file_key: "String",
+      chunk_index: "String",
+      chunk_text: "String",
+      content_hash: "String",
+      size: "String",
+    },
+    field_descriptions: {
+      file_key: "__bodyfile__<sha256(record_type:record_slug:record_field:content_hash)> (hash key)",
+      chunk_index: "zero-padded six-digit position of this part (range key)",
+      chunk_text: "this part of the full UTF-8 text",
+      content_hash: "SHA-256 hex of the full UTF-8 text",
+      size: "full text byte length",
+    },
+    field_classifications: {
+      file_key: ["no_index", "metadata"],
+      chunk_index: ["no_index", "metadata"],
+      chunk_text: ["no_index", "metadata"],
+      content_hash: ["no_index", "metadata"],
+      size: ["no_index", "metadata"],
+    },
+    field_data_classifications: {
+      file_key: GENERAL,
+      chunk_index: GENERAL,
+      chunk_text: GENERAL,
+      content_hash: GENERAL,
+      size: GENERAL,
+    },
+  },
+  mutation_mappers: {},
+};
 
 export type RecordTypeDef = {
   type: RecordType;
@@ -1256,6 +1305,12 @@ export const UNIQUE_SCHEMAS: UniqueSchemaEntry[] = [
     schema: bodyFileSchema,
     types: [],
     extraKeys: [BODY_FILE_SCHEMA_KEY],
+  },
+  {
+    key: BODY_CHUNK_SCHEMA_KEY,
+    schema: bodyChunkSchema,
+    types: [],
+    extraKeys: [BODY_CHUNK_SCHEMA_KEY],
   },
   {
     key: BRAIN_LIST_PAGE_SCHEMA_KEY,

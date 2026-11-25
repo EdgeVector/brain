@@ -1,6 +1,6 @@
 {
   "app_id": "brain",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "source": "https://github.com/EdgeVector/brain.git",
   "metadata": {
     "display_name": "Brain",
@@ -1677,6 +1677,92 @@
       }
     },
     {
+      "name": "BrainBodyChunk",
+      "owner_app_id": "brain",
+      "descriptive_name": "BrainBodyChunk",
+      "purpose_statement": "One part of the full long text of one fbrain record field (body); the parts under one body file key, in position order, join to the full text, and the record keeps only a bounded head and a marker line",
+      "schema_type": "HashRange",
+      "fields": [
+        "knowledge_text_file_lookup_key",
+        "knowledge_text_chunk_position_text",
+        "knowledge_text_chunk_utf8_text",
+        "file_content_sha256_hex",
+        "file_size_bytes_decimal_text"
+      ],
+      "field_types": {
+        "knowledge_text_file_lookup_key": "String",
+        "knowledge_text_chunk_position_text": "String",
+        "knowledge_text_chunk_utf8_text": "String",
+        "file_content_sha256_hex": "String",
+        "file_size_bytes_decimal_text": "String"
+      },
+      "field_descriptions": {
+        "knowledge_text_file_lookup_key": "the key __bodyfile__ followed by the SHA-256 digest of source record type, slug and local field name",
+        "knowledge_text_chunk_position_text": "the zero-padded six-digit base-10 position of one part within the full text of a knowledge text file",
+        "knowledge_text_chunk_utf8_text": "one consecutive part of the full UTF-8 text of a knowledge text file; the parts in position order join to the full text",
+        "file_content_sha256_hex": "the lowercase SHA-256 hexadecimal digest of the bytes of a file",
+        "file_size_bytes_decimal_text": "the base-10 text encoding of a file size in bytes"
+      },
+      "field_classifications": {
+        "knowledge_text_file_lookup_key": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_text_chunk_position_text": [
+          "no_index",
+          "metadata"
+        ],
+        "knowledge_text_chunk_utf8_text": [
+          "no_index",
+          "metadata"
+        ],
+        "file_content_sha256_hex": [
+          "no_index",
+          "metadata"
+        ],
+        "file_size_bytes_decimal_text": [
+          "no_index",
+          "metadata"
+        ]
+      },
+      "field_data_classifications": {
+        "knowledge_text_file_lookup_key": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_text_chunk_position_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "knowledge_text_chunk_utf8_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_content_sha256_hex": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        },
+        "file_size_bytes_decimal_text": {
+          "sensitivity_level": 0,
+          "data_domain": "general"
+        }
+      },
+      "record_keys": {
+        "primary": {
+          "kind": "hash_range",
+          "range_type": "String"
+        },
+        "alternates": {}
+      },
+      "field_versions": {
+        "knowledge_text_file_lookup_key": 1,
+        "knowledge_text_chunk_position_text": 1,
+        "knowledge_text_chunk_utf8_text": 1,
+        "file_content_sha256_hex": 1,
+        "file_size_bytes_decimal_text": 1
+      }
+    },
+    {
       "name": "BrainListPage",
       "owner_app_id": "brain",
       "descriptive_name": "BrainListPage",
@@ -2194,6 +2280,7 @@
       "brain/BrainAttachmentBlob",
       "brain/BrainAttachmentFile",
       "brain/BrainBodyFile",
+      "brain/BrainBodyChunk",
       "brain/BrainListPage",
       "brain/BrainListLocator",
       "brain/BrainCompactListLocator_v1",
@@ -2221,6 +2308,7 @@
       "brain/BrainAttachmentBlob",
       "brain/BrainAttachmentFile",
       "brain/BrainBodyFile",
+      "brain/BrainBodyChunk",
       "brain/BrainListPage",
       "brain/BrainListLocator",
       "brain/BrainCompactListLocator_v1",
