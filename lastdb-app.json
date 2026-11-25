@@ -1,6 +1,6 @@
 {
   "app_id": "brain",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "source": "https://github.com/EdgeVector/brain.git",
   "metadata": {
     "display_name": "Brain",
