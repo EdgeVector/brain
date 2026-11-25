@@ -573,6 +573,24 @@
         "sensitivity_level": 0,
         "data_domain": "general"
       }
+    },
+    "knowledge_text_chunk_position_text": {
+      "description": "the zero-padded six-digit base-10 position of one part within the full text of a knowledge text file",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
+    },
+    "knowledge_text_chunk_utf8_text": {
+      "description": "one consecutive part of the full UTF-8 text of a knowledge text file; the parts in position order join to the full text",
+      "field_type": "String",
+      "version": 1,
+      "classification": {
+        "sensitivity_level": 0,
+        "data_domain": "general"
+      }
     }
   },
   "schemas": {
@@ -762,6 +780,13 @@
       "tags": "knowledge_record_tag_labels",
       "created_at": "knowledge_record_created_at",
       "updated_at": "knowledge_record_updated_at"
+    },
+    "BrainBodyChunk": {
+      "file_key": "knowledge_text_file_lookup_key",
+      "chunk_index": "knowledge_text_chunk_position_text",
+      "chunk_text": "knowledge_text_chunk_utf8_text",
+      "content_hash": "file_content_sha256_hex",
+      "size": "file_size_bytes_decimal_text"
     }
   }
 }

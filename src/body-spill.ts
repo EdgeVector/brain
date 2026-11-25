@@ -3,20 +3,34 @@ import { canonicalProfilesForHashes } from "./canonical-vocabulary.ts";
 // Seal runs in `buildResidentWritePlan` and in `writeRecordFields` (append, tag, link, gate).
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 
-import { writeStoredFile } from "./app-files.ts";
-import { BrainError, type BatchPointRead, type NodeClient, type QueryRow, type Verbose } from "./client.ts";
+import {
+  BrainError,
+  type BatchMutationOp,
+  type BatchRangeRead,
+  type NodeClient,
+  type QueryRow,
+  type Verbose,
+} from "./client.ts";
 import { writeConfig, type Config } from "./config.ts";
 import type { BrainRecord } from "./record.ts";
 import { RECORD_BUDGET_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 import {
-  BODY_FILE_SCHEMA_KEY,
+  BODY_CHUNK_FIELDS,
+  BODY_CHUNK_SCHEMA_KEY,
   RECORDS,
   type RecordType,
 } from "./schemas.ts";
 
-const BODY_FILE_NAME = "brain/BrainBodyFile";
+const BODY_CHUNK_NAME = "brain/BrainBodyChunk";
+
+/** Raw UTF-8 bytes per chunk. Escapes can grow a chunk; see CHUNK_SERIALIZED_MAX. */
+export const CHUNK_BYTES = 32 * 1024;
+/** A chunk's text, serialized, stays under this, so the chunk record fits the record budget. */
+const CHUNK_SERIALIZED_MAX = 44 * 1024;
+/** Chunk records per write request, and per range page. */
+const CHUNK_WRITE_BATCH = 24;
+const CHUNK_PAGE = 32;
 
 /** Spill a field when its serialized size is above this. Matches the contract (32 KiB). */
 export const SPILL_THRESHOLD_BYTES = 32 * 1024;
@@ -36,17 +50,6 @@ export const SPILL_BLOB_MAX_BYTES = 16 * 1024 * 1024;
 const SPILL_FILE_KEY_PREFIX = "__bodyfile__";
 const MIN_FORCE_SPILL_BYTES = 8 * 1024;
 const MIN_HEAD_BYTES = 2 * 1024;
-
-const FILE_FIELDS = [
-  "file_key",
-  "record_type",
-  "record_slug",
-  "record_field",
-  "content_hash",
-  "size",
-  "created_at",
-  "updated_at",
-];
 
 /** Which text fields of a record type can spill. Everything else is size-guarded only. */
 export function spillFieldsFor(_type: RecordType): readonly string[] {
@@ -136,126 +139,164 @@ export function bodyFileKey(type: RecordType, slug: string, field: string, conte
 
 type SpillCfg = Pick<Config, "schemaHashes">;
 
-type SidecarRow = {
-  /** The key the row was read at: the versioned key or the original per-field key. */
-  key: string;
-  contentHash: string;
-  size: number;
-  createdAt: string;
-};
-
 function stringOf(fields: Record<string, unknown>, key: string): string {
   const v = fields[key];
   return typeof v === "string" ? v : "";
 }
 
-async function queryRowByKey(
-  node: NodeClient,
-  schemaHash: string,
-  fields: string[],
-  keyHash: string,
-): Promise<QueryRow | null> {
-  if (node.queryByKey) return node.queryByKey({ schemaHash, fields, keyHash });
-  const all = await node.queryAll({ schemaHash, fields, filter: { HashKey: keyHash } });
-  return all.results.find((r) => r.key?.hash === keyHash || r.fields?.file_key === keyHash) ?? null;
-}
-
-async function readSidecar(
-  node: NodeClient,
-  schemaHash: string,
-  key: string,
-): Promise<SidecarRow | null> {
-  const row = await queryRowByKey(node, schemaHash, FILE_FIELDS, key);
-  return sidecarFromRow(row);
-}
-
-function sidecarFromRow(row: QueryRow | null): SidecarRow | null {
-  if (row === null) return null;
-  const f = (row.fields ?? {}) as Record<string, unknown>;
-  return {
-    key: row.key?.hash ?? stringOf(f, "file_key"),
-    contentHash: stringOf(f, "content_hash"),
-    size: Number(stringOf(f, "size")) || 0,
-    createdAt: stringOf(f, "created_at"),
-  };
-}
-
-async function readMarkerSidecar(
-  node: NodeClient,
-  schemaHash: string,
-  type: RecordType,
-  slug: string,
-  field: string,
-  contentHash: string,
-): Promise<SidecarRow | null> {
-  const versioned = bodyFileKey(type, slug, field, contentHash);
-  const legacy = bodyFileKey(type, slug, field);
-  // Read both known keys together for compatibility with the original layout.
-  // New writes never overwrite the legacy key.
-  if (node.queryByKeys) {
-    const rows = await node.queryByKeys({
-      schemaHash,
-      fields: FILE_FIELDS,
-      keys: [{ hash: versioned }, { hash: legacy }],
-    });
-    const byKey = new Map(rows.map((row) => [row.key?.hash ?? stringOf(row.fields ?? {}, "file_key"), row]));
-    return sidecarFromRow(byKey.get(versioned) ?? byKey.get(legacy) ?? null);
-  }
-  const [current, previous] = await Promise.all([
-    readSidecar(node, schemaHash, versioned),
-    readSidecar(node, schemaHash, legacy),
-  ]);
-  return current ?? previous;
-}
-
-// Pin the body-file schema to its exact name. The installer places it.
-export function ensureBodyFileSchema(
+// Pin the body-chunk schema to its exact name, like the body-file schema.
+export function ensureBodyChunkSchema(
   cfg: Config,
   opts: { persist: boolean; configPath?: string } = { persist: true },
 ): string {
-  if (cfg.schemaHashes[BODY_FILE_SCHEMA_KEY] === BODY_FILE_NAME) return BODY_FILE_NAME;
-  cfg.schemaHashes[BODY_FILE_SCHEMA_KEY] = BODY_FILE_NAME;
+  if (cfg.schemaHashes[BODY_CHUNK_SCHEMA_KEY] === BODY_CHUNK_NAME) return BODY_CHUNK_NAME;
+  cfg.schemaHashes[BODY_CHUNK_SCHEMA_KEY] = BODY_CHUNK_NAME;
   cfg.schemaFieldAliases = { ...cfg.schemaFieldAliases, ...canonicalProfilesForHashes(cfg.schemaHashes) };
   if (opts.persist) {
     if (opts.configPath !== undefined) writeConfig(cfg, opts.configPath);
     else writeConfig(cfg);
   }
-  return BODY_FILE_NAME;
+  return BODY_CHUNK_NAME;
 }
 
-// One write: the sidecar fields plus a path to the text already on disk.
-async function putSidecar(
-  node: NodeClient,
-  schemaHash: string,
-  key: string,
-  bytes: Uint8Array,
-  fields: Record<string, unknown>,
-): Promise<void> {
-  if (!node.writeRecordFile) {
+function bodyChunkSchemaHash(cfg: SpillCfg | null): string {
+  const pin = cfg?.schemaHashes[BODY_CHUNK_SCHEMA_KEY];
+  if (typeof pin === "string" && pin.length > 0 && !/^[a-f0-9]{64}$/.test(pin)) {
+    return pin.startsWith("brain/") ? pin : `brain/${pin}`;
+  }
+  return BODY_CHUNK_NAME;
+}
+
+export function chunkRange(index: number): string {
+  return String(index).padStart(6, "0");
+}
+
+/**
+ * Split text into consecutive parts of at most CHUNK_BYTES UTF-8 bytes, cut on
+ * a character boundary. A part whose serialized form is too large (many
+ * escapes) is cut smaller. The parts join to exactly `text`.
+ */
+export function splitChunks(text: string): string[] {
+  const buf = Buffer.from(text, "utf8");
+  const parts: string[] = [];
+  let start = 0;
+  while (start < buf.length) {
+    let size = Math.min(CHUNK_BYTES, buf.length - start);
+    for (;;) {
+      let end = start + size;
+      while (end < buf.length && end > start && (buf[end]! & 0xc0) === 0x80) end--;
+      const part = buf.subarray(start, end).toString("utf8");
+      if (serializedBytes(part) <= CHUNK_SERIALIZED_MAX || size <= 1024) {
+        parts.push(part);
+        start = end;
+        break;
+      }
+      size = Math.floor(size / 2);
+    }
+  }
+  return parts;
+}
+
+/** The chunk records of one text, in position order. */
+export function chunkOps(schemaHash: string, key: string, full: { buf: Buffer; sha256: string }): BatchMutationOp[] {
+  const parts = splitChunks(full.buf.toString("utf8"));
+  return parts.map((part, index) => ({
+    mutationType: "create" as const,
+    // A failed earlier attempt may have left some chunks. Their text is the
+    // same, because the key names the content hash.
+    replaceIfPresent: true as const,
+    schemaHash,
+    keyHash: key,
+    keyRange: chunkRange(index),
+    fields: {
+      file_key: key,
+      chunk_index: chunkRange(index),
+      chunk_text: part,
+      content_hash: full.sha256,
+      size: String(full.buf.length),
+    },
+  }));
+}
+
+/** Write chunk records in requests of CHUNK_WRITE_BATCH. */
+export async function writeChunkOps(node: NodeClient, ops: BatchMutationOp[]): Promise<void> {
+  if (!node.mutateBatch) {
     throw new BrainError({
       code: "app_api_route_unavailable",
-      message: "Brain cannot store a body file without the app write route.",
+      message: "Brain cannot store long text without the batch write route.",
     });
   }
-  const path = writeStoredFile(key, bytes);
-  await node.writeRecordFile({ schemaHash, keyHash: key, fields, path, name: key });
+  for (let start = 0; start < ops.length; start += CHUNK_WRITE_BATCH) {
+    await node.mutateBatch(ops.slice(start, start + CHUNK_WRITE_BATCH), { durability: "durable" });
+  }
 }
 
-async function fetchBlob(node: NodeClient, schemaHash: string, key: string): Promise<Uint8Array> {
-  if (!node.queryByKey) {
-    throw new BrainError({ code: "keyed_read_required", message: "The body file read needs a keyed client." });
+type ChunkText = { bytes: Uint8Array; contentHash: string; size: number };
+
+/**
+ * Read the chunks of every key: one batched read per round of pages. A key
+ * with no chunk records is absent from the result.
+ */
+export async function readChunkTexts(
+  node: NodeClient,
+  cfg: SpillCfg | null,
+  keys: readonly string[],
+): Promise<Map<string, ChunkText>> {
+  const out = new Map<string, ChunkText>();
+  if (keys.length === 0) return out;
+  const readBatch = node.readBatch;
+  if (!readBatch) {
+    throw new BrainError({ code: "keyed_read_required", message: "The long text read needs a batched client." });
   }
-  const row = await node.queryByKey({ schemaHash, fields: [], keyHash: key, file: true });
-  if (!row) throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
-  const path = row.file?.path;
-  if (!path) {
-    throw new BrainError({
-      code: "body_spill_blob_missing",
-      message: "The body file has no path. Brain cannot read file bytes stored inside LastDB.",
-      hint: "Write the record again with its full text (brain put --allow-shrink).",
+  const schemaHash = bodyChunkSchemaHash(cfg);
+  const rows = new Map<string, QueryRow[]>();
+  let pending: Array<{ key: string; cursor?: string }> = [...new Set(keys)].map((key) => ({ key }));
+  while (pending.length > 0) {
+    const reads: BatchRangeRead[] = pending.map(({ key, cursor }) => ({
+      kind: "range",
+      schemaHash,
+      fields: [...BODY_CHUNK_FIELDS],
+      range: { hash: key },
+      limit: CHUNK_PAGE,
+      ...(cursor ? { cursor } : {}),
+    }));
+    const hits = await readBatch(reads);
+    const next: typeof pending = [];
+    hits.forEach((hit, index) => {
+      const key = pending[index]!.key;
+      if (hit.kind !== "range") {
+        throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected read." });
+      }
+      if (hit.error) throw hit.error;
+      const list = rows.get(key) ?? [];
+      list.push(...hit.rows);
+      rows.set(key, list);
+      if (hit.nextCursor) next.push({ key, cursor: hit.nextCursor });
+    });
+    pending = next;
+  }
+  for (const [key, list] of rows) {
+    if (list.length === 0) continue;
+    const ordered = list
+      .map((row) => ({ range: row.key?.range ?? stringOf(row.fields ?? {}, "chunk_index"), fields: row.fields ?? {} }))
+      .sort((a, b) => (a.range < b.range ? -1 : a.range > b.range ? 1 : 0));
+    ordered.forEach((row, index) => {
+      if (row.range !== chunkRange(index)) {
+        throw new BrainError({
+          code: "body_spill_chunk_missing",
+          message: `The long text ${key} is missing part ${chunkRange(index)}.`,
+          hint: "Write the record again with its full text.",
+        });
+      }
+    });
+    const first = ordered[0]!.fields as Record<string, unknown>;
+    out.set(key, {
+      bytes: new Uint8Array(Buffer.from(ordered.map((row) => stringOf(row.fields as Record<string, unknown>, "chunk_text")).join(""), "utf8")),
+      contentHash: stringOf(first, "content_hash"),
+      size: Number(stringOf(first, "size")) || 0,
     });
   }
-  return new Uint8Array(readFileSync(path));
+  return out;
 }
 
 function verifyBytes(bytes: Uint8Array, sha256: string, size: number, what: string): void {
@@ -276,86 +317,17 @@ export const STORED_FORM = Symbol("brain.storedForm");
 
 type HydratedRecord = BrainRecord & { [STORED_FORM]?: Record<string, string> };
 
-function bodyFileSchemaHash(cfg: SpillCfg | null): string {
-  const pin = cfg?.schemaHashes[BODY_FILE_SCHEMA_KEY];
-  if (typeof pin === "string" && pin.length > 0 && !/^[a-f0-9]{64}$/.test(pin)) {
-    return pin.startsWith("brain/") ? pin : `brain/${pin}`;
-  }
-  return BODY_FILE_NAME;
-}
-
 export type HydrateOptions = {
   // Load only these spilled fields. Omitted loads every spilled field.
   fields?: readonly string[];
 };
 
-async function resolveSpilledField(
-  node: NodeClient,
-  cfg: SpillCfg | null,
-  type: RecordType,
-  slug: string,
-  field: string,
-  marker: SpillMarker,
-): Promise<string> {
-  const schemaHash = bodyFileSchemaHash(cfg);
-  const key = bodyFileKey(type, slug, marker.field || field, marker.sha256);
-  const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, marker.field || field, marker.sha256);
-  if (sidecar === null) {
-    throw new BrainError({
-      code: "body_spill_sidecar_missing",
-      message: `${type} ${slug}: field ${field} points at a body file record that does not exist (${key}).`,
-      hint: "The record may have synced before its sidecar. Retry; if it stays, write the record again with its full text.",
-    });
-  }
-  if (sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
-    const message =
-      `${type} ${slug}: field ${field} names text ${marker.sha256.slice(0, 12)}, ` +
-      `but the body file record holds ${sidecar.contentHash.slice(0, 12)}.`;
-    throw new BrainError({
-      code: "body_spill_sidecar_mismatch",
-      message,
-      hint: "The stored text reference does not match this record revision. Read the record again or restore its full text.",
-    });
-  }
-  const bytes = await fetchBlob(node, schemaHash, sidecar.key);
-  verifyBytes(bytes, marker.sha256, marker.bytes, `${type} ${slug} field ${field}`);
-  return Buffer.from(bytes).toString("utf8");
-}
-
-/**
- * Replace every spilled field of `record` with its full text. A record with no
- * marker comes back unchanged (same object, no reads). The returned copy keeps
- * the stored form under `STORED_FORM`, so the write plan can tell "unchanged"
- * from "legacy text that still needs a spill".
- */
-async function hydrateRecordOne(
-  node: NodeClient,
-  cfg: SpillCfg | null,
-  type: RecordType,
-  record: BrainRecord,
-  opts?: HydrateOptions,
-): Promise<BrainRecord> {
-  const pending: Array<{ field: string; marker: SpillMarker; stored: string }> = [];
-  const only = opts?.fields;
-  for (const field of spillFieldsFor(type)) {
-    if (only !== undefined && !only.includes(field)) continue;
-    const value = record[field];
-    if (typeof value !== "string") continue;
-    const marker = parseSpillMarker(value);
-    if (marker !== null) pending.push({ field, marker, stored: value });
-  }
-  if (pending.length === 0) return record;
-  const texts = await Promise.all(
-    pending.map((p) => resolveSpilledField(node, cfg, type, record.slug, p.field, p.marker)),
-  );
-  const out: HydratedRecord = { ...record };
-  const stored: Record<string, string> = {};
-  pending.forEach((p, i) => {
-    out[p.field] = texts[i]!;
-    stored[p.field] = p.stored;
+function bodyFileMissing(what: string, key: string): BrainError {
+  return new BrainError({
+    code: "body_spill_chunk_missing",
+    message: `${what}: the long text has no stored parts (${key}).`,
+    hint: "The record may have synced before its long text. Retry; if it stays, write the record again with its full text.",
   });
-  Object.defineProperty(out, STORED_FORM, { value: stored, enumerable: false });
-  return out;
 }
 
 type PendingSpill = {
@@ -363,14 +335,15 @@ type PendingSpill = {
   field: string;
   marker: SpillMarker;
   stored: string;
-  versioned: string;
-  legacy: string;
+  key: string;
 };
 
 /**
- * Hydrate many records. Sidecar keys share one `/v1/read`. The chosen file
- * keys share a second. The first failure in input order is the error. A
- * record with no marker is the same object, and no read is sent for it.
+ * Replace every spilled field with its full text. The chunks of every key
+ * share one batched read per page round. The first failure in input order is
+ * the error. A record with no marker is the same object, and no read is sent
+ * for it. The returned copy keeps the stored form under `STORED_FORM`, so the
+ * write plan can tell "unchanged" from "text that still needs a spill".
  */
 export async function hydrateRecords(
   node: NodeClient,
@@ -392,118 +365,30 @@ export async function hydrateRecords(
         field,
         marker,
         stored: value,
-        versioned: bodyFileKey(item.type, item.record.slug, name, marker.sha256),
-        legacy: bodyFileKey(item.type, item.record.slug, name),
+        key: bodyFileKey(item.type, item.record.slug, name, marker.sha256),
       });
     }
   });
   if (pending.length === 0) return items.map((item) => item.record);
-  const readBatch = node.readBatch;
-  if (!readBatch) {
-    const out: BrainRecord[] = [];
-    for (const item of items) out.push(await hydrateRecordOne(node, cfg, item.type, item.record, item.opts));
-    return out;
-  }
-  const schemaHash = bodyFileSchemaHash(cfg);
-  const sidecarReads: BatchPointRead[] = [];
-  for (const item of pending) {
-    sidecarReads.push(
-      { kind: "point", schemaHash, fields: FILE_FIELDS, hash: item.versioned },
-      { kind: "point", schemaHash, fields: FILE_FIELDS, hash: item.legacy },
-    );
-  }
-  const sidecarHits = await readBatch(sidecarReads);
-  const sidecarRows = new Map<string, QueryRow>();
-  for (let index = 0; index < sidecarHits.length; index += 1) {
-    const hit = sidecarHits[index]!;
-    if (hit.kind !== "point") {
-      throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected read." });
-    }
-    if (hit.error) throw hit.error;
-    if (hit.row) sidecarRows.set(sidecarReads[index]!.hash, hit.row);
-  }
-  const chosen: Array<{ pendingIndex: number; key: string }> = [];
-  for (let index = 0; index < pending.length; index += 1) {
-    const item = pending[index]!;
-    const source = items[item.itemIndex]!;
-    const sidecar = sidecarFromRow(sidecarRows.get(item.versioned) ?? sidecarRows.get(item.legacy) ?? null);
-    if (sidecar === null) {
-      throw new BrainError({
-        code: "body_spill_sidecar_missing",
-        message: `${source.type} ${source.record.slug}: field ${item.field} points at a body file record that does not exist (${item.versioned}).`,
-        hint: "The record may have synced before its sidecar. Retry; if it stays, write the record again with its full text.",
-      });
-    }
-    if (sidecar.contentHash !== item.marker.sha256 || sidecar.size !== item.marker.bytes) {
-      throw new BrainError({
-        code: "body_spill_sidecar_mismatch",
-        message:
-          `${source.type} ${source.record.slug}: field ${item.field} names text ${item.marker.sha256.slice(0, 12)}, ` +
-          `but the body file record holds ${sidecar.contentHash.slice(0, 12)}.`,
-        hint: "The stored text reference does not match this record revision. Read the record again or restore its full text.",
-      });
-    }
-    chosen.push({ pendingIndex: index, key: sidecar.key });
-  }
-  const uniqueKeys = [...new Set(chosen.map((item) => item.key))];
-  const fileHits = await readBatch(uniqueKeys.map((hash) => ({
-    kind: "point" as const,
-    schemaHash,
-    fields: [],
-    hash,
-    file: true,
-  })));
-  const files = new Map<string, Uint8Array>();
-  for (let index = 0; index < fileHits.length; index += 1) {
-    const hit = fileHits[index]!;
-    const hash = uniqueKeys[index]!;
-    if (hit.kind !== "point") {
-      throw new BrainError({ code: "record_read_incomplete", message: "LastDB returned an unexpected read." });
-    }
-    if (hit.error) throw hit.error;
-    if (!hit.row) {
-      throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
-    }
-    const path = hit.row.file?.path;
-    if (!path) {
-      throw new BrainError({
-        code: "body_spill_blob_missing",
-        message: "The body file has no path. Brain cannot read file bytes stored inside LastDB.",
-        hint: "Write the record again with its full text (brain put --allow-shrink).",
-      });
-    }
-    files.set(hash, new Uint8Array(readFileSync(path)));
-  }
-  const texts: string[] = [];
-  for (const item of chosen) {
-    const pendingItem = pending[item.pendingIndex]!;
-    const source = items[pendingItem.itemIndex]!;
-    const bytes = files.get(item.key);
-    if (!bytes) {
-      throw new BrainError({ code: "body_spill_sidecar_missing", message: "The body file record is missing." });
-    }
-    verifyBytes(
-      bytes,
-      pendingItem.marker.sha256,
-      pendingItem.marker.bytes,
-      `${source.type} ${source.record.slug} field ${pendingItem.field}`,
-    );
-    texts.push(Buffer.from(bytes).toString("utf8"));
-  }
+  const texts = await readChunkTexts(node, cfg, pending.map((item) => item.key));
   const copies = new Map<number, HydratedRecord>();
   const storedForms = new Map<number, Record<string, string>>();
-  chosen.forEach((item, index) => {
-    const pendingItem = pending[item.pendingIndex]!;
-    let copy = copies.get(pendingItem.itemIndex);
+  for (const item of pending) {
+    const source = items[item.itemIndex]!;
+    const what = `${source.type} ${source.record.slug} field ${item.field}`;
+    const text = texts.get(item.key);
+    if (!text) throw bodyFileMissing(what, item.key);
+    verifyBytes(text.bytes, item.marker.sha256, item.marker.bytes, what);
+    let copy = copies.get(item.itemIndex);
     if (!copy) {
-      copy = { ...items[pendingItem.itemIndex]!.record };
-      copies.set(pendingItem.itemIndex, copy);
+      copy = { ...source.record };
+      copies.set(item.itemIndex, copy);
     }
-    copy[pendingItem.field] = texts[index]!;
-    const stored = storedForms.get(pendingItem.itemIndex) ?? {};
-    stored[pendingItem.field] = pendingItem.stored;
-    storedForms.set(pendingItem.itemIndex, stored);
-  });
+    copy[item.field] = Buffer.from(text.bytes).toString("utf8");
+    const stored = storedForms.get(item.itemIndex) ?? {};
+    stored[item.field] = item.stored;
+    storedForms.set(item.itemIndex, stored);
+  }
   for (const [index, stored] of storedForms) {
     Object.defineProperty(copies.get(index)!, STORED_FORM, { value: stored, enumerable: false });
   }
@@ -669,15 +554,16 @@ export function fieldsToSpill(
   return planSeal(type, slug, fields).spill.map((s) => s.field);
 }
 
-async function commitSidecar(opts: {
+async function commitChunks(opts: {
   node: NodeClient;
+  cfg: SpillCfg;
   schemaHash: string;
   type: RecordType;
   slug: string;
   field: string;
   full: { buf: Buffer; sha256: string };
 }): Promise<{ reused: boolean }> {
-  const { node, schemaHash, type, slug, field, full } = opts;
+  const { node, cfg, schemaHash, type, slug, field, full } = opts;
   if (full.buf.length > SPILL_BLOB_MAX_BYTES) {
     throw new BrainError({
       code: "body_spill_too_large",
@@ -686,25 +572,17 @@ async function commitSidecar(opts: {
     });
   }
   const key = bodyFileKey(type, slug, field, full.sha256);
-  const existing = await readSidecar(node, schemaHash, key);
-  // The write stores the fields and the file together, so a sidecar with
-  // these fields has this file.
-  if (existing !== null && existing.contentHash === full.sha256 && existing.size === full.buf.length) {
+  const what = `${type} ${slug} field ${field}`;
+  const existing = (await readChunkTexts(node, cfg, [key])).get(key);
+  if (existing !== undefined && existing.contentHash === full.sha256 && existing.size === full.buf.length) {
+    verifyBytes(existing.bytes, full.sha256, full.buf.length, what);
     return { reused: true };
   }
-  // 1. sidecar and its file in one write, 2. verify it reads back. The record is written after.
-  const now = new Date().toISOString();
-  await putSidecar(node, schemaHash, key, full.buf, {
-    file_key: key,
-    record_type: type,
-    record_slug: slug,
-    record_field: field,
-    content_hash: full.sha256,
-    size: String(full.buf.length),
-    created_at: existing?.createdAt || now,
-    updated_at: now,
-  });
-  verifyBytes(await fetchBlob(node, schemaHash, key), full.sha256, full.buf.length, `${type} ${slug} field ${field}`);
+  // 1. the chunks, 2. read them back. The record that names them is written after.
+  await writeChunkOps(node, chunkOps(schemaHash, key, full));
+  const written = (await readChunkTexts(node, cfg, [key])).get(key);
+  if (written === undefined) throw bodyFileMissing(what, key);
+  verifyBytes(written.bytes, full.sha256, full.buf.length, what);
   return { reused: false };
 }
 
@@ -739,10 +617,10 @@ export async function sealRecordFields(opts: {
   const spilled: SpilledField[] = [];
 
   if (plan.spill.length > 0 || plan.pass.length > 0) {
-    const schemaHash = ensureBodyFileSchema(cfg, { persist: true });
+    const schemaHash = ensureBodyChunkSchema(cfg, { persist: true });
     const results = await Promise.all(
       plan.spill.map(async (s) => {
-        const { reused } = await commitSidecar({ node, schemaHash, type, slug, field: s.field, full: s.full });
+        const { reused } = await commitChunks({ node, cfg, schemaHash, type, slug, field: s.field, full: s.full });
         const done: SpilledField = {
           field: s.field,
           bytes: s.full.buf.length,
@@ -754,19 +632,19 @@ export async function sealRecordFields(opts: {
       }),
     );
     spilled.push(...results);
-    // A pass-through marker must still point at a real sidecar with that text.
-    await Promise.all(
-      plan.pass.map(async ({ field, marker }) => {
-        const sidecar = await readMarkerSidecar(node, schemaHash, type, slug, field, marker.sha256);
-        if (sidecar === null || sidecar.contentHash !== marker.sha256 || sidecar.size !== marker.bytes) {
-          throw new BrainError({
-            code: "body_spill_sidecar_mismatch",
-            message: `${type} ${slug}: field ${field} carries a marker with no matching body file record.`,
-            hint: "Read the record again with `brain get` and write the full text.",
-          });
-        }
-      }),
-    );
+    // A pass-through marker must still name stored text with that hash.
+    const passKeys = plan.pass.map(({ field, marker }) => bodyFileKey(type, slug, field, marker.sha256));
+    const passTexts = await readChunkTexts(node, cfg, passKeys);
+    plan.pass.forEach(({ field, marker }, index) => {
+      const text = passTexts.get(passKeys[index]!);
+      if (!text || text.contentHash !== marker.sha256 || text.size !== marker.bytes) {
+        throw new BrainError({
+          code: "body_spill_sidecar_mismatch",
+          message: `${type} ${slug}: field ${field} carries a marker with no matching stored text.`,
+          hint: "Read the record again with `brain get` and write the full text.",
+        });
+      }
+    });
     for (const s of spilled) {
       opts.verbose?.(
         `body-spill: ${type} ${slug} field=${s.field} bytes=${s.bytes} head=${s.headBytes} ` +
