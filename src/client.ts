@@ -2035,6 +2035,15 @@ export function nodeHttpErrorHint(err: unknown): string {
   );
 }
 
+// Owner sockets are absolute paths (`defaultFolddbSocketPath` /
+// `BRAIN_FOLDDB_SOCKET`). Refuse relative values so a cwd-relative probe
+// cannot be aimed by a crafted config field.
+function ownerSocketPresent(socketPath: string): boolean {
+  if (!isAbsolute(socketPath)) return false;
+  // codeql[js/path-injection]: local owner-socket path from config/env, not remote input
+  return existsSync(socketPath);
+}
+
 function connectionError(
   baseUrl: string,
   cause: unknown,
@@ -2043,7 +2052,7 @@ function connectionError(
   if (
     ctx.routeSocket &&
     ctx.socketCause !== undefined &&
-    (ctx.phase === "body" || existsSync(ctx.routeSocket.socketPath))
+    (ctx.phase === "body" || ownerSocketPresent(ctx.routeSocket.socketPath))
   ) {
     return new BrainError({
       code: "service_unreachable",
@@ -2053,7 +2062,7 @@ function connectionError(
       cause: { socket: ctx.socketCause, fallback: cause },
     });
   }
-  if (ctx.socketPath && !existsSync(ctx.socketPath)) {
+  if (ctx.socketPath && !ownerSocketPresent(ctx.socketPath)) {
     return new BrainError({
       code: "service_unreachable",
       message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,
