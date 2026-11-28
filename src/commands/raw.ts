@@ -1,7 +1,5 @@
 // `brain raw <method> <path> [body]` — authenticated passthrough to the
-// node or the schema service. Path prefix picks the service:
-//   /api/  → node (Unix socket)
-//   /v1/   → schema service (no auth header)
+// LastDB node. Path must start with `/api/` or `/v1/` (app read/write).
 //
 // Body sources:
 //   omitted | "-"   → read raw bytes from stdin
@@ -10,7 +8,6 @@
 
 import {
   newReadClientFromCfg,
-  newSchemaServiceClient,
   BrainError,
   type RawResponse,
   type Verbose,
@@ -35,17 +32,11 @@ export type RawOptions = {
 export async function rawCmd(opts: RawOptions): Promise<number> {
   const { print, printErr } = resolvePrintSinks(opts);
   const method = normalizeMethod(opts.method);
-  const target = pickService(opts.path);
+  assertNodePath(opts.path);
   const body = await resolveBody(opts.body, opts.readStdin);
 
-  let res: RawResponse;
-  if (target === "node") {
-    const node = newReadClientFromCfg(opts.cfg, opts.verbose);
-    res = await node.rawCall(method, opts.path, body);
-  } else {
-    const schema = newSchemaServiceClient(opts.cfg.schemaServiceUrl, opts.verbose);
-    res = await schema.rawCall(method, opts.path, body);
-  }
+  const node = newReadClientFromCfg(opts.cfg, opts.verbose);
+  const res: RawResponse = await node.rawCall(method, opts.path, body);
 
   opts.verbose?.(`status=${res.status}`);
   if (opts.verbose) {
@@ -75,12 +66,11 @@ export function normalizeMethod(raw: string): RawMethod {
   return upper as RawMethod;
 }
 
-export function pickService(path: string): "node" | "schema" {
-  if (path.startsWith("/api/")) return "node";
-  if (path.startsWith("/v1/")) return "schema";
+export function assertNodePath(path: string): void {
+  if (path.startsWith("/api/") || path.startsWith("/v1/")) return;
   throw new BrainError({
     code: "invalid_raw_path",
-    message: `Path "${path}" must start with /api/ (node) or /v1/ (schema service).`,
+    message: `Path "${path}" must start with /api/ or /v1/.`,
   });
 }
 

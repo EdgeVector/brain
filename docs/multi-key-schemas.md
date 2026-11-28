@@ -13,7 +13,7 @@ Each record kind uses recent and status keys. Task also uses a design key. Range
 A config must set `storageModel` to `multi-key-v1`. Any other value is `config_invalid`.
 
 Ten field descriptions and purpose statements in `src/schemas.ts` still name `fbrain`.
-They stay unchanged because the Schema Service identity hash includes them.
+They stay unchanged because the signed definition identity includes them.
 
 ## CI comparison
 

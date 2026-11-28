@@ -22,7 +22,6 @@ export type Config = {
   storageModel: "multi-key-v1";
   configVersion: number;
   nodeUrl: string;
-  schemaServiceUrl: string;
   userHash: string;
   schemaHashes: Record<string, string>;
   /** Definition identities are separate from runtime addresses. */
@@ -38,8 +37,8 @@ export type Config = {
   /**
    * When false, the client skips capability acquisition (same effect as
    * `BRAIN_APP_IDENTITY_ENFORCE=off`). Legacy configs may contain false from
-   * the retired unregistered-schema bootstrap. New initialization must use
-   * Schema Service-registered identities and must not treat this flag as a
+   * the retired unregistered-schema bootstrap. New initialization pins owned
+   * schemas from the app manifest and must not treat this flag as a
    * local-schema option. Omitted when unset → default enforce-on.
    */
   appIdentityEnforce?: boolean;
@@ -135,7 +134,7 @@ function assertConfigShape(path: string, raw: unknown): Config {
     throw new ConfigInvalidError(path, "unsupported storageModel");
   }
 
-  for (const key of ["nodeUrl", "schemaServiceUrl", "userHash"] as const) {
+  for (const key of ["nodeUrl", "userHash"] as const) {
     if (!(key in r)) {
       throw new ConfigInvalidError(path, `missing field "${key}"`);
     }
@@ -171,7 +170,6 @@ function assertConfigShape(path: string, raw: unknown): Config {
     storageModel: "multi-key-v1",
     configVersion: CONFIG_VERSION,
     nodeUrl: r.nodeUrl as string,
-    schemaServiceUrl: r.schemaServiceUrl as string,
     userHash: r.userHash as string,
     schemaHashes,
     schemaFieldAliases: readFieldAliases(path, r.schemaFieldAliases),

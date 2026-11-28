@@ -5,18 +5,16 @@ import { QUERY_PAGE_SIZE, queryPageSize } from "./query-page-size.ts";
 import { RECORD_BUDGET_BYTES, RECORD_CAP_BYTES, recordBudgetMessage, recordBytes } from "./record-cap.ts";
 export { QUERY_PAGE_SIZE };
 import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAliasProfiles } from "./field-alias-transport.ts";
-// Typed wrappers for the LastDB node and the schema service.
+// Typed wrappers for the LastDB node.
 //
-// Node routes use the Unix socket. Schema-service routes use HTTPS.
-// All errors flow through `mapError` so every Error Registry row maps
-// to an actionable message in one place.
+// Node routes use the Unix socket. All errors flow through `mapError` so
+// every Error Registry row maps to an actionable message in one place.
 //
 // Record reads and writes go through the LastDB app API (`POST /v1/read` and
 // `POST /v1/write`). The restricted app socket serves only those routes.
 // Search still posts `/api/app/search` for a developer running on the owner
 // socket. Schema declaration, identity, version, and consent are not called.
 
-import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -118,16 +116,6 @@ export type SearchOptions = {
   // the app-namespaced hash) and harmless, and it protects search quality
   // during the migration window before every node carries namespaced data.
   schemas?: string[];
-};
-
-export type RegisteredSchema = {
-  name: string;
-  descriptive_name: string;
-  schema_type: string;
-  fields: string[];
-  field_types: Record<string, unknown>;
-  identity_hash?: string;
-  source?: string;
 };
 
 export type RawResponse = {
@@ -341,38 +329,29 @@ export function defaultLoadProbe(): { load1: number; cores: number } {
 // for the normal load a healthy machine carries without crying starvation.
 const STARVATION_LOAD_FACTOR = 1.5;
 
-// Hint for a request timeout. For the local node path this is load-aware: when
-// the host is CPU-saturated (load >> cores) the node is almost certainly
-// STARVED, not broken — so the old static "cold-initializing its schema index"
-// guess was actively misleading (it sent devs to restart a perfectly healthy,
-// hours-up node when the real fix was "await the other CPU hog"). The
-// schema-service path is a remote Lambda, where local load is irrelevant — it
-// keeps the load-agnostic hint. See the `nodeDownHint` / `isNodeReachableButErroring`
-// family for the precedent of context-aware hints.
+// Hint for a request timeout. Load-aware: when the host is CPU-saturated
+// (load >> cores) the node is almost certainly STARVED, not broken — so the
+// old static "cold-initializing its schema index" guess was actively
+// misleading (it sent devs to restart a perfectly healthy, hours-up node when
+// the real fix was "await the other CPU hog"). See the `nodeDownHint` /
+// `isNodeReachableButErroring` family for the precedent of context-aware hints.
 export function timeoutHint(
-  service: "node" | "schema",
   loadProbe: () => { load1: number; cores: number } = defaultLoadProbe,
 ): string {
   const idempotentTail =
     "Writes are upserts keyed by slug, so re-running the command is safe. Raise the deadline with BRAIN_HTTP_TIMEOUT_MS if it's just slow.";
-  if (service === "node") {
-    const { load1, cores } = loadProbe();
-    // load1 > 0 guards the "unmeasurable" platforms; cores > 0 is defensive.
-    if (cores > 0 && load1 > cores * STARVATION_LOAD_FACTOR) {
-      return (
-        `This machine is under heavy CPU load (load ${load1.toFixed(1)} on ${cores} cores) — ` +
-        "the node is likely starved, not broken. Re-run once the other work " +
-        "(e.g. a build/test run) finishes. " +
-        idempotentTail
-      );
-    }
+  const { load1, cores } = loadProbe();
+  // load1 > 0 guards the "unmeasurable" platforms; cores > 0 is defensive.
+  if (cores > 0 && load1 > cores * STARVATION_LOAD_FACTOR) {
     return (
-      "The node may be slow (under load, or cold-initializing its schema index). " +
+      `This machine is under heavy CPU load (load ${load1.toFixed(1)} on ${cores} cores) — ` +
+      "the node is likely starved, not broken. Re-run once the other work " +
+      "(e.g. a build/test run) finishes. " +
       idempotentTail
     );
   }
   return (
-    "The schema service may be under heavy load (e.g. a cold Lambda). " +
+    "The node may be slow (under load, or cold-initializing its schema index). " +
     idempotentTail
   );
 }
@@ -382,26 +361,24 @@ export function timeoutHint(
 function timeoutError(
   path: string,
   method: string,
-  service: "node" | "schema",
   timeoutMs: number,
   cause: unknown,
 ): BrainError {
-  const which = service === "node" ? "node" : "schema service";
   return new BrainError({
     code: "service_timeout",
     // No DOCTOR_TIP here. A timeout means BUSY, not down, and the standing
     // workspace rule is: do not run doctor/restart for a timeout — retry, and
     // name the load with `lastdb admin ops`. The tip sent routines toward doctor on
     // every busy read (papercut-brain-busy-timeout-suggests-doctor-20260922).
-    message: `${which} did not respond within ${timeoutMs}ms (${method} ${path}) — busy, not down: retry with backoff; \`lastdb admin ops\` names the load. Do not run doctor or restart for a timeout.`,
-    hint: timeoutHint(service),
+    message: `node did not respond within ${timeoutMs}ms (${method} ${path}) — busy, not down: retry with backoff; \`lastdb admin ops\` names the load. Do not run doctor or restart for a timeout.`,
+    hint: timeoutHint(),
     cause,
   });
 }
 
-// Appended by every node + schema-service error message so non-doctor callers
-// (list/put/etc.) point users at `brain doctor`. `doctor` itself must strip
-// this back off — see stripDoctorTip below.
+// Appended by every node error message so non-doctor callers (list/put/etc.)
+// point users at `brain doctor`. `doctor` itself must strip this back off —
+// see stripDoctorTip below.
 export const DOCTOR_TIP = "— run `brain doctor` for a full diagnosis";
 
 // Strip the trailing " ${DOCTOR_TIP}." that client.ts appends to BrainError
@@ -414,15 +391,6 @@ export function stripDoctorTip(message: string): string {
   }
   return message;
 }
-
-// Read-only Schema Service client. Brain declares its schemas through the
-// node (`/api/apps/declare-schema`) and never writes to the catalog.
-export type SchemaServiceClient = {
-  baseUrl: string;
-  listSchemas(): Promise<unknown>;
-  getSchemaByHash(hash: string): Promise<RegisteredSchema | null>;
-  rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
-};
 
 // Supplies the verbatim base64 CapabilityToken blob attached to every write
 // as `X-App-Capability`. Returns null when no capability is held (the node
@@ -601,9 +569,8 @@ export type NodeClient = {
   requestConsent(appId: string, scope: string): Promise<{ status: number; body: unknown }>;
   consentStatus(requestId: string): Promise<{ status: number; body: unknown }>;
   // POST /api/apps/declare-schema — ask Mini to resolve/register an app-owned
-  // schema and return its Schema Service catalog identity
-  // with the node. Newer local-first nodes persist an app-schema mapping and
-  // return the canonical local-mint hash without consulting schema_service.
+  // schema and return its catalog identity with the node. Local-first nodes
+  // persist an app-schema mapping and return the canonical local-mint hash.
   declareAppSchema?(appId: string, schema: AddSchemaRequest["schema"]): Promise<AppSchemaDeclaration>;
   // GET /api/schemas — the schemas currently loaded into this node's DB,
   // each carrying the authoritative `identity_hash` the node computed. Used
@@ -703,81 +670,6 @@ export type NodeClient = {
   search(query: string, opts?: SearchOptions): Promise<NativeIndexHit[]>;
   rawCall(method: string, path: string, body?: unknown): Promise<RawResponse>;
 };
-
-export function newSchemaServiceClient(
-  baseUrl: string,
-  verbose: Verbose = noopVerbose,
-): SchemaServiceClient {
-  const url = stripTrailingSlash(baseUrl);
-  return {
-    baseUrl: url,
-    async listSchemas() {
-      const { res, readBody } = await callSchemaServiceRaw(url, "/v1/schemas", "GET", undefined, verbose);
-      const body = await readBody();
-      if (res.status !== 200) {
-        throw mapSchemaServiceError(res, body, "/v1/schemas");
-      }
-      return body;
-    },
-    async getSchemaByHash(hash) {
-      const path = `/v1/schema/${encodeURIComponent(hash)}`;
-      const { res, readBody } = await callSchemaServiceRaw(url, path, "GET", undefined, verbose);
-      if (res.status === 404) {
-        await readBody();
-        return null;
-      }
-      const body = await readBody();
-      if (res.status !== 200) {
-        throw mapSchemaServiceError(res, body, path);
-      }
-      // Two response shapes have been observed:
-      //   - {schema: {...}, system: bool}  (SchemaEnvelope, current server)
-      //   - {...schema fields...}          (older or simpler responses)
-      // Prefer the envelope; fall back to treating the body as the schema.
-      const obj = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
-      if (!obj) {
-        throw new BrainError({
-          code: "schema_lookup_bad_response",
-          message: `Schema service ${path} returned a non-JSON or non-object body: ${JSON.stringify(body).slice(0, 200)}`,
-        });
-      }
-      const wrapped = obj.schema as Record<string, unknown> | undefined;
-      const schemaObj = wrapped && typeof wrapped === "object" ? wrapped : obj;
-      if (!schemaObj.fields && !schemaObj.field_types && !schemaObj.descriptive_name) {
-        throw new BrainError({
-          code: "schema_lookup_no_schema",
-          message: `Schema service ${path} returned unrecognised body: ${JSON.stringify(body).slice(0, 200)}`,
-        });
-      }
-      return {
-        name: stringProp(schemaObj, "name"),
-        descriptive_name: stringProp(schemaObj, "descriptive_name"),
-        schema_type: stringProp(schemaObj, "schema_type"),
-        fields: Array.isArray(schemaObj.fields)
-          ? (schemaObj.fields as unknown[]).filter((v): v is string => typeof v === "string")
-          : [],
-        field_types:
-          schemaObj.field_types && typeof schemaObj.field_types === "object"
-            ? (schemaObj.field_types as Record<string, unknown>)
-            : {},
-        identity_hash:
-          typeof schemaObj.identity_hash === "string" ? (schemaObj.identity_hash as string) : undefined,
-        source: typeof schemaObj.source === "string" ? (schemaObj.source as string) : undefined,
-      };
-    },
-    async rawCall(method, path, body) {
-      const { res, readBody } = await callSchemaServiceRaw(url, path, method, body, verbose);
-      const text = await readBody({ asText: true });
-      return { status: res.status, headers: res.headers, body: text, json:parseJsonSafe(text) };
-
-    },
-  };
-}
-
-function stringProp(obj: Record<string, unknown>, key: string): string {
-  const v = obj[key];
-  return typeof v === "string" ? v : "";
-}
 
 export function newNodeClient(opts: {
   schemaFieldAliases?: FieldAliasProfiles;
@@ -1758,7 +1650,6 @@ async function callNodeRaw(
     method,
     body,
     verbose,
-    service: "node",
     // X-LastDB-Client is a best-effort ops label for Mini request telemetry
     // (not a security boundary).
     headers: {
@@ -1767,16 +1658,6 @@ async function callNodeRaw(
     },
     socketPath,
   });
-}
-
-async function callSchemaServiceRaw(
-  baseUrl: string,
-  path: string,
-  method: string,
-  body: unknown,
-  verbose: Verbose,
-): Promise<BoundedResponse> {
-  return verboseFetch({ baseUrl, path, method, body, verbose, service: "schema", headers: {} });
 }
 
 // The result of a bounded request: the response headers, plus a `readBody`
@@ -1817,12 +1698,11 @@ type ConnectionErrorContext = {
 
 // Node routes use the owner socket whenever a path is set, including when the
 // socket file is absent. A down node fails the connect and the caller maps that
-// to a node-not-running error. Schema service stays on HTTPS.
+// to a node-not-running error.
 export function localNodeRouteSocket(
-  service: "node" | "schema",
   socketPath?: string,
 ): NodeSocketSelection | null {
-  if (service !== "node" || !socketPath) return null;
+  if (!socketPath) return null;
   return { socketPath };
 }
 
@@ -1864,25 +1744,23 @@ async function boundedNodeFetch(opts: {
   method: string;
   body?: string;
   verbose?: Verbose;
-  service: "node" | "schema";
   headers: Record<string, string>;
   socketPath?: string;
   timeoutMs: number;
   routeSocket?: NodeSocketSelection | null;
 }): Promise<BoundedFetchResult> {
   const tcpUrl = `${opts.baseUrl}${opts.path}`;
-  const tag = opts.service === "node" ? "NODE" : "SCHEMA";
   const headers = { ...opts.headers };
   const bodyBytes = Buffer.byteLength(opts.body ?? "");
   const localRouteSocket =
     opts.routeSocket !== undefined
       ? opts.routeSocket
-      : localNodeRouteSocket(opts.service, opts.socketPath);
+      : localNodeRouteSocket(opts.socketPath);
   const preflightTarget = localRouteSocket
     ? `${opts.path} [unix:${localRouteSocket.socketPath}]`
     : tcpUrl;
   opts.verbose?.(
-    `→ ${tag} ${opts.method} ${preflightTarget}` +
+    `→ NODE ${opts.method} ${preflightTarget}` +
       (opts.body !== undefined ? ` bodyBytes=${bodyBytes}` : ""),
   );
 
@@ -1898,7 +1776,7 @@ async function boundedNodeFetch(opts: {
     const url = socket ? `http://localhost${opts.path}` : tcpUrl;
     const transport = socket ? `unix:${socket.socketPath}` : "tcp";
     opts.verbose?.(
-      `→ ${tag} ${opts.method} ${url} [${transport}]` +
+      `→ NODE ${opts.method} ${url} [${transport}]` +
         (opts.body !== undefined ? ` bodyBytes=${bodyBytes}` : ""),
     );
     const init: RequestInit & { unix?: string } = {
@@ -1909,7 +1787,7 @@ async function boundedNodeFetch(opts: {
     };
     if (socket) init.unix = socket.socketPath;
     const r = await fetch(url, init);
-    opts.verbose?.(`← ${tag} ${opts.method} ${url} [${transport}] status=${r.status}`);
+    opts.verbose?.(`← NODE ${opts.method} ${url} [${transport}] status=${r.status}`);
     return r;
   };
 
@@ -1933,7 +1811,7 @@ async function boundedNodeFetch(opts: {
         throw socketErr;
       }
     } else {
-      // Schema service, or a node call with no socket path: plain HTTP.
+      // Node call with no socket path: plain HTTP.
       res = await attempt(null);
     }
     try {
@@ -1954,17 +1832,14 @@ async function boundedNodeFetch(opts: {
   }
 }
 
-// Shared inner fetch for both service clients. Differs only by the verbose
-// log tag (NODE vs SCHEMA), the service-specific headers passed in, and the
-// connectionError service param. Same shape and intent as the per-flag
-// helpers in PRs #87/#88/#89/#97.
+// Shared inner fetch for the node client. Same shape and intent as the
+// per-flag helpers in PRs #87/#88/#89/#97.
 async function verboseFetch(opts: {
   baseUrl: string;
   path: string;
   method: string;
   body: unknown;
   verbose: Verbose;
-  service: "node" | "schema";
   headers: Record<string, string>;
   timeoutMs?: number;
   socketPath?: string;
@@ -1990,7 +1865,6 @@ async function verboseFetch(opts: {
       method: opts.method,
       body: bodyStr,
       verbose: opts.verbose,
-      service: opts.service,
       headers,
       socketPath: opts.socketPath,
       timeoutMs,
@@ -1998,9 +1872,9 @@ async function verboseFetch(opts: {
   } catch (err) {
     if (err instanceof BoundedFetchFailure) {
       if (err.timeout) {
-        throw timeoutError(opts.path, opts.method, opts.service, timeoutMs, err.cause);
+        throw timeoutError(opts.path, opts.method, timeoutMs, err.cause);
       }
-      throw connectionError(opts.baseUrl, opts.service, err.cause, err.failureCtx);
+      throw connectionError(opts.baseUrl, err.cause, err.failureCtx);
     }
     throw err;
   }
@@ -2160,30 +2034,36 @@ export function nodeHttpErrorHint(err: unknown): string {
   );
 }
 
-// brain talks to a deployed cloud schema-service Lambda by default —
-// there is no local schema_service to "start" unless you're a fold
-// contributor pointing at localhost. So an unreachable schema service is
-// almost always a network/outage issue for a downloaded user.
-export function schemaDownHint(url: string): string {
-  if (/localhost|127\.0\.0\.1/.test(url)) {
-    return "Start fold's schema service (`./run.sh --local --local-schema` runs both).";
+function errnoCode(err: unknown): string {
+  if (!err || typeof err !== "object") return "";
+  if ("code" in err && typeof (err as { code: unknown }).code === "string") {
+    return (err as { code: string }).code;
   }
-  return "brain uses a cloud schema service (no local schema_service to run) — check your network connection or for a service outage.";
+  if ("cause" in err) return errnoCode((err as { cause: unknown }).cause);
+  return "";
 }
 
 function connectionError(
   baseUrl: string,
-  service: "node" | "schema",
   cause: unknown,
   ctx: ConnectionErrorContext = {},
 ): BrainError {
-  const which = service === "node" ? "node" : "schema service";
-  if (
-    service === "node" &&
-    ctx.routeSocket &&
-    ctx.socketCause !== undefined &&
-    (ctx.phase === "body" || existsSync(ctx.routeSocket.socketPath))
-  ) {
+  // Distinguish missing socket (ENOENT) from a present-but-refusing socket
+  // via the connect errno — no filesystem probe of the config path.
+  const socketCause = ctx.socketCause ?? cause;
+  const socketPath = ctx.routeSocket?.socketPath ?? ctx.socketPath;
+  if (socketPath && errnoCode(socketCause) === "ENOENT") {
+    return new BrainError({
+      code: "service_unreachable",
+      message: `node not running: Unix socket not found at ${socketPath} ${DOCTOR_TIP}.`,
+      hint: socketMissingHint(socketPath),
+      agentHint: socketMissingAgentHint(socketPath),
+      cause: ctx.socketCause !== undefined
+        ? { socket: ctx.socketCause, fallback: cause }
+        : cause,
+    });
+  }
+  if (ctx.routeSocket && ctx.socketCause !== undefined) {
     return new BrainError({
       code: "service_unreachable",
       message: `node socket not reachable at unix:${ctx.routeSocket.socketPath} ${DOCTOR_TIP}.`,
@@ -2192,19 +2072,10 @@ function connectionError(
       cause: { socket: ctx.socketCause, fallback: cause },
     });
   }
-  if (service === "node" && ctx.socketPath && !existsSync(ctx.socketPath)) {
-    return new BrainError({
-      code: "service_unreachable",
-      message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,
-      hint: socketMissingHint(ctx.socketPath),
-      agentHint: socketMissingAgentHint(ctx.socketPath),
-      cause,
-    });
-  }
   return new BrainError({
     code: "service_unreachable",
-    message: `${which} not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
-    hint: service === "node" ? nodeDownHint() : schemaDownHint(baseUrl),
+    message: `node not reachable at ${baseUrl} ${DOCTOR_TIP}.`,
+    hint: nodeDownHint(),
     cause,
   });
 }
@@ -2255,13 +2126,12 @@ function fetchTransport(
           method,
           headers,
           body: bodyStr,
-          service: "node",
           socketPath,
           timeoutMs,
         });
       } catch (err) {
         if (err instanceof BoundedFetchFailure) {
-          if (err.timeout) throw timeoutError(path, method, "node", timeoutMs, err.cause);
+          if (err.timeout) throw timeoutError(path, method, timeoutMs, err.cause);
           throw new BrainTransportError(
             `request to ${baseUrl}${path} failed: ${err.message}`,
             err.failureCtx,
@@ -2344,7 +2214,7 @@ export function sdkTransportReachableError(
     // Reuse the canonical timeout error the hand-rolled bounded-fetch path
     // already raises, so both transports render one `service_timeout` shape
     // with the same load-aware, retry-oriented hint.
-    return timeoutError(path, method, "node", Number(timedOut[1]), err);
+    return timeoutError(path, method, Number(timedOut[1]), err);
   }
 
   const nonJson = SDK_NON_JSON_RE.exec(msg);
@@ -2399,7 +2269,7 @@ function mapSdkDataError(
     return mapNodeError(err.status, err.body, path);
   }
   if (err instanceof BrainTransportError) {
-    return connectionError(baseUrl, "node", err, err.failureCtx);
+    return connectionError(baseUrl, err, err.failureCtx);
   }
   if (err instanceof TransportError) {
     // The SDK collapses three DIFFERENT situations into one bare
@@ -2411,9 +2281,9 @@ function mapSdkDataError(
     // Classify on the message the SDK's transport actually emits.
     const reachable = sdkTransportReachableError(err, method, path);
     if (reachable) return reachable;
-    return connectionError(baseUrl, "node", err, {
+    return connectionError(baseUrl, err, {
       socketPath,
-      routeSocket: localNodeRouteSocket("node", socketPath),
+      routeSocket: localNodeRouteSocket(socketPath),
       socketCause: err,
     });
   }
@@ -2666,15 +2536,6 @@ export function mapNodeError(status: number, body: unknown, path: string): Brain
     code: `node_http_${status}`,
     message: `Node ${path} returned HTTP ${status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""}.`,
     hint,
-  });
-}
-
-export function mapSchemaServiceError(res: Response, body: unknown, path: string): BrainError {
-  const errCode = bodyError(body);
-  const msg = bodyMessage(body);
-  return new BrainError({
-    code: `schema_http_${res.status}`,
-    message: `Schema service ${path} returned HTTP ${res.status}${msg ? `: ${msg}` : ""}${errCode ? ` [${errCode}]` : ""} ${DOCTOR_TIP}.`,
   });
 }
 

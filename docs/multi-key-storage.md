@@ -59,8 +59,8 @@ Update, delete, and title-only mutation samples each change one record.
 The checks verify exact membership, values, counts, body values, and restart recovery.
 Creation, update, delete, and title-only samples use distinct operations.
 
-The workflow requires the exact definitions in the DEV Schema Service before it builds a daemon.
-`ENVIRONMENT: dev` selects that service for the check and for both daemons.
+The workflow requires the exact definitions from the app manifest before it builds a daemon.
+`ENVIRONMENT: dev` selects that environment for the check and for both daemons.
 It does not replace missing definitions with system schemas or local names.
 The required `benchmark-complete` check retains all operation and upload gates.
 CI summaries and verified artifacts retain the measurements.

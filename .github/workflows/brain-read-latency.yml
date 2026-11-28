@@ -17,8 +17,7 @@ concurrency:
   group: brain-native-latency-${{ github.ref }}
   cancel-in-progress: true
 env:
-  # The daemon names the DEV environment and declares schemas locally (lastdb#1142),
-  # so no Schema Service definition check runs here.
+  # The daemon names the DEV environment and declares schemas locally (lastdb#1142).
   ENVIRONMENT: dev
   APP_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
   APP_AFTER: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -28,13 +28,14 @@ export function syncOwnedModel(
     ),
   );
   const next: Config = {
-    ...existing,
     ...base,
     storageModel: MULTI_KEY_MODEL,
     schemaHashes,
     appIdentityEnforce: false,
     schemaFieldAliases: canonicalProfilesForHashes(schemaHashes),
   };
-  delete next.schemaIdentities;
+  if (existing?.nodeSocketPath && !next.nodeSocketPath) {
+    next.nodeSocketPath = existing.nodeSocketPath;
+  }
   return next;
 }

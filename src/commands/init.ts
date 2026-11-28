@@ -30,7 +30,6 @@ import { resolvePrintSink } from "../format.ts";
 export type InitOptions = {
   // Optional. When unset, the resolver uses the existing config URL or the default.
   nodeUrl?: string;
-  schemaServiceUrl?: string;
   configPath?: string;
   bootstrapName?: string;
   verbose?: Verbose;
@@ -49,11 +48,8 @@ export type InitOptions = {
 };
 
 // Local Mini is Unix-socket only. DEFAULT_NODE_URL is a loopback marker
-// (hostname only). It is not a TCP endpoint. Schema service is the prod
-// cloud Lambda; the dev Lambda is separate from production.
+// (hostname only). It is not a TCP endpoint.
 export const DEFAULT_NODE_URL = "http://127.0.0.1";
-export const DEFAULT_SCHEMA_SERVICE_URL =
-  "https://axo709qs11.execute-api.us-east-1.amazonaws.com";
 
 // Default cold-build retry schedule. Two competing cases share one budget:
 //   - The COMMON new-dev miss: the node just isn't running yet. init prints
@@ -153,9 +149,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
     print(`[init] existing config at ${configPath} — verifying`);
   }
 
-  const resolved = resolveUrls(opts, existing);
-  const nodeUrl = resolved.nodeUrl;
-  const schemaServiceUrl = resolved.schemaServiceUrl;
+  const nodeUrl = resolveNodeUrl(opts, existing);
   // Resolve the socket path for node requests. Persist it so later commands
   // use the same socket without re-supplying BRAIN_FOLDDB_SOCKET or LASTDB_HOME.
   const nodeSocketPath = defaultFolddbSocketPath(existing?.nodeSocketPath);
@@ -175,7 +169,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const userHash = existing?.userHash && existing.userHash.length > 0 ? existing.userHash : "local";
   print(`[2/${STEPS}] pinning ${UNIQUE_SCHEMAS.length} brain schemas to exact names`);
   const config = syncOwnedModel({
-    configVersion: CONFIG_VERSION, nodeUrl, schemaServiceUrl, userHash, schemaHashes: {},
+    configVersion: CONFIG_VERSION, nodeUrl, userHash, schemaHashes: {},
     nodeSocketPath,
   }, existing);
   print(`[3/${STEPS}] writing config at ${configPath}`);
@@ -312,19 +306,11 @@ export async function probeWithRetry(
   }
 }
 
-type ResolvedUrls = {
-  nodeUrl: string;
-  schemaServiceUrl: string;
-};
-
-export function resolveUrls(
-  opts: Pick<InitOptions, "nodeUrl" | "schemaServiceUrl">,
+export function resolveNodeUrl(
+  opts: Pick<InitOptions, "nodeUrl">,
   existing: Config | null,
-): ResolvedUrls {
-  const nodeUrl = opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
-  const schemaServiceUrl =
-    opts.schemaServiceUrl ?? existing?.schemaServiceUrl ?? DEFAULT_SCHEMA_SERVICE_URL;
-  return { nodeUrl, schemaServiceUrl };
+): string {
+  return opts.nodeUrl ?? existing?.nodeUrl ?? DEFAULT_NODE_URL;
 }
 
 function isUnreachable(err: unknown): boolean {

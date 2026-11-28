@@ -245,7 +245,7 @@ ${RECORD_NEW_HELP_LINES}
   gates          list structured open human gates from the canonical open-decisions record
   gate           add, clear, or verify structured open-decisions gates
   doctor         health-check the local setup (--freshness adds G3 retrieval probes)
-  raw            authenticated passthrough to node or schema service
+  raw            authenticated passthrough to the LastDB node
   delete         delete a record (native LastDB Delete; also stamps a tombstone tag)
   admin-snapshot publish/deliver a privacy-safe admin rollup for LastDB deliver
   reindex        backfill named record keys into one list, keyword page, or type directory
@@ -278,9 +278,9 @@ function simpleNewHelp(type: RecordType): string {
 }
 
 export const COMMAND_HELP: Record<Command, string> = {
-  init: `brain init [--node-url URL] [--schema-service-url URL] [--name DISPLAY] [--grant-consent|--yes]
+  init: `brain init [--node-url URL] [--name DISPLAY] [--grant-consent|--yes]
 
-Probe the node, declare Brain schemas, and save ~/.brain/config.json.
+Probe the node, pin Brain schemas, and save ~/.brain/config.json.
 Local access uses the configured LastDB owner socket.
 When LastSeek is installed, init registers Brain's record schemas and builds
 the Brain search index if that index is missing or does not cover them.
@@ -288,7 +288,6 @@ If LastSeek is not installed, init says so and continues. Search then uses
 keyword heads. Run \`brain index\` to register or rebuild later.
 
   --node-url             defaults to http://127.0.0.1, selecting the local Unix socket
-  --schema-service-url   defaults to the production schema service
   --name                 bootstrap display name (default: brain)
   --grant-consent, --yes retained for existing callers. Local access is confirmed
                          through the owner socket. Remote access requires approval
@@ -695,11 +694,9 @@ Evidence pointers understood by verify:
   doctor: `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage [--usage-window N] [--usage-path PATH]]
 
 Live health checks:
-  - config valid (~/.brain/config.json + hex-64 hashes)
-  - schema service reachable
+  - config valid (~/.brain/config.json + pinned schema names)
   - node reachable + provisioned
-  - schemas loaded into the node
-  - schema drift between schemas.ts and the registered Design/Task schemas
+  - schemas pinned to brain/<Name>
   - write-ready: confirm local owner-socket access. Remote nodes check
     the cached capability and app registration, with a next-step hint
     when access requires approval.
@@ -753,15 +750,15 @@ record type. Also appends/updates today's count in
 Exits non-zero if any check fails or the pollution probe FAILs.`,
   raw: `brain raw <method> <path> [body]
 
-Authenticated passthrough. \`/api/\` paths go to the node over its
-Unix socket; \`/v1/\` paths go to the schema service. Body argument
-is treated as the literal request body; omit or pass \`-\` to read
-from stdin. Exits 0 on 2xx, 1 otherwise.
+Authenticated passthrough to the LastDB node over its Unix socket.
+\`/api/\` and \`/v1/\` paths are accepted (app read/write uses \`/v1/\`).
+Body argument is treated as the literal request body; omit or pass \`-\`
+to read from stdin. Exits 0 on 2xx, 1 otherwise.
 
 Examples:
   brain raw GET /api/system/auto-identity
   brain raw GET /api/schemas
-  brain raw GET /v1/schemas`,
+  brain raw POST /v1/read '{"items":[]}'`,
   delete: `brain delete <slug> [--type T] [--force] [--json]
 brain delete --tag T [--type T] [--status S] [--yes] [--force] [--json]
 
@@ -934,7 +931,6 @@ This command is installed by \`brain mcp install\` into ./.claude/settings.json.
 // `values.foo` accesses; `satisfies` enforces that every Command has an entry.
 const INIT_OPTIONS = {
   "node-url": { type: "string" },
-  "schema-service-url": { type: "string" },
   name: { type: "string" },
   "grant-consent": { type: "boolean", default: false },
   // `--yes` is a conventional alias for `--grant-consent` (apt/npm style) —
@@ -1624,11 +1620,11 @@ function suggestOption(
 // recover `init`'s most important papercut: a new dev abbreviating `--node-url`
 // to `--node`. `node`→`node-url` is edit distance 4 (threshold 2 ⇒ rejected),
 // while `node`→`name` is distance 2 (⇒ wrongly suggested). So we first try a
-// prefix relationship — `--node` is a prefix of `--node-url`, `--schema-service`
-// a prefix of `--schema-service-url` — and only fall back to suggestOption when
-// no prefix match exists. When several known flags share the prefix we prefer
-// the shortest (closest abbreviation). The other direction (a known flag being
-// a prefix of a longer typo, e.g. `--node-urls`) is handled symmetrically.
+// prefix relationship — `--node` is a prefix of `--node-url` — and only fall
+// back to suggestOption when no prefix match exists. When several known flags
+// share the prefix we prefer the shortest (closest abbreviation). The other
+// direction (a known flag being a prefix of a longer typo, e.g. `--node-urls`)
+// is handled symmetrically.
 function suggestInitOption(
   unknown: string,
   knownKeys: readonly string[],
@@ -1646,14 +1642,13 @@ function suggestInitOption(
 }
 
 // Single funnel for every non-init command's parseArgs. Wraps the call so a
-// muscle-memory `brain <cmd> --node-url <URL>` / `--schema-service-url <URL>`
-// (the user re-using the flag they learned at `init`) becomes an actionable
-// nudge instead of parseArgs's bare "Unknown option" — or, worse on commands
-// that take positionals like `get`, its actively-misleading
-// `-- "--node-url"` advice. The node and schema-service are pinned in
-// `~/.brain/config.json` at init time and not overridable per-command; the
-// hint points at the right path to change them. `init` itself does NOT go
-// through this helper — it accepts both flags via INIT_OPTIONS and we must
+// muscle-memory `brain <cmd> --node-url <URL>` (the user re-using the flag
+// they learned at `init`) becomes an actionable nudge instead of parseArgs's
+// bare "Unknown option" — or, worse on commands that take positionals like
+// `get`, its actively-misleading `-- "--node-url"` advice. The node is pinned
+// in `~/.brain/config.json` at init time and not overridable per-command; the
+// hint points at the right path to change it. `init` itself does NOT go
+// through this helper — it accepts `--node-url` via INIT_OPTIONS and we must
 // not regress that.
 // Node's `parseArgs` throws ERR_PARSE_ARGS_* for malformed invocations: an
 // unknown flag, a flag missing its value, or an unexpected positional. These
@@ -1740,15 +1735,12 @@ function parseCommandArgs<T extends ParseArgsConfig>(
       (err as NodeJS.ErrnoException).code === "ERR_PARSE_ARGS_UNKNOWN_OPTION"
     ) {
       const args = config.args ?? [];
-      if (
-        args.includes("--node-url") ||
-        args.includes("--schema-service-url")
-      ) {
+      if (args.includes("--node-url")) {
         throw new BrainError({
           code: "node_url_is_init_only",
           message:
-            "--node-url / --schema-service-url are only accepted by `brain init`. The node and schema-service are pinned in ~/.brain/config.json at init time.",
-          hint: "To point brain at a different node, re-run `brain init --node-url <URL> [--schema-service-url <URL>]` (or edit ~/.brain/config.json directly).",
+            "--node-url is only accepted by `brain init`. The node is pinned in ~/.brain/config.json at init time.",
+          hint: "To point brain at a different node, re-run `brain init --node-url <URL>` (or edit ~/.brain/config.json directly).",
         });
       }
       // A near-miss spelling of one of THIS command's own flags (the classic:
@@ -1929,15 +1921,15 @@ async function dispatch(cmd: Command, args: Argv, g: Globals): Promise<number> {
 type Verbose = ((msg: string) => void) | undefined;
 
 // `init` deliberately does NOT route through parseCommandArgs (it's the one
-// command that legitimately accepts --node-url / --schema-service-url, which
-// that helper rejects). But it still owes a friendly unknown-option nudge: the
-// new-dev path's literal first command is often `brain init --node <url>`
-// (the obvious abbreviation of --node-url), and bare parseArgs dead-ends it
-// with `error: Unknown option '--node'` and no recovery. Catch
+// command that legitimately accepts --node-url, which that helper rejects).
+// But it still owes a friendly unknown-option nudge: the new-dev path's
+// literal first command is often `brain init --node <url>` (the obvious
+// abbreviation of --node-url), and bare parseArgs dead-ends it with
+// `error: Unknown option '--node'` and no recovery. Catch
 // ERR_PARSE_ARGS_UNKNOWN_OPTION and upgrade it to a prefix-aware suggestion so
-// `--node`→`--node-url` and `--schema-service`→`--schema-service-url` resolve
-// (plain Levenshtein can't — see suggestInitOption). Exit code stays 2
-// (unknown_init_option is in USAGE_ERROR_CODES).
+// `--node`→`--node-url` resolves (plain Levenshtein can't — see
+// suggestInitOption). Exit code stays 2 (unknown_init_option is in
+// USAGE_ERROR_CODES).
 function parseInitArgs(args: Argv) {
   try {
     return parseArgs({
@@ -1980,15 +1972,12 @@ function parseInitArgs(args: Argv) {
 
 async function runInitCmd(args: Argv, verbose: Verbose): Promise<number> {
   const { values } = parseInitArgs(args);
-  // runInit resolves the node URL and the schema-service URL from flags,
-  // the existing config, or the defaults.
+  // runInit resolves the node URL from flags, the existing config, or the default.
   const initOpts: Parameters<typeof runInit>[0] = {
     bootstrapName: values.name,
     verbose,
   };
   if (values["node-url"]) initOpts.nodeUrl = values["node-url"];
-  if (values["schema-service-url"])
-    initOpts.schemaServiceUrl = values["schema-service-url"];
   if (values["grant-consent"] || values.yes) initOpts.grantConsent = true;
   await runInit(initOpts);
   return 0;

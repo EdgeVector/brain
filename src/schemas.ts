@@ -27,46 +27,41 @@
 // `BrainKindNote` schema + a `kind` discriminator + `v1_marker_a/b`
 // structural-distinctness markers to defeat fold's structural
 // canonicalization. With dual-signal canonicalization default-on,
-// the structural collision is solved at the schema-service layer
-// (distinct purpose statements veto the merge), so the workaround
-// is unnecessary. After the consolidation migration (PR #63) moved
-// every pre-Phase-E `BrainKindNote` row into its per-kind canonical,
-// the legacy schema is no longer registered or read from.
+// distinct purpose statements veto the merge, so the workaround is
+// unnecessary. After the consolidation migration (PR #63) moved every
+// pre-Phase-E `BrainKindNote` row into its per-kind canonical, the
+// legacy schema is no longer registered or read from.
 //
-// Brain declares these bodies through the node's
-// `POST /api/apps/declare-schema`; Brain never writes them to Schema
-// Service. The receipt's `canonical` names the schema that every
-// subsequent mutation/query MUST pin to. The descriptive_name is for
+// The installer places these schemas from `lastdb-app.json`. Init pins
+// each owned name (`brain/<Name>`). The descriptive_name is for
 // human-facing display only.
 
 // The app id that owns every brain schema. Under app_identity v3.1,
-// `owner_app_id` is part of the schema's identity: the schema_service resolver
-// normalizes `name: "Concept"` + `owner_app_id: "brain"` to the canonical
-// name `brain/Concept` (design doc, "owner_app_id participates in
+// `owner_app_id` is part of the schema's identity: the node normalizes
+// `name: "Concept"` + `owner_app_id: "brain"` to the canonical name
+// `brain/Concept` (design doc, "owner_app_id participates in
 // identity_hash"). So `brain/Concept` and `kanban/Concept` are distinct
-// identities even with identical fields. The publish path (`folddb-dev app
-// publish` / `schema publish --app brain`, run by the developer in the
-// migration runbook) authorizes this claim with a dev cert; brain's own
-// schema definitions just declare ownership so re-registration is idempotent
-// and the node resolves short names to the brain/* namespace at boot.
+// identities even with identical fields. The publish path (`lastdb app
+// publish`, run by the developer in the migration runbook) authorizes
+// this claim; brain's own schema definitions just declare ownership so
+// the node resolves short names to the brain/* namespace at boot.
 export const OWNER_APP_ID = "brain";
 
 export type FieldType = "String" | "DateTime" | "Any" | { Array: "String" };
 
 export type SchemaDefinition = {
   name: string;
-  // App-identity ownership. The schema_service folds this into the identity
-  // hash and stores the schema under the canonical name `{owner_app_id}/{name}`
-  // (= `brain/<Name>`). Set on every brain schema; optional in the TS type
-  // so externally-loaded schema definitions (e.g. legacy definitions, or future
-  // non-brain catalogues) can omit it without a TS error.
+  // App-identity ownership. Folded into the identity hash; the schema is
+  // stored under the canonical name `{owner_app_id}/{name}` (= `brain/<Name>`).
+  // Set on every brain schema; optional in the TS type so externally-loaded
+  // schema definitions (e.g. legacy definitions, or future non-brain
+  // catalogues) can omit it without a TS error.
   owner_app_id?: string;
   descriptive_name: string;
-  // Phase A of dual-signal canonicalization (PR #303): the schema service
-  // consults this alongside the structural signal at registration time.
-  // Defaults to `descriptive_name` server-side when omitted; the Phase 6
-  // schemas set it explicitly to distinguish themselves from each other
-  // (they all share the same field shape).
+  // Dual-signal canonicalization consults this alongside the structural
+  // signal. Defaults to `descriptive_name` when omitted; the Phase 6 schemas
+  // set it explicitly to distinguish themselves from each other (they all
+  // share the same field shape).
   purpose_statement?: string;
   // Every PRODUCT record schema is "Hash" (one row per slug). "HashRange"
   // exists for a page key. A page row uses a hash and a range.
@@ -523,16 +518,14 @@ export const tagIndexSchema: AddSchemaRequest = {
  * in `tmb_copy`; see src/tag-index.ts for the dual-read. The legacy `TagIndex`
  * schema stays registered so its rows stay readable; it is never written again.
  *
- * Field names and descriptions are specific on purpose. The schema service
- * unifies fields by identity: a first draft of this schema had a generic
- * "RFC 3339 timestamp" field, the service unified it with another app's
- * `bge_created_at`, and the node then refused every write of the draft's own
- * field name (2026-10-12, dev service). So there is no timestamp field, and no
+ * Field names and descriptions are specific on purpose. A first draft of this
+ * schema had a generic "RFC 3339 timestamp" field that unified with another
+ * app's `bge_created_at`, and the node then refused every write of the draft's
+ * own field name (2026-10-12). So there is no timestamp field, and no
  * description repeats the wording of a sibling index or of the legacy TagIndex.
  *
- * Register this schema ONLY through `brain init`. The node registers a new
- * schema in the Schema Service of its OWN environment, not the one brain's
- * config names, so no write path may declare it.
+ * The installer places this schema from the app manifest. No write path may
+ * declare it.
  */
 export const TAG_MEMBER_SCHEMA_KEY = "__tagmember__";
 export const TAG_MEMBER_MIGRATED_RANGE = "__tmb_migrated__";
