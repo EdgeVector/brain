@@ -83,8 +83,8 @@ A global `--verbose` flag echoes every HTTP request and response — including t
 | `brain search <query> [-n N \| --limit N] [--exact] [--min-score F] [--type T]…` | Semantic search; dedupes fragments per record, skips stale hits. Repeatable `--type` scopes results to one or more record types (e.g. `--type design --type task` to exclude noisy concept streams). `-n` and `--limit` are aliases. Pure-vector, so a brand-new write may take ~1s to land in the index — reach for `ask` when you need to retrieve something you just wrote. Does not build the LastSeek index; run `brain index` for that |
 | `brain index [--wait]` | Names every record schema `brain search` can pass (`brain/<Type>`) to `lastseek index --app brain` and prints LastSeek's JSON. Returns at once. `--wait` runs the build in the foreground |
 | `brain ask <query> [-n N \| --limit N] [--expand\|--llm] [--explain] [--type T]… [--field PATH]…` | Hybrid retrieval: BM25 + vector fused via Reciprocal Rank Fusion. **No LLM call by default.** LLM query expansion is opt-in via `--expand` (alias `--llm`). The default path needs no API key. Wider recall than `search` — paraphrase via vector, rare-token / acronym matches via BM25. Repeatable `--type` narrows both the BM25 corpus and the vector schemas filter. `--field` projects plain values from result rows. `-n` and `--limit` are aliases; `--no-llm` is accepted as a back-compat no-op |
-| `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded, schema drift. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `brain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
-| `brain raw <method> <path> [body]` | Authenticated passthrough to node (`/api/…`) or schema service (`/v1/…`) |
+| `brain doctor [--freshness] [--write] [--mcp] [--json] [--usage]` | Live health check: reachability, provisioning, schemas-loaded. `--freshness` adds the G3 freshness + pollution probes; `--write` adds an idempotent `put → get → soft-delete` round-trip that proves writes actually land; `--mcp` boots the `brain-mcp` compatibility entrypoint and asserts the full 10-tool agent surface (the strongest agent-integration check — see [MCP](#mcp)); `--json` emits machine-readable output; `--usage` prints team-adoption write counts by userHash over the last 7 days (see [Doctor](#doctor)) |
+| `brain raw <method> <path> [body]` | Authenticated passthrough to the LastDB node (`/api/…` or `/v1/…`) |
 | `brain admin-snapshot publish [--dry-run] [--json]`<br>`brain admin-snapshot deliver [--approve] …` | Publish a privacy-safe Brain admin rollup on Mini, then stage/approve a LastDB deliver to the existing admin kanban-consumer (see [Admin snapshot deliver](#admin-snapshot-deliver)) |
 | `brain delete <slug> [--type T]`<br>`brain delete --tag T [--type T] [--status S] [--yes]` | Deletes a record (or, in filter mode, every live record matching the `list`-style selector — dry-run by default, `--yes` to apply). LastDB native Delete converges tip absence. The CLI also stamps a tombstone tag so older read paths hide the row (see [Delete](#delete)) |
 | `brain reindex --target <hash> --source-hash <type> --slug <slug>` | Repairs the named list-page keys. One call names one target, one source type, and at most 25 slugs (see [Recovery](#recovery)) |
@@ -130,7 +130,7 @@ and this table can't drift.
 | `sop` | Standard operating procedure: a repeatable step-by-step process an agent follows to perform a recurring task | `active \| superseded \| archived` | dedicated `Sop` schema |
 | `decision` | A call a human made — the choice, its rationale, and outcome — kept as an auditable trail | `proposed \| go \| hold \| done \| moot \| superseded` | dedicated `Decision` schema |
 
-Each of the six Phase 6 types gets its own dedicated schema with a distinct `descriptive_name` + `purpose_statement`. We originally landed a single combined schema (`BrainKindNote`) plus a `kind` discriminator as a workaround for fold_db's structural canonicalization (the node merged schemas with overlapping field positions during `/api/schemas/load`, making the second schema's data inaccessible). As of Phase E (PR #63, dual-signal canonicalization cutover) the schema service consults the purpose-statement embedding alongside the structural signal, so distinct purpose statements veto the merge and all six can share the same 7-field shape without colliding onto one canonical hash. The combined-schema workaround was retired; the consolidation migration moved every pre-Phase-E row into its per-kind canonical, and the legacy `BrainKindNote` schema is no longer registered or read.
+Each of the six Phase 6 types gets its own dedicated schema with a distinct `descriptive_name` + `purpose_statement`. We originally landed a single combined schema (`BrainKindNote`) plus a `kind` discriminator as a workaround for fold_db's structural canonicalization (the node merged schemas with overlapping field positions during `/api/schemas/load`, making the second schema's data inaccessible). As of Phase E (PR #63, dual-signal canonicalization cutover) distinct purpose statements veto the merge and all six can share the same 7-field shape without colliding onto one canonical hash. The combined-schema workaround was retired; the consolidation migration moved every pre-Phase-E row into its per-kind canonical, and the legacy `BrainKindNote` schema is no longer registered or read.
 
 Slug uniqueness is now per-type — a `concept` and a `preference` can share the slug `foo`. `brain get` is read-only, so when invoked without `--type` on a slug that resolves in more than one schema it returns a deterministic winner by type precedence (starting with `reference`, then `project`); pass `--type` to override. Mutating or destructive flows (`brain status`, `brain delete`) still error with `Slug "X" exists in multiple schemas (concept, preference). Specify --type.` so you re-issue with `--type` before changing anything.
 
@@ -166,19 +166,10 @@ NOTE
 **Green example:**
 
 ```
-[PASS] config  — node=unix:<home>/data/folddb.sock schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
-[PASS] schema-service-reachable
+[PASS] config  — node=unix:<home>/data/folddb.sock
 [PASS] node-reachable
-[PASS] node-provisioned  — user_hash=dd616fa8…
-[PASS] schemas-loaded  — 932/932 loaded
-[PASS] schema-drift[Design]  — Design @ 84d9f350b4ff…
-[PASS] schema-drift[Task]  — Task @ c0352ec0c453…
-[PASS] schema-drift[Concept]  — Concept @ 57df5c3fe50c…
-[PASS] schema-drift[Preference]  — Preference @ 9b1f04ac7e21…
-[PASS] schema-drift[Reference]  — Reference @ a3d2cc18f9b5…
-[PASS] schema-drift[Agent]  — Agent @ 42e7b6815ac0…
-[PASS] schema-drift[Project]  — Project @ 7c5a90def142…
-[PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
+[PASS] node-provisioned  — The app id authorizes Brain. Identity is not probed.
+[PASS] schemas-loaded  — 10/10 record schemas pinned to brain/<Name>
 [WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require brain to drive fold_db's sync transport (deployed but not yet wired up from brain; tracked as G16)
 
 OK
@@ -186,23 +177,14 @@ OK
 
 The `[WARN]` line at the bottom is always emitted. It is disclosure, not detection. It says the record set is local to this daemon. WARN does not flip the exit code (same pattern as the pollution-probe WARN).
 
-**Red example** (drift detected after schemas.ts was edited but `brain init` wasn't re-run):
+**Red example** (config still pins hex hashes after schemas moved to owned names):
 
 ```
-[PASS] config  — node=unix:<home>/data/folddb.sock schemaServiceUrl=https://axo709qs11.execute-api.us-east-1.amazonaws.com
-[PASS] schema-service-reachable
+[PASS] config  — node=unix:<home>/data/folddb.sock
 [PASS] node-reachable
-[PASS] node-provisioned  — user_hash=dd616fa8…
-[PASS] schemas-loaded  — 932/932 loaded
-[FAIL] schema-drift[Design]  — fields missing from registered schema: owner
-       fix:   re-run `brain init` so the config picks up the current canonical hash; otherwise reconcile schemas.ts with the registered schema
-[PASS] schema-drift[Task]  — Task @ c0352ec0c453…
-[PASS] schema-drift[Concept]  — Concept @ 57df5c3fe50c…
-[PASS] schema-drift[Preference]  — Preference @ 9b1f04ac7e21…
-[PASS] schema-drift[Reference]  — Reference @ a3d2cc18f9b5…
-[PASS] schema-drift[Agent]  — Agent @ 42e7b6815ac0…
-[PASS] schema-drift[Project]  — Project @ 7c5a90def142…
-[PASS] schema-drift[Spike]  — Spike @ 1f8b3e6d24a7…
+[PASS] node-provisioned  — The app id authorizes Brain. Identity is not probed.
+[FAIL] schemas-loaded  — re-run brain init to replace pins: Design, Task
+       fix:   re-run `brain init`
 [WARN] single-machine-slice  — you're on this daemon; record set is local — multi-machine reads require brain to drive fold_db's sync transport (deployed but not yet wired up from brain; tracked as G16)
 
 FAIL: 1 issue
@@ -470,28 +452,20 @@ methodology and the regression-guard CI job that keeps these numbers honest.
 
 ## Architecture
 
-`brain` is a thin **two-service client** that splits across local + cloud:
+`brain` is a thin client of the local LastDB node:
 
 ```
 brain CLI (TypeScript / Bun)
    │
-   ├──── Unix socket ──────────────► LastDB (`<home>/data/folddb.sock`)
-   │                                  persistence, indexing, mutations
-   │
-   └──── HTTPS (cloud) ────────────► schema_service (AWS Lambda)
-                                       prod: us-east-1 (daily use)
-                                       dev:  us-west-2 (iteration + CI tests)
+   └──── Unix socket ──────────────► LastDB (`<home>/data/folddb.sock`)
+                                      persistence, indexing, mutations
 ```
 
-The node binary is local — Sled storage, all reads/writes go through it. The
-schema service moved to two cloud Lambdas: prod is the default for daily use,
-dev is targeted by `brain init --schema-service-url <dev URL>` and the
-integration test harness. brain holds only the schemas, the CLI parsing, and
-the error-message layer.
-
-Power users contributing to fold itself can still point at a worktree-local
-schema service with `--node-url` / `--schema-service-url` on `brain init`
-(e.g. when running `./run.sh --local --local-schema` from a fold checkout).
+The node binary is local — Sled storage, all reads/writes go through it.
+Schemas are placed from the signed app manifest at `lastdb app install` time
+(lastdb #1946). brain holds the CLI parsing, owned schema pins, and the
+error-message layer. Point at a different node with
+`brain init --node-url <URL>`.
 
 ## Troubleshooting
 
@@ -588,8 +562,7 @@ The app keeps its local command field names.
 A schema-specific field map translates those names for the stored canonical identity.
 The map leaves values, record keys, cursors, and file references intact.
 
-A fresh home submits these definitions through normal schema declarations.
-The schema service checks names, definitions, types, and concept reuse for every caller.
+A fresh home places these definitions from the signed app manifest at install time.
 No special vocabulary key or operator approval path exists.
 
 Date fields use `DateTime` when the current wire value is an RFC 3339 instant.

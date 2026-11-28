@@ -360,7 +360,7 @@ export async function acquireCapability(opts: AcquireOptions): Promise<StoredCap
     throw new BrainError({
       code: "app_not_registered",
       message:
-        `Node rejected consent request: app "${appId}" is not registered with schema_service.`,
+        `Node rejected consent request: app "${appId}" is not registered.`,
       hint:
         "Ask the target node owner to check the installed Brain app with `lastdb app status brain`.",
     });

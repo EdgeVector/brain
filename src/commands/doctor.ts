@@ -18,7 +18,6 @@ import {
   nodeHttpErrorHint,
   stripDoctorTip,
   type NodeClient,
-  type SchemaServiceClient,
   type Verbose,
 } from "../client.ts";
 import { tryReadConfig } from "../config.ts";
@@ -66,9 +65,6 @@ export {
   runMcpEntrypointProbe,
 } from "./doctor/mcp-boot.ts";
 export {
-  classifySchemaDrift,
-  diffSchemas,
-  schemaServiceFixHint,
   validateConfigShape,
 } from "./doctor/schema-drift.ts";
 
@@ -76,8 +72,7 @@ export type DoctorOptions = {
   configPath?: string;
   verbose?: Verbose;
   print?: (line: string) => void;
-  // For testing: inject prebuilt clients to bypass the real fetches.
-  schemaClientFactory?: (url: string, v?: Verbose) => SchemaServiceClient;
+  // For testing: inject a prebuilt node client to bypass the real fetches.
   nodeClientFactory?: (opts: {
     baseUrl: string;
     userHash: string;
@@ -197,7 +192,7 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push({
       name: "config",
       ok: true,
-      detail: `${doctorNodeConfigDetail(cfg.nodeUrl, nodeSocketPath)} schemaServiceUrl=${cfg.schemaServiceUrl}`,
+      detail: doctorNodeConfigDetail(cfg.nodeUrl, nodeSocketPath),
     });
   }
   verbose?.(`config: ${cfgIssues.length === 0 ? "ok" : `bad — ${cfgIssues.join("; ")}`}`);
@@ -213,8 +208,8 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
   });
 
   // --usage diverts to the team-adoption report (G13). It needs a valid
-  // config + reachable node but doesn't depend on the schema-drift /
-  // freshness checks, so we short-circuit before running them.
+  // config + reachable node but doesn't depend on the freshness checks, so
+  // we short-circuit before running them.
   if (opts.usage) {
     if (cfgIssues.length > 0) {
       print("usage report skipped — config is invalid (see [FAIL] above).");
@@ -231,13 +226,6 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
       return 1;
     }
   }
-
-  checks.push({
-    name: "schema-service-reachable",
-    ok: true,
-    tag: "SKIP",
-    detail: "Brain does not contact the schema service.",
-  });
 
   // Reachability is one keyed read. Identity, health, and version routes are
   // not on the app socket.
@@ -312,21 +300,10 @@ export async function doctor(opts: DoctorOptions = {}): Promise<number> {
     checks.push(skippedByPrereqs("schemas-loaded", "config is invalid"));
   }
 
-  for (const entry of DOCTOR_RECORD_SCHEMAS) {
-    const label = entry.schema.schema.descriptive_name;
-    checks.push({
-      name: `schema-drift[${label}]`,
-      ok: true,
-      tag: "SKIP",
-      detail: "Brain does not read schemas at run time.",
-    });
-  }
-
   // Embedding-runtime probe — issue one trivial Search app query so the node
   // is forced to load its ONNX model. Surfaces the
-  // `embedding_model_unavailable` failure as a structured FAIL, separate
-  // from schema-drift, so `brain doctor` is the one source of truth for
-  // "is search end-to-end usable?" — not just "are the schemas right?".
+  // `embedding_model_unavailable` failure as a structured FAIL, so
+  // `brain doctor` is the one source of truth for "is search end-to-end usable?"
   // Cheap when it passes (one app-search request); the heavy freshness probe stays
   // gated behind --freshness.
   if (provisioned && schemasLoadedOk) {

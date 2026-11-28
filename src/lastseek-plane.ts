@@ -91,7 +91,7 @@ function notice(line: string): void {
 export type LastSeekHit = {
   /** The canonical schema identity the row is keyed on. */
   schema_identity: string;
-  /** Readable name, when the Schema Service table knows one. */
+  /** Readable schema name when LastSeek reports one. */
   schema: string | null;
   key_hash: string | null;
   key_range: string | null;
