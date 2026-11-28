@@ -15,7 +15,6 @@ import { encodeFieldRequest, decodeFieldReply, fieldAliasTransport, type FieldAl
 // Search still posts `/api/app/search` for a developer running on the owner
 // socket. Schema declaration, identity, version, and consent are not called.
 
-import { existsSync } from "node:fs";
 import { cpus, homedir, loadavg } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -2035,13 +2034,13 @@ export function nodeHttpErrorHint(err: unknown): string {
   );
 }
 
-// Owner sockets are absolute paths (`defaultFolddbSocketPath` /
-// `BRAIN_FOLDDB_SOCKET`). Refuse relative values so a cwd-relative probe
-// cannot be aimed by a crafted config field.
-function ownerSocketPresent(socketPath: string): boolean {
-  if (!isAbsolute(socketPath)) return false;
-  // codeql[js/path-injection]: local owner-socket path from config/env, not remote input
-  return existsSync(socketPath);
+function errnoCode(err: unknown): string {
+  if (!err || typeof err !== "object") return "";
+  if ("code" in err && typeof (err as { code: unknown }).code === "string") {
+    return (err as { code: string }).code;
+  }
+  if ("cause" in err) return errnoCode((err as { cause: unknown }).cause);
+  return "";
 }
 
 function connectionError(
@@ -2049,26 +2048,28 @@ function connectionError(
   cause: unknown,
   ctx: ConnectionErrorContext = {},
 ): BrainError {
-  if (
-    ctx.routeSocket &&
-    ctx.socketCause !== undefined &&
-    (ctx.phase === "body" || ownerSocketPresent(ctx.routeSocket.socketPath))
-  ) {
+  // Distinguish missing socket (ENOENT) from a present-but-refusing socket
+  // via the connect errno — no filesystem probe of the config path.
+  const socketCause = ctx.socketCause ?? cause;
+  const socketPath = ctx.routeSocket?.socketPath ?? ctx.socketPath;
+  if (socketPath && errnoCode(socketCause) === "ENOENT") {
+    return new BrainError({
+      code: "service_unreachable",
+      message: `node not running: Unix socket not found at ${socketPath} ${DOCTOR_TIP}.`,
+      hint: socketMissingHint(socketPath),
+      agentHint: socketMissingAgentHint(socketPath),
+      cause: ctx.socketCause !== undefined
+        ? { socket: ctx.socketCause, fallback: cause }
+        : cause,
+    });
+  }
+  if (ctx.routeSocket && ctx.socketCause !== undefined) {
     return new BrainError({
       code: "service_unreachable",
       message: `node socket not reachable at unix:${ctx.routeSocket.socketPath} ${DOCTOR_TIP}.`,
       hint: socketUnreachableHint(ctx.routeSocket.socketPath),
       agentHint: socketUnreachableAgentHint(ctx.routeSocket.socketPath),
       cause: { socket: ctx.socketCause, fallback: cause },
-    });
-  }
-  if (ctx.socketPath && !ownerSocketPresent(ctx.socketPath)) {
-    return new BrainError({
-      code: "service_unreachable",
-      message: `node not running: Unix socket not found at ${ctx.socketPath} ${DOCTOR_TIP}.`,
-      hint: socketMissingHint(ctx.socketPath),
-      agentHint: socketMissingAgentHint(ctx.socketPath),
-      cause,
     });
   }
   return new BrainError({
